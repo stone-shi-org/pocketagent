@@ -14,6 +14,7 @@ import { ApprovalSheet } from '../components/ApprovalSheet.js';
 import { PromptBox } from '../components/PromptBox.js';
 import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
 import { notifyApproval, ensureNotificationPermission } from '../agent/notifications.js';
+import { takePendingPrompt } from '../agent/pending-prompt.js';
 
 interface Props {
   sessionId: string;
@@ -136,6 +137,15 @@ export function AgentPage({ sessionId, onBack, onApiError }: Props): JSX.Element
   const alive = !isTerminalStatus(status);
   const inputDisabled = !alive || connection !== 'connected';
   const pending = transcript.pending[0] ?? null;
+
+  // A prompt typed on the composer is delivered once the socket is up. Taking
+  // it is destructive — it can only be read once — so this waits until there is
+  // somewhere to actually send it.
+  useEffect(() => {
+    if (inputDisabled) return;
+    const queued = takePendingPrompt(sessionId);
+    if (queued) sendPrompt(queued);
+  }, [inputDisabled, sessionId, sendPrompt]);
 
   const costLabel = useMemo(
     () => (transcript.totalCostUsd > 0 ? `$${transcript.totalCostUsd.toFixed(3)}` : null),

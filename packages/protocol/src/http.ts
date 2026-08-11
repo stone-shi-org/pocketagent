@@ -1,5 +1,13 @@
 import { z } from 'zod';
-import { AdoptableTarget, AgentInfo, ConversationInfo, SessionInfo, WorkspaceEntry } from './session.js';
+import {
+  AdoptableTarget,
+  AgentInfo,
+  ConversationInfo,
+  HostInfo,
+  ProjectInfo,
+  SessionInfo,
+  WorkspaceEntry,
+} from './session.js';
 import { SessionTransport } from './agent-events.js';
 import { LIMITS } from './ws.js';
 
@@ -65,6 +73,26 @@ export const AdoptableListResponse = z.object({
   targets: z.array(AdoptableTarget),
 });
 export type AdoptableListResponse = z.infer<typeof AdoptableListResponse>;
+
+/**
+ * Everything the home screen needs, in one round trip.
+ *
+ * Composed server-side rather than by the client joining three endpoints: the
+ * merge of live sessions with on-disk conversations needs the workspace
+ * registry and the transcript store, and a phone on a slow link should not pay
+ * three round trips to render its first screen.
+ */
+export const ProjectListResponse = z.object({
+  host: HostInfo,
+  projects: z.array(ProjectInfo),
+});
+export type ProjectListResponse = z.infer<typeof ProjectListResponse>;
+
+export const HostListResponse = z.object({
+  /** The host serving this request, first. One entry until federation exists. */
+  hosts: z.array(HostInfo).min(1),
+});
+export type HostListResponse = z.infer<typeof HostListResponse>;
 
 export const AgentListResponse = z.object({
   agents: z.array(AgentInfo),

@@ -24,7 +24,8 @@
     "demo:agent": "pnpm -F @pocketagent/server exec node scripts/agent-demo.mjs",
     "demo:native-ui": "pnpm -F @pocketagent/server exec node scripts/native-ui-demo.mjs",
     "demo:resume-adopt": "pnpm -F @pocketagent/server exec node scripts/resume-adopt-demo.mjs",
-    "demo:resume-adopt-ui": "pnpm -F @pocketagent/server exec node scripts/resume-adopt-ui-demo.mjs"
+    "demo:resume-adopt-ui": "pnpm -F @pocketagent/server exec node scripts/resume-adopt-ui-demo.mjs",
+    "demo:home-ui": "pnpm -F @pocketagent/server exec node scripts/home-ui-demo.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

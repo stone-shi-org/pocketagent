@@ -9,6 +9,7 @@ import { createTerminal } from '../terminal/create-terminal.js';
 import { MobileKeyBar, ctrlSequence } from '../components/MobileKeyBar.js';
 import { PromptBox } from '../components/PromptBox.js';
 import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
+import { takePendingPrompt } from '../agent/pending-prompt.js';
 
 interface Props {
   sessionId: string;
@@ -31,6 +32,8 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
   const [notice, setNotice] = useState<string | null>(null);
   const [hints, setHints] = useState<TerminalHintKind[]>([]);
   const [ctrlActive, setCtrlActive] = useState(false);
+  /** The CLI has printed something, so it is far enough up to be typed at. */
+  const [sawOutput, setSawOutput] = useState(false);
   const [fatal, setFatal] = useState<string | null>(null);
   /**
    * An adopted pane shares its grid with whoever else is attached, so we must
@@ -63,9 +66,13 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
             setNotice('Older output was dropped from the server buffer.');
           }
           bundle.term.write(data);
+          if (data.length > 0) setSawOutput(true);
         },
 
-        onOutput: (data) => bundle.term.write(data),
+        onOutput: (data) => {
+          setSawOutput(true);
+          bundle.term.write(data);
+        },
 
         onAttached: (info) => {
           setSession(info);
@@ -222,6 +229,15 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
 
   const alive = !isTerminalStatus(status);
   const inputDisabled = !alive || connection !== 'connected';
+
+  // A prompt typed on the composer, delivered once the CLI can receive it.
+  // Unlike a structured session there is no readiness signal here, so this
+  // waits for the process to have produced something before typing at it.
+  useEffect(() => {
+    if (inputDisabled || !sawOutput) return;
+    const queued = takePendingPrompt(sessionId);
+    if (queued) sendPrompt(queued);
+  }, [inputDisabled, sawOutput, sessionId, sendPrompt]);
 
   return (
     <div className="terminal-page">

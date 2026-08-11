@@ -4,9 +4,18 @@ import { SessionError } from '../sessions/manager.js';
 import { WorkspaceError } from '../workspaces/index.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
-  const { sessions, workspaces, agents, conversations, adoption } = app.pocket;
+  const { sessions, workspaces, agents, conversations, adoption, projects } = app.pocket;
 
   app.get('/api/agents', async () => ({ agents: agents.list() }));
+
+  /** The home screen: every directory with activity, and the chats inside it. */
+  app.get('/api/projects', async () => ({
+    host: projects.host(),
+    projects: await projects.list(sessions.list()),
+  }));
+
+  /** One entry until a front server can register others. */
+  app.get('/api/hosts', async () => ({ hosts: [projects.host()] }));
 
   app.get('/api/workspaces', async () => ({ workspaces: await workspaces.list() }));
 

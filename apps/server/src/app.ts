@@ -17,6 +17,7 @@ import { buildChildEnv } from './sessions/env.js';
 import { PushService } from './push/index.js';
 import { ConversationStore } from './conversations/index.js';
 import { AdoptionService } from './adopt/index.js';
+import { ProjectService } from './projects/index.js';
 import { authRoutes } from './routes/auth.js';
 import { pushRoutes } from './routes/push.js';
 import { sessionRoutes } from './routes/sessions.js';
@@ -110,6 +111,8 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     );
   }
 
+  const projects = new ProjectService({ workspaces, conversations, version: VERSION });
+
   const sessions = new SessionManager({
     db,
     agents,
@@ -134,6 +137,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     push,
     conversations,
     adoption,
+    projects,
   };
   app.decorate('pocket', context);
 

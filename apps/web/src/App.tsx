@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { ApiError } from './api/client.js';
 import { useHashRoute } from './hooks/useHashRoute.js';
 import { LoginPage } from './pages/LoginPage.js';
-import { SessionListPage } from './pages/SessionListPage.js';
+import { ProjectsPage } from './pages/ProjectsPage.js';
+import { ComposerPage } from './pages/ComposerPage.js';
 import { TerminalPage } from './pages/TerminalPage.js';
 import { AgentPage } from './pages/AgentPage.js';
 import { api } from './api/client.js';
@@ -118,9 +119,21 @@ export function App(): JSX.Element {
     );
   }
 
+  if (route.name === 'compose') {
+    return (
+      <ComposerPage
+        {...(route.cwd !== undefined ? { initialCwd: route.cwd } : {})}
+        onBack={() => navigate({ name: 'list' })}
+        onCreated={(sessionId) => navigate({ name: 'terminal', sessionId })}
+        onApiError={handleApiError}
+      />
+    );
+  }
+
   return (
-    <SessionListPage
+    <ProjectsPage
       onOpen={(sessionId) => navigate({ name: 'terminal', sessionId })}
+      onCompose={(cwd) => navigate(cwd ? { name: 'compose', cwd } : { name: 'compose' })}
       onApiError={handleApiError}
       onLogout={logout}
     />

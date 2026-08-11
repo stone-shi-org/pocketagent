@@ -2,7 +2,9 @@ import type {
   AdoptableTarget,
   AgentInfo,
   ConversationInfo,
+  HostInfo,
   MeResponse,
+  ProjectInfo,
   SessionInfo,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
@@ -64,6 +66,12 @@ export const api = {
   me: () => request<MeResponse>('/api/auth/me'),
 
   listSessions: () => request<{ sessions: SessionInfo[] }>('/api/sessions'),
+
+  /** Everything the home screen draws, in one round trip. */
+  listProjects: () =>
+    request<{ host: HostInfo; projects: ProjectInfo[] }>('/api/projects'),
+
+  listHosts: () => request<{ hosts: HostInfo[] }>('/api/hosts'),
 
   getSession: (id: string) => request<SessionInfo>(`/api/sessions/${encodeURIComponent(id)}`),
 

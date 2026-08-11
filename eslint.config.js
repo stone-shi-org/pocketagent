@@ -43,6 +43,7 @@ export default tseslint.config(
       'apps/server/scripts/browser-demo.mjs',
       'apps/server/scripts/native-ui-demo.mjs',
       'apps/server/scripts/resume-adopt-ui-demo.mjs',
+      'apps/server/scripts/home-ui-demo.mjs',
     ],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },
   },

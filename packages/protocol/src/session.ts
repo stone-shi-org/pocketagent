@@ -130,6 +130,72 @@ export const ConversationInfo = z.object({
 export type ConversationInfo = z.infer<typeof ConversationInfo>;
 
 /**
+ * A machine that PocketAgent can run agents on.
+ *
+ * There is exactly one today — the server you are talking to — but the concept
+ * is first-class from the start so that a front server fronting several backs
+ * does not require the client to be rewritten. Anything that varies per machine
+ * belongs here rather than in a global response field.
+ */
+export const HostInfo = z.object({
+  /** Stable across restarts; opaque to the client. */
+  id: z.string(),
+  /** What to show in the header, e.g. `stone-dev01`. */
+  name: z.string(),
+  version: z.string(),
+  /** False once a front server can report a back it cannot currently reach. */
+  online: z.boolean(),
+});
+export type HostInfo = z.infer<typeof HostInfo>;
+
+/**
+ * One row in a project's chat list.
+ *
+ * Deliberately unifies two things the server tracks separately: a session that
+ * is running now, and a conversation that only exists on disk. To the person
+ * holding the phone they are the same thing — a chat they were having — and the
+ * difference is a status, not a category.
+ *
+ * `sessionId` is set when there is a live session to open directly.
+ * `conversationId` is set when there is a transcript to resume from. A chat can
+ * have both: a running session that was itself resumed from a transcript.
+ */
+export const ChatSummary = z.object({
+  /** Stable row key. The session id when live, else the conversation id. */
+  id: z.string(),
+  sessionId: z.string().nullable(),
+  conversationId: z.string().nullable(),
+  title: z.string(),
+  /** Agent id, or null for a conversation whose session is long gone. */
+  agent: z.string().nullable(),
+  agentDisplayName: z.string(),
+  transport: SessionTransport.nullable(),
+  /** Null when this row is history rather than a session. */
+  status: SessionStatus.nullable(),
+  /** True when the session is still able to produce output. */
+  live: z.boolean(),
+  updatedAt: z.number().int(),
+  messageCount: z.number().int().nonnegative().nullable(),
+  /** An agent process is running in this directory, though maybe not this chat. */
+  directoryBusy: z.boolean(),
+});
+export type ChatSummary = z.infer<typeof ChatSummary>;
+
+/** A workspace directory, with everything that has happened in it. */
+export const ProjectInfo = z.object({
+  /** Absolute canonical path; also the row key. */
+  cwd: z.string(),
+  /** Basename, which is what reads well on a phone. */
+  name: z.string(),
+  /** Root-relative path, for disambiguating two projects with one basename. */
+  workspaceLabel: z.string(),
+  isGitRepo: z.boolean(),
+  gitBranch: z.string().nullable(),
+  chats: z.array(ChatSummary),
+});
+export type ProjectInfo = z.infer<typeof ProjectInfo>;
+
+/**
  * An existing tmux pane that PocketAgent could attach to.
  *
  * Only populated when adoption is explicitly enabled, and only for panes whose

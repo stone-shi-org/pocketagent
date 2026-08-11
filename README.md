@@ -263,21 +263,30 @@ gives the terminal noticeably more room.
 ## Using it
 
 1. **Log in** with your access token.
-2. **New session** → three tabs:
-   - **New** — pick an agent (Claude Code / Shell), a workspace directory, and an interface.
-   - **Resume** — continue a Claude Code conversation already on disk, including one you
-     started at a terminal.
-   - **Attach** — mirror a tmux pane you started yourself. Only shown when enabled.
+2. **Home screen — Projects.** A folder per workspace directory, with every chat that has
+   happened in it underneath. Tap a folder to collapse it, a chat to open it, the ✎ beside a
+   folder to start a chat there, or the search field to filter across all of them. The header
+   names the host you are connected to.
 
-   See [Picking up work you started elsewhere](#picking-up-work-you-started-elsewhere).
-3. **Terminal.** Type directly into it, or compose in the prompt box at the bottom and hit
+   Live sessions and finished conversations share one list, marked with a green dot when
+   running. Tapping a finished one resumes it as a new branch — the original transcript is
+   only read. See
+   [Picking up work you started elsewhere](#picking-up-work-you-started-elsewhere).
+3. **Compose (✎).** Four rows say what is about to happen — host, workspace, agent and
+   interface, and either "New chat" or a conversation to resume — over a prompt box. The
+   session is created when you send, and your text becomes its first turn, so nothing is
+   left running if you back out.
+
+   The ⋯ menu holds the rest: refresh, sign out, and **More session options…**, which is the
+   older dialog and the only place offering *Continue in place* and *Attach to a tmux pane*.
+4. **Terminal.** Type directly into it, or compose in the prompt box at the bottom and hit
    Send — much easier for long prompts on a phone.
-4. **Answer prompts yourself.** When Claude asks "Do you want to make this edit?", you
+5. **Answer prompts yourself.** When Claude asks "Do you want to make this edit?", you
    answer with `1`/`2`/Enter/Esc, exactly as at the terminal. PocketAgent never answers for
    you.
-5. **Key bar** provides Esc, Ctrl, ^C, Tab, arrows, Enter, and a `»` overflow with ⌫,
+6. **Key bar** provides Esc, Ctrl, ^C, Tab, arrows, Enter, and a `»` overflow with ⌫,
    ⇧Tab, ^D, ^Z, ^L, ^R and `1`/`2`/`3`/`y`/`n` for menu answers.
-6. **Close the tab whenever.** The process keeps running. Reopen later and you get the
+7. **Close the tab whenever.** The process keeps running. Reopen later and you get the
    buffered history plus everything that happened while you were gone.
 
 ### Reconnect behaviour
@@ -644,6 +653,10 @@ pnpm demo:browser     # terminal UI in real Chrome at iPhone viewport
 pnpm demo:agent       # native transport: events, approvals, reconnect-mid-approval
 pnpm demo:native-ui   # native UI in real Chrome: tool cards, diffs, approval sheet
 
+# Home screen and composer. Seeds its own chats, so it needs only a scratch server
+# with a couple of workspace directories.
+PA_TOKEN=... pnpm demo:home-ui
+
 # Resume and attach. These need a scratch server: a workspace root you do not mind
 # an agent writing in, and POCKETAGENT_ADOPT_TMUX_SOCKET set to a throwaway socket.
 # The first creates a real conversation and checks the original file is untouched;
@@ -738,7 +751,15 @@ should have told you. Raise `OUTPUT_BUFFER_BYTES`, or press `^L` to redraw.
 11. **Attaching to your own tmux is a shared session, not a takeover.** Your prefix key is
     live from the browser, and the window follows whichever client attached most recently.
     A pane in a plain terminal (no tmux) cannot be attached to at all.
-12. **Conversation discovery is Claude-specific.** It reads Claude Code's on-disk transcript
+12. **One host.** The header, the composer's host row and `GET /api/hosts` are shaped for
+    several machines, but a server only ever reports itself. Driving more than one needs a
+    front server that registers backs and proxies to them; that does not exist yet, and it
+    would concentrate credentials for every registered machine in one place, so it wants
+    designing rather than bolting on.
+13. **The home screen lists only directories with chats in them.** A configured workspace
+    you have never used does not appear until you start something there; the composer's
+    workspace row can still reach it.
+14. **Conversation discovery is Claude-specific.** It reads Claude Code's on-disk transcript
     format. Other agents would each need their own reader; the rest of the session
     machinery is agent-agnostic.
 
