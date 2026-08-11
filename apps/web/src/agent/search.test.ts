@@ -26,6 +26,8 @@ function project(name: string, titles: string[]): ProjectInfo {
     workspaceLabel: name,
     isGitRepo: false,
     gitBranch: null,
+    hidden: false,
+    isWorkspace: true,
     chats: titles.map(chat),
   };
 }

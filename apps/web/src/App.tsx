@@ -4,6 +4,8 @@ import { useHashRoute } from './hooks/useHashRoute.js';
 import { LoginPage } from './pages/LoginPage.js';
 import { ProjectsPage } from './pages/ProjectsPage.js';
 import { ComposerPage } from './pages/ComposerPage.js';
+import { DesktopShell } from './pages/DesktopShell.js';
+import { useIsDesktop } from './hooks/useMediaQuery.js';
 import { TerminalPage } from './pages/TerminalPage.js';
 import { AgentPage } from './pages/AgentPage.js';
 import { api } from './api/client.js';
@@ -71,6 +73,7 @@ function SessionRoute({
 export function App(): JSX.Element {
   const [auth, setAuth] = useState<AuthState>('checking');
   const [route, navigate] = useHashRoute();
+  const desktop = useIsDesktop();
 
   useEffect(() => {
     let cancelled = false;
@@ -107,6 +110,28 @@ export function App(): JSX.Element {
 
   if (auth === 'anonymous') {
     return <LoginPage onAuthenticated={() => setAuth('authenticated')} />;
+  }
+
+  // Desktop keeps the list and the session on screen together, so the shell
+  // owns the route and the session pane is handed to it as a child.
+  if (desktop) {
+    return (
+      <DesktopShell
+        route={route}
+        onNavigate={navigate}
+        onApiError={handleApiError}
+        onLogout={logout}
+      >
+        {route.name === 'terminal' && (
+          <SessionRoute
+            key={route.sessionId}
+            sessionId={route.sessionId}
+            onBack={() => navigate({ name: 'list' })}
+            onApiError={handleApiError}
+          />
+        )}
+      </DesktopShell>
+    );
   }
 
   if (route.name === 'terminal') {

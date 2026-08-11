@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import type { WorkspaceEntry } from '@pocketagent/protocol';
 
@@ -35,13 +36,80 @@ function assertWellFormed(requested: string): void {
   }
 }
 
+/**
+ * The folders agents may run in.
+ *
+ * These used to be fixed in the environment. They are now a list the user
+ * curates from the UI, stored in the database and seeded from configuration on
+ * first run — a static list could not express "add this repo I just cloned"
+ * without an ssh session and a restart.
+ *
+ * What did *not* change is the check itself: a session's working directory must
+ * still resolve inside one of these. The browser cannot name an arbitrary path
+ * and have an agent started there; it can only name one of the folders someone
+ * deliberately added. That is a weaker boundary than a fixed allowlist and it
+ * is worth being clear about, but it is the boundary the feature asks for, and
+ * adding a folder stays an explicit, separately audited act.
+ */
 export class WorkspaceRegistry {
-  constructor(private readonly roots: readonly string[]) {
-    if (roots.length === 0) throw new Error('WorkspaceRegistry requires at least one root');
+  private roots: string[];
+
+  constructor(
+    seed: readonly string[],
+    private readonly store?: WorkspaceStore,
+  ) {
+    this.roots = store ? store.load([...seed]) : [...seed];
   }
 
   getRoots(): readonly string[] {
     return this.roots;
+  }
+
+  /**
+   * Add a folder. Any absolute directory on this host is allowed — that is the
+   * point — but it must exist, be a directory, and be readable, and `/` is
+   * refused because "every file on the machine" is never a project.
+   */
+  async add(requested: string): Promise<string> {
+    assertWellFormed(requested);
+    const real = await this.canonicalDirectory(requested);
+    if (real === '/') {
+      throw new WorkspaceError('Refusing to use "/" as a project folder.', 'forbidden');
+    }
+    if (!this.roots.includes(real)) {
+      this.roots = [...this.roots, real].sort();
+      this.store?.add(real);
+    }
+    return real;
+  }
+
+  /** Forget a folder. Sessions already running in it are left alone. */
+  remove(path: string): boolean {
+    if (!this.roots.includes(path)) return false;
+    this.roots = this.roots.filter((r) => r !== path);
+    this.store?.remove(path);
+    return true;
+  }
+
+  /** Resolve and validate a directory without adding it, for the picker. */
+  async canonicalDirectory(requested: string): Promise<string> {
+    const absolute = path.resolve(
+      requested.startsWith('~') ? path.join(homedir(), requested.slice(1)) : requested,
+    );
+    let real: string;
+    try {
+      real = await fs.realpath(absolute);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        throw new WorkspaceError(`Directory does not exist: ${requested}`, 'not_found');
+      }
+      throw new WorkspaceError('Directory is not accessible.', 'forbidden');
+    }
+    if (!(await fs.stat(real)).isDirectory()) {
+      throw new WorkspaceError('Path is not a directory.', 'not_a_directory');
+    }
+    return real;
   }
 
   /**
@@ -91,70 +159,48 @@ export class WorkspaceRegistry {
     return real;
   }
 
-  /** Best-effort label for the UI, e.g. `src/project` for root `/home/me`. */
+  /**
+   * Short, unambiguous label: `~/src/project`.
+   *
+   * Folders are arbitrary now, so two of them can share a basename. The home
+   * directory is abbreviated because that prefix is on almost every path here
+   * and carries no information.
+   */
   labelFor(canonicalPath: string): string {
-    for (const root of this.roots) {
-      if (canonicalPath === root) return path.basename(root);
-      if (isContained(root, canonicalPath)) {
-        return path.join(path.basename(root), path.relative(root, canonicalPath));
-      }
-    }
-    return canonicalPath;
+    const home = homedir();
+    if (canonicalPath === home) return '~';
+    return canonicalPath.startsWith(`${home}/`)
+      ? `~/${canonicalPath.slice(home.length + 1)}`
+      : canonicalPath;
   }
 
   /**
-   * Roots plus their immediate child directories. Children whose canonical path
-   * escapes the root (dangling or outward-pointing symlinks) are dropped rather
-   * than shown-and-then-rejected at session start.
+   * The folders themselves — no longer their children.
+   *
+   * Listing every immediate subdirectory turned `venv`, `__pycache__` and
+   * `test-reports` into projects, which is not what any of them are. A folder
+   * is a project because someone added it.
    */
   async list(): Promise<WorkspaceEntry[]> {
     const entries: WorkspaceEntry[] = [];
-    const seen = new Set<string>();
-
     for (const root of this.roots) {
-      if (!seen.has(root)) {
-        seen.add(root);
-        entries.push({
-          path: root,
-          name: root,
-          isRoot: true,
-          isGitRepo: await isGitRepo(root),
-        });
-      }
-
-      let dirents;
-      try {
-        dirents = await fs.readdir(root, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-
-      const children = dirents
-        .filter((d) => (d.isDirectory() || d.isSymbolicLink()) && !d.name.startsWith('.'))
-        .sort((a, b) => a.name.localeCompare(b.name));
-
-      for (const child of children) {
-        const childPath = path.join(root, child.name);
-        let real: string;
-        try {
-          real = await fs.realpath(childPath);
-          if (!(await fs.stat(real)).isDirectory()) continue;
-        } catch {
-          continue;
-        }
-        if (!isContained(root, real) || seen.has(real)) continue;
-        seen.add(real);
-        entries.push({
-          path: real,
-          name: child.name,
-          isRoot: false,
-          isGitRepo: await isGitRepo(real),
-        });
-      }
+      entries.push({
+        path: root,
+        name: path.basename(root) || root,
+        isRoot: true,
+        isGitRepo: await isGitRepo(root),
+      });
     }
-
-    return entries;
+    return entries.sort((a, b) => a.name.localeCompare(b.name));
   }
+}
+
+/** Persistence seam, so the registry stays testable without a database. */
+export interface WorkspaceStore {
+  /** Returns the stored folders, seeding from `seed` the first time only. */
+  load(seed: string[]): string[];
+  add(path: string): void;
+  remove(path: string): void;
 }
 
 async function isGitRepo(dir: string): Promise<boolean> {
@@ -164,4 +210,32 @@ async function isGitRepo(dir: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Database-backed folder list.
+ *
+ * Seeds from configuration exactly once, tracked by a flag rather than by the
+ * table being empty: removing your last folder must not resurrect the ones you
+ * started with on the next boot.
+ */
+export function createWorkspaceStore(db: {
+  read: (key: string) => string | null;
+  write: (key: string, value: string) => void;
+  list: () => string[];
+  insert: (path: string) => void;
+  delete: (path: string) => boolean;
+}): WorkspaceStore {
+  const SEEDED = 'workspaces_seeded';
+  return {
+    load(seed) {
+      if (db.read(SEEDED) === null) {
+        for (const path of seed) db.insert(path);
+        db.write(SEEDED, new Date().toISOString());
+      }
+      return db.list();
+    },
+    add: (path) => db.insert(path),
+    remove: (path) => void db.delete(path),
+  };
 }

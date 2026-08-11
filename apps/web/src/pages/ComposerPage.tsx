@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { AgentInfo, ConversationInfo, HostInfo, WorkspaceEntry } from '@pocketagent/protocol';
+import type {
+  AgentInfo,
+  ChatSummary,
+  HostInfo,
+  ProjectInfo,
+  WorkspaceEntry,
+} from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { SelectorRow, type SelectorOption } from '../components/SelectorRow.js';
 import { Icon } from '../components/Icon.js';
@@ -36,7 +42,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   const [host, setHost] = useState<HostInfo | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
-  const [conversations, setConversations] = useState<ConversationInfo[]>([]);
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -48,13 +54,16 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([api.listHosts(), api.listWorkspaces(), api.listAgents(), api.listConversations()])
-      .then(([h, w, a, c]) => {
+    // Sourced from /api/projects rather than /api/conversations so that this
+    // row shows exactly what the home screen shows: live sessions included,
+    // and anything the user removed or hid left out.
+    Promise.all([api.listHosts(), api.listWorkspaces(), api.listAgents(), api.listProjects()])
+      .then(([h, w, a, p]) => {
         if (cancelled) return;
         setHost(h.hosts[0] ?? null);
         setWorkspaces(w.workspaces);
         setAgents(a.agents);
-        setConversations(c.conversations);
+        setProjects(p.projects);
 
         setCwd((prev) => prev || w.workspaces[0]?.path || '');
         const preferred = a.agents.find((x) => x.available) ?? a.agents[0];
@@ -106,29 +115,54 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   );
 
   /**
-   * The fourth row doubles as branch display and resume picker: for a new chat
-   * it shows the checked-out branch, and the alternatives are the conversations
-   * already recorded in this directory.
+   * The fourth row: start something new, or pick up something already here.
+   *
+   * "Here" means the chosen directory *or anything under it*, because choosing a
+   * workspace root and being told there is nothing to resume — while every
+   * project inside it is full of chats — is simply wrong. A chat carries its own
+   * directory, so picking one from a subdirectory runs it where it belongs
+   * rather than where the row above happens to point.
    */
-  const here = useMemo(
-    () => conversations.filter((c) => c.cwd === cwd),
-    [conversations, cwd],
-  );
+  const here = useMemo(() => {
+    if (!cwd) return [];
+    const out: { chat: ChatSummary; cwd: string; label: string }[] = [];
+    for (const project of projects) {
+      if (project.cwd !== cwd && !project.cwd.startsWith(`${cwd}/`)) continue;
+      for (const chat of project.chats) {
+        // A finished chat with no transcript has nothing to continue from.
+        if (!chat.live && !chat.conversationId) continue;
+        out.push({
+          chat,
+          cwd: project.cwd,
+          label: project.cwd === cwd ? '' : project.name,
+        });
+      }
+    }
+    return out.sort((a, b) => b.chat.updatedAt - a.chat.updatedAt);
+  }, [projects, cwd]);
+
   const branch = useMemo(
-    () => here.find((c) => c.gitBranch)?.gitBranch ?? null,
-    [here],
+    () => projects.find((p) => p.cwd === cwd)?.gitBranch ?? null,
+    [projects, cwd],
   );
+
   const resumeOptions: SelectorOption[] = [
     { value: NEW_CHAT, label: branch ? `New chat · ${branch}` : 'New chat' },
-    ...here.map((c) => ({
-      value: c.id,
-      label: c.title,
-      detail: `${formatRelative(c.updatedAt)}${c.probablyLive ? ' · in use now' : ''}`,
+    ...here.map(({ chat, label }) => ({
+      value: chat.id,
+      label: chat.title,
+      detail: [
+        chat.live ? 'running now' : formatRelative(chat.updatedAt),
+        label,
+      ]
+        .filter(Boolean)
+        .join(' · '),
     })),
   ];
 
+  const picked = here.find((h) => h.chat.id === resumeId);
+
   const [agentId, transport] = flavour ? (flavour.split(':') as [string, 'terminal' | 'structured']) : ['', ''];
-  const resuming = resumeId !== NEW_CHAT;
   const canSend = !busy && !!cwd && !!agentId && prompt.trim().length > 0;
 
   const submit = useCallback(async () => {
@@ -136,15 +170,26 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
     setBusy(true);
     setError(null);
     try {
+      // Already running: join it and hand it the prompt. Starting a second
+      // process against the same conversation is the one thing resuming exists
+      // to avoid.
+      if (picked?.chat.live && picked.chat.sessionId) {
+        setPendingPrompt(picked.chat.sessionId, prompt);
+        onCreated(picked.chat.sessionId);
+        return;
+      }
+
+      const resumeFrom = picked?.chat.conversationId ?? null;
       const session = await api.createSession({
         agent: agentId,
-        cwd,
+        // A resumed chat runs where it was, not where the row above points.
+        cwd: picked?.cwd ?? cwd,
         cols: 80,
         rows: 24,
         // Resuming is only meaningful over the structured transport, which is
         // what owns the conversation.
-        transport: resuming ? 'structured' : (transport as 'terminal' | 'structured'),
-        ...(resuming ? { resumeAgentSessionId: resumeId, forkSession: true } : {}),
+        transport: resumeFrom ? 'structured' : (transport as 'terminal' | 'structured'),
+        ...(resumeFrom ? { resumeAgentSessionId: resumeFrom, forkSession: true } : {}),
       });
       setPendingPrompt(session.id, prompt);
       onCreated(session.id);
@@ -153,7 +198,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
       setError(err instanceof ApiError ? err.message : 'Could not start the chat.');
       setBusy(false);
     }
-  }, [canSend, agentId, cwd, transport, resuming, resumeId, prompt, onCreated, onApiError]);
+  }, [canSend, agentId, cwd, transport, picked, prompt, onCreated, onApiError]);
 
   return (
     <div className="app composer-page">
@@ -212,9 +257,11 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
         </div>
       )}
 
-      {resuming && (
+      {picked && (
         <p className="composer-note">
-          Resuming as a new branch — the original transcript is left untouched.
+          {picked.chat.live
+            ? 'Already running — your prompt goes to that session.'
+            : 'Resuming as a new branch — the original transcript is left untouched.'}
         </p>
       )}
 

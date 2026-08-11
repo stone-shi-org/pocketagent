@@ -37,8 +37,8 @@ and `adopt.test.ts` skip themselves when `tmux` is not installed.
 
 ### Live demos
 
-The unit suite cannot cover xterm rendering, a real agent, or a real tmux server. Six demo
-scripts do, against a *running* server:
+The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
+decision. Eight demo scripts do, against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -47,12 +47,19 @@ pnpm demo:agent           # structured transport: events, approvals, reconnect m
 pnpm demo:native-ui       # native UI in real Chrome: tool cards, diffs, approval sheet
 PA_TOKEN=... pnpm demo:resume-adopt      # resume + tmux attach over the API
 PA_TOKEN=... pnpm demo:resume-adopt-ui   # both pickers and confirmations in a browser
+PA_TOKEN=... pnpm demo:home-ui           # projects screen and composer, phone viewport
+PA_TOKEN=... pnpm demo:resume-history    # resuming a real transcript, with its history
+PA_TOKEN=... pnpm demo:desktop-ui        # two-pane shell, and the width/pointer switch
 ```
 
-The first four read the token from `.env` and default to `:8787`. The last two expect a
-*scratch* server (`PA_BASE`, default `:8788`) with a throwaway workspace root and
-`POCKETAGENT_ADOPT_TMUX_SOCKET` set — they create files, start agents, and kill tmux servers.
-Never point them at the real `.env` database; use a separate `DATABASE_PATH`.
+The first four read the token from `.env` and default to `:8787`. The rest expect a
+*scratch* server (`PA_BASE`) with a throwaway workspace root — they create files, start
+agents, and kill tmux servers. Never point them at the real `.env` database; use a separate
+`DATABASE_PATH`.
+
+**Rebuild then restart** before running a browser demo against a built server: the server
+caches `index.html` at boot, so a fresh bundle on disk is not the one being served, and the
+page loads blank with a 404 for the old asset.
 
 ## Architecture
 
@@ -116,6 +123,22 @@ server registering backs would not force a client rewrite. **No such front serve
 and building one concentrates credentials for every registered machine in one process —
 treat it as a design problem, not a feature request.
 
+### The composer's fourth row
+
+Reads `/api/projects`, not `/api/conversations`, so it shows exactly what the home screen
+shows — live sessions included, removed and hidden ones left out. It matches the selected
+directory *or any below it*, and a picked chat supplies its own `cwd`; resuming a
+conversation in a directory it did not belong to would point the agent at the wrong tree.
+Picking a chat that is already live navigates to it instead of creating anything.
+
+### Hiding and removing
+
+Nothing in the UI deletes a transcript. "Remove" means: drop the session row
+(`SessionManager.forget`, refused for a running session) and record the conversation id in
+`hidden_chats` so the next disk scan does not resurrect it. `project_visibility` stores
+*decisions* rather than a hidden list, because build directories are hidden by default and
+an unhide has to be storable too — an explicit row always wins over `AUTO_HIDDEN_DIRS`.
+
 ### Wire protocol
 
 `packages/protocol` is the single source of truth: Zod schemas for every HTTP body and
@@ -137,8 +160,16 @@ These are load-bearing. Several were bugs first.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.
-- **The browser never supplies a filesystem path outside a workspace root, an executable, or
-  argv.** Adoption and resume both take their `cwd` from the server-validated target.
+- **A session's cwd must still resolve inside a workspace folder** — but that list is now
+  user-managed (`workspaces` table, seeded once from config) rather than fixed in the
+  environment. Adding a folder via `POST /api/workspaces/add` is the moment access is
+  granted, and it is logged. `GET /api/browse` is read-only and can see any directory the
+  server's user can; that is a deliberate widening and the cost of picking any folder.
+- **The browser never supplies an executable or argv.** Adoption and resume both take their
+  `cwd` from the server-validated target.
+- **A project is an added folder, or a directory inside one.** Chats in a directory outside
+  every folder are not listed, so removing a folder actually removes it. Nothing is deleted;
+  re-adding brings its chats back.
 - **`cols`/`rows` are `nonnegative()`, not `positive()`** — a structured session has no
   character grid and reports 0. Requiring a positive value silently invalidated every
   `attached` frame for structured sessions.
@@ -161,12 +192,24 @@ These are load-bearing. Several were bugs first.
   narrate what the code already says.
 - Frontend state is hand-rolled React (hash routing, no router or state library) and plain
   CSS in `apps/web/src/styles.css`. Keep it that way unless there is a real reason.
+- **Two layouts, chosen by `matchMedia` in `hooks/useMediaQuery.ts` — never by user-agent
+  sniffing.** `(min-width: 900px) and (pointer: fine)` gets `DesktopShell` (sidebar plus
+  session pane); everything else gets the single-column phone pages. The list itself lives
+  in `components/ProjectList.tsx` and is shared, so the two layouts cannot drift on rules
+  like "tapping a finished chat resumes it as a branch".
 - **The theme is light, and `color-scheme` is pinned to it.** Everything reads from the
   token block at the top of `styles.css`; adding a raw hex outside it is how the palette
   rots. The one dark surface is the terminal (`--console`), because ANSI palettes are drawn
   for dark backgrounds.
 - Icons are inline SVG in `components/Icon.tsx`, 24px grid, 1.7 stroke, `currentColor`. Add
   to that set rather than reaching for a text glyph or an icon font.
+- **`navigator.clipboard` is not available here.** It needs a secure context, and this app
+  is normally reached over plain HTTP on a LAN or tailnet address. `agent/clipboard.ts`
+  falls back to a throwaway textarea plus `execCommand('copy')`; anything that copies must
+  go through it. The same caveat applies to any other secure-context-only API.
+- **`--console` is the one dark surface in a light app, so anything using it as a background
+  must also set `color: var(--console-text)`** — inheriting the body colour renders
+  dark-on-dark, which is exactly how the code blocks broke once.
 - The home screen carries no metadata per row on purpose — a chat is its title and, if
   running, a green dot. Structure comes from weight and whitespace, not borders and badges.
 - `eslint.config.js` scopes browser globals to the Playwright demo scripts by filename — add

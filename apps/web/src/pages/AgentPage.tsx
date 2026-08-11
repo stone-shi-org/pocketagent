@@ -188,7 +188,7 @@ export function AgentPage({ sessionId, onBack, onApiError }: Props): JSX.Element
   );
 
   return (
-    <div className="terminal-page">
+    <div className="terminal-page agent-page">
       <header className="topbar">
         <button type="button" className="round-btn" onClick={onBack} aria-label="Back to sessions">
           <Icon name="chevron-left" size={20} />

@@ -90,7 +90,77 @@ const MIGRATIONS: readonly string[] = [
   ALTER TABLE sessions ADD COLUMN transport TEXT NOT NULL DEFAULT 'terminal';
   ALTER TABLE sessions ADD COLUMN agent_session_id TEXT;
   `,
+  // What the user has chosen not to see.
+  //
+  // `project_visibility` records *decisions*, not a hidden list: build-output
+  // directories are hidden by default, so unhiding one has to be storable too.
+  // A row here always wins over the default patterns, in either direction.
+  //
+  // `hidden_chats` is keyed on the agent's conversation id rather than a
+  // session id, because the transcript is what would otherwise bring a removed
+  // chat back on the next scan of disk.
+  `
+  CREATE TABLE IF NOT EXISTS project_visibility (
+    cwd        TEXT PRIMARY KEY,
+    hidden     INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS hidden_chats (
+    conversation_id TEXT PRIMARY KEY,
+    created_at      INTEGER NOT NULL
+  );
+  `,
+  // Folders the user has added, and a place to remember one-off facts such as
+  // whether the initial seed from configuration has already happened.
+  //
+  // Workspaces moved out of the environment so they can be managed from the
+  // UI. Configuration now only *seeds* this table on first run: editing
+  // `.env` afterwards would otherwise silently fight what the user added.
+  `
+  CREATE TABLE IF NOT EXISTS workspaces (
+    path     TEXT PRIMARY KEY,
+    added_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+  `,
 ];
+
+export function readSetting(db: Db, key: string): string | null {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as
+    | { value: string }
+    | undefined;
+  return row?.value ?? null;
+}
+
+export function writeSetting(db: Db, key: string, value: string): void {
+  db.prepare(
+    `INSERT INTO settings (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  ).run(key, value);
+}
+
+export function readWorkspaces(db: Db): string[] {
+  const rows = db.prepare('SELECT path FROM workspaces ORDER BY path').all() as {
+    path: string;
+  }[];
+  return rows.map((r) => r.path);
+}
+
+export function insertWorkspace(db: Db, path: string): void {
+  db.prepare('INSERT OR IGNORE INTO workspaces (path, added_at) VALUES (?, ?)').run(
+    path,
+    Date.now(),
+  );
+}
+
+export function deleteWorkspace(db: Db, path: string): boolean {
+  return db.prepare('DELETE FROM workspaces WHERE path = ?').run(path).changes > 0;
+}
 
 /**
  * `env_keys_json` deliberately stores only the *names* of environment overrides,
@@ -152,6 +222,58 @@ export function markStaleSessionsInterrupted(
 
 export function purgeExpiredAuthSessions(db: Db, now = Date.now()): number {
   return db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(now).changes;
+}
+
+/**
+ * Directories hidden by default because they are build output, not work.
+ *
+ * Matched on basename. These are defaults only: an explicit row in
+ * `project_visibility` overrides them either way, so unhiding `dist` sticks.
+ */
+export const AUTO_HIDDEN_DIRS: ReadonlySet<string> = new Set([
+  '__pycache__',
+  'node_modules',
+  '.venv',
+  'venv',
+  '.git',
+  'dist',
+  'build',
+  'target',
+  'coverage',
+  '.next',
+  '.tox',
+  '.mypy_cache',
+  '.pytest_cache',
+]);
+
+export interface VisibilityRow {
+  cwd: string;
+  hidden: number;
+}
+
+export function readProjectVisibility(db: Db): Map<string, boolean> {
+  const rows = db.prepare('SELECT cwd, hidden FROM project_visibility').all() as VisibilityRow[];
+  return new Map(rows.map((r) => [r.cwd, r.hidden === 1]));
+}
+
+export function setProjectVisibility(db: Db, cwd: string, hidden: boolean): void {
+  db.prepare(
+    `INSERT INTO project_visibility (cwd, hidden, created_at) VALUES (?, ?, ?)
+       ON CONFLICT(cwd) DO UPDATE SET hidden = excluded.hidden`,
+  ).run(cwd, hidden ? 1 : 0, Date.now());
+}
+
+export function readHiddenChats(db: Db): Set<string> {
+  const rows = db.prepare('SELECT conversation_id FROM hidden_chats').all() as {
+    conversation_id: string;
+  }[];
+  return new Set(rows.map((r) => r.conversation_id));
+}
+
+export function hideChat(db: Db, conversationId: string): void {
+  db.prepare(
+    'INSERT OR IGNORE INTO hidden_chats (conversation_id, created_at) VALUES (?, ?)',
+  ).run(conversationId, Date.now());
 }
 
 /** Keep the session table from growing forever on a long-lived install. */

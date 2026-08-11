@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { TranscriptItem, TranscriptState } from '../agent/transcript.js';
 import { renderMarkdown } from '../agent/markdown.js';
 import { ToolCard } from './ToolCard.js';
+import { CopyButton } from './CopyButton.js';
 
 export function Transcript({
   state,
@@ -69,9 +70,22 @@ function Item({ item }: { item: TranscriptItem }): JSX.Element | null {
   switch (item.type) {
     case 'text':
       return item.role === 'user' ? (
-        <div className="bubble user">{item.text}</div>
+        <div className="message user">
+          <div className="bubble user">{item.text}</div>
+          <div className="message-actions">
+            <CopyButton text={item.text} label="Copy prompt" />
+          </div>
+        </div>
       ) : (
-        <Markdown text={item.text} streaming={item.streaming} />
+        <div className="message assistant">
+          <Markdown text={item.text} streaming={item.streaming} />
+          {/* Nothing to copy until the block has stopped growing. */}
+          {!item.streaming && (
+            <div className="message-actions">
+              <CopyButton text={item.text} label="Copy answer" />
+            </div>
+          )}
+        </div>
       );
     case 'thinking':
       return <Thinking text={item.text} />;

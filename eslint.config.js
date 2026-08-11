@@ -45,6 +45,8 @@ export default tseslint.config(
       'apps/server/scripts/resume-adopt-ui-demo.mjs',
       'apps/server/scripts/home-ui-demo.mjs',
       'apps/server/scripts/resume-history-demo.mjs',
+      'apps/server/scripts/desktop-ui-demo.mjs',
+      'apps/server/scripts/copy-ui-demo.mjs',
     ],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },
   },

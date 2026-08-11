@@ -34,6 +34,9 @@ or use private remote-control APIs. It launches `claude` exactly the way you wou
 - [Process backends](#process-backends)
 - [Accessing from another device](#accessing-from-another-device)
 - [Using it](#using-it)
+- [Copying a message](#copying-a-message)
+- [Tidying the list](#tidying-the-list)
+- [Layouts](#layouts)
 - [Security model](#security-model)
 - [How it works](#how-it-works)
 - [Development](#development)
@@ -94,14 +97,33 @@ To rotate: edit `POCKETAGENT_AUTH_TOKEN` in `.env` and restart. Existing browser
 keep working until their cookies expire — to force everyone out, delete `data/pocketagent.db`
 (this also clears session history) or `DELETE FROM auth_sessions;`.
 
-### Configure workspace roots
+### Project folders
+
+Folders are managed from the app: **Add a project folder** at the bottom of the list opens
+a picker with two tabs.
+
+- **Suggested** — directories Claude Code and Codex have already run in, read from their
+  own session stores. Usually the whole answer, and it saves navigating a filesystem on a
+  phone.
+- **Browse** — the host's directories, navigated from your home directory. Not an OS file
+  dialog: a browser's directory picker returns a handle to storage on *this device*, and a
+  file input never reveals an absolute path, so the server lists its own directories and the
+  browser walks them.
+
+Any absolute directory on the host can be added, except `/`. Subdirectories are *not* added
+with it — `venv`, `node_modules` and `test-reports` are not projects.
 
 ```env
+# Optional. Seeds the list on a *fresh database* only; after that the app owns it,
+# so editing this later will not fight what you added in the UI.
 POCKETAGENT_WORKSPACE_ROOTS=/home/me/src,/home/me/work
 ```
 
-Sessions may only run inside these directories. There is no default: an unset value must
-never mean "the whole filesystem", so the server refuses to start without it.
+**What the boundary is now.** A session's working directory must still resolve inside one of
+these folders — that check has not gone away, it just consults a list you curate instead of
+one fixed in the environment. Adding a folder is the moment access is granted, and it is
+logged. Removing one revokes it: new sessions there are refused, though anything already
+running keeps running.
 
 ### All settings
 
@@ -110,7 +132,7 @@ never mean "the whole filesystem", so the server refuses to start without it.
 | `HOST` | `127.0.0.1` | Bind address. Non-loopback logs a warning. |
 | `PORT` | `8787` | |
 | `POCKETAGENT_AUTH_TOKEN` | — | **Required.** Min 24 chars. |
-| `POCKETAGENT_WORKSPACE_ROOTS` | — | **Required.** Comma-separated directories. |
+| `POCKETAGENT_WORKSPACE_ROOTS` | — | Optional. Seeds project folders on a fresh database only. |
 | `POCKETAGENT_SESSION_TTL_HOURS` | `720` | How long a browser stays signed in. |
 | `POCKETAGENT_COOKIE_SECURE` | auto | `Secure` cookie flag; defaults to on when `NODE_ENV=production`. |
 | `POCKETAGENT_ALLOWED_ORIGINS` | same-origin | Comma-separated Origin allowlist. |
@@ -263,7 +285,13 @@ gives the terminal noticeably more room.
 ## Using it
 
 1. **Log in** with your access token.
-2. **Home screen — Projects.** A folder per workspace directory, with every chat that has
+2. **On a desktop browser you get a two-pane layout**: the chat list stays in a
+   sidebar and a session opens beside it, so switching chats is a click rather than a
+   round trip through the home screen. Below 900px — or on any touch device — you get the
+   phone layout described here. That is decided by viewport width and pointer type, live,
+   so dragging a window narrow switches layouts without a reload. See
+   [Layouts](#layouts).
+3. **Home screen — Projects.** A folder per workspace directory, with every chat that has
    happened in it underneath. Tap a folder to collapse it, a chat to open it, the ✎ beside a
    folder to start a chat there, or the search field to filter across all of them. The header
    names the host you are connected to.
@@ -272,22 +300,79 @@ gives the terminal noticeably more room.
    running. Tapping a finished one resumes it as a new branch — the original transcript is
    only read. See
    [Picking up work you started elsewhere](#picking-up-work-you-started-elsewhere).
-3. **Compose (✎).** Four rows say what is about to happen — host, workspace, agent and
-   interface, and either "New chat" or a conversation to resume — over a prompt box. The
-   session is created when you send, and your text becomes its first turn, so nothing is
-   left running if you back out.
+4. **Compose (✎).** Four rows say what is about to happen — host, workspace, agent and
+   interface, and either "New chat" or something already on the host — over a prompt box.
+   The session is created when you send, and your text becomes its first turn, so nothing
+   is left running if you back out.
+
+   The fourth row lists chats in the chosen directory **and anything under it**, so picking
+   a workspace root still finds the work inside it; a chat resumed from a subdirectory runs
+   where it belongs, not where the row above points. Chats already **running** are offered
+   too — picking one joins it and sends your prompt there rather than starting a second
+   process against the same conversation.
 
    The ⋯ menu holds the rest: refresh, sign out, and **More session options…**, which is the
    older dialog and the only place offering *Continue in place* and *Attach to a tmux pane*.
-4. **Terminal.** Type directly into it, or compose in the prompt box at the bottom and hit
+5. **Terminal.** Type directly into it, or compose in the prompt box at the bottom and hit
    Send — much easier for long prompts on a phone.
-5. **Answer prompts yourself.** When Claude asks "Do you want to make this edit?", you
+6. **Answer prompts yourself.** When Claude asks "Do you want to make this edit?", you
    answer with `1`/`2`/Enter/Esc, exactly as at the terminal. PocketAgent never answers for
    you.
-6. **Key bar** provides Esc, Ctrl, ^C, Tab, arrows, Enter, and a `»` overflow with ⌫,
+7. **Key bar** provides Esc, Ctrl, ^C, Tab, arrows, Enter, and a `»` overflow with ⌫,
    ⇧Tab, ^D, ^Z, ^L, ^R and `1`/`2`/`3`/`y`/`n` for menu answers.
-7. **Close the tab whenever.** The process keeps running. Reopen later and you get the
+8. **Close the tab whenever.** The process keeps running. Reopen later and you get the
    buffered history plus everything that happened while you were gone.
+
+### Copying a message
+
+Every prompt and answer has a copy icon underneath it, which copies the **markdown
+source** rather than the rendered text — a code block you cannot paste back into an editor
+is not much use.
+
+It works over plain HTTP. `navigator.clipboard` only exists in a secure context, so on a
+LAN or tailnet address it is simply undefined; the button falls back to the older
+selection-based copy. The icon becomes a tick on success; the only case that spells
+anything out is failure, where it says *Couldn't copy* rather than silently doing nothing.
+
+### Tidying the list
+
+There is no "delete a project" — a project is a directory that has chats in it, so it
+disappears when its last chat does. Two controls get you there, and **neither deletes
+anything from disk**:
+
+- **✕ on a finished chat** removes it from the list. The session record goes and the
+  conversation is remembered as removed so the next scan does not put it back. The
+  transcript stays where it is and stays resumable from a terminal. Running chats have no
+  ✕ — stop them first, or the process would be left alive with no way back to it.
+- **⋯ on a folder** offers *Clear N finished chats* and *Hide this project*.
+
+Hiding is reversible from **⋯ → Hidden projects…**, which also lists the directories hidden
+by default: `__pycache__`, `node_modules`, `.venv`, `dist`, `build`, `target`, `.next` and
+friends. Those are defaults, not rules — unhiding one is remembered and wins over the
+pattern.
+
+To actually delete a conversation you delete its `.jsonl` under `~/.claude/projects`
+yourself. PocketAgent will not do it: that file belongs to Claude Code, and losing it loses
+the conversation everywhere, not just here.
+
+### Layouts
+
+There are two, and which you get is decided by `matchMedia`, never by the user-agent
+string. UA strings lie by design, the platform parts are being frozen in favour of Client
+Hints, and none of it answers the question that matters: a desktop window dragged to half
+width wants the compact layout, and a tablet with a trackpad wants the roomy one.
+
+```
+(min-width: 900px) and (pointer: fine)   ->  two panes
+anything else                            ->  single column
+```
+
+Both halves matter. Width alone hands a landscape tablet a sidebar it loses the moment a
+keyboard appears; pointer alone hands a narrow desktop window a layout that does not fit.
+
+The desktop pane also drops the on-screen key bar — a real keyboard already has Esc and
+Ctrl — and holds the transcript to a readable column while leaving the terminal full width,
+because a terminal is a character grid and constraining it just wastes the space.
 
 ### Reconnect behaviour
 

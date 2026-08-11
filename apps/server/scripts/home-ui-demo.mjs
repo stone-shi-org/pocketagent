@@ -93,8 +93,10 @@ async function seed() {
     projects.filter((p) => p.chats.some((c) => c.live)).map((p) => p.cwd),
   );
 
+  // Every configured folder is a project now; there are no child entries to
+  // filter out, because subdirectories stopped being listed as workspaces.
   let created = 0;
-  for (const workspace of workspaces.filter((w) => !w.isRoot)) {
+  for (const workspace of workspaces) {
     if (occupied.has(workspace.path)) continue;
     await call('/api/sessions', {
       method: 'POST',
@@ -108,7 +110,7 @@ async function seed() {
     });
     created++;
   }
-  return { created, total: workspaces.filter((w) => !w.isRoot).length };
+  return { created, total: workspaces.length };
 }
 
 const seeded = await seed();

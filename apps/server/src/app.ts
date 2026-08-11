@@ -8,8 +8,17 @@ import fastifyStatic from '@fastify/static';
 import { AUTH_COOKIE_NAME, LIMITS } from '@pocketagent/protocol';
 import type { Config } from './config/index.js';
 import { AuthService, isOriginAllowed } from './auth/index.js';
-import { openDatabase, purgeExpiredAuthSessions, type Db } from './db/index.js';
-import { WorkspaceRegistry } from './workspaces/index.js';
+import {
+  deleteWorkspace,
+  insertWorkspace,
+  openDatabase,
+  purgeExpiredAuthSessions,
+  readSetting,
+  readWorkspaces,
+  writeSetting,
+  type Db,
+} from './db/index.js';
+import { WorkspaceRegistry, createWorkspaceStore } from './workspaces/index.js';
 import { createDefaultRegistry } from './agents/registry.js';
 import { createBackend, DirectPtyBackend } from './backends/index.js';
 import { SessionManager } from './sessions/manager.js';
@@ -72,7 +81,22 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   purgeExpiredAuthSessions(db);
 
   const auth = new AuthService(db, config.authToken, config.sessionTtlMs);
-  const workspaces = new WorkspaceRegistry(config.workspaceRoots);
+  const workspaces = new WorkspaceRegistry(
+    config.workspaceRoots,
+    createWorkspaceStore({
+      read: (key) => readSetting(db, key),
+      write: (key, value) => writeSetting(db, key, value),
+      list: () => readWorkspaces(db),
+      insert: (path) => insertWorkspace(db, path),
+      delete: (path) => deleteWorkspace(db, path),
+    }),
+  );
+  if (workspaces.getRoots().length === 0) {
+    app.log.warn(
+      'No project folders yet. Add one from the app, or set ' +
+        'POCKETAGENT_WORKSPACE_ROOTS to seed the list on a fresh database.',
+    );
+  }
   const agents = createDefaultRegistry({ shell: config.shell, claudeBin: config.claudeBin });
 
   const backend = createBackend({
@@ -111,7 +135,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     );
   }
 
-  const projects = new ProjectService({ workspaces, conversations, version: VERSION });
+  const projects = new ProjectService({ workspaces, conversations, db, version: VERSION });
 
   const sessions = new SessionManager({
     db,

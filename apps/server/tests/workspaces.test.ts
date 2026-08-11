@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { WorkspaceRegistry, WorkspaceError, isContained } from '../src/workspaces/index.js';
 import { makeWorkspace } from './helpers.js';
@@ -89,29 +90,58 @@ describe('WorkspaceRegistry', () => {
     });
   });
 
-  it('lists roots and immediate children but omits escaping symlinks', async () => {
+  it('lists the folders themselves, not their children', async () => {
+    // Listing every subdirectory turned `venv` and `__pycache__` into projects.
+    // A folder is a project because someone added it.
     fs.mkdirSync(path.join(ws.root, 'second'));
-    fs.mkdirSync(path.join(ws.root, '.hidden'));
-    fs.symlinkSync('/etc', path.join(ws.root, 'escape-hatch'));
+    const names = (await registry.list()).map((e) => e.name);
+    expect(names).toEqual([path.basename(ws.root)]);
+    expect(names).not.toContain('second');
+    expect(names).not.toContain('project');
+  });
 
-    const entries = await registry.list();
-    const names = entries.map((e) => e.name);
+  it('adds any directory on the host, and forgets it again', async () => {
+    const other = fs.realpathSync(fs.mkdtempSync('/tmp/pa-add-'));
+    try {
+      const added = await registry.add(other);
+      expect(added).toBe(other);
+      expect((await registry.list()).map((e) => e.path)).toContain(other);
+      // Which is the point: it can now be used as a working directory.
+      await expect(registry.resolveWorkspacePath(other)).resolves.toBe(other);
 
-    expect(entries[0]?.isRoot).toBe(true);
-    expect(names).toContain('project');
-    expect(names).toContain('second');
-    expect(names).not.toContain('.hidden');
-    expect(names).not.toContain('escape-hatch');
+      expect(registry.remove(other)).toBe(true);
+      await expect(registry.resolveWorkspacePath(other)).rejects.toThrow(WorkspaceError);
+    } finally {
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses "/" — every file on the machine is not a project', async () => {
+    await expect(registry.add('/')).rejects.toThrow(WorkspaceError);
+  });
+
+  it('refuses a folder that does not exist or is not a directory', async () => {
+    await expect(registry.add('/tmp/definitely-not-here-xyz')).rejects.toThrow(WorkspaceError);
+    const file = path.join(ws.root, 'a-file');
+    fs.writeFileSync(file, 'x');
+    await expect(registry.add(file)).rejects.toThrow(WorkspaceError);
+  });
+
+  it('adding the same folder twice is not an error and does not duplicate it', async () => {
+    await registry.add(ws.root);
+    expect((await registry.list()).filter((e) => e.path === ws.root)).toHaveLength(1);
   });
 
   it('flags git repositories', async () => {
-    fs.mkdirSync(path.join(ws.project, '.git'));
+    fs.mkdirSync(path.join(ws.root, '.git'));
     const entries = await registry.list();
-    expect(entries.find((e) => e.name === 'project')?.isGitRepo).toBe(true);
+    expect(entries[0]?.isGitRepo).toBe(true);
   });
 
-  it('produces a readable label', () => {
-    expect(registry.labelFor(ws.project)).toBe(`${path.basename(ws.root)}/project`);
-    expect(registry.labelFor(ws.root)).toBe(path.basename(ws.root));
+  it('labels a path relative to home, since folders can now be anywhere', () => {
+    // Two added folders can share a basename, so the label carries the path.
+    expect(registry.labelFor('/tmp/x/y')).toBe('/tmp/x/y');
+    expect(registry.labelFor(os.homedir())).toBe('~');
+    expect(registry.labelFor(path.join(os.homedir(), 'src/app'))).toBe('~/src/app');
   });
 });

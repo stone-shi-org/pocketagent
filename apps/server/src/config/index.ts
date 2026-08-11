@@ -160,11 +160,6 @@ function canonicalizeRoots(raw: string): string[] {
     }
   }
 
-  if (roots.length === 0) {
-    throw new ConfigError(
-      `POCKETAGENT_WORKSPACE_ROOTS did not yield any usable directory.\n${problems.join('\n')}`,
-    );
-  }
   return roots;
 }
 
@@ -188,15 +183,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
 
-  const rootsRaw = e.POCKETAGENT_WORKSPACE_ROOTS?.trim();
-  if (!rootsRaw) {
-    throw new ConfigError(
-      'POCKETAGENT_WORKSPACE_ROOTS is not set. Set it to a comma-separated list of\n' +
-        'directories that sessions may run in, e.g.\n\n' +
-        `    POCKETAGENT_WORKSPACE_ROOTS=${path.join(os.homedir(), 'src')}\n\n` +
-        'There is no default: an unset value must never mean "the whole filesystem".',
-    );
-  }
+  // Optional now: workspaces live in the database and are managed from the UI,
+  // and this only seeds them on first run. Unset is safe — it means no folders
+  // at all, and the app asks you to add one — which is why the old hard failure
+  // is gone. It never meant "the whole filesystem" and still does not.
+  const rootsRaw = e.POCKETAGENT_WORKSPACE_ROOTS?.trim() ?? '';
 
   const host = e.HOST.trim();
   const isNetworkExposed = !['127.0.0.1', 'localhost', '::1'].includes(host);

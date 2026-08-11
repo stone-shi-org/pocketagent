@@ -1,6 +1,8 @@
 import type {
   AdoptableTarget,
   AgentEvent,
+  BrowseEntry,
+  DiscoveredFolder,
   AgentInfo,
   ConversationInfo,
   HostInfo,
@@ -69,8 +71,35 @@ export const api = {
   listSessions: () => request<{ sessions: SessionInfo[] }>('/api/sessions'),
 
   /** Everything the home screen draws, in one round trip. */
-  listProjects: () =>
-    request<{ host: HostInfo; projects: ProjectInfo[] }>('/api/projects'),
+  listProjects: (includeHidden = false) =>
+    request<{ host: HostInfo; projects: ProjectInfo[] }>(
+      `/api/projects${includeHidden ? '?includeHidden=1' : ''}`,
+    ),
+
+  /** Drops a chat from the list. Never deletes a transcript. */
+  removeChat: (ids: { sessionId?: string; conversationId?: string }) =>
+    request<{ ok: true }>('/api/chats/remove', {
+      method: 'POST',
+      body: JSON.stringify(ids),
+    }),
+
+  clearFinished: (cwd: string) =>
+    request<{ ok: true; removedSessions: number; removedConversations: number }>(
+      '/api/projects/clear-finished',
+      { method: 'POST', body: JSON.stringify({ cwd }) },
+    ),
+
+  hideProject: (cwd: string) =>
+    request<{ ok: true }>('/api/projects/hide', {
+      method: 'POST',
+      body: JSON.stringify({ cwd }),
+    }),
+
+  unhideProject: (cwd: string) =>
+    request<{ ok: true }>('/api/projects/unhide', {
+      method: 'POST',
+      body: JSON.stringify({ cwd }),
+    }),
 
   listHosts: () => request<{ hosts: HostInfo[] }>('/api/hosts'),
 
@@ -103,6 +132,30 @@ export const api = {
     request<{ conversationId?: string; events: AgentEvent[] }>(
       `/api/sessions/${encodeURIComponent(id)}/history`,
     ),
+
+  addWorkspace: (path: string) =>
+    request<{ ok: true; path: string; label: string }>('/api/workspaces/add', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
+
+  removeWorkspace: (path: string) =>
+    request<{ ok: boolean }>('/api/workspaces/remove', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
+
+  listDiscovered: () => request<{ folders: DiscoveredFolder[] }>('/api/discovered'),
+
+  /** Subdirectories of `path` on the host; defaults to the home directory. */
+  browse: (path?: string) =>
+    request<{
+      path: string;
+      label: string;
+      parent: string | null;
+      added: boolean;
+      entries: BrowseEntry[];
+    }>(`/api/browse${path ? `?path=${encodeURIComponent(path)}` : ''}`),
 
   listWorkspaces: () => request<{ workspaces: WorkspaceEntry[] }>('/api/workspaces'),
 

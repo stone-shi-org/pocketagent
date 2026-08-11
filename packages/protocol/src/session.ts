@@ -191,9 +191,44 @@ export const ProjectInfo = z.object({
   workspaceLabel: z.string(),
   isGitRepo: z.boolean(),
   gitBranch: z.string().nullable(),
+  /** Excluded from the list unless explicitly asked for. */
+  hidden: z.boolean(),
+  /**
+   * True when this is a folder the user added, rather than a subdirectory that
+   * merely happens to have had a session run in it. Only the former can be
+   * removed; the latter can only be hidden.
+   */
+  isWorkspace: z.boolean(),
   chats: z.array(ChatSummary),
 });
 export type ProjectInfo = z.infer<typeof ProjectInfo>;
+
+/**
+ * A folder found in an agent's own history.
+ *
+ * Suggested, never granted: appearing here means some agent has run in this
+ * directory before, not that PocketAgent may use it.
+ */
+export const DiscoveredFolder = z.object({
+  path: z.string(),
+  /** Display form, e.g. `~/src/project`. */
+  label: z.string(),
+  /** Agent ids that have run here, e.g. `claude`, `codex`. */
+  agents: z.array(z.string()),
+  lastUsedAt: z.number().int(),
+  sessions: z.number().int().nonnegative(),
+});
+export type DiscoveredFolder = z.infer<typeof DiscoveredFolder>;
+
+/** One directory in the picker. */
+export const BrowseEntry = z.object({
+  path: z.string(),
+  name: z.string(),
+  isGitRepo: z.boolean(),
+  /** Already a project, so the picker can say so instead of offering it twice. */
+  added: z.boolean(),
+});
+export type BrowseEntry = z.infer<typeof BrowseEntry>;
 
 /**
  * An existing tmux pane that PocketAgent could attach to.

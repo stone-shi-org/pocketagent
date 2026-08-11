@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadConfig, ConfigError } from '../src/config/index.js';
+import { loadConfig } from '../src/config/index.js';
 import { makeWorkspace, TEST_TOKEN } from './helpers.js';
 
 function env(overrides: Record<string, string | undefined>): NodeJS.ProcessEnv {
@@ -31,16 +31,18 @@ describe('config', () => {
     }
   });
 
-  it('refuses to start with no workspace roots — unset must not mean "everything"', () => {
-    expect(() => loadConfig(env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN }))).toThrow(
-      /POCKETAGENT_WORKSPACE_ROOTS is not set/,
-    );
+  it('starts with no workspace roots — they are a seed now, not a requirement', () => {
+    // Folders are managed from the app and stored in the database. Unset means
+    // no folders at all, which is safe; it never meant "the whole filesystem".
+    const config = loadConfig(env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN }));
+    expect(config.workspaceRoots).toEqual([]);
   });
 
-  it('rejects "/" as a workspace root', () => {
-    expect(() =>
-      loadConfig(env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN, POCKETAGENT_WORKSPACE_ROOTS: '/' })),
-    ).toThrow(ConfigError);
+  it('never seeds "/" as a workspace root', () => {
+    const config = loadConfig(
+      env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN, POCKETAGENT_WORKSPACE_ROOTS: '/' }),
+    );
+    expect(config.workspaceRoots).toEqual([]);
   });
 
   it('canonicalizes roots through symlinks and de-duplicates them', () => {

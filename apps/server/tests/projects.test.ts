@@ -4,8 +4,9 @@ import path from 'node:path';
 import type { SessionInfo } from '@pocketagent/protocol';
 import { ProjectService, readGitBranch } from '../src/projects/index.js';
 import { ConversationStore, encodeProjectDir } from '../src/conversations/index.js';
+import { hideChat, openDatabase } from '../src/db/index.js';
 import { WorkspaceRegistry } from '../src/workspaces/index.js';
-import { createTestApp, makeWorkspace, type TestApp } from './helpers.js';
+import { createTestApp, makeWorkspace, waitFor, type TestApp } from './helpers.js';
 
 function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
   return {
@@ -63,6 +64,7 @@ describe('ProjectService', () => {
   let ws: ReturnType<typeof makeWorkspace>;
   let projectsDir: string;
   let service: ProjectService;
+  let db: ReturnType<typeof openDatabase>;
 
   const writeTranscript = (cwd: string, id: string, title: string): void => {
     const dir = path.join(projectsDir, encodeProjectDir(cwd));
@@ -82,6 +84,7 @@ describe('ProjectService', () => {
     ws = makeWorkspace();
     projectsDir = fs.mkdtempSync('/tmp/pa-proj-');
     const workspaces = new WorkspaceRegistry([ws.root]);
+    db = openDatabase(':memory:');
     service = new ProjectService({
       workspaces,
       conversations: new ConversationStore({
@@ -89,11 +92,13 @@ describe('ProjectService', () => {
         workspaces,
         listRunningCwds: async () => [],
       }),
+      db,
       version: '9.9.9',
       hostname: 'stone-dev01.internal.example.com',
     });
   });
   afterEach(() => {
+    db.close();
     ws.cleanup();
     fs.rmSync(projectsDir, { recursive: true, force: true });
   });
@@ -118,10 +123,8 @@ describe('ProjectService', () => {
       makeSession({ id: 'b', cwd: other }),
     ]);
 
-    expect(projects).toHaveLength(2);
-    const names = projects.map((p) => p.name).sort();
-    expect(names).toEqual(['other', 'project']);
     expect(projects.find((p) => p.name === 'project')?.chats.map((c) => c.id)).toEqual(['a']);
+    expect(projects.find((p) => p.name === 'other')?.chats.map((c) => c.id)).toEqual(['b']);
   });
 
   it('shows a live session and a past conversation side by side', async () => {
@@ -177,11 +180,90 @@ describe('ProjectService', () => {
       makeSession({ id: 'old', cwd: older, lastActivityAt: 1000 }),
       makeSession({ id: 'new', cwd: ws.project, lastActivityAt: 2000 }),
     ]);
-    expect(projects.map((p) => p.name)).toEqual(['project', 'older']);
+    // Directories with work come first, newest first; empty ones follow.
+    expect(projects.slice(0, 2).map((p) => p.name)).toEqual(['project', 'older']);
+    expect(projects.slice(2).every((p) => p.chats.length === 0)).toBe(true);
   });
 
-  it('omits directories with nothing in them', async () => {
-    expect(await service.list([])).toEqual([]);
+  it('lists an added folder that has no chats yet', async () => {
+    // A repo you have not started work in is still somewhere you can start it.
+    // Hiding it made the home screen a history rather than a launcher.
+    const projects = await service.list([]);
+    const found = projects.find((p) => p.cwd === ws.root);
+    expect(found).toBeDefined();
+    expect(found?.chats).toEqual([]);
+  });
+
+  it('sorts empty folders stably, so the list does not shuffle', async () => {
+    const registry = new WorkspaceRegistry([ws.root]);
+    for (const name of ['zebra', 'alpha', 'mango']) {
+      const dir = path.join(ws.root, name);
+      fs.mkdirSync(dir);
+      await registry.add(dir);
+    }
+    const svc = new ProjectService({
+      workspaces: registry,
+      conversations: new ConversationStore({
+        projectsDir,
+        workspaces: registry,
+        listRunningCwds: async () => [],
+      }),
+      db,
+      version: '1',
+    });
+    const first = (await svc.list([])).map((p) => p.name);
+    const second = (await svc.list([])).map((p) => p.name);
+    expect(first).toEqual(second);
+    expect(first.indexOf('alpha')).toBeLessThan(first.indexOf('mango'));
+  });
+
+  it('hides build output by default without being told to', async () => {
+    const junk = path.join(ws.root, '__pycache__');
+    fs.mkdirSync(junk);
+    const projects = await service.list([
+      makeSession({ id: 'junk', cwd: junk }),
+      makeSession({ id: 'real', cwd: ws.project }),
+    ]);
+    expect(projects.map((p) => p.name)).not.toContain('__pycache__');
+    expect(projects.map((p) => p.name)).toContain('project');
+  });
+
+  it('shows a hidden project when explicitly asked, flagged as hidden', async () => {
+    const junk = path.join(ws.root, 'node_modules');
+    fs.mkdirSync(junk);
+    const projects = await service.list([makeSession({ cwd: junk })], true);
+    expect(projects[0]).toMatchObject({ name: 'node_modules', hidden: true });
+  });
+
+  it('lets an explicit unhide beat the default patterns', async () => {
+    // Someone who unhides `dist` means it; the defaults must not re-hide it.
+    const dist = path.join(ws.root, 'dist');
+    fs.mkdirSync(dist);
+    service.setHidden(dist, false);
+    const projects = await service.list([makeSession({ cwd: dist })]);
+    expect(projects.map((p) => p.name)).toContain('dist');
+  });
+
+  it('hides a project the user hid, and unhides it again', async () => {
+    service.setHidden(ws.project, true);
+    const names = async () => (await service.list([makeSession({ cwd: ws.project })])).map((p) => p.name);
+    expect(await names()).not.toContain('project');
+
+    service.setHidden(ws.project, false);
+    expect(await names()).toContain('project');
+  });
+
+  it('drops a conversation the user removed, and keeps the transcript', async () => {
+    writeTranscript(ws.project, 'gone', 'Old question');
+    writeTranscript(ws.project, 'kept', 'Still wanted');
+
+    hideChat(db, 'gone');
+    const [project] = await service.list([]);
+    expect(project?.chats.map((c) => c.id)).toEqual(['kept']);
+
+    // Removal is a list decision, not a deletion.
+    const dir = path.join(projectsDir, encodeProjectDir(ws.project));
+    expect(fs.existsSync(path.join(dir, 'gone.jsonl'))).toBe(true);
   });
 
   it('reports the git branch for a project that has one', async () => {
@@ -189,6 +271,40 @@ describe('ProjectService', () => {
     fs.writeFileSync(path.join(ws.project, '.git', 'HEAD'), 'ref: refs/heads/main\n');
     const [project] = await service.list([makeSession({ cwd: ws.project })]);
     expect(project).toMatchObject({ isGitRepo: true, gitBranch: 'main' });
+  });
+
+  it('drops a directory once its folder is no longer a project', async () => {
+    // "Remove this folder" has to actually remove it. A folder with history is
+    // exactly where doing nothing would look broken. Nothing is deleted: the
+    // chats come back if the folder is added again.
+    const registry = new WorkspaceRegistry([ws.root]);
+    const svc = new ProjectService({
+      workspaces: registry,
+      conversations: new ConversationStore({
+        projectsDir,
+        workspaces: registry,
+        listRunningCwds: async () => [],
+      }),
+      db,
+      version: '1',
+    });
+    const session = makeSession({ cwd: ws.project });
+    expect((await svc.list([session])).map((p) => p.cwd)).toContain(ws.project);
+
+    registry.remove(ws.root);
+    expect(await svc.list([session])).toEqual([]);
+
+    await registry.add(ws.root);
+    expect((await svc.list([session])).map((p) => p.cwd)).toContain(ws.project);
+  });
+
+  it('marks which projects are folders the user added', async () => {
+    const sub = path.join(ws.project, 'subdir');
+    fs.mkdirSync(sub);
+    const projects = await service.list([makeSession({ cwd: sub })]);
+    // The root was added; a directory a session merely ran in was not.
+    expect(projects.find((p) => p.cwd === ws.root)?.isWorkspace).toBe(true);
+    expect(projects.find((p) => p.cwd === sub)?.isWorkspace).toBe(false);
   });
 });
 
@@ -285,5 +401,153 @@ describe('GET /api/sessions/:id/history', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().events).toEqual([]);
+  });
+});
+
+describe('removing and hiding over HTTP', () => {
+  let t: TestApp;
+  beforeEach(async () => {
+    t = await createTestApp();
+  });
+  afterEach(() => t.cleanup());
+
+  const headers = () => ({ cookie: t.cookie });
+
+  const startSession = async (): Promise<string> => {
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(),
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24 },
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json().id as string;
+  };
+
+  const chatsIn = async (cwd: string) => {
+    const res = await t.app.inject({ method: 'GET', url: '/api/projects', headers: headers() });
+    const project = res.json().projects.find((p: { cwd: string }) => p.cwd === cwd);
+    return (project?.chats ?? []) as { id: string; live: boolean }[];
+  };
+
+  it('refuses to remove a running session rather than orphaning it', async () => {
+    const id = await startSession();
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/chats/remove',
+      headers: headers(),
+      payload: { sessionId: id },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('session_running');
+    expect((await chatsIn(t.projectDir)).map((c) => c.id)).toContain(id);
+  });
+
+  it('removes a finished session from the list', async () => {
+    const id = await startSession();
+    await t.app.inject({ method: 'DELETE', url: `/api/sessions/${id}`, headers: headers() });
+    await waitFor(async () => !(await chatsIn(t.projectDir)).some((c) => c.live));
+
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/chats/remove',
+      headers: headers(),
+      payload: { sessionId: id },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((await chatsIn(t.projectDir)).map((c) => c.id)).not.toContain(id);
+  });
+
+  it('treats removing something already gone as success', async () => {
+    // The desired end state is "not in the list", which is already true.
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/chats/remove',
+      headers: headers(),
+      payload: { sessionId: 'never-existed' },
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('rejects a remove that names nothing', async () => {
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/chats/remove',
+      headers: headers(),
+      payload: {},
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('clears finished chats but leaves running ones', async () => {
+    const finished = await startSession();
+    const running = await startSession();
+    await t.app.inject({ method: 'DELETE', url: `/api/sessions/${finished}`, headers: headers() });
+    await waitFor(async () => (await chatsIn(t.projectDir)).some((c) => !c.live));
+
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/projects/clear-finished',
+      headers: headers(),
+      payload: { cwd: t.projectDir },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const ids = (await chatsIn(t.projectDir)).map((c) => c.id);
+    expect(ids).toContain(running);
+    expect(ids).not.toContain(finished);
+  });
+
+  it('hides and unhides a project', async () => {
+    await startSession();
+    expect(await chatsIn(t.projectDir)).not.toHaveLength(0);
+
+    await t.app.inject({
+      method: 'POST',
+      url: '/api/projects/hide',
+      headers: headers(),
+      payload: { cwd: t.projectDir },
+    });
+    expect(await chatsIn(t.projectDir)).toHaveLength(0);
+
+    // Still there, just not listed.
+    const withHidden = await t.app.inject({
+      method: 'GET',
+      url: '/api/projects?includeHidden=1',
+      headers: headers(),
+    });
+    expect(
+      withHidden.json().projects.find((p: { cwd: string }) => p.cwd === t.projectDir).hidden,
+    ).toBe(true);
+
+    await t.app.inject({
+      method: 'POST',
+      url: '/api/projects/unhide',
+      headers: headers(),
+      payload: { cwd: t.projectDir },
+    });
+    expect(await chatsIn(t.projectDir)).not.toHaveLength(0);
+  });
+
+  it('will not hide a directory outside the workspace roots', async () => {
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/projects/hide',
+      headers: headers(),
+      payload: { cwd: '/etc' },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('requires authentication for every one of them', async () => {
+    for (const url of [
+      '/api/chats/remove',
+      '/api/projects/clear-finished',
+      '/api/projects/hide',
+      '/api/projects/unhide',
+    ]) {
+      const res = await t.app.inject({ method: 'POST', url, payload: { cwd: '/tmp' } });
+      expect(res.statusCode, url).toBe(401);
+    }
   });
 });

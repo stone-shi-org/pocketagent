@@ -28,6 +28,7 @@ export class SessionError extends Error {
       | 'too_many_sessions'
       | 'not_found'
       | 'not_running'
+      | 'session_running'
       | 'spawn_failed'
       | 'unsupported_transport',
     readonly statusCode = 400,
@@ -464,6 +465,43 @@ export class SessionManager {
     const session = this.live.get(id);
     if (!session) throw new SessionError(`No such session: ${id}`, 'not_found', 404);
     return session;
+  }
+
+  /**
+   * Forget a finished session.
+   *
+   * Only the record: there is no process left to stop, and nothing on disk is
+   * touched. A running session is refused rather than silently killed —
+   * removing a row for a live process would orphan it, still running with no
+   * way back to it.
+   */
+  forget(id: string): void {
+    const live = this.live.get(id);
+    if (live?.isAlive()) {
+      throw new SessionError(
+        'Stop this session before removing it.',
+        'session_running',
+        409,
+      );
+    }
+    this.live.delete(id);
+    const changes = this.opts.db.prepare('DELETE FROM sessions WHERE id = ?').run(id).changes;
+    if (changes === 0 && !live) {
+      throw new SessionError(`No such session: ${id}`, 'not_found', 404);
+    }
+  }
+
+  /** Forget every finished session in a directory. Running ones are left. */
+  forgetFinishedIn(cwd: string): number {
+    for (const [id, session] of this.live) {
+      if (session.spec.cwd === cwd && !session.isAlive()) this.live.delete(id);
+    }
+    return this.opts.db
+      .prepare(
+        `DELETE FROM sessions
+          WHERE cwd = ? AND status NOT IN ('starting', 'running')`,
+      )
+      .run(cwd).changes;
   }
 
   /**

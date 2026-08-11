@@ -1,7 +1,16 @@
-import type { FastifyPluginAsync } from 'fastify';
-import { CreateSessionRequest } from '@pocketagent/protocol';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import {
+  CreateSessionRequest,
+  ProjectRequest,
+  RemoveChatRequest,
+  WorkspaceRequest,
+} from '@pocketagent/protocol';
+import os from 'node:os';
+import path from 'node:path';
+import { browseDirectory, discoverFolders } from '../discover/index.js';
 import { SessionError } from '../sessions/manager.js';
 import { WorkspaceError } from '../workspaces/index.js';
+import { hideChat } from '../db/index.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
   const { sessions, workspaces, agents, conversations, adoption, projects } = app.pocket;
@@ -9,15 +18,201 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
   app.get('/api/agents', async () => ({ agents: agents.list() }));
 
   /** The home screen: every directory with activity, and the chats inside it. */
-  app.get('/api/projects', async () => ({
+  app.get<{ Querystring: { includeHidden?: string } }>('/api/projects', async (request) => ({
     host: projects.host(),
-    projects: await projects.list(sessions.list()),
+    projects: await projects.list(sessions.list(), request.query.includeHidden === '1'),
   }));
+
+  /**
+   * Remove a chat from the list.
+   *
+   * Nothing on disk is deleted. The session record goes, and a conversation is
+   * remembered as removed so the next scan of the transcript directory does not
+   * quietly put it back. It stays resumable from a terminal.
+   */
+  app.post('/api/chats/remove', async (request, reply) => {
+    const parsed = RemoveChatRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: { code: 'bad_request', message: parsed.error.issues[0]?.message ?? 'Invalid body.' },
+      });
+    }
+
+    if (parsed.data.sessionId) {
+      try {
+        sessions.forget(parsed.data.sessionId);
+      } catch (err) {
+        if (err instanceof SessionError) {
+          // A missing record is the desired end state, so only a *running*
+          // session is worth refusing over.
+          if (err.code !== 'not_found') {
+            return reply
+              .code(err.statusCode)
+              .send({ error: { code: err.code, message: err.message } });
+          }
+        } else throw err;
+      }
+    }
+    if (parsed.data.conversationId) hideChat(app.pocket.db, parsed.data.conversationId);
+
+    return reply.send({ ok: true });
+  });
+
+  /** Forget every finished chat in a directory. Running ones are left alone. */
+  app.post('/api/projects/clear-finished', async (request, reply) => {
+    const cwd = await resolveProjectCwd(request.body, reply);
+    if (cwd === null) return reply;
+
+    const removedSessions = sessions.forgetFinishedIn(cwd);
+    let removedConversations = 0;
+    for (const project of await projects.list(sessions.list(), true)) {
+      if (project.cwd !== cwd) continue;
+      for (const chat of project.chats) {
+        if (chat.live || !chat.conversationId) continue;
+        hideChat(app.pocket.db, chat.conversationId);
+        removedConversations++;
+      }
+    }
+    return reply.send({ ok: true, removedSessions, removedConversations });
+  });
+
+  app.post('/api/projects/hide', async (request, reply) => {
+    const cwd = await resolveProjectCwd(request.body, reply);
+    if (cwd === null) return reply;
+    projects.setHidden(cwd, true);
+    return reply.send({ ok: true });
+  });
+
+  app.post('/api/projects/unhide', async (request, reply) => {
+    const cwd = await resolveProjectCwd(request.body, reply);
+    if (cwd === null) return reply;
+    projects.setHidden(cwd, false);
+    return reply.send({ ok: true });
+  });
+
+  /**
+   * Validate a directory from the browser the same way session creation does.
+   * Returns null once it has already written the error response.
+   */
+  async function resolveProjectCwd(body: unknown, reply: FastifyReply): Promise<string | null> {
+    const parsed = ProjectRequest.safeParse(body);
+    if (!parsed.success) {
+      void reply.code(400).send({
+        error: { code: 'bad_request', message: parsed.error.issues[0]?.message ?? 'Invalid body.' },
+      });
+      return null;
+    }
+    try {
+      return await workspaces.resolveWorkspacePath(parsed.data.cwd);
+    } catch (err) {
+      if (err instanceof WorkspaceError) {
+        const status = err.code === 'forbidden' ? 403 : err.code === 'not_found' ? 404 : 400;
+        void reply.code(status).send({ error: { code: err.code, message: err.message } });
+        return null;
+      }
+      throw err;
+    }
+  }
 
   /** One entry until a front server can register others. */
   app.get('/api/hosts', async () => ({ hosts: [projects.host()] }));
 
   app.get('/api/workspaces', async () => ({ workspaces: await workspaces.list() }));
+
+  /**
+   * Add a project folder.
+   *
+   * Any absolute directory on this host, which is the point of the feature —
+   * but note what it means: from here on, sessions may be started inside it.
+   * The check at session creation has not gone away, it now consults a list the
+   * user curates rather than one fixed in the environment.
+   */
+  app.post('/api/workspaces/add', async (request, reply) => {
+    const parsed = WorkspaceRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: { code: 'bad_request', message: parsed.error.issues[0]?.message ?? 'Invalid body.' },
+      });
+    }
+    try {
+      const added = await workspaces.add(parsed.data.path);
+      app.log.warn({ path: added }, 'project folder added; sessions may now run here');
+      return reply.send({ ok: true, path: added, label: workspaces.labelFor(added) });
+    } catch (err) {
+      if (err instanceof WorkspaceError) {
+        const status = err.code === 'forbidden' ? 403 : err.code === 'not_found' ? 404 : 400;
+        return reply.code(status).send({ error: { code: err.code, message: err.message } });
+      }
+      throw err;
+    }
+  });
+
+  /** Forget a folder. Sessions already running in it keep running. */
+  app.post('/api/workspaces/remove', async (request, reply) => {
+    const parsed = WorkspaceRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: { code: 'bad_request', message: parsed.error.issues[0]?.message ?? 'Invalid body.' },
+      });
+    }
+    return reply.send({ ok: workspaces.remove(parsed.data.path) });
+  });
+
+  /** Folders the agents have run in before, minus the ones already added. */
+  app.get('/api/discovered', async () => {
+    const added = new Set(workspaces.getRoots());
+    const folders = await discoverFolders();
+    return {
+      folders: folders
+        .filter((f) => !added.has(f.path))
+        .map((f) => ({ ...f, label: workspaces.labelFor(f.path) })),
+    };
+  });
+
+  /**
+   * List subdirectories, for picking a folder to add.
+   *
+   * A browser cannot offer an OS directory picker for a path on a *different*
+   * machine: `showDirectoryPicker` hands back a handle to the phone's own
+   * storage, and a file input never exposes an absolute path. So the host does
+   * the listing and the browser navigates it.
+   *
+   * Read-only, and it can see anything the server's user can. That is a real
+   * widening of what the browser learns about this filesystem, and it is the
+   * cost of letting you pick any folder rather than a preconfigured one.
+   */
+  app.get<{ Querystring: { path?: string } }>('/api/browse', async (request, reply) => {
+    const requested = request.query.path?.trim() || os.homedir();
+    let dir: string;
+    try {
+      dir = await workspaces.canonicalDirectory(requested);
+    } catch (err) {
+      if (err instanceof WorkspaceError) {
+        const status = err.code === 'not_found' ? 404 : 403;
+        return reply.code(status).send({ error: { code: err.code, message: err.message } });
+      }
+      throw err;
+    }
+
+    const added = new Set(workspaces.getRoots());
+    let entries;
+    try {
+      entries = await browseDirectory(dir);
+    } catch {
+      return reply
+        .code(403)
+        .send({ error: { code: 'forbidden', message: 'Directory is not readable.' } });
+    }
+
+    const parent = path.dirname(dir);
+    return reply.send({
+      path: dir,
+      label: workspaces.labelFor(dir),
+      parent: parent === dir ? null : parent,
+      added: added.has(dir),
+      entries: entries.map((e) => ({ ...e, added: added.has(e.path) })),
+    });
+  });
 
   app.get('/api/sessions', async () => ({ sessions: sessions.list() }));
 

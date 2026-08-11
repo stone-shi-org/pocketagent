@@ -2,7 +2,9 @@ import { z } from 'zod';
 import {
   AdoptableTarget,
   AgentInfo,
+  BrowseEntry,
   ConversationInfo,
+  DiscoveredFolder,
   HostInfo,
   ProjectInfo,
   SessionInfo,
@@ -87,6 +89,53 @@ export const ProjectListResponse = z.object({
   projects: z.array(ProjectInfo),
 });
 export type ProjectListResponse = z.infer<typeof ProjectListResponse>;
+
+/**
+ * Remove one chat from the list.
+ *
+ * Both ids are optional but at least one is required: a chat can be a live
+ * record, a transcript, or both, and removing it has to cover whichever exist.
+ * Nothing on disk is deleted — a conversation is remembered as removed so a
+ * later scan does not put it back.
+ */
+export const RemoveChatRequest = z
+  .object({
+    sessionId: z.string().max(128).optional(),
+    conversationId: z.string().max(128).optional(),
+  })
+  .refine((v) => v.sessionId !== undefined || v.conversationId !== undefined, {
+    message: 'Provide a sessionId, a conversationId, or both.',
+  });
+export type RemoveChatRequest = z.infer<typeof RemoveChatRequest>;
+
+/** Directories are addressed by path; the server still validates containment. */
+export const ProjectRequest = z.object({
+  cwd: z.string().min(1).max(4096),
+});
+export type ProjectRequest = z.infer<typeof ProjectRequest>;
+
+/** Add or forget a project folder. Any absolute directory on the host. */
+export const WorkspaceRequest = z.object({
+  path: z.string().min(1).max(4096),
+});
+export type WorkspaceRequest = z.infer<typeof WorkspaceRequest>;
+
+export const DiscoveredListResponse = z.object({
+  folders: z.array(DiscoveredFolder),
+});
+export type DiscoveredListResponse = z.infer<typeof DiscoveredListResponse>;
+
+export const BrowseResponse = z.object({
+  /** Canonical path being listed. */
+  path: z.string(),
+  label: z.string(),
+  /** Null at the filesystem root, where there is nowhere further up. */
+  parent: z.string().nullable(),
+  /** True when this directory is already a project. */
+  added: z.boolean(),
+  entries: z.array(BrowseEntry),
+});
+export type BrowseResponse = z.infer<typeof BrowseResponse>;
 
 export const HostListResponse = z.object({
   /** The host serving this request, first. One entry until federation exists. */
