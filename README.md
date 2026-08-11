@@ -852,4 +852,4 @@ should have told you. Raise `OUTPUT_BUFFER_BYTES`, or press `^L` to redraw.
 
 ## License
 
-MIT
+[MIT](LICENSE) © 2026 Stone Shi
