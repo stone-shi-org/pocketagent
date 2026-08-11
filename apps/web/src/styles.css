@@ -1,0 +1,827 @@
+:root {
+  --bg: #0d1117;
+  --bg-elev: #161b22;
+  --bg-elev-2: #1c2128;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-dim: #8b949e;
+  --accent: #58a6ff;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --danger: #f85149;
+  --radius: 10px;
+
+  /* Safe-area insets so the control bar clears the iPhone home indicator. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+/* 16px minimum stops iOS Safari from zooming the viewport on focus. */
+input,
+textarea,
+select {
+  font-size: 16px;
+}
+
+button {
+  cursor: pointer;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 10px 14px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06121f;
+  font-weight: 600;
+}
+
+button.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+input[type='password'],
+input[type='text'],
+select,
+textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  width: 100%;
+}
+
+input:focus,
+select:focus,
+textarea:focus,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  height: 100dvh;
+}
+
+/* ---------- Login ---------- */
+
+.login-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  padding: 24px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 28px 24px;
+}
+
+.login-card h1 {
+  margin: 0 0 4px;
+  font-size: 22px;
+}
+
+.login-card .sub {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 0 0 20px;
+}
+
+.field {
+  margin-bottom: 14px;
+}
+
+.field label {
+  display: block;
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.error-box {
+  background: rgba(248, 81, 73, 0.12);
+  border: 1px solid rgba(248, 81, 73, 0.4);
+  color: #ffb4ae;
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+
+.warn-note {
+  margin-top: 18px;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+/* ---------- Top bar ---------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: calc(10px + var(--safe-top)) calc(12px + var(--safe-right)) 10px
+    calc(12px + var(--safe-left));
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+  min-height: 52px;
+}
+
+.topbar .title {
+  flex: 1;
+  min-width: 0;
+}
+
+.topbar .title strong {
+  display: block;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar .title span {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.icon-btn {
+  padding: 8px 12px;
+  flex: 0 0 auto;
+}
+
+/* ---------- Session list ---------- */
+
+.list-scroll {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px calc(12px + var(--safe-right)) calc(24px + var(--safe-bottom))
+    calc(12px + var(--safe-left));
+}
+
+.session-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-bottom: 10px;
+}
+
+.session-card .meta {
+  flex: 1;
+  min-width: 0;
+  /* The card body is a <button> for keyboard/tap semantics, so the browser
+     default of centred button text has to be undone. */
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+}
+
+.session-card .meta .name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-card .meta .detail {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+
+.badge {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+
+.badge.running {
+  color: var(--ok);
+}
+.badge.starting {
+  color: var(--accent);
+}
+.badge.exited,
+.badge.killed,
+.badge.interrupted {
+  color: var(--text-dim);
+}
+.badge.error {
+  color: var(--danger);
+}
+.badge.connecting,
+.badge.reconnecting {
+  color: var(--warn);
+}
+.badge.connected {
+  color: var(--ok);
+}
+.badge.disconnected {
+  color: var(--text-dim);
+}
+
+.empty {
+  text-align: center;
+  color: var(--text-dim);
+  padding: 48px 16px;
+  font-size: 14px;
+}
+
+.list-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.list-actions button {
+  flex: 1;
+}
+
+/* ---------- Dialog ---------- */
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 50;
+}
+
+@media (min-width: 600px) {
+  .dialog-backdrop {
+    align-items: center;
+  }
+}
+
+.dialog {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 14px 14px 0 0;
+  width: 100%;
+  max-width: 480px;
+  padding: 20px calc(20px + var(--safe-right)) calc(20px + var(--safe-bottom))
+    calc(20px + var(--safe-left));
+  max-height: 90dvh;
+  overflow-y: auto;
+}
+
+@media (min-width: 600px) {
+  .dialog {
+    border-radius: 14px;
+  }
+}
+
+.dialog h2 {
+  margin: 0 0 16px;
+  font-size: 18px;
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.dialog-actions button {
+  flex: 1;
+}
+
+/* ---------- Terminal ---------- */
+
+.terminal-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  height: 100dvh;
+  min-height: 0;
+}
+
+.terminal-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  background: #000;
+  padding: 4px 0 0 4px;
+  overflow: hidden;
+}
+
+.terminal-host .xterm {
+  height: 100%;
+}
+
+.notice {
+  padding: 6px 12px;
+  font-size: 12px;
+  background: rgba(210, 153, 34, 0.15);
+  border-bottom: 1px solid rgba(210, 153, 34, 0.35);
+  color: #e3b341;
+  flex: 0 0 auto;
+}
+
+.notice.exited {
+  background: rgba(139, 148, 158, 0.14);
+  border-bottom-color: var(--border);
+  color: var(--text-dim);
+}
+
+/* Key bar: horizontally scrollable so it never wraps on a narrow phone. */
+.keybar {
+  display: flex;
+  gap: 6px;
+  padding: 8px calc(8px + var(--safe-right)) 8px calc(8px + var(--safe-left));
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex: 0 0 auto;
+}
+
+.keybar::-webkit-scrollbar {
+  display: none;
+}
+
+.keybar button {
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  min-width: 44px;
+  min-height: 40px;
+}
+
+.keybar button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06121f;
+  font-weight: 700;
+}
+
+.promptbar {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  padding: 8px calc(8px + var(--safe-right)) calc(8px + var(--safe-bottom))
+    calc(8px + var(--safe-left));
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.promptbar textarea {
+  flex: 1;
+  resize: none;
+  max-height: 120px;
+  min-height: 42px;
+  line-height: 1.35;
+  padding: 10px;
+}
+
+.promptbar button {
+  flex: 0 0 auto;
+  height: 42px;
+}
+
+.spinner {
+  color: var(--text-dim);
+  padding: 32px;
+  text-align: center;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hint-chip {
+  font-size: 11px;
+  color: var(--warn);
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   Structured agent UI
+   ========================================================================== */
+
+.agent-strip {
+  display: flex;
+  gap: 8px;
+  padding: 8px calc(12px + var(--safe-right)) 8px calc(12px + var(--safe-left));
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+  min-height: 40px;
+  align-items: center;
+}
+.agent-strip::-webkit-scrollbar { display: none; }
+.agent-strip:empty { display: none; }
+
+.chip {
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev-2);
+  color: var(--text);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.chip.muted { color: var(--text-dim); }
+.chip.danger-chip { color: var(--danger); border-color: var(--danger); }
+
+.file-list {
+  margin: 0;
+  padding: 8px calc(12px + var(--safe-right)) 8px calc(28px + var(--safe-left));
+  background: var(--bg-elev-2);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  max-height: 30vh;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  flex: 0 0 auto;
+}
+/* Truncate paths from the left so the filename stays visible. `direction: rtl`
+   moves the ellipsis to the start, but on its own it also reorders neutral
+   characters — a leading "/" jumps to the end. `unicode-bidi: plaintext` keeps
+   the text itself in its own natural (LTR) order. */
+.file-list li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  unicode-bidi: plaintext;
+  text-align: left;
+}
+
+.transcript {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: 14px calc(12px + var(--safe-right)) 20px calc(12px + var(--safe-left));
+  position: relative;
+}
+
+.bubble.user {
+  background: var(--accent);
+  color: #06121f;
+  padding: 10px 14px;
+  border-radius: 16px 16px 4px 16px;
+  margin: 10px 0 10px auto;
+  max-width: 85%;
+  width: fit-content;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+}
+
+.answer { margin: 12px 0; overflow-wrap: anywhere; }
+.answer.streaming::after {
+  content: '▌';
+  color: var(--accent);
+  animation: blink 1s steps(2) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+.answer h1, .answer h2, .answer h3 { font-size: 16px; margin: 16px 0 8px; }
+.answer p { margin: 8px 0; line-height: 1.6; }
+.answer ul, .answer ol { margin: 8px 0; padding-left: 22px; }
+.answer li { margin: 4px 0; }
+.answer a { color: var(--accent); }
+.answer code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  background: var(--bg-elev-2);
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+.answer pre {
+  background: #0b0e13;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.answer pre code { background: none; padding: 0; font-size: inherit; }
+.answer blockquote {
+  border-left: 3px solid var(--border);
+  margin: 8px 0;
+  padding-left: 12px;
+  color: var(--text-dim);
+}
+.answer table { border-collapse: collapse; font-size: 13px; display: block; overflow-x: auto; }
+.answer th, .answer td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+
+.thinking { margin: 8px 0; }
+.thinking-head {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 4px 0;
+  font-style: italic;
+}
+.thinking-body {
+  border-left: 2px solid var(--border);
+  margin: 6px 0 6px 6px;
+  padding: 6px 0 6px 12px;
+  color: var(--text-dim);
+  font-size: 13px;
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+
+/* ---- Tool cards ---- */
+.tool-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin: 10px 0;
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+.tool-card.waiting { border-color: var(--warn); }
+.tool-card.error { border-color: var(--danger); }
+.tool-card.denied { opacity: 0.65; }
+
+.tool-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 10px 12px;
+  text-align: left;
+  font-size: 13.5px;
+}
+.tool-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); flex: 0 0 auto; }
+.tool-dot.ok { background: var(--ok); }
+.tool-dot.error { background: var(--danger); }
+.tool-dot.waiting { background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
+.tool-dot.running { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.3; } }
+
+.tool-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.tool-state { font-size: 11px; color: var(--text-dim); flex: 0 0 auto; }
+.chev { color: var(--text-dim); flex: 0 0 auto; font-size: 11px; }
+
+.diff-stat { font-size: 11px; font-family: ui-monospace, monospace; flex: 0 0 auto; }
+.diff-stat .add { color: var(--ok); margin-right: 5px; }
+.diff-stat .del { color: var(--danger); }
+
+.tool-body { border-top: 1px solid var(--border); padding: 10px 12px; }
+.tool-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin: 10px 0 4px; }
+.tool-input, .tool-result {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #0b0e13;
+  border-radius: 6px;
+  padding: 10px;
+  margin: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  color: var(--text-dim);
+}
+.tool-result.error { color: #ffb4ae; }
+
+/* ---- Diffs ---- */
+.diff {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  background: #0b0e13;
+  border-radius: 6px;
+  overflow-x: auto;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.diff-line { display: flex; white-space: pre; }
+.diff-line .gutter { width: 18px; flex: 0 0 auto; text-align: center; color: var(--text-dim); user-select: none; }
+.diff-line .code { flex: 1; padding-right: 10px; }
+.diff-line.add { background: rgba(63, 185, 80, 0.14); }
+.diff-line.add .gutter { color: var(--ok); }
+.diff-line.remove { background: rgba(248, 81, 73, 0.14); }
+.diff-line.remove .gutter { color: var(--danger); }
+.diff-gap { color: var(--text-dim); padding: 2px 0 2px 18px; user-select: none; }
+
+.notice.inline { margin: 8px 0; border-radius: 8px; border: 1px solid; }
+.notice.inline.info { background: rgba(88,166,255,0.1); border-color: rgba(88,166,255,0.35); color: var(--accent); }
+.notice.inline.error { background: rgba(248,81,73,0.12); border-color: rgba(248,81,73,0.4); color: #ffb4ae; }
+
+.turn-footer { font-size: 11px; color: var(--text-dim); text-align: right; margin: 4px 0 16px; font-variant-numeric: tabular-nums; }
+.turn-sep { height: 12px; }
+
+.working { display: flex; gap: 5px; padding: 12px 2px; }
+.working .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim); animation: bounce 1.2s infinite; }
+.working .dot:nth-child(2) { animation-delay: 0.15s; }
+.working .dot:nth-child(3) { animation-delay: 0.3s; }
+@keyframes bounce { 0%, 60%, 100% { opacity: 0.25; } 30% { opacity: 1; } }
+
+.jump-latest {
+  position: sticky;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 12px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+  box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+}
+
+/* ---- Approval sheet ---- */
+.approval-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.65);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 60;
+}
+@media (min-width: 600px) { .approval-backdrop { align-items: center; } }
+
+.approval-sheet {
+  background: var(--bg-elev);
+  border: 1px solid var(--warn);
+  border-radius: 16px 16px 0 0;
+  width: 100%;
+  max-width: 520px;
+  padding: 18px calc(18px + var(--safe-right)) calc(18px + var(--safe-bottom)) calc(18px + var(--safe-left));
+  max-height: 88dvh;
+  overflow-y: auto;
+}
+@media (min-width: 600px) { .approval-sheet { border-radius: 16px; } }
+
+.approval-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.approval-badge {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--warn); border: 1px solid var(--warn); border-radius: 999px; padding: 3px 9px;
+}
+.approval-queued { font-size: 11px; color: var(--text-dim); }
+.approval-title { margin: 0 0 8px; font-size: 17px; line-height: 1.35; }
+.approval-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; color: var(--text-dim); margin-bottom: 8px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; unicode-bidi: plaintext; text-align: left;
+}
+.approval-reason { font-size: 13px; color: var(--text-dim); margin-bottom: 10px; }
+.approval-diff, .approval-input { margin-bottom: 14px; max-height: 40vh; }
+.approval-input {
+  font-family: ui-monospace, monospace; font-size: 12px; background: #0b0e13;
+  border-radius: 6px; padding: 10px; overflow: auto; color: var(--text-dim); white-space: pre-wrap;
+}
+.approval-actions { display: flex; gap: 8px; }
+.approval-actions.column { flex-direction: column; }
+.approval-actions button { flex: 1; min-height: 46px; }
+button.primary-danger { background: var(--danger); border-color: var(--danger); color: #1a0605; font-weight: 600; }
+
+.transport-hint { font-size: 12px; color: var(--text-dim); margin-top: -8px; margin-bottom: 14px; line-height: 1.45; }
+
+/* ---- New-session dialog: modes, pick lists, confirm ---- */
+.mode-tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+.mode-tabs button {
+  flex: 1; padding: 8px 6px; font-size: 13px; border-radius: 999px;
+  background: var(--bg); color: var(--text-dim);
+}
+.mode-tabs button.active { background: var(--bg-elev-2); color: var(--text); border-color: var(--accent); }
+
+.pick-list { max-height: 46dvh; overflow-y: auto; margin: 0 -4px 4px; padding: 0 4px; }
+
+.pick-row {
+  display: block; width: 100%; text-align: left;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-elev-2); margin-bottom: 8px; overflow: hidden;
+}
+.pick-main {
+  display: block; width: 100%; text-align: left; background: none;
+  border: none; border-radius: 0; padding: 11px 12px; font: inherit;
+}
+.pick-title {
+  font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 7px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pick-detail { font-size: 11.5px; color: var(--text-dim); margin-top: 3px; }
+.pick-preview {
+  font-size: 12px; color: var(--text-dim); margin-top: 5px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.pick-warn { font-size: 11.5px; color: var(--warn); margin-top: 6px; }
+.pick-actions { display: flex; gap: 8px; padding: 0 12px 11px; }
+.pick-actions button { flex: 1; font-size: 13px; padding: 9px 8px; }
+
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--ok);
+  flex: 0 0 auto; animation: pulse 1.6s ease-in-out infinite;
+}
+
+.confirm-body { font-size: 14px; line-height: 1.5; margin: 0 0 12px; }
+.confirm-body.dim { color: var(--text-dim); font-size: 13px; }
+.confirm-list { font-size: 13px; line-height: 1.55; color: var(--text-dim); padding-left: 20px; margin: 0 0 8px; }
+.confirm-list li { margin-bottom: 8px; }
+.confirm-list strong { color: var(--text); }
+
+.inline-link {
+  background: none; border: none; padding: 0; font: inherit;
+  color: var(--accent); text-decoration: underline; cursor: pointer;
+}
+
+/* An adopted pane keeps its own grid; let it scroll rather than reflow. */
+.terminal-host.fixed-grid { overflow: auto; }

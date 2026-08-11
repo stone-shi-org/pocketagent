@@ -1,0 +1,41 @@
+{
+  "name": "pocketagent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.34.5",
+  "scripts": {
+    "dev": "concurrently -n server,web -c cyan,magenta \"pnpm -F @pocketagent/server dev\" \"pnpm -F @pocketagent/web dev\"",
+    "build": "pnpm -F @pocketagent/protocol build && pnpm -F @pocketagent/server build && pnpm -F @pocketagent/web build",
+    "start": "pnpm -F @pocketagent/server start",
+    "test": "pnpm protocol && vitest run",
+    "test:watch": "pnpm protocol && vitest",
+    "lint": "pnpm protocol && eslint .",
+    "lint:fix": "pnpm protocol && eslint . --fix",
+    "typecheck": "pnpm protocol && pnpm -r typecheck",
+    "//protocol": "The shared package is consumed as built output, so it must exist before anything typechecks, lints, or runs.",
+    "protocol": "pnpm -F @pocketagent/protocol build",
+    "generate-token": "node apps/server/scripts/generate-token.mjs",
+    "demo:protocol": "pnpm -F @pocketagent/server exec node scripts/e2e-demo.mjs",
+    "demo:browser": "pnpm -F @pocketagent/server exec node scripts/browser-demo.mjs",
+    "demo:agent": "pnpm -F @pocketagent/server exec node scripts/agent-demo.mjs",
+    "demo:native-ui": "pnpm -F @pocketagent/server exec node scripts/native-ui-demo.mjs",
+    "demo:resume-adopt": "pnpm -F @pocketagent/server exec node scripts/resume-adopt-demo.mjs",
+    "demo:resume-adopt-ui": "pnpm -F @pocketagent/server exec node scripts/resume-adopt-ui-demo.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.5",
+    "concurrently": "^9.1.2",
+    "eslint": "^9.17.0",
+    "globals": "^17.9.0",
+    "playwright": "^1.62.1",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.19.1",
+    "vitest": "^3.0.5"
+  }
+}
