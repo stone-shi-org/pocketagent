@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Icon, type IconName } from './Icon.js';
 
 export interface SelectorOption {
   value: string;
@@ -8,8 +9,7 @@ export interface SelectorOption {
 }
 
 interface Props {
-  /** Single glyph shown on the left. Kept as text so there is no icon font. */
-  icon: string;
+  icon: IconName;
   label: string;
   value: string;
   options: SelectorOption[];
@@ -47,15 +47,9 @@ export function SelectorRow({
         aria-haspopup={only ? undefined : 'listbox'}
         data-selector={label}
       >
-        <span className="selector-icon" aria-hidden="true">
-          {icon}
-        </span>
+        <Icon name={icon} className="leading" />
         <span className="selector-value">{current?.label ?? value}</span>
-        {!only && (
-          <span className="selector-chevron" aria-hidden="true">
-            ⌃⌄
-          </span>
-        )}
+        {!only && <Icon name="stepper" className="stepper" />}
       </button>
 
       {open && (

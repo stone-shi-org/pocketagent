@@ -1,15 +1,31 @@
 :root {
-  --bg: #0d1117;
-  --bg-elev: #161b22;
-  --bg-elev-2: #1c2128;
-  --border: #30363d;
-  --text: #e6edf3;
-  --text-dim: #8b949e;
-  --accent: #58a6ff;
-  --ok: #3fb950;
-  --warn: #d29922;
-  --danger: #f85149;
-  --radius: 10px;
+  /* Light, and only light. A phone in dark mode would otherwise get a theme
+     nobody designed, so `color-scheme` is pinned rather than left to the OS. */
+  --bg: #ffffff;
+  --bg-elev: #f4f4f6;
+  --bg-elev-2: #ffffff;
+  --border: #e6e6eb;
+  --border-strong: #d3d3d9;
+  --text: #0b0b0d;
+  --text-dim: #86868b;
+  --accent: #0a66ff;
+  --on-accent: #ffffff;
+  --ok: #1fa855;
+  --warn: #b26a00;
+  --danger: #e02d23;
+  --ink: #0b0b0d;
+  --on-ink: #ffffff;
+  --radius: 12px;
+  --radius-lg: 18px;
+
+  /* Two elevations only. Anything more and cards start competing. */
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 5%), 0 1px 3px rgb(0 0 0 / 4%);
+  --shadow-md: 0 10px 30px rgb(0 0 0 / 12%), 0 2px 8px rgb(0 0 0 / 6%);
+
+  /* The one dark surface: a terminal. ANSI palettes are drawn for dark
+     backgrounds, and bright yellow on white is unreadable. */
+  --console: #0b0e13;
+  --console-text: #e6edf3;
 
   /* Safe-area insets so the control bar clears the iPhone home indicator. */
   --safe-top: env(safe-area-inset-top, 0px);
@@ -17,7 +33,12 @@
   --safe-left: env(safe-area-inset-left, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
 
-  color-scheme: dark;
+  color-scheme: light;
+}
+
+.icon {
+  flex: none;
+  display: block;
 }
 
 * {
@@ -77,7 +98,7 @@ button:disabled {
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #06121f;
+  color: var(--on-accent);
   font-weight: 600;
 }
 
@@ -90,7 +111,7 @@ input[type='password'],
 input[type='text'],
 select,
 textarea {
-  background: var(--bg);
+  background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 12px;
@@ -125,15 +146,18 @@ button:focus-visible {
 .login-card {
   width: 100%;
   max-width: 380px;
-  background: var(--bg-elev);
+  background: var(--bg-elev-2);
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 28px 24px;
+  border-radius: 20px;
+  padding: 30px 26px;
+  box-shadow: var(--shadow-md);
 }
 
 .login-card h1 {
   margin: 0 0 4px;
-  font-size: 22px;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
 
 .login-card .sub {
@@ -154,9 +178,9 @@ button:focus-visible {
 }
 
 .error-box {
-  background: rgba(248, 81, 73, 0.12);
-  border: 1px solid rgba(248, 81, 73, 0.4);
-  color: #ffb4ae;
+  background: #fdeceb;
+  border: 1px solid #f6c9c6;
+  color: #a3221a;
   border-radius: var(--radius);
   padding: 10px 12px;
   font-size: 13px;
@@ -178,10 +202,10 @@ button:focus-visible {
   gap: 10px;
   padding: calc(10px + var(--safe-top)) calc(12px + var(--safe-right)) 10px
     calc(12px + var(--safe-left));
-  background: var(--bg-elev);
+  background: var(--bg);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
-  min-height: 52px;
+  min-height: 54px;
 }
 
 .topbar .title {
@@ -191,7 +215,9 @@ button:focus-visible {
 
 .topbar .title strong {
   display: block;
-  font-size: 15px;
+  font-size: 15.5px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -209,6 +235,18 @@ button:focus-visible {
 .icon-btn {
   padding: 8px 12px;
   flex: 0 0 auto;
+}
+
+.topbar .icon-btn.danger {
+  border-color: transparent;
+  background: none;
+  font-weight: 500;
+  padding: 8px 6px;
+}
+
+.topbar .icon-btn.danger:hover:not(:disabled) {
+  background: var(--bg-elev);
+  border-color: transparent;
 }
 
 /* ---------- Session list ---------- */
@@ -263,40 +301,47 @@ button:focus-visible {
 }
 
 .badge {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 3px 8px;
-  border-radius: 999px;
-  border: 1px solid currentColor;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
   white-space: nowrap;
 }
 
-.badge.running {
-  color: var(--ok);
+.badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
 }
-.badge.starting {
-  color: var(--accent);
+
+.badge.running::before {
+  background: var(--ok);
 }
-.badge.exited,
-.badge.killed,
-.badge.interrupted {
-  color: var(--text-dim);
+.badge.starting::before {
+  background: var(--accent);
 }
-.badge.error {
-  color: var(--danger);
+.badge.exited::before,
+.badge.killed::before,
+.badge.interrupted::before,
+.badge.disconnected::before {
+  background: var(--border-strong);
+}
+.badge.error::before {
+  background: var(--danger);
 }
 .badge.connecting,
-.badge.reconnecting {
-  color: var(--warn);
+.badge.reconnecting::before {
+  background: var(--warn);
 }
-.badge.connected {
-  color: var(--ok);
+.badge.connected::before {
+  background: var(--ok);
 }
-.badge.disconnected {
-  color: var(--text-dim);
-}
+
 
 .empty {
   text-align: center;
@@ -320,7 +365,7 @@ button:focus-visible {
 .dialog-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: rgb(0 0 0 / 28%);
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -380,7 +425,7 @@ button:focus-visible {
   flex: 1 1 auto;
   min-height: 0;
   position: relative;
-  background: #000;
+  background: var(--console);
   padding: 4px 0 0 4px;
   overflow: hidden;
 }
@@ -392,14 +437,14 @@ button:focus-visible {
 .notice {
   padding: 6px 12px;
   font-size: 12px;
-  background: rgba(210, 153, 34, 0.15);
-  border-bottom: 1px solid rgba(210, 153, 34, 0.35);
-  color: #e3b341;
+  background: #fdf3e3;
+  border-bottom: 1px solid #f0dcb8;
+  color: #8a5300;
   flex: 0 0 auto;
 }
 
 .notice.exited {
-  background: rgba(139, 148, 158, 0.14);
+  background: var(--bg-elev);
   border-bottom-color: var(--border);
   color: var(--text-dim);
 }
@@ -432,7 +477,7 @@ button:focus-visible {
 .keybar button.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: #06121f;
+  color: var(--on-accent);
   font-weight: 700;
 }
 
@@ -454,6 +499,12 @@ button:focus-visible {
   min-height: 42px;
   line-height: 1.35;
   padding: 10px;
+}
+
+.promptbar button.primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--on-ink);
 }
 
 .promptbar button {
@@ -548,7 +599,7 @@ button:focus-visible {
 
 .bubble.user {
   background: var(--accent);
-  color: #06121f;
+  color: var(--on-accent);
   padding: 10px 14px;
   border-radius: 16px 16px 4px 16px;
   margin: 10px 0 10px auto;
@@ -580,7 +631,7 @@ button:focus-visible {
   border-radius: 4px;
 }
 .answer pre {
-  background: #0b0e13;
+  background: var(--console);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px;
@@ -670,7 +721,7 @@ button:focus-visible {
   font-size: 12px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  background: #0b0e13;
+  background: var(--console);
   border-radius: 6px;
   padding: 10px;
   margin: 0;
@@ -678,14 +729,14 @@ button:focus-visible {
   overflow-y: auto;
   color: var(--text-dim);
 }
-.tool-result.error { color: #ffb4ae; }
+.tool-result.error { color: #ff9d95; }
 
 /* ---- Diffs ---- */
 .diff {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   line-height: 1.5;
-  background: #0b0e13;
+  background: var(--console);
   border-radius: 6px;
   overflow-x: auto;
   max-height: 340px;
@@ -694,15 +745,15 @@ button:focus-visible {
 .diff-line { display: flex; white-space: pre; }
 .diff-line .gutter { width: 18px; flex: 0 0 auto; text-align: center; color: var(--text-dim); user-select: none; }
 .diff-line .code { flex: 1; padding-right: 10px; }
-.diff-line.add { background: rgba(63, 185, 80, 0.14); }
+.diff-line.add { background: rgb(31 168 85 / 18%); }
 .diff-line.add .gutter { color: var(--ok); }
-.diff-line.remove { background: rgba(248, 81, 73, 0.14); }
+.diff-line.remove { background: rgb(224 45 35 / 16%); }
 .diff-line.remove .gutter { color: var(--danger); }
 .diff-gap { color: var(--text-dim); padding: 2px 0 2px 18px; user-select: none; }
 
 .notice.inline { margin: 8px 0; border-radius: 8px; border: 1px solid; }
-.notice.inline.info { background: rgba(88,166,255,0.1); border-color: rgba(88,166,255,0.35); color: var(--accent); }
-.notice.inline.error { background: rgba(248,81,73,0.12); border-color: rgba(248,81,73,0.4); color: #ffb4ae; }
+.notice.inline.info { background: #eef4ff; border-color: #cbdcff; color: #0a4bbf; }
+.notice.inline.error { background: #fdeceb; border-color: #f6c9c6; color: #a3221a; }
 
 .turn-footer { font-size: 11px; color: var(--text-dim); text-align: right; margin: 4px 0 16px; font-variant-numeric: tabular-nums; }
 .turn-sep { height: 12px; }
@@ -722,14 +773,14 @@ button:focus-visible {
   padding: 6px 14px;
   border-radius: 999px;
   background: var(--bg-elev-2);
-  box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+  box-shadow: var(--shadow-md);
 }
 
 /* ---- Approval sheet ---- */
 .approval-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,0.65);
+  background: rgb(0 0 0 / 28%);
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -765,13 +816,13 @@ button:focus-visible {
 .approval-reason { font-size: 13px; color: var(--text-dim); margin-bottom: 10px; }
 .approval-diff, .approval-input { margin-bottom: 14px; max-height: 40vh; }
 .approval-input {
-  font-family: ui-monospace, monospace; font-size: 12px; background: #0b0e13;
+  font-family: ui-monospace, monospace; font-size: 12px; background: var(--console);
   border-radius: 6px; padding: 10px; overflow: auto; color: var(--text-dim); white-space: pre-wrap;
 }
 .approval-actions { display: flex; gap: 8px; }
 .approval-actions.column { flex-direction: column; }
 .approval-actions button { flex: 1; min-height: 46px; }
-button.primary-danger { background: var(--danger); border-color: var(--danger); color: #1a0605; font-weight: 600; }
+button.primary-danger { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 600; }
 
 .transport-hint { font-size: 12px; color: var(--text-dim); margin-top: -8px; margin-bottom: 14px; line-height: 1.45; }
 
@@ -827,11 +878,12 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 .terminal-host.fixed-grid { overflow: auto; }
 
 /* ---------------------------------------------------------------------------
-   Home screen: projects, chats, composer
+   Home screen and composer
 
-   Layout mirrors the reference design — a folder per workspace with its chats
-   beneath, a dock pinned to the bottom — in this app's own palette rather than
-   the reference's light theme.
+   Follows the reference design: no dividers, no cards, no badges. Structure is
+   carried by weight and whitespace alone, which is what makes a list of chats
+   read as content rather than as a control panel. Chrome earns its ink only
+   where it is interactive — the round buttons, the search pill, the dock.
    --------------------------------------------------------------------------- */
 
 .projects-page,
@@ -840,39 +892,53 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  background: var(--bg);
 }
+
+/* Header ------------------------------------------------------------------ */
 
 .home-bar {
   position: relative;
+  flex: none;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: calc(10px + var(--safe-top)) calc(14px + var(--safe-right)) 10px
-    calc(14px + var(--safe-left));
-  border-bottom: 1px solid var(--border);
+  min-height: 56px;
+  padding: calc(8px + var(--safe-top)) calc(16px + var(--safe-right)) 8px
+    calc(16px + var(--safe-left));
 }
 
+/* Absolutely centred so the title stays put regardless of what flanks it. */
 .home-title {
-  flex: 1;
-  min-width: 0;
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  gap: 1px;
+  max-width: 60%;
+  pointer-events: none;
 }
 
 .home-title strong {
   font-size: 17px;
-  letter-spacing: -0.01em;
+  font-weight: 650;
+  letter-spacing: -0.015em;
 }
 
 .host-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: 5px;
+  font-size: 12.5px;
   color: var(--text-dim);
   max-width: 100%;
+}
+
+.host-chip .icon {
+  width: 14px;
+  height: 14px;
+  opacity: 0.75;
 }
 
 .host-name {
@@ -884,55 +950,89 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 }
 
 .host-dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--ok);
   flex: none;
 }
 
 .host-dot.offline {
-  background: var(--text-dim);
+  background: var(--border-strong);
 }
+
+.spacer {
+  flex: 1;
+}
+
+/* Round buttons ----------------------------------------------------------- */
 
 .round-btn {
   flex: none;
-  width: 36px;
-  height: 36px;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
   border-radius: 50%;
   border: 1px solid var(--border);
-  background: var(--bg-elev);
+  background: var(--bg-elev-2);
   color: var(--text);
-  font-size: 16px;
-  line-height: 1;
-  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: background 120ms ease, transform 120ms ease;
 }
 
-.round-btn:active {
-  background: var(--bg-elev-2);
+.round-btn:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--bg-elev);
 }
+
+.round-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.round-btn.plain {
+  border-color: transparent;
+  background: none;
+  box-shadow: none;
+  color: var(--text-dim);
+}
+
+.round-btn.plain:hover:not(:disabled) {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+
+/* Project list ------------------------------------------------------------ */
 
 .home-scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  padding: 4px calc(14px + var(--safe-right)) 8px calc(14px + var(--safe-left));
+  padding: 0 calc(20px + var(--safe-right)) 20px calc(20px + var(--safe-left));
 }
 
 .section-heading {
-  font-size: 20px;
-  margin: 14px 2px 6px;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  margin: 14px 0 10px;
 }
 
 .project {
-  margin-bottom: 6px;
+  /* The gap above a folder is what separates one group from the last. */
+  margin-top: 18px;
+}
+
+.project:first-of-type {
+  margin-top: 4px;
 }
 
 .project-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
 .project-name {
@@ -940,23 +1040,26 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 2px;
+  gap: 12px;
+  padding: 8px 0;
   background: none;
   border: none;
+  border-radius: 8px;
   color: var(--text);
   font: inherit;
-  font-weight: 600;
-  font-size: 17px;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
   text-align: left;
-  cursor: pointer;
 }
 
-.folder-icon {
-  color: var(--text-dim);
-  font-size: 12px;
-  flex: none;
-  width: 12px;
+.project-name:hover:not(:disabled) {
+  border-color: transparent;
+}
+
+.project-name .folder {
+  color: var(--text);
+  opacity: 0.9;
 }
 
 .project-label {
@@ -966,28 +1069,23 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   unicode-bidi: plaintext;
 }
 
-.project-branch,
+/* Rotates to point right when the folder is closed. */
+.project-caret {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--text-dim);
+  transition: transform 160ms ease;
+}
+
+.project-caret.closed {
+  transform: rotate(-90deg);
+}
+
 .project-count {
   flex: none;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
-  color: var(--text-dim);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 1px 7px;
-}
-
-.project-count {
-  border-color: transparent;
-  background: var(--bg-elev);
-}
-
-.compose-in-project {
-  width: 32px;
-  height: 32px;
-  font-size: 14px;
-  border-color: transparent;
-  background: none;
   color: var(--text-dim);
 }
 
@@ -997,56 +1095,61 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   text-align: left;
   background: none;
   border: none;
-  border-radius: var(--radius);
+  border-radius: 10px;
   color: var(--text);
   font: inherit;
-  padding: 10px 8px 10px 22px;
-  cursor: pointer;
+  font-size: 16.5px;
+  line-height: 1.35;
+  /* Flush with the folder icon rather than indented under its name. Grouping
+     comes from the heading's weight and the space above it, so an indent here
+     only makes the column ragged. */
+  padding: 13px 8px 13px 2px;
 }
 
-.chat-row:active {
+.chat-row:hover:not(:disabled) {
+  background: var(--bg-elev);
+  border-color: transparent;
+}
+
+.chat-row:active:not(:disabled) {
   background: var(--bg-elev);
 }
 
 .chat-row:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
 }
 
 .chat-title {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  /* Two lines then ellipsis: enough to recognize a prompt, not a wall of text. */
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.chat-meta {
   display: block;
-  margin-top: 2px;
-  font-size: 12px;
-  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+/* The only status the list carries. Everything else is one tap away. */
 .live-dot {
   display: inline-block;
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--ok);
-  margin-right: 6px;
+  margin-right: 8px;
+  vertical-align: 1px;
 }
+
+.chat-row.pending .chat-title {
+  color: var(--text-dim);
+}
+
+/* Dock -------------------------------------------------------------------- */
 
 .home-dock {
   flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px calc(14px + var(--safe-right)) calc(10px + var(--safe-bottom))
-    calc(14px + var(--safe-left));
-  border-top: 1px solid var(--border);
+  padding: 8px calc(16px + var(--safe-right)) calc(12px + var(--safe-bottom))
+    calc(16px + var(--safe-left));
   background: var(--bg);
 }
 
@@ -1056,9 +1159,8 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 44px;
-  padding: 0 14px;
-  border: 1px solid var(--border);
+  height: 46px;
+  padding: 0 16px;
   border-radius: 999px;
   background: var(--bg-elev);
   color: var(--text-dim);
@@ -1074,6 +1176,11 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   /* 16px keeps iOS from zooming the viewport when the field is focused. */
   font-size: 16px;
   outline: none;
+  padding: 0;
+}
+
+.search-pill input::placeholder {
+  color: var(--text-dim);
 }
 
 .search-pill input::-webkit-search-cancel-button {
@@ -1081,28 +1188,43 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 }
 
 .search-clear {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
   border: none;
-  background: none;
-  color: var(--text-dim);
-  font-size: 18px;
-  cursor: pointer;
-  padding: 0 2px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  color: var(--bg);
+}
+
+.search-clear .icon {
+  width: 13px;
+  height: 13px;
 }
 
 .compose-fab {
   flex: none;
+  display: grid;
+  place-items: center;
   width: 52px;
   height: 52px;
+  padding: 0;
   border-radius: 50%;
   border: none;
-  background: var(--text);
-  color: var(--bg);
-  font-size: 20px;
-  cursor: pointer;
+  background: var(--ink);
+  color: var(--on-ink);
+  box-shadow: var(--shadow-md);
+  transition: transform 120ms ease;
+}
+
+.compose-fab:hover:not(:disabled) {
+  border-color: transparent;
 }
 
 .compose-fab:active {
-  opacity: 0.85;
+  transform: scale(0.94);
 }
 
 /* Overflow menu ----------------------------------------------------------- */
@@ -1115,31 +1237,31 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 
 .menu {
   position: absolute;
-  top: calc(52px + var(--safe-top));
-  right: calc(14px + var(--safe-right));
-  min-width: 210px;
+  top: calc(54px + var(--safe-top));
+  right: calc(16px + var(--safe-right));
+  min-width: 216px;
   display: flex;
   flex-direction: column;
+  padding: 6px;
   background: var(--bg-elev-2);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-  box-shadow: 0 12px 32px rgb(0 0 0 / 45%);
+  border-radius: 14px;
+  box-shadow: var(--shadow-md);
 }
 
 .menu button {
-  padding: 13px 14px;
+  padding: 11px 12px;
   background: none;
   border: none;
-  border-bottom: 1px solid var(--border);
+  border-radius: 9px;
   color: var(--text);
   font: inherit;
   text-align: left;
-  cursor: pointer;
 }
 
-.menu button:last-child {
-  border-bottom: none;
+.menu button:hover:not(:disabled) {
+  background: var(--bg-elev);
+  border-color: transparent;
 }
 
 .menu button.danger {
@@ -1155,14 +1277,13 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   flex-direction: column;
   justify-content: flex-end;
   overflow-y: auto;
-  padding: 0 calc(18px + var(--safe-right)) 0 calc(18px + var(--safe-left));
+  padding: 0 calc(24px + var(--safe-right)) 0 calc(24px + var(--safe-left));
 }
 
 .selector-stack {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding-bottom: 14px;
+  padding-bottom: 18px;
 }
 
 .selector-row {
@@ -1170,25 +1291,25 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   align-items: center;
   gap: 14px;
   width: 100%;
-  padding: 11px 2px;
+  padding: 10px 0;
   background: none;
   border: none;
   color: var(--text);
   font: inherit;
-  font-size: 17px;
+  font-size: 17.5px;
+  letter-spacing: -0.01em;
   text-align: left;
-  cursor: pointer;
 }
 
-.selector-icon {
-  flex: none;
-  width: 22px;
+.selector-row:hover:not(:disabled) {
+  border-color: transparent;
+}
+
+.selector-row .leading {
   color: var(--text-dim);
-  font-size: 15px;
 }
 
 .selector-value {
-  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1196,16 +1317,17 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   unicode-bidi: plaintext;
 }
 
-.selector-chevron {
+.selector-row .stepper {
   flex: none;
+  width: 17px;
+  height: 17px;
   color: var(--text-dim);
-  font-size: 11px;
-  letter-spacing: -2px;
+  opacity: 0.8;
 }
 
 .composer-note {
-  margin: 0 18px 8px;
-  font-size: 12px;
+  margin: 0 calc(24px + var(--safe-left)) 10px;
+  font-size: 12.5px;
   color: var(--text-dim);
 }
 
@@ -1213,10 +1335,11 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   flex: none;
   margin: 0 calc(14px + var(--safe-right)) calc(12px + var(--safe-bottom))
     calc(14px + var(--safe-left));
-  padding: 10px 12px;
+  padding: 14px 16px 10px;
   border: 1px solid var(--border);
-  border-radius: 22px;
-  background: var(--bg-elev);
+  border-radius: 26px;
+  background: var(--bg-elev-2);
+  box-shadow: var(--shadow-sm);
 }
 
 .composer-input {
@@ -1225,22 +1348,28 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   background: none;
   color: var(--text);
   font: inherit;
-  font-size: 16px;
+  font-size: 17px;
+  line-height: 1.4;
   resize: none;
   outline: none;
+  padding: 0;
+}
+
+.composer-input::placeholder {
+  color: var(--text-dim);
 }
 
 .composer-actions {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 6px;
+  margin-top: 8px;
 }
 
 .composer-hint {
   flex: 1;
   min-width: 0;
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1249,20 +1378,30 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 
 .send-btn {
   flex: none;
-  width: 34px;
-  height: 34px;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
   border-radius: 50%;
   border: none;
-  background: var(--accent);
-  color: #06121f;
-  font-size: 16px;
-  cursor: pointer;
+  background: var(--ink);
+  color: var(--on-ink);
+  transition: transform 120ms ease;
+}
+
+.send-btn:hover:not(:disabled) {
+  border-color: transparent;
+}
+
+.send-btn:active:not(:disabled) {
+  transform: scale(0.94);
 }
 
 .send-btn:disabled {
-  background: var(--bg-elev-2);
+  background: var(--bg-elev);
   color: var(--text-dim);
-  cursor: default;
+  opacity: 1;
 }
 
 /* Picker sheet ------------------------------------------------------------ */
@@ -1271,20 +1410,20 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   position: fixed;
   inset: 0;
   z-index: 40;
-  background: rgb(0 0 0 / 55%);
+  background: rgb(0 0 0 / 22%);
   display: flex;
   align-items: flex-end;
 }
 
 .sheet {
   width: 100%;
-  max-height: 70vh;
+  max-height: 72dvh;
   display: flex;
   flex-direction: column;
   background: var(--bg-elev-2);
-  border-top-left-radius: 18px;
-  border-top-right-radius: 18px;
-  padding: 14px 14px calc(14px + var(--safe-bottom));
+  border-radius: 22px 22px 0 0;
+  padding: 10px 10px calc(10px + var(--safe-bottom));
+  box-shadow: var(--shadow-md);
 }
 
 @media (min-width: 600px) {
@@ -1295,58 +1434,97 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 
   .sheet {
     max-width: 460px;
-    border-radius: 18px;
+    border-radius: 22px;
   }
+}
+
+/* The grab handle standing in for a title bar, as on iOS. */
+.sheet::before {
+  content: '';
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-strong);
+  margin: 2px auto 8px;
+  flex: none;
 }
 
 .sheet-title {
   font-size: 13px;
+  font-weight: 600;
   color: var(--text-dim);
-  padding: 2px 4px 10px;
+  padding: 2px 12px 8px;
 }
 
 .sheet-options {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 2px;
 }
 
 .sheet-option {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 12px 12px;
+  padding: 13px 12px;
   border: none;
-  border-radius: var(--radius);
+  border-radius: 12px;
   background: none;
   color: var(--text);
   font: inherit;
+  font-size: 16px;
   text-align: left;
-  cursor: pointer;
+}
+
+.sheet-option:hover:not(:disabled) {
+  background: var(--bg-elev);
+  border-color: transparent;
 }
 
 .sheet-option.selected {
   background: var(--bg-elev);
+  font-weight: 600;
 }
 
 .sheet-option:disabled {
-  opacity: 0.45;
-  cursor: default;
+  opacity: 0.4;
 }
 
 .sheet-option-detail {
-  font-size: 12px;
+  font-size: 12.5px;
+  font-weight: 400;
   color: var(--text-dim);
 }
 
 .sheet-cancel {
-  margin-top: 10px;
-  padding: 13px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: none;
+  margin-top: 8px;
+  padding: 14px;
+  border: none;
+  border-radius: 14px;
+  background: var(--bg-elev);
   color: var(--text);
   font: inherit;
-  cursor: pointer;
+  font-weight: 600;
+}
+
+.sheet-cancel:hover:not(:disabled) {
+  border-color: transparent;
+}
+
+/* Marks where the conversation you resumed ends and this session begins. */
+.history-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 2px 14px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.history-divider::before,
+.history-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
 }

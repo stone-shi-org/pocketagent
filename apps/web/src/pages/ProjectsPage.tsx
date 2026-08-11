@@ -3,7 +3,7 @@ import type { ChatSummary, HostInfo, ProjectInfo } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { NewSessionDialog } from '../components/NewSessionDialog.js';
 import { PushToggle } from '../components/PushToggle.js';
-import { formatRelative } from '../components/StatusBadge.js';
+import { Icon } from '../components/Icon.js';
 import { filterProjects } from '../agent/search.js';
 
 interface Props {
@@ -57,14 +57,19 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
   /**
    * Open a chat.
    *
-   * A live session opens directly. A finished one is a transcript, so it has to
-   * be resumed first — as a new branch, which is the non-destructive choice and
-   * therefore safe to do on a plain tap. Appending to the original transcript
-   * needs a confirmation and lives in the advanced dialog.
+   * Only a *live* session is opened directly. A finished one has no process to
+   * attach to — after a server restart it is a database row and nothing else —
+   * so what the tap means is "continue this", and continuing means resuming the
+   * conversation. Resuming branches, which is non-destructive and therefore
+   * safe on a plain tap; appending to the original transcript needs a
+   * confirmation and lives in the advanced dialog.
+   *
+   * A finished chat with no conversation behind it (a plain shell, say) has
+   * nothing to continue. It still opens, so its final state is reachable.
    */
   const open = useCallback(
     async (chat: ChatSummary) => {
-      if (chat.sessionId) {
+      if (chat.sessionId && (chat.live || !chat.conversationId)) {
         onOpen(chat.sessionId);
         return;
       }
@@ -104,13 +109,12 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
           {host && (
             <span className="host-chip">
               <span className={`host-dot${host.online ? '' : ' offline'}`} aria-hidden="true" />
-              <span className="host-icon" aria-hidden="true">
-                ▣
-              </span>
+              <Icon name="terminal" />
               <span className="host-name">{host.name}</span>
             </span>
           )}
         </div>
+        <span className="spacer" />
         <button
           type="button"
           className="round-btn"
@@ -118,7 +122,7 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
           aria-label="More"
           aria-expanded={menuOpen}
         >
-          ⋯
+          <Icon name="ellipsis" size={20} />
         </button>
         {menuOpen && (
           <OverflowMenu
@@ -181,20 +185,22 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
                   }
                   aria-expanded={!isCollapsed}
                 >
-                  <span className="folder-icon" aria-hidden="true">
-                    {isCollapsed ? '▸' : '▾'}
-                  </span>
+                  <Icon name="folder" className="folder" />
                   <span className="project-label">{project.name}</span>
-                  {project.gitBranch && <span className="project-branch">{project.gitBranch}</span>}
+                  <Icon
+                    name="chevron-down"
+                    className={`project-caret${isCollapsed ? ' closed' : ''}`}
+                  />
                   {isCollapsed && <span className="project-count">{project.chats.length}</span>}
                 </button>
                 <button
                   type="button"
-                  className="round-btn compose-in-project"
+                  className="round-btn plain"
                   onClick={() => onCompose(project.cwd)}
                   aria-label={`New chat in ${project.name}`}
+                  title={`New chat in ${project.name}`}
                 >
-                  ✎
+                  <Icon name="compose" size={19} />
                 </button>
               </div>
 
@@ -203,25 +209,17 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
                   <button
                     key={chat.id}
                     type="button"
-                    className={`chat-row${chat.live ? ' live' : ''}`}
+                    className={`chat-row${chat.live ? ' live' : ''}${
+                      resuming === chat.id ? ' pending' : ''
+                    }`}
                     data-chat-id={chat.id}
                     onClick={() => void open(chat)}
                     disabled={resuming !== null}
+                    title={chat.title}
                   >
                     <span className="chat-title">
                       {chat.live && <span className="live-dot" aria-label="running" />}
-                      {chat.title}
-                    </span>
-                    <span className="chat-meta">
-                      {resuming === chat.id
-                        ? 'Resuming…'
-                        : [
-                            chat.live ? statusLabel(chat) : null,
-                            formatRelative(chat.updatedAt),
-                            chat.messageCount ? `${chat.messageCount} msgs` : null,
-                          ]
-                            .filter(Boolean)
-                            .join(' · ')}
+                      {resuming === chat.id ? 'Resuming…' : chat.title}
                     </span>
                   </button>
                 ))}
@@ -232,7 +230,7 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
 
       <div className="home-dock">
         <div className="search-pill">
-          <span aria-hidden="true">⌕</span>
+          <Icon name="search" size={18} />
           <input
             type="search"
             value={search}
@@ -241,8 +239,13 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
             aria-label="Search chats"
           />
           {searching && (
-            <button type="button" className="search-clear" onClick={() => setSearch('')} aria-label="Clear search">
-              ×
+            <button
+              type="button"
+              className="search-clear"
+              onClick={() => setSearch('')}
+              aria-label="Clear search"
+            >
+              <Icon name="close" size={13} />
             </button>
           )}
         </div>
@@ -253,7 +256,7 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
           onClick={() => onCompose()}
           aria-label="New chat"
         >
-          ✎
+          <Icon name="compose" size={23} />
         </button>
       </div>
 
@@ -308,10 +311,6 @@ function OverflowMenu({
   );
 }
 
-function statusLabel(chat: ChatSummary): string {
-  if (chat.status === 'starting') return 'starting';
-  return chat.transport === 'structured' ? 'native' : 'terminal';
-}
 
 function projectOf(projects: ProjectInfo[] | null, chat: ChatSummary): ProjectInfo | undefined {
   return projects?.find((p) => p.chats.some((c) => c.id === chat.id));

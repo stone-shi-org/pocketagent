@@ -246,3 +246,44 @@ describe('GET /api/projects', () => {
     expect(res.json().hosts).toHaveLength(1);
   });
 });
+
+describe('GET /api/sessions/:id/history', () => {
+  let t: TestApp;
+  beforeEach(async () => {
+    t = await createTestApp();
+  });
+  afterEach(() => t.cleanup());
+
+  it('requires authentication', async () => {
+    const res = await t.app.inject({ method: 'GET', url: '/api/sessions/whatever/history' });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('is empty for a session that is not resuming anything', async () => {
+    // A fresh session streams its own events; replaying them from disk as
+    // "history" would render every message twice.
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24 },
+    });
+    const res = await t.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${created.json().id}/history`,
+      headers: { cookie: t.cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().events).toEqual([]);
+  });
+
+  it('is empty rather than an error for an unknown session', async () => {
+    const res = await t.app.inject({
+      method: 'GET',
+      url: '/api/sessions/does-not-exist/history',
+      headers: { cookie: t.cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().events).toEqual([]);
+  });
+});

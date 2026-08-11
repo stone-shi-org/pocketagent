@@ -23,8 +23,10 @@ export function createTerminal(element: HTMLElement): TerminalBundle {
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
     lineHeight: 1.15,
     macOptionIsMeta: true,
+    // The terminal stays dark inside a light app, deliberately: ANSI palettes
+    // are drawn for dark backgrounds, and bright yellow on white is unreadable.
     theme: {
-      background: '#000000',
+      background: '#0b0e13',
       foreground: '#e6edf3',
       cursor: '#58a6ff',
       selectionBackground: '#264f78',

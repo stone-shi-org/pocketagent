@@ -8,11 +8,18 @@ import type {
 import { isTerminalStatus } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { TerminalConnection, type ConnectionState } from '../api/ws-client.js';
-import { applyEvent, applyEvents, emptyTranscript, type TranscriptState } from '../agent/transcript.js';
+import {
+  applyEvent,
+  applyEvents,
+  emptyTranscript,
+  type TranscriptItem,
+  type TranscriptState,
+} from '../agent/transcript.js';
 import { Transcript } from '../components/Transcript.js';
 import { ApprovalSheet } from '../components/ApprovalSheet.js';
 import { PromptBox } from '../components/PromptBox.js';
 import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
+import { Icon } from '../components/Icon.js';
 import { notifyApproval, ensureNotificationPermission } from '../agent/notifications.js';
 import { takePendingPrompt } from '../agent/pending-prompt.js';
 
@@ -39,6 +46,9 @@ export function AgentPage({ sessionId, onBack, onApiError }: Props): JSX.Element
   const [notice, setNotice] = useState<string | null>(null);
   const [deciding, setDeciding] = useState(false);
   const [showFiles, setShowFiles] = useState(false);
+  /** Prior conversation, kept apart from the live transcript on purpose: a
+      replay frame replaces the live one wholesale and would otherwise wipe it. */
+  const [history, setHistory] = useState<TranscriptItem[]>([]);
 
   useEffect(() => {
     const conn = new TerminalConnection({
@@ -107,6 +117,31 @@ export function AgentPage({ sessionId, onBack, onApiError }: Props): JSX.Element
     };
   }, [sessionId, onApiError]);
 
+  /**
+   * Backstory for a resumed conversation.
+   *
+   * The agent keeps the history internally but never re-emits it, so without
+   * this a resumed chat opens blank and looks like it lost everything. Prepended
+   * rather than merged: these events happened before anything on this socket,
+   * and they are the only ones that can be out of order with the live stream.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    setHistory([]);
+    api
+      .sessionHistory(sessionId)
+      .then(({ events }) => {
+        if (cancelled || events.length === 0) return;
+        setHistory(applyEvents(emptyTranscript(), events).items);
+      })
+      .catch(() => {
+        /* history is a nicety; a session without it still works */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
   const sendPrompt = useCallback((text: string): boolean => {
     return connRef.current?.sendPrompt(text) ?? false;
   }, []);
@@ -155,8 +190,8 @@ export function AgentPage({ sessionId, onBack, onApiError }: Props): JSX.Element
   return (
     <div className="terminal-page">
       <header className="topbar">
-        <button type="button" className="icon-btn" onClick={onBack} aria-label="Back to sessions">
-          ‹
+        <button type="button" className="round-btn" onClick={onBack} aria-label="Back to sessions">
+          <Icon name="chevron-left" size={20} />
         </button>
         <div className="title">
           <strong>{session?.title ?? sessionId}</strong>
@@ -217,7 +252,7 @@ export function AgentPage({ sessionId, onBack, onApiError }: Props): JSX.Element
         </div>
       )}
 
-      <Transcript state={transcript} />
+      <Transcript state={transcript} history={history} />
 
       {pending && (
         <ApprovalSheet

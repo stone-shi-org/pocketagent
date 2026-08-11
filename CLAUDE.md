@@ -161,6 +161,14 @@ These are load-bearing. Several were bugs first.
   narrate what the code already says.
 - Frontend state is hand-rolled React (hash routing, no router or state library) and plain
   CSS in `apps/web/src/styles.css`. Keep it that way unless there is a real reason.
+- **The theme is light, and `color-scheme` is pinned to it.** Everything reads from the
+  token block at the top of `styles.css`; adding a raw hex outside it is how the palette
+  rots. The one dark surface is the terminal (`--console`), because ANSI palettes are drawn
+  for dark backgrounds.
+- Icons are inline SVG in `components/Icon.tsx`, 24px grid, 1.7 stroke, `currentColor`. Add
+  to that set rather than reaching for a text glyph or an icon font.
+- The home screen carries no metadata per row on purpose — a chat is its title and, if
+  running, a green dot. Structure comes from weight and whitespace, not borders and badges.
 - `eslint.config.js` scopes browser globals to the Playwright demo scripts by filename — add
   new browser-driving scripts to that list.
 

@@ -11,8 +11,11 @@ import { AgentEvent, AgentReplayPayload, PermissionDecision } from './agent-even
  * number that belonged to a previous run of the output stream.
  * v3 added structured sessions: agent events, prompts, permission decisions
  * and interrupt, alongside the existing raw-terminal frames.
+ * v4 added the `session_ended` error code, for attaching to a session this
+ * process no longer holds. An older client would drop the frame as invalid and
+ * sit on "connecting" forever, so it has to renegotiate rather than guess.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /** Hard caps, enforced on the server before any frame is acted on. */
 export const LIMITS = {
@@ -190,6 +193,8 @@ export const ErrorCode = z.enum([
   'bad_message',
   'unauthorized',
   'not_found',
+  /** Known to the database, but its process belonged to a previous server. */
+  'session_ended',
   'not_attached',
   'session_not_running',
   'rate_limited',

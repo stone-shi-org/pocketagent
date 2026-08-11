@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AgentInfo, ConversationInfo, HostInfo, WorkspaceEntry } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { SelectorRow, type SelectorOption } from '../components/SelectorRow.js';
+import { Icon } from '../components/Icon.js';
 import { setPendingPrompt } from '../agent/pending-prompt.js';
 import { formatRelative } from '../components/StatusBadge.js';
 
@@ -158,7 +159,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
     <div className="app composer-page">
       <header className="home-bar">
         <button type="button" className="round-btn" onClick={onBack} aria-label="Back">
-          ‹
+          <Icon name="chevron-left" size={20} />
         </button>
       </header>
 
@@ -168,7 +169,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
         ) : (
           <div className="selector-stack">
             <SelectorRow
-              icon="▣"
+              icon="terminal"
               label="Host"
               ariaLabel="Host"
               value={host?.id ?? ''}
@@ -178,7 +179,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
               }}
             />
             <SelectorRow
-              icon="▤"
+              icon="folder"
               label="Workspace"
               ariaLabel="Workspace"
               value={cwd}
@@ -186,7 +187,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
               onChange={setCwd}
             />
             <SelectorRow
-              icon="▭"
+              icon="laptop"
               label="Agent"
               ariaLabel="Agent and interface"
               value={flavour}
@@ -194,7 +195,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
               onChange={(v) => setFlavour(v as Flavour)}
             />
             <SelectorRow
-              icon="⑂"
+              icon="branch"
               label="Chat"
               ariaLabel="New chat or a conversation to resume"
               value={resumeId}
@@ -244,7 +245,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
             disabled={!canSend}
             aria-label="Start chat"
           >
-            {busy ? '…' : '↑'}
+            {busy ? '…' : <Icon name="arrow-up" size={19} />}
           </button>
         </div>
       </div>

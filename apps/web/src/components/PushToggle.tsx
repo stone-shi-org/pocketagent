@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { disablePush, enablePush, pushEnabled, pushSupported } from '../agent/notifications.js';
+import { Icon } from './Icon.js';
 
 /**
  * Opt-in control for approval notifications.
@@ -49,7 +50,7 @@ export function PushToggle({ compact = false }: { compact?: boolean } = {}): JSX
         aria-label={on ? 'Approval alerts on' : 'Approval alerts off'}
         title={reason ?? (on ? 'Approval alerts on' : 'Approval alerts off')}
       >
-        {on ? '🔔' : '🔕'}
+        <Icon name={on ? 'bell' : 'bell-off'} size={20} />
       </button>
     );
   }

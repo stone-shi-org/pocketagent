@@ -86,6 +86,21 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
     const attachTo = (sessionId: string, afterSeq: number, epoch?: string): void => {
       const session = sessions.get(sessionId);
       if (!session) {
+        // A session the database remembers but this process does not: it ran
+        // under a previous server. That is an ordinary end-of-life, not a
+        // missing id, and saying "not found" about a session the user can see
+        // in their list reads as a bug. Its output is gone — buffers are in
+        // memory only — so there is nothing to attach to either way.
+        const persisted = sessions.find(sessionId);
+        if (persisted) {
+          send({ type: 'status', sessionId, status: persisted.status, session: persisted });
+          sendError(
+            'session_ended',
+            'This session ended when the server restarted. Its output was not kept.',
+            sessionId,
+          );
+          return;
+        }
         sendError('not_found', 'Session is no longer available on this server.', sessionId);
         return;
       }

@@ -2,7 +2,8 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { ConversationInfo } from '@pocketagent/protocol';
+import type { AgentEvent, ConversationInfo } from '@pocketagent/protocol';
+import { normalizeSdkMessage } from '../sessions/normalize.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 
 /**
@@ -143,6 +144,75 @@ export class ConversationStore {
     const all = await this.list(200);
     return all.find((c) => c.id === id) ?? null;
   }
+
+  /**
+   * The messages of a conversation, as the events the UI already renders.
+   *
+   * Resuming without this opens a blank screen: the agent has the history
+   * internally but never re-emits it, so the person who asked to continue a
+   * conversation cannot see what they are continuing.
+   *
+   * Containment is re-checked here rather than trusted from the caller — this
+   * reads a file path derived from a browser-supplied id.
+   */
+  async history(id: string, maxEvents = 400): Promise<AgentEvent[] | null> {
+    const info = await this.find(id);
+    if (!info) return null;
+
+    const file = path.join(this.projectsDir, encodeProjectDir(info.cwd), `${id}.jsonl`);
+    let text: string;
+    try {
+      text = await fs.readFile(file, 'utf8');
+    } catch {
+      return null;
+    }
+
+    const events: AgentEvent[] = [];
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('{')) continue;
+      let record: unknown;
+      try {
+        record = JSON.parse(trimmed);
+      } catch {
+        continue;
+      }
+      events.push(...transcriptRecordToEvents(record));
+    }
+
+    // Keep the tail: the end of a conversation is the part you are resuming
+    // from, and it is what a phone should scroll to.
+    return events.length > maxEvents ? events.slice(-maxEvents) : events;
+  }
+}
+
+/**
+ * One transcript line to zero or more events.
+ *
+ * The records carry the same `message` shape the SDK emits, so tool calls,
+ * results and assistant text go through the live normalizer and cannot drift
+ * from it. What the normalizer does *not* cover is a plain user prompt: live,
+ * that event is raised when the browser sends one, not by parsing a message.
+ */
+export function transcriptRecordToEvents(record: unknown): AgentEvent[] {
+  if (typeof record !== 'object' || record === null) return [];
+  const r = record as Record<string, unknown>;
+  if (r.isSidechain === true) return []; // a subagent's private conversation
+  if (r.type !== 'user' && r.type !== 'assistant') return [];
+
+  const message = r.message;
+  if (r.type === 'user' && typeof message === 'object' && message !== null) {
+    const content = (message as { content?: unknown }).content;
+    if (typeof content === 'string') {
+      const text = content.trim();
+      // Slash commands and tool plumbing are echoed into the transcript as
+      // user messages; they are noise in a chat view.
+      if (!text || text.startsWith('<')) return [];
+      return [{ kind: 'user_prompt', id: `hist_${String(r.uuid ?? text.slice(0, 24))}`, text }];
+    }
+  }
+
+  return normalizeSdkMessage(record);
 }
 
 /**

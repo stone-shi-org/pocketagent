@@ -31,6 +31,20 @@ const check = (cond, label, detail = '') => {
 
 fs.mkdirSync(SHOTS, { recursive: true });
 
+/** Poll until a condition holds. Beats sleeping and hoping React re-rendered. */
+async function until(predicate, timeout = 5000) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    try {
+      if (await predicate()) return true;
+    } catch {
+      /* element not there yet */
+    }
+    if (Date.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 async function launch() {
   for (const options of [
     {},
@@ -72,7 +86,12 @@ async function seed() {
   await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ token: TOKEN }) });
   const { workspaces } = await call('/api/workspaces');
   const { projects } = await call('/api/projects');
-  const occupied = new Set(projects.map((p) => p.cwd));
+  // Keyed on a *live* chat, not any chat. Sessions on the direct backend die
+  // with the server, so after a restart every previous run's chat is history
+  // and seeding on mere presence leaves nothing running to assert against.
+  const occupied = new Set(
+    projects.filter((p) => p.chats.some((c) => c.live)).map((p) => p.cwd),
+  );
 
   let created = 0;
   for (const workspace of workspaces.filter((w) => !w.isRoot)) {
@@ -130,21 +149,21 @@ try {
   );
   await page.screenshot({ path: path.join(SHOTS, 'home-projects.png') });
 
-  heading('A git project shows its branch');
-  const branches = await page.locator('.project-branch').allTextContents();
-  check(branches.length >= 1, 'branch shown on the folder row', branches.join(', '));
-
   heading('Folders collapse');
+  const chatCount = () => first.locator('.chat-row').count();
   await first.locator('.project-name').click();
-  await page.waitForTimeout(150);
-  check((await first.locator('.chat-row').count()) === 0, 'chats hidden when collapsed');
+  await until(async () => (await chatCount()) === 0);
+  check((await chatCount()) === 0, 'chats hidden when collapsed');
   await first.locator('.project-name').click();
-  await page.waitForTimeout(150);
-  check((await first.locator('.chat-row').count()) === chats, 'and come back when expanded');
+  await until(async () => (await chatCount()) === chats);
+  check((await chatCount()) === chats, 'and come back when expanded');
 
   heading('Search filters across every project');
   await page.fill('.search-pill input', 'notes');
-  await page.waitForTimeout(250);
+  await until(async () => {
+    const labels = await page.locator('.project-label').allTextContents();
+    return labels.length > 0 && labels.every((s) => s.toLowerCase().includes('notes'));
+  });
   const shown = await page.locator('.project-label').allTextContents();
   check(
     shown.every((s) => s.toLowerCase().includes('notes')) && shown.length > 0,
@@ -152,10 +171,10 @@ try {
     shown.join(', '),
   );
   await page.fill('.search-pill input', 'zzzz-no-such-chat');
-  await page.waitForTimeout(250);
+  await until(() => page.locator('.empty').isVisible());
   check(await page.locator('.empty').isVisible(), 'and an honest empty state when nothing matches');
   await page.click('.search-clear');
-  await page.waitForTimeout(200);
+  await until(async () => (await page.locator('.project').count()) > 0);
 
   heading('The compose button opens the composer');
   await page.click('.compose-fab');
@@ -168,22 +187,28 @@ try {
   check(values[1].length > 0, 'workspace row', values[1]);
   check(/·/.test(values[2]), 'agent and interface in one row', values[2]);
   check(/New chat/.test(values[3]), 'chat row defaults to a new chat', values[3]);
+  check(
+    (await page.locator('.selector-row .icon').count()) >= 4,
+    'every row is led by a real icon, not a glyph',
+  );
   await page.screenshot({ path: path.join(SHOTS, 'home-composer.png') });
 
-  heading('The host row does not pretend to offer a choice');
-  check(
-    (await page.locator('.selector-row').first().locator('.selector-chevron').count()) === 0,
-    'no stepper on a row with one option',
-  );
+  heading('A row only shows a stepper when it has somewhere to step');
+  const rowLocator = (n) => page.locator('.selector-row').nth(n).locator('.stepper');
+  check((await rowLocator(0).count()) === 0, 'host has one option, so no stepper');
+  // Pins the check above to the real rule rather than to a class name that
+  // could be renamed out from under it.
+  check((await rowLocator(1).count()) === 1, 'workspace has several, so it gets one');
 
   heading('Picking a workspace opens a sheet');
   await page.locator('.selector-row').nth(1).click();
   await page.waitForSelector('.sheet');
   const options = await page.locator('.sheet-option').count();
   check(options >= 2, 'the sheet lists the workspaces', `${options} options`);
-  const target = page.locator('.sheet-option', { hasText: 'notes-app' }).first();
-  await target.click();
-  await page.waitForTimeout(200);
+  await page.locator('.sheet-option', { hasText: 'notes-app' }).first().click();
+  await until(async () =>
+    (await page.locator('.selector-value').nth(1).innerText()).includes('notes-app'),
+  );
   check(
     (await page.locator('.selector-value').nth(1).innerText()).includes('notes-app'),
     'and the row updates to the choice',
@@ -192,14 +217,16 @@ try {
   heading('Send is disabled until there is something to send');
   check(await page.locator('.send-btn').isDisabled(), 'disabled with an empty prompt');
   await page.fill('.composer-input', 'echo HELLO_FROM_COMPOSER');
-  await page.waitForTimeout(150);
+  await until(async () => !(await page.locator('.send-btn').isDisabled()));
   check(!(await page.locator('.send-btn').isDisabled()), 'enabled once a prompt is typed');
 
   heading('Choosing the terminal interface and sending starts the session');
   await page.locator('.selector-row').nth(2).click();
   await page.waitForSelector('.sheet');
   await page.locator('.sheet-option', { hasText: 'Shell · terminal' }).first().click();
-  await page.waitForTimeout(200);
+  await until(async () =>
+    (await page.locator('.selector-value').nth(2).innerText()).includes('Shell'),
+  );
   await page.click('.send-btn');
   await page.waitForSelector('.terminal-page', { timeout: 20_000 });
   check(true, 'landed on the session');
@@ -216,7 +243,10 @@ try {
   heading('Back returns to the projects screen, with the new chat in place');
   await page.click('button[aria-label="Back to sessions"]');
   await page.waitForSelector('.projects-page');
-  await page.waitForTimeout(600);
+  await until(async () => {
+    const t = await page.locator('.chat-title').allTextContents();
+    return t.some((x) => x.includes('notes-app'));
+  }, 10_000);
   const titles = await page.locator('.chat-title').allTextContents();
   check(
     titles.some((t) => t.includes('notes-app')),

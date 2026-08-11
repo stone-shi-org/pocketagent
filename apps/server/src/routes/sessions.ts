@@ -32,6 +32,27 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     targets: await adoption.list(),
   }));
 
+  /**
+   * The conversation a session was resumed from, as renderable events.
+   *
+   * Keyed on the session rather than the conversation so the *server* decides
+   * which transcript is in play; the browser never names a file. A session that
+   * is not a resume has no history to show — its events are being streamed
+   * live, and replaying them from disk would double every message.
+   */
+  app.get<{ Params: { id: string } }>('/api/sessions/:id/history', async (request, reply) => {
+    const resumedFrom = sessions.resumedConversationId(request.params.id);
+    if (!resumedFrom) return reply.send({ events: [] });
+
+    const events = await conversations.history(resumedFrom);
+    if (events === null) {
+      // The transcript is gone or outside a workspace root. Not fatal: the
+      // session still works, it just opens without its backstory.
+      return reply.send({ events: [] });
+    }
+    return reply.send({ conversationId: resumedFrom, events });
+  });
+
   app.get<{ Params: { id: string } }>('/api/sessions/:id', async (request, reply) => {
     const info = sessions.find(request.params.id);
     if (!info) {

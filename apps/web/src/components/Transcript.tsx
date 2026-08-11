@@ -3,7 +3,14 @@ import type { TranscriptItem, TranscriptState } from '../agent/transcript.js';
 import { renderMarkdown } from '../agent/markdown.js';
 import { ToolCard } from './ToolCard.js';
 
-export function Transcript({ state }: { state: TranscriptState }): JSX.Element {
+export function Transcript({
+  state,
+  history,
+}: {
+  state: TranscriptState;
+  /** Messages from the conversation being resumed, shown above this session. */
+  history?: TranscriptItem[];
+}): JSX.Element {
   const endRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
@@ -11,7 +18,7 @@ export function Transcript({ state }: { state: TranscriptState }): JSX.Element {
   // Follow the tail, but stop fighting the user the moment they scroll up.
   useEffect(() => {
     if (pinned) endRef.current?.scrollIntoView({ block: 'end' });
-  }, [state.items.length, pinned]);
+  }, [state.items.length, history?.length, pinned]);
 
   const onScroll = (): void => {
     const el = scrollRef.current;
@@ -20,11 +27,23 @@ export function Transcript({ state }: { state: TranscriptState }): JSX.Element {
     setPinned(atBottom);
   };
 
+  const past = history ?? [];
+
   return (
     <div className="transcript" ref={scrollRef} onScroll={onScroll}>
-      {state.items.length === 0 && (
+      {past.length === 0 && state.items.length === 0 && (
         <div className="empty">Send a prompt to start the conversation.</div>
       )}
+
+      {past.map((item) => (
+        <Item key={`h_${item.key}`} item={item} />
+      ))}
+      {past.length > 0 && (
+        <div className="history-divider">
+          <span>Resumed here</span>
+        </div>
+      )}
+
       {state.items.map((item) => (
         <Item key={item.key} item={item} />
       ))}

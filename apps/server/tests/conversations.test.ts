@@ -5,6 +5,7 @@ import {
   ConversationStore,
   encodeProjectDir,
   readTranscriptMeta,
+  transcriptRecordToEvents,
 } from '../src/conversations/index.js';
 import { parsePaneLine } from '../src/adopt/index.js';
 import { WorkspaceRegistry } from '../src/workspaces/index.js';
@@ -291,5 +292,173 @@ describe('parsePaneLine', () => {
   it('rejects malformed lines', () => {
     expect(parsePaneLine('')).toBeNull();
     expect(parsePaneLine('too|few|fields')).toBeNull();
+  });
+});
+
+describe('transcriptRecordToEvents', () => {
+  it('turns a typed prompt into a user message', () => {
+    const events = transcriptRecordToEvents({
+      type: 'user',
+      uuid: 'u1',
+      message: { role: 'user', content: 'what does this do?' },
+    });
+    expect(events).toEqual([
+      { kind: 'user_prompt', id: 'hist_u1', text: 'what does this do?' },
+    ]);
+  });
+
+  it('reads assistant text through the same normalizer the live stream uses', () => {
+    const events = transcriptRecordToEvents({
+      type: 'assistant',
+      message: { role: 'assistant', id: 'm1', content: [{ type: 'text', text: 'It sorts.' }] },
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'text', text: 'It sorts.' });
+  });
+
+  it('keeps tool calls and their results', () => {
+    const call = transcriptRecordToEvents({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'tu1', name: 'Read', input: { file_path: '/w/a.ts' } }],
+      },
+    });
+    expect(call[0]).toMatchObject({ kind: 'tool_use', name: 'Read', filePath: '/w/a.ts' });
+
+    const result = transcriptRecordToEvents({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'tu1', content: 'export const a = 1;' }],
+      },
+    });
+    expect(result[0]).toMatchObject({ kind: 'tool_result', toolUseId: 'tu1' });
+  });
+
+  it("skips a subagent's private conversation", () => {
+    // Sidechain records belong to a Task subagent; showing them inline would
+    // interleave two conversations.
+    expect(
+      transcriptRecordToEvents({
+        type: 'assistant',
+        isSidechain: true,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'inner' }] },
+      }),
+    ).toEqual([]);
+  });
+
+  it('skips tool plumbing echoed as a user message', () => {
+    expect(
+      transcriptRecordToEvents({
+        type: 'user',
+        message: { role: 'user', content: '<command-name>/clear</command-name>' },
+      }),
+    ).toEqual([]);
+  });
+
+  it('ignores bookkeeping records', () => {
+    for (const type of ['queue-operation', 'attachment', 'last-prompt', 'ai-title', 'system']) {
+      expect(transcriptRecordToEvents({ type })).toEqual([]);
+    }
+  });
+
+  it('never throws on rubbish', () => {
+    expect(transcriptRecordToEvents(null)).toEqual([]);
+    expect(transcriptRecordToEvents(42)).toEqual([]);
+    expect(transcriptRecordToEvents({ type: 'user' })).toEqual([]);
+  });
+});
+
+describe('ConversationStore.history', () => {
+  let ws: ReturnType<typeof makeWorkspace>;
+  let projectsDir: string;
+  let store: ConversationStore;
+
+  const write = (id: string, records: unknown[], cwd?: string): void => {
+    const dir = path.join(projectsDir, encodeProjectDir(cwd ?? ws.project));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, `${id}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n'),
+    );
+  };
+
+  const turn = (prompt: string, answer: string, n: number): unknown[] => [
+    { type: 'user', uuid: `u${n}`, sessionId: 'c1', cwd: ws.project, message: { content: prompt } },
+    {
+      type: 'assistant',
+      sessionId: 'c1',
+      message: { role: 'assistant', id: `m${n}`, content: [{ type: 'text', text: answer }] },
+    },
+  ];
+
+  beforeEach(() => {
+    ws = makeWorkspace();
+    projectsDir = fs.mkdtempSync('/tmp/pa-hist-');
+    store = new ConversationStore({
+      projectsDir,
+      workspaces: new WorkspaceRegistry([ws.root]),
+      listRunningCwds: async () => [],
+    });
+  });
+  afterEach(() => {
+    ws.cleanup();
+    fs.rmSync(projectsDir, { recursive: true, force: true });
+  });
+
+  it('returns the conversation in order', async () => {
+    write('c1', [...turn('first question', 'first answer', 1), ...turn('second', 'second answer', 2)]);
+    const events = await store.history('c1');
+    expect(events?.map((e) => e.kind)).toEqual([
+      'user_prompt',
+      'text',
+      'user_prompt',
+      'text',
+    ]);
+    expect(events?.[0]).toMatchObject({ text: 'first question' });
+    expect(events?.[3]).toMatchObject({ text: 'second answer' });
+  });
+
+  it('keeps the tail when a conversation is longer than the cap', async () => {
+    const records = [];
+    for (let i = 0; i < 50; i++) records.push(...turn(`q${i}`, `a${i}`, i));
+    write('c1', records);
+
+    const events = await store.history('c1', 4);
+    expect(events).toHaveLength(4);
+    // The end is what you are resuming from.
+    expect(events?.[3]).toMatchObject({ kind: 'text', text: 'a49' });
+  });
+
+  it('refuses a conversation outside the workspace roots', async () => {
+    const outside = fs.mkdtempSync('/tmp/pa-hist-out-');
+    try {
+      const dir = path.join(projectsDir, encodeProjectDir(outside));
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, 'secret.jsonl'),
+        JSON.stringify({ type: 'user', sessionId: 'secret', cwd: outside, message: { content: 'hi' } }),
+      );
+      expect(await store.history('secret')).toBeNull();
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null for a conversation that does not exist', async () => {
+    expect(await store.history('nope')).toBeNull();
+  });
+
+  it('survives a truncated final line', async () => {
+    const dir = path.join(projectsDir, encodeProjectDir(ws.project));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'c1.jsonl'),
+      JSON.stringify({ type: 'user', uuid: 'u1', sessionId: 'c1', cwd: ws.project, message: { content: 'ok' } }) +
+        '\n{"type":"assistant","mess',
+    );
+    const events = await store.history('c1');
+    expect(events).toHaveLength(1);
   });
 });

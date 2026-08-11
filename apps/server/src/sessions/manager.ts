@@ -466,6 +466,19 @@ export class SessionManager {
     return session;
   }
 
+  /**
+   * The conversation this session was asked to continue, if any.
+   *
+   * Note this is the id it *resumed from*, not the id it is writing to — a
+   * forked resume writes elsewhere, and the history worth showing is the one
+   * that already existed.
+   */
+  resumedConversationId(id: string): string | null {
+    const session = this.live.get(id);
+    if (!session || session.transport !== 'structured') return null;
+    return session.spec.resumeAgentSessionId ?? null;
+  }
+
   countAlive(): number {
     let n = 0;
     for (const s of this.live.values()) if (s.isAlive()) n++;

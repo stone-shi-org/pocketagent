@@ -1,5 +1,6 @@
 import type {
   AdoptableTarget,
+  AgentEvent,
   AgentInfo,
   ConversationInfo,
   HostInfo,
@@ -96,6 +97,12 @@ export const api = {
 
   deleteSession: (id: string) =>
     request<SessionInfo>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /** Messages of the conversation this session resumed, if it resumed one. */
+  sessionHistory: (id: string) =>
+    request<{ conversationId?: string; events: AgentEvent[] }>(
+      `/api/sessions/${encodeURIComponent(id)}/history`,
+    ),
 
   listWorkspaces: () => request<{ workspaces: WorkspaceEntry[] }>('/api/workspaces'),
 

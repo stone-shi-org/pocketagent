@@ -9,6 +9,7 @@ import { createTerminal } from '../terminal/create-terminal.js';
 import { MobileKeyBar, ctrlSequence } from '../components/MobileKeyBar.js';
 import { PromptBox } from '../components/PromptBox.js';
 import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
+import { Icon } from '../components/Icon.js';
 import { takePendingPrompt } from '../agent/pending-prompt.js';
 
 interface Props {
@@ -101,6 +102,7 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
 
         onError: (code, message) => {
           if (code === 'not_found') setFatal(message);
+          else if (code === 'session_ended') setNotice(message);
         },
       },
     });
@@ -242,8 +244,8 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
   return (
     <div className="terminal-page">
       <header className="topbar">
-        <button type="button" className="icon-btn" onClick={onBack} aria-label="Back to sessions">
-          ‹
+        <button type="button" className="round-btn" onClick={onBack} aria-label="Back to sessions">
+          <Icon name="chevron-left" size={20} />
         </button>
         <div className="title">
           <strong>{session?.title ?? sessionId}</strong>
