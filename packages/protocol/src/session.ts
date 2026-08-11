@@ -140,7 +140,7 @@ export type ConversationInfo = z.infer<typeof ConversationInfo>;
 export const HostInfo = z.object({
   /** Stable across restarts; opaque to the client. */
   id: z.string(),
-  /** What to show in the header, e.g. `stone-dev01`. */
+  /** What to show in the header, e.g. `workbench-01`. */
   name: z.string(),
   version: z.string(),
   /** False once a front server can report a back it cannot currently reach. */

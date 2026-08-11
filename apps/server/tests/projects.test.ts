@@ -94,7 +94,7 @@ describe('ProjectService', () => {
       }),
       db,
       version: '9.9.9',
-      hostname: 'stone-dev01.internal.example.com',
+      hostname: 'workbench-01.internal.example.com',
     });
   });
   afterEach(() => {
@@ -105,7 +105,7 @@ describe('ProjectService', () => {
 
   it('identifies the host by its short name', () => {
     const host = service.host();
-    expect(host.name).toBe('stone-dev01');
+    expect(host.name).toBe('workbench-01');
     expect(host.version).toBe('9.9.9');
     expect(host.online).toBe(true);
   });
