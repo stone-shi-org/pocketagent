@@ -29,6 +29,7 @@ or use private remote-control APIs. It launches `claude` exactly the way you wou
 - [Install](#install)
 - [Configuration](#configuration)
 - [Running](#running)
+- [Deploying to another machine](#deploying-to-another-machine)
 - [Two interfaces: native and terminal](#two-interfaces-native-and-terminal)
 - [Picking up work you started elsewhere](#picking-up-work-you-started-elsewhere)
 - [Process backends](#process-backends)
@@ -60,7 +61,7 @@ or use private remote-control APIs. It launches `claude` exactly the way you wou
 ## Install
 
 ```bash
-git clone <this-repo> pocketagent
+git clone https://github.com/stone-shi/pocketagent
 cd pocketagent
 pnpm install
 pnpm build
@@ -200,6 +201,68 @@ loginctl enable-linger "$USER"     # keep it running when you are logged out
 With the default `direct` backend, restarting the service **kills every running session**.
 Set `POCKETAGENT_BACKEND=tmux` and they survive restarts — see
 [Process backends](#process-backends).
+
+---
+
+## Deploying to another machine
+
+**Build on the target.** Not because it is tidier, but because two dependencies leave you
+no choice: `node-pty` publishes prebuilt binaries for macOS and Windows and *not* for
+Linux, so it compiles from source on every Linux install, and `better-sqlite3` does the
+same. Both artifacts are pinned to the architecture, C library and Node ABI they were
+built against.
+
+```bash
+# Debian/Ubuntu. tmux is optional but see Process backends.
+sudo apt install -y build-essential python3 git tmux
+# Node 22+ — nvm, NodeSource, or your distribution's package
+npm i -g pnpm@10
+
+git clone https://github.com/stone-shi/pocketagent && cd pocketagent
+pnpm install          # compiles node-pty and better-sqlite3 here
+pnpm build
+pnpm generate-token   # writes a fresh token into .env, mode 600
+pnpm start
+```
+
+Then wire up the service unit from [Running it as a service](#running-it-as-a-service).
+
+### What has to be true on the target
+
+- **Node 22+**, and a C++ toolchain for the two native modules.
+- **The agent CLI is installed *and already logged in*.** PocketAgent runs `claude` the way
+  you would; it holds no provider credentials of its own and cannot log in for you. This is
+  the step that gets forgotten.
+- **A fresh access token.** Generate one there — do not copy `.env` across. One token on two
+  hosts means one leak costs you both.
+- **A fresh database.** Do not copy `data/pocketagent.db`. It records sessions that
+  reference process ids, tmux session names and paths belonging to the old machine, along
+  with a project-folder list pointing at directories that may not exist here. Start empty
+  and add folders from the app.
+
+### Copying a build instead
+
+Works only when the target genuinely matches: same architecture, same or newer glibc, same
+Node major version. Then `pnpm build` and ship the tree including `node_modules`, and the
+target needs no compiler.
+
+Weigh it first. The Claude Agent SDK resolves a platform-specific binary — there are
+`linux-x64`, `linux-arm64` and musl variants — and it is the better part of 300 MB on its
+own, so you are moving roughly 430 MB to avoid installing `build-essential`. A
+`node_modules` built here will also fail on a musl distribution such as Alpine, on arm64,
+or against an older glibc, usually with a linker error rather than a clear one.
+
+If you later upgrade Node across a major version, the compiled `.node` files stop loading
+with an ABI mismatch. `pnpm rebuild` fixes it.
+
+### On containers
+
+Docker is the usual answer to "package it" and a poor fit here. The point of PocketAgent is
+to run agents against *your* filesystem with *your* CLI credentials, so a working container
+ends up mounting the host filesystem, the agent's config directory and the CLI itself —
+at which point the isolation it was bought for is gone, and tmux adoption and PTY handling
+have new ways to break. Worth it only if you specifically want a pinned, repeatable build
+toolchain.
 
 ---
 
