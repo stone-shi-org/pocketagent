@@ -360,7 +360,7 @@ button:focus-visible {
 .badge.error::before {
   background: var(--danger);
 }
-.badge.connecting,
+.badge.connecting::before,
 .badge.reconnecting::before {
   background: var(--warn);
 }
@@ -770,6 +770,19 @@ button:focus-visible {
 .tool-dot.error { background: var(--danger); }
 .tool-dot.waiting { background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
 .tool-dot.running { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+/*
+ * A tool call running past LONG_RUNNING_MS (ToolCard.tsx) gets a hollow dot
+ * instead of the solid pulsing one, and stops pulsing — a pulse reads as
+ * "actively progressing," which we have no basis to claim once it's run far
+ * longer than typical. This is the "still running, or stuck?" signal the
+ * plain running dot can't give: it looks identical at 2 seconds and 20 minutes.
+ */
+.tool-dot.running.long-running {
+  box-sizing: border-box;
+  background: transparent;
+  border: 2px solid var(--warn);
+  animation: none;
+}
 @keyframes pulse { 50% { opacity: 0.3; } }
 
 .tool-summary {
