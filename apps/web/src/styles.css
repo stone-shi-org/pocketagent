@@ -1442,6 +1442,12 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   box-shadow: var(--shadow-sm);
 }
 
+/* Same border/shadow lift as .promptbar:focus-within, not a colour ring. */
+.composer-dock:focus-within {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-md);
+}
+
 .composer-input {
   width: 100%;
   border: none;
@@ -1453,6 +1459,13 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   resize: none;
   outline: none;
   padding: 0;
+}
+
+/* The plain `.composer-input { outline: none }` above loses to the global
+   `textarea:focus` rule on focus — a type+pseudo-class selector outranks a
+   lone class one — so the accent-colour outline was still winning. */
+.composer-input:focus {
+  outline: none;
 }
 
 .composer-input::placeholder {
