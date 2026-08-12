@@ -1797,6 +1797,7 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 /* Safe-area padding is for a phone edge, not a pane in the middle of a screen. */
 .workspace .topbar,
 .workspace .home-bar,
+.workspace .transcript,
 .workspace .promptbar,
 .workspace .composer-dock,
 .workspace .composer-body {
@@ -1809,10 +1810,10 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   margin-right: 20px;
 }
 
-/* A transcript the full width of a monitor is unreadable, so it and its prompt
-   box are held to a column. A terminal is the opposite: it is a character grid,
-   and constraining it would just waste the space it could be using. */
-.workspace .agent-page .transcript,
+/* The transcript fills the pane — a chat bubble is already width-capped
+   per-message (.bubble.user, 85%), so the container doesn't need its own
+   column. The prompt box stays a centered column, though: an input box
+   stretched to the full width of a monitor is a target, not an affordance. */
 .workspace .agent-page .promptbar {
   width: 100%;
   max-width: 860px;
