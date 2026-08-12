@@ -118,6 +118,14 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   private _busy = false;
   /** True while the operator's global skip-permissions switch is applied here. */
   private _globalBypass = false;
+  /**
+   * Claude Code's own generated title for this conversation, once looked up.
+   * Null until `SessionManager` finds one — `spec.title` stays the honest,
+   * fixed creation-time name (`Claude Code · <folder>` for a fresh chat, or
+   * whatever a resume was given) and is never mutated, same reasoning as
+   * `_globalBypass` above.
+   */
+  private _derivedTitle: string | null = null;
 
   constructor(spec: StructuredSessionSpec, epoch?: string) {
     super();
@@ -180,6 +188,14 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   /** True while the operator's global skip-permissions switch is applied here. */
   get globalBypassActive(): boolean {
     return this._globalBypass;
+  }
+  /** Claude Code's own generated title for this conversation, if found yet. */
+  get derivedTitle(): string | null {
+    return this._derivedTitle;
+  }
+  /** Called by `SessionManager` once it has looked one up. See `_derivedTitle`. */
+  setDerivedTitle(title: string): void {
+    this._derivedTitle = title;
   }
 
   isAlive(): boolean {

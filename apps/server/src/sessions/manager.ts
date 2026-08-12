@@ -96,6 +96,12 @@ export interface ManagerOptions {
   logger?: { info: (o: object, m?: string) => void; warn: (o: object, m?: string) => void };
   /** Boot-time seed for the global skip-permissions switch; the database wins after that. */
   globalSkipPermissionsDefault?: boolean;
+  /**
+   * Looks up Claude Code's own generated title for one conversation. Optional
+   * so tests can omit it — without it, a structured session simply keeps its
+   * fixed creation-time title forever, which is the pre-existing behaviour.
+   */
+  titleFor?: (cwd: string, agentSessionId: string) => Promise<string | null>;
 }
 
 const SWEEP_INTERVAL_MS = 15_000;
@@ -513,9 +519,12 @@ export class SessionManager {
     this.live.set(args.id, session);
     this.wire(session);
     // The agent id arrives asynchronously in the first event; persist it then
-    // so a restart can offer to resume the conversation.
+    // so a restart can offer to resume the conversation. Each completed turn
+    // is also a cheap opportunity to pick up Claude Code's own generated
+    // title for the conversation, once it exists.
     session.on('event', (_seq, event) => {
       if (event.kind === 'session_started') this.persist(session);
+      if (event.kind === 'turn_complete') void this.refreshDerivedTitle(session);
     });
 
     try {
@@ -536,6 +545,34 @@ export class SessionManager {
       'session started',
     );
     return session;
+  }
+
+  /**
+   * Pick up Claude Code's own generated title for a conversation.
+   *
+   * A session's own `spec.title` is fixed at creation and never updated —
+   * but the CLI process behind a structured session writes a real,
+   * content-derived title into its own transcript almost as soon as the
+   * conversation starts, the same one `ProjectService` already surfaces for
+   * the home-screen list. This is what keeps an *open* session's own title
+   * (its `AgentPage` header, not just the list row) in sync with that,
+   * without the cost of `ConversationStore.find()`'s full directory scan on
+   * every turn — `titleFor` goes straight to the one file it needs.
+   */
+  private async refreshDerivedTitle(session: StructuredSession): Promise<void> {
+    const agentSessionId = session.agentSessionId;
+    if (!agentSessionId || !this.opts.titleFor) return;
+
+    let title: string | null;
+    try {
+      title = await this.opts.titleFor(session.spec.cwd, agentSessionId);
+    } catch {
+      return; // Best-effort: the fixed creation-time title still shows.
+    }
+    if (!title || title === session.derivedTitle) return;
+
+    session.setDerivedTitle(title);
+    this.persist(session);
   }
 
   get(id: string): ManagedSession | undefined {
@@ -665,10 +702,25 @@ export class SessionManager {
     return row ? this.rowToInfo(row) : null;
   }
 
+  /**
+   * The title actually worth showing right now.
+   *
+   * `spec.title` is fixed at creation and deliberately never mutated (history
+   * and persistence should always show what a session was actually started
+   * with — see the skip-permissions overrides above for the same reasoning).
+   * A structured session's *derived* title is the one exception worth
+   * preferring for display: it only ever improves on the generic fallback,
+   * and the point of it existing is to be shown.
+   */
+  private displayTitle(session: ManagedSession): string {
+    if (session.transport === 'structured' && session.derivedTitle) return session.derivedTitle;
+    return session.spec.title;
+  }
+
   toInfo(session: ManagedSession): SessionInfo {
     return {
       id: session.id,
-      title: session.spec.title,
+      title: this.displayTitle(session),
       agent: session.spec.agent,
       agentDisplayName: session.spec.agentDisplayName,
       cwd: session.spec.cwd,
@@ -775,7 +827,7 @@ export class SessionManager {
         `UPDATE sessions
             SET status = ?, pid = ?, cols = ?, rows = ?, exit_code = ?, exit_signal = ?,
                 started_at = ?, ended_at = ?, last_activity_at = ?, external_id = ?,
-                agent_session_id = ?
+                agent_session_id = ?, title = ?
           WHERE id = ?`,
       )
       .run(
@@ -790,6 +842,11 @@ export class SessionManager {
         session.lastActivityAt,
         session.externalId,
         session.agentSessionId,
+        // Written through here (not just `insertRow`) so a session evicted
+        // from memory, or read back after a restart, still shows the derived
+        // title once one was found rather than reverting to the generic
+        // creation-time name.
+        this.displayTitle(session),
         session.id,
       );
   }

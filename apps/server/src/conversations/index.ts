@@ -146,6 +146,28 @@ export class ConversationStore {
   }
 
   /**
+   * The transcript-derived title for one specific, already-known conversation.
+   *
+   * Unlike `list()`/`find()`, this does not scan every transcript on disk —
+   * the caller already knows exactly which file it wants, so it goes straight
+   * there. Built for `SessionManager` to keep a *live* session's own title in
+   * sync with what Claude Code names the conversation shortly after it
+   * starts; doing that with `find()`'s full directory scan on every turn
+   * would be far too expensive to call as often as it needs to.
+   */
+  async titleFor(cwd: string, id: string): Promise<string | null> {
+    let resolved: string;
+    try {
+      resolved = await this.workspaces.resolveWorkspacePath(cwd);
+    } catch {
+      return null;
+    }
+    const file = path.join(this.projectsDir, encodeProjectDir(resolved), `${id}.jsonl`);
+    const meta = await readTranscriptMeta(file);
+    return meta.title;
+  }
+
+  /**
    * The messages of a conversation, as the events the UI already renders.
    *
    * Resuming without this opens a blank screen: the agent has the history

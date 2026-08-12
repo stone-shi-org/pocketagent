@@ -160,6 +160,37 @@ describe('ProjectService', () => {
     });
   });
 
+  it('shows the transcript-derived title for a live session, not its fixed creation-time name', async () => {
+    // A session's own title is set once at creation and never updated
+    // (`Claude Code · <folder>` for every fresh chat); Claude Code writes a
+    // real, content-derived title into the transcript almost immediately.
+    // Without picking that up, every live chat in one folder reads identically.
+    writeTranscript(ws.project, 'conv-1', 'Fix the login bug');
+    const [project] = await service.list([
+      makeSession({
+        id: 'live',
+        cwd: ws.project,
+        agentSessionId: 'conv-1',
+        title: 'Claude Code · project',
+      }),
+    ]);
+
+    expect(project?.chats).toHaveLength(1);
+    expect(project?.chats[0]?.title).toBe('Fix the login bug');
+  });
+
+  it('falls back to the session\'s own title when no transcript matches yet', async () => {
+    // A session with no agentSessionId (not yet started, or a non-Claude
+    // agent), or one whose transcript has not appeared on disk yet, has
+    // nothing to look up — it must keep its own title rather than showing
+    // nothing or a lookup failure.
+    const [project] = await service.list([
+      makeSession({ id: 'live', cwd: ws.project, agentSessionId: null, title: 'Claude Code · project' }),
+    ]);
+
+    expect(project?.chats[0]?.title).toBe('Claude Code · project');
+  });
+
   it('marks a finished session as not live but keeps it listed', async () => {
     const [project] = await service.list([
       makeSession({ id: 'done', cwd: ws.project, status: 'exited' }),

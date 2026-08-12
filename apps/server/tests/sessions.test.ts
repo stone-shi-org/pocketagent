@@ -5,6 +5,7 @@ import { createTestApp, waitFor, sleep, type TestApp } from './helpers.js';
 import { buildChildEnv } from '../src/sessions/env.js';
 import { createClaudeAdapter } from '../src/agents/claude.js';
 import { createShellAdapter } from '../src/agents/shell.js';
+import { StructuredSession } from '../src/sessions/structured-session.js';
 
 function headers(t: TestApp): Record<string, string> {
   return { cookie: t.cookie };
@@ -389,5 +390,82 @@ describe('PTY lifecycle', () => {
     sessionA.terminate();
     await waitFor(() => !sessionA.isAlive());
     expect(sessionB.isAlive()).toBe(true);
+  });
+});
+
+/**
+ * A structured session's own `spec.title` is fixed at creation and never
+ * updated; Claude Code's own generated title, once `SessionManager` finds
+ * one, is what `toInfo()`/`persist()` prefer to show instead. These
+ * construct a `StructuredSession` directly, without starting it, so they pin
+ * the preference logic itself rather than the (already separately tested)
+ * lookup and the event wiring that triggers it.
+ */
+describe('derived conversation titles', () => {
+  let t: TestApp;
+  beforeEach(async () => {
+    t = await createTestApp();
+  });
+  afterEach(() => t.cleanup());
+
+  function makeStructuredSession(id = 'struct-1'): StructuredSession {
+    return new StructuredSession({
+      id,
+      title: 'Claude Code · project',
+      agent: 'claude',
+      agentDisplayName: 'Claude Code',
+      cwd: t.projectDir,
+      env: {},
+      workspaceLabel: 'project',
+      eventBufferBytes: 64 * 1024,
+      createdAt: Date.now(),
+    });
+  }
+
+  it('shows the fixed creation-time title until a derived one is found', () => {
+    const session = makeStructuredSession();
+    expect(t.context.sessions.toInfo(session).title).toBe('Claude Code · project');
+  });
+
+  it('prefers the derived title once one is found', () => {
+    const session = makeStructuredSession();
+    session.setDerivedTitle('Fix the login bug');
+    expect(t.context.sessions.toInfo(session).title).toBe('Fix the login bug');
+  });
+
+  it('never mutates spec.title — only the display value changes', () => {
+    const session = makeStructuredSession();
+    session.setDerivedTitle('Fix the login bug');
+    expect(session.spec.title).toBe('Claude Code · project');
+  });
+
+  it('does not apply a structured session\'s derived-title concept to a terminal session', async () => {
+    const id = await createShellSession(t);
+    const session = t.context.sessions.getOrThrow(id);
+    // A PtySession has no `derivedTitle` at all; `toInfo` must not read
+    // through anything by mistake for the other transport.
+    expect(t.context.sessions.toInfo(session).title).toBe(session.spec.title);
+  });
+
+  it('persists the derived title, so a session read back from the database shows it too', () => {
+    const session = makeStructuredSession('struct-2');
+    // Mirrors how `persistence.test.ts` seeds a row directly: `persist` is an
+    // UPDATE, so a row has to exist first, same as it would after `create()`.
+    t.db
+      .prepare(
+        `INSERT INTO sessions
+           (id, title, agent, command, args_json, cwd, env_keys_json, status, pid,
+            cols, rows, created_at, started_at, transport)
+         VALUES (?, ?, 'claude', '', '[]', ?, '[]', 'running', NULL, 0, 0, ?, ?, 'structured')`,
+      )
+      .run(session.id, session.spec.title, session.spec.cwd, session.spec.createdAt, session.spec.createdAt);
+
+    session.setDerivedTitle('Fix the login bug');
+    t.context.sessions.persist(session);
+
+    const row = t.db.prepare('SELECT title FROM sessions WHERE id = ?').get(session.id) as {
+      title: string;
+    };
+    expect(row.title).toBe('Fix the login bug');
   });
 });

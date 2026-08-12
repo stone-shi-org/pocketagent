@@ -205,6 +205,45 @@ describe('ConversationStore', () => {
     }
   });
 
+  describe('titleFor', () => {
+    it('reads one conversation directly, without scanning every transcript', async () => {
+      writeTranscript(ws.project, 'conv-1');
+      const store = new ConversationStore({
+        projectsDir,
+        workspaces: new WorkspaceRegistry([ws.root]),
+        listRunningCwds: async () => [],
+      });
+
+      expect(await store.titleFor(ws.project, 'conv-1')).toBe('Title conv-1');
+    });
+
+    it('returns null for a conversation that does not exist yet', async () => {
+      const store = new ConversationStore({
+        projectsDir,
+        workspaces: new WorkspaceRegistry([ws.root]),
+        listRunningCwds: async () => [],
+      });
+
+      expect(await store.titleFor(ws.project, 'no-such-conversation')).toBeNull();
+    });
+
+    it('refuses a cwd outside the workspace roots rather than reading anything', async () => {
+      const outside = fs.mkdtempSync('/tmp/pa-outside-title-');
+      try {
+        writeTranscript(outside, 'secret-conv');
+        const store = new ConversationStore({
+          projectsDir,
+          workspaces: new WorkspaceRegistry([ws.root]),
+          listRunningCwds: async () => [],
+        });
+
+        expect(await store.titleFor(outside, 'secret-conv')).toBeNull();
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
   it('ignores a transcript whose recorded cwd escapes the root', async () => {
     // The directory name says one thing; the transcript says another. The
     // transcript is authoritative, so containment must be decided on it.

@@ -150,6 +150,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     idleTimeoutSeconds: config.sessionIdleTimeoutSeconds,
     logger: app.log,
     globalSkipPermissionsDefault: config.globalSkipPermissionsDefault,
+    titleFor: (cwd, agentSessionId) => conversations.titleFor(cwd, agentSessionId),
   });
   if (sessions.getGlobalSkipPermissions()) {
     app.log.warn(
