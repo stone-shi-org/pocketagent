@@ -33,6 +33,12 @@ export interface StructuredSessionSpec {
   maxBudgetUsd?: number;
   /** Absolute path to the agent executable, when not on PATH. */
   executablePath?: string;
+  /**
+   * Explicit, off-by-default opt-in to the SDK's `bypassPermissions` mode.
+   * Undefined/false preserves the invariant below: every tool call is routed
+   * to the browser and nothing is auto-approved server-side.
+   */
+  skipPermissions?: boolean;
 }
 
 export interface StructuredSessionEvents {
@@ -151,12 +157,19 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   async start(): Promise<void> {
     if (this.queryHandle) throw new Error('session already started');
 
+    // By default every tool call comes back to us; nothing is auto-approved
+    // server-side. `skipPermissions` is the one explicit, per-session escape
+    // hatch: the user opted in at creation time, so we hand the SDK its own
+    // bypass mode instead of faking approval through `canUseTool`. Both
+    // fields are required together — `bypassPermissions` alone is refused by
+    // the SDK. `canUseTool` stays wired either way: the SDK simply never
+    // calls it once permissions are bypassed.
     const options: Options = {
       cwd: this.spec.cwd,
       env: this.spec.env,
       abortController: this.abort,
-      // Every tool call comes back to us; nothing is auto-approved server-side.
-      permissionMode: 'default',
+      permissionMode: this.spec.skipPermissions ? 'bypassPermissions' : 'default',
+      ...(this.spec.skipPermissions ? { allowDangerouslySkipPermissions: true } : {}),
       canUseTool: (toolName, input, opts) => this.requestPermission(toolName, input, opts),
       includePartialMessages: true,
       ...(this.spec.resumeAgentSessionId ? { resume: this.spec.resumeAgentSessionId } : {}),

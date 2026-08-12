@@ -264,6 +264,12 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
         )}
       </header>
 
+      {session?.skipPermissionsEnabled && (
+        <div className="skip-permissions-banner" role="status">
+          Approvals are bypassed for this session — tool calls run unattended.
+        </div>
+      )}
+
       {fatal && <div className="notice">{fatal}</div>}
 
       {!fatal && notice && (

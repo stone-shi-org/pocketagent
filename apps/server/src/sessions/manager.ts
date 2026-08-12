@@ -50,6 +50,12 @@ export interface CreateSessionInput {
   resumeAgentSessionId?: string;
   /** Branch rather than append when resuming. Defaults to true. */
   forkSession?: boolean;
+  /**
+   * Explicit, off-by-default opt-in to run this session with approvals
+   * bypassed. Only has any effect on an adapter that reports
+   * `supportsSkipPermissions`; every other adapter ignores it.
+   */
+  skipPermissions?: boolean;
   /** Attach to an already-running tmux pane instead of starting a process. */
   adopt?: {
     command: string;
@@ -162,6 +168,7 @@ export class SessionManager {
           workspaceLabel: this.opts.workspaces.labelFor(row.cwd),
           outputBufferBytes: this.opts.outputBufferBytes,
           createdAt: row.created_at,
+          skipPermissions: row.skip_permissions === 1,
         },
         backend,
       );
@@ -286,11 +293,16 @@ export class SessionManager {
       );
     }
 
+    // Only honour the opt-in on an adapter that actually declares support for
+    // it; anything else silently ignores it rather than erroring, since the
+    // client is expected to gate the control on `supportsSkipPermissions` too.
+    const skipPermissions = input.skipPermissions === true && adapter.supportsSkipPermissions === true;
+
     // Adoption replaces the adapter's argv with an attach command the server
     // built from a validated target. The browser never supplies argv.
     const built = input.adopt
       ? { command: input.adopt.command, args: input.adopt.args, env: undefined }
-      : adapter.buildCommand({ cwd: input.cwd, cols: input.cols, rows: input.rows });
+      : adapter.buildCommand({ cwd: input.cwd, cols: input.cols, rows: input.rows, skipPermissions });
     const executable = resolveExecutable(built.command);
 
     if (executable === null) {
@@ -342,6 +354,7 @@ export class SessionManager {
           ? { resumeAgentSessionId: input.resumeAgentSessionId }
           : {}),
         ...(input.forkSession !== undefined ? { forkSession: input.forkSession } : {}),
+        skipPermissions,
       });
     }
 
@@ -364,6 +377,7 @@ export class SessionManager {
         workspaceLabel,
         outputBufferBytes: this.opts.outputBufferBytes,
         adopted: input.adopt !== undefined,
+        skipPermissions,
       },
       // Adoption always runs the attach client as our own child: the thing we
       // spawn is a tmux *client*, and killing it must only detach.
@@ -410,6 +424,7 @@ export class SessionManager {
     executable: string;
     env: Record<string, string>;
     resumeAgentSessionId?: string;
+    skipPermissions?: boolean;
   }): Promise<StructuredSession> {
     const session = new StructuredSession({
       id: args.id,
@@ -426,6 +441,7 @@ export class SessionManager {
         ? { resumeAgentSessionId: args.resumeAgentSessionId }
         : {}),
       ...(this.opts.maxBudgetUsd !== undefined ? { maxBudgetUsd: this.opts.maxBudgetUsd } : {}),
+      skipPermissions: args.skipPermissions === true,
     });
 
     this.insertRow(session, args.createdAt);
@@ -609,6 +625,7 @@ export class SessionManager {
       agentSessionId: session.agentSessionId,
       durable: session.survivesServerRestart,
       adopted: session.transport === 'terminal' && session.spec.adopted === true,
+      skipPermissionsEnabled: session.spec.skipPermissions === true,
     };
   }
 
@@ -638,6 +655,7 @@ export class SessionManager {
       agentSessionId: row.agent_session_id,
       durable: false,
       adopted: false,
+      skipPermissionsEnabled: row.skip_permissions === 1,
     };
   }
 
@@ -647,8 +665,9 @@ export class SessionManager {
         `INSERT INTO sessions
            (id, title, agent, command, args_json, cwd, env_keys_json, status, pid,
             cols, rows, exit_code, exit_signal, created_at, started_at, ended_at,
-            last_activity_at, backend, external_id, transport, agent_session_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            last_activity_at, backend, external_id, transport, agent_session_id,
+            skip_permissions)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         session.id,
@@ -673,6 +692,7 @@ export class SessionManager {
         session.externalId,
         session.transport,
         session.agentSessionId,
+        session.spec.skipPermissions === true ? 1 : 0,
       );
   }
 

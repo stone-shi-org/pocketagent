@@ -211,6 +211,12 @@ export function AgentPage({ sessionId, onBack, onApiError }: Props): JSX.Element
         )}
       </header>
 
+      {session?.skipPermissionsEnabled && (
+        <div className="skip-permissions-banner" role="status">
+          Approvals are bypassed for this session — tool calls run unattended.
+        </div>
+      )}
+
       <div className="agent-strip">
         {transcript.files.length > 0 && (
           <button type="button" className="chip" onClick={() => setShowFiles((v) => !v)}>

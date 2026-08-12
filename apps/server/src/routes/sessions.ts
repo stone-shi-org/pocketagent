@@ -320,6 +320,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
           ? { resumeAgentSessionId: body.resumeAgentSessionId }
           : {}),
         forkSession: body.forkSession,
+        skipPermissions: body.skipPermissions,
         ...(adopt ? { adopt } : {}),
       });
       return reply.code(201).send(sessions.toInfo(session));

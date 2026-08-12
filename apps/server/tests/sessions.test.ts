@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createTestApp, waitFor, sleep, type TestApp } from './helpers.js';
 import { buildChildEnv } from '../src/sessions/env.js';
+import { createClaudeAdapter } from '../src/agents/claude.js';
+import { createShellAdapter } from '../src/agents/shell.js';
 
 function headers(t: TestApp): Record<string, string> {
   return { cookie: t.cookie };
@@ -51,6 +53,28 @@ describe('environment sanitization', () => {
   });
 });
 
+describe('skip-permissions opt-in, off by default', () => {
+  const opts = { cwd: '/tmp', cols: 80, rows: 24 };
+
+  it('never adds the flag unless the caller explicitly asks', () => {
+    const adapter = createClaudeAdapter('claude');
+    expect(adapter.buildCommand(opts).args).toEqual([]);
+    expect(adapter.buildCommand({ ...opts, skipPermissions: false }).args).toEqual([]);
+  });
+
+  it('adds --dangerously-skip-permissions only when explicitly opted in', () => {
+    const adapter = createClaudeAdapter('claude');
+    expect(adapter.buildCommand({ ...opts, skipPermissions: true }).args).toEqual([
+      '--dangerously-skip-permissions',
+    ]);
+  });
+
+  it('a shell has no such flag to add, opted in or not', () => {
+    const adapter = createShellAdapter('/bin/bash');
+    expect(adapter.buildCommand({ ...opts, skipPermissions: true }).args).toEqual(['-i']);
+  });
+});
+
 describe('session HTTP routes', () => {
   let t: TestApp;
 
@@ -65,6 +89,22 @@ describe('session HTTP routes', () => {
     expect(ids).toContain('shell');
     expect(ids).toContain('claude');
     expect(res.body).not.toContain('/bin/bash');
+  });
+
+  it('reports supportsSkipPermissions only for the agent that actually has the flag', async () => {
+    const res = await t.app.inject({ method: 'GET', url: '/api/agents', headers: headers(t) });
+    const agents = res.json().agents as { id: string; supportsSkipPermissions: boolean }[];
+    expect(agents.find((a) => a.id === 'claude')?.supportsSkipPermissions).toBe(true);
+    expect(agents.find((a) => a.id === 'shell')?.supportsSkipPermissions).toBe(false);
+  });
+
+  it('ignores skipPermissions for an agent that does not support it, rather than silently spawning it unsafely', async () => {
+    // A shell has no approval concept and no `--dangerously-skip-permissions`
+    // equivalent; the manager must not just pass the client's wish straight
+    // through to a session that has no idea what to do with it.
+    const id = await createShellSession(t, { skipPermissions: true });
+    const info = t.context.sessions.find(id);
+    expect(info?.skipPermissionsEnabled).toBe(false);
   });
 
   it('creates a running session', async () => {

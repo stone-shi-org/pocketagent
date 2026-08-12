@@ -14,6 +14,11 @@ export interface StartSessionOptions {
   cwd: string;
   cols: number;
   rows: number;
+  /**
+   * Explicit, off-by-default opt-in to running with approvals bypassed.
+   * Ignored by adapters that don't declare `supportsSkipPermissions`.
+   */
+  skipPermissions?: boolean;
 }
 
 export interface AgentCommand {
@@ -36,6 +41,12 @@ export interface AgentAdapter {
   transports: SessionTransport[];
   /** Used when the client does not ask for a specific transport. */
   defaultTransport: SessionTransport;
+  /**
+   * True when this adapter has a real auto-approve flag to opt into. Absent
+   * (or false) means `skipPermissions` on `buildCommand` is a no-op, and the
+   * client should not offer the control at all.
+   */
+  supportsSkipPermissions?: boolean;
 
   buildCommand(options: StartSessionOptions): AgentCommand;
 

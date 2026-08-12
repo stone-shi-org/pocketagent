@@ -26,6 +26,13 @@ export interface PtySessionSpec {
    * must not auto-resize it: the size is shared with the other viewer.
    */
   adopted?: boolean;
+  /**
+   * True when `args` already includes the adapter's auto-approve flag. Pure
+   * metadata for display (`SessionInfo.skipPermissionsEnabled`) — the flag
+   * itself was baked into `args` by the adapter's `buildCommand`, not applied
+   * here.
+   */
+  skipPermissions?: boolean;
 }
 
 export interface PtySessionEvents {

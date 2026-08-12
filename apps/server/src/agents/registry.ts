@@ -24,6 +24,7 @@ export class AgentRegistry {
       available: a.isAvailable?.() ?? true,
       transports: a.transports,
       defaultTransport: a.defaultTransport,
+      supportsSkipPermissions: a.supportsSkipPermissions ?? false,
     }));
   }
 }

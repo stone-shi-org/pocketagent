@@ -81,6 +81,7 @@ const SESSION: SessionInfo = {
   agentSessionId: null,
   durable: false,
   adopted: false,
+  skipPermissionsEnabled: false,
 };
 
 function setup(handlers: TerminalConnectionHandlers = {}) {

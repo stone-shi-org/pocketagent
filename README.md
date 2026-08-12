@@ -534,6 +534,13 @@ is the equivalent of the terminal's don't-ask-again.
 become an allow, and turning it into a deny would throw away work you simply had not looked
 at yet. It waits.
 
+**Approvals can be bypassed, but only if you say so.** The "New session" dialog offers a
+"Skip approvals for this session" toggle for agents that support it — off by default. Turning
+it on runs Claude Code with `--dangerously-skip-permissions` (terminal transport) or the
+Agent SDK's `bypassPermissions` mode (structured transport): every tool call runs
+immediately, unattended. A session running this way says so persistently in its header, not
+just at the moment you created it. Use it only for a session you trust completely.
+
 ### What native mode does not give you
 
 - **Durability.** The Agent SDK owns the child process, so structured sessions do not use

@@ -154,9 +154,14 @@ truncated full replay rather than splicing a corrupt ANSI stream.
 
 These are load-bearing. Several were bugs first.
 
-- **Never answer a prompt for the user.** No auto-approval anywhere: `permissionMode` stays
-  `default`, `canUseTool` routes every call to the browser, and there is deliberately **no
-  timeout** on a pending approval — an unanswered one must never decay into an allow.
+- **Never answer a prompt for the user, unless they explicitly said so.** `permissionMode`
+  stays `default` and `canUseTool` routes every call to the browser *by default*, and there
+  is deliberately **no timeout** on a pending approval — an unanswered one must never decay
+  into an allow. The one exception is `CreateSessionRequest.skipPermissions`, a per-session,
+  off-by-default opt-in (`structured-session.ts` sets the SDK's `bypassPermissions` mode;
+  `claude.ts` adds `--dangerously-skip-permissions` for the terminal transport). It must stay
+  opt-in — never the default — and a session running with it must say so persistently in the
+  UI (`SessionInfo.skipPermissionsEnabled`), not just at the moment it was created.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.

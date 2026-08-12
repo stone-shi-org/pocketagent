@@ -54,6 +54,15 @@ export const CreateSessionRequest = z.object({
   forkSession: z.boolean().default(false),
   /** Attach to an existing tmux pane instead of starting a new process. */
   adoptTargetId: z.string().max(256).optional(),
+  /**
+   * Run this session with tool approvals bypassed instead of routed to the
+   * browser (Claude Code's `--dangerously-skip-permissions` / the SDK's
+   * `bypassPermissions` mode). Defaults to false: approval-on-every-call is
+   * the whole point of PocketAgent, so this must be an explicit per-session
+   * choice, never a silent default. Only agents that report
+   * `supportsSkipPermissions` in `AgentInfo` honour it.
+   */
+  skipPermissions: z.boolean().default(false),
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 

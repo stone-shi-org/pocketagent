@@ -33,6 +33,7 @@ function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
     agentSessionId: null,
     durable: false,
     adopted: false,
+    skipPermissionsEnabled: false,
     ...overrides,
   };
 }

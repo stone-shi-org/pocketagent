@@ -118,6 +118,8 @@ export const api = {
     forkSession?: boolean;
     /** Attach to an existing tmux pane, by opaque id from /api/adoptable. */
     adoptTargetId?: string;
+    /** Explicit opt-in to bypass approvals. Defaults to false server-side. */
+    skipPermissions?: boolean;
   }) =>
     request<SessionInfo>('/api/sessions', {
       method: 'POST',

@@ -76,6 +76,12 @@ export const SessionInfo = z.object({
    * must not resize it — the grid is shared with whoever else is watching.
    */
   adopted: z.boolean(),
+  /**
+   * True when this session was started with approvals bypassed. Surfaced so
+   * the UI can show it persistently while the session runs — the opt-in must
+   * stay visible, not just be a fire-and-forget checkbox at creation time.
+   */
+  skipPermissionsEnabled: z.boolean(),
 });
 export type SessionInfo = z.infer<typeof SessionInfo>;
 
@@ -89,6 +95,13 @@ export const AgentInfo = z.object({
   transports: z.array(SessionTransport).min(1),
   /** Transport used when the client does not choose one. */
   defaultTransport: SessionTransport,
+  /**
+   * True when this agent has a real auto-approve mode to opt into
+   * (`--dangerously-skip-permissions` / SDK `bypassPermissions`). Drives
+   * whether the client offers the toggle at all — an agent with no such flag
+   * has nothing for it to do.
+   */
+  supportsSkipPermissions: z.boolean(),
 });
 export type AgentInfo = z.infer<typeof AgentInfo>;
 

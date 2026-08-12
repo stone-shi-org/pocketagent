@@ -31,6 +31,8 @@ export interface SessionRow {
   transport: string;
   /** The agent's own conversation id, for resuming a structured session. */
   agent_session_id: string | null;
+  /** 1 when this session was started with approvals bypassed. */
+  skip_permissions: number;
 }
 
 export interface AuthSessionRow {
@@ -127,6 +129,12 @@ const MIGRATIONS: readonly string[] = [
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
+  `,
+  // Per-session opt-in to bypass approvals. Off by default (see
+  // structured-session.ts / claude.ts): recorded so the session list and the
+  // live session view can show it persistently rather than only at creation.
+  `
+  ALTER TABLE sessions ADD COLUMN skip_permissions INTEGER NOT NULL DEFAULT 0;
   `,
 ];
 

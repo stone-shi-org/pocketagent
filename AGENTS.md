@@ -22,7 +22,7 @@ PocketAgent is a monorepo configured with `pnpm` workspace packages:
 When modifying code or running tasks, agents must strictly adhere to the following:
 
 ### 1. Invariants (Do Not Break)
-* **Never Auto-Approve:** Auto-approval is disabled; all tool executions and approvals are routed directly to the client browser. There is no timeout on pending approvals.
+* **Never Auto-Approve by default:** Auto-approval is disabled by default; all tool executions and approvals are routed directly to the client browser, with no timeout on pending approvals. The one exception is `skipPermissions`, an explicit per-session opt-in the user chooses at creation time (see CLAUDE.md Invariants) — it must stay off by default and must never be applied silently.
 * **Safe Directory Containment Check:** Containment is checked via `fs.realpath` + `path.relative` in [`workspaces/index.ts`](file:///data/homes/stoneshi/src/agents-remote-control/apps/server/src/workspaces/index.ts). Never use simple string prefix matching.
 * **No Adopted Tmux Resizing:** Never resize tmux panes automatically for adopted sessions.
 * **Sanitize Child Environments:** Strip all environment variables prefixed with `POCKETAGENT_*` in [`sessions/env.ts`](file:///data/homes/stoneshi/src/agents-remote-control/apps/server/src/sessions/env.ts) to prevent token leaks.

@@ -28,6 +28,10 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
   const [agent, setAgent] = useState('');
   const [cwd, setCwd] = useState('');
   const [transport, setTransport] = useState<SessionTransport>('terminal');
+  /** Off by default. Only meaningful for an agent that reports
+      `supportsSkipPermissions`; reset whenever a different agent is picked so
+      the choice never silently carries over to one that ignores it. */
+  const [skipPermissions, setSkipPermissions] = useState(false);
 
   /** Set while a resume or adopt needs an extra, explicit confirmation. */
   const [confirming, setConfirming] = useState<
@@ -89,7 +93,7 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
   }
 
   const startFresh = (): Promise<void> =>
-    submit({ agent, cwd, cols: 80, rows: 24, transport });
+    submit({ agent, cwd, cols: 80, rows: 24, transport, skipPermissions });
 
   /** Fork is the default: it never touches the original transcript. */
   const resume = (conversation: ConversationInfo, fork: boolean): Promise<void> =>
@@ -188,6 +192,7 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
                       setAgent(e.target.value);
                       const next = agents.find((x) => x.id === e.target.value);
                       if (next) setTransport(next.defaultTransport);
+                      setSkipPermissions(false);
                     }}
                   >
                     {agents.map((a) => (
@@ -234,6 +239,24 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
                         : 'A real terminal: exact fidelity, answered with keystrokes.'}
                     </p>
                   </>
+                )}
+
+                {selected?.supportsSkipPermissions && (
+                  <div className="field checkbox-row">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={skipPermissions}
+                        onChange={(e) => setSkipPermissions(e.target.checked)}
+                      />
+                      Skip approvals for this session
+                    </label>
+                    <p className="warn-note danger-note">
+                      Off by default. Every tool call runs immediately, unattended — nothing is
+                      routed to you for approval. Only turn this on for a session you trust
+                      completely, e.g. one running in a throwaway directory.
+                    </p>
+                  </div>
                 )}
 
                 {workspaces.length === 0 && (
