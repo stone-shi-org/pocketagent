@@ -2056,6 +2056,36 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   padding: 8px 10px;
 }
 
+/* Show-more chats -----------------------------------------------------------
+   A project's chat list truncates at CHAT_PAGE_SIZE; this reveals the rest
+   in place rather than navigating anywhere. Styled dimmer than a chat row
+   itself so it reads as "more of the list", not another chat. */
+
+.chats-more {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 8px 9px 2px;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  border-radius: 10px;
+}
+
+.chats-more:hover {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+
+.sidebar .chats-more {
+  font-size: 13px;
+  padding: 6px 10px 6px 29px;
+}
+
 .browse-bar {
   display: flex;
   align-items: center;

@@ -6,6 +6,9 @@ import { filterProjects } from '../agent/search.js';
 
 const REFRESH_MS = 5000;
 
+/** Chats shown per project before a "show more" row appears. */
+const CHAT_PAGE_SIZE = 5;
+
 export interface ProjectsState {
   projects: ProjectInfo[] | null;
   host: HostInfo | null;
@@ -203,6 +206,7 @@ export function ProjectList({
   onAddProject,
 }: ListProps): JSX.Element {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [expandedChats, setExpandedChats] = useState<Set<string>>(() => new Set());
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const { projects, resuming, open } = state;
 
@@ -216,6 +220,9 @@ export function ProjectList({
       else next.add(cwd);
       return next;
     });
+
+  const showMoreChats = (cwd: string): void =>
+    setExpandedChats((prev) => new Set(prev).add(cwd));
 
   return (
     <>
@@ -294,44 +301,67 @@ export function ProjectList({
               <div className="project-empty">No chats yet</div>
             )}
 
-            {!isCollapsed &&
-              project.chats.map((chat) => (
-                <div key={chat.id} className={`chat-line${chat.live ? ' live' : ''}`}>
-                <button
-                  type="button"
-                  className={[
-                    'chat-row',
-                    chat.live ? 'live' : '',
-                    resuming === chat.id ? 'pending' : '',
-                    activeSessionId && chat.sessionId === activeSessionId ? 'active' : '',
-                  ]
-                    .filter(Boolean)
-                    .join(' ')}
-                  data-chat-id={chat.id}
-                  onClick={() => void open(chat)}
-                  disabled={resuming !== null}
-                  title={chat.title}
-                >
-                  <span className="chat-title">
-                    {chat.live && <span className="live-dot" aria-label="running" />}
-                    {resuming === chat.id ? 'Resuming…' : chat.title}
-                  </span>
-                </button>
-                {/* Running chats have no remove: stop them first, so the
-                    process is never orphaned by losing its record. */}
-                {!chat.live && (
-                  <button
-                    type="button"
-                    className="chat-remove"
-                    onClick={() => void state.removeChat(chat)}
-                    aria-label={`Remove ${chat.title} from the list`}
-                    title="Remove from list"
-                  >
-                    <Icon name="close" size={14} />
-                  </button>
-                )}
-                </div>
-              ))}
+            {(() => {
+              // A search that hid a folder's other chats already narrowed
+              // this to what matched, so the page limit only applies while
+              // browsing — truncating a search result would hide a hit.
+              const isExpanded = searching || expandedChats.has(project.cwd);
+              const shown = isExpanded ? project.chats : project.chats.slice(0, CHAT_PAGE_SIZE);
+              const remaining = project.chats.length - shown.length;
+              return (
+                !isCollapsed && (
+                  <>
+                    {shown.map((chat) => (
+                      <div key={chat.id} className={`chat-line${chat.live ? ' live' : ''}`}>
+                      <button
+                        type="button"
+                        className={[
+                          'chat-row',
+                          chat.live ? 'live' : '',
+                          resuming === chat.id ? 'pending' : '',
+                          activeSessionId && chat.sessionId === activeSessionId ? 'active' : '',
+                        ]
+                          .filter(Boolean)
+                          .join(' ')}
+                        data-chat-id={chat.id}
+                        onClick={() => void open(chat)}
+                        disabled={resuming !== null}
+                        title={chat.title}
+                      >
+                        <span className="chat-title">
+                          {chat.live && <span className="live-dot" aria-label="running" />}
+                          {resuming === chat.id ? 'Resuming…' : chat.title}
+                        </span>
+                      </button>
+                      {/* Running chats have no remove: stop them first, so the
+                          process is never orphaned by losing its record. */}
+                      {!chat.live && (
+                        <button
+                          type="button"
+                          className="chat-remove"
+                          onClick={() => void state.removeChat(chat)}
+                          aria-label={`Remove ${chat.title} from the list`}
+                          title="Remove from list"
+                        >
+                          <Icon name="close" size={14} />
+                        </button>
+                      )}
+                      </div>
+                    ))}
+                    {remaining > 0 && (
+                      <button
+                        type="button"
+                        className="chats-more"
+                        onClick={() => showMoreChats(project.cwd)}
+                      >
+                        <Icon name="chevron-down" size={16} />
+                        Show {remaining} more
+                      </button>
+                    )}
+                  </>
+                )
+              );
+            })()}
           </section>
         );
       })}
