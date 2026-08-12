@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="PocketAgent">
+  <!--
+    A shell prompt on the app's ink colour.
+
+    Deliberately not the 1.7-stroke terminal glyph from the in-app icon set: at
+    16px in a browser tab that reads as grey mush. Two heavy strokes on a solid
+    tile survive being shrunk, which is the only thing a favicon has to do.
+  -->
+  <rect width="32" height="32" rx="7" fill="#0b0b0d" />
+  <g fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9 12l4 4-4 4" />
+    <path d="M17.5 20.5h5.5" />
+  </g>
+</svg>
