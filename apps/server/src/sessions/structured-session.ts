@@ -160,7 +160,7 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
       canUseTool: (toolName, input, opts) => this.requestPermission(toolName, input, opts),
       includePartialMessages: true,
       ...(this.spec.resumeAgentSessionId ? { resume: this.spec.resumeAgentSessionId } : {}),
-      ...(this.spec.resumeAgentSessionId && this.spec.forkSession !== false
+      ...(this.spec.resumeAgentSessionId && this.spec.forkSession === true
         ? { forkSession: true }
         : {}),
       ...(this.spec.maxBudgetUsd !== undefined ? { maxBudgetUsd: this.spec.maxBudgetUsd } : {}),

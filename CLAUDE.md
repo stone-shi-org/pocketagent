@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. See [AGENTS.md](file:///data/homes/stoneshi/src/agents-remote-control/AGENTS.md) for guidelines applicable to other agentic coding assistants.
 
 ## Commands
 
@@ -38,7 +38,7 @@ and `adopt.test.ts` skip themselves when `tmux` is not installed.
 ### Live demos
 
 The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
-decision. Eight demo scripts do, against a *running* server:
+decision. Ten demo scripts do, against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -50,6 +50,7 @@ PA_TOKEN=... pnpm demo:resume-adopt-ui   # both pickers and confirmations in a b
 PA_TOKEN=... pnpm demo:home-ui           # projects screen and composer, phone viewport
 PA_TOKEN=... pnpm demo:resume-history    # resuming a real transcript, with its history
 PA_TOKEN=... pnpm demo:desktop-ui        # two-pane shell, and the width/pointer switch
+PA_TOKEN=... pnpm demo:copy-ui           # copy-to-clipboard fallback over plain HTTP
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -102,8 +103,7 @@ there is the *conversation*, not the process.
   `~/.claude/projects/<encoded-cwd>/<id>.jsonl`. The directory-name encoding
   (`/` → `-`) is **lossy and must never be inverted**: containment is decided by a
   forward-encoded prefix filter plus the `cwd` recorded *inside* the transcript. Resuming
-  defaults to `forkSession: true`, because two processes resuming one id append to a single
-  interleaved file and neither sees the other's turns.
+  defaults to `forkSession: false` so continuing a conversation appends in-place without creating duplicate chats.
 - `adopt/index.ts` — attaches to a pane on a *foreign* tmux socket. Off unless
   `POCKETAGENT_ADOPT_TMUX_SOCKET` is set. The browser only ever sends an opaque
   sha256-derived id; the server builds the argv. Adopted sessions always use the direct

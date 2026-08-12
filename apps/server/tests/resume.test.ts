@@ -72,22 +72,22 @@ describe('resume options handed to the agent', () => {
     await session.terminate();
   });
 
-  it('branches by default when resuming, leaving the original transcript read-only', async () => {
+  it('continues in-place by default when resuming', async () => {
     const session = makeSession({ resumeAgentSessionId: 'original-conversation' });
     await session.start();
     expect(onlyOptions().resume).toBe('original-conversation');
-    expect(onlyOptions().forkSession).toBe(true);
+    expect(onlyOptions().forkSession).toBeUndefined();
     await session.terminate();
   });
 
-  it('continues in place only when the caller explicitly opts out of forking', async () => {
+  it('branches when the caller explicitly requests forking', async () => {
     const session = makeSession({
       resumeAgentSessionId: 'original-conversation',
-      forkSession: false,
+      forkSession: true,
     });
     await session.start();
     expect(onlyOptions().resume).toBe('original-conversation');
-    expect(onlyOptions().forkSession).toBeUndefined();
+    expect(onlyOptions().forkSession).toBe(true);
     await session.terminate();
   });
 
@@ -110,27 +110,27 @@ describe('resume options handed to the agent', () => {
 });
 
 describe('resume request validation', () => {
-  it('defaults to forking, so the safe choice is the one you get by omission', () => {
+  it('defaults to continue-in-place (forkSession: false)', () => {
     const parsed = CreateSessionRequest.parse({
       agent: 'claude',
       cwd: '/tmp',
       cols: 80,
       rows: 24,
       resumeAgentSessionId: 'abc',
-    });
-    expect(parsed.forkSession).toBe(true);
-  });
-
-  it('accepts an explicit continue-in-place', () => {
-    const parsed = CreateSessionRequest.parse({
-      agent: 'claude',
-      cwd: '/tmp',
-      cols: 80,
-      rows: 24,
-      resumeAgentSessionId: 'abc',
-      forkSession: false,
     });
     expect(parsed.forkSession).toBe(false);
+  });
+
+  it('accepts an explicit forking request', () => {
+    const parsed = CreateSessionRequest.parse({
+      agent: 'claude',
+      cwd: '/tmp',
+      cols: 80,
+      rows: 24,
+      resumeAgentSessionId: 'abc',
+      forkSession: true,
+    });
+    expect(parsed.forkSession).toBe(true);
   });
 });
 

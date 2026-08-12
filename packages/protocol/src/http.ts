@@ -49,11 +49,9 @@ export const CreateSessionRequest = z.object({
   resumeAgentSessionId: z.string().max(128).optional(),
   /**
    * When resuming, branch onto a new conversation id instead of appending to
-   * the original transcript. Defaults to true: appending while another process
-   * still holds the same conversation interleaves two divergent histories into
-   * one file, and neither process can see the other's turns.
+   * the original transcript. Defaults to false so resuming continues the chat in-place.
    */
-  forkSession: z.boolean().default(true),
+  forkSession: z.boolean().default(false),
   /** Attach to an existing tmux pane instead of starting a new process. */
   adoptTargetId: z.string().max(256).optional(),
 });

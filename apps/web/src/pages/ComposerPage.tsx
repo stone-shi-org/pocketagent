@@ -189,7 +189,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
         // Resuming is only meaningful over the structured transport, which is
         // what owns the conversation.
         transport: resumeFrom ? 'structured' : (transport as 'terminal' | 'structured'),
-        ...(resumeFrom ? { resumeAgentSessionId: resumeFrom, forkSession: true } : {}),
+        ...(resumeFrom ? { resumeAgentSessionId: resumeFrom, forkSession: false } : {}),
       });
       setPendingPrompt(session.id, prompt);
       onCreated(session.id);

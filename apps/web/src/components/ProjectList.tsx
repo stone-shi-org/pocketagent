@@ -85,7 +85,7 @@ export function useProjects(
           rows: 24,
           transport: 'structured',
           resumeAgentSessionId: chat.conversationId,
-          forkSession: true,
+          forkSession: false,
           title: chat.title,
         });
         await refresh();
