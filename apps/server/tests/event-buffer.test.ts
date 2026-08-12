@@ -83,6 +83,7 @@ describe('EventBuffer', () => {
       filePath: null,
       reason: null,
       canAllowForSession: true,
+      questions: null,
     });
 
     const found = buffer.findByKind('permission_request');

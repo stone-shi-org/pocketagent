@@ -66,6 +66,13 @@ const RawEnv = z.object({
   POCKETAGENT_CLAUDE_BIN: z.string().default('claude'),
   POCKETAGENT_WEB_DIST: z.string().optional(),
 
+  /**
+   * Boot-time seed for the global "skip all approvals" switch. See `Config.globalSkipPermissionsDefault`.
+   * Off by default; once the switch has been toggled at runtime via `PATCH
+   * /api/settings`, the persisted value wins and this is ignored on later boots.
+   */
+  POCKETAGENT_GLOBAL_SKIP_PERMISSIONS: boolish(false),
+
   POCKETAGENT_BACKEND: z.enum(['direct', 'tmux']).default('direct'),
   POCKETAGENT_PUSH_CONTACT: z.string().default('mailto:pocketagent@localhost'),
   POCKETAGENT_TMUX_BIN: z.string().default('tmux'),
@@ -91,6 +98,14 @@ export interface Config {
   sessionTtlMs: number;
   cookieSecure: boolean;
   trustProxy: boolean;
+  /**
+   * Seeds the database-backed global skip-permissions switch on first boot only.
+   *
+   * DANGEROUS: when that switch is on, every session bypasses approval instead
+   * of routing it to the browser — the opposite of PocketAgent's default
+   * per-session, off-by-default `skipPermissions` opt-in. See CLAUDE.md.
+   */
+  globalSkipPermissionsDefault: boolean;
   shell: string;
   claudeBin: string;
   webDistPath: string;
@@ -227,6 +242,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         ? isProduction
         : ['1', 'true', 'yes', 'on'].includes(e.POCKETAGENT_COOKIE_SECURE.trim().toLowerCase()),
     trustProxy: e.POCKETAGENT_TRUST_PROXY,
+    globalSkipPermissionsDefault: e.POCKETAGENT_GLOBAL_SKIP_PERMISSIONS,
     shell: e.POCKETAGENT_SHELL?.trim() || env.SHELL || '/bin/bash',
     claudeBin: e.POCKETAGENT_CLAUDE_BIN.trim(),
     webDistPath,

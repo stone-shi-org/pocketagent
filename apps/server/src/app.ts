@@ -30,6 +30,7 @@ import { ProjectService } from './projects/index.js';
 import { authRoutes } from './routes/auth.js';
 import { pushRoutes } from './routes/push.js';
 import { sessionRoutes } from './routes/sessions.js';
+import { settingsRoutes } from './routes/settings.js';
 import { websocketRoutes } from './ws/index.js';
 import type { PocketContext } from './types.js';
 
@@ -148,7 +149,13 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     outputBufferBytes: config.outputBufferBytes,
     idleTimeoutSeconds: config.sessionIdleTimeoutSeconds,
     logger: app.log,
+    globalSkipPermissionsDefault: config.globalSkipPermissionsDefault,
   });
+  if (sessions.getGlobalSkipPermissions()) {
+    app.log.warn(
+      'global skip-permissions switch is ON: every session bypasses approval instead of asking',
+    );
+  }
 
   const context: PocketContext = {
     config,
@@ -242,6 +249,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   await app.register(authRoutes);
   await app.register(sessionRoutes);
+  await app.register(settingsRoutes);
   await app.register(pushRoutes);
   await app.register(websocketRoutes);
 

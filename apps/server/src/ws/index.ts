@@ -331,6 +331,7 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
             message.requestId,
             message.decision,
             message.message,
+            message.answer,
           );
           if (!ok) {
             // Two phones can race to answer the same approval; the loser gets a

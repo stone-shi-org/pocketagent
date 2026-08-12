@@ -554,6 +554,7 @@ describe('TerminalConnection: structured sessions', () => {
           filePath: null,
           reason: null,
           canAllowForSession: true,
+          questions: null,
         },
       ],
     });

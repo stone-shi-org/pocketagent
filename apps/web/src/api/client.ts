@@ -186,4 +186,13 @@ export const api = {
     }),
 
   pushTest: () => request<{ sent: number; pruned: number }>('/api/push/test', { method: 'POST' }),
+
+  /** The operator's server-wide "skip all approvals" switch. Off by default. */
+  getSettings: () => request<{ skipPermissionsEnabled: boolean }>('/api/settings'),
+
+  updateSettings: (skipPermissionsEnabled: boolean) =>
+    request<{ skipPermissionsEnabled: boolean }>('/api/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ skipPermissionsEnabled }),
+    }),
 };

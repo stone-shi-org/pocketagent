@@ -68,6 +68,41 @@ export const ToolResultEvent = z.object({
 });
 
 /**
+ * One question and its choices, as the SDK's built-in `AskUserQuestion` tool
+ * asks it. Mirrors that tool's own input schema (`sdk-tools.d.ts`) rather than
+ * inventing a shape, since the answer has to be handed straight back as that
+ * tool's `updatedInput` — see `AskUserQuestionAnswer` below.
+ */
+export const AskUserQuestionOption = z.object({
+  label: z.string(),
+  description: z.string(),
+  preview: z.string().optional(),
+});
+export type AskUserQuestionOption = z.infer<typeof AskUserQuestionOption>;
+
+export const AskUserQuestionItem = z.object({
+  question: z.string(),
+  header: z.string(),
+  options: z.array(AskUserQuestionOption),
+  multiSelect: z.boolean(),
+});
+export type AskUserQuestionItem = z.infer<typeof AskUserQuestionItem>;
+
+/**
+ * A human's answer to an `AskUserQuestion` call.
+ *
+ * `answers` is keyed by each question's own `question` text — the same
+ * convention the SDK's `AskUserQuestionOutput` uses — with multi-select
+ * values comma-joined. `response` is free text used instead of, or alongside,
+ * picking an option ("Other").
+ */
+export const AskUserQuestionAnswer = z.object({
+  answers: z.record(z.string()),
+  response: z.string().max(4000).optional(),
+});
+export type AskUserQuestionAnswer = z.infer<typeof AskUserQuestionAnswer>;
+
+/**
  * The agent wants to do something that needs a human decision.
  *
  * `title` is the sentence the SDK itself renders (e.g. "Claude wants to edit
@@ -84,6 +119,14 @@ export const PermissionRequestEvent = z.object({
   reason: z.string().nullable(),
   /** True when the SDK offered rules that would stop it asking again. */
   canAllowForSession: z.boolean(),
+  /**
+   * Parsed `AskUserQuestion` input, when `toolName` is that tool and the
+   * input actually matches its schema. Null for every other tool call, and
+   * also null (rather than throwing) if the SDK ever changes that shape out
+   * from under us — the UI falls back to a generic approval in that case
+   * instead of crashing on an unrecognized payload.
+   */
+  questions: z.array(AskUserQuestionItem).nullable(),
 });
 
 export const PermissionDecision = z.enum(['allow', 'allow_session', 'deny']);

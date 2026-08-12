@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { SessionInfo, SessionStatus } from './session.js';
-import { AgentEvent, AgentReplayPayload, PermissionDecision } from './agent-events.js';
+import {
+  AgentEvent,
+  AgentReplayPayload,
+  AskUserQuestionAnswer,
+  PermissionDecision,
+} from './agent-events.js';
 
 /**
  * Wire protocol version. The client sends it as a query parameter on the
@@ -108,6 +113,13 @@ export const PermissionMessage = z.object({
   decision: PermissionDecision,
   /** Shown to the agent when denying, so it can adjust rather than guess. */
   message: z.string().max(2000).optional(),
+  /**
+   * The chosen answer, for an `AskUserQuestion` call. Required in practice for
+   * that tool's `allow` to mean anything — a bare allow with no answer leaves
+   * the SDK executing the tool with nothing to report back, which reads to the
+   * agent as a failed call rather than a real answer.
+   */
+  answer: AskUserQuestionAnswer.optional(),
 });
 
 /** Stop the current turn at the next safe point. */

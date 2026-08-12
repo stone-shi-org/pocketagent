@@ -2,7 +2,13 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import type { SessionInfo, SessionStatus, SessionTransport } from '@pocketagent/protocol';
 import type { Db, SessionRow } from '../db/index.js';
-import { markStaleSessionsInterrupted, pruneOldSessions } from '../db/index.js';
+import {
+  GLOBAL_SKIP_PERMISSIONS_KEY,
+  markStaleSessionsInterrupted,
+  pruneOldSessions,
+  readSetting,
+  writeSetting,
+} from '../db/index.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import { resolveExecutable } from '../agents/registry.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
@@ -88,6 +94,8 @@ export interface ManagerOptions {
   /** Rows of finished sessions kept in the history table. */
   historyLimit?: number;
   logger?: { info: (o: object, m?: string) => void; warn: (o: object, m?: string) => void };
+  /** Boot-time seed for the global skip-permissions switch; the database wins after that. */
+  globalSkipPermissionsDefault?: boolean;
 }
 
 const SWEEP_INTERVAL_MS = 15_000;
@@ -103,8 +111,59 @@ export class SessionManager {
   private readonly live = new Map<string, ManagedSession>();
   private readonly attachCounts = new Map<string, number>();
   private sweepTimer: NodeJS.Timeout | null = null;
+  /**
+   * The operator's server-wide "skip all approvals" switch. See CLAUDE.md —
+   * this is a deliberate override of the per-session, off-by-default
+   * `skipPermissions` invariant, not a config knob like any other.
+   */
+  private globalSkipPermissions: boolean;
 
-  constructor(private readonly opts: ManagerOptions) {}
+  constructor(private readonly opts: ManagerOptions) {
+    const stored = readSetting(opts.db, GLOBAL_SKIP_PERMISSIONS_KEY);
+    if (stored === null) {
+      // First boot: seed from configuration, same as `workspaces` does, so a
+      // later restart with a *different* env var does not fight whatever gets
+      // toggled at runtime from here on.
+      this.globalSkipPermissions = opts.globalSkipPermissionsDefault === true;
+      writeSetting(
+        opts.db,
+        GLOBAL_SKIP_PERMISSIONS_KEY,
+        this.globalSkipPermissions ? '1' : '0',
+      );
+    } else {
+      this.globalSkipPermissions = stored === '1';
+    }
+  }
+
+  getGlobalSkipPermissions(): boolean {
+    return this.globalSkipPermissions;
+  }
+
+  /**
+   * Flip the global "skip all approvals" switch.
+   *
+   * Persists immediately so a restart does not revert it, and reaches into
+   * every currently live *structured* session so the effect is immediate
+   * rather than "starting with the next session". Terminal/PTY sessions
+   * already running are left alone: `--dangerously-skip-permissions` is baked
+   * into argv at spawn, there is no way to change it for a running process
+   * short of killing it, and `terminal/classifier.ts` must never grow an
+   * answerable approval channel to fake one. New sessions of either transport
+   * pick up the switch automatically via the gate in `create()` below.
+   */
+  async setGlobalSkipPermissions(enabled: boolean): Promise<void> {
+    this.globalSkipPermissions = enabled;
+    writeSetting(this.opts.db, GLOBAL_SKIP_PERMISSIONS_KEY, enabled ? '1' : '0');
+    this.opts.logger?.[enabled ? 'warn' : 'info'](
+      { enabled },
+      'global skip-permissions switch changed',
+    );
+    await Promise.all(
+      [...this.live.values()]
+        .filter((s): s is StructuredSession => s.transport === 'structured')
+        .map((s) => s.applyGlobalSkipPermissions(enabled)),
+    );
+  }
 
   /**
    * Reconcile the database with reality.
@@ -296,7 +355,13 @@ export class SessionManager {
     // Only honour the opt-in on an adapter that actually declares support for
     // it; anything else silently ignores it rather than erroring, since the
     // client is expected to gate the control on `supportsSkipPermissions` too.
-    const skipPermissions = input.skipPermissions === true && adapter.supportsSkipPermissions === true;
+    // The global switch ORs in here rather than being applied after the fact,
+    // so a session created while it is on is honest about it from birth —
+    // `spec.skipPermissions` (and therefore what gets persisted and shown)
+    // reflects reality instead of needing a second source of truth.
+    const skipPermissions =
+      (input.skipPermissions === true || this.globalSkipPermissions) &&
+      adapter.supportsSkipPermissions === true;
 
     // Adoption replaces the adapter's argv with an attach command the server
     // built from a validated target. The browser never supplies argv.
@@ -625,7 +690,15 @@ export class SessionManager {
       agentSessionId: session.agentSessionId,
       durable: session.survivesServerRestart,
       adopted: session.transport === 'terminal' && session.spec.adopted === true,
-      skipPermissionsEnabled: session.spec.skipPermissions === true,
+      // `spec.skipPermissions` is the honest record of what this session was
+      // created with; a structured session can additionally have the global
+      // switch applied to it live after the fact (see
+      // `setGlobalSkipPermissions`), which `spec` deliberately never mutates
+      // to reflect. OR them so the badge stays true to what is actually
+      // happening right now, not just what was chosen at creation.
+      skipPermissionsEnabled:
+        session.spec.skipPermissions === true ||
+        (session.transport === 'structured' && session.globalBypassActive),
     };
   }
 

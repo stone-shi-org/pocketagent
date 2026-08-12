@@ -3,6 +3,7 @@ import { NewSessionDialog } from '../components/NewSessionDialog.js';
 import { HiddenProjects } from '../components/HiddenProjects.js';
 import { AddProject } from '../components/AddProject.js';
 import { PushToggle } from '../components/PushToggle.js';
+import { SettingsDialog } from '../components/SettingsDialog.js';
 import { Icon } from '../components/Icon.js';
 import {
   HostChip,
@@ -35,6 +36,7 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   return (
     <div className="app projects-page">
@@ -67,6 +69,10 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
             onHidden={() => {
               setMenuOpen(false);
               setShowHidden(true);
+            }}
+            onSettings={() => {
+              setMenuOpen(false);
+              setShowSettings(true);
             }}
             onLogout={onLogout}
           />
@@ -117,6 +123,10 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
         />
       )}
 
+      {showSettings && (
+        <SettingsDialog onClose={() => setShowSettings(false)} onApiError={onApiError} />
+      )}
+
       {showAdvanced && (
         <NewSessionDialog
           onCancel={() => setShowAdvanced(false)}
@@ -136,12 +146,14 @@ export function OverflowMenu({
   onAdvanced,
   onRefresh,
   onHidden,
+  onSettings,
   onLogout,
 }: {
   onClose: () => void;
   onAdvanced: () => void;
   onRefresh: () => void;
   onHidden: () => void;
+  onSettings: () => void;
   onLogout: () => void;
 }): JSX.Element {
   const ref = useRef<HTMLDivElement>(null);
@@ -154,8 +166,17 @@ export function OverflowMenu({
   }, [onClose]);
 
   return (
-    <div className="menu-backdrop" onClick={onClose} role="presentation">
-      <div className="menu" ref={ref} onClick={(e) => e.stopPropagation()} role="menu">
+    <>
+      {/* A full-page click-away target. It must not be `.menu`'s DOM parent:
+          `.menu-backdrop` is `position: fixed`, which would become the
+          containing block for an absolutely-positioned child and place it
+          against the *viewport's* edge instead of the trigger button's own
+          header — exactly right on the phone's full-width bar, wildly wrong
+          in the desktop sidebar, which sits far from that edge. Siblings let
+          `.menu` anchor to `.home-bar`/`.sidebar-head` (both already
+          `position: relative`) instead. */}
+      <div className="menu-backdrop" onClick={onClose} role="presentation" />
+      <div className="menu" ref={ref} role="menu">
         <button type="button" role="menuitem" onClick={onRefresh}>
           Refresh
         </button>
@@ -165,10 +186,13 @@ export function OverflowMenu({
         <button type="button" role="menuitem" onClick={onAdvanced}>
           More session options…
         </button>
+        <button type="button" role="menuitem" onClick={onSettings}>
+          Settings…
+        </button>
         <button type="button" role="menuitem" className="danger" onClick={onLogout}>
           Sign out
         </button>
       </div>
-    </div>
+    </>
   );
 }

@@ -2,6 +2,7 @@ import {
   PROTOCOL_VERSION,
   ServerMessage,
   type AgentEvent,
+  type AskUserQuestionAnswer,
   type ClientMessage,
   type PermissionDecision,
   type PermissionRequestEvent,
@@ -302,8 +303,13 @@ export class TerminalConnection {
     return this.send({ type: 'prompt', sessionId: this.sessionId, text });
   }
 
-  /** Answer a pending approval. */
-  sendPermission(requestId: string, decision: PermissionDecision, message?: string): boolean {
+  /** Answer a pending approval. `answer` carries the choice for a question-shaped tool. */
+  sendPermission(
+    requestId: string,
+    decision: PermissionDecision,
+    message?: string,
+    answer?: AskUserQuestionAnswer,
+  ): boolean {
     if (!this.sessionId) return false;
     return this.send({
       type: 'permission',
@@ -311,6 +317,7 @@ export class TerminalConnection {
       requestId,
       decision,
       ...(message ? { message } : {}),
+      ...(answer ? { answer } : {}),
     });
   }
 

@@ -162,6 +162,20 @@ These are load-bearing. Several were bugs first.
   `claude.ts` adds `--dangerously-skip-permissions` for the terminal transport). It must stay
   opt-in — never the default — and a session running with it must say so persistently in the
   UI (`SessionInfo.skipPermissionsEnabled`), not just at the moment it was created.
+- **The global skip-permissions switch is the one deliberate, operator-level override of the
+  invariant above.** `POCKETAGENT_GLOBAL_SKIP_PERMISSIONS` seeds it at boot; the database
+  (`settings.global_skip_permissions`, via `SessionManager.setGlobalSkipPermissions`) wins after
+  that, toggleable at runtime over `PATCH /api/settings`. It is off by default and was added
+  only because a specific operator asked for it with full knowledge of what it removes — it is
+  not a pattern to reach for casually elsewhere. On: every new session (either transport) starts
+  bypassed, and every currently *running structured* session is flipped live via the SDK's
+  `setPermissionMode`, draining anything already parked waiting for a human. What it does **not**
+  do: reach a terminal session already running — `--dangerously-skip-permissions` is fixed in
+  argv at spawn, and `terminal/classifier.ts` must still never gain an answerable approval
+  channel to fake a live toggle. `SessionInfo.skipPermissionsEnabled` for a structured session
+  ORs in `StructuredSession.globalBypassActive` so the badge reflects live reality; `spec` itself
+  is never mutated, so history and persistence still record what a session was actually created
+  with.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.

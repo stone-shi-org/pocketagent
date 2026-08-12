@@ -185,6 +185,33 @@ describe('summarizeToolUse', () => {
     expect(summarizeToolUse('MysteryTool', { q: 'hello' })).toBe('MysteryTool hello');
     expect(summarizeToolUse('MysteryTool', {})).toBe('MysteryTool');
   });
+
+  // AskUserQuestion's only top-level field is an array (`questions`), which the
+  // generic default case cannot summarize (it looks for a string value) — this
+  // used to collapse to the bare tool name, which is where the "big JSON dump"
+  // bug started: a title with no useful information at all.
+  it('renders the question text for AskUserQuestion instead of the bare tool name', () => {
+    expect(
+      summarizeToolUse('AskUserQuestion', {
+        questions: [{ question: 'Which approach should I take?', header: 'Approach', options: [], multiSelect: false }],
+      }),
+    ).toBe('Which approach should I take?');
+  });
+
+  it('summarizes multiple AskUserQuestion questions by count', () => {
+    expect(
+      summarizeToolUse('AskUserQuestion', {
+        questions: [
+          { question: 'A?', header: 'A', options: [], multiSelect: false },
+          { question: 'B?', header: 'B', options: [], multiSelect: false },
+        ],
+      }),
+    ).toBe('Asking 2 questions');
+  });
+
+  it('falls back gracefully when AskUserQuestion input is malformed', () => {
+    expect(summarizeToolUse('AskUserQuestion', {})).toBe('Asking a question');
+  });
 });
 
 describe('extractPath', () => {

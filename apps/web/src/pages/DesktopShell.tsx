@@ -4,6 +4,7 @@ import { NewSessionDialog } from '../components/NewSessionDialog.js';
 import { HiddenProjects } from '../components/HiddenProjects.js';
 import { AddProject } from '../components/AddProject.js';
 import { PushToggle } from '../components/PushToggle.js';
+import { SettingsDialog } from '../components/SettingsDialog.js';
 import { Icon } from '../components/Icon.js';
 import { HostChip, ProjectList, SearchField, useProjects } from '../components/ProjectList.js';
 import { OverflowMenu } from './ProjectsPage.js';
@@ -45,6 +46,7 @@ export function DesktopShell({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   const activeSessionId = route.name === 'terminal' ? route.sessionId : null;
 
@@ -80,6 +82,10 @@ export function DesktopShell({
               onHidden={() => {
                 setMenuOpen(false);
                 setShowHidden(true);
+              }}
+              onSettings={() => {
+                setMenuOpen(false);
+                setShowSettings(true);
               }}
               onLogout={onLogout}
             />
@@ -150,6 +156,10 @@ export function DesktopShell({
           onChanged={() => void state.refresh()}
           onApiError={onApiError}
         />
+      )}
+
+      {showSettings && (
+        <SettingsDialog onClose={() => setShowSettings(false)} onApiError={onApiError} />
       )}
 
       {showAdvanced && (

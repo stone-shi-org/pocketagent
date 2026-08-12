@@ -167,6 +167,26 @@ export const HealthResponse = z.object({
 });
 export type HealthResponse = z.infer<typeof HealthResponse>;
 
+/**
+ * Server-wide switch to bypass approvals for every session.
+ *
+ * A deliberate, dangerous override of the per-session `CreateSessionRequest.skipPermissions`
+ * opt-in: PocketAgent's whole reason to exist is routing every approval to the
+ * browser, and this switch turns that off fleet-wide instead of session-by-session.
+ * It is off by default and must be turned on explicitly by whoever operates this
+ * server — see the "global skip-permissions switch" invariant in CLAUDE.md for what
+ * it does and does not reach (a running terminal session's flag is fixed at spawn).
+ */
+export const GlobalSettingsResponse = z.object({
+  skipPermissionsEnabled: z.boolean(),
+});
+export type GlobalSettingsResponse = z.infer<typeof GlobalSettingsResponse>;
+
+export const UpdateGlobalSettingsRequest = z.object({
+  skipPermissionsEnabled: z.boolean(),
+});
+export type UpdateGlobalSettingsRequest = z.infer<typeof UpdateGlobalSettingsRequest>;
+
 export const ApiError = z.object({
   error: z.object({
     code: z.string(),

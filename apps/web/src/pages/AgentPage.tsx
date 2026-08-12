@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  AskUserQuestionAnswer,
   PermissionDecision,
   PermissionRequestEvent,
   SessionInfo,
@@ -147,11 +148,11 @@ export function AgentPage({ sessionId, onBack, onApiError }: Props): JSX.Element
   }, []);
 
   const decide = useCallback(
-    (decision: PermissionDecision, message?: string) => {
+    (decision: PermissionDecision, message?: string, answer?: AskUserQuestionAnswer) => {
       const request = transcript.pending[0];
       if (!request) return;
       setDeciding(true);
-      connRef.current?.sendPermission(request.id, decision, message);
+      connRef.current?.sendPermission(request.id, decision, message, answer);
       // Optimistically clear so the sheet closes immediately on a slow link;
       // the authoritative permission_resolved event follows.
       setTranscript((prev) => ({ ...prev, pending: prev.pending.slice(1) }));

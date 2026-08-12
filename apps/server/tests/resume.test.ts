@@ -15,6 +15,7 @@ import { createTestApp, makeWorkspace, type TestApp } from './helpers.js';
  * still not be deterministic.
  */
 const captured: { options: any; prompt: unknown }[] = [];
+const permissionModeCalls: string[] = [];
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: ({ prompt, options }: { prompt: unknown; options: unknown }) => {
@@ -30,7 +31,9 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
         await new Promise(() => {});
       },
       interrupt: async () => {},
-      setPermissionMode: async () => {},
+      setPermissionMode: async (mode: string) => {
+        permissionModeCalls.push(mode);
+      },
     };
   },
 }));
@@ -62,6 +65,7 @@ function onlyOptions(): any {
 describe('resume options handed to the agent', () => {
   beforeEach(() => {
     captured.length = 0;
+    permissionModeCalls.length = 0;
   });
 
   it('starts a fresh conversation with neither resume nor fork', async () => {
@@ -105,6 +109,197 @@ describe('resume options handed to the agent', () => {
     const session = makeSession({ resumeAgentSessionId: 'original-conversation' });
     expect(session.agentSessionId).toBe('original-conversation');
     await session.start();
+    await session.terminate();
+  });
+});
+
+/**
+ * The operator's global skip-permissions switch (`SessionManager.setGlobalSkipPermissions`)
+ * is the one deliberate override of "never answer a prompt for the user" — see CLAUDE.md.
+ * These pin what `StructuredSession.applyGlobalSkipPermissions` actually does to an
+ * already-running session, independent of the manager or the HTTP layer around it.
+ */
+describe('global skip-permissions switch, applied to a running session', () => {
+  beforeEach(() => {
+    captured.length = 0;
+    permissionModeCalls.length = 0;
+  });
+
+  it('is off until applied, and tracks the switch once it is', async () => {
+    const session = makeSession();
+    expect(session.globalBypassActive).toBe(false);
+    await session.start();
+    await session.applyGlobalSkipPermissions(true);
+    expect(session.globalBypassActive).toBe(true);
+    expect(permissionModeCalls).toEqual(['bypassPermissions']);
+    await session.terminate();
+  });
+
+  it('drains an approval already parked waiting for a human, as an allow', async () => {
+    const session = makeSession();
+    await session.start();
+    const controller = new AbortController();
+    const resultPromise = onlyOptions().canUseTool('Bash', { command: 'echo hi' }, {
+      signal: controller.signal,
+    });
+    expect(session.pendingPermissions()).toHaveLength(1);
+
+    await session.applyGlobalSkipPermissions(true);
+
+    await expect(resultPromise).resolves.toEqual({ behavior: 'allow' });
+    expect(session.pendingPermissions()).toHaveLength(0);
+    await session.terminate();
+  });
+
+  it('restores plain "default" mode when switched back off on a session with no opt-in of its own', async () => {
+    const session = makeSession();
+    await session.start();
+    await session.applyGlobalSkipPermissions(true);
+    await session.applyGlobalSkipPermissions(false);
+    expect(session.globalBypassActive).toBe(false);
+    expect(permissionModeCalls).toEqual(['bypassPermissions', 'default']);
+    await session.terminate();
+  });
+
+  it('leaves bypassPermissions in place when switched off on a session that opted in itself', async () => {
+    const session = makeSession({ skipPermissions: true });
+    await session.start();
+    await session.applyGlobalSkipPermissions(true);
+    permissionModeCalls.length = 0;
+    await session.applyGlobalSkipPermissions(false);
+    // The session's own opt-in still applies — turning off the *global*
+    // switch must not silently start asking for approval on a session that
+    // separately chose to bypass it.
+    expect(permissionModeCalls).toEqual(['bypassPermissions']);
+    await session.terminate();
+  });
+
+  it('never mutates spec — history and persistence still show what the session actually started with', async () => {
+    const session = makeSession();
+    await session.start();
+    await session.applyGlobalSkipPermissions(true);
+    expect(session.spec.skipPermissions).not.toBe(true);
+    await session.terminate();
+  });
+});
+
+/**
+ * The SDK's built-in `AskUserQuestion` tool rides the exact same `canUseTool`
+ * channel as every other tool, but the human's answer has to travel back as
+ * the tool's own `updatedInput` rather than a bare allow — see the
+ * `resolvePermission` comment. A plain allow with no answer is what used to
+ * make the agent report the call as failed and fall back to asking in plain
+ * text.
+ */
+describe('AskUserQuestion: a question, not an approval', () => {
+  beforeEach(() => {
+    captured.length = 0;
+    permissionModeCalls.length = 0;
+  });
+
+  const QUESTION_INPUT = {
+    questions: [
+      {
+        question: 'Which library should we use?',
+        header: 'Library',
+        options: [
+          { label: 'date-fns', description: 'Smaller, tree-shakeable' },
+          { label: 'moment', description: 'Legacy, larger bundle' },
+        ],
+        multiSelect: false,
+      },
+    ],
+  };
+
+  it('parses the question onto the emitted event instead of leaving it as raw JSON', async () => {
+    const session = makeSession();
+    await session.start();
+    const controller = new AbortController();
+    void onlyOptions().canUseTool('AskUserQuestion', QUESTION_INPUT, { signal: controller.signal });
+
+    const pending = session.pendingPermissions();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.questions).toEqual(QUESTION_INPUT.questions);
+    await session.terminate();
+  });
+
+  it('does not parse a question for an ordinary tool call', async () => {
+    const session = makeSession();
+    await session.start();
+    const controller = new AbortController();
+    void onlyOptions().canUseTool('Bash', { command: 'ls' }, { signal: controller.signal });
+
+    expect(session.pendingPermissions()[0]?.questions).toBeNull();
+    await session.terminate();
+  });
+
+  it('falls back to null rather than throwing when the input does not match the schema', async () => {
+    const session = makeSession();
+    await session.start();
+    const controller = new AbortController();
+    void onlyOptions().canUseTool('AskUserQuestion', { questions: 'not an array' }, {
+      signal: controller.signal,
+    });
+
+    expect(session.pendingPermissions()[0]?.questions).toBeNull();
+    await session.terminate();
+  });
+
+  it('hands the chosen answer back as updatedInput, not a bare allow', async () => {
+    const session = makeSession();
+    await session.start();
+    const controller = new AbortController();
+    const resultPromise = onlyOptions().canUseTool('AskUserQuestion', QUESTION_INPUT, {
+      signal: controller.signal,
+    });
+
+    const id = session.pendingPermissions()[0]?.id;
+    expect(id).toBeDefined();
+    session.resolvePermission(id!, 'allow', undefined, {
+      answers: { 'Which library should we use?': 'date-fns' },
+    });
+
+    await expect(resultPromise).resolves.toEqual({
+      behavior: 'allow',
+      updatedInput: {
+        ...QUESTION_INPUT,
+        answers: { 'Which library should we use?': 'date-fns' },
+      },
+    });
+    await session.terminate();
+  });
+
+  it('still supports a bare allow when the client sends no structured answer', async () => {
+    // Backward compatibility / a client that has not been updated: this is the
+    // pre-fix behaviour, deliberately preserved for every *other* tool.
+    const session = makeSession();
+    await session.start();
+    const controller = new AbortController();
+    const resultPromise = onlyOptions().canUseTool('Bash', { command: 'ls' }, {
+      signal: controller.signal,
+    });
+    const id = session.pendingPermissions()[0]?.id;
+    session.resolvePermission(id!, 'allow');
+    await expect(resultPromise).resolves.toEqual({ behavior: 'allow' });
+    await session.terminate();
+  });
+
+  it('leaves a pending question for the human instead of guessing an answer when the global switch is flipped on', async () => {
+    const session = makeSession();
+    await session.start();
+    const controller = new AbortController();
+    const resultPromise = onlyOptions().canUseTool('AskUserQuestion', QUESTION_INPUT, {
+      signal: controller.signal,
+    });
+
+    await session.applyGlobalSkipPermissions(true);
+
+    // Unlike every other tool, this must NOT have been auto-resolved.
+    expect(session.pendingPermissions()).toHaveLength(1);
+
+    const id = session.pendingPermissions()[0]!.id;
+    session.resolvePermission(id, 'allow', undefined, { answers: { 'Which library should we use?': 'moment' } });
+    await expect(resultPromise).resolves.toMatchObject({ behavior: 'allow' });
     await session.terminate();
   });
 });

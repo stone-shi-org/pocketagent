@@ -852,6 +852,25 @@ button:focus-visible {
 .approval-actions button { flex: 1; min-height: 46px; }
 button.primary-danger { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 600; }
 
+/* ---- AskUserQuestion, inside the approval sheet ---- */
+.question-form { display: flex; flex-direction: column; gap: 18px; margin-bottom: 4px; }
+.question-block + .question-block { padding-top: 14px; border-top: 1px solid var(--border); }
+.question-header {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-dim); margin-bottom: 4px;
+}
+.question-text { font-size: 15px; font-weight: 600; margin-bottom: 10px; line-height: 1.35; }
+.question-options { display: flex; flex-direction: column; gap: 6px; }
+.question-option {
+  display: block; width: 100%; text-align: left; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg);
+}
+.question-option.selected { border-color: var(--accent); background: var(--bg-elev-2); }
+.question-option-label { font-size: 14px; font-weight: 600; }
+.question-option-desc { font-size: 12.5px; color: var(--text-dim); margin-top: 2px; }
+.question-other { margin-top: 8px; }
+.question-other input { font-size: 13px; }
+
 .transport-hint { font-size: 12px; color: var(--text-dim); margin-top: -8px; margin-bottom: 14px; line-height: 1.45; }
 
 /* ---- New-session dialog: modes, pick lists, confirm ---- */
@@ -1268,6 +1287,12 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   position: absolute;
   top: calc(54px + var(--safe-top));
   right: calc(16px + var(--safe-right));
+  /* Above `.menu-backdrop` (z-index: 30). They are siblings now — see the
+     comment in `OverflowMenu` — so without an explicit value here `.menu`
+     would fall into the z-index:auto paint group, which draws *before* a
+     later sibling that has a positive z-index, hiding the menu behind its
+     own backdrop. */
+  z-index: 31;
   min-width: 216px;
   display: flex;
   flex-direction: column;

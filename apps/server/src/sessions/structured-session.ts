@@ -1,14 +1,42 @@
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { query, type Options, type PermissionResult, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import type {
-  AgentEvent,
-  PermissionDecision,
-  PermissionRequestEvent,
-  SessionStatus,
+import { z } from 'zod';
+import {
+  query,
+  type Options,
+  type PermissionMode,
+  type PermissionResult,
+  type Query,
+  type SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk';
+import {
+  AskUserQuestionItem,
+  type AgentEvent,
+  type AskUserQuestionAnswer,
+  type PermissionDecision,
+  type PermissionRequestEvent,
+  type SessionStatus,
 } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
 import { normalizeSdkMessage, summarizeToolUse } from './normalize.js';
+
+/** The exact tool name the SDK's built-in interactive question uses. */
+const ASK_USER_QUESTION_TOOL = 'AskUserQuestion';
+
+/**
+ * Parse `AskUserQuestion`'s own input into typed questions, defensively.
+ *
+ * The SDK hands this tool call through the same generic `canUseTool` channel
+ * as every other one, with no separate message type or schema guarantee at
+ * that layer — so this only trusts the shape once it has actually checked it,
+ * and returns null (never throws) if a future SDK version changes it. A null
+ * here just means the UI falls back to a generic approval instead of a real
+ * question form; it must never crash the session.
+ */
+function parseAskUserQuestion(input: Record<string, unknown>): AskUserQuestionItem[] | null {
+  const parsed = z.array(AskUserQuestionItem).safeParse(input.questions);
+  return parsed.success ? parsed.data : null;
+}
 
 export interface StructuredSessionSpec {
   id: string;
@@ -88,6 +116,8 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   private _startError: string | null = null;
   /** True while the agent is mid-turn, as opposed to idle awaiting a prompt. */
   private _busy = false;
+  /** True while the operator's global skip-permissions switch is applied here. */
+  private _globalBypass = false;
 
   constructor(spec: StructuredSessionSpec, epoch?: string) {
     super();
@@ -146,6 +176,10 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   }
   get busy(): boolean {
     return this._busy;
+  }
+  /** True while the operator's global skip-permissions switch is applied here. */
+  get globalBypassActive(): boolean {
+    return this._globalBypass;
   }
 
   isAlive(): boolean {
@@ -303,6 +337,51 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
     }
   }
 
+  /**
+   * Apply or release the operator's server-wide skip-permissions switch.
+   *
+   * Unlike the per-session `spec.skipPermissions` opt-in (fixed for the life of
+   * the session), this can reach a session that is already running: the SDK's
+   * `setPermissionMode` takes effect on the query in flight, and turning the
+   * switch on drains every approval already parked waiting for a human, so it
+   * does not sit forever behind a switch that says nothing should be asked.
+   * Turning the switch back off restores whatever mode this session actually
+   * started with — its own opt-in, if any, otherwise back to asking.
+   *
+   * Called only by `SessionManager.setGlobalSkipPermissions`, which is the one
+   * deliberate, operator-level override of "never answer a prompt for the
+   * user" (see CLAUDE.md). It has no effect on a session that has already
+   * ended, and it never touches `spec` — that stays the honest record of what
+   * this session was actually created with.
+   */
+  async applyGlobalSkipPermissions(enabled: boolean): Promise<void> {
+    this._globalBypass = enabled;
+    if (!this.queryHandle || !this.isAlive()) return;
+
+    const mode: PermissionMode = enabled || this.spec.skipPermissions ? 'bypassPermissions' : 'default';
+    try {
+      await this.queryHandle.setPermissionMode(mode);
+    } catch (err) {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text: `Failed to apply the global approval switch: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+
+    if (enabled) {
+      // A bare allow with no answer is exactly the bug this class of tool
+      // needs *not* to hit (see `resolvePermission`) — bypassing approval
+      // does not mean inventing an answer on the human's behalf, so a
+      // pending question is left for them rather than drained here.
+      for (const [id, pending] of [...this.pending]) {
+        if (pending.event.toolName === ASK_USER_QUESTION_TOOL) continue;
+        this.resolvePermission(id, 'allow');
+      }
+    }
+  }
+
   // ---- Approvals -----------------------------------------------------------
 
   /**
@@ -341,6 +420,7 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
       filePath: opts.blockedPath ?? extractPathSafe(input),
       reason: opts.decisionReason ?? null,
       canAllowForSession: suggestions.length > 0,
+      questions: toolName === ASK_USER_QUESTION_TOOL ? parseAskUserQuestion(input) : null,
     };
 
     return new Promise<PermissionResult>((resolve) => {
@@ -358,7 +438,12 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   }
 
   /** Answer a pending approval. Returns false if the id is unknown or stale. */
-  resolvePermission(id: string, decision: PermissionDecision, message?: string): boolean {
+  resolvePermission(
+    id: string,
+    decision: PermissionDecision,
+    message?: string,
+    answer?: AskUserQuestionAnswer,
+  ): boolean {
     const entry = this.pending.get(id);
     if (!entry) return false;
     this.pending.delete(id);
@@ -375,6 +460,22 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
       entry.resolve({
         behavior: 'allow',
         updatedPermissions: entry.suggestions as never,
+      });
+    } else if (answer) {
+      // `AskUserQuestion` (and anything else shaped like it) does not read a
+      // bare allow as "proceed" — the tool's whole output IS the human's
+      // answer. A plain `{behavior: 'allow'}` here runs the call with nothing
+      // to report, which the agent sees as a failed tool call and falls back
+      // to asking the same question again in plain text. Handing back the
+      // original input plus the chosen answer as `updatedInput` is what the
+      // SDK actually reads as the tool's result.
+      entry.resolve({
+        behavior: 'allow',
+        updatedInput: {
+          ...entry.event.input,
+          answers: answer.answers,
+          ...(answer.response !== undefined ? { response: answer.response } : {}),
+        },
       });
     } else {
       entry.resolve({ behavior: 'allow' });

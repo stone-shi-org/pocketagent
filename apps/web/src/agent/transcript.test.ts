@@ -21,6 +21,7 @@ const permission = (id: string, toolName = 'Write'): AgentEvent => ({
   filePath: null,
   reason: null,
   canAllowForSession: true,
+  questions: null,
 });
 
 describe('transcript: text', () => {

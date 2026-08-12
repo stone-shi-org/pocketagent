@@ -138,6 +138,17 @@ const MIGRATIONS: readonly string[] = [
   `,
 ];
 
+/**
+ * Key in `settings` for the server-wide "skip all approvals" switch.
+ *
+ * Persisted rather than left as a pure env var so a runtime toggle (see
+ * `PATCH /api/settings`) survives a restart without an operator having to edit
+ * `.env`, and so a later restart with a *different* `POCKETAGENT_GLOBAL_SKIP_PERMISSIONS`
+ * does not silently fight whatever was last chosen at runtime — the same "config
+ * only seeds, the database wins after that" rule `workspaces` already uses.
+ */
+export const GLOBAL_SKIP_PERMISSIONS_KEY = 'global_skip_permissions';
+
 export function readSetting(db: Db, key: string): string | null {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as
     | { value: string }
