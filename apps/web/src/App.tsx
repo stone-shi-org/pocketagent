@@ -147,6 +147,7 @@ export function App(): JSX.Element {
   if (route.name === 'compose') {
     return (
       <ComposerPage
+        key={route.cwd ?? ''}
         {...(route.cwd !== undefined ? { initialCwd: route.cwd } : {})}
         onBack={() => navigate({ name: 'list' })}
         onCreated={(sessionId) => navigate({ name: 'terminal', sessionId })}

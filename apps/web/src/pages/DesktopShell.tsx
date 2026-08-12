@@ -136,6 +136,11 @@ export function DesktopShell({
       <main className="workspace">
         {route.name === 'compose' ? (
           <ComposerPage
+            // Keyed on cwd so picking a different project's "new chat" while the
+            // composer is already open remounts it instead of reusing the old
+            // instance's `cwd` state (composer and list are on screen together
+            // here, unlike the mobile flow).
+            key={route.cwd ?? ''}
             {...(route.cwd !== undefined ? { initialCwd: route.cwd } : {})}
             onBack={() => onNavigate({ name: 'list' })}
             onCreated={(sessionId) => {
