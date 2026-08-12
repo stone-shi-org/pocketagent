@@ -507,35 +507,81 @@ button:focus-visible {
   font-weight: 700;
 }
 
+/* A floating pill, not a flush toolbar — the same shape as the first-prompt
+   composer (.composer-dock) so the two don't read as two different apps. */
 .promptbar {
   display: flex;
-  gap: 8px;
   align-items: flex-end;
-  padding: 8px calc(8px + var(--safe-right)) calc(8px + var(--safe-bottom))
-    calc(8px + var(--safe-left));
-  background: var(--bg-elev);
-  border-top: 1px solid var(--border);
+  gap: 8px;
   flex: 0 0 auto;
+  margin: 0 calc(10px + var(--safe-right)) calc(16px + var(--safe-bottom))
+    calc(10px + var(--safe-left));
+  padding: 8px 8px 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 26px;
+  background: var(--bg-elev-2);
+  box-shadow: var(--shadow-sm);
+}
+
+/* A subtle border/shadow lift on focus, not a colour ring — the accent outline
+   from the global input:focus rule reads as a stray blue rectangle inside a
+   pill that already has its own border. */
+.promptbar:focus-within {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-md);
 }
 
 .promptbar textarea {
   flex: 1;
+  border: none;
+  background: none;
+  outline: none;
   resize: none;
-  max-height: 120px;
-  min-height: 42px;
-  line-height: 1.35;
-  padding: 10px;
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1.4;
+  padding: 8px 0;
+  margin: 0;
+  min-height: 24px;
+  max-height: 160px;
+  /* Hidden by default so one line never shows a scrollbar; the auto-grow
+     effect in PromptBox flips this to 'auto' only once content actually
+     exceeds max-height. */
+  overflow-y: hidden;
+}
+
+.promptbar textarea:focus {
+  outline: none;
+}
+
+.promptbar textarea::placeholder {
+  color: var(--text-dim);
 }
 
 .promptbar button.primary {
+  flex: none;
+  align-self: flex-end;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
+  border: none;
   background: var(--ink);
-  border-color: var(--ink);
   color: var(--on-ink);
+  transition: transform 120ms ease;
 }
 
-.promptbar button {
-  flex: 0 0 auto;
-  height: 42px;
+.promptbar button.primary:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.promptbar button.primary:disabled {
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  opacity: 1;
 }
 
 .spinner {
@@ -1770,7 +1816,10 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 .workspace .agent-page .promptbar {
   width: 100%;
   max-width: 860px;
-  margin: 0 auto;
+  /* Horizontal centering only — a shorthand `margin: 0 auto` would zero out
+     the promptbar's own bottom margin and pin it flush to the pane edge. */
+  margin-left: auto;
+  margin-right: auto;
 }
 
 /* Bottom-anchoring the composer is a thumb-reach idiom. With a pointer and a
