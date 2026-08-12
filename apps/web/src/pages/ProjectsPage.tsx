@@ -4,6 +4,7 @@ import { HiddenProjects } from '../components/HiddenProjects.js';
 import { AddProject } from '../components/AddProject.js';
 import { PushToggle } from '../components/PushToggle.js';
 import { SettingsDialog } from '../components/SettingsDialog.js';
+import { RunningSessions } from '../components/RunningSessions.js';
 import { Icon } from '../components/Icon.js';
 import {
   HostChip,
@@ -37,6 +38,10 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
   const [showHidden, setShowHidden] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showRunning, setShowRunning] = useState(false);
+
+  const runningCount =
+    state.projects?.reduce((n, p) => n + p.chats.filter((c) => c.live).length, 0) ?? 0;
 
   return (
     <div className="app projects-page">
@@ -70,6 +75,11 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
               setMenuOpen(false);
               setShowHidden(true);
             }}
+            onRunning={() => {
+              setMenuOpen(false);
+              setShowRunning(true);
+            }}
+            runningCount={runningCount}
             onSettings={() => {
               setMenuOpen(false);
               setShowSettings(true);
@@ -127,6 +137,14 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
         <SettingsDialog onClose={() => setShowSettings(false)} onApiError={onApiError} />
       )}
 
+      {showRunning && (
+        <RunningSessions
+          onClose={() => setShowRunning(false)}
+          onOpen={onOpen}
+          onApiError={onApiError}
+        />
+      )}
+
       {showAdvanced && (
         <NewSessionDialog
           onCancel={() => setShowAdvanced(false)}
@@ -146,6 +164,8 @@ export function OverflowMenu({
   onAdvanced,
   onRefresh,
   onHidden,
+  onRunning,
+  runningCount = 0,
   onSettings,
   onLogout,
 }: {
@@ -153,6 +173,9 @@ export function OverflowMenu({
   onAdvanced: () => void;
   onRefresh: () => void;
   onHidden: () => void;
+  onRunning: () => void;
+  /** Shown next to the menu item so a growing pile of live sessions is noticed before opening it. */
+  runningCount?: number;
   onSettings: () => void;
   onLogout: () => void;
 }): JSX.Element {
@@ -182,6 +205,9 @@ export function OverflowMenu({
         </button>
         <button type="button" role="menuitem" onClick={onHidden}>
           Hidden projects…
+        </button>
+        <button type="button" role="menuitem" onClick={onRunning}>
+          Active sessions{runningCount > 0 ? ` (${runningCount})` : ''}…
         </button>
         <button type="button" role="menuitem" onClick={onAdvanced}>
           More session options…

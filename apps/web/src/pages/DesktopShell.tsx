@@ -5,6 +5,7 @@ import { HiddenProjects } from '../components/HiddenProjects.js';
 import { AddProject } from '../components/AddProject.js';
 import { PushToggle } from '../components/PushToggle.js';
 import { SettingsDialog } from '../components/SettingsDialog.js';
+import { RunningSessions } from '../components/RunningSessions.js';
 import { Icon } from '../components/Icon.js';
 import { HostChip, ProjectList, SearchField, useProjects } from '../components/ProjectList.js';
 import { OverflowMenu } from './ProjectsPage.js';
@@ -47,8 +48,11 @@ export function DesktopShell({
   const [showHidden, setShowHidden] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showRunning, setShowRunning] = useState(false);
 
   const activeSessionId = route.name === 'terminal' ? route.sessionId : null;
+  const runningCount =
+    state.projects?.reduce((n, p) => n + p.chats.filter((c) => c.live).length, 0) ?? 0;
 
   return (
     <div className="desktop-shell">
@@ -83,6 +87,11 @@ export function DesktopShell({
                 setMenuOpen(false);
                 setShowHidden(true);
               }}
+              onRunning={() => {
+                setMenuOpen(false);
+                setShowRunning(true);
+              }}
+              runningCount={runningCount}
               onSettings={() => {
                 setMenuOpen(false);
                 setShowSettings(true);
@@ -160,6 +169,14 @@ export function DesktopShell({
 
       {showSettings && (
         <SettingsDialog onClose={() => setShowSettings(false)} onApiError={onApiError} />
+      )}
+
+      {showRunning && (
+        <RunningSessions
+          onClose={() => setShowRunning(false)}
+          onOpen={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+          onApiError={onApiError}
+        />
       )}
 
       {showAdvanced && (
