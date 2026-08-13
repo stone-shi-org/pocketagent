@@ -22,12 +22,14 @@ import { PromptBox } from '../components/PromptBox.js';
 import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
 import { Icon } from '../components/Icon.js';
 import { notifyApproval, ensureNotificationPermission } from '../agent/notifications.js';
-import { takePendingPrompt } from '../agent/pending-prompt.js';
+import { takePendingPrompt, setPendingPrompt } from '../agent/pending-prompt.js';
 
 interface Props {
   sessionId: string;
   onBack: () => void;
   onApiError: (error: unknown) => void;
+  /** Navigates to a newly created session — see `resumeAndSend` below. */
+  onResumed: (sessionId: string) => void;
 }
 
 /**
@@ -37,7 +39,7 @@ interface Props {
  * difference is that events are rendered as components instead of written into
  * a terminal emulator.
  */
-export function AgentPage({ sessionId, onBack, onApiError }: Props): JSX.Element {
+export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): JSX.Element {
   const connRef = useRef<TerminalConnection | null>(null);
   const [transcript, setTranscript] = useState<TranscriptState>(emptyTranscript);
   const [session, setSession] = useState<SessionInfo | null>(null);
@@ -47,6 +49,7 @@ export function AgentPage({ sessionId, onBack, onApiError }: Props): JSX.Element
   const [notice, setNotice] = useState<string | null>(null);
   const [deciding, setDeciding] = useState(false);
   const [showFiles, setShowFiles] = useState(false);
+  const [resuming, setResuming] = useState(false);
   /** Prior conversation, kept apart from the live transcript on purpose: a
       replay frame replaces the live one wholesale and would otherwise wipe it. */
   const [history, setHistory] = useState<TranscriptItem[]>([]);
@@ -171,7 +174,49 @@ export function AgentPage({ sessionId, onBack, onApiError }: Props): JSX.Element
   }, [sessionId, onApiError]);
 
   const alive = !isTerminalStatus(status);
-  const inputDisabled = !alive || connection !== 'connected';
+  // A stopped/exited session has no process left to send to, but the agent's
+  // own conversation survives it — same fact `ProjectList.open` relies on to
+  // resume a finished chat from the home screen. Continuing here does the
+  // same thing: start a fresh session bound to that conversation and hand it
+  // the prompt, rather than leaving the box disabled forever just because
+  // *this* session ended. `forkSession: false` matches every other resume
+  // path so this does not pile up duplicate chats.
+  const canResume = !alive && !!session?.agentSessionId;
+  const resumeAndSend = useCallback(
+    (text: string): boolean => {
+      if (!session?.agentSessionId || resuming) return false;
+      setResuming(true);
+      void api
+        .createSession({
+          agent: session.agent,
+          cwd: session.cwd,
+          cols: 80,
+          rows: 24,
+          transport: 'structured',
+          resumeAgentSessionId: session.agentSessionId,
+          forkSession: false,
+          title: session.title,
+        })
+        .then((created) => {
+          setPendingPrompt(created.id, text);
+          onResumed(created.id);
+        })
+        .catch((err) => {
+          onApiError(err);
+          setNotice(err instanceof ApiError ? err.message : 'Could not continue this chat.');
+          setResuming(false);
+        });
+      return true;
+    },
+    [session, resuming, onApiError, onResumed],
+  );
+
+  const handleSend = useCallback(
+    (text: string): boolean => (alive ? sendPrompt(text) : resumeAndSend(text)),
+    [alive, sendPrompt, resumeAndSend],
+  );
+
+  const inputDisabled = alive ? connection !== 'connected' : !canResume || resuming;
   const pending = transcript.pending[0] ?? null;
 
   // A prompt typed on the composer is delivered once the socket is up. Taking
@@ -270,7 +315,7 @@ export function AgentPage({ sessionId, onBack, onApiError }: Props): JSX.Element
         />
       )}
 
-      <PromptBox sessionId={sessionId} onSend={sendPrompt} disabled={inputDisabled} />
+      <PromptBox sessionId={sessionId} onSend={handleSend} disabled={inputDisabled} />
     </div>
   );
 }

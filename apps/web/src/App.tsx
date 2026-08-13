@@ -23,10 +23,12 @@ function SessionRoute({
   sessionId,
   onBack,
   onApiError,
+  onResumed,
 }: {
   sessionId: string;
   onBack: () => void;
   onApiError: (error: unknown) => void;
+  onResumed: (sessionId: string) => void;
 }): JSX.Element {
   const [transport, setTransport] = useState<'terminal' | 'structured' | null>(null);
   const [missing, setMissing] = useState(false);
@@ -65,7 +67,9 @@ function SessionRoute({
   }
   if (transport === null) return <div className="spinner">Opening session…</div>;
   if (transport === 'structured') {
-    return <AgentPage sessionId={sessionId} onBack={onBack} onApiError={onApiError} />;
+    return (
+      <AgentPage sessionId={sessionId} onBack={onBack} onApiError={onApiError} onResumed={onResumed} />
+    );
   }
   return <TerminalPage sessionId={sessionId} onBack={onBack} onApiError={onApiError} />;
 }
@@ -128,6 +132,7 @@ export function App(): JSX.Element {
             sessionId={route.sessionId}
             onBack={() => navigate({ name: 'list' })}
             onApiError={handleApiError}
+            onResumed={(sessionId) => navigate({ name: 'terminal', sessionId })}
           />
         )}
       </DesktopShell>
@@ -140,6 +145,7 @@ export function App(): JSX.Element {
         sessionId={route.sessionId}
         onBack={() => navigate({ name: 'list' })}
         onApiError={handleApiError}
+        onResumed={(sessionId) => navigate({ name: 'terminal', sessionId })}
       />
     );
   }
