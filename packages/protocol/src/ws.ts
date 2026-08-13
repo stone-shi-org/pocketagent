@@ -19,8 +19,25 @@ import {
  * v4 added the `session_ended` error code, for attaching to a session this
  * process no longer holds. An older client would drop the frame as invalid and
  * sit on "connecting" forever, so it has to renegotiate rather than guess.
+ * v5 added `commands_available`/`command_output` agent events, for a slash-
+ * command picker on structured sessions.
  */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
+
+/**
+ * WebSocket close codes the server uses for conditions the client must not
+ * just retry through. Shared here (rather than kept private to the server)
+ * so `TerminalConnection`'s `onclose` can tell "the server will say this
+ * again forever" (a version skew after a redeploy) apart from an ordinary
+ * transient drop, which *is* worth retrying — without duplicating the numbers
+ * on both sides where they could quietly drift apart.
+ */
+export const WsCloseCode = {
+  PROTOCOL_MISMATCH: 4001,
+  UNAUTHORIZED: 4003,
+  FLOOD: 4008,
+  BACKPRESSURE: 4009,
+} as const;
 
 /** Hard caps, enforced on the server before any frame is acted on. */
 export const LIMITS = {

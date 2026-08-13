@@ -90,6 +90,8 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           if (code === 'not_found') setFatal(message);
           else setNotice(message);
         },
+
+        onFatal: setFatal,
       },
     });
     connRef.current = conn;
@@ -315,7 +317,12 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         />
       )}
 
-      <PromptBox sessionId={sessionId} onSend={handleSend} disabled={inputDisabled} />
+      <PromptBox
+        sessionId={sessionId}
+        onSend={handleSend}
+        disabled={inputDisabled}
+        commands={transcript.commands}
+      />
     </div>
   );
 }

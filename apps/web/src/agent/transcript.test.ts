@@ -200,6 +200,39 @@ describe('transcript: turns', () => {
   });
 });
 
+describe('transcript: slash commands', () => {
+  it('starts with no commands', () => {
+    expect(emptyTranscript().commands).toEqual([]);
+  });
+
+  it('sets the command list from commands_available', () => {
+    const state = applyEvent(emptyTranscript(), {
+      kind: 'commands_available',
+      commands: [{ name: 'usage', description: 'Show usage', argumentHint: '', aliases: [] }],
+    });
+    expect(state.commands).toEqual([{ name: 'usage', description: 'Show usage', argumentHint: '', aliases: [] }]);
+  });
+
+  it('replaces rather than merges on a later commands_available', () => {
+    // Mirrors the SDK's own `commands_changed` semantics: a skill can be
+    // discovered *and* retracted mid-session, so this must not accumulate.
+    const state = applyEvents(emptyTranscript(), [
+      { kind: 'commands_available', commands: [{ name: 'a', description: '', argumentHint: '', aliases: [] }] },
+      { kind: 'commands_available', commands: [{ name: 'b', description: '', argumentHint: '', aliases: [] }] },
+    ]);
+    expect(state.commands).toEqual([{ name: 'b', description: '', argumentHint: '', aliases: [] }]);
+  });
+
+  it('renders command_output as its own transcript item', () => {
+    const state = applyEvent(emptyTranscript(), {
+      kind: 'command_output',
+      id: 'u-1',
+      text: 'Usage: 12.3k tokens',
+    });
+    expect(state.items).toEqual([{ type: 'command_output', key: 'co_u-1', text: 'Usage: 12.3k tokens' }]);
+  });
+});
+
 describe('transcript: replay equivalence', () => {
   it('produces the same view whether applied live or replayed at once', () => {
     const events: AgentEvent[] = [

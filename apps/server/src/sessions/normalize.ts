@@ -1,5 +1,5 @@
 import path from 'node:path';
-import type { AgentEvent } from '@pocketagent/protocol';
+import type { AgentEvent, SlashCommandInfo } from '@pocketagent/protocol';
 
 /** Tool results can be enormous; the UI only needs a readable preview. */
 const MAX_RESULT_CHARS = 8000;
@@ -34,17 +34,65 @@ export function normalizeSdkMessage(message: unknown): AgentEvent[] {
 }
 
 function normalizeSystem(message: Record<string, unknown>): AgentEvent[] {
-  if (str(message.subtype) !== 'init') return [];
-  return [
-    {
-      kind: 'session_started',
-      agentSessionId: str(message.session_id) ?? null,
-      model: str(message.model) ?? null,
-      cwd: str(message.cwd) ?? '',
-      tools: Array.isArray(message.tools) ? message.tools.filter(isString) : [],
-      permissionMode: str(message.permissionMode) ?? null,
-    },
-  ];
+  const subtype = str(message.subtype);
+
+  if (subtype === 'init') {
+    return [
+      {
+        kind: 'session_started',
+        agentSessionId: str(message.session_id) ?? null,
+        model: str(message.model) ?? null,
+        cwd: str(message.cwd) ?? '',
+        tools: Array.isArray(message.tools) ? message.tools.filter(isString) : [],
+        permissionMode: str(message.permissionMode) ?? null,
+      },
+    ];
+  }
+
+  // Fire-and-forget push of the full slash-command list after a mid-session
+  // change (a skill discovered in a subdirectory, say). REPLACE semantics —
+  // `StructuredSession`'s initial `supportedCommands()` call uses the same
+  // shape via `normalizeSlashCommands` below, so both paths land on one event.
+  if (subtype === 'commands_changed') {
+    return [{ kind: 'commands_available', commands: normalizeSlashCommands(message.commands) }];
+  }
+
+  // Output from a command that resolved locally, without a model turn (e.g.
+  // /usage, /voice). The SDK's own message carries no back-reference to which
+  // command produced it, so there is nothing to attach beyond the text.
+  if (subtype === 'local_command_output') {
+    const content = str(message.content) ?? '';
+    if (content.trim().length === 0) return [];
+    return [
+      { kind: 'command_output', id: str(message.uuid) ?? `lco_${clamp(content, 32)}`, text: clamp(content, MAX_TEXT_CHARS) },
+    ];
+  }
+
+  return [];
+}
+
+/**
+ * Defensive re-validation of the SDK's own `SlashCommand[]` shape — same
+ * discipline as every other field in this file: trust it once it has actually
+ * been checked, and drop anything that does not look right rather than throw.
+ * Used both for `system`/`commands_changed` messages and for the plain
+ * `SlashCommand[]` `StructuredSession` gets back from `supportedCommands()`.
+ */
+export function normalizeSlashCommands(value: unknown): SlashCommandInfo[] {
+  if (!Array.isArray(value)) return [];
+  const commands: SlashCommandInfo[] = [];
+  for (const raw of value) {
+    if (!isRecord(raw)) continue;
+    const name = str(raw.name);
+    if (!name) continue;
+    commands.push({
+      name,
+      description: str(raw.description) ?? '',
+      argumentHint: str(raw.argumentHint) ?? '',
+      aliases: Array.isArray(raw.aliases) ? raw.aliases.filter(isString) : [],
+    });
+  }
+  return commands;
 }
 
 function normalizeAssistant(message: Record<string, unknown>): AgentEvent[] {

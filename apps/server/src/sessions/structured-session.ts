@@ -18,7 +18,7 @@ import {
   type SessionStatus,
 } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
-import { normalizeSdkMessage, summarizeToolUse } from './normalize.js';
+import { normalizeSdkMessage, normalizeSlashCommands, summarizeToolUse } from './normalize.js';
 
 /** The exact tool name the SDK's built-in interactive question uses. */
 const ASK_USER_QUESTION_TOOL = 'AskUserQuestion';
@@ -243,6 +243,30 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
     this._lastActivityAt = this._startedAt;
     this.setStatus('running');
     void this.pump();
+    void this.fetchInitialCommands();
+  }
+
+  /**
+   * Fetch the slash-command list once at startup, for the picker.
+   *
+   * `commands_changed` (handled in `pump()` via `normalizeSdkMessage`) covers
+   * every *later* change; this covers the list that already exists at
+   * connect time, which nothing would otherwise push. Best-effort — a session
+   * that cannot report its commands still works fine without a picker, so a
+   * failure here must never fail startup or surface as a user-facing error.
+   */
+  private async fetchInitialCommands(): Promise<void> {
+    const handle = this.queryHandle;
+    if (!handle) return;
+    try {
+      const commands = await handle.supportedCommands();
+      if (!this.isAlive()) return;
+      this.emitEvent({ kind: 'commands_available', commands: normalizeSlashCommands(commands) });
+    } catch {
+      // Older CLI builds or an already-torn-down query may not support this;
+      // silently do without the picker rather than emit a notice for
+      // something the user never asked for.
+    }
   }
 
   /**

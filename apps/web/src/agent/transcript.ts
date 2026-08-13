@@ -1,4 +1,4 @@
-import type { AgentEvent, PermissionRequestEvent } from '@pocketagent/protocol';
+import type { AgentEvent, PermissionRequestEvent, SlashCommandInfo } from '@pocketagent/protocol';
 
 /**
  * A renderable conversation, folded down from the raw event stream.
@@ -59,7 +59,20 @@ export interface TurnItem {
   outputTokens: number | null;
 }
 
-export type TranscriptItem = TextItem | ThinkingItem | ToolItem | NoticeItem | TurnItem;
+/** Output from a slash command that resolved locally, without a model turn. */
+export interface CommandOutputItem {
+  type: 'command_output';
+  key: string;
+  text: string;
+}
+
+export type TranscriptItem =
+  | TextItem
+  | ThinkingItem
+  | ToolItem
+  | NoticeItem
+  | TurnItem
+  | CommandOutputItem;
 
 export interface TranscriptState {
   items: TranscriptItem[];
@@ -72,6 +85,9 @@ export interface TranscriptState {
   /** True between a user prompt and the matching turn_complete. */
   busy: boolean;
   totalCostUsd: number;
+  /** Slash commands this agent currently supports, for the `/` picker. Empty
+      for an agent that never reports any — the composer just has no picker. */
+  commands: SlashCommandInfo[];
 }
 
 export function emptyTranscript(): TranscriptState {
@@ -83,6 +99,7 @@ export function emptyTranscript(): TranscriptState {
     agentSessionId: null,
     busy: false,
     totalCostUsd: 0,
+    commands: [],
   };
 }
 
@@ -247,6 +264,18 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
           ...state.items,
           { type: 'notice', key: `n_${state.items.length}`, level: event.level, text: event.text },
         ],
+      };
+
+    // REPLACE semantics, per the SDK's own `commands_changed` doc comment —
+    // this is the full current list, not a delta, whether it arrived from
+    // that push or from the initial `supportedCommands()` fetch.
+    case 'commands_available':
+      return { ...state, commands: event.commands };
+
+    case 'command_output':
+      return {
+        ...state,
+        items: [...state.items, { type: 'command_output', key: `co_${event.id}`, text: event.text }],
       };
 
     default:

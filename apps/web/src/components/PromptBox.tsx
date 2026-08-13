@@ -1,14 +1,55 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import type { SlashCommandInfo } from '@pocketagent/protocol';
 import { Icon } from './Icon.js';
 
 const DRAFT_KEY_PREFIX = 'pocketagent:draft:';
 const MAX_HEIGHT = 160;
+/** Enough to scan on a phone screen without the picker itself needing to scroll far. */
+const MAX_PICKER_RESULTS = 8;
 
 interface Props {
   sessionId: string;
   /** Returns false when the socket is down, so the draft is kept. */
   onSend: (text: string) => boolean;
   disabled: boolean;
+  /**
+   * Slash commands this agent currently supports, for the `/` picker.
+   * Undefined/empty just means no picker — the box still sends whatever text
+   * is typed, so an agent-agnostic caller (e.g. TerminalPage) can omit this
+   * entirely rather than pass an empty array on purpose.
+   */
+  commands?: SlashCommandInfo[];
+}
+
+/**
+ * Only matches when `/` starts the *whole* box with no space yet — the
+ * common case of typing a command as the first thing in an empty composer.
+ * Deliberately not cursor-aware (this is a plain controlled textarea, not a
+ * PTY): a `/` typed mid-sentence is just a slash, not a trigger.
+ */
+const SLASH_TRIGGER = /^\/(\S*)$/;
+
+/** The fragment after the leading `/`, or null when `text` isn't a trigger. */
+export function slashFragment(text: string): string | null {
+  return SLASH_TRIGGER.exec(text)?.[1] ?? null;
+}
+
+/**
+ * Commands whose name or an alias starts with `fragment`, capped for a phone
+ * screen. Exported pure so the matching rule is tested without rendering the
+ * component — same pattern as `ctrlSequence` in MobileKeyBar.tsx.
+ */
+export function filterSlashCommands(
+  commands: SlashCommandInfo[],
+  fragment: string,
+  max = MAX_PICKER_RESULTS,
+): SlashCommandInfo[] {
+  const needle = fragment.toLowerCase();
+  return commands
+    .filter(
+      (c) => c.name.toLowerCase().startsWith(needle) || c.aliases.some((a) => a.toLowerCase().startsWith(needle)),
+    )
+    .slice(0, max);
 }
 
 /**
@@ -19,7 +60,7 @@ interface Props {
  * The draft survives reconnects — and reloads — via sessionStorage, so a dropped
  * tunnel never costs you the text you just typed.
  */
-export function PromptBox({ sessionId, onSend, disabled }: Props): JSX.Element {
+export function PromptBox({ sessionId, onSend, disabled, commands = [] }: Props): JSX.Element {
   const key = DRAFT_KEY_PREFIX + sessionId;
   const [text, setText] = useState(() => {
     try {
@@ -29,6 +70,10 @@ export function PromptBox({ sessionId, onSend, disabled }: Props): JSX.Element {
     }
   });
   const ref = useRef<HTMLTextAreaElement>(null);
+  const [selected, setSelected] = useState(0);
+  // Escape hides the picker without touching the text underneath it; typing
+  // again (any change at all) un-dismisses it, same as a normal autocomplete.
+  const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
     try {
@@ -50,13 +95,56 @@ export function PromptBox({ sessionId, onSend, disabled }: Props): JSX.Element {
     el.style.overflowY = contentHeight > MAX_HEIGHT ? 'auto' : 'hidden';
   }, [text]);
 
+  const fragment = slashFragment(text);
+  const filtered = useMemo(
+    () => (fragment === null || commands.length === 0 ? [] : filterSlashCommands(commands, fragment)),
+    [commands, fragment],
+  );
+  const pickerOpen = !dismissed && filtered.length > 0;
+
+  // Re-clamp rather than reset to 0 on every keystroke — arrow-key selection
+  // survives the list narrowing as long as the index is still in range.
+  useEffect(() => {
+    setSelected((prev) => Math.min(prev, Math.max(filtered.length - 1, 0)));
+  }, [filtered.length]);
+
   function send(): void {
     const value = text;
     if (value.length === 0 || disabled) return;
     if (onSend(value)) setText('');
   }
 
+  function pick(command: SlashCommandInfo): void {
+    setText(`/${command.name} `);
+    setDismissed(false);
+    ref.current?.focus();
+  }
+
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    if (pickerOpen) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setSelected((i) => (i + 1) % filtered.length);
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setSelected((i) => (i - 1 + filtered.length) % filtered.length);
+        return;
+      }
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        event.preventDefault();
+        const chosen = filtered[selected] ?? filtered[0];
+        if (chosen) pick(chosen);
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setDismissed(true);
+        return;
+      }
+    }
+
     // Enter sends; Shift+Enter is a newline — matches ComposerPage's convention
     // for the first-prompt composer, and the usual chat-app default.
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -67,10 +155,38 @@ export function PromptBox({ sessionId, onSend, disabled }: Props): JSX.Element {
 
   return (
     <div className="promptbar">
+      {pickerOpen && (
+        <div className="slash-picker" role="listbox" aria-label="Slash commands">
+          {filtered.map((command, index) => (
+            <button
+              key={command.name}
+              type="button"
+              role="option"
+              aria-selected={index === selected}
+              className={index === selected ? 'active' : ''}
+              onMouseDown={(e) => {
+                // mousedown (not click) so this fires before the textarea's own
+                // blur, otherwise the picker vanishes before the tap registers.
+                e.preventDefault();
+                pick(command);
+              }}
+            >
+              <span className="cmd-name">
+                /{command.name}
+                {command.argumentHint && <span className="cmd-hint">{command.argumentHint}</span>}
+              </span>
+              {command.description && <span className="cmd-desc">{command.description}</span>}
+            </button>
+          ))}
+        </div>
+      )}
       <textarea
         ref={ref}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          setDismissed(false);
+        }}
         onKeyDown={onKeyDown}
         placeholder="Type a prompt…"
         rows={1}

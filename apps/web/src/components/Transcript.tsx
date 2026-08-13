@@ -93,6 +93,8 @@ function Item({ item }: { item: TranscriptItem }): JSX.Element | null {
       return <ToolCard item={item} />;
     case 'notice':
       return <div className={`notice inline ${item.level}`}>{item.text}</div>;
+    case 'command_output':
+      return <div className="command-output">{item.text}</div>;
     case 'turn':
       return <TurnFooter item={item} />;
     default:

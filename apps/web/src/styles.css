@@ -510,6 +510,7 @@ button:focus-visible {
 /* A floating pill, not a flush toolbar — the same shape as the first-prompt
    composer (.composer-dock) so the two don't read as two different apps. */
 .promptbar {
+  position: relative;
   display: flex;
   align-items: flex-end;
   gap: 8px;
@@ -521,6 +522,57 @@ button:focus-visible {
   border-radius: 26px;
   background: var(--bg-elev-2);
   box-shadow: var(--shadow-sm);
+}
+
+/* The `/` command picker: floats above the pill rather than pushing it up, so
+   it never fights the textarea's own auto-grow for vertical space. */
+.slash-picker {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-elev-2);
+  box-shadow: var(--shadow-md);
+  padding: 6px;
+}
+
+.slash-picker button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  text-align: left;
+}
+
+.slash-picker button.active {
+  background: var(--bg-elev);
+}
+
+.slash-picker .cmd-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.slash-picker .cmd-hint {
+  font-weight: 400;
+  color: var(--text-dim);
+  margin-left: 6px;
+}
+
+.slash-picker .cmd-desc {
+  font-size: 12px;
+  color: var(--text-dim);
 }
 
 /* A subtle border/shadow lift on focus, not a colour ring — the accent outline
@@ -841,6 +893,21 @@ button:focus-visible {
 .notice.inline { margin: 8px 0; border-radius: 8px; border: 1px solid; }
 .notice.inline.info { background: #eef4ff; border-color: #cbdcff; color: #0a4bbf; }
 .notice.inline.error { background: #fdeceb; border-color: #f6c9c6; color: #a3221a; }
+
+/* Output from a locally-resolved slash command (e.g. /usage) — a CLI-style
+   readout, not assistant prose, so it gets its own quiet monospace block
+   rather than a chat bubble. */
+.command-output {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
 
 .turn-footer { font-size: 11px; color: var(--text-dim); text-align: right; margin: 4px 0 16px; font-variant-numeric: tabular-nums; }
 .turn-sep { height: 12px; }

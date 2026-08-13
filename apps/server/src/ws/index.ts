@@ -3,6 +3,7 @@ import type { WebSocket } from 'ws';
 import {
   LIMITS,
   PROTOCOL_VERSION,
+  WsCloseCode,
   parseClientMessage,
   type AgentEvent,
   type ErrorCode,
@@ -13,11 +14,15 @@ import {
 import { isOriginAllowed } from '../auth/index.js';
 import type { ManagedSession, StructuredLikeSession } from '../sessions/manager.js';
 
-/** Close codes. 4000+ is the application-defined range. */
-const CLOSE_PROTOCOL_MISMATCH = 4001;
-const CLOSE_UNAUTHORIZED = 4003;
-const CLOSE_FLOOD = 4008;
-const CLOSE_BACKPRESSURE = 4009;
+/**
+ * Close codes. 4000+ is the application-defined range. Shared with the client
+ * via `WsCloseCode` in the protocol package — see that export's doc comment
+ * for why this must not be a private, server-only enum.
+ */
+const CLOSE_PROTOCOL_MISMATCH = WsCloseCode.PROTOCOL_MISMATCH;
+const CLOSE_UNAUTHORIZED = WsCloseCode.UNAUTHORIZED;
+const CLOSE_FLOOD = WsCloseCode.FLOOD;
+const CLOSE_BACKPRESSURE = WsCloseCode.BACKPRESSURE;
 
 /**
  * If a client stops reading (phone asleep, tunnel wedged) the kernel buffer

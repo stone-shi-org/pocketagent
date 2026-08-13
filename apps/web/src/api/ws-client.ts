@@ -1,6 +1,7 @@
 import {
   PROTOCOL_VERSION,
   ServerMessage,
+  WsCloseCode,
   type AgentEvent,
   type AskUserQuestionAnswer,
   type ClientMessage,
@@ -28,6 +29,14 @@ export interface TerminalConnectionHandlers {
   onConnectionState?: (state: ConnectionState) => void;
   onHint?: (hints: TerminalHintKind[]) => void;
   onError?: (code: string, message: string) => void;
+  /**
+   * The server closed the socket for a reason retrying cannot fix (a
+   * protocol version skew after this tab's bundle went stale, so far). Distinct
+   * from `onError`, which is for a recoverable, server-sent `error` frame —
+   * this fires on the close itself and reconnecting stops, since the server
+   * would just say the same thing again.
+   */
+  onFatal?: (message: string) => void;
 
   // ---- Structured sessions ----
   /** One live agent event, already de-duplicated on `seq`. */
@@ -154,10 +163,19 @@ export class TerminalConnection {
       // `onclose` always follows; reconnect scheduling lives there.
     };
 
-    socket.onclose = () => {
+    socket.onclose = (event: CloseEvent) => {
       this.socket = null;
       if (this.closedByUser) {
         this.setState('disconnected');
+        return;
+      }
+      // A version skew is permanent until this tab reloads — the server will
+      // reject the next attempt with the exact same close code, so retrying
+      // is just "Reconnecting…" forever with no way out. Stop and say so,
+      // rather than let this look identical to a transient drop.
+      if (event.code === WsCloseCode.PROTOCOL_MISMATCH) {
+        this.setState('disconnected');
+        this.handlers.onFatal?.('This app was updated. Reload the page to reconnect.');
         return;
       }
       this.scheduleReconnect();

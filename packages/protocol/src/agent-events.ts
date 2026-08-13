@@ -165,6 +165,44 @@ export const UserPromptEvent = z.object({
   text: z.string(),
 });
 
+/**
+ * One slash command an agent currently supports, as the Claude Agent SDK's own
+ * `SlashCommand` type shapes it (built-ins, `.claude/commands/`, skills,
+ * plugin commands) — mirrored rather than invented so a picker can show
+ * exactly what typing `/` at a real prompt would offer.
+ */
+export const SlashCommandInfo = z.object({
+  name: z.string(),
+  description: z.string(),
+  /** e.g. "<file>". Empty string when the command takes no argument. */
+  argumentHint: z.string(),
+  /** Other names that resolve to this same command (e.g. `/cost` for `/usage`). */
+  aliases: z.array(z.string()),
+});
+export type SlashCommandInfo = z.infer<typeof SlashCommandInfo>;
+
+/**
+ * The full set of commands usable right now. REPLACE semantics, not a merge —
+ * mirrors the SDK's own `commands_changed` push, which resends the whole list
+ * rather than a delta (skills can be discovered *and* retracted mid-session).
+ */
+export const CommandsAvailableEvent = z.object({
+  kind: z.literal('commands_available'),
+  commands: z.array(SlashCommandInfo),
+});
+
+/**
+ * Output from a command that resolved locally, without a model turn (e.g.
+ * Claude's `/usage`, `/voice`). There is no reliable `commandName` to attach —
+ * the SDK's own `local_command_output` message does not carry one — so this
+ * renders as its own transcript item rather than guessing which command it
+ * came from.
+ */
+export const CommandOutputEvent = z.object({
+  kind: z.literal('command_output'),
+  id: z.string(),
+  text: z.string(),
+});
 
 export type SessionStartedEvent = z.infer<typeof SessionStartedEvent>;
 export type TextEvent = z.infer<typeof TextEvent>;
@@ -177,6 +215,8 @@ export type PermissionResolvedEvent = z.infer<typeof PermissionResolvedEvent>;
 export type TurnCompleteEvent = z.infer<typeof TurnCompleteEvent>;
 export type NoticeEvent = z.infer<typeof NoticeEvent>;
 export type UserPromptEvent = z.infer<typeof UserPromptEvent>;
+export type CommandsAvailableEvent = z.infer<typeof CommandsAvailableEvent>;
+export type CommandOutputEvent = z.infer<typeof CommandOutputEvent>;
 
 export const AgentEvent = z.discriminatedUnion('kind', [
   SessionStartedEvent,
@@ -190,6 +230,8 @@ export const AgentEvent = z.discriminatedUnion('kind', [
   TurnCompleteEvent,
   NoticeEvent,
   UserPromptEvent,
+  CommandsAvailableEvent,
+  CommandOutputEvent,
 ]);
 export type AgentEvent = z.infer<typeof AgentEvent>;
 

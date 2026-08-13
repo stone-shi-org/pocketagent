@@ -9,6 +9,7 @@ import {
   normalizeOpencodeEvent,
   normalizePiEvent,
   normalizeSdkMessage,
+  normalizeSlashCommands,
   summarizeAgyTool,
   summarizeOpencodeTool,
   summarizePiTool,
@@ -45,6 +46,78 @@ describe('normalizeSdkMessage: system', () => {
 
   it('ignores other system subtypes', () => {
     expect(normalizeSdkMessage({ type: 'system', subtype: 'hook_started' })).toEqual([]);
+  });
+
+  it('maps commands_changed to commands_available with REPLACE semantics', () => {
+    const events = normalizeSdkMessage({
+      type: 'system',
+      subtype: 'commands_changed',
+      commands: [
+        { name: 'usage', description: 'Show usage', argumentHint: '', aliases: ['cost', 'stats'] },
+        { name: 'compact', description: 'Compact context', argumentHint: '<focus>' },
+      ],
+    });
+    expect(events).toEqual([
+      {
+        kind: 'commands_available',
+        commands: [
+          { name: 'usage', description: 'Show usage', argumentHint: '', aliases: ['cost', 'stats'] },
+          { name: 'compact', description: 'Compact context', argumentHint: '<focus>', aliases: [] },
+        ],
+      },
+    ]);
+  });
+
+  it('drops malformed entries in commands_changed rather than throwing', () => {
+    const events = normalizeSdkMessage({
+      type: 'system',
+      subtype: 'commands_changed',
+      commands: [{ description: 'no name field' }, 'not an object', { name: 'ok' }],
+    });
+    expect(events).toEqual([
+      { kind: 'commands_available', commands: [{ name: 'ok', description: '', argumentHint: '', aliases: [] }] },
+    ]);
+  });
+
+  it('ignores a non-array commands_changed payload', () => {
+    expect(
+      normalizeSdkMessage({ type: 'system', subtype: 'commands_changed', commands: 'nope' }),
+    ).toEqual([{ kind: 'commands_available', commands: [] }]);
+  });
+
+  it('maps local_command_output to command_output', () => {
+    const events = normalizeSdkMessage({
+      type: 'system',
+      subtype: 'local_command_output',
+      content: 'Usage: 12.3k tokens',
+      uuid: 'u-1',
+    });
+    expect(events).toEqual([{ kind: 'command_output', id: 'u-1', text: 'Usage: 12.3k tokens' }]);
+  });
+
+  it('drops empty local_command_output rather than rendering a blank card', () => {
+    expect(
+      normalizeSdkMessage({ type: 'system', subtype: 'local_command_output', content: '   ', uuid: 'u-2' }),
+    ).toEqual([]);
+  });
+});
+
+describe('normalizeSlashCommands', () => {
+  it('fills in missing optional fields', () => {
+    expect(normalizeSlashCommands([{ name: 'help' }])).toEqual([
+      { name: 'help', description: '', argumentHint: '', aliases: [] },
+    ]);
+  });
+
+  it('drops entries with no name and filters non-string aliases', () => {
+    expect(normalizeSlashCommands([{ description: 'no name' }, { name: 'ok', aliases: ['a', 2, 'b'] }])).toEqual([
+      { name: 'ok', description: '', argumentHint: '', aliases: ['a', 'b'] },
+    ]);
+  });
+
+  it('returns [] for a non-array input', () => {
+    expect(normalizeSlashCommands(undefined)).toEqual([]);
+    expect(normalizeSlashCommands('nope')).toEqual([]);
   });
 });
 

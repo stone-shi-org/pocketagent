@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ServerMessage, SessionInfo } from '@pocketagent/protocol';
+import { WsCloseCode, type ServerMessage, type SessionInfo } from '@pocketagent/protocol';
 import {
   TerminalConnection,
   type ConnectionState,
@@ -13,7 +13,7 @@ class FakeSocket {
   readyState = 0;
   sent: string[] = [];
   onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
   closed = false;
@@ -27,10 +27,11 @@ class FakeSocket {
     this.sent.push(data);
   }
 
-  close(): void {
+  /** 1000 (normal closure) unless a test cares about a specific server close code. */
+  close(code = 1000): void {
     this.closed = true;
     this.readyState = 3;
-    this.onclose?.();
+    this.onclose?.({ code });
   }
 
   // --- test helpers ---
@@ -39,9 +40,9 @@ class FakeSocket {
     this.onopen?.();
   }
 
-  drop(): void {
+  drop(code = 1000): void {
     this.readyState = 3;
-    this.onclose?.();
+    this.onclose?.({ code });
   }
 
   emit(message: ServerMessage): void {
@@ -207,6 +208,37 @@ describe('TerminalConnection: connection state', () => {
 
     vi.advanceTimersByTime(10_000);
     expect(socketCount()).toBe(1);
+  });
+
+  it('stops reconnecting and reports fatal on a protocol-mismatch close', () => {
+    // Regression: a stale bundle (from before a PROTOCOL_VERSION bump) talking
+    // to a rebuilt server gets this close code on every attempt — retrying is
+    // "Reconnecting…" forever with no way out, since the server says the same
+    // thing again every time. `onFatal` must fire and reconnecting must stop
+    // instead, so the UI can tell the user to reload rather than spin.
+    let fatal: string | null = null;
+    const { connection, socket, socketCount } = setup({ onFatal: (message) => (fatal = message) });
+    connection.open('abc');
+
+    socket().drop(WsCloseCode.PROTOCOL_MISMATCH);
+
+    expect(connection.getState()).toBe('disconnected');
+    expect(fatal).toMatch(/reload/i);
+
+    vi.advanceTimersByTime(10_000);
+    expect(socketCount()).toBe(1);
+  });
+
+  it('does treat an ordinary close code as retriable, not fatal', () => {
+    const { connection, socket, socketCount } = setup();
+    connection.open('abc');
+    socket().open();
+
+    socket().drop(1006); // e.g. a dropped tunnel
+    expect(connection.getState()).toBe('reconnecting');
+
+    vi.advanceTimersByTime(200);
+    expect(socketCount()).toBe(2);
   });
 
   it('sends detach before closing so the server frees the reference promptly', () => {

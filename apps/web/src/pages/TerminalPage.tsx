@@ -104,6 +104,8 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
           if (code === 'not_found') setFatal(message);
           else if (code === 'session_ended') setNotice(message);
         },
+
+        onFatal: setFatal,
       },
     });
     connRef.current = connection;
