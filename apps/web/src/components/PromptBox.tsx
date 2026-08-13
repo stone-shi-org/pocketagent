@@ -71,6 +71,14 @@ export function PromptBox({ sessionId, onSend, disabled, commands = [] }: Props)
   });
   const ref = useRef<HTMLTextAreaElement>(null);
   const [selected, setSelected] = useState(0);
+  // One entry per currently-rendered picker row, so the active one can be
+  // scrolled into view on arrow-key navigation — `.slash-picker` scrolls
+  // (`max-height` + `overflow-y: auto`) but the browser has no reason to
+  // follow a *keyboard* selection change on its own the way it would a
+  // mouse click; without this, arrow-down past the visible rows moves
+  // `selected` (and the `active` class) right off screen with nothing
+  // showing which command Enter would actually pick.
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
   // Escape hides the picker without touching the text underneath it; typing
   // again (any change at all) un-dismisses it, same as a normal autocomplete.
   const [dismissed, setDismissed] = useState(false);
@@ -107,6 +115,13 @@ export function PromptBox({ sessionId, onSend, disabled, commands = [] }: Props)
   useEffect(() => {
     setSelected((prev) => Math.min(prev, Math.max(filtered.length - 1, 0)));
   }, [filtered.length]);
+
+  // `block: 'nearest'` scrolls the minimum amount needed to bring the row
+  // fully into `.slash-picker`'s own scroll area — never yanks the whole
+  // page, and does nothing at all once the row is already visible.
+  useEffect(() => {
+    itemRefs.current[selected]?.scrollIntoView({ block: 'nearest' });
+  }, [selected]);
 
   function send(): void {
     const value = text;
@@ -160,6 +175,9 @@ export function PromptBox({ sessionId, onSend, disabled, commands = [] }: Props)
           {filtered.map((command, index) => (
             <button
               key={command.name}
+              ref={(el) => {
+                itemRefs.current[index] = el;
+              }}
               type="button"
               role="option"
               aria-selected={index === selected}
