@@ -15,14 +15,26 @@ import type { WorkspaceRegistry } from '../workspaces/index.js';
 import type { ProcessBackend } from '../backends/index.js';
 import { PtySession } from './pty-session.js';
 import { StructuredSession } from './structured-session.js';
+import { AgySession } from './agy-session.js';
 import { buildChildEnv } from './env.js';
+
+/**
+ * Either engine behind the `structured` transport. `StructuredSession` holds
+ * the Claude Agent SDK's query open for the session's whole life;
+ * `AgySession` spawns the `agy` CLI fresh per turn. Both normalize into the
+ * same `AgentEvent` union and expose the same approval-adjacent surface (even
+ * though `AgySession`'s is always empty — see its own docs), so everything
+ * below that only checks `transport === 'structured'` can treat them
+ * interchangeably.
+ */
+export type StructuredLikeSession = StructuredSession | AgySession;
 
 /**
  * Either flavour of session. They share the metadata surface the manager,
  * routes, and persistence need; the WebSocket layer narrows on `transport`
  * for the operations that only make sense for one of them.
  */
-export type ManagedSession = PtySession | StructuredSession;
+export type ManagedSession = PtySession | StructuredLikeSession;
 
 export class SessionError extends Error {
   override readonly name = 'SessionError';
@@ -166,7 +178,7 @@ export class SessionManager {
     );
     await Promise.all(
       [...this.live.values()]
-        .filter((s): s is StructuredSession => s.transport === 'structured')
+        .filter((s): s is StructuredLikeSession => s.transport === 'structured')
         .map((s) => s.applyGlobalSkipPermissions(enabled)),
     );
   }
@@ -365,9 +377,16 @@ export class SessionManager {
     // so a session created while it is on is honest about it from birth —
     // `spec.skipPermissions` (and therefore what gets persisted and shown)
     // reflects reality instead of needing a second source of truth.
+    //
+    // `forcesSkipPermissions` overrides all of that unconditionally: an
+    // adapter that sets it (only `agy`, so far — see `agents/agy.ts`) has no
+    // synchronous approval channel at all in its structured mode, so there is
+    // no "off" state to honour an opt-out into. This is the one case where
+    // `skipPermissions` is not actually a choice made per session.
     const skipPermissions =
-      (input.skipPermissions === true || this.globalSkipPermissions) &&
-      adapter.supportsSkipPermissions === true;
+      adapter.forcesSkipPermissions === true ||
+      ((input.skipPermissions === true || this.globalSkipPermissions) &&
+        adapter.supportsSkipPermissions === true);
 
     // Adoption replaces the adapter's argv with an attach command the server
     // built from a validated target. The browser never supplies argv.
@@ -412,6 +431,24 @@ export class SessionManager {
     }
 
     if (transport === 'structured') {
+      const env = buildChildEnv({ cwd: input.cwd, overrides: built.env });
+
+      if (adapter.structuredKind === 'agy-cli') {
+        return this.startAgy({
+          id,
+          title,
+          adapter,
+          cwd: input.cwd,
+          workspaceLabel,
+          createdAt,
+          executable,
+          env,
+          ...(input.resumeAgentSessionId
+            ? { resumeAgentSessionId: input.resumeAgentSessionId }
+            : {}),
+        });
+      }
+
       return this.startStructured({
         id,
         title,
@@ -420,7 +457,7 @@ export class SessionManager {
         workspaceLabel,
         createdAt,
         executable,
-        env: buildChildEnv({ cwd: input.cwd, overrides: built.env }),
+        env,
         ...(input.resumeAgentSessionId
           ? { resumeAgentSessionId: input.resumeAgentSessionId }
           : {}),
@@ -542,6 +579,71 @@ export class SessionManager {
     this.persist(session);
     this.opts.logger?.info(
       { sessionId: args.id, agent: args.adapter.id, transport: 'structured' },
+      'session started',
+    );
+    return session;
+  }
+
+  /**
+   * Structured, but via `AgySession` instead of the Claude Agent SDK — see
+   * that class for why it is a distinct code path rather than a flag on
+   * `startStructured`. `skipPermissions` is not a parameter here: it is
+   * always `true`, enforced in `create()` via `adapter.forcesSkipPermissions`
+   * before this is ever called.
+   */
+  private async startAgy(args: {
+    id: string;
+    title: string;
+    adapter: { id: string; displayName: string };
+    cwd: string;
+    workspaceLabel: string;
+    createdAt: number;
+    executable: string;
+    env: Record<string, string>;
+    resumeAgentSessionId?: string;
+  }): Promise<AgySession> {
+    const session = new AgySession({
+      id: args.id,
+      title: args.title,
+      agent: args.adapter.id,
+      agentDisplayName: args.adapter.displayName,
+      cwd: args.cwd,
+      env: args.env,
+      workspaceLabel: args.workspaceLabel,
+      eventBufferBytes: this.opts.outputBufferBytes,
+      createdAt: args.createdAt,
+      executablePath: args.executable,
+      ...(args.resumeAgentSessionId
+        ? { resumeAgentSessionId: args.resumeAgentSessionId }
+        : {}),
+      skipPermissions: true,
+    });
+
+    this.insertRow(session, args.createdAt);
+    this.live.set(args.id, session);
+    this.wire(session);
+    // Unlike `startStructured`, there is no derived-title lookup: agy keeps no
+    // transcript store this server knows how to read, so the fixed
+    // creation-time title stands for the life of the session.
+    session.on('event', (_seq, event) => {
+      if (event.kind === 'session_started') this.persist(session);
+    });
+
+    try {
+      await session.start();
+    } catch (err) {
+      this.persist(session);
+      this.live.delete(args.id);
+      throw new SessionError(
+        `Failed to start ${args.adapter.displayName}: ${err instanceof Error ? err.message : String(err)}`,
+        'spawn_failed',
+        500,
+      );
+    }
+
+    this.persist(session);
+    this.opts.logger?.info(
+      { sessionId: args.id, agent: args.adapter.id, transport: 'structured', backend: 'agy-cli' },
       'session started',
     );
     return session;

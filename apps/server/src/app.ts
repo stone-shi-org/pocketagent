@@ -98,7 +98,11 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
         'POCKETAGENT_WORKSPACE_ROOTS to seed the list on a fresh database.',
     );
   }
-  const agents = createDefaultRegistry({ shell: config.shell, claudeBin: config.claudeBin });
+  const agents = createDefaultRegistry({
+    shell: config.shell,
+    claudeBin: config.claudeBin,
+    agyBin: config.agyBin,
+  });
 
   const backend = createBackend({
     id: config.backend,

@@ -47,6 +47,22 @@ export interface AgentAdapter {
    * client should not offer the control at all.
    */
   supportsSkipPermissions?: boolean;
+  /**
+   * True when this adapter can never route an approval to the browser — every
+   * structured session it starts runs bypassed, unconditionally. See
+   * `AgentInfo.forcesSkipPermissions`. `SessionManager.create` ORs this into
+   * the computed `skipPermissions` regardless of what the caller asked for.
+   */
+  forcesSkipPermissions?: boolean;
+  /**
+   * Which structured engine drives this adapter's `structured` transport.
+   * Undefined (the default) means the Claude Agent SDK, via `StructuredSession`.
+   * `'agy-cli'` means `AgySession`, which spawns the `agy` CLI's headless
+   * `stream-json` mode fresh for each turn instead of holding one SDK query
+   * open. Server-internal only — the client sees the same normalized
+   * `AgentEvent` union either way and does not need to know which engine ran.
+   */
+  structuredKind?: 'agy-cli';
 
   buildCommand(options: StartSessionOptions): AgentCommand;
 

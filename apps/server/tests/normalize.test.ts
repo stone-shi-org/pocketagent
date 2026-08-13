@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { extractPath, normalizeSdkMessage, summarizeToolUse } from '../src/sessions/normalize.js';
+import {
+  extractAgyPath,
+  extractPath,
+  normalizeAgyMessage,
+  normalizeSdkMessage,
+  summarizeAgyTool,
+  summarizeToolUse,
+} from '../src/sessions/normalize.js';
 
 /**
  * These payloads mirror what the Agent SDK actually emits — captured from a
@@ -224,5 +231,221 @@ describe('extractPath', () => {
   it('returns null when there is no path', () => {
     expect(extractPath({ command: 'ls' })).toBeNull();
     expect(extractPath({ file_path: '' })).toBeNull();
+  });
+});
+
+/**
+ * These payloads mirror `agy --output-format stream-json` (v1.1.12), captured
+ * from a live headless run — same discipline as `normalizeSdkMessage` above:
+ * tested without spawning the CLI.
+ */
+describe('normalizeAgyMessage: init', () => {
+  it('maps init to session_started', () => {
+    const events = normalizeAgyMessage({
+      event: 'init',
+      conversation_id: 'conv-1',
+      init: {
+        cwd: '/tmp/work',
+        tools: ['run_command', 'view_file'],
+        permission_mode: 'always-proceed',
+      },
+    });
+    expect(events).toEqual([
+      {
+        kind: 'session_started',
+        agentSessionId: 'conv-1',
+        model: null,
+        cwd: '/tmp/work',
+        tools: ['run_command', 'view_file'],
+        permissionMode: 'always-proceed',
+      },
+    ]);
+  });
+});
+
+describe('normalizeAgyMessage: step_update', () => {
+  it('maps an ACTIVE tool step to tool_use', () => {
+    const events = normalizeAgyMessage({
+      event: 'step_update',
+      step_update: {
+        conversation_id: 'conv-1',
+        step_index: 3,
+        state: 'ACTIVE',
+        step_type: 'tool',
+        tool_name: 'run_command',
+        tool_info: { name: 'run_command', parameters: { CommandLine: 'pwd' } },
+      },
+    });
+    expect(events).toEqual([
+      {
+        kind: 'tool_use',
+        id: 'agy_conv-1_3',
+        name: 'run_command',
+        input: { CommandLine: 'pwd' },
+        summary: 'Run pwd',
+        filePath: null,
+      },
+    ]);
+  });
+
+  it('maps a DONE tool step to tool_result', () => {
+    const events = normalizeAgyMessage({
+      event: 'step_update',
+      step_update: {
+        conversation_id: 'conv-1',
+        step_index: 3,
+        state: 'DONE',
+        step_type: 'tool',
+        tool_name: 'run_command',
+        tool_info: { name: 'run_command', parameters: { CommandLine: 'pwd' }, output: '/tmp\n' },
+      },
+    });
+    expect(events).toEqual([
+      {
+        kind: 'tool_result',
+        id: 'agy_tr_conv-1_3',
+        toolUseId: 'agy_conv-1_3',
+        content: '/tmp\n',
+        truncated: false,
+        isError: false,
+      },
+    ]);
+  });
+
+  it('marks a DONE tool step with a TOOL_ERROR as an error result', () => {
+    const events = normalizeAgyMessage({
+      event: 'step_update',
+      step_update: {
+        conversation_id: 'conv-1',
+        step_index: 6,
+        state: 'DONE',
+        step_type: 'tool',
+        tool_name: 'run_command',
+        tool_info: {
+          name: 'run_command',
+          parameters: {},
+          error: { type: 'TOOL_ERROR', message: 'context canceled' },
+        },
+      },
+    });
+    expect(events[0]).toMatchObject({ kind: 'tool_result', content: 'context canceled', isError: true });
+  });
+
+  it('maps an agent_response step with text_delta to text_delta', () => {
+    const events = normalizeAgyMessage({
+      event: 'step_update',
+      step_update: {
+        conversation_id: 'conv-1',
+        step_index: 17,
+        state: 'ACTIVE',
+        step_type: 'agent_response',
+        text_delta: 'hello',
+      },
+    });
+    expect(events).toEqual([{ kind: 'text_delta', id: 'agy_conv-1_17', text: 'hello' }]);
+  });
+
+  it('drops an agent_response step with no text_delta, a silent planning step', () => {
+    expect(
+      normalizeAgyMessage({
+        event: 'step_update',
+        step_update: {
+          conversation_id: 'conv-1',
+          step_index: 2,
+          state: 'DONE',
+          step_type: 'agent_response',
+          usage: { input_tokens: 100 },
+        },
+      }),
+    ).toEqual([]);
+  });
+
+  it('ignores user_input and checkpoint steps, which are internal bookkeeping', () => {
+    expect(
+      normalizeAgyMessage({
+        event: 'step_update',
+        step_update: { conversation_id: 'c', step_index: 0, state: 'DONE', step_type: 'user_input' },
+      }),
+    ).toEqual([]);
+    expect(
+      normalizeAgyMessage({
+        event: 'step_update',
+        step_update: { conversation_id: 'c', step_index: 4, state: 'DONE', step_type: 'checkpoint' },
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe('normalizeAgyMessage: result', () => {
+  it('carries status and token usage for the status chip', () => {
+    const events = normalizeAgyMessage({
+      event: 'result',
+      result: {
+        conversation_id: 'conv-1',
+        status: 'SUCCESS',
+        response: 'hello\n',
+        duration_seconds: 13.696213968,
+        num_turns: 1,
+        usage: { input_tokens: 34619, output_tokens: 1710 },
+      },
+    });
+    expect(events).toEqual([
+      {
+        kind: 'turn_complete',
+        stopReason: 'SUCCESS',
+        isError: false,
+        numTurns: 1,
+        durationMs: 13696,
+        costUsd: null,
+        inputTokens: 34619,
+        outputTokens: 1710,
+      },
+    ]);
+  });
+
+  it('treats any non-SUCCESS status as an error', () => {
+    const events = normalizeAgyMessage({
+      event: 'result',
+      result: { conversation_id: 'conv-1', status: 'FAILED', usage: {} },
+    });
+    expect(events[0]).toMatchObject({ isError: true, stopReason: 'FAILED' });
+  });
+});
+
+describe('normalizeAgyMessage: robustness', () => {
+  it('returns nothing for unknown event types instead of throwing', () => {
+    expect(normalizeAgyMessage({ event: 'heartbeat' })).toEqual([]);
+  });
+
+  it('tolerates malformed input', () => {
+    expect(normalizeAgyMessage(null)).toEqual([]);
+    expect(normalizeAgyMessage('nonsense')).toEqual([]);
+    expect(normalizeAgyMessage({ event: 'step_update' })).toEqual([]);
+    expect(normalizeAgyMessage({ event: 'init' })).toEqual([
+      { kind: 'session_started', agentSessionId: null, model: null, cwd: '', tools: [], permissionMode: null },
+    ]);
+  });
+});
+
+describe('summarizeAgyTool', () => {
+  it('summarizes agy-specific tools readably', () => {
+    expect(summarizeAgyTool('run_command', { CommandLine: 'ls -la' })).toBe('Run ls -la');
+    expect(summarizeAgyTool('view_file', { AbsolutePath: '/a/b/c.ts' })).toBe('Read c.ts');
+    expect(summarizeAgyTool('write_to_file', { AbsolutePath: '/a/b/c.ts' })).toBe('Write c.ts');
+  });
+
+  it('falls back to something useful for unknown tools', () => {
+    expect(summarizeAgyTool('mystery_tool', {})).toBe('mystery_tool');
+  });
+});
+
+describe('extractAgyPath', () => {
+  it('finds the path under agy-specific key names', () => {
+    expect(extractAgyPath({ AbsolutePath: '/a' })).toBe('/a');
+    expect(extractAgyPath({ TargetFile: '/b' })).toBe('/b');
+  });
+
+  it('returns null when there is no path', () => {
+    expect(extractAgyPath({ CommandLine: 'ls' })).toBeNull();
   });
 });

@@ -64,6 +64,7 @@ const RawEnv = z.object({
 
   POCKETAGENT_SHELL: z.string().optional(),
   POCKETAGENT_CLAUDE_BIN: z.string().default('claude'),
+  POCKETAGENT_AGY_BIN: z.string().default('agy'),
   POCKETAGENT_WEB_DIST: z.string().optional(),
 
   /**
@@ -108,6 +109,7 @@ export interface Config {
   globalSkipPermissionsDefault: boolean;
   shell: string;
   claudeBin: string;
+  agyBin: string;
   webDistPath: string;
   /** Where agent processes live. `tmux` lets them survive a server restart. */
   backend: 'direct' | 'tmux';
@@ -245,6 +247,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     globalSkipPermissionsDefault: e.POCKETAGENT_GLOBAL_SKIP_PERMISSIONS,
     shell: e.POCKETAGENT_SHELL?.trim() || env.SHELL || '/bin/bash',
     claudeBin: e.POCKETAGENT_CLAUDE_BIN.trim(),
+    agyBin: e.POCKETAGENT_AGY_BIN.trim(),
     webDistPath,
     backend: e.POCKETAGENT_BACKEND,
     tmuxBin: e.POCKETAGENT_TMUX_BIN.trim(),

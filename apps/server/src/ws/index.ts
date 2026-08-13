@@ -11,8 +11,7 @@ import {
   type TerminalHintKind,
 } from '@pocketagent/protocol';
 import { isOriginAllowed } from '../auth/index.js';
-import type { ManagedSession } from '../sessions/manager.js';
-import type { StructuredSession } from '../sessions/structured-session.js';
+import type { ManagedSession, StructuredLikeSession } from '../sessions/manager.js';
 
 /** Close codes. 4000+ is the application-defined range. */
 const CLOSE_PROTOCOL_MISMATCH = 4001;
@@ -201,7 +200,7 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
     };
 
     /** Narrow to a live structured session, reporting the mismatch otherwise. */
-    const requireStructured = (sessionId: string): StructuredSession | null => {
+    const requireStructured = (sessionId: string): StructuredLikeSession | null => {
       const session = requireAttached(sessionId);
       if (!session) return null;
       if (session.transport !== 'structured') {

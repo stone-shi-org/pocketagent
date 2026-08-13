@@ -241,22 +241,32 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
                   </>
                 )}
 
-                {selected?.supportsSkipPermissions && (
+                {selected?.forcesSkipPermissions ? (
                   <div className="field checkbox-row">
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={skipPermissions}
-                        onChange={(e) => setSkipPermissions(e.target.checked)}
-                      />
-                      Skip approvals for this session
-                    </label>
                     <p className="warn-note danger-note">
-                      Off by default. Every tool call runs immediately, unattended — nothing is
-                      routed to you for approval. Only turn this on for a session you trust
-                      completely, e.g. one running in a throwaway directory.
+                      {selected.displayName} has no approval gate in this mode — every tool call
+                      runs immediately, unattended. This cannot be turned off; it is a limit of
+                      how the CLI's headless mode works, not a setting.
                     </p>
                   </div>
+                ) : (
+                  selected?.supportsSkipPermissions && (
+                    <div className="field checkbox-row">
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={skipPermissions}
+                          onChange={(e) => setSkipPermissions(e.target.checked)}
+                        />
+                        Skip approvals for this session
+                      </label>
+                      <p className="warn-note danger-note">
+                        Off by default. Every tool call runs immediately, unattended — nothing is
+                        routed to you for approval. Only turn this on for a session you trust
+                        completely, e.g. one running in a throwaway directory.
+                      </p>
+                    </div>
+                  )
                 )}
 
                 {workspaces.length === 0 && (

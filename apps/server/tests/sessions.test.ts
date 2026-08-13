@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createTestApp, waitFor, sleep, type TestApp } from './helpers.js';
 import { buildChildEnv } from '../src/sessions/env.js';
 import { createClaudeAdapter } from '../src/agents/claude.js';
 import { createShellAdapter } from '../src/agents/shell.js';
+import { createAgyAdapter } from '../src/agents/agy.js';
 import { StructuredSession } from '../src/sessions/structured-session.js';
+
+const AGY_FIXTURE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'fixtures/fake-agy.mjs',
+);
 
 function headers(t: TestApp): Record<string, string> {
   return { cookie: t.cookie };
@@ -73,6 +80,12 @@ describe('skip-permissions opt-in, off by default', () => {
   it('a shell has no such flag to add, opted in or not', () => {
     const adapter = createShellAdapter('/bin/bash');
     expect(adapter.buildCommand({ ...opts, skipPermissions: true }).args).toEqual(['-i']);
+  });
+
+  it('agy declares forcesSkipPermissions — it has no off state, unlike claude/shell', () => {
+    expect(createAgyAdapter('agy').forcesSkipPermissions).toBe(true);
+    expect(createClaudeAdapter('claude').forcesSkipPermissions).toBeUndefined();
+    expect(createShellAdapter('/bin/bash').forcesSkipPermissions).toBeUndefined();
   });
 });
 
@@ -213,6 +226,83 @@ describe('session HTTP routes', () => {
       headers: headers(t),
     });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('agy adapter: structured, forced skip-permissions', () => {
+  let t: TestApp;
+
+  beforeEach(async () => {
+    // Points the adapter at a fixture script instead of the real CLI: real
+    // agy costs real inference and network access, which a test suite must
+    // not depend on. See tests/fixtures/fake-agy.mjs.
+    t = await createTestApp({ POCKETAGENT_AGY_BIN: AGY_FIXTURE });
+  });
+  afterEach(() => t.cleanup());
+
+  it('reports forcesSkipPermissions only for agy', async () => {
+    const res = await t.app.inject({ method: 'GET', url: '/api/agents', headers: headers(t) });
+    const agents = res.json().agents as { id: string; forcesSkipPermissions: boolean }[];
+    expect(agents.find((a) => a.id === 'agy')?.forcesSkipPermissions).toBe(true);
+    expect(agents.find((a) => a.id === 'claude')?.forcesSkipPermissions).toBe(false);
+    expect(agents.find((a) => a.id === 'shell')?.forcesSkipPermissions).toBe(false);
+  });
+
+  it('is unavailable when the configured binary cannot be resolved', async () => {
+    await t.cleanup();
+    t = await createTestApp({ POCKETAGENT_AGY_BIN: '/no/such/agy-binary' });
+    const res = await t.app.inject({ method: 'GET', url: '/api/agents', headers: headers(t) });
+    const agents = res.json().agents as { id: string; available: boolean }[];
+    expect(agents.find((a) => a.id === 'agy')?.available).toBe(false);
+  });
+
+  it('creates a structured session that is bypassed even without asking, and cannot be created over terminal', async () => {
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: { agent: 'agy', cwd: t.projectDir, cols: 80, rows: 24 },
+    });
+    expect(created.statusCode).toBe(201);
+    const body = created.json();
+    expect(body.agent).toBe('agy');
+    expect(body.transport).toBe('structured');
+    // Never asked for skipPermissions — forced true regardless, unlike claude.
+    expect(body.skipPermissionsEnabled).toBe(true);
+
+    const rejected = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: { agent: 'agy', cwd: t.projectDir, cols: 80, rows: 24, transport: 'terminal' },
+    });
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json().error.code).toBe('unsupported_transport');
+  });
+
+  it('runs a real turn through the manager, spawning the fixture per prompt', async () => {
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: { agent: 'agy', cwd: t.projectDir, cols: 80, rows: 24 },
+    });
+    const id = created.json().id as string;
+
+    const session = t.context.sessions.getOrThrow(id);
+    if (session.transport !== 'structured') throw new Error('expected a structured session');
+    session.prompt('hello');
+
+    await waitFor(() =>
+      session.buffer.replayAfter(0).events.some((e) => e.event.kind === 'turn_complete'),
+    );
+    const kinds = session.buffer.replayAfter(0).events.map((e) => e.event.kind);
+    expect(kinds).toContain('session_started');
+    expect(kinds).toContain('tool_use');
+    expect(kinds).toContain('turn_complete');
+
+    const info = t.context.sessions.find(id);
+    expect(info?.skipPermissionsEnabled).toBe(true);
   });
 });
 

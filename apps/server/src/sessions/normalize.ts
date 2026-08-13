@@ -214,6 +214,189 @@ function stringifyToolResult(content: unknown): string {
   return JSON.stringify(content);
 }
 
+// ---------------------------------------------------------------------------
+// agy (Google Antigravity CLI) — headless `agy --output-format stream-json`
+// ---------------------------------------------------------------------------
+
+/**
+ * Translate one line of `agy --output-format stream-json` output into zero or
+ * more normalized events.
+ *
+ * Shapes below were captured against the real CLI (v1.1.12): each line is
+ * `{"event": "init" | "step_update" | "result", ...}`. Kept pure and
+ * defensive for the same reason as `normalizeSdkMessage` — an unrecognized
+ * shape (a future agy version, or a line this parser has not seen) must
+ * return `[]`, never throw and never take down `AgySession`'s pump loop.
+ */
+export function normalizeAgyMessage(message: unknown): AgentEvent[] {
+  if (!isRecord(message)) return [];
+  const event = str(message.event);
+
+  switch (event) {
+    case 'init':
+      return normalizeAgyInit(message);
+    case 'step_update':
+      return normalizeAgyStepUpdate(message);
+    case 'result':
+      return normalizeAgyResult(message);
+    default:
+      return [];
+  }
+}
+
+function normalizeAgyInit(message: Record<string, unknown>): AgentEvent[] {
+  const init = isRecord(message.init) ? message.init : {};
+  return [
+    {
+      kind: 'session_started',
+      agentSessionId: str(message.conversation_id) ?? null,
+      // The `init` line carries no model field — `--model`/`models` live
+      // outside the event stream — so this stays null rather than guessing.
+      model: null,
+      cwd: str(init.cwd) ?? '',
+      tools: Array.isArray(init.tools) ? init.tools.filter(isString) : [],
+      permissionMode: str(init.permission_mode) ?? null,
+    },
+  ];
+}
+
+function normalizeAgyStepUpdate(message: Record<string, unknown>): AgentEvent[] {
+  const update = isRecord(message.step_update) ? message.step_update : null;
+  if (!update) return [];
+
+  const stepType = str(update.step_type);
+  const conversationId = str(update.conversation_id) ?? '';
+  const stepIndex = num(update.step_index) ?? 0;
+  const stepId = `agy_${conversationId}_${stepIndex}`;
+
+  if (stepType === 'agent_response') {
+    const text = str(update.text_delta) ?? '';
+    if (!text) return [];
+    return [{ kind: 'text_delta', id: stepId, text }];
+  }
+
+  if (stepType === 'tool') {
+    const toolInfo = isRecord(update.tool_info) ? update.tool_info : {};
+    const name = str(update.tool_name) ?? str(toolInfo.name) ?? 'tool';
+    const input = isRecord(toolInfo.parameters) ? toolInfo.parameters : {};
+
+    if (str(update.state) === 'DONE') {
+      const error = isRecord(toolInfo.error) ? toolInfo.error : null;
+      const output = str(toolInfo.output) ?? (error ? str(error.message) ?? '' : '');
+      return [
+        {
+          kind: 'tool_result',
+          id: `agy_tr_${conversationId}_${stepIndex}`,
+          toolUseId: stepId,
+          content: clamp(output, MAX_RESULT_CHARS),
+          truncated: output.length > MAX_RESULT_CHARS,
+          isError: error !== null,
+        },
+      ];
+    }
+
+    // Any non-DONE state (only "ACTIVE" observed) is the call starting.
+    return [
+      {
+        kind: 'tool_use',
+        id: stepId,
+        name,
+        input,
+        summary: summarizeAgyTool(name, input),
+        filePath: extractAgyPath(input),
+      },
+    ];
+  }
+
+  // user_input / checkpoint / unknown step types are internal bookkeeping —
+  // we synthesize our own `user_prompt` event in `AgySession.prompt()`, and
+  // the rest has nothing worth showing.
+  return [];
+}
+
+function normalizeAgyResult(message: Record<string, unknown>): AgentEvent[] {
+  const result = isRecord(message.result) ? message.result : {};
+  const usage = isRecord(result.usage) ? result.usage : {};
+  const status = str(result.status);
+  const durationSeconds = num(result.duration_seconds);
+
+  return [
+    {
+      kind: 'turn_complete',
+      stopReason: status ?? null,
+      isError: status !== undefined && status !== 'SUCCESS',
+      numTurns: num(result.num_turns),
+      durationMs: durationSeconds !== null ? Math.round(durationSeconds * 1000) : null,
+      // Headless agy reports token counts, never a dollar figure.
+      costUsd: null,
+      inputTokens: num(usage.input_tokens),
+      outputTokens: num(usage.output_tokens),
+    },
+  ];
+}
+
+/**
+ * A short human sentence for one of agy's own tool names.
+ *
+ * Kept separate from `summarizeToolUse`: agy's tool surface (`run_command`,
+ * `write_to_file`, `view_file`, ...) does not overlap with Claude Code's, and
+ * conflating the two switch statements would make either one harder to read.
+ */
+export function summarizeAgyTool(name: string, input: Record<string, unknown>): string {
+  const file = extractAgyPath(input);
+  const base = file ? path.basename(file) : null;
+
+  switch (name) {
+    case 'run_command': {
+      const cmd = str(input.CommandLine) ?? '';
+      return cmd ? `Run ${clamp(cmd.split('\n')[0] ?? cmd, 80)}` : 'Run command';
+    }
+    case 'view_file':
+      return base ? `Read ${base}` : 'Read file';
+    case 'write_to_file':
+      return base ? `Write ${base}` : 'Write file';
+    case 'replace_file_content':
+    case 'multi_replace_file_content':
+    case 'sed_file':
+      return base ? `Edit ${base}` : 'Edit file';
+    case 'list_dir':
+      return base ? `List ${base}` : 'List directory';
+    case 'grep_search':
+      return `Search ${str(input.Query) ?? str(input.pattern) ?? ''}`.trim() || 'Search';
+    case 'find_by_name':
+      return `Find ${str(input.Pattern) ?? 'files'}`;
+    case 'read_url_content':
+    case 'open_browser_url':
+      return `Fetch ${str(input.Url) ?? str(input.url) ?? 'URL'}`;
+    case 'search_web':
+      return `Search web: ${clamp(str(input.query) ?? '', 60)}`;
+    case 'ask_permission':
+    case 'ask_question':
+      return 'Asking a question';
+    default: {
+      if (base) return `${name} ${base}`;
+      const first = Object.values(input).find(isString);
+      return first ? `${name} ${clamp(first, 60)}` : name;
+    }
+  }
+}
+
+/**
+ * The file an agy tool call touches, if any.
+ *
+ * agy's parameter names vary tool-to-tool and were not fully enumerable from
+ * a single probe run, so this checks every key name observed or plausible
+ * rather than committing to one fixed shape — same defensive spirit as
+ * `extractPath` above.
+ */
+export function extractAgyPath(input: Record<string, unknown>): string | null {
+  for (const key of ['AbsolutePath', 'TargetFile', 'Path', 'file_path', 'path']) {
+    const value = input[key];
+    if (isString(value) && value.length > 0) return value;
+  }
+  return null;
+}
+
 function blockId(inner: Record<string, unknown> | null, index: number): string {
   const base = (inner && str(inner.id)) || 'msg';
   return `${base}_${index}`;

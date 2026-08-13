@@ -37,6 +37,13 @@ export default tseslint.config(
     rules: { 'no-console': 'off' },
   },
   {
+    // Plain-JS process fixtures spawned by tests (e.g. a fake `agy` CLI) —
+    // not TypeScript, so they need `no-undef`'s Node globals spelled out
+    // explicitly the same way the scripts above do.
+    files: ['apps/server/tests/fixtures/**/*.mjs'],
+    languageOptions: { globals: globals.node },
+  },
+  {
     // The callbacks passed to page.evaluate() are serialized and run inside the
     // browser, so DOM globals are legitimately in scope there.
     files: [

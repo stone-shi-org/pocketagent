@@ -4,6 +4,7 @@ import type { AgentInfo } from '@pocketagent/protocol';
 import type { AgentAdapter } from './types.js';
 import { createShellAdapter } from './shell.js';
 import { createClaudeAdapter } from './claude.js';
+import { createAgyAdapter } from './agy.js';
 
 export class AgentRegistry {
   private readonly adapters = new Map<string, AgentAdapter>();
@@ -25,6 +26,7 @@ export class AgentRegistry {
       transports: a.transports,
       defaultTransport: a.defaultTransport,
       supportsSkipPermissions: a.supportsSkipPermissions ?? false,
+      forcesSkipPermissions: a.forcesSkipPermissions ?? false,
     }));
   }
 }
@@ -32,11 +34,13 @@ export class AgentRegistry {
 export interface RegistryOptions {
   shell: string;
   claudeBin: string;
+  agyBin: string;
 }
 
 export function createDefaultRegistry(options: RegistryOptions): AgentRegistry {
   const registry = new AgentRegistry();
   registry.register(createClaudeAdapter(options.claudeBin));
+  registry.register(createAgyAdapter(options.agyBin));
   registry.register(createShellAdapter(options.shell));
   return registry;
 }

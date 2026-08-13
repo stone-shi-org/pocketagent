@@ -102,6 +102,15 @@ export const AgentInfo = z.object({
    * has nothing for it to do.
    */
   supportsSkipPermissions: z.boolean(),
+  /**
+   * True when approvals are *always* bypassed for this agent — there is no
+   * off state to offer. Distinct from `supportsSkipPermissions`, which implies
+   * a per-session choice: this is for an agent whose only structured mode has
+   * no synchronous approval channel at all (see `agy`'s headless CLI), so the
+   * client must show a fixed notice instead of a toggle the user could
+   * mistake for a real off switch.
+   */
+  forcesSkipPermissions: z.boolean(),
 });
 export type AgentInfo = z.infer<typeof AgentInfo>;
 
