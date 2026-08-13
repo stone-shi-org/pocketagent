@@ -166,8 +166,19 @@ rl.on('line', (line) => {
     // methods this fixture does not need to shape data for).
     if (method === 'thread/read') {
       const t = threads.get(params.threadId) ?? { cwd: '' };
+      // `status` is a tagged object in the real protocol (`{ type: 'idle' |
+      // 'active' | ... }`), not a plain string — matching that shape here on
+      // purpose after a live `/status` surfaced `CodexSession` assuming the
+      // wrong one and silently printing "unknown".
       return respond(id, {
-        thread: { id: params.threadId, name: 'Test thread', cwd: t.cwd, status: 'active', cliVersion: '0.147.0-test', gitInfo: { branch: 'main' } },
+        thread: {
+          id: params.threadId,
+          name: 'Test thread',
+          cwd: t.cwd,
+          status: { type: 'active', activeFlags: [] },
+          cliVersion: '0.147.0-test',
+          gitInfo: { branch: 'main' },
+        },
       });
     }
     if (method === 'model/list') {

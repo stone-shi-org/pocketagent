@@ -381,10 +381,15 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
           threadId,
           includeTurns: false,
         });
+        // `status` is a tagged object (`{ type: 'idle' | 'active' | ... }`),
+        // not a plain string — confirmed against the real schema after a
+        // live `/status` came back "unknown" from `str()` silently failing
+        // to match the wrong shape.
+        const statusType = isRecord(thread.status) ? str(thread.status.type) : undefined;
         const lines = [
           `thread:     ${str(thread.name) ?? '(unnamed)'} (${threadId})`,
           `cwd:        ${str(thread.cwd) ?? this.spec.cwd}`,
-          `status:     ${str(thread.status) ?? 'unknown'}`,
+          `status:     ${statusType ?? 'unknown'}`,
           `cliVersion: ${str(thread.cliVersion) ?? 'unknown'}`,
         ];
         const git = isRecord(thread.gitInfo) ? thread.gitInfo : null;

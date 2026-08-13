@@ -262,7 +262,12 @@ describe('CodexSession', () => {
 
       const output = events.find((e) => e.kind === 'command_output');
       expect(output).toMatchObject({ text: expect.stringContaining('Test thread') });
-      expect(output && output.kind === 'command_output' ? output.text : '').toContain('git branch: main');
+      const text = output && output.kind === 'command_output' ? output.text : '';
+      expect(text).toContain('git branch: main');
+      // `status` is a tagged object (`{ type: 'active', ... }`) in the real
+      // protocol, not a plain string — regression coverage for a live bug
+      // where this silently printed "unknown" instead of "active".
+      expect(text).toContain('status:     active');
       // Not a turn — never goes busy waiting on `turn/completed`.
       expect(session.busy).toBe(false);
       expect(events.some((e) => e.kind === 'turn_complete')).toBe(false);
