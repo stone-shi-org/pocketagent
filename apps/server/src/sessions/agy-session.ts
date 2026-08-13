@@ -220,7 +220,6 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       }
       this.child = child;
 
-      let sawText = false;
       let stderrTail = '';
 
       const rl = readline.createInterface({ input: child.stdout });
@@ -236,24 +235,29 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
           return; // Never let one malformed line take down the turn.
         }
 
-        for (const event of normalizeAgyMessageSafe(parsed)) {
-          if (event.kind === 'session_started' && event.agentSessionId) {
-            this._agentSessionId = event.agentSessionId;
-          }
-          if (event.kind === 'text' || event.kind === 'text_delta') sawText = true;
-          this.emitEvent(event);
-        }
-
-        // The final `result` line's own `response` field duplicates whatever
-        // text_delta already streamed — but if a turn produced no visible text
-        // at all (e.g. a shape this parser doesn't yet recognize), surface it
-        // rather than silently dropping the agent's only answer.
-        if (isRecord(parsed) && parsed.event === 'result' && !sawText) {
+        // Finalize any streamed text *before* the `turn_complete` that the
+        // `result` line below normalizes to. The client drops a still-
+        // "streaming" text block wholesale when a turn ends (it has no way to
+        // match a delta stream to a completed block by id — see
+        // `transcript.ts`'s `dropStreaming`), so an agy answer that only ever
+        // arrived as `text_delta` chunks would render, then vanish the
+        // instant the turn finished. `result.response` carries the same text
+        // the deltas already streamed (observed against the real CLI,
+        // v1.1.12), so it doubles as the closing block whether or not deltas
+        // arrived — not just the fallback for when they didn't.
+        if (isRecord(parsed) && parsed.event === 'result') {
           const result = isRecord(parsed.result) ? parsed.result : {};
           const response = typeof result.response === 'string' ? result.response.trim() : '';
           if (response) {
             this.emitEvent({ kind: 'text', id: `agy_final_${this.id}_${Date.now()}`, text: response });
           }
+        }
+
+        for (const event of normalizeAgyMessageSafe(parsed)) {
+          if (event.kind === 'session_started' && event.agentSessionId) {
+            this._agentSessionId = event.agentSessionId;
+          }
+          this.emitEvent(event);
         }
       });
 

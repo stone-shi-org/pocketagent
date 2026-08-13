@@ -58,7 +58,7 @@ describe('AgySession', () => {
     expect(session.resolvePermission('anything', 'allow')).toBe(false);
   });
 
-  it('runs one turn end to end: user_prompt, session_started, tool_use/result, text, turn_complete', async () => {
+  it('runs one turn end to end: user_prompt, session_started, tool_use/result, text_delta, text, turn_complete', async () => {
     session = new AgySession(makeSpec());
     await session.start();
     const events = collect(session);
@@ -76,6 +76,11 @@ describe('AgySession', () => {
       'tool_use',
       'tool_result',
       'text_delta',
+      // The closing `text` event matters as much as its content: without it,
+      // the client's `dropStreaming` on `turn_complete` deletes the whole
+      // answer instead of finalizing it — the delta stream is never marked
+      // complete otherwise. See the comment in `agy-session.ts`.
+      'text',
       'turn_complete',
     ]);
 
@@ -85,6 +90,8 @@ describe('AgySession', () => {
     expect(toolResult).toMatchObject({ content: 'hi\n', isError: false });
     const textDelta = events.find((e) => e.kind === 'text_delta');
     expect(textDelta).toMatchObject({ text: 'echo: hello' });
+    const text = events.find((e) => e.kind === 'text');
+    expect(text).toMatchObject({ text: 'echo: hello' });
     const turnComplete = events.find((e) => e.kind === 'turn_complete');
     expect(turnComplete).toMatchObject({ isError: false, inputTokens: 10, outputTokens: 5 });
 
