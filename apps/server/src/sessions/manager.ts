@@ -893,6 +893,27 @@ export class SessionManager {
   }
 
   /**
+   * The same shared `codex app-server` process a real Codex session would
+   * use, for reading account-level data (rate limits) that has nothing to do
+   * with any one session. Started on first call, same as
+   * `getOrCreateCodexServer` — a usage poll pays the one-time cost of
+   * spawning the process, not a fresh one every time. Null when the `codex`
+   * binary is not configured or not on PATH, mirroring `AgentInfo.available`.
+   */
+  getCodexServerForUsage(): CodexServerManager | null {
+    const adapter = this.opts.agents.get('codex');
+    if (!adapter) return null;
+
+    const cwd = this.opts.workspaces.getRoots()[0] ?? process.cwd();
+    const built = adapter.buildCommand({ cwd, cols: 80, rows: 24, skipPermissions: false });
+    const executable = resolveExecutable(built.command);
+    if (!executable) return null;
+
+    const env = buildChildEnv({ cwd, overrides: built.env });
+    return this.getOrCreateCodexServer(executable, env);
+  }
+
+  /**
    * Structured, but via `CodexSession` talking to a shared
    * `codex app-server` process instead of the Claude Agent SDK, a per-turn
    * `agy` subprocess, or opencode's HTTP server. See `CodexSession`/

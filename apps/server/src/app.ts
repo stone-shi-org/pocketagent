@@ -27,10 +27,17 @@ import { PushService } from './push/index.js';
 import { ConversationStore } from './conversations/index.js';
 import { AdoptionService } from './adopt/index.js';
 import { ProjectService } from './projects/index.js';
+import {
+  UsageService,
+  createClaudeUsageSource,
+  createCodexUsageSource,
+  createAgyUsageSource,
+} from './usage/index.js';
 import { authRoutes } from './routes/auth.js';
 import { pushRoutes } from './routes/push.js';
 import { sessionRoutes } from './routes/sessions.js';
 import { settingsRoutes } from './routes/settings.js';
+import { usageRoutes } from './routes/usage.js';
 import { websocketRoutes } from './ws/index.js';
 import type { PocketContext } from './types.js';
 
@@ -165,6 +172,26 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     );
   }
 
+  const usage = new UsageService([
+    createClaudeUsageSource({
+      claudeBin: config.claudeBin,
+      cwd: config.workspaceRoots[0] ?? process.cwd(),
+      logger: app.log,
+    }),
+    // Reuses the same shared `codex app-server` process a real Codex session
+    // would talk to (starting it on first use) rather than spawning a second
+    // one just for usage — see `SessionManager.getCodexServerForUsage`.
+    createCodexUsageSource({
+      getServer: () => sessions.getCodexServerForUsage(),
+      logger: app.log,
+    }),
+    createAgyUsageSource({
+      agyBin: config.agyBin,
+      cwd: config.workspaceRoots[0] ?? process.cwd(),
+      logger: app.log,
+    }),
+  ]);
+
   const context: PocketContext = {
     config,
     auth,
@@ -177,6 +204,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     conversations,
     adoption,
     projects,
+    usage,
   };
   app.decorate('pocket', context);
 
@@ -259,6 +287,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(sessionRoutes);
   await app.register(settingsRoutes);
   await app.register(pushRoutes);
+  await app.register(usageRoutes);
   await app.register(websocketRoutes);
 
   // ---- Static frontend ------------------------------------------------------
@@ -299,6 +328,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   }
 
   app.addHook('onClose', async () => {
+    usage.stop();
     await sessions.shutdown();
     if (ownsDb) db.close();
   });

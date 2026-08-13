@@ -8,6 +8,7 @@ import { SettingsDialog } from '../components/SettingsDialog.js';
 import { RunningSessions } from '../components/RunningSessions.js';
 import { Icon } from '../components/Icon.js';
 import { HostChip, ProjectList, SearchField, useProjects } from '../components/ProjectList.js';
+import { UsageBar } from '../components/UsageBar.js';
 import { OverflowMenu } from './ProjectsPage.js';
 import { ComposerPage } from './ComposerPage.js';
 
@@ -131,6 +132,8 @@ export function DesktopShell({
             emptyHint="Nothing here yet. Start a chat to see it listed."
           />
         </div>
+
+        <UsageBar />
       </aside>
 
       <main className="workspace">

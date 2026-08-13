@@ -1,6 +1,7 @@
 import type {
   AdoptableTarget,
   AgentEvent,
+  AgentUsageInfo,
   BrowseEntry,
   DiscoveredFolder,
   AgentInfo,
@@ -195,4 +196,7 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ skipPermissionsEnabled }),
     }),
+
+  /** Rate-limit usage for every agent that reports its own, for the status area next to `HostChip`. */
+  getUsage: () => request<{ usage: AgentUsageInfo[] }>('/api/usage'),
 };

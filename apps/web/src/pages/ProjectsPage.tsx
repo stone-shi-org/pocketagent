@@ -12,6 +12,7 @@ import {
   SearchField,
   useProjects,
 } from '../components/ProjectList.js';
+import { UsageBar } from '../components/UsageBar.js';
 
 interface Props {
   onOpen: (sessionId: string) => void;
@@ -103,6 +104,8 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
           emptyHint="Nothing here yet. Tap the compose button to start a chat."
         />
       </div>
+
+      <UsageBar />
 
       <div className="home-dock">
         <SearchField value={search} onChange={setSearch} />

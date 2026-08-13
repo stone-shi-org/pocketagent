@@ -187,6 +187,42 @@ export const UpdateGlobalSettingsRequest = z.object({
 });
 export type UpdateGlobalSettingsRequest = z.infer<typeof UpdateGlobalSettingsRequest>;
 
+/**
+ * One agent's own account/rate-limit usage — Claude's `/usage` slash command,
+ * Codex's `account/rateLimits/read` RPC, and whatever a future agent adapter
+ * adds. Each is polled locally and in the background by its own source under
+ * `apps/server/src/usage/`, never fetched inside a request. `available:
+ * false` covers every way a given agent's reading can fail (no binary, not
+ * on a metered plan, a shape the parser does not recognise) with one field
+ * the client can branch on instead of guessing from `error`, which is
+ * diagnostic text only.
+ */
+export const AgentUsageInfo = z.object({
+  /** Matches `AgentInfo.id`, e.g. `"claude"` or `"codex"`. */
+  agent: z.string(),
+  agentDisplayName: z.string(),
+  available: z.boolean(),
+  percentUsed: z.number().min(0).max(100).nullable(),
+  /**
+   * What the percentage is *of*, when the source distinguishes windows —
+   * e.g. Codex's "7-day". Null for a source like Claude's `/usage` that only
+   * ever reports one window and does not name it.
+   */
+  windowLabel: z.string().nullable(),
+  /** Human phrasing, e.g. "Aug 13, 4:30pm" — deliberately not reparsed into a Date. */
+  resetsAtLabel: z.string().nullable(),
+  timezone: z.string().nullable(),
+  /** When this snapshot was taken, not when the browser fetched it. */
+  updatedAt: z.string(),
+  error: z.string().nullable(),
+});
+export type AgentUsageInfo = z.infer<typeof AgentUsageInfo>;
+
+export const UsageListResponse = z.object({
+  usage: z.array(AgentUsageInfo),
+});
+export type UsageListResponse = z.infer<typeof UsageListResponse>;
+
 export const ApiError = z.object({
   error: z.object({
     code: z.string(),

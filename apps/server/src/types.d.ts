@@ -9,6 +9,7 @@ import type { PushService } from './push/index.js';
 import type { ConversationStore } from './conversations/index.js';
 import type { AdoptionService } from './adopt/index.js';
 import type { ProjectService } from './projects/index.js';
+import type { UsageService } from './usage/index.js';
 
 export interface PocketContext {
   config: Config;
@@ -22,6 +23,7 @@ export interface PocketContext {
   conversations: ConversationStore;
   adoption: AdoptionService;
   projects: ProjectService;
+  usage: UsageService;
 }
 
 declare module 'fastify' {
