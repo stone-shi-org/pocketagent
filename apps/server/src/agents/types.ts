@@ -62,11 +62,13 @@ export interface AgentAdapter {
    * open. `'opencode-server'` means `OpencodeSession`, talking HTTP + SSE to
    * one `opencode serve` process shared across every opencode session.
    * `'codex-app-server'` means `CodexSession`, talking JSON-RPC over stdio to
-   * one shared `codex app-server` process. Server-internal only — the client
-   * sees the same normalized `AgentEvent` union either way and does not need
-   * to know which engine ran.
+   * one shared `codex app-server` process. `'pi-rpc'` means `PiSession`,
+   * which owns one persistent `pi --mode rpc` process per session instead of
+   * sharing a daemon. Server-internal only — the client sees the same
+   * normalized `AgentEvent` union either way and does not need to know which
+   * engine ran.
    */
-  structuredKind?: 'agy-cli' | 'opencode-server' | 'codex-app-server';
+  structuredKind?: 'agy-cli' | 'opencode-server' | 'codex-app-server' | 'pi-rpc';
 
   buildCommand(options: StartSessionOptions): AgentCommand;
 

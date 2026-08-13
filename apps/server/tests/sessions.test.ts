@@ -9,6 +9,7 @@ import { createShellAdapter } from '../src/agents/shell.js';
 import { createAgyAdapter } from '../src/agents/agy.js';
 import { createOpencodeAdapter } from '../src/agents/opencode.js';
 import { createCodexAdapter } from '../src/agents/codex.js';
+import { createPiAdapter } from '../src/agents/pi.js';
 import { StructuredSession } from '../src/sessions/structured-session.js';
 
 const AGY_FIXTURE = path.resolve(
@@ -22,6 +23,10 @@ const OPENCODE_FIXTURE = path.resolve(
 const CODEX_FIXTURE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   'fixtures/fake-codex-app-server.mjs',
+);
+const PI_FIXTURE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'fixtures/fake-pi-rpc.mjs',
 );
 
 function headers(t: TestApp): Record<string, string> {
@@ -108,6 +113,11 @@ describe('skip-permissions opt-in, off by default', () => {
     const adapter = createCodexAdapter('codex');
     expect(adapter.supportsSkipPermissions).toBe(true);
     expect(adapter.forcesSkipPermissions).toBeUndefined();
+  });
+
+  it('pi forces it like agy, but for a stronger reason — no approval concept exists anywhere', () => {
+    const adapter = createPiAdapter('pi');
+    expect(adapter.forcesSkipPermissions).toBe(true);
   });
 });
 
@@ -511,6 +521,64 @@ describe('codex adapter: structured, real approval gate via app-server', () => {
       session.buffer.replayAfter(0).events.some((e) => e.event.kind === 'turn_complete'),
     );
     const kinds = session.buffer.replayAfter(0).events.map((e) => e.event.kind);
+    expect(kinds).not.toContain('permission_request');
+  });
+});
+
+describe('pi adapter: structured, forced skip-permissions (no approval concept at all)', () => {
+  let t: TestApp;
+
+  beforeEach(async () => {
+    // Points the adapter at a fixture RPC process instead of the real CLI:
+    // no provider in this environment had working credentials for pi. See
+    // tests/fixtures/fake-pi-rpc.mjs.
+    t = await createTestApp({ POCKETAGENT_PI_BIN: PI_FIXTURE });
+  });
+  afterEach(() => t.cleanup());
+
+  it('reports forcesSkipPermissions', async () => {
+    const res = await t.app.inject({ method: 'GET', url: '/api/agents', headers: headers(t) });
+    const agents = res.json().agents as { id: string; forcesSkipPermissions: boolean }[];
+    expect(agents.find((a) => a.id === 'pi')?.forcesSkipPermissions).toBe(true);
+  });
+
+  it('creates a structured session that is always bypassed, even without asking', async () => {
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: { agent: 'pi', cwd: t.projectDir, cols: 80, rows: 24 },
+    });
+    expect(created.statusCode).toBe(201);
+    const body = created.json();
+    expect(body.agent).toBe('pi');
+    expect(body.transport).toBe('structured');
+    expect(body.skipPermissionsEnabled).toBe(true);
+    // Unlike the shared-daemon adapters, pi owns one real process per
+    // session — a genuine pid is reported, same as a PTY session.
+    expect(body.pid).toBeGreaterThan(0);
+  });
+
+  it('runs a real turn through the manager, driving a real persistent process', async () => {
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: { agent: 'pi', cwd: t.projectDir, cols: 80, rows: 24 },
+    });
+    const id = created.json().id as string;
+
+    const session = t.context.sessions.getOrThrow(id);
+    if (session.transport !== 'structured') throw new Error('expected a structured session');
+    session.prompt('hello');
+
+    await waitFor(() =>
+      session.buffer.replayAfter(0).events.some((e) => e.event.kind === 'turn_complete'),
+    );
+    const kinds = session.buffer.replayAfter(0).events.map((e) => e.event.kind);
+    expect(kinds).toContain('session_started');
+    expect(kinds).toContain('tool_use');
+    expect(kinds).toContain('turn_complete');
     expect(kinds).not.toContain('permission_request');
   });
 });

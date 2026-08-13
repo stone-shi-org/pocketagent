@@ -885,3 +885,186 @@ function extractCodexErrorMessage(params: Record<string, unknown>): string {
   if (isString(message)) return message;
   return 'Codex reported an error.';
 }
+
+// ---------------------------------------------------------------------------
+// pi — `pi --mode rpc`'s JSON event stream
+// ---------------------------------------------------------------------------
+
+/**
+ * Translate one event from `pi --mode rpc`'s stdout into zero or more
+ * normalized events.
+ *
+ * Shapes below come from the installed CLI's own shipped TypeScript
+ * declarations (`AssistantMessageEvent`, `Usage`, `AgentEvent` in
+ * `@earendil-works/pi-ai`/`pi-agent-core`) and its `docs/rpc.md`, read
+ * directly rather than observed live — no provider in this environment had
+ * working credentials for `pi` to run a real session against. `pi` has no
+ * approval concept in any mode (see `agents/pi.ts`), so unlike the other
+ * three normalizers there is no `permission_request` case here at all — it
+ * would have nothing to map from.
+ *
+ * `messageSeq` disambiguates delta ids across separate assistant messages in
+ * the same turn: pi's own `contentIndex` restarts at 0 per message, so
+ * `PiSession` increments this counter on every `message_start` and threads it
+ * through, the same role `OpencodeSession`/`CodexSession` play caching cross-
+ * event state their own normalizers can't see in one call.
+ */
+export function normalizePiEvent(message: unknown, messageSeq = 0): AgentEvent[] {
+  if (!isRecord(message)) return [];
+  const type = str(message.type);
+
+  switch (type) {
+    case 'message_update':
+      return normalizePiMessageUpdate(message, messageSeq);
+    case 'tool_execution_start':
+      return normalizePiToolExecution(message, 'start');
+    case 'tool_execution_end':
+      return normalizePiToolExecution(message, 'end');
+    case 'agent_settled':
+      // Usage/cost/stopReason are not on this event — they came earlier, on
+      // the last assistant `message_end`. `PiSession` caches that and
+      // patches it in itself; this function has no cross-event memory to do
+      // that with.
+      return [
+        {
+          kind: 'turn_complete',
+          stopReason: null,
+          isError: false,
+          numTurns: null,
+          durationMs: null,
+          costUsd: null,
+          inputTokens: null,
+          outputTokens: null,
+        },
+      ];
+    case 'auto_retry_end':
+      if (message.success === false) {
+        return [
+          {
+            kind: 'notice',
+            level: 'error',
+            text: str(message.finalError) ?? 'Retry failed after multiple attempts.',
+          },
+        ];
+      }
+      return [];
+    case 'extension_error':
+      return [
+        {
+          kind: 'notice',
+          level: 'warn',
+          text: `Extension error: ${str(message.error) ?? 'unknown error'}`,
+        },
+      ];
+    default:
+      // agent_start/agent_end/turn_start/turn_end/message_start/message_end/
+      // bash_execution_update/tool_execution_update/queue_update/compaction_*/
+      // extension_ui_request and everything else have no rendering in this
+      // union yet — `agent_settled` and `tool_execution_*` already cover the
+      // moments PocketAgent needs (turn done, tool ran).
+      return [];
+  }
+}
+
+function normalizePiMessageUpdate(message: Record<string, unknown>, messageSeq: number): AgentEvent[] {
+  const ame = isRecord(message.assistantMessageEvent) ? message.assistantMessageEvent : null;
+  if (!ame) return [];
+  const ameType = str(ame.type);
+  const contentIndex = num(ame.contentIndex) ?? 0;
+  const id = `pi_${messageSeq}_${contentIndex}`;
+
+  if (ameType === 'text_delta') {
+    const delta = str(ame.delta);
+    if (!delta) return [];
+    return [{ kind: 'text_delta', id, text: delta }];
+  }
+
+  if (ameType === 'text_end') {
+    const content = str(ame.content) ?? '';
+    if (content.trim().length === 0) return [];
+    return [{ kind: 'text', id, text: clamp(content, MAX_TEXT_CHARS) }];
+  }
+
+  if (ameType === 'thinking_end') {
+    const content = str(ame.content) ?? '';
+    if (content.trim().length === 0) return [];
+    return [{ kind: 'thinking', id, text: clamp(content, MAX_TEXT_CHARS) }];
+  }
+
+  // text_start/thinking_start/thinking_delta/toolcall_* — nothing to show
+  // yet; `tool_execution_start`/`tool_execution_end` carry the real
+  // execution lifecycle pi's own docs recommend using for that.
+  return [];
+}
+
+function normalizePiToolExecution(message: Record<string, unknown>, phase: 'start' | 'end'): AgentEvent[] {
+  const toolCallId = str(message.toolCallId);
+  if (!toolCallId) return [];
+  const toolName = str(message.toolName) ?? 'tool';
+
+  if (phase === 'start') {
+    const input = isRecord(message.args) ? message.args : {};
+    return [
+      {
+        kind: 'tool_use',
+        id: toolCallId,
+        name: toolName,
+        input,
+        summary: summarizePiTool(toolName, input),
+        filePath: extractPiPath(input),
+      },
+    ];
+  }
+
+  const result = isRecord(message.result) ? message.result : {};
+  const content = stringifyToolResult(result.content);
+  return [
+    {
+      kind: 'tool_result',
+      id: `pi_tr_${toolCallId}`,
+      toolUseId: toolCallId,
+      content: clamp(content, MAX_RESULT_CHARS),
+      truncated: content.length > MAX_RESULT_CHARS,
+      isError: message.isError === true,
+    },
+  ];
+}
+
+/**
+ * A short human sentence for one of pi's own tool names.
+ *
+ * Unverified against a live tool call — no provider in this environment had
+ * working credentials for `pi` — so this leans on the generic fallback
+ * rather than guessing argument key names this was never able to observe.
+ */
+export function summarizePiTool(name: string, input: Record<string, unknown>): string {
+  const file = extractPiPath(input);
+  const base = file ? path.basename(file) : null;
+
+  switch (name) {
+    case 'bash': {
+      const cmd = str(input.command) ?? '';
+      return cmd ? `Run ${clamp(cmd.split('\n')[0] ?? cmd, 80)}` : 'Run command';
+    }
+    case 'read':
+      return base ? `Read ${base}` : 'Read file';
+    case 'write':
+      return base ? `Write ${base}` : 'Write file';
+    case 'edit':
+      return base ? `Edit ${base}` : 'Edit file';
+    default: {
+      if (base) return `${name} ${base}`;
+      const first = Object.values(input).find(isString);
+      return first ? `${name} ${clamp(first, 60)}` : name;
+    }
+  }
+}
+
+/** The file a pi tool call touches, if any. Best-effort, same caveat as `summarizePiTool`. */
+export function extractPiPath(input: Record<string, unknown>): string | null {
+  for (const key of ['path', 'file_path', 'filePath']) {
+    const value = input[key];
+    if (isString(value) && value.length > 0) return value;
+  }
+  return null;
+}

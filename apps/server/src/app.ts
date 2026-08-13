@@ -104,6 +104,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     agyBin: config.agyBin,
     opencodeBin: config.opencodeBin,
     codexBin: config.codexBin,
+    piBin: config.piBin,
   });
 
   const backend = createBackend({

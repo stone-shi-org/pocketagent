@@ -20,6 +20,7 @@ import { OpencodeSession } from './opencode-session.js';
 import { OpencodeServerManager } from './opencode-server.js';
 import { CodexSession } from './codex-session.js';
 import { CodexServerManager } from './codex-server.js';
+import { PiSession } from './pi-session.js';
 import { buildChildEnv } from './env.js';
 
 /**
@@ -27,12 +28,13 @@ import { buildChildEnv } from './env.js';
  * Claude Agent SDK's query open for the session's whole life; `AgySession`
  * spawns the `agy` CLI fresh per turn; `OpencodeSession` and `CodexSession`
  * each talk to a shared daemon (HTTP + SSE for opencode, JSON-RPC over stdio
- * for codex). All four normalize into the same `AgentEvent` union and expose
- * the same approval-adjacent surface (empty for `AgySession` — see its own
- * docs), so everything below that only checks `transport === 'structured'`
- * can treat them interchangeably.
+ * for codex); `PiSession` owns one persistent `pi --mode rpc` process per
+ * session, no daemon to share. All five normalize into the same `AgentEvent`
+ * union and expose the same approval-adjacent surface (empty for `AgySession`
+ * and `PiSession` — see their own docs), so everything below that only
+ * checks `transport === 'structured'` can treat them interchangeably.
  */
-export type StructuredLikeSession = StructuredSession | AgySession | OpencodeSession | CodexSession;
+export type StructuredLikeSession = StructuredSession | AgySession | OpencodeSession | CodexSession | PiSession;
 
 /**
  * Either flavour of session. They share the metadata surface the manager,
@@ -496,6 +498,22 @@ export class SessionManager {
         });
       }
 
+      if (adapter.structuredKind === 'pi-rpc') {
+        return this.startPi({
+          id,
+          title,
+          adapter,
+          cwd: input.cwd,
+          workspaceLabel,
+          createdAt,
+          executable,
+          env,
+          ...(input.resumeAgentSessionId
+            ? { resumeAgentSessionId: input.resumeAgentSessionId }
+            : {}),
+        });
+      }
+
       return this.startStructured({
         id,
         title,
@@ -691,6 +709,70 @@ export class SessionManager {
     this.persist(session);
     this.opts.logger?.info(
       { sessionId: args.id, agent: args.adapter.id, transport: 'structured', backend: 'agy-cli' },
+      'session started',
+    );
+    return session;
+  }
+
+  /**
+   * Structured, but via `PiSession` — a persistent per-session `pi --mode
+   * rpc` process, not a per-turn subprocess like `AgySession` or a shared
+   * daemon like opencode/codex. `skipPermissions` is not a parameter here
+   * for the same reason as `startAgy`: it is always `true`, enforced in
+   * `create()` via `adapter.forcesSkipPermissions`.
+   */
+  private async startPi(args: {
+    id: string;
+    title: string;
+    adapter: { id: string; displayName: string };
+    cwd: string;
+    workspaceLabel: string;
+    createdAt: number;
+    executable: string;
+    env: Record<string, string>;
+    resumeAgentSessionId?: string;
+  }): Promise<PiSession> {
+    const session = new PiSession({
+      id: args.id,
+      title: args.title,
+      agent: args.adapter.id,
+      agentDisplayName: args.adapter.displayName,
+      cwd: args.cwd,
+      env: args.env,
+      workspaceLabel: args.workspaceLabel,
+      eventBufferBytes: this.opts.outputBufferBytes,
+      createdAt: args.createdAt,
+      executablePath: args.executable,
+      ...(args.resumeAgentSessionId
+        ? { resumeAgentSessionId: args.resumeAgentSessionId }
+        : {}),
+      skipPermissions: true,
+    });
+
+    this.insertRow(session, args.createdAt);
+    this.live.set(args.id, session);
+    this.wire(session);
+    // No derived-title lookup, same reasoning as agy: pi keeps its own
+    // session store, not one this server knows how to read.
+    session.on('event', (_seq, event) => {
+      if (event.kind === 'session_started') this.persist(session);
+    });
+
+    try {
+      await session.start();
+    } catch (err) {
+      this.persist(session);
+      this.live.delete(args.id);
+      throw new SessionError(
+        `Failed to start ${args.adapter.displayName}: ${err instanceof Error ? err.message : String(err)}`,
+        'spawn_failed',
+        500,
+      );
+    }
+
+    this.persist(session);
+    this.opts.logger?.info(
+      { sessionId: args.id, agent: args.adapter.id, transport: 'structured', backend: 'pi-rpc' },
       'session started',
     );
     return session;

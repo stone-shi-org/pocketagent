@@ -3,12 +3,15 @@ import {
   extractAgyPath,
   extractOpencodePath,
   extractPath,
+  extractPiPath,
   normalizeAgyMessage,
   normalizeCodexEvent,
   normalizeOpencodeEvent,
+  normalizePiEvent,
   normalizeSdkMessage,
   summarizeAgyTool,
   summarizeOpencodeTool,
+  summarizePiTool,
   summarizeToolUse,
 } from '../src/sessions/normalize.js';
 
@@ -869,5 +872,148 @@ describe('normalizeCodexEvent: robustness', () => {
   it('returns nothing for unknown methods', () => {
     expect(normalizeCodexEvent({ method: 'account/rateLimits/updated', params: {} })).toEqual([]);
     expect(normalizeCodexEvent({ method: 'mcpServer/startupStatus/updated', params: {} })).toEqual([]);
+  });
+});
+
+/**
+ * These payloads mirror `pi --mode rpc`'s JSON event stream, built from the
+ * installed CLI's own shipped TypeScript declarations
+ * (`AssistantMessageEvent`, `Usage` in `@earendil-works/pi-ai`) and its
+ * `docs/rpc.md` — no provider in this environment had working credentials
+ * for `pi` to run a real session against, so unlike the other three
+ * normalizers these were never observed live.
+ */
+describe('normalizePiEvent: message_update', () => {
+  it('emits text_delta, then a final text on text_end', () => {
+    expect(
+      normalizePiEvent({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'hel' } }, 3),
+    ).toEqual([{ kind: 'text_delta', id: 'pi_3_0', text: 'hel' }]);
+
+    expect(
+      normalizePiEvent({ type: 'message_update', assistantMessageEvent: { type: 'text_end', contentIndex: 0, content: 'hello' } }, 3),
+    ).toEqual([{ kind: 'text', id: 'pi_3_0', text: 'hello' }]);
+  });
+
+  it('disambiguates content index 0 across two different messages via messageSeq', () => {
+    const first = normalizePiEvent(
+      { type: 'message_update', assistantMessageEvent: { type: 'text_end', contentIndex: 0, content: 'first' } },
+      1,
+    );
+    const second = normalizePiEvent(
+      { type: 'message_update', assistantMessageEvent: { type: 'text_end', contentIndex: 0, content: 'second' } },
+      2,
+    );
+    expect(first[0]).toMatchObject({ id: 'pi_1_0' });
+    expect(second[0]).toMatchObject({ id: 'pi_2_0' });
+  });
+
+  it('emits thinking only on thinking_end', () => {
+    expect(
+      normalizePiEvent({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', contentIndex: 0, delta: 'thin' } }, 1),
+    ).toEqual([]);
+    expect(
+      normalizePiEvent({ type: 'message_update', assistantMessageEvent: { type: 'thinking_end', contentIndex: 0, content: 'done thinking' } }, 1),
+    ).toEqual([{ kind: 'thinking', id: 'pi_1_0', text: 'done thinking' }]);
+  });
+
+  it('ignores toolcall_* deltas — tool_execution_* carries the real lifecycle', () => {
+    expect(
+      normalizePiEvent({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_delta', contentIndex: 0, delta: '{"comm' } }, 1),
+    ).toEqual([]);
+  });
+});
+
+describe('normalizePiEvent: tool execution', () => {
+  it('maps tool_execution_start to tool_use', () => {
+    const events = normalizePiEvent({ type: 'tool_execution_start', toolCallId: 'call_1', toolName: 'bash', args: { command: 'ls -la' } });
+    expect(events).toEqual([
+      { kind: 'tool_use', id: 'call_1', name: 'bash', input: { command: 'ls -la' }, summary: 'Run ls -la', filePath: null },
+    ]);
+  });
+
+  it('maps tool_execution_end to a non-error tool_result', () => {
+    const events = normalizePiEvent({
+      type: 'tool_execution_end',
+      toolCallId: 'call_1',
+      toolName: 'bash',
+      result: { content: [{ type: 'text', text: 'hi\n' }] },
+      isError: false,
+    });
+    expect(events).toEqual([
+      { kind: 'tool_result', id: 'pi_tr_call_1', toolUseId: 'call_1', content: 'hi\n', truncated: false, isError: false },
+    ]);
+  });
+
+  it('marks an errored tool_execution_end as an error result', () => {
+    const events = normalizePiEvent({
+      type: 'tool_execution_end',
+      toolCallId: 'call_1',
+      toolName: 'bash',
+      result: { content: [{ type: 'text', text: 'command not found' }] },
+      isError: true,
+    });
+    expect(events[0]).toMatchObject({ kind: 'tool_result', isError: true, content: 'command not found' });
+  });
+});
+
+describe('normalizePiEvent: turn lifecycle', () => {
+  it('maps agent_settled to a turn_complete with no usage of its own', () => {
+    expect(normalizePiEvent({ type: 'agent_settled' })).toEqual([
+      { kind: 'turn_complete', stopReason: null, isError: false, numTurns: null, durationMs: null, costUsd: null, inputTokens: null, outputTokens: null },
+    ]);
+  });
+
+  it('maps a failed auto_retry_end to an error notice', () => {
+    expect(normalizePiEvent({ type: 'auto_retry_end', success: false, attempt: 3, finalError: '529 overloaded' })).toEqual([
+      { kind: 'notice', level: 'error', text: '529 overloaded' },
+    ]);
+  });
+
+  it('ignores a successful auto_retry_end', () => {
+    expect(normalizePiEvent({ type: 'auto_retry_end', success: true, attempt: 2 })).toEqual([]);
+  });
+
+  it('maps extension_error to a warning notice', () => {
+    expect(normalizePiEvent({ type: 'extension_error', extensionPath: '/x.ts', event: 'tool_call', error: 'boom' })).toEqual([
+      { kind: 'notice', level: 'warn', text: 'Extension error: boom' },
+    ]);
+  });
+});
+
+describe('normalizePiEvent: robustness', () => {
+  it('returns nothing for unknown or lifecycle-only event types', () => {
+    expect(normalizePiEvent({ type: 'agent_start' })).toEqual([]);
+    expect(normalizePiEvent({ type: 'turn_start' })).toEqual([]);
+    expect(normalizePiEvent({ type: 'queue_update', steering: [], followUp: [] })).toEqual([]);
+  });
+
+  it('tolerates malformed input', () => {
+    expect(normalizePiEvent(null)).toEqual([]);
+    expect(normalizePiEvent('nonsense')).toEqual([]);
+    expect(normalizePiEvent({ type: 'message_update' })).toEqual([]);
+    expect(normalizePiEvent({ type: 'tool_execution_start' })).toEqual([]);
+  });
+});
+
+describe('summarizePiTool', () => {
+  it('summarizes well-known tools readably', () => {
+    expect(summarizePiTool('bash', { command: 'npm test' })).toBe('Run npm test');
+    expect(summarizePiTool('read', { path: '/a/b/c.ts' })).toBe('Read c.ts');
+    expect(summarizePiTool('write', { path: '/a/b/c.ts' })).toBe('Write c.ts');
+  });
+
+  it('falls back to something useful for unknown tools', () => {
+    expect(summarizePiTool('mystery_tool', {})).toBe('mystery_tool');
+  });
+});
+
+describe('extractPiPath', () => {
+  it('finds the path under common key names', () => {
+    expect(extractPiPath({ path: '/a' })).toBe('/a');
+    expect(extractPiPath({ file_path: '/b' })).toBe('/b');
+  });
+
+  it('returns null when there is no path', () => {
+    expect(extractPiPath({ command: 'ls' })).toBeNull();
   });
 });
