@@ -324,6 +324,8 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
    */
   private async runSlashCommand(name: string, args: string): Promise<void> {
     this._busy = true;
+    let isError = false;
+    let endsSession = false;
     try {
       const outcome = await this.dispatchSlashCommand(name, args);
       this.emitEvent(
@@ -331,8 +333,9 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
           ? { kind: 'command_output', id: crypto.randomBytes(6).toString('hex'), text: outcome.text }
           : { kind: 'notice', level: 'info', text: outcome.text },
       );
-      if (outcome.display === 'notice' && outcome.endsSession) this.terminate();
+      endsSession = outcome.display === 'notice' && Boolean(outcome.endsSession);
     } catch (err) {
+      isError = true;
       this.emitEvent({
         kind: 'notice',
         level: 'error',
@@ -341,6 +344,28 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
     } finally {
       this._busy = false;
     }
+
+    // No real turn ran, but the browser's "three dots" busy indicator is
+    // armed by `user_prompt` and disarmed only by `turn_complete` (see
+    // `apps/web/src/agent/transcript.ts`) — exactly the contract every other
+    // agent's *local* commands already honor (Claude's `/usage`, agy's own
+    // `/help`, ...: their query/turn lifecycle still ends in a real
+    // completion signal even though no model turn happened). Without this,
+    // a live `/status` left the indicator spinning forever, since nothing
+    // else here ever completes a "turn". All-null fields render as an
+    // invisible 12px spacer (`.turn-sep`), not a visible footer — see
+    // `TurnFooter` in `Transcript.tsx`.
+    this.emitEvent({
+      kind: 'turn_complete',
+      stopReason: null,
+      isError,
+      numTurns: null,
+      durationMs: null,
+      costUsd: null,
+      inputTokens: null,
+      outputTokens: null,
+    });
+    if (endsSession) this.terminate();
   }
 
   /**

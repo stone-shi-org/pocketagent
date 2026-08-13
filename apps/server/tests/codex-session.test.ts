@@ -268,9 +268,13 @@ describe('CodexSession', () => {
       // protocol, not a plain string — regression coverage for a live bug
       // where this silently printed "unknown" instead of "active".
       expect(text).toContain('status:     active');
-      // Not a turn — never goes busy waiting on `turn/completed`.
+      // No real turn ran (never touched `turn/start`), but a synthetic,
+      // all-null `turn_complete` still follows — that is what clears the
+      // browser's "three dots" busy indicator, which is armed by
+      // `user_prompt` and disarmed only by `turn_complete`. Without it, a
+      // live `/status` left the indicator spinning forever.
       expect(session.busy).toBe(false);
-      expect(events.some((e) => e.kind === 'turn_complete')).toBe(false);
+      expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({ isError: false, durationMs: null, inputTokens: null });
     });
 
     it('/model lists models formatted with id, default marker, and description', async () => {
@@ -310,7 +314,7 @@ describe('CodexSession', () => {
       }
     });
 
-    it('/compact and /rename resolve to a success notice, not a command_output or a turn', async () => {
+    it('/compact and /rename resolve to a success notice, not a command_output, each still followed by a synthetic turn_complete', async () => {
       server = makeServer();
       session = new CodexSession(makeSpec(), server);
       await session.start();
@@ -322,7 +326,10 @@ describe('CodexSession', () => {
       session.prompt('/rename my thread');
       await waitFor(() => events.some((e) => e.kind === 'notice' && e.text.includes('Renamed thread to "my thread"')));
 
-      expect(events.some((e) => e.kind === 'turn_complete')).toBe(false);
+      // One synthetic turn_complete per slash command, not zero and not one
+      // shared — each dismisses its own `user_prompt`'s busy indicator.
+      expect(events.filter((e) => e.kind === 'turn_complete')).toHaveLength(2);
+      expect(events.some((e) => e.kind === 'command_output')).toBe(false);
     });
 
     it('/rename with no argument reports usage instead of calling the RPC', async () => {
@@ -358,18 +365,25 @@ describe('CodexSession', () => {
       expect(events.find((e) => e.kind === 'notice')).toMatchObject({ text: 'Usage: /memories enabled|disabled|reset' });
     });
 
-    it('/review runs as a real turn on the same thread (busy until turn_complete), unlike the other commands', async () => {
+    it('/review runs as a real turn on the same thread (busy until the real turn_complete), unlike the other commands\' synthetic one', async () => {
       server = makeServer();
       session = new CodexSession(makeSpec(), server);
       await session.start();
       const events = collect(session);
 
       session.prompt('/review');
+      // Busy synchronously, before any RPC round-trip even resolves — unlike
+      // `runSlashCommand`'s commands, which only go busy for the duration of
+      // one await.
       expect(session.busy).toBe(true);
       await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
 
       expect(events.find((e) => e.kind === 'text')).toMatchObject({ text: 'Looks fine.' });
       expect(events.some((e) => e.kind === 'command_output')).toBe(false);
+      // The real turn's own `turn/completed` carries a duration; the
+      // synthetic one `runSlashCommand` emits for every other command never
+      // does — this is what tells the two apart.
+      expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({ durationMs: 5 });
       await waitFor(() => session?.busy === false);
     });
 
