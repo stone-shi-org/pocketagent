@@ -117,6 +117,28 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { healthy: true });
   }
 
+  // Shape captured live against the real, installed server (v1.17.18) via
+  // `GET /command?directory=...` and its own OpenAPI `/doc`.
+  if (req.method === 'GET' && url.pathname === '/command') {
+    return send(res, 200, [
+      {
+        name: 'init',
+        description: 'guided AGENTS.md setup',
+        source: 'command',
+        template: 'Create or update `AGENTS.md` for this repository...',
+        hints: ['$ARGUMENTS'],
+      },
+      {
+        name: 'review',
+        description: 'review changes [commit|branch|pr], defaults to uncommitted',
+        source: 'command',
+        template: 'You are a code reviewer...',
+        subtask: true,
+        hints: ['$ARGUMENTS'],
+      },
+    ]);
+  }
+
   if (req.method === 'GET' && url.pathname === '/event') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     res.write(`data: ${JSON.stringify({ id: 'evt_init', type: 'server.connected', properties: {} })}\n\n`);
@@ -144,6 +166,20 @@ const server = http.createServer(async (req, res) => {
     res.end();
     void runTurn(sessionID, text);
     return;
+  }
+
+  const commandMatch = /^\/session\/([^/]+)\/command$/.exec(url.pathname);
+  if (req.method === 'POST' && commandMatch) {
+    const sessionID = commandMatch[1];
+    const body = await readBody(req);
+    // Real opencode returns the completed message synchronously here rather
+    // than accepting async like prompt_async — schema-confirmed, not
+    // exercised against a live model turn (see `matchKnownCommand`'s doc
+    // comment). This fixture mirrors "synchronous response" but still
+    // broadcasts over SSE first, since that is what a real caller actually
+    // listens to for rendering.
+    await runTurn(sessionID, `/${body.command} ${body.arguments ?? ''}`.trim());
+    return send(res, 200, { info: { id: 'msg_a', sessionID, role: 'assistant' }, parts: [] });
   }
 
   const abortMatch = /^\/session\/([^/]+)\/abort$/.exec(url.pathname);

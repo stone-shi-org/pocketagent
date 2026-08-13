@@ -111,6 +111,27 @@ function handleLine(line) {
     respond(msg.id, true, { command: 'abort' });
     return;
   }
+  if (msg.type === 'get_commands') {
+    // Shape captured live against the real, installed CLI (v0.84.1) — note
+    // the real server nests `sourceInfo: {path, source, scope, origin}`
+    // rather than the flat `location`/`path` docs/rpc.md documents; this
+    // fixture matches what was actually observed on the wire.
+    respond(msg.id, true, {
+      command: 'get_commands',
+      data: {
+        commands: [
+          {
+            name: 'session-name',
+            description: 'Set or clear session name',
+            source: 'extension',
+            sourceInfo: { path: '/home/user/.pi/agent/extensions/session.ts', source: 'file', scope: 'user', origin: 'top-level' },
+          },
+          { name: 'skill:brave-search', description: 'Web search via Brave API', source: 'skill' },
+        ],
+      },
+    });
+    return;
+  }
   respond(msg.id, true, { command: msg.type, data: {} });
 }
 

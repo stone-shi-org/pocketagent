@@ -287,9 +287,30 @@ export function normalizeAgyMessage(message: unknown): AgentEvent[] {
       return normalizeAgyStepUpdate(message);
     case 'result':
       return normalizeAgyResult(message);
+    case 'command_result':
+      return normalizeAgyCommandResult(message);
     default:
       return [];
   }
+}
+
+/**
+ * agy resolves `/help` (and other built-ins) locally — confirmed live
+ * (v1.1.12): zero tokens, zero duration, no model turn — and reports it as
+ * `{"event":"command_result","command":{"name":"help","data":{"commands":[...]}}}`.
+ * Only `/help`'s own `data.commands` matches `SlashCommandInfo[]`; every other
+ * command name's `data` means something else entirely (`/agents` lists
+ * subagents, `/model` lists models, ...) and must not be misread as one.
+ * `AgySession.fetchInitialCommands()` runs `/help` once, silently, at start
+ * for exactly this event; this same case also fires if a user types `/help`
+ * themselves mid-conversation, keeping the picker's list fresh for free.
+ */
+function normalizeAgyCommandResult(message: Record<string, unknown>): AgentEvent[] {
+  const command = isRecord(message.command) ? message.command : null;
+  if (!command || str(command.name) !== 'help') return [];
+  const data = isRecord(command.data) ? command.data : null;
+  if (!data) return [];
+  return [{ kind: 'commands_available', commands: normalizeSlashCommands(data.commands) }];
 }
 
 function normalizeAgyInit(message: Record<string, unknown>): AgentEvent[] {
@@ -682,6 +703,30 @@ export function extractOpencodePath(input: Record<string, unknown>): string | nu
     if (isString(value) && value.length > 0) return value;
   }
   return null;
+}
+
+/**
+ * opencode's own `GET /command` response — confirmed live (v1.17.18) — not an
+ * SSE event, so unlike everything above this is consumed directly by
+ * `OpencodeSession.fetchInitialCommands()`, never through `normalizeOpencodeEvent`.
+ * Deliberately not reusing `normalizeSlashCommands`: opencode has no `aliases`
+ * field, and its `hints` (e.g. `["$ARGUMENTS"]`) are internal template
+ * placeholders, not a human-readable argument hint like the SDK's — showing
+ * one verbatim in a picker would look like a rendering bug, so this leaves
+ * `argumentHint` empty rather than surface it. A `template` field also exists
+ * (the full prompt the command expands to) and is deliberately dropped: it is
+ * often thousands of characters and has no use in a picker.
+ */
+export function normalizeOpencodeCommands(value: unknown): SlashCommandInfo[] {
+  if (!Array.isArray(value)) return [];
+  const commands: SlashCommandInfo[] = [];
+  for (const raw of value) {
+    if (!isRecord(raw)) continue;
+    const name = str(raw.name);
+    if (!name) continue;
+    commands.push({ name, description: str(raw.description) ?? '', argumentHint: '', aliases: [] });
+  }
+  return commands;
 }
 
 function blockId(inner: Record<string, unknown> | null, index: number): string {

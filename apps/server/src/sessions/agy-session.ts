@@ -151,7 +151,64 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this._startedAt = Date.now();
     this._lastActivityAt = this._startedAt;
     this.setStatus('running');
+    this.fetchInitialCommands();
     return Promise.resolve();
+  }
+
+  /**
+   * Learn agy's built-in command list for the picker, via its own `/help` —
+   * confirmed live (v1.1.12) to resolve locally with zero tokens, zero
+   * duration, and no model turn, so this costs nothing and has no
+   * conversation-visible side effect worth suppressing beyond not queuing it
+   * like a real prompt. No `--conversation` is passed: the built-in list is
+   * fixed and does not depend on any session's history. Best-effort and
+   * silent — a failure here just means no picker, never a broken session, so
+   * every error is swallowed rather than surfaced as a notice.
+   */
+  private fetchInitialCommands(): void {
+    const bin = this.spec.executablePath ?? 'agy';
+    const args = ['--output-format', 'stream-json', '--dangerously-skip-permissions', '-p', '/help'];
+
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(bin, args, { cwd: this.spec.cwd, env: this.spec.env });
+    } catch {
+      return;
+    }
+
+    // Never tracked as `this.child`: this probe is fully independent of the
+    // real turn queue, so it must not be visible to interrupt()/terminate()'s
+    // bookkeeping for the actual conversation.
+    const rl = readline.createInterface({ input: child.stdout });
+    rl.on('line', (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        return;
+      }
+      for (const event of normalizeAgyMessageSafe(parsed)) {
+        if (event.kind === 'commands_available') this.emitEvent(event);
+      }
+    });
+    child.stderr.on('data', () => {
+      // Nothing here is worth surfacing — see the doc comment above.
+    });
+    child.on('error', () => {});
+
+    // A defensive backstop, not an expected path: real `/help` resolves
+    // instantly (observed duration_seconds: 0). Guards against an orphaned
+    // process if a future agy version ever makes this a real, slow turn.
+    const killer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }, 10_000);
+    child.on('exit', () => clearTimeout(killer));
   }
 
   /** No-op: nothing here ever asks the operator's global switch to apply. */

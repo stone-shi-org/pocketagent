@@ -51,6 +51,23 @@ describe('PiSession', () => {
     expect(session.pid).toBeGreaterThan(0);
   });
 
+  it('learns the command list at start via get_commands, a side channel with no visible user_prompt', async () => {
+    session = new PiSession(makeSpec());
+    const events = collect(session);
+    await session.start();
+
+    await waitFor(() => events.some((e) => e.kind === 'commands_available'));
+
+    expect(events.some((e) => e.kind === 'user_prompt')).toBe(false);
+    const commands = events.find((e) => e.kind === 'commands_available');
+    expect(commands).toMatchObject({
+      commands: [
+        { name: 'session-name', description: 'Set or clear session name', argumentHint: '', aliases: [] },
+        { name: 'skill:brave-search', description: 'Web search via Brave API', argumentHint: '', aliases: [] },
+      ],
+    });
+  });
+
   it('always reports skipPermissions, matching the always-bypassed contract', () => {
     session = new PiSession(makeSpec());
     expect(session.spec.skipPermissions).toBe(true);

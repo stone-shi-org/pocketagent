@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { AgentEvent, PermissionRequestEvent, SessionStatus } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
-import { normalizePiEvent } from './normalize.js';
+import { normalizePiEvent, normalizeSlashCommands } from './normalize.js';
 import type { StructuredSessionEvents } from './structured-session.js';
 
 export interface PiSessionSpec {
@@ -239,6 +239,23 @@ export class PiSession extends EventEmitter<StructuredSessionEvents> {
       // mode to bypass in the first place.
       permissionMode: null,
     });
+
+    void this.fetchInitialCommands();
+  }
+
+  /**
+   * Learn pi's command list for the picker via its own `get_commands` RPC
+   * (docs/rpc.md: "Get available commands (extension commands, prompt
+   * templates, and skills). These can be invoked via the `prompt` command by
+   * prefixing with `/`.") — a genuine side-channel query, not a prompt, so
+   * unlike `AgySession`'s `/help` probe this has no conversation-visible
+   * shape to suppress in the first place. Best-effort: a failure here just
+   * means no picker, never a broken session.
+   */
+  private async fetchInitialCommands(): Promise<void> {
+    const res = await this.sendCommand('get_commands');
+    if (!res.success || !isRecord(res.data)) return;
+    this.emitEvent({ kind: 'commands_available', commands: normalizeSlashCommands(res.data.commands) });
   }
 
   private handleChunk(chunk: Buffer): void {

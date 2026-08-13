@@ -103,6 +103,52 @@ describe('OpencodeSession', () => {
     expect(session.agentSessionId).toMatch(/^ses_test/);
   });
 
+  it('learns the command list at start via GET /command', async () => {
+    server = makeServer();
+    session = new OpencodeSession(makeSpec(), server);
+    const events = collect(session);
+    await session.start();
+
+    await waitFor(() => events.some((e) => e.kind === 'commands_available'));
+    expect(events.find((e) => e.kind === 'commands_available')).toMatchObject({
+      commands: [
+        { name: 'init', description: 'guided AGENTS.md setup', argumentHint: '', aliases: [] },
+        { name: 'review', description: 'review changes [commit|branch|pr], defaults to uncommitted', argumentHint: '', aliases: [] },
+      ],
+    });
+  });
+
+  it('routes a known command to POST /session/{id}/command instead of prompt_async', async () => {
+    server = makeServer();
+    session = new OpencodeSession(makeSpec(), server);
+    const events = collect(session);
+    await session.start();
+    await waitFor(() => events.some((e) => e.kind === 'commands_available'));
+
+    session.prompt('/init extra context');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    // The fixture's /command handler echoes `/${command} ${arguments}` back
+    // through the exact same turn machinery as a normal prompt, so a
+    // matching echo here proves the command+arguments split, not just that
+    // *some* text arrived.
+    expect(events.find((e) => e.kind === 'text')).toMatchObject({ text: 'echo: /init extra context' });
+  });
+
+  it('sends an unrecognized leading-slash message as plain chat text, not a command', async () => {
+    server = makeServer();
+    session = new OpencodeSession(makeSpec(), server);
+    const events = collect(session);
+    await session.start();
+    await waitFor(() => events.some((e) => e.kind === 'commands_available'));
+
+    // Never fetched from GET /command — must not be guessed at as one.
+    session.prompt('/not-a-real-command');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    expect(events.find((e) => e.kind === 'text')).toMatchObject({ text: 'echo: /not-a-real-command' });
+  });
+
   it('runs one turn end to end: user_prompt, tool_use/result, text, turn_complete with usage', async () => {
     server = makeServer();
     session = new OpencodeSession(makeSpec(), server);

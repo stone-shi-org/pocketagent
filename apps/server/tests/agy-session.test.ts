@@ -51,6 +51,25 @@ describe('AgySession', () => {
     expect(session.busy).toBe(false);
   });
 
+  it('learns the command list at start via a silent /help, with no visible user_prompt', async () => {
+    session = new AgySession(makeSpec());
+    const events = collect(session);
+    await session.start();
+
+    await waitFor(() => events.some((e) => e.kind === 'commands_available'));
+
+    // The probe must never look like a real turn: no echoed prompt for it.
+    expect(events.some((e) => e.kind === 'user_prompt')).toBe(false);
+    const commands = events.find((e) => e.kind === 'commands_available');
+    expect(commands).toMatchObject({
+      commands: [
+        { name: 'agents', description: 'List available custom agents', argumentHint: '', aliases: [] },
+        { name: 'model', description: 'Set a model', argumentHint: '', aliases: [] },
+        { name: 'usage', description: 'View model quota usage', argumentHint: '', aliases: ['quota'] },
+      ],
+    });
+  });
+
   it('always reports skipPermissions, matching the always-bypassed contract', async () => {
     session = new AgySession(makeSpec());
     expect(session.spec.skipPermissions).toBe(true);

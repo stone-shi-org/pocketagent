@@ -22,6 +22,38 @@ if (prompt === 'FAIL') {
   process.exit(1);
 }
 
+// `/help` resolves locally in real agy — no `init` line, no tool step, zero
+// tokens/duration — captured live against v1.1.12. Handled before the normal
+// turn shape below since `AgySession.fetchInitialCommands()` sends exactly
+// this and expects exactly this response shape.
+if (prompt === '/help') {
+  emit({
+    event: 'command_result',
+    command: {
+      name: 'help',
+      data: {
+        commands: [
+          { name: 'agents', description: 'List available custom agents' },
+          { name: 'model', description: 'Set a model' },
+          { name: 'usage', aliases: ['quota'], description: 'View model quota usage' },
+        ],
+      },
+    },
+  });
+  emit({
+    event: 'result',
+    result: {
+      conversation_id: conversationId,
+      status: 'SUCCESS',
+      response: '/agents\tList available custom agents\n/model\tSet a model\n/usage (quota)\tView model quota usage\n',
+      duration_seconds: 0,
+      num_turns: 0,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    },
+  });
+  process.exit(0);
+}
+
 emit({
   event: 'init',
   conversation_id: conversationId,

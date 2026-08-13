@@ -42,6 +42,17 @@ interface PendingApproval {
  * three structured engines in this codebase where that is actually true
  * (`AgySession`'s headless mode has no such gate; `StructuredSession` and
  * `OpencodeSession` do).
+ *
+ * No slash-command picker here, unlike `StructuredSession`/`AgySession`/
+ * `PiSession`: confirmed via `codex app-server generate-json-schema --out
+ * <dir> --experimental` (real, installed v0.147.0) that the app-server
+ * protocol has no command-list method and no text-based `/name` convention
+ * on `turn/start`'s input — every equivalent feature (`thread/compact/start`,
+ * `model/list`, `skills/list`, ...) is its own distinct JSON-RPC method, not
+ * something a human types. That parsing lives in the TUI, which this class
+ * bypasses entirely, so there is nothing here to build a uniform picker on
+ * top of without hand-mapping each command name to its own RPC call — a
+ * materially bigger, separate feature, not this one.
  */
 export class CodexSession extends EventEmitter<StructuredSessionEvents> {
   readonly transport = 'structured' as const;

@@ -6,6 +6,7 @@ import {
   extractPiPath,
   normalizeAgyMessage,
   normalizeCodexEvent,
+  normalizeOpencodeCommands,
   normalizeOpencodeEvent,
   normalizePiEvent,
   normalizeSdkMessage,
@@ -492,6 +493,45 @@ describe('normalizeAgyMessage: result', () => {
   });
 });
 
+describe('normalizeAgyMessage: command_result', () => {
+  it('maps /help to commands_available', () => {
+    const events = normalizeAgyMessage({
+      event: 'command_result',
+      command: {
+        name: 'help',
+        data: {
+          commands: [
+            { name: 'agents', description: 'List available custom agents' },
+            { name: 'usage', aliases: ['quota'], description: 'View model quota usage' },
+          ],
+        },
+      },
+    });
+    expect(events).toEqual([
+      {
+        kind: 'commands_available',
+        commands: [
+          { name: 'agents', description: 'List available custom agents', argumentHint: '', aliases: [] },
+          { name: 'usage', description: 'View model quota usage', argumentHint: '', aliases: ['quota'] },
+        ],
+      },
+    ]);
+  });
+
+  it('ignores every other command name, since its data means something else entirely', () => {
+    // e.g. /agents lists subagents, /model lists models — neither is a
+    // SlashCommandInfo[] and must not be misread as one.
+    expect(
+      normalizeAgyMessage({ event: 'command_result', command: { name: 'agents', data: { agents: [] } } }),
+    ).toEqual([]);
+  });
+
+  it('tolerates a missing command or data', () => {
+    expect(normalizeAgyMessage({ event: 'command_result' })).toEqual([]);
+    expect(normalizeAgyMessage({ event: 'command_result', command: { name: 'help' } })).toEqual([]);
+  });
+});
+
 describe('normalizeAgyMessage: robustness', () => {
   it('returns nothing for unknown event types instead of throwing', () => {
     expect(normalizeAgyMessage({ event: 'heartbeat' })).toEqual([]);
@@ -764,6 +804,25 @@ describe('normalizeOpencodeEvent: robustness', () => {
     expect(normalizeOpencodeEvent('nonsense')).toEqual([]);
     expect(normalizeOpencodeEvent({ type: 'message.part.updated' })).toEqual([]);
     expect(normalizeOpencodeEvent({ type: 'permission.replied', properties: {} })).toEqual([]);
+  });
+});
+
+describe('normalizeOpencodeCommands', () => {
+  it('maps the real GET /command shape, dropping template and hints', () => {
+    const commands = normalizeOpencodeCommands([
+      { name: 'init', description: 'guided AGENTS.md setup', source: 'command', template: 'very long...', hints: ['$ARGUMENTS'] },
+      { name: 'review', description: 'review changes', source: 'command', template: 'also long...', hints: ['$ARGUMENTS'] },
+    ]);
+    expect(commands).toEqual([
+      { name: 'init', description: 'guided AGENTS.md setup', argumentHint: '', aliases: [] },
+      { name: 'review', description: 'review changes', argumentHint: '', aliases: [] },
+    ]);
+  });
+
+  it('drops entries with no name and returns [] for a non-array input', () => {
+    expect(normalizeOpencodeCommands([{ description: 'no name' }])).toEqual([]);
+    expect(normalizeOpencodeCommands(undefined)).toEqual([]);
+    expect(normalizeOpencodeCommands('nope')).toEqual([]);
   });
 });
 

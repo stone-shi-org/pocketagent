@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { AgentEvent, PermissionDecision, PermissionRequestEvent, SessionStatus } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
-import { normalizeOpencodeEvent } from './normalize.js';
+import { normalizeOpencodeCommands, normalizeOpencodeEvent } from './normalize.js';
 import type { OpencodeServerManager } from './opencode-server.js';
 import type { StructuredSessionEvents } from './structured-session.js';
 
@@ -52,6 +52,8 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
   readonly epoch: string;
 
   private readonly pending = new Map<string, PermissionRequestEvent>();
+  /** Names from the last `commands_available` fetch, so `prompt()` knows which leading `/name` to route to the command endpoint instead of sending as chat text. */
+  private readonly knownCommands = new Set<string>();
 
   private _status: SessionStatus = 'starting';
   private _opencodeSessionId: string | null = null;
@@ -179,6 +181,36 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
       tools: [],
       permissionMode: this.spec.skipPermissions ? 'bypassPermissions' : 'default',
     });
+
+    void this.fetchInitialCommands();
+  }
+
+  /**
+   * Learn opencode's command list for the picker via its own `GET /command`
+   * — confirmed live (v1.17.18) as a plain HTTP response, not an SSE event,
+   * hence `normalizeOpencodeCommands` rather than `normalizeOpencodeEvent`.
+   * Also records the names in `knownCommands`, since unlike the Claude SDK,
+   * agy, and pi — where sending `/name` as plain chat text is itself enough,
+   * confirmed for agy and documented for pi — opencode has no such text
+   * convention: running a command is a distinct endpoint
+   * (`POST /session/{id}/command`), which `prompt()` below routes to only
+   * for a name this fetch actually returned. Best-effort: a failure here
+   * just means no picker, never a broken session.
+   */
+  private async fetchInitialCommands(): Promise<void> {
+    if (!this._opencodeSessionId) return;
+    try {
+      const raw = await this.server.request<unknown>('/command', {
+        method: 'GET',
+        query: { directory: this.spec.cwd },
+      });
+      const commands = normalizeOpencodeCommands(raw);
+      this.knownCommands.clear();
+      for (const c of commands) this.knownCommands.add(c.name);
+      this.emitEvent({ kind: 'commands_available', commands });
+    } catch {
+      /* best-effort — see the doc comment above */
+    }
   }
 
   private handleRaw(raw: unknown): void {
@@ -248,11 +280,23 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
     this._busy = true;
     this.emitEvent({ kind: 'user_prompt', id: crypto.randomBytes(6).toString('hex'), text });
 
+    // A leading `/name` only routes to the dedicated command endpoint when
+    // `name` is one this session actually fetched — anything else (including
+    // a bare `/` a user typed as ordinary punctuation) is just chat text, the
+    // same as it would be for every other agent. See `fetchInitialCommands`.
+    const command = matchKnownCommand(text, this.knownCommands);
+    const endpoint = command
+      ? `/session/${this._opencodeSessionId}/command`
+      : `/session/${this._opencodeSessionId}/prompt_async`;
+    const body = command
+      ? { command: command.name, arguments: command.args }
+      : { parts: [{ type: 'text', text }] };
+
     void this.server
-      .request(`/session/${this._opencodeSessionId}/prompt_async`, {
+      .request(endpoint, {
         method: 'POST',
         query: { directory: this.spec.cwd },
-        body: { parts: [{ type: 'text', text }] },
+        body,
       })
       .catch((err) => {
         this._busy = false;
@@ -407,6 +451,31 @@ function usageFields(usage: { cost: number | null; input: number | null; output:
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Parses a leading `/name [args]` and checks `name` against the session's own
+ * fetched command list. Returns null for anything else, including a `/name`
+ * that *looks* like a command but was never actually reported by `GET
+ * /command` — better to send it as plain chat text (which is exactly what
+ * happens today, with no picker at all) than guess at a command that does
+ * not exist and get a 404 back.
+ *
+ * Unverified against a live turn: this environment could not reach a working
+ * model provider (see `summarizeOpencodeTool`'s doc comment for the same
+ * caveat), so `POST /session/{id}/command` is confirmed correct against the
+ * real, installed server's own OpenAPI schema, but not against an actual
+ * assistant response.
+ */
+export function matchKnownCommand(
+  text: string,
+  known: ReadonlySet<string>,
+): { name: string; args: string } | null {
+  const match = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(text.trim());
+  if (!match) return null;
+  const name = match[1];
+  if (!name || !known.has(name)) return null;
+  return { name, args: match[2] ?? '' };
 }
 
 /** Never let one malformed opencode payload kill this session's event handling. */
