@@ -1,3 +1,6 @@
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -227,5 +230,237 @@ describe('CodexSession', () => {
     expect(session.isAlive()).toBe(false);
     expect(session.pendingPermissions()).toHaveLength(0);
     expect(exited).toBe(true);
+  });
+
+  it('emits commands_available with the hand-mapped slash-command table right after session_started', async () => {
+    server = makeServer();
+    session = new CodexSession(makeSpec(), server);
+    const events = collect(session);
+    await session.start();
+
+    const commandsEvent = events.find((e) => e.kind === 'commands_available');
+    expect(commandsEvent?.kind).toBe('commands_available');
+    const names = commandsEvent && commandsEvent.kind === 'commands_available' ? commandsEvent.commands.map((c) => c.name) : [];
+    expect(names).toEqual(
+      expect.arrayContaining(['status', 'model', 'skills', 'hooks', 'mcp', 'permissions', 'ps', 'usage', 'plugins', 'compact', 'rename', 'review', 'goal', 'memories', 'archive', 'delete', 'logout']),
+    );
+    // Deliberately excluded: pure TUI/composer settings and multi-session
+    // navigation commands — see `dispatchSlashCommand`'s doc comment.
+    expect(names).not.toEqual(expect.arrayContaining(['vim', 'theme', 'exit', 'new', 'resume']));
+  });
+
+  describe('slash commands', () => {
+    it('/status resolves via thread/read without touching turn/start, as a command_output', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      await session.start();
+      const events = collect(session);
+
+      expect(session.prompt('/status')).toBe(true);
+      expect(events[0]).toMatchObject({ kind: 'user_prompt', text: '/status' });
+      await waitFor(() => events.some((e) => e.kind === 'command_output'));
+
+      const output = events.find((e) => e.kind === 'command_output');
+      expect(output).toMatchObject({ text: expect.stringContaining('Test thread') });
+      expect(output && output.kind === 'command_output' ? output.text : '').toContain('git branch: main');
+      // Not a turn — never goes busy waiting on `turn/completed`.
+      expect(session.busy).toBe(false);
+      expect(events.some((e) => e.kind === 'turn_complete')).toBe(false);
+    });
+
+    it('/model lists models formatted with id, default marker, and description', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('/model');
+      await waitFor(() => events.some((e) => e.kind === 'command_output'));
+      const output = events.find((e) => e.kind === 'command_output');
+      const text = output && output.kind === 'command_output' ? output.text : '';
+      expect(text).toContain('gpt-5.6-terra (default)');
+      expect(text).toContain('gpt-5.6-fast');
+      expect(text).not.toContain('gpt-5.6-fast (default)');
+    });
+
+    it('/mcp, /skills, /hooks, /permissions, /ps, /usage, /plugins each resolve to a command_output', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      await session.start();
+
+      for (const [command, expectedSubstring] of [
+        ['/mcp', 'filesystem'],
+        ['/skills', 'commit-helper'],
+        ['/hooks', 'pre-commit'],
+        ['/permissions', 'default'],
+        ['/ps', 'npm run dev'],
+        ['/usage', '123456'],
+        ['/plugins', 'official'],
+      ] as const) {
+        const events = collect(session);
+        session.prompt(command);
+        await waitFor(() => events.some((e) => e.kind === 'command_output'));
+        const output = events.find((e) => e.kind === 'command_output');
+        expect(output && output.kind === 'command_output' ? output.text : '').toContain(expectedSubstring);
+      }
+    });
+
+    it('/compact and /rename resolve to a success notice, not a command_output or a turn', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('/compact');
+      await waitFor(() => events.some((e) => e.kind === 'notice' && e.text.includes('Compacting')));
+
+      session.prompt('/rename my thread');
+      await waitFor(() => events.some((e) => e.kind === 'notice' && e.text.includes('Renamed thread to "my thread"')));
+
+      expect(events.some((e) => e.kind === 'turn_complete')).toBe(false);
+    });
+
+    it('/rename with no argument reports usage instead of calling the RPC', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('/rename');
+      await waitFor(() => events.some((e) => e.kind === 'notice'));
+      expect(events.find((e) => e.kind === 'notice')).toMatchObject({ text: 'Usage: /rename <name>' });
+    });
+
+    it('/goal with no argument reports "no goal set" when the fixture has none', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('/goal');
+      await waitFor(() => events.some((e) => e.kind === 'command_output'));
+      expect(events.find((e) => e.kind === 'command_output')).toMatchObject({ text: expect.stringContaining('No goal set') });
+    });
+
+    it('/memories with an invalid mode reports usage instead of guessing', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('/memories sideways');
+      await waitFor(() => events.some((e) => e.kind === 'notice'));
+      expect(events.find((e) => e.kind === 'notice')).toMatchObject({ text: 'Usage: /memories enabled|disabled|reset' });
+    });
+
+    it('/review runs as a real turn on the same thread (busy until turn_complete), unlike the other commands', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('/review');
+      expect(session.busy).toBe(true);
+      await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+      expect(events.find((e) => e.kind === 'text')).toMatchObject({ text: 'Looks fine.' });
+      expect(events.some((e) => e.kind === 'command_output')).toBe(false);
+      await waitFor(() => session?.busy === false);
+    });
+
+    it('/archive ends the session after a successful thread/archive', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('/archive');
+      await waitFor(() => session?.status === 'killed');
+      expect(events.find((e) => e.kind === 'notice')).toMatchObject({ text: expect.stringContaining('archived') });
+      expect(session.isAlive()).toBe(false);
+    });
+
+    it('an unrecognized slash command still falls through to a real turn, unchanged from before this feature', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('/vim');
+      expect(session.busy).toBe(true);
+      await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+      expect(events.find((e) => e.kind === 'text')).toMatchObject({ text: 'echo: /vim' });
+    });
+
+    it('/diff shells out to git directly (no app-server RPC) and reports tracked and untracked changes', async () => {
+      const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'pa-codex-diff-'));
+      try {
+        execFileSync('git', ['init', '-q'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo });
+        fs.writeFileSync(path.join(repo, 'tracked.txt'), 'one\n');
+        execFileSync('git', ['add', 'tracked.txt'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'initial'], { cwd: repo });
+        fs.writeFileSync(path.join(repo, 'tracked.txt'), 'one\ntwo\n');
+        fs.writeFileSync(path.join(repo, 'new-file.txt'), 'brand new\n');
+
+        server = makeServer();
+        session = new CodexSession(makeSpec({ cwd: repo }), server);
+        await session.start();
+        const events = collect(session);
+
+        session.prompt('/diff');
+        await waitFor(() => events.some((e) => e.kind === 'command_output'));
+        const text = events.find((e) => e.kind === 'command_output');
+        const diff = text && text.kind === 'command_output' ? text.text : '';
+        expect(diff).toContain('tracked.txt');
+        expect(diff).toContain('+two');
+        expect(diff).toContain('new-file.txt');
+        expect(diff).toContain('+brand new');
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+      }
+    });
+
+    it('/diff reports "No changes." for a clean working tree', async () => {
+      const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'pa-codex-diff-clean-'));
+      try {
+        execFileSync('git', ['init', '-q'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo });
+        fs.writeFileSync(path.join(repo, 'tracked.txt'), 'one\n');
+        execFileSync('git', ['add', 'tracked.txt'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'initial'], { cwd: repo });
+
+        server = makeServer();
+        session = new CodexSession(makeSpec({ cwd: repo }), server);
+        await session.start();
+        const events = collect(session);
+
+        session.prompt('/diff');
+        await waitFor(() => events.some((e) => e.kind === 'command_output'));
+        expect(events.find((e) => e.kind === 'command_output')).toMatchObject({ text: 'No changes.' });
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+      }
+    });
+
+    it('a slash-command RPC failure surfaces as an error notice instead of crashing the session', async () => {
+      const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'pa-codex-diff-notgit-'));
+      try {
+        // No `git init` — `/diff` should fail cleanly, not throw uncaught.
+        server = makeServer();
+        session = new CodexSession(makeSpec({ cwd: repo }), server);
+        await session.start();
+        const events = collect(session);
+
+        session.prompt('/diff');
+        await waitFor(() => events.some((e) => e.kind === 'notice' && e.level === 'error'));
+        expect(events.find((e) => e.kind === 'notice')).toMatchObject({ text: expect.stringContaining('/diff failed') });
+        expect(session.isAlive()).toBe(true);
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+      }
+    });
   });
 });

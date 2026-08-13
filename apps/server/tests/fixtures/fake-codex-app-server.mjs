@@ -158,6 +158,58 @@ rl.on('line', (line) => {
       if (flag) flag.aborted = true;
       return respond(id, {});
     }
+
+    // Below: just enough canned data for each slash-command RPC in
+    // `CodexSession.dispatchSlashCommand` to exercise its real formatting
+    // logic in codex-session.test.ts, rather than falling through to the
+    // catch-all `respond(id, {})` (which would still be a valid response for
+    // methods this fixture does not need to shape data for).
+    if (method === 'thread/read') {
+      const t = threads.get(params.threadId) ?? { cwd: '' };
+      return respond(id, {
+        thread: { id: params.threadId, name: 'Test thread', cwd: t.cwd, status: 'active', cliVersion: '0.147.0-test', gitInfo: { branch: 'main' } },
+      });
+    }
+    if (method === 'model/list') {
+      return respond(id, {
+        data: [
+          { id: 'gpt-5.6-terra', displayName: 'GPT-5.6 Terra', description: 'General purpose', isDefault: true },
+          { id: 'gpt-5.6-fast', displayName: 'GPT-5.6 Fast', description: 'Faster, less thorough', isDefault: false },
+        ],
+      });
+    }
+    if (method === 'skills/list') {
+      return respond(id, { data: [{ cwd: '', errors: [], skills: [{ name: 'commit-helper', description: 'Writes commit messages', enabled: true }] }] });
+    }
+    if (method === 'hooks/list') {
+      return respond(id, { data: [{ cwd: '', errors: [], warnings: [], hooks: [{ key: 'pre-commit', eventName: 'beforeCommit', enabled: true }] }] });
+    }
+    if (method === 'mcpServerStatus/list') {
+      return respond(id, { data: [{ name: 'filesystem', authStatus: 'unsupported', tools: { read_file: {}, write_file: {} } }] });
+    }
+    if (method === 'permissionProfile/list') {
+      return respond(id, { data: [{ id: 'default', description: 'Default sandbox profile', allowed: true }] });
+    }
+    if (method === 'thread/backgroundTerminals/list') {
+      return respond(id, { data: [{ command: 'npm run dev', cwd: '/tmp/project', itemId: 'term_1', processId: 'p1', osPid: 4242 }] });
+    }
+    if (method === 'account/usage/read') {
+      return respond(id, { summary: { lifetimeTokens: 123456, currentStreakDays: 3, longestStreakDays: 10, peakDailyTokens: 5000 } });
+    }
+    if (method === 'plugin/list') {
+      return respond(id, { marketplaces: [{ name: 'official', plugins: [{}, {}] }] });
+    }
+    if (method === 'review/start') {
+      respond(id, { reviewThreadId: params.threadId, turn: { id: 'turn_review', items: [], status: 'inProgress' } });
+      void (async () => {
+        await sleep(10);
+        notify('item/started', { threadId: params.threadId, item: { type: 'agentMessage', id: 'msg_review', text: '', phase: 'final_answer' } });
+        notify('item/completed', { threadId: params.threadId, item: { type: 'agentMessage', id: 'msg_review', text: 'Looks fine.', phase: 'final_answer' } });
+        notify('turn/completed', { threadId: params.threadId, turn: { id: 'turn_review', items: [], status: 'completed', error: null, durationMs: 5 } });
+      })();
+      return;
+    }
+
     return respond(id, {});
   }
 });
