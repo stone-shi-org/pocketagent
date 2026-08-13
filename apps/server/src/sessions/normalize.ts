@@ -660,3 +660,228 @@ function str(value: unknown): string | undefined {
 function num(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
+
+// ---------------------------------------------------------------------------
+// codex — `codex app-server`'s JSON-RPC notifications and requests
+// ---------------------------------------------------------------------------
+
+/**
+ * One incoming line from `codex app-server`, already parsed enough to know
+ * whether it is a notification (`id` undefined) or a server request awaiting
+ * a reply (`id` set) — see `CodexServerManager`. This mirrors that file's own
+ * `JsonRpcIncoming` shape rather than importing it, to keep this module's
+ * only dependency on session internals at zero, same as the other two
+ * normalizers.
+ */
+export interface CodexIncoming {
+  method: string;
+  params: Record<string, unknown>;
+  id?: number;
+}
+
+/**
+ * Translate one JSON-RPC message from `codex app-server` into zero or more
+ * normalized events.
+ *
+ * Shapes below were captured live against the real, installed CLI (v0.147.0,
+ * with a working ChatGPT login) — including a genuine approval round trip
+ * that blocked a command until replied to — with two exceptions called out
+ * where they occur: the exact field names for a *successful* command's
+ * output were never confirmed (the account's rate limit was too close to its
+ * cap, mid-development, to safely re-run for it), and `fileChange`/`reasoning`
+ * items were inferred from the approval-request params and the protocol's own
+ * JSON Schema rather than observed directly. Both fall back to `''`/`null`
+ * rather than guessing wrong, per the same defensive discipline as
+ * `normalizeAgyMessage`/`normalizeOpencodeEvent`.
+ */
+export function normalizeCodexEvent(message: CodexIncoming): AgentEvent[] {
+  const { method, params, id } = message;
+
+  switch (method) {
+    case 'item/started':
+      return normalizeCodexItem(params.item, 'started');
+    case 'item/completed':
+      return normalizeCodexItem(params.item, 'completed');
+    case 'item/agentMessage/delta': {
+      const delta = str(params.delta);
+      const itemId = str(params.itemId);
+      if (!delta || !itemId) return [];
+      return [{ kind: 'text_delta', id: itemId, text: delta }];
+    }
+    case 'turn/completed': {
+      const turn = isRecord(params.turn) ? params.turn : {};
+      const hasError = turn.error !== null && turn.error !== undefined;
+      return [
+        {
+          kind: 'turn_complete',
+          stopReason: hasError ? 'error' : null,
+          isError: hasError,
+          numTurns: null,
+          durationMs: num(turn.durationMs),
+          // Token/cost usage is not on this notification — it arrives
+          // separately via `thread/tokenUsage/updated`. `CodexSession`
+          // caches the latest one and patches it in itself, the same
+          // enrichment `OpencodeSession` does for `session.idle`.
+          costUsd: null,
+          inputTokens: null,
+          outputTokens: null,
+        },
+      ];
+    }
+    case 'item/commandExecution/requestApproval':
+    case 'item/fileChange/requestApproval':
+      if (id === undefined) return [];
+      return [normalizeCodexPermission(method, params, id)];
+    case 'error':
+      return [{ kind: 'notice', level: 'error', text: extractCodexErrorMessage(params) }];
+    default:
+      // Every other item type (todoList, webSearch, mcpToolCall, ...) and
+      // every other notification (rate limits, mcp startup, thread renames,
+      // ...) has nothing to render in this union yet.
+      return [];
+  }
+}
+
+function normalizeCodexItem(itemRaw: unknown, phase: 'started' | 'completed'): AgentEvent[] {
+  if (!isRecord(itemRaw)) return [];
+  const type = str(itemRaw.type);
+  const id = str(itemRaw.id) ?? 'cx_item';
+
+  // The user's own prompt is echoed back as a `userMessage` item; we already
+  // emit our own `user_prompt` locally in `CodexSession.prompt()`.
+  if (type === 'userMessage') return [];
+
+  if (type === 'agentMessage') {
+    if (phase !== 'completed') return [];
+    const text = str(itemRaw.text) ?? '';
+    if (text.trim().length === 0) return [];
+    return [{ kind: 'text', id, text: clamp(text, MAX_TEXT_CHARS) }];
+  }
+
+  if (type === 'reasoning') {
+    if (phase !== 'completed') return [];
+    const text = extractCodexReasoningText(itemRaw);
+    if (!text) return [];
+    return [{ kind: 'thinking', id, text: clamp(text, MAX_TEXT_CHARS) }];
+  }
+
+  if (type === 'commandExecution') {
+    if (phase === 'started') {
+      const command = str(itemRaw.command) ?? '';
+      return [
+        {
+          kind: 'tool_use',
+          id,
+          name: 'commandExecution',
+          input: { command, cwd: str(itemRaw.cwd) ?? '' },
+          summary: command ? `Run ${clamp(command.split('\n')[0] ?? command, 80)}` : 'Run command',
+          filePath: null,
+        },
+      ];
+    }
+    const output = extractCodexCommandOutput(itemRaw);
+    return [
+      {
+        kind: 'tool_result',
+        id: `cx_tr_${id}`,
+        toolUseId: id,
+        content: clamp(output, MAX_RESULT_CHARS),
+        truncated: output.length > MAX_RESULT_CHARS,
+        isError: str(itemRaw.status) === 'failed',
+      },
+    ];
+  }
+
+  if (type === 'fileChange') {
+    // Never observed live (see this section's own doc comment) — the
+    // approval-request params only carry an `itemId` back-reference, not the
+    // file/diff itself, so there is nothing more specific to show yet.
+    if (phase === 'started') {
+      return [{ kind: 'tool_use', id, name: 'fileChange', input: {}, summary: 'Edit file', filePath: null }];
+    }
+    return [
+      {
+        kind: 'tool_result',
+        id: `cx_tr_${id}`,
+        toolUseId: id,
+        content: '',
+        truncated: false,
+        isError: str(itemRaw.status) === 'failed',
+      },
+    ];
+  }
+
+  return [];
+}
+
+/** Best-effort: never confirmed live (reasoning summaries were empty in the one run tested). */
+function extractCodexReasoningText(item: Record<string, unknown>): string | null {
+  for (const key of ['content', 'summary']) {
+    const arr = item[key];
+    if (!Array.isArray(arr)) continue;
+    const text = arr
+      .map((block) => (isString(block) ? block : isRecord(block) ? str(block.text) : undefined))
+      .filter((t): t is string => t !== undefined && t.trim().length > 0)
+      .join('\n');
+    if (text) return text;
+  }
+  return null;
+}
+
+/**
+ * Best-effort: a *failed* command's shape was observed live (the run this was
+ * built against deliberately triggered a rejection to confirm the approval
+ * gate itself), but a clean successful completion's output field was not —
+ * the account's rate limit was too close to its cap to safely re-run for it.
+ * Checks every plausible key name rather than committing to one.
+ */
+function extractCodexCommandOutput(item: Record<string, unknown>): string {
+  for (const key of ['aggregatedOutput', 'output', 'stdout']) {
+    const value = item[key];
+    if (isString(value)) return value;
+  }
+  const error = item.error;
+  if (isString(error)) return error;
+  if (isRecord(error) && isString(error.message)) return error.message;
+  return '';
+}
+
+function normalizeCodexPermission(
+  method: string,
+  params: Record<string, unknown>,
+  id: number,
+): AgentEvent {
+  const toolName = method === 'item/commandExecution/requestApproval' ? 'commandExecution' : 'fileChange';
+  const command = str(params.command);
+  const reason = str(params.reason);
+
+  return {
+    kind: 'permission_request',
+    // The JSON-RPC request id this reply must echo back — see
+    // `CodexSession.resolvePermission`. Stringified only because
+    // `PermissionRequestEvent.id` is a string everywhere else in the union;
+    // `CodexSession` converts it back to a number before replying.
+    id: String(id),
+    toolName,
+    input: command ? { command, cwd: str(params.cwd) ?? '' } : { itemId: str(params.itemId) ?? '' },
+    title:
+      reason ??
+      (command ? `Allow: ${clamp(command.split('\n')[0] ?? command, 80)}?` : `Allow: ${toolName}?`),
+    displayName: null,
+    filePath: null,
+    reason: null,
+    // Both approval types accept "acceptForSession" per the real response
+    // schema, so a session-wide allow is always on the table.
+    canAllowForSession: true,
+    questions: null,
+  };
+}
+
+function extractCodexErrorMessage(params: Record<string, unknown>): string {
+  const error = params.error;
+  if (isString(error)) return error;
+  if (isRecord(error) && isString(error.message)) return error.message;
+  const message = params.message;
+  if (isString(message)) return message;
+  return 'Codex reported an error.';
+}

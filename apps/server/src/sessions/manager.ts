@@ -18,18 +18,21 @@ import { StructuredSession } from './structured-session.js';
 import { AgySession } from './agy-session.js';
 import { OpencodeSession } from './opencode-session.js';
 import { OpencodeServerManager } from './opencode-server.js';
+import { CodexSession } from './codex-session.js';
+import { CodexServerManager } from './codex-server.js';
 import { buildChildEnv } from './env.js';
 
 /**
  * Any engine behind the `structured` transport. `StructuredSession` holds the
  * Claude Agent SDK's query open for the session's whole life; `AgySession`
- * spawns the `agy` CLI fresh per turn; `OpencodeSession` talks HTTP + SSE to a
- * shared `opencode serve` process. All three normalize into the same
- * `AgentEvent` union and expose the same approval-adjacent surface (empty for
- * `AgySession` — see its own docs), so everything below that only checks
- * `transport === 'structured'` can treat them interchangeably.
+ * spawns the `agy` CLI fresh per turn; `OpencodeSession` and `CodexSession`
+ * each talk to a shared daemon (HTTP + SSE for opencode, JSON-RPC over stdio
+ * for codex). All four normalize into the same `AgentEvent` union and expose
+ * the same approval-adjacent surface (empty for `AgySession` — see its own
+ * docs), so everything below that only checks `transport === 'structured'`
+ * can treat them interchangeably.
  */
-export type StructuredLikeSession = StructuredSession | AgySession | OpencodeSession;
+export type StructuredLikeSession = StructuredSession | AgySession | OpencodeSession | CodexSession;
 
 /**
  * Either flavour of session. They share the metadata surface the manager,
@@ -143,6 +146,8 @@ export class SessionManager {
    * serves every directory rather than one per chat.
    */
   private opencodeServer: OpencodeServerManager | null = null;
+  /** Same idea as `opencodeServer`, for `codex app-server` — see `CodexServerManager`. */
+  private codexServer: CodexServerManager | null = null;
 
   constructor(private readonly opts: ManagerOptions) {
     const stored = readSetting(opts.db, GLOBAL_SKIP_PERMISSIONS_KEY);
@@ -474,6 +479,23 @@ export class SessionManager {
         });
       }
 
+      if (adapter.structuredKind === 'codex-app-server') {
+        return this.startCodex({
+          id,
+          title,
+          adapter,
+          cwd: input.cwd,
+          workspaceLabel,
+          createdAt,
+          executable,
+          env,
+          ...(input.resumeAgentSessionId
+            ? { resumeAgentSessionId: input.resumeAgentSessionId }
+            : {}),
+          skipPermissions,
+        });
+      }
+
       return this.startStructured({
         id,
         title,
@@ -762,6 +784,93 @@ export class SessionManager {
     this.persist(session);
     this.opts.logger?.info(
       { sessionId: args.id, agent: args.adapter.id, transport: 'structured', backend: 'opencode-server' },
+      'session started',
+    );
+    return session;
+  }
+
+  /**
+   * The one `codex app-server` process shared by every `CodexSession`. Same
+   * reasoning as `getOrCreateOpencodeServer`.
+   */
+  private getOrCreateCodexServer(executable: string, env: Record<string, string>): CodexServerManager {
+    if (this.codexServer) return this.codexServer;
+
+    const server = new CodexServerManager({
+      executablePath: executable,
+      env,
+      cwd: this.opts.workspaces.getRoots()[0] ?? process.cwd(),
+    });
+    server.on('crashed', () => {
+      for (const session of this.live.values()) {
+        if (session instanceof CodexSession) session.markServerCrashed();
+      }
+    });
+    this.codexServer = server;
+    return server;
+  }
+
+  /**
+   * Structured, but via `CodexSession` talking to a shared
+   * `codex app-server` process instead of the Claude Agent SDK, a per-turn
+   * `agy` subprocess, or opencode's HTTP server. See `CodexSession`/
+   * `CodexServerManager` for why this is its own code path.
+   */
+  private async startCodex(args: {
+    id: string;
+    title: string;
+    adapter: { id: string; displayName: string };
+    cwd: string;
+    workspaceLabel: string;
+    createdAt: number;
+    executable: string;
+    env: Record<string, string>;
+    resumeAgentSessionId?: string;
+    skipPermissions?: boolean;
+  }): Promise<CodexSession> {
+    const server = this.getOrCreateCodexServer(args.executable, args.env);
+    const session = new CodexSession(
+      {
+        id: args.id,
+        title: args.title,
+        agent: args.adapter.id,
+        agentDisplayName: args.adapter.displayName,
+        cwd: args.cwd,
+        workspaceLabel: args.workspaceLabel,
+        eventBufferBytes: this.opts.outputBufferBytes,
+        createdAt: args.createdAt,
+        ...(args.resumeAgentSessionId
+          ? { resumeAgentSessionId: args.resumeAgentSessionId }
+          : {}),
+        skipPermissions: args.skipPermissions === true,
+      },
+      server,
+    );
+
+    this.insertRow(session, args.createdAt);
+    this.live.set(args.id, session);
+    this.wire(session);
+    // No derived-title lookup, same reasoning as agy/opencode: codex keeps
+    // its own conversation store, not one this server knows how to read.
+    session.on('event', (_seq, event) => {
+      if (event.kind === 'session_started') this.persist(session);
+    });
+
+    try {
+      await session.start();
+    } catch (err) {
+      this.persist(session);
+      this.live.delete(args.id);
+      throw new SessionError(
+        `Failed to start ${args.adapter.displayName}: ${err instanceof Error ? err.message : String(err)}`,
+        'spawn_failed',
+        500,
+      );
+    }
+
+    this.persist(session);
+    this.opts.logger?.info(
+      { sessionId: args.id, agent: args.adapter.id, transport: 'structured', backend: 'codex-app-server' },
       'session started',
     );
     return session;
@@ -1146,10 +1255,12 @@ export class SessionManager {
     for (const timer of this.approvalTimers.values()) clearTimeout(timer);
     this.approvalTimers.clear();
     this.opts.backend.dispose?.();
-    // Every opencode session above has already been asked to stop; the
+    // Every opencode/codex session above has already been asked to stop; the
     // shared process outlives any one of them, so it is only killed here.
     this.opencodeServer?.dispose();
     this.opencodeServer = null;
+    this.codexServer?.dispose();
+    this.codexServer = null;
     this.live.clear();
     this.attachCounts.clear();
   }

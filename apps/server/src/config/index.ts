@@ -66,6 +66,7 @@ const RawEnv = z.object({
   POCKETAGENT_CLAUDE_BIN: z.string().default('claude'),
   POCKETAGENT_AGY_BIN: z.string().default('agy'),
   POCKETAGENT_OPENCODE_BIN: z.string().default('opencode'),
+  POCKETAGENT_CODEX_BIN: z.string().default('codex'),
   POCKETAGENT_WEB_DIST: z.string().optional(),
 
   /**
@@ -112,6 +113,7 @@ export interface Config {
   claudeBin: string;
   agyBin: string;
   opencodeBin: string;
+  codexBin: string;
   webDistPath: string;
   /** Where agent processes live. `tmux` lets them survive a server restart. */
   backend: 'direct' | 'tmux';
@@ -251,6 +253,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     claudeBin: e.POCKETAGENT_CLAUDE_BIN.trim(),
     agyBin: e.POCKETAGENT_AGY_BIN.trim(),
     opencodeBin: e.POCKETAGENT_OPENCODE_BIN.trim(),
+    codexBin: e.POCKETAGENT_CODEX_BIN.trim(),
     webDistPath,
     backend: e.POCKETAGENT_BACKEND,
     tmuxBin: e.POCKETAGENT_TMUX_BIN.trim(),

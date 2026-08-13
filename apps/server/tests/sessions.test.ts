@@ -8,6 +8,7 @@ import { createClaudeAdapter } from '../src/agents/claude.js';
 import { createShellAdapter } from '../src/agents/shell.js';
 import { createAgyAdapter } from '../src/agents/agy.js';
 import { createOpencodeAdapter } from '../src/agents/opencode.js';
+import { createCodexAdapter } from '../src/agents/codex.js';
 import { StructuredSession } from '../src/sessions/structured-session.js';
 
 const AGY_FIXTURE = path.resolve(
@@ -17,6 +18,10 @@ const AGY_FIXTURE = path.resolve(
 const OPENCODE_FIXTURE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   'fixtures/fake-opencode-server.mjs',
+);
+const CODEX_FIXTURE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'fixtures/fake-codex-app-server.mjs',
 );
 
 function headers(t: TestApp): Record<string, string> {
@@ -95,6 +100,12 @@ describe('skip-permissions opt-in, off by default', () => {
 
   it('opencode supports the real toggle, unlike agy — it has a genuine approval gate', () => {
     const adapter = createOpencodeAdapter('opencode');
+    expect(adapter.supportsSkipPermissions).toBe(true);
+    expect(adapter.forcesSkipPermissions).toBeUndefined();
+  });
+
+  it('codex also supports the real toggle — app-server has a genuine approval gate too', () => {
+    const adapter = createCodexAdapter('codex');
     expect(adapter.supportsSkipPermissions).toBe(true);
     expect(adapter.forcesSkipPermissions).toBeUndefined();
   });
@@ -398,6 +409,96 @@ describe('opencode adapter: structured, real approval gate', () => {
         rows: 24,
         skipPermissions: true,
       },
+    });
+    expect(created.json().skipPermissionsEnabled).toBe(true);
+
+    const id = created.json().id as string;
+    const session = t.context.sessions.getOrThrow(id);
+    if (session.transport !== 'structured') throw new Error('expected a structured session');
+    session.prompt('NEEDS_PERMISSION');
+
+    await waitFor(() =>
+      session.buffer.replayAfter(0).events.some((e) => e.event.kind === 'turn_complete'),
+    );
+    const kinds = session.buffer.replayAfter(0).events.map((e) => e.event.kind);
+    expect(kinds).not.toContain('permission_request');
+  });
+});
+
+describe('codex adapter: structured, real approval gate via app-server', () => {
+  let t: TestApp;
+
+  beforeEach(async () => {
+    // Points the adapter at a fixture JSON-RPC process instead of the real
+    // CLI: real codex needs a live ChatGPT/API login and burns real usage.
+    // See tests/fixtures/fake-codex-app-server.mjs.
+    t = await createTestApp({ POCKETAGENT_CODEX_BIN: CODEX_FIXTURE });
+  });
+  afterEach(() => t.cleanup());
+
+  it('reports supportsSkipPermissions without forcesSkipPermissions', async () => {
+    const res = await t.app.inject({ method: 'GET', url: '/api/agents', headers: headers(t) });
+    const agents = res.json().agents as {
+      id: string;
+      supportsSkipPermissions: boolean;
+      forcesSkipPermissions: boolean;
+    }[];
+    const codex = agents.find((a) => a.id === 'codex');
+    expect(codex?.supportsSkipPermissions).toBe(true);
+    expect(codex?.forcesSkipPermissions).toBe(false);
+  });
+
+  it('creates a structured session that defaults to asking', async () => {
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: { agent: 'codex', cwd: t.projectDir, cols: 80, rows: 24 },
+    });
+    expect(created.statusCode).toBe(201);
+    const body = created.json();
+    expect(body.agent).toBe('codex');
+    expect(body.transport).toBe('structured');
+    expect(body.skipPermissionsEnabled).toBe(false);
+  });
+
+  it('runs a real turn through the manager and surfaces a genuine approval request', async () => {
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: { agent: 'codex', cwd: t.projectDir, cols: 80, rows: 24 },
+    });
+    const id = created.json().id as string;
+
+    const session = t.context.sessions.getOrThrow(id);
+    if (session.transport !== 'structured') throw new Error('expected a structured session');
+    session.prompt('NEEDS_PERMISSION');
+
+    await waitFor(() =>
+      session.buffer.replayAfter(0).events.some((e) => e.event.kind === 'permission_request'),
+    );
+    const request = session
+      .buffer.replayAfter(0)
+      .events.map((e) => e.event)
+      .find((e) => e.kind === 'permission_request');
+    expect(request).toBeTruthy();
+
+    expect(session.resolvePermission(request!.id, 'allow')).toBe(true);
+
+    await waitFor(() =>
+      session.buffer.replayAfter(0).events.some((e) => e.event.kind === 'turn_complete'),
+    );
+    const kinds = session.buffer.replayAfter(0).events.map((e) => e.event.kind);
+    expect(kinds).toContain('tool_result');
+  });
+
+  it('creates a session that skips approvals when explicitly opted in', async () => {
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: { agent: 'codex', cwd: t.projectDir, cols: 80, rows: 24, skipPermissions: true },
     });
     expect(created.json().skipPermissionsEnabled).toBe(true);
 

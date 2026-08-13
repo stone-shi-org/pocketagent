@@ -4,6 +4,7 @@ import {
   extractOpencodePath,
   extractPath,
   normalizeAgyMessage,
+  normalizeCodexEvent,
   normalizeOpencodeEvent,
   normalizeSdkMessage,
   summarizeAgyTool,
@@ -710,5 +711,163 @@ describe('extractOpencodePath', () => {
 
   it('returns null when there is no path', () => {
     expect(extractOpencodePath({ command: 'ls' })).toBeNull();
+  });
+});
+
+/**
+ * These payloads mirror `codex app-server`'s JSON-RPC protocol (v0.147.0),
+ * captured live against the real, installed CLI with a working ChatGPT login
+ * — including a genuine approval round trip that blocked a command until
+ * replied to. Two spots are best-effort rather than observed (called out
+ * inline): a *successful* command's output field name, and `fileChange`/
+ * `reasoning` item shapes.
+ */
+describe('normalizeCodexEvent: items', () => {
+  it('ignores the user_message echo — user_prompt is emitted locally instead', () => {
+    expect(
+      normalizeCodexEvent({
+        method: 'item/started',
+        params: { threadId: 't', item: { type: 'userMessage', id: 'msg_u', content: [{ type: 'text', text: 'hi' }] } },
+      }),
+    ).toEqual([]);
+  });
+
+  it('emits text_delta for agentMessage streaming, and a final text on completion', () => {
+    expect(
+      normalizeCodexEvent({
+        method: 'item/agentMessage/delta',
+        params: { threadId: 't', turnId: 'tu', itemId: 'msg_a', delta: 'hel' },
+      }),
+    ).toEqual([{ kind: 'text_delta', id: 'msg_a', text: 'hel' }]);
+
+    expect(
+      normalizeCodexEvent({
+        method: 'item/started',
+        params: { threadId: 't', item: { type: 'agentMessage', id: 'msg_a', text: '', phase: 'commentary' } },
+      }),
+    ).toEqual([]);
+
+    expect(
+      normalizeCodexEvent({
+        method: 'item/completed',
+        params: { threadId: 't', item: { type: 'agentMessage', id: 'msg_a', text: 'hello', phase: 'final_answer' } },
+      }),
+    ).toEqual([{ kind: 'text', id: 'msg_a', text: 'hello' }]);
+  });
+
+  it('maps a started commandExecution to tool_use', () => {
+    const events = normalizeCodexEvent({
+      method: 'item/started',
+      params: {
+        threadId: 't',
+        item: { type: 'commandExecution', id: 'exec-1', command: 'ls -la', cwd: '/tmp', status: 'inProgress' },
+      },
+    });
+    expect(events).toEqual([
+      { kind: 'tool_use', id: 'exec-1', name: 'commandExecution', input: { command: 'ls -la', cwd: '/tmp' }, summary: 'Run ls -la', filePath: null },
+    ]);
+  });
+
+  it('maps a completed commandExecution to a non-error tool_result', () => {
+    const events = normalizeCodexEvent({
+      method: 'item/completed',
+      params: {
+        threadId: 't',
+        item: { type: 'commandExecution', id: 'exec-1', command: 'echo hi', status: 'completed', aggregatedOutput: 'hi\n' },
+      },
+    });
+    expect(events).toEqual([
+      { kind: 'tool_result', id: 'cx_tr_exec-1', toolUseId: 'exec-1', content: 'hi\n', truncated: false, isError: false },
+    ]);
+  });
+
+  it('maps a failed commandExecution to an error tool_result — the shape this was actually verified live against', () => {
+    const events = normalizeCodexEvent({
+      method: 'item/completed',
+      params: {
+        threadId: 't',
+        item: { type: 'commandExecution', id: 'exec-1', command: 'rm x', status: 'failed', error: 'approval request failed' },
+      },
+    });
+    expect(events[0]).toMatchObject({ kind: 'tool_result', isError: true, content: 'approval request failed' });
+  });
+
+  it('ignores unknown item types', () => {
+    expect(
+      normalizeCodexEvent({ method: 'item/started', params: { threadId: 't', item: { type: 'webSearch', id: 'x' } } }),
+    ).toEqual([]);
+  });
+});
+
+describe('normalizeCodexEvent: turn lifecycle', () => {
+  it('maps turn/completed to a turn_complete with no usage of its own', () => {
+    expect(
+      normalizeCodexEvent({
+        method: 'turn/completed',
+        params: { threadId: 't', turn: { id: 'tu', items: [], status: 'completed', error: null, durationMs: 42 } },
+      }),
+    ).toEqual([
+      { kind: 'turn_complete', stopReason: null, isError: false, numTurns: null, durationMs: 42, costUsd: null, inputTokens: null, outputTokens: null },
+    ]);
+  });
+
+  it('treats a non-null turn.error as an error', () => {
+    expect(
+      normalizeCodexEvent({
+        method: 'turn/completed',
+        params: { threadId: 't', turn: { id: 'tu', items: [], status: 'failed', error: { message: 'boom' }, durationMs: 1 } },
+      }),
+    ).toMatchObject([{ isError: true, stopReason: 'error' }]);
+  });
+
+  it('maps a thread-level error notification to a notice', () => {
+    expect(
+      normalizeCodexEvent({ method: 'error', params: { threadId: 't', error: { message: 'boom' } } }),
+    ).toEqual([{ kind: 'notice', level: 'error', text: 'boom' }]);
+  });
+});
+
+describe('normalizeCodexEvent: approvals', () => {
+  it('maps a commandExecution approval request to a generic permission_request', () => {
+    const events = normalizeCodexEvent({
+      method: 'item/commandExecution/requestApproval',
+      params: { threadId: 't', turnId: 'tu', itemId: 'exec-1', reason: 'Allow running rm -rf?', command: 'rm -rf /tmp/x', cwd: '/tmp' },
+      id: 7,
+    });
+    expect(events).toEqual([
+      {
+        kind: 'permission_request', id: '7', toolName: 'commandExecution',
+        input: { command: 'rm -rf /tmp/x', cwd: '/tmp' }, title: 'Allow running rm -rf?',
+        displayName: null, filePath: null, reason: null, canAllowForSession: true, questions: null,
+      },
+    ]);
+  });
+
+  it('maps a fileChange approval request generically, falling back to itemId with no reason', () => {
+    const events = normalizeCodexEvent({
+      method: 'item/fileChange/requestApproval',
+      params: { threadId: 't', turnId: 'tu', itemId: 'file-1' },
+      id: 3,
+    });
+    expect(events).toEqual([
+      {
+        kind: 'permission_request', id: '3', toolName: 'fileChange',
+        input: { itemId: 'file-1' }, title: 'Allow: fileChange?',
+        displayName: null, filePath: null, reason: null, canAllowForSession: true, questions: null,
+      },
+    ]);
+  });
+
+  it('drops an approval request with no id — nothing this codebase could ever reply to', () => {
+    expect(
+      normalizeCodexEvent({ method: 'item/commandExecution/requestApproval', params: { threadId: 't' } }),
+    ).toEqual([]);
+  });
+});
+
+describe('normalizeCodexEvent: robustness', () => {
+  it('returns nothing for unknown methods', () => {
+    expect(normalizeCodexEvent({ method: 'account/rateLimits/updated', params: {} })).toEqual([]);
+    expect(normalizeCodexEvent({ method: 'mcpServer/startupStatus/updated', params: {} })).toEqual([]);
   });
 });

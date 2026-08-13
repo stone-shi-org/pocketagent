@@ -60,11 +60,13 @@ export interface AgentAdapter {
    * `'agy-cli'` means `AgySession`, which spawns the `agy` CLI's headless
    * `stream-json` mode fresh for each turn instead of holding one SDK query
    * open. `'opencode-server'` means `OpencodeSession`, talking HTTP + SSE to
-   * one `opencode serve` process shared across every opencode session. Server-
-   * internal only — the client sees the same normalized `AgentEvent` union
-   * either way and does not need to know which engine ran.
+   * one `opencode serve` process shared across every opencode session.
+   * `'codex-app-server'` means `CodexSession`, talking JSON-RPC over stdio to
+   * one shared `codex app-server` process. Server-internal only — the client
+   * sees the same normalized `AgentEvent` union either way and does not need
+   * to know which engine ran.
    */
-  structuredKind?: 'agy-cli' | 'opencode-server';
+  structuredKind?: 'agy-cli' | 'opencode-server' | 'codex-app-server';
 
   buildCommand(options: StartSessionOptions): AgentCommand;
 
