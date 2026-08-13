@@ -14,18 +14,24 @@ import readline from 'node:readline';
  * reason. Lazily started on the first opencode session, kept running for the
  * life of this process, torn down in `SessionManager.shutdown()`.
  *
- * Events arrive over one shared `GET /event` SSE stream (opencode's own
- * per-session `/session/{id}/event` exists too, but one connection demuxed by
- * `properties.sessionID` is cheaper than N, and global events — plugin
- * loading, catalog updates — have no session at all to attach to anyway).
+ * Events arrive over `GET /event` SSE streams demuxed by `properties.sessionID`
+ * (opencode's own per-session `/session/{id}/event` exists too, but one
+ * connection per directory covers every session in it). This is *not* one
+ * single global stream, even though the daemon itself is: `/event` only
+ * delivers session/message events when called with a matching `directory`
+ * query param (confirmed against its own OpenAPI doc and by observation —
+ * without it you get `server.connected`/`server.heartbeat` and nothing else,
+ * silently, forever). So one SSE connection is kept per distinct directory
+ * that has a registered session, ref-counted as sessions for that directory
+ * come and go, rather than one connection for the whole process.
  */
 export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
   private child: ChildProcessWithoutNullStreams | null = null;
   private baseUrl: string | null = null;
   private starting: Promise<string> | null = null;
   private ready = false;
-  private sseAbort: AbortController | null = null;
-  private readonly handlers = new Map<string, (raw: unknown) => void>();
+  private readonly eventStreams = new Map<string, { abort: AbortController; refCount: number }>();
+  private readonly handlers = new Map<string, { directory: string; handler: (raw: unknown) => void }>();
 
   constructor(
     private readonly opts: {
@@ -81,7 +87,6 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
         settle(() => {
           this.baseUrl = url;
           this.ready = true;
-          this.startEventStream(url);
           resolve(url);
         });
       };
@@ -104,8 +109,15 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
         this.child = null;
         this.baseUrl = null;
         this.ready = false;
-        this.sseAbort?.abort();
-        this.sseAbort = null;
+        for (const { abort } of this.eventStreams.values()) abort.abort();
+        this.eventStreams.clear();
+        // `starting` must be cleared too, not just `baseUrl`: it is a settled
+        // promise at this point (resolved if `wasReady`, rejected otherwise),
+        // and a settled promise is still truthy, so leaving it in place would
+        // make every future `ensureStarted()` return that same dead promise
+        // forever instead of spawning a replacement — the shared server would
+        // never recover from one crash for the rest of this process's life.
+        this.starting = null;
         settle(() =>
           reject(
             new Error(
@@ -122,18 +134,48 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
     });
   }
 
-  private startEventStream(baseUrl: string): void {
+  /**
+   * Opens (or joins) the one event stream for `directory`, ref-counted so it
+   * closes once the last session using it unregisters. Safe to call before
+   * the server has finished spawning — a resumed session can call `register`
+   * without ever calling `request` first (no `POST /session` needed when
+   * `resumeAgentSessionId` is already known), so this cannot assume
+   * `this.baseUrl` is set yet.
+   */
+  private ensureEventStreamFor(directory: string): void {
+    const existing = this.eventStreams.get(directory);
+    if (existing) {
+      existing.refCount++;
+      return;
+    }
     const abort = new AbortController();
-    this.sseAbort = abort;
-    void this.readEventStream(baseUrl, abort.signal);
+    this.eventStreams.set(directory, { abort, refCount: 1 });
+    this.ensureStarted()
+      .then((url) => {
+        if (abort.signal.aborted) return;
+        void this.readEventStream(url, directory, abort.signal);
+      })
+      .catch(() => {
+        // `ensureStarted` rejecting means the spawn itself failed; whatever
+        // triggered `register` is already surfacing that failure through its
+        // own `request` call, so just stop tracking a stream for a server
+        // that never came up.
+        this.eventStreams.delete(directory);
+      });
   }
 
-  /** Reconnects on a transient drop; gives up once `dispose()` aborts the signal. */
-  private async readEventStream(baseUrl: string, signal: AbortSignal): Promise<void> {
+  /** Reconnects on a transient drop; gives up once the directory's last session unregisters. */
+  private async readEventStream(baseUrl: string, directory: string, signal: AbortSignal): Promise<void> {
     for (;;) {
       if (signal.aborted) return;
       try {
-        const res = await fetch(`${baseUrl}/event`, { signal });
+        const url = new URL('/event', baseUrl);
+        // Required, not cosmetic: without a `directory` query param, `/event`
+        // delivers only session-less bookkeeping (`server.connected`,
+        // `server.heartbeat`) and silently omits every `message.*`/`session.*`
+        // event — every turn would hang forever with no error anywhere.
+        url.searchParams.set('directory', directory);
+        const res = await fetch(url, { signal });
         const body = res.body;
         if (!body) return;
         const reader = body.getReader();
@@ -152,7 +194,7 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
         }
       } catch {
         if (signal.aborted) return;
-        this.opts.logger?.warn({}, 'opencode event stream dropped, reconnecting');
+        this.opts.logger?.warn({ directory }, 'opencode event stream dropped, reconnecting');
       }
       if (signal.aborted) return;
       await new Promise((r) => setTimeout(r, 1000));
@@ -181,17 +223,32 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
       // Session-less events (plugin/catalog/provider bookkeeping) have no
       // handler to reach and are not part of any chat's transcript.
       if (!sessionID) continue;
-      this.handlers.get(sessionID)?.(parsed);
+      this.handlers.get(sessionID)?.handler(parsed);
     }
   }
 
-  /** One opencode session id maps to at most one live `OpencodeSession` handler. */
-  register(sessionId: string, handler: (raw: unknown) => void): void {
-    this.handlers.set(sessionId, handler);
+  /**
+   * One opencode session id maps to at most one live `OpencodeSession`
+   * handler. `directory` is the session's own cwd — it opens (or joins) that
+   * directory's event stream, since that is what `/event` requires to
+   * deliver anything for this session at all.
+   */
+  register(sessionId: string, directory: string, handler: (raw: unknown) => void): void {
+    this.handlers.set(sessionId, { directory, handler });
+    this.ensureEventStreamFor(directory);
   }
 
   unregister(sessionId: string): void {
+    const entry = this.handlers.get(sessionId);
     this.handlers.delete(sessionId);
+    if (!entry) return;
+    const stream = this.eventStreams.get(entry.directory);
+    if (!stream) return;
+    stream.refCount--;
+    if (stream.refCount <= 0) {
+      stream.abort.abort();
+      this.eventStreams.delete(entry.directory);
+    }
   }
 
   async request<T>(
@@ -224,8 +281,8 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
 
   /** Kills the shared process. Every registered session must have already stopped using it. */
   dispose(): void {
-    this.sseAbort?.abort();
-    this.sseAbort = null;
+    for (const { abort } of this.eventStreams.values()) abort.abort();
+    this.eventStreams.clear();
     this.handlers.clear();
     this.removeAllListeners();
     if (this.child) {

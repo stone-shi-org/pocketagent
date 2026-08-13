@@ -161,7 +161,7 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
       throw err;
     }
 
-    this.server.register(this._opencodeSessionId, (raw) => this.handleRaw(raw));
+    this.server.register(this._opencodeSessionId, this.spec.cwd, (raw) => this.handleRaw(raw));
 
     this._startedAt = Date.now();
     this._lastActivityAt = this._startedAt;
