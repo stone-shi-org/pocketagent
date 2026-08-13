@@ -251,6 +251,20 @@ export class PiSession extends EventEmitter<StructuredSessionEvents> {
    * unlike `AgySession`'s `/help` probe this has no conversation-visible
    * shape to suppress in the first place. Best-effort: a failure here just
    * means no picker, never a broken session.
+   *
+   * Deliberately excludes pi's built-in TUI commands (`/model`, `/settings`,
+   * `/login`, `/new`, `/tree`, `/resume`, `/compact`, `/reload`, ... — pi's
+   * own docs list plenty more) — and this is not a gap to close later, it is
+   * what pi's docs say `get_commands` is *for*: "Built-in TUI commands
+   * (`/settings`, `/hotkeys`, etc.) are not included. They are handled only
+   * in interactive mode **and would not execute if sent via `prompt`**"
+   * (docs/rpc.md, verbatim; docs/extensions.md says the same). That last
+   * clause is the reason this class never hand-lists them the way one might
+   * be tempted to: pi's own maintainers confirm sending one through this
+   * session's `prompt()` would not do the thing its name suggests, so a
+   * picker entry for one would render but lie. What `get_commands` *does*
+   * return (extension commands, prompt templates, skills) is genuinely
+   * invocable via `prompt` and is exactly what this reports.
    */
   private async fetchInitialCommands(): Promise<void> {
     const res = await this.sendCommand('get_commands');

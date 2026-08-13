@@ -196,6 +196,24 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
    * (`POST /session/{id}/command`), which `prompt()` below routes to only
    * for a name this fetch actually returned. Best-effort: a failure here
    * just means no picker, never a broken session.
+   *
+   * Deliberately incomplete, and confirmed as such rather than assumed: this
+   * only ever returns opencode's *custom* commands — its own docs
+   * (https://opencode.ai/docs/commands/) draw a hard line between these and
+   * "built-in commands like `/init`, `/undo`, `/redo`, `/share`, `/help`"
+   * (that list is illustrative, not exhaustive — a live TUI session's
+   * rotating tips surfaced `/unshare` too, which the docs never even name).
+   * None of those built-ins appear in a live `GET /command` response
+   * (checked against this exact repo), and there is no other documented
+   * endpoint that lists them. They also do not look reachable through either
+   * endpoint this class uses: the keybinds doc
+   * (https://opencode.ai/docs/keybinds/) shows most TUI actions are
+   * keybinding-driven, not text — the same architecture that ruled out a
+   * picker for codex. Adding guessed names for these here would repeat
+   * exactly the mistake `CodexSession`'s doc comment explains avoiding: a
+   * picker entry that renders but silently does nothing real when picked,
+   * because there is no confirmed way to invoke it headlessly. If opencode
+   * ever documents a real one, wire it in then — not by guessing now.
    */
   private async fetchInitialCommands(): Promise<void> {
     if (!this._opencodeSessionId) return;
