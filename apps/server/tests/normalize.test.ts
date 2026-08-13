@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   extractAgyPath,
+  extractOpencodePath,
   extractPath,
   normalizeAgyMessage,
+  normalizeOpencodeEvent,
   normalizeSdkMessage,
   summarizeAgyTool,
+  summarizeOpencodeTool,
   summarizeToolUse,
 } from '../src/sessions/normalize.js';
 
@@ -447,5 +450,265 @@ describe('extractAgyPath', () => {
 
   it('returns null when there is no path', () => {
     expect(extractAgyPath({ CommandLine: 'ls' })).toBeNull();
+  });
+});
+
+/**
+ * These payloads mirror opencode's `GET /event` SSE stream (v1.17.18),
+ * cross-checked against the real, installed `@opencode-ai/sdk` generated
+ * types — same discipline as `normalizeSdkMessage`/`normalizeAgyMessage`
+ * above: tested without a live server or a working model provider.
+ */
+describe('normalizeOpencodeEvent: message.part.updated (text)', () => {
+  it('emits text_delta while a part is still streaming', () => {
+    const events = normalizeOpencodeEvent({
+      type: 'message.part.updated',
+      properties: {
+        sessionID: 'ses_1',
+        delta: 'hel',
+        part: { id: 'prt_1', sessionID: 'ses_1', messageID: 'msg_1', type: 'text', text: 'hel' },
+      },
+    });
+    expect(events).toEqual([{ kind: 'text_delta', id: 'prt_1', text: 'hel' }]);
+  });
+
+  it('emits a final text block once time.end is set', () => {
+    const events = normalizeOpencodeEvent({
+      type: 'message.part.updated',
+      properties: {
+        sessionID: 'ses_1',
+        part: {
+          id: 'prt_1',
+          sessionID: 'ses_1',
+          messageID: 'msg_1',
+          type: 'text',
+          text: 'hello world',
+          time: { start: 0, end: 1 },
+        },
+      },
+    });
+    expect(events).toEqual([{ kind: 'text', id: 'prt_1', text: 'hello world' }]);
+  });
+
+  it('drops a plain user-submitted part — no delta, no time.end — without any role check', () => {
+    // This is the exact shape captured live for the user's own echoed prompt:
+    // no `time` field at all on the part.
+    const events = normalizeOpencodeEvent({
+      type: 'message.part.updated',
+      properties: {
+        sessionID: 'ses_1',
+        part: { id: 'prt_u', sessionID: 'ses_1', messageID: 'msg_u', type: 'text', text: 'hi there' },
+      },
+    });
+    expect(events).toEqual([]);
+  });
+});
+
+describe('normalizeOpencodeEvent: message.part.updated (reasoning)', () => {
+  it('emits thinking only once time.end is set', () => {
+    expect(
+      normalizeOpencodeEvent({
+        type: 'message.part.updated',
+        properties: {
+          sessionID: 'ses_1',
+          part: { id: 'prt_r', sessionID: 'ses_1', messageID: 'msg_1', type: 'reasoning', text: 'thinking...', time: { start: 0 } },
+        },
+      }),
+    ).toEqual([]);
+
+    expect(
+      normalizeOpencodeEvent({
+        type: 'message.part.updated',
+        properties: {
+          sessionID: 'ses_1',
+          part: { id: 'prt_r', sessionID: 'ses_1', messageID: 'msg_1', type: 'reasoning', text: 'done thinking', time: { start: 0, end: 1 } },
+        },
+      }),
+    ).toEqual([{ kind: 'thinking', id: 'prt_r', text: 'done thinking' }]);
+  });
+});
+
+describe('normalizeOpencodeEvent: message.part.updated (tool)', () => {
+  it('maps a running tool call to tool_use', () => {
+    const events = normalizeOpencodeEvent({
+      type: 'message.part.updated',
+      properties: {
+        sessionID: 'ses_1',
+        part: {
+          id: 'prt_t', sessionID: 'ses_1', messageID: 'msg_1', type: 'tool', callID: 'call_1', tool: 'bash',
+          state: { status: 'running', input: { command: 'ls -la' } },
+        },
+      },
+    });
+    expect(events).toEqual([
+      { kind: 'tool_use', id: 'prt_t', name: 'bash', input: { command: 'ls -la' }, summary: 'Run ls -la', filePath: null },
+    ]);
+  });
+
+  it('maps a completed tool call to a non-error tool_result', () => {
+    const events = normalizeOpencodeEvent({
+      type: 'message.part.updated',
+      properties: {
+        sessionID: 'ses_1',
+        part: {
+          id: 'prt_t', sessionID: 'ses_1', messageID: 'msg_1', type: 'tool', callID: 'call_1', tool: 'bash',
+          state: { status: 'completed', input: {}, output: 'hi\n', title: 'ls', metadata: {}, time: { start: 0, end: 1 } },
+        },
+      },
+    });
+    expect(events).toEqual([
+      { kind: 'tool_result', id: 'oc_tr_prt_t', toolUseId: 'prt_t', content: 'hi\n', truncated: false, isError: false },
+    ]);
+  });
+
+  it('maps an errored tool call to an error tool_result', () => {
+    const events = normalizeOpencodeEvent({
+      type: 'message.part.updated',
+      properties: {
+        sessionID: 'ses_1',
+        part: {
+          id: 'prt_t', sessionID: 'ses_1', messageID: 'msg_1', type: 'tool', callID: 'call_1', tool: 'bash',
+          state: { status: 'error', input: {}, error: 'command not found', time: { start: 0, end: 1 } },
+        },
+      },
+    });
+    expect(events[0]).toMatchObject({ kind: 'tool_result', content: 'command not found', isError: true });
+  });
+
+  it('ignores a pending tool call — arguments are still streaming in', () => {
+    expect(
+      normalizeOpencodeEvent({
+        type: 'message.part.updated',
+        properties: {
+          sessionID: 'ses_1',
+          part: { id: 'prt_t', sessionID: 'ses_1', messageID: 'msg_1', type: 'tool', callID: 'call_1', tool: 'bash', state: { status: 'pending', input: {}, raw: '' } },
+        },
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe('normalizeOpencodeEvent: session lifecycle', () => {
+  it('maps session.idle to a turn_complete with no usage of its own', () => {
+    const events = normalizeOpencodeEvent({ type: 'session.idle', properties: { sessionID: 'ses_1' } });
+    expect(events).toEqual([
+      { kind: 'turn_complete', stopReason: null, isError: false, numTurns: null, durationMs: null, costUsd: null, inputTokens: null, outputTokens: null },
+    ]);
+  });
+
+  it('maps session.error to an error notice, extracting the nested message', () => {
+    const events = normalizeOpencodeEvent({
+      type: 'session.error',
+      properties: { sessionID: 'ses_1', error: { name: 'UnknownError', data: { message: 'boom' } } },
+    });
+    expect(events).toEqual([{ kind: 'notice', level: 'error', text: 'boom' }]);
+  });
+
+  it('falls back to the error name when there is no message', () => {
+    const events = normalizeOpencodeEvent({
+      type: 'session.error',
+      properties: { sessionID: 'ses_1', error: { name: 'ProviderAuthError', data: {} } },
+    });
+    expect(events).toEqual([{ kind: 'notice', level: 'error', text: 'ProviderAuthError.' }]);
+  });
+
+  it('drops the assistant message.updated shell — it carries no renderable content of its own', () => {
+    expect(
+      normalizeOpencodeEvent({
+        type: 'message.updated',
+        properties: { sessionID: 'ses_1', info: { id: 'msg_a', sessionID: 'ses_1', role: 'assistant', cost: 0.01, tokens: {} } },
+      }),
+    ).toEqual([]);
+  });
+
+  it('surfaces an error embedded in message.updated as a notice', () => {
+    const events = normalizeOpencodeEvent({
+      type: 'message.updated',
+      properties: {
+        sessionID: 'ses_1',
+        info: { id: 'msg_a', sessionID: 'ses_1', role: 'assistant', error: { name: 'UnknownError', data: { message: 'output too long' } } },
+      },
+    });
+    expect(events).toEqual([{ kind: 'notice', level: 'error', text: 'output too long' }]);
+  });
+
+  it('ignores a user message.updated entirely', () => {
+    expect(
+      normalizeOpencodeEvent({
+        type: 'message.updated',
+        properties: { sessionID: 'ses_1', info: { id: 'msg_u', sessionID: 'ses_1', role: 'user' } },
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe('normalizeOpencodeEvent: permissions', () => {
+  it('maps permission.updated to a generic permission_request', () => {
+    const events = normalizeOpencodeEvent({
+      type: 'permission.updated',
+      properties: {
+        id: 'per_1', type: 'bash', sessionID: 'ses_1', messageID: 'msg_1',
+        title: 'Allow running rm -rf?', metadata: { command: 'rm -rf /tmp/x' },
+        time: { created: 0 },
+      },
+    });
+    expect(events).toEqual([
+      {
+        kind: 'permission_request', id: 'per_1', toolName: 'bash',
+        input: { command: 'rm -rf /tmp/x' }, title: 'Allow running rm -rf?',
+        displayName: null, filePath: null, reason: null, canAllowForSession: true, questions: null,
+      },
+    ]);
+  });
+
+  it('maps permission.replied to permission_resolved with the decision inferred from the reply', () => {
+    expect(
+      normalizeOpencodeEvent({ type: 'permission.replied', properties: { sessionID: 's', permissionID: 'per_1', response: 'always' } }),
+    ).toEqual([{ kind: 'permission_resolved', id: 'per_1', decision: 'allow_session', message: null }]);
+
+    expect(
+      normalizeOpencodeEvent({ type: 'permission.replied', properties: { sessionID: 's', permissionID: 'per_2', response: 'reject' } }),
+    ).toEqual([{ kind: 'permission_resolved', id: 'per_2', decision: 'deny', message: null }]);
+
+    expect(
+      normalizeOpencodeEvent({ type: 'permission.replied', properties: { sessionID: 's', permissionID: 'per_3', response: 'once' } }),
+    ).toEqual([{ kind: 'permission_resolved', id: 'per_3', decision: 'allow', message: null }]);
+  });
+});
+
+describe('normalizeOpencodeEvent: robustness', () => {
+  it('returns nothing for unknown or session-less event types', () => {
+    expect(normalizeOpencodeEvent({ type: 'plugin.added', properties: { id: 'x' } })).toEqual([]);
+    expect(normalizeOpencodeEvent({ type: 'catalog.updated', properties: {} })).toEqual([]);
+  });
+
+  it('tolerates malformed input', () => {
+    expect(normalizeOpencodeEvent(null)).toEqual([]);
+    expect(normalizeOpencodeEvent('nonsense')).toEqual([]);
+    expect(normalizeOpencodeEvent({ type: 'message.part.updated' })).toEqual([]);
+    expect(normalizeOpencodeEvent({ type: 'permission.replied', properties: {} })).toEqual([]);
+  });
+});
+
+describe('summarizeOpencodeTool', () => {
+  it('summarizes well-known tools readably', () => {
+    expect(summarizeOpencodeTool('bash', { command: 'npm test' })).toBe('Run npm test');
+    expect(summarizeOpencodeTool('read', { filePath: '/a/b/c.ts' })).toBe('Read c.ts');
+    expect(summarizeOpencodeTool('grep', { pattern: 'TODO' })).toBe('Search TODO');
+  });
+
+  it('falls back to something useful for unknown tools', () => {
+    expect(summarizeOpencodeTool('mystery_tool', {})).toBe('mystery_tool');
+  });
+});
+
+describe('extractOpencodePath', () => {
+  it('finds the path under common key names', () => {
+    expect(extractOpencodePath({ filePath: '/a' })).toBe('/a');
+    expect(extractOpencodePath({ path: '/b' })).toBe('/b');
+  });
+
+  it('returns null when there is no path', () => {
+    expect(extractOpencodePath({ command: 'ls' })).toBeNull();
   });
 });

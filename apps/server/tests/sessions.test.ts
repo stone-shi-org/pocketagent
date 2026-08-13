@@ -7,11 +7,16 @@ import { buildChildEnv } from '../src/sessions/env.js';
 import { createClaudeAdapter } from '../src/agents/claude.js';
 import { createShellAdapter } from '../src/agents/shell.js';
 import { createAgyAdapter } from '../src/agents/agy.js';
+import { createOpencodeAdapter } from '../src/agents/opencode.js';
 import { StructuredSession } from '../src/sessions/structured-session.js';
 
 const AGY_FIXTURE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   'fixtures/fake-agy.mjs',
+);
+const OPENCODE_FIXTURE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'fixtures/fake-opencode-server.mjs',
 );
 
 function headers(t: TestApp): Record<string, string> {
@@ -86,6 +91,12 @@ describe('skip-permissions opt-in, off by default', () => {
     expect(createAgyAdapter('agy').forcesSkipPermissions).toBe(true);
     expect(createClaudeAdapter('claude').forcesSkipPermissions).toBeUndefined();
     expect(createShellAdapter('/bin/bash').forcesSkipPermissions).toBeUndefined();
+  });
+
+  it('opencode supports the real toggle, unlike agy — it has a genuine approval gate', () => {
+    const adapter = createOpencodeAdapter('opencode');
+    expect(adapter.supportsSkipPermissions).toBe(true);
+    expect(adapter.forcesSkipPermissions).toBeUndefined();
   });
 });
 
@@ -303,6 +314,103 @@ describe('agy adapter: structured, forced skip-permissions', () => {
 
     const info = t.context.sessions.find(id);
     expect(info?.skipPermissionsEnabled).toBe(true);
+  });
+});
+
+describe('opencode adapter: structured, real approval gate', () => {
+  let t: TestApp;
+
+  beforeEach(async () => {
+    // Points the adapter at a fixture HTTP+SSE server instead of the real
+    // CLI: real opencode needs a working model provider, which the sandbox
+    // this was built in could not reliably reach. See
+    // tests/fixtures/fake-opencode-server.mjs.
+    t = await createTestApp({ POCKETAGENT_OPENCODE_BIN: OPENCODE_FIXTURE });
+  });
+  afterEach(() => t.cleanup());
+
+  it('reports supportsSkipPermissions without forcesSkipPermissions', async () => {
+    const res = await t.app.inject({ method: 'GET', url: '/api/agents', headers: headers(t) });
+    const agents = res.json().agents as {
+      id: string;
+      supportsSkipPermissions: boolean;
+      forcesSkipPermissions: boolean;
+    }[];
+    const opencode = agents.find((a) => a.id === 'opencode');
+    expect(opencode?.supportsSkipPermissions).toBe(true);
+    expect(opencode?.forcesSkipPermissions).toBe(false);
+  });
+
+  it('creates a structured session that defaults to asking, unlike agy', async () => {
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: { agent: 'opencode', cwd: t.projectDir, cols: 80, rows: 24 },
+    });
+    expect(created.statusCode).toBe(201);
+    const body = created.json();
+    expect(body.agent).toBe('opencode');
+    expect(body.transport).toBe('structured');
+    expect(body.skipPermissionsEnabled).toBe(false);
+  });
+
+  it('runs a real turn through the manager and surfaces a genuine permission request', async () => {
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: { agent: 'opencode', cwd: t.projectDir, cols: 80, rows: 24 },
+    });
+    const id = created.json().id as string;
+
+    const session = t.context.sessions.getOrThrow(id);
+    if (session.transport !== 'structured') throw new Error('expected a structured session');
+    session.prompt('NEEDS_PERMISSION');
+
+    await waitFor(() =>
+      session.buffer.replayAfter(0).events.some((e) => e.event.kind === 'permission_request'),
+    );
+    const request = session
+      .buffer.replayAfter(0)
+      .events.map((e) => e.event)
+      .find((e) => e.kind === 'permission_request');
+    expect(request).toBeTruthy();
+
+    expect(session.resolvePermission(request!.id, 'allow')).toBe(true);
+
+    await waitFor(() =>
+      session.buffer.replayAfter(0).events.some((e) => e.event.kind === 'turn_complete'),
+    );
+    const kinds = session.buffer.replayAfter(0).events.map((e) => e.event.kind);
+    expect(kinds).toContain('tool_result');
+  });
+
+  it('creates a session that skips permissions when explicitly opted in', async () => {
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(t),
+      payload: {
+        agent: 'opencode',
+        cwd: t.projectDir,
+        cols: 80,
+        rows: 24,
+        skipPermissions: true,
+      },
+    });
+    expect(created.json().skipPermissionsEnabled).toBe(true);
+
+    const id = created.json().id as string;
+    const session = t.context.sessions.getOrThrow(id);
+    if (session.transport !== 'structured') throw new Error('expected a structured session');
+    session.prompt('NEEDS_PERMISSION');
+
+    await waitFor(() =>
+      session.buffer.replayAfter(0).events.some((e) => e.event.kind === 'turn_complete'),
+    );
+    const kinds = session.buffer.replayAfter(0).events.map((e) => e.event.kind);
+    expect(kinds).not.toContain('permission_request');
   });
 });
 

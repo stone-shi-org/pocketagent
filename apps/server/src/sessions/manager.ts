@@ -16,18 +16,20 @@ import type { ProcessBackend } from '../backends/index.js';
 import { PtySession } from './pty-session.js';
 import { StructuredSession } from './structured-session.js';
 import { AgySession } from './agy-session.js';
+import { OpencodeSession } from './opencode-session.js';
+import { OpencodeServerManager } from './opencode-server.js';
 import { buildChildEnv } from './env.js';
 
 /**
- * Either engine behind the `structured` transport. `StructuredSession` holds
- * the Claude Agent SDK's query open for the session's whole life;
- * `AgySession` spawns the `agy` CLI fresh per turn. Both normalize into the
- * same `AgentEvent` union and expose the same approval-adjacent surface (even
- * though `AgySession`'s is always empty — see its own docs), so everything
- * below that only checks `transport === 'structured'` can treat them
- * interchangeably.
+ * Any engine behind the `structured` transport. `StructuredSession` holds the
+ * Claude Agent SDK's query open for the session's whole life; `AgySession`
+ * spawns the `agy` CLI fresh per turn; `OpencodeSession` talks HTTP + SSE to a
+ * shared `opencode serve` process. All three normalize into the same
+ * `AgentEvent` union and expose the same approval-adjacent surface (empty for
+ * `AgySession` — see its own docs), so everything below that only checks
+ * `transport === 'structured'` can treat them interchangeably.
  */
-export type StructuredLikeSession = StructuredSession | AgySession;
+export type StructuredLikeSession = StructuredSession | AgySession | OpencodeSession;
 
 /**
  * Either flavour of session. They share the metadata surface the manager,
@@ -135,6 +137,12 @@ export class SessionManager {
    * `skipPermissions` invariant, not a config knob like any other.
    */
   private globalSkipPermissions: boolean;
+  /**
+   * Lazily started on the first opencode session and shared by every one
+   * after that — see `OpencodeServerManager`'s own docs for why one process
+   * serves every directory rather than one per chat.
+   */
+  private opencodeServer: OpencodeServerManager | null = null;
 
   constructor(private readonly opts: ManagerOptions) {
     const stored = readSetting(opts.db, GLOBAL_SKIP_PERMISSIONS_KEY);
@@ -449,6 +457,23 @@ export class SessionManager {
         });
       }
 
+      if (adapter.structuredKind === 'opencode-server') {
+        return this.startOpencode({
+          id,
+          title,
+          adapter,
+          cwd: input.cwd,
+          workspaceLabel,
+          createdAt,
+          executable,
+          env,
+          ...(input.resumeAgentSessionId
+            ? { resumeAgentSessionId: input.resumeAgentSessionId }
+            : {}),
+          skipPermissions,
+        });
+      }
+
       return this.startStructured({
         id,
         title,
@@ -644,6 +669,99 @@ export class SessionManager {
     this.persist(session);
     this.opts.logger?.info(
       { sessionId: args.id, agent: args.adapter.id, transport: 'structured', backend: 'agy-cli' },
+      'session started',
+    );
+    return session;
+  }
+
+  /**
+   * The one `opencode serve` process shared by every `OpencodeSession`.
+   * Spawned on first use; `executable`/`env` come from whichever session
+   * happens to trigger that, but every opencode session uses the same
+   * adapter and therefore the same resolved binary, so this is stable.
+   */
+  private getOrCreateOpencodeServer(executable: string, env: Record<string, string>): OpencodeServerManager {
+    if (this.opencodeServer) return this.opencodeServer;
+
+    const server = new OpencodeServerManager({
+      executablePath: executable,
+      env,
+      cwd: this.opts.workspaces.getRoots()[0] ?? process.cwd(),
+      logger: this.opts.logger,
+    });
+    // A crash after startup takes every live opencode session's server-side
+    // state with it — there is nothing left to reconnect to, so each one is
+    // told directly rather than left to time out silently.
+    server.on('crashed', () => {
+      for (const session of this.live.values()) {
+        if (session instanceof OpencodeSession) session.markServerCrashed();
+      }
+    });
+    this.opencodeServer = server;
+    return server;
+  }
+
+  /**
+   * Structured, but via `OpencodeSession` talking to a shared
+   * `opencode serve` process instead of the Claude Agent SDK or a per-turn
+   * `agy` subprocess. See `OpencodeSession`/`OpencodeServerManager` for why
+   * this is its own code path.
+   */
+  private async startOpencode(args: {
+    id: string;
+    title: string;
+    adapter: { id: string; displayName: string };
+    cwd: string;
+    workspaceLabel: string;
+    createdAt: number;
+    executable: string;
+    env: Record<string, string>;
+    resumeAgentSessionId?: string;
+    skipPermissions?: boolean;
+  }): Promise<OpencodeSession> {
+    const server = this.getOrCreateOpencodeServer(args.executable, args.env);
+    const session = new OpencodeSession(
+      {
+        id: args.id,
+        title: args.title,
+        agent: args.adapter.id,
+        agentDisplayName: args.adapter.displayName,
+        cwd: args.cwd,
+        workspaceLabel: args.workspaceLabel,
+        eventBufferBytes: this.opts.outputBufferBytes,
+        createdAt: args.createdAt,
+        ...(args.resumeAgentSessionId
+          ? { resumeAgentSessionId: args.resumeAgentSessionId }
+          : {}),
+        skipPermissions: args.skipPermissions === true,
+      },
+      server,
+    );
+
+    this.insertRow(session, args.createdAt);
+    this.live.set(args.id, session);
+    this.wire(session);
+    // No derived-title lookup, same reasoning as agy: opencode keeps its own
+    // conversation store, not one this server knows how to read.
+    session.on('event', (_seq, event) => {
+      if (event.kind === 'session_started') this.persist(session);
+    });
+
+    try {
+      await session.start();
+    } catch (err) {
+      this.persist(session);
+      this.live.delete(args.id);
+      throw new SessionError(
+        `Failed to start ${args.adapter.displayName}: ${err instanceof Error ? err.message : String(err)}`,
+        'spawn_failed',
+        500,
+      );
+    }
+
+    this.persist(session);
+    this.opts.logger?.info(
+      { sessionId: args.id, agent: args.adapter.id, transport: 'structured', backend: 'opencode-server' },
       'session started',
     );
     return session;
@@ -1028,6 +1146,10 @@ export class SessionManager {
     for (const timer of this.approvalTimers.values()) clearTimeout(timer);
     this.approvalTimers.clear();
     this.opts.backend.dispose?.();
+    // Every opencode session above has already been asked to stop; the
+    // shared process outlives any one of them, so it is only killed here.
+    this.opencodeServer?.dispose();
+    this.opencodeServer = null;
     this.live.clear();
     this.attachCounts.clear();
   }

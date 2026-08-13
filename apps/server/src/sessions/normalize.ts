@@ -397,6 +397,245 @@ export function extractAgyPath(input: Record<string, unknown>): string | null {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// opencode — `opencode serve`'s shared `GET /event` SSE stream
+// ---------------------------------------------------------------------------
+
+/**
+ * Translate one event from opencode's `GET /event` SSE stream into zero or
+ * more normalized events.
+ *
+ * Shapes below come from the real, installed `@opencode-ai/sdk` v1.17.18
+ * generated types (`dist/gen/types.gen.d.ts`) cross-checked against a live
+ * `opencode serve` instance's own `/doc` OpenAPI output. The two disagreed on
+ * naming more than once during development — the OpenAPI catalog still lists
+ * schemas like `EventPermissionAsked` that no longer correspond to anything
+ * actually emitted on the wire in this version, where the live discriminant
+ * is `permission.updated` — so this only trusts shapes that were confirmed in
+ * the shipped `.d.ts`, and returns `[]` for anything else rather than
+ * guessing. As with `normalizeSdkMessage`/`normalizeAgyMessage`, an
+ * unrecognized event must never throw.
+ */
+export function normalizeOpencodeEvent(message: unknown): AgentEvent[] {
+  if (!isRecord(message)) return [];
+  const type = str(message.type);
+  const properties = isRecord(message.properties) ? message.properties : {};
+
+  switch (type) {
+    case 'message.part.updated':
+      return normalizeOpencodePart(properties);
+    case 'message.updated':
+      return normalizeOpencodeMessage(properties);
+    case 'session.idle':
+      // Cost/token totals are not on this event (see `properties` in the
+      // `.d.ts`: just `{sessionID}`) — they arrive separately via
+      // `message.updated` for the assistant message. `OpencodeSession`
+      // caches the latest one and patches it into this event's fields
+      // itself; this function has no cross-event memory to do that with.
+      return [
+        {
+          kind: 'turn_complete',
+          stopReason: null,
+          isError: false,
+          numTurns: null,
+          durationMs: null,
+          costUsd: null,
+          inputTokens: null,
+          outputTokens: null,
+        },
+      ];
+    case 'session.error':
+      return [
+        {
+          kind: 'notice',
+          level: 'error',
+          text: extractOpencodeErrorMessage(properties.error),
+        },
+      ];
+    case 'permission.updated':
+      return [normalizeOpencodePermission(properties)];
+    case 'permission.replied': {
+      const decision = opencodeReplyToDecision(str(properties.response));
+      const id = str(properties.id) ?? str(properties.permissionID);
+      if (!id) return [];
+      return [{ kind: 'permission_resolved', id, decision, message: null }];
+    }
+    default:
+      return [];
+  }
+}
+
+function normalizeOpencodePart(properties: Record<string, unknown>): AgentEvent[] {
+  const part = isRecord(properties.part) ? properties.part : null;
+  if (!part) return [];
+  const partType = str(part.type);
+  const id = str(part.id) ?? str(part.callID) ?? 'oc_part';
+
+  if (partType === 'text') {
+    const events: AgentEvent[] = [];
+    const delta = str(properties.delta);
+    if (delta) events.push({ kind: 'text_delta', id, text: delta });
+
+    // opencode has no separate "block finished" signal; `time.end` on the
+    // part itself is it. A plain user-submitted part (echoed back over the
+    // same event type) carries no `time` at all, so this naturally never
+    // fires for the user's own prompt — no role check needed to keep from
+    // re-showing it.
+    const time = isRecord(part.time) ? part.time : null;
+    if (time && num(time.end) !== null) {
+      const text = str(part.text) ?? '';
+      if (text.trim().length > 0) events.push({ kind: 'text', id, text: clamp(text, MAX_TEXT_CHARS) });
+    }
+    return events;
+  }
+
+  if (partType === 'reasoning') {
+    const time = isRecord(part.time) ? part.time : null;
+    if (!time || num(time.end) === null) return [];
+    const text = str(part.text) ?? '';
+    if (text.trim().length === 0) return [];
+    return [{ kind: 'thinking', id, text: clamp(text, MAX_TEXT_CHARS) }];
+  }
+
+  if (partType === 'tool') {
+    const state = isRecord(part.state) ? part.state : null;
+    const status = state ? str(state.status) : null;
+    const name = str(part.tool) ?? 'tool';
+    const input = state && isRecord(state.input) ? state.input : {};
+
+    if (status === 'running') {
+      return [
+        {
+          kind: 'tool_use',
+          id,
+          name,
+          input,
+          summary: summarizeOpencodeTool(name, input),
+          filePath: extractOpencodePath(input),
+        },
+      ];
+    }
+    if (status === 'completed' || status === 'error') {
+      const isError = status === 'error';
+      const content = state ? str(isError ? state.error : state.output) ?? '' : '';
+      return [
+        {
+          kind: 'tool_result',
+          id: `oc_tr_${id}`,
+          toolUseId: id,
+          content: clamp(content, MAX_RESULT_CHARS),
+          truncated: content.length > MAX_RESULT_CHARS,
+          isError,
+        },
+      ];
+    }
+    // "pending": arguments are still streaming in, nothing to show yet.
+    return [];
+  }
+
+  // file / step-start / step-finish / snapshot / patch / agent / retry /
+  // compaction / subtask parts have no rendering in this union yet.
+  return [];
+}
+
+function normalizeOpencodeMessage(properties: Record<string, unknown>): AgentEvent[] {
+  const info = isRecord(properties.info) ? properties.info : null;
+  if (!info || str(info.role) !== 'assistant') return [];
+  if (!isRecord(info.error)) return [];
+  return [{ kind: 'notice', level: 'error', text: extractOpencodeErrorMessage(info.error) }];
+}
+
+function normalizeOpencodePermission(properties: Record<string, unknown>): AgentEvent {
+  const id = str(properties.id) ?? '';
+  // `type` here is the permission/tool kind (e.g. "bash", "edit"), not the
+  // literal string "permission" — same field opencode's own title sentence
+  // (below) describes.
+  const toolName = str(properties.type) ?? 'tool';
+  const metadata = isRecord(properties.metadata) ? properties.metadata : {};
+
+  return {
+    kind: 'permission_request',
+    id,
+    toolName,
+    input: metadata,
+    // opencode renders its own sentence for this, same reasoning as the SDK's
+    // `opts.title` in structured-session.ts: show what the CLI would show.
+    title: str(properties.title) ?? `Allow: ${toolName}?`,
+    displayName: null,
+    filePath: extractOpencodePath(metadata),
+    reason: null,
+    // The reply endpoint always accepts "always", so a session-wide allow is
+    // always on the table — there is no per-request flag saying otherwise.
+    canAllowForSession: true,
+    // opencode's question flow (a separate `/question` resource) is not
+    // mapped in this version; every permission is a generic approval.
+    questions: null,
+  };
+}
+
+function opencodeReplyToDecision(
+  reply: string | undefined,
+): 'allow' | 'allow_session' | 'deny' {
+  if (reply === 'always') return 'allow_session';
+  if (reply === 'reject') return 'deny';
+  return 'allow';
+}
+
+function extractOpencodeErrorMessage(error: unknown): string {
+  if (!isRecord(error)) return 'Unknown error.';
+  const data = isRecord(error.data) ? error.data : {};
+  const message = str(data.message);
+  if (message) return message;
+  const name = str(error.name);
+  return name ? `${name}.` : 'Unknown error.';
+}
+
+/**
+ * A short human sentence for one of opencode's own tool names.
+ *
+ * Unverified against a live tool call — the sandbox this was built in could
+ * not reach a working model provider (see the PR/commit notes) — so this
+ * leans on the generic fallback rather than guessing parameter key names for
+ * tools this was never able to observe firing.
+ */
+export function summarizeOpencodeTool(name: string, input: Record<string, unknown>): string {
+  const file = extractOpencodePath(input);
+  const base = file ? path.basename(file) : null;
+
+  switch (name) {
+    case 'bash': {
+      const cmd = str(input.command) ?? '';
+      return cmd ? `Run ${clamp(cmd.split('\n')[0] ?? cmd, 80)}` : 'Run command';
+    }
+    case 'read':
+      return base ? `Read ${base}` : 'Read file';
+    case 'write':
+      return base ? `Write ${base}` : 'Write file';
+    case 'edit':
+      return base ? `Edit ${base}` : 'Edit file';
+    case 'glob':
+      return `Find ${str(input.pattern) ?? 'files'}`;
+    case 'grep':
+      return `Search ${str(input.pattern) ?? ''}`.trim() || 'Search';
+    case 'webfetch':
+      return `Fetch ${str(input.url) ?? 'URL'}`;
+    default: {
+      if (base) return `${name} ${base}`;
+      const first = Object.values(input).find(isString);
+      return first ? `${name} ${clamp(first, 60)}` : name;
+    }
+  }
+}
+
+/** The file an opencode tool call touches, if any. Best-effort, same caveat as `summarizeOpencodeTool`. */
+export function extractOpencodePath(input: Record<string, unknown>): string | null {
+  for (const key of ['filePath', 'file_path', 'path']) {
+    const value = input[key];
+    if (isString(value) && value.length > 0) return value;
+  }
+  return null;
+}
+
 function blockId(inner: Record<string, unknown> | null, index: number): string {
   const base = (inner && str(inner.id)) || 'msg';
   return `${base}_${index}`;

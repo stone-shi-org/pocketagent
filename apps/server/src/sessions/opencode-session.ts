@@ -1,0 +1,419 @@
+import crypto from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import type { AgentEvent, PermissionDecision, PermissionRequestEvent, SessionStatus } from '@pocketagent/protocol';
+import { EventBuffer } from '../terminal/event-buffer.js';
+import { normalizeOpencodeEvent } from './normalize.js';
+import type { OpencodeServerManager } from './opencode-server.js';
+import type { StructuredSessionEvents } from './structured-session.js';
+
+export interface OpencodeSessionSpec {
+  id: string;
+  title: string;
+  agent: string;
+  agentDisplayName: string;
+  cwd: string;
+  workspaceLabel: string;
+  eventBufferBytes: number;
+  createdAt: number;
+  /** opencode's own session id, to attach to an existing conversation instead of creating one. */
+  resumeAgentSessionId?: string;
+  /**
+   * Explicit, off-by-default opt-in to auto-approving every tool call.
+   *
+   * Unlike agy, opencode has a genuine synchronous permission gate
+   * (`permission.updated` over SSE, replied to with `POST
+   * /permission/{id}/reply`) — so unlike `AgySession`, this is a real choice,
+   * not a fixed fact about the CLI. When true, `OpencodeSession` auto-replies
+   * "always" to every permission itself instead of forwarding it to the
+   * browser, the same shape as `StructuredSession`'s `bypassPermissions`.
+   */
+  skipPermissions?: boolean;
+}
+
+interface CreatedSession {
+  id: string;
+}
+
+/**
+ * An agent driven through `opencode serve`'s HTTP + SSE API.
+ *
+ * Third shape of "structured" in this codebase, alongside `StructuredSession`
+ * (one long-lived SDK query) and `AgySession` (one subprocess per turn):
+ * opencode's server is a genuine multi-session daemon, shared across every
+ * `OpencodeSession` via one `OpencodeServerManager` (see that class). This
+ * object owns exactly one opencode-side session id and the PocketAgent-facing
+ * event surface for it; it does not own the process.
+ */
+export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
+  readonly transport = 'structured' as const;
+  readonly id: string;
+  readonly spec: OpencodeSessionSpec;
+  readonly buffer: EventBuffer;
+  readonly epoch: string;
+
+  private readonly pending = new Map<string, PermissionRequestEvent>();
+
+  private _status: SessionStatus = 'starting';
+  private _opencodeSessionId: string | null = null;
+  private _startedAt: number | null = null;
+  private _endedAt: number | null = null;
+  private _lastActivityAt: number | null = null;
+  private _busy = false;
+  private _globalBypass = false;
+  private _startError: string | null = null;
+  /** Cached from the latest `message.updated` for the assistant, since `session.idle` carries no usage of its own. */
+  private _lastUsage: { cost: number | null; input: number | null; output: number | null } | null = null;
+
+  constructor(
+    spec: OpencodeSessionSpec,
+    private readonly server: OpencodeServerManager,
+    epoch?: string,
+  ) {
+    super();
+    this.id = spec.id;
+    this.spec = spec;
+    this.buffer = new EventBuffer(spec.eventBufferBytes);
+    this.epoch = epoch ?? crypto.randomBytes(8).toString('base64url');
+    this._opencodeSessionId = spec.resumeAgentSessionId ?? null;
+  }
+
+  // ---- Shared session surface ---------------------------------------------
+
+  get status(): SessionStatus {
+    return this._status;
+  }
+  get pid(): number | null {
+    return null;
+  }
+  get cols(): number {
+    return 0;
+  }
+  get rows(): number {
+    return 0;
+  }
+  get exitCode(): number | null {
+    return null;
+  }
+  get exitSignal(): number | null {
+    return null;
+  }
+  get startedAt(): number | null {
+    return this._startedAt;
+  }
+  get endedAt(): number | null {
+    return this._endedAt;
+  }
+  get lastActivityAt(): number | null {
+    return this._lastActivityAt;
+  }
+  get startError(): string | null {
+    return this._startError;
+  }
+  get externalId(): string | null {
+    return null;
+  }
+  get backendId(): string {
+    return 'opencode-server';
+  }
+  get survivesServerRestart(): boolean {
+    // Same reasoning as the other two structured engines: the wrapper does
+    // not survive, but opencode persists the conversation itself, so a new
+    // session can attach to `agentSessionId` after a restart.
+    return false;
+  }
+  get agentSessionId(): string | null {
+    return this._opencodeSessionId;
+  }
+  get busy(): boolean {
+    return this._busy;
+  }
+  get globalBypassActive(): boolean {
+    return this._globalBypass;
+  }
+  /** No transcript store this server knows how to read; the fixed creation-time title stands. */
+  get derivedTitle(): string | null {
+    return null;
+  }
+  setDerivedTitle(_title: string): void {
+    // No-op: see `derivedTitle`.
+  }
+
+  isAlive(): boolean {
+    return this._status === 'starting' || this._status === 'running';
+  }
+
+  // ---- Lifecycle -------------------------------------------------------------
+
+  async start(): Promise<void> {
+    try {
+      if (!this._opencodeSessionId) {
+        const created = await this.server.request<CreatedSession>('/session', {
+          method: 'POST',
+          query: { directory: this.spec.cwd },
+          body: { title: this.spec.title },
+        });
+        this._opencodeSessionId = created.id;
+      }
+    } catch (err) {
+      this._startError = err instanceof Error ? err.message : String(err);
+      this._endedAt = Date.now();
+      this.setStatus('error');
+      throw err;
+    }
+
+    this.server.register(this._opencodeSessionId, (raw) => this.handleRaw(raw));
+
+    this._startedAt = Date.now();
+    this._lastActivityAt = this._startedAt;
+    this.setStatus('running');
+
+    // Unlike the Agent SDK's own "system init" message or agy's `init` line,
+    // opencode's session-created confirmation is the synchronous HTTP
+    // response above, not something that arrives over the event stream — so
+    // this is emitted directly rather than waited for.
+    this.emitEvent({
+      kind: 'session_started',
+      agentSessionId: this._opencodeSessionId,
+      model: null,
+      cwd: this.spec.cwd,
+      tools: [],
+      permissionMode: this.spec.skipPermissions ? 'bypassPermissions' : 'default',
+    });
+  }
+
+  private handleRaw(raw: unknown): void {
+    this._lastActivityAt = Date.now();
+
+    // Cache the assistant's running cost/tokens — `session.idle` (mapped to
+    // `turn_complete`) carries none of its own; see `normalizeOpencodeEvent`.
+    if (isRecord(raw) && raw.type === 'message.updated') {
+      const properties = isRecord(raw.properties) ? raw.properties : {};
+      const info = isRecord(properties.info) ? properties.info : null;
+      if (info && info.role === 'assistant') {
+        const tokens = isRecord(info.tokens) ? info.tokens : {};
+        this._lastUsage = {
+          cost: typeof info.cost === 'number' ? info.cost : null,
+          input: typeof tokens.input === 'number' ? tokens.input : null,
+          output: typeof tokens.output === 'number' ? tokens.output : null,
+        };
+      }
+    }
+
+    for (const event of normalizeOpencodeEventSafe(raw)) {
+      if (event.kind === 'permission_request') {
+        this.handlePermissionRequest(event);
+        continue;
+      }
+      if (event.kind === 'turn_complete') {
+        this._busy = false;
+        this.emitEvent(this._lastUsage ? { ...event, ...usageFields(this._lastUsage) } : event);
+        this._lastUsage = null;
+        continue;
+      }
+      if (isRecord(raw) && raw.type === 'session.error') this._busy = false;
+      this.emitEvent(event);
+    }
+  }
+
+  private handlePermissionRequest(event: PermissionRequestEvent): void {
+    if (this.spec.skipPermissions || this._globalBypass) {
+      // The bypass is realized here, not by any opencode-side flag: there is
+      // no spawn-time "skip permissions" switch for `serve` mode (that only
+      // exists on `opencode run`'s `--auto`), so PocketAgent auto-replies
+      // itself instead of ever surfacing the request.
+      void this.replyPermissionHttp(event.id, 'always');
+      return;
+    }
+    this.pending.set(event.id, event);
+    this.emitEvent(event);
+    this.emit('permission', this.pendingPermissions());
+  }
+
+  private emitEvent(event: AgentEvent): void {
+    const entry = this.buffer.append(event);
+    this.emit('event', entry.seq, entry.event);
+  }
+
+  private setStatus(status: SessionStatus): void {
+    if (this._status === status) return;
+    this._status = status;
+    this.emit('status', status);
+  }
+
+  // ---- Conversation ------------------------------------------------------------
+
+  prompt(text: string): boolean {
+    if (!this.isAlive() || !this._opencodeSessionId) return false;
+    this._lastActivityAt = Date.now();
+    this._busy = true;
+    this.emitEvent({ kind: 'user_prompt', id: crypto.randomBytes(6).toString('hex'), text });
+
+    void this.server
+      .request(`/session/${this._opencodeSessionId}/prompt_async`, {
+        method: 'POST',
+        query: { directory: this.spec.cwd },
+        body: { parts: [{ type: 'text', text }] },
+      })
+      .catch((err) => {
+        this._busy = false;
+        this.emitEvent({
+          kind: 'notice',
+          level: 'error',
+          text: `Failed to send the prompt: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      });
+    return true;
+  }
+
+  async interrupt(): Promise<void> {
+    if (!this._opencodeSessionId) return;
+    try {
+      await this.server.request(`/session/${this._opencodeSessionId}/abort`, {
+        method: 'POST',
+        query: { directory: this.spec.cwd },
+      });
+      this.emitEvent({ kind: 'notice', level: 'info', text: 'Interrupted.' });
+    } catch (err) {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text: `Interrupt failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  /** See `StructuredSession.applyGlobalSkipPermissions` — same override, same reasoning. */
+  async applyGlobalSkipPermissions(enabled: boolean): Promise<void> {
+    this._globalBypass = enabled;
+    if (!enabled) return;
+    for (const id of [...this.pending.keys()]) this.resolvePermission(id, 'allow_session');
+  }
+
+  // ---- Approvals -----------------------------------------------------------------
+
+  pendingPermissions(): PermissionRequestEvent[] {
+    return [...this.pending.values()];
+  }
+
+  /**
+   * Answer a pending approval.
+   *
+   * Stays synchronous, like every other `resolvePermission` in this codebase
+   * (the WebSocket layer calls it without awaiting) even though replying
+   * actually means an HTTP round trip: the pending-map check that decides
+   * "found vs already resolved" is synchronous and in-memory, and the reply
+   * itself fires as a tracked side effect — a failure there surfaces as a
+   * notice rather than an exception nobody is awaiting for.
+   */
+  resolvePermission(id: string, decision: PermissionDecision, message?: string): boolean {
+    const event = this.pending.get(id);
+    if (!event) return false;
+    this.pending.delete(id);
+    this._lastActivityAt = Date.now();
+
+    const reply = decision === 'deny' ? 'reject' : decision === 'allow_session' ? 'always' : 'once';
+    void this.replyPermissionHttp(id, reply, message);
+
+    this.emitEvent({
+      kind: 'permission_resolved',
+      id,
+      decision,
+      message: message?.trim() || null,
+    });
+    this.emit('permission', this.pendingPermissions());
+    return true;
+  }
+
+  private async replyPermissionHttp(
+    id: string,
+    reply: 'once' | 'always' | 'reject',
+    message?: string,
+  ): Promise<void> {
+    try {
+      await this.server.request(`/permission/${id}/reply`, {
+        method: 'POST',
+        query: { directory: this.spec.cwd },
+        body: { reply, ...(message?.trim() ? { message: message.trim() } : {}) },
+      });
+    } catch (err) {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text: `Failed to reply to a permission request: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  // ---- Teardown --------------------------------------------------------------------
+
+  /**
+   * Stops this chat's own view of things and asks opencode to abort any
+   * in-flight turn. Deliberately does not delete the opencode-side session —
+   * same reasoning as `StructuredSession`: the process/wrapper ends, but the
+   * conversation is opencode's to keep, resumable later via `agentSessionId`.
+   */
+  terminate(_graceMs?: number): void {
+    if (!this.isAlive()) return;
+    this.pending.clear();
+    this.emit('permission', []);
+    this._endedAt = Date.now();
+    this.setStatus('killed');
+
+    if (this._opencodeSessionId) {
+      this.server.unregister(this._opencodeSessionId);
+      void this.server
+        .request(`/session/${this._opencodeSessionId}/abort`, {
+          method: 'POST',
+          query: { directory: this.spec.cwd },
+        })
+        .catch(() => undefined);
+    }
+  }
+
+  detachProcess(): void {
+    this.terminate();
+  }
+
+  dispose(): void {
+    if (this._opencodeSessionId) this.server.unregister(this._opencodeSessionId);
+    this.pending.clear();
+    this.removeAllListeners();
+  }
+
+  /** No-op: idle hints are a terminal-only heuristic. */
+  pollIdleHint(): void {}
+
+  /** Called by `SessionManager` when the shared `opencode serve` process dies mid-session. */
+  markServerCrashed(): void {
+    if (!this.isAlive()) return;
+    this.pending.clear();
+    this.emit('permission', []);
+    this._busy = false;
+    this._startError = 'The opencode server process exited unexpectedly.';
+    this._endedAt = Date.now();
+    this.setStatus('error');
+    this.emitEvent({ kind: 'notice', level: 'error', text: this._startError });
+    this.emit('exit', null, null);
+  }
+}
+
+function usageFields(usage: { cost: number | null; input: number | null; output: number | null }): {
+  costUsd: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+} {
+  return { costUsd: usage.cost, inputTokens: usage.input, outputTokens: usage.output };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Never let one malformed opencode payload kill this session's event handling. */
+function normalizeOpencodeEventSafe(message: unknown): AgentEvent[] {
+  try {
+    return normalizeOpencodeEvent(message);
+  } catch {
+    return [];
+  }
+}

@@ -5,6 +5,7 @@ import type { AgentAdapter } from './types.js';
 import { createShellAdapter } from './shell.js';
 import { createClaudeAdapter } from './claude.js';
 import { createAgyAdapter } from './agy.js';
+import { createOpencodeAdapter } from './opencode.js';
 
 export class AgentRegistry {
   private readonly adapters = new Map<string, AgentAdapter>();
@@ -35,12 +36,14 @@ export interface RegistryOptions {
   shell: string;
   claudeBin: string;
   agyBin: string;
+  opencodeBin: string;
 }
 
 export function createDefaultRegistry(options: RegistryOptions): AgentRegistry {
   const registry = new AgentRegistry();
   registry.register(createClaudeAdapter(options.claudeBin));
   registry.register(createAgyAdapter(options.agyBin));
+  registry.register(createOpencodeAdapter(options.opencodeBin));
   registry.register(createShellAdapter(options.shell));
   return registry;
 }

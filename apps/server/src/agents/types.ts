@@ -59,10 +59,12 @@ export interface AgentAdapter {
    * Undefined (the default) means the Claude Agent SDK, via `StructuredSession`.
    * `'agy-cli'` means `AgySession`, which spawns the `agy` CLI's headless
    * `stream-json` mode fresh for each turn instead of holding one SDK query
-   * open. Server-internal only — the client sees the same normalized
-   * `AgentEvent` union either way and does not need to know which engine ran.
+   * open. `'opencode-server'` means `OpencodeSession`, talking HTTP + SSE to
+   * one `opencode serve` process shared across every opencode session. Server-
+   * internal only — the client sees the same normalized `AgentEvent` union
+   * either way and does not need to know which engine ran.
    */
-  structuredKind?: 'agy-cli';
+  structuredKind?: 'agy-cli' | 'opencode-server';
 
   buildCommand(options: StartSessionOptions): AgentCommand;
 
