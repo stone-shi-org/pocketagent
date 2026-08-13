@@ -18,6 +18,7 @@ import {
 } from '../agent/transcript.js';
 import { Transcript } from '../components/Transcript.js';
 import { ApprovalSheet } from '../components/ApprovalSheet.js';
+import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { PromptBox } from '../components/PromptBox.js';
 import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
 import { Icon } from '../components/Icon.js';
@@ -50,6 +51,8 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   const [deciding, setDeciding] = useState(false);
   const [showFiles, setShowFiles] = useState(false);
   const [resuming, setResuming] = useState(false);
+  const [confirmingStop, setConfirmingStop] = useState(false);
+  const [stopping, setStopping] = useState(false);
   /** Prior conversation, kept apart from the live transcript on purpose: a
       replay frame replaces the live one wholesale and would otherwise wipe it. */
   const [history, setHistory] = useState<TranscriptItem[]>([]);
@@ -167,11 +170,14 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   );
 
   const terminate = useCallback(async () => {
-    if (!window.confirm('Terminate this session? The agent will be stopped.')) return;
+    setStopping(true);
     try {
       await api.deleteSession(sessionId);
     } catch (err) {
       onApiError(err);
+    } finally {
+      setStopping(false);
+      setConfirmingStop(false);
     }
   }, [sessionId, onApiError]);
 
@@ -253,7 +259,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           <StatusBadge status={status} />
         </div>
         {alive && (
-          <button type="button" className="danger icon-btn" onClick={() => void terminate()}>
+          <button type="button" className="danger icon-btn" onClick={() => setConfirmingStop(true)}>
             Stop
           </button>
         )}
@@ -323,6 +329,17 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         disabled={inputDisabled}
         commands={transcript.commands}
       />
+
+      {confirmingStop && (
+        <ConfirmDialog
+          title="Terminate this session?"
+          body="The agent will be stopped."
+          confirmLabel={stopping ? 'Stopping…' : 'Terminate'}
+          busy={stopping}
+          onConfirm={() => void terminate()}
+          onCancel={() => setConfirmingStop(false)}
+        />
+      )}
     </div>
   );
 }

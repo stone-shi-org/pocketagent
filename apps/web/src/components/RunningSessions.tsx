@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { SessionInfo } from '@pocketagent/protocol';
 import { isTerminalStatus } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
+import { ConfirmDialog } from './ConfirmDialog.js';
 import { formatRelative } from './StatusBadge.js';
 
 const REFRESH_MS = 4000;
@@ -29,6 +30,7 @@ export function RunningSessions({
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [confirmSession, setConfirmSession] = useState<SessionInfo | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -53,16 +55,16 @@ export function RunningSessions({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onClose();
+      // The confirm dialog's own Escape handler owns this key while it is open.
+      if (e.key === 'Escape' && !confirmSession) onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, confirmSession]);
 
   /** Same confirm wording as the per-session Stop button, for one behaviour. */
   const stop = useCallback(
     async (session: SessionInfo) => {
-      if (!window.confirm(`Stop “${session.title}”? The agent will be terminated.`)) return;
       setBusyId(session.id);
       try {
         await api.deleteSession(session.id);
@@ -72,13 +74,14 @@ export function RunningSessions({
         setError(err instanceof ApiError ? err.message : 'Could not stop that session.');
       } finally {
         setBusyId(null);
+        setConfirmSession(null);
       }
     },
     [load, onApiError],
   );
 
   return (
-    <div className="dialog-backdrop" onClick={onClose} role="presentation">
+    <div className="dialog-backdrop" onClick={confirmSession ? undefined : onClose} role="presentation">
       <div
         className="dialog"
         onClick={(e) => e.stopPropagation()}
@@ -127,7 +130,7 @@ export function RunningSessions({
                 <button
                   type="button"
                   className="danger"
-                  onClick={() => void stop(session)}
+                  onClick={() => setConfirmSession(session)}
                   disabled={busyId !== null}
                 >
                   {busyId === session.id ? 'Stopping…' : 'Stop'}
@@ -143,6 +146,17 @@ export function RunningSessions({
           </button>
         </div>
       </div>
+
+      {confirmSession && (
+        <ConfirmDialog
+          title={`Stop “${confirmSession.title}”?`}
+          body="The agent will be terminated."
+          confirmLabel={busyId === confirmSession.id ? 'Stopping…' : 'Stop'}
+          busy={busyId === confirmSession.id}
+          onConfirm={() => void stop(confirmSession)}
+          onCancel={() => setConfirmSession(null)}
+        />
+      )}
     </div>
   );
 }

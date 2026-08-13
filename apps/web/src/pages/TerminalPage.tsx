@@ -8,6 +8,7 @@ import { TerminalConnection, type ConnectionState } from '../api/ws-client.js';
 import { createTerminal } from '../terminal/create-terminal.js';
 import { MobileKeyBar, ctrlSequence } from '../components/MobileKeyBar.js';
 import { PromptBox } from '../components/PromptBox.js';
+import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
 import { Icon } from '../components/Icon.js';
 import { takePendingPrompt } from '../agent/pending-prompt.js';
@@ -42,6 +43,8 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
    */
   const adoptedRef = useRef(false);
   const [takeOverSize, setTakeOverSize] = useState(false);
+  const [confirmingStop, setConfirmingStop] = useState(false);
+  const [stopping, setStopping] = useState(false);
 
   const ctrlActiveRef = useRef(false);
   ctrlActiveRef.current = ctrlActive;
@@ -223,11 +226,14 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
   }, []);
 
   const terminate = useCallback(async () => {
-    if (!window.confirm('Terminate this session? The running process will be stopped.')) return;
+    setStopping(true);
     try {
       await api.deleteSession(sessionId);
     } catch (err) {
       onApiError(err);
+    } finally {
+      setStopping(false);
+      setConfirmingStop(false);
     }
   }, [sessionId, onApiError]);
 
@@ -260,7 +266,7 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
           <StatusBadge status={status} />
         </div>
         {alive && (
-          <button type="button" className="danger icon-btn" onClick={() => void terminate()}>
+          <button type="button" className="danger icon-btn" onClick={() => setConfirmingStop(true)}>
             Stop
           </button>
         )}
@@ -319,6 +325,17 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
       />
 
       <PromptBox sessionId={sessionId} onSend={sendPrompt} disabled={inputDisabled} />
+
+      {confirmingStop && (
+        <ConfirmDialog
+          title="Terminate this session?"
+          body="The running process will be stopped."
+          confirmLabel={stopping ? 'Stopping…' : 'Terminate'}
+          busy={stopping}
+          onConfirm={() => void terminate()}
+          onCancel={() => setConfirmingStop(false)}
+        />
+      )}
     </div>
   );
 }
