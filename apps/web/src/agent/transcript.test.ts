@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '@pocketagent/protocol';
-import { applyEvent, applyEvents, emptyTranscript, type ToolItem } from './transcript.js';
+import { applyEvent, applyEvents, emptyTranscript, groupIntoTurns, type ToolItem } from './transcript.js';
 
 const toolUse = (id: string, name = 'Read', filePath: string | null = '/a/b.ts'): AgentEvent => ({
   kind: 'tool_use',
@@ -230,6 +230,58 @@ describe('transcript: slash commands', () => {
       text: 'Usage: 12.3k tokens',
     });
     expect(state.items).toEqual([{ type: 'command_output', key: 'co_u-1', text: 'Usage: 12.3k tokens' }]);
+  });
+});
+
+describe('transcript: groupIntoTurns', () => {
+  it('groups a prompt with the output that follows it, up to the next prompt', () => {
+    const state = applyEvents(emptyTranscript(), [
+      { kind: 'user_prompt', id: 'u1', text: 'first' },
+      { kind: 'text', id: 't1', text: 'reply one' },
+      { kind: 'user_prompt', id: 'u2', text: 'second' },
+      { kind: 'text', id: 't2', text: 'reply two' },
+    ]);
+    const turns = groupIntoTurns(state.items);
+    expect(turns).toHaveLength(2);
+    expect(turns[0]!.prompt).toMatchObject({ text: 'first' });
+    expect(turns[0]!.leaves.map((l) => l.type)).toEqual(['text']);
+    expect(turns[1]!.prompt).toMatchObject({ text: 'second' });
+    expect(turns[1]!.leaves.map((l) => l.type)).toEqual(['text']);
+  });
+
+  it('puts anything before the first prompt into a leading, prompt-less turn', () => {
+    const state = applyEvents(emptyTranscript(), [
+      { kind: 'notice', level: 'info', text: 'connected' },
+      { kind: 'user_prompt', id: 'u1', text: 'go' },
+    ]);
+    const turns = groupIntoTurns(state.items);
+    expect(turns).toHaveLength(2);
+    expect(turns[0]!.prompt).toBeNull();
+    expect(turns[0]!.leaves.map((l) => l.type)).toEqual(['notice']);
+    expect(turns[1]!.prompt).toMatchObject({ text: 'go' });
+  });
+
+  it('drops the leading turn entirely when there is nothing before the first prompt', () => {
+    const state = applyEvents(emptyTranscript(), [{ kind: 'user_prompt', id: 'u1', text: 'go' }]);
+    const turns = groupIntoTurns(state.items);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.prompt).toMatchObject({ text: 'go' });
+  });
+
+  it('keeps a trailing prompt with no output yet as its own turn', () => {
+    const state = applyEvents(emptyTranscript(), [
+      { kind: 'user_prompt', id: 'u1', text: 'first' },
+      { kind: 'text', id: 't1', text: 'reply' },
+      { kind: 'user_prompt', id: 'u2', text: 'still thinking about this one' },
+    ]);
+    const turns = groupIntoTurns(state.items);
+    expect(turns).toHaveLength(2);
+    expect(turns[1]!.prompt).toMatchObject({ text: 'still thinking about this one' });
+    expect(turns[1]!.leaves).toEqual([]);
+  });
+
+  it('returns an empty list for an empty transcript', () => {
+    expect(groupIntoTurns([])).toEqual([]);
   });
 });
 

@@ -287,6 +287,39 @@ export function applyEvents(state: TranscriptState, events: AgentEvent[]): Trans
   return events.reduce(applyEvent, state);
 }
 
+/**
+ * A turn: a user prompt (the node) and everything the agent produced in
+ * response, up to the next prompt (the leaves). Purely a rendering grouping —
+ * `TranscriptState.items` stays the flat, order-preserving source of truth so
+ * the streaming/mutate-by-id logic in `applyEvent` above never has to think
+ * about turn boundaries.
+ */
+export interface TurnNode {
+  key: string;
+  /** Null only for the leading turn: items that arrived before any prompt
+      (e.g. a `notice` from session_started). Nothing sticky renders for it. */
+  prompt: TextItem | null;
+  leaves: TranscriptItem[];
+}
+
+/** Group a flat item list into turns. One `O(n)` pass; see Transcript.tsx for
+    why re-running this on every render is cheap enough not to warrant
+    maintaining it incrementally inside the reducer instead. */
+export function groupIntoTurns(items: TranscriptItem[]): TurnNode[] {
+  const turns: TurnNode[] = [];
+  let current: TurnNode = { key: 'leading', prompt: null, leaves: [] };
+  for (const item of items) {
+    if (item.type === 'text' && item.role === 'user') {
+      turns.push(current);
+      current = { key: item.key, prompt: item, leaves: [] };
+    } else {
+      current.leaves.push(item);
+    }
+  }
+  turns.push(current);
+  return turns.filter((turn) => turn.prompt !== null || turn.leaves.length > 0);
+}
+
 /** Remove any in-progress streaming preview. */
 function dropStreaming(items: TranscriptItem[]): TranscriptItem[] {
   return items.filter((i) => !(i.type === 'text' && i.streaming));
