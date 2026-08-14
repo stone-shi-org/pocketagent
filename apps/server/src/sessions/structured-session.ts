@@ -20,7 +20,15 @@ import {
   type SessionStatus,
 } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
-import { normalizeModels, normalizeSdkMessage, normalizeSlashCommands, summarizeToolUse } from './normalize.js';
+import {
+  createBackgroundTaskState,
+  normalizeModels,
+  normalizeSdkMessage,
+  normalizeSlashCommands,
+  reconcileBackgroundTasks,
+  summarizeToolUse,
+  type BackgroundTaskState,
+} from './normalize.js';
 
 /** The exact tool name the SDK's built-in interactive question uses. */
 const ASK_USER_QUESTION_TOOL = 'AskUserQuestion';
@@ -108,6 +116,8 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   private closed = false;
 
   private readonly pending = new Map<string, PendingPermission>();
+  /** See `reconcileBackgroundTasks`'s doc comment in `normalize.ts`. */
+  private readonly backgroundTasks: BackgroundTaskState = createBackgroundTaskState();
 
   private _status: SessionStatus = 'starting';
   private _agentSessionId: string | null = null;
@@ -385,7 +395,12 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
     try {
       for await (const message of handle) {
         this._lastActivityAt = Date.now();
-        for (const event of normalizeSdkMessageSafe(message)) {
+        const events = reconcileBackgroundTasks(
+          message,
+          normalizeSdkMessageSafe(message),
+          this.backgroundTasks,
+        );
+        for (const event of events) {
           if (event.kind === 'session_started' && event.agentSessionId) {
             this._agentSessionId = event.agentSessionId;
           }
@@ -410,6 +425,21 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   private finish(): void {
     if (!this.isAlive()) return;
     this.rejectAllPending('Session ended before this request was answered.');
+    // A background sub-agent (see `reconcileBackgroundTasks`) has its real
+    // `tool_result` withheld until it actually finishes. If the session ends
+    // first, nothing else will ever supply that result — a tool card, or a
+    // fleet-view sub-agent chip, would otherwise sit "awaiting" forever.
+    for (const [toolUseId, taskId] of this.backgroundTasks.pending) {
+      this.emitEvent({
+        kind: 'tool_result',
+        id: `bgtask_end_${taskId}`,
+        toolUseId,
+        content: 'Session ended before this sub-agent finished.',
+        truncated: false,
+        isError: true,
+      });
+    }
+    this.backgroundTasks.pending.clear();
     this._endedAt = Date.now();
     this._busy = false;
     this.setStatus(this.abort.signal.aborted ? 'killed' : 'exited');

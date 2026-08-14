@@ -2,8 +2,8 @@ import type { AgentEvent } from '@pocketagent/protocol';
 
 /**
  * A rolling preview for one structured session's fleet card: the last few
- * lines worth showing, plus whichever `Task` (sub-agent) calls are currently
- * in flight.
+ * lines worth showing, plus whichever sub-agent calls are currently in
+ * flight.
  *
  * Deliberately not `agent/transcript.ts`'s reducer — that one keeps the whole
  * conversation (every tool card, every turn) for a single open session. A
@@ -11,10 +11,33 @@ import type { AgentEvent } from '@pocketagent/protocol';
  * cards at once, so this only ever keeps the tail.
  *
  * Sub-agent depth is best-effort by design (see the "Agents" fleet-view
- * plan): a `Task` tool call is the Claude Agent SDK's only visible trace of a
- * sub-agent today, so a chip appears on `tool_use` and disappears on the
- * matching `tool_result` — there is no deeper transcript to show for it.
+ * plan): a sub-agent-launching tool call is the Claude Agent SDK's only
+ * visible trace of a sub-agent today, so a chip appears on `tool_use` and
+ * disappears on the matching `tool_result` — there is no deeper transcript
+ * to show for it.
  */
+
+/**
+ * Tool names observed to launch a sub-agent, per backend — confirmed live,
+ * not documented anywhere:
+ *  - Claude Agent SDK: `Agent` (not `Task`, which in current SDK builds is an
+ *    unrelated task-tracking tool). `Task` is kept for older CLI builds that
+ *    may still use that name.
+ *  - opencode: `task`, lower-case — and unlike Claude's, opencode's blocks
+ *    synchronously until the sub-agent finishes, so its `tool_result` is
+ *    already the real one (no async/background reconciliation needed, the
+ *    way `structured-session.ts` has to do for Claude's).
+ *  - agy: `invoke_subagent` — but only reaches this as a `tool_use` at all
+ *    because `apps/server/src/sessions/normalize.ts`'s `normalizeAgyStepUpdate`
+ *    synthesizes one from a completely different raw event shape
+ *    (`step_type: 'subagent'`, not the ordinary `'tool'`); see that
+ *    function's doc comment for how thoroughly agy hides this one.
+ * Mirrors the same match in `apps/server/src/sessions/normalize.ts`'s
+ * `summarizeToolUse`/`summarizeOpencodeTool`/`summarizeAgyTool`, duplicated
+ * rather than shared across the server/web boundary, same reasoning as
+ * `strip-ansi.ts`.
+ */
+const SUBAGENT_TOOL_NAMES: ReadonlySet<string> = new Set(['Agent', 'Task', 'task', 'invoke_subagent']);
 
 const MAX_LINES = 5;
 const MAX_LINE_CHARS = 100;
@@ -55,6 +78,11 @@ function lastLine(text: string): string {
 
 function pushLine(state: FleetPreviewState, line: string): FleetPreviewState {
   if (!line) return state;
+  // Collapse an immediate repeat rather than burning a line slot on it — the
+  // clearest case being opencode's SSE stream re-emitting the same tool_use
+  // verbatim while a part is still "running" (see the dedup comment on
+  // `subagents` below for the fuller story on why that happens).
+  if (state.lines.at(-1) === line) return state;
   return { ...state, lines: [...state.lines, line].slice(-MAX_LINES) };
 }
 
@@ -71,7 +99,13 @@ export function applyFleetEvent(state: FleetPreviewState, event: AgentEvent): Fl
 
     case 'tool_use': {
       const next = pushLine(state, clamp(event.summary, MAX_LINE_CHARS));
-      if (event.name !== 'Task') return next;
+      if (!SUBAGENT_TOOL_NAMES.has(event.name)) return next;
+      // opencode's SSE stream re-emits `tool_use` for the same id every time
+      // the part's status is still "running" (confirmed live: a single
+      // sub-agent call produced two identical events before its
+      // `tool_result`) — without this guard, that becomes two chips for one
+      // call rather than one that just updates in place.
+      if (next.subagents.some((s) => s.toolUseId === event.id)) return next;
       return {
         ...next,
         subagents: [...next.subagents, { toolUseId: event.id, summary: event.summary }],

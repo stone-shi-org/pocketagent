@@ -71,6 +71,18 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   private _endedAt: number | null = null;
   private _lastActivityAt: number | null = null;
   private _busy = false;
+  /**
+   * `tool_use` ids of `invoke_subagent` calls still awaiting resolution.
+   * agy's own step lifecycle for that tool call marks itself `DONE` almost
+   * immediately — confirmed live not to mean the background sub-agent
+   * actually finished (see `normalizeAgyStepUpdate`'s doc comment) — and
+   * pushes nothing else when it really does. The one boundary that *is*
+   * trustworthy, confirmed against the same live run, is the turn's own
+   * `result` line: resolved here in `runTurn`, and defensively in `finish()`
+   * too, so a turn that errors or gets killed mid-flight cannot leave a
+   * fleet-view chip stuck open forever either.
+   */
+  private readonly pendingSubagents = new Set<string>();
 
   constructor(spec: AgySessionSpec, epoch?: string) {
     super();
@@ -385,11 +397,28 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
           if (response) {
             this.emitEvent({ kind: 'text', id: `agy_final_${this.id}_${Date.now()}`, text: response });
           }
+          // See `pendingSubagents`'s doc comment: the turn's own `result`
+          // line is the one point trusted as "the sub-agent is actually
+          // done" — the step's own `DONE` moments after it started is not.
+          for (const toolUseId of this.pendingSubagents) {
+            this.emitEvent({
+              kind: 'tool_result',
+              id: `agy_sub_end_${toolUseId}`,
+              toolUseId,
+              content: 'Subagent finished.',
+              truncated: false,
+              isError: false,
+            });
+          }
+          this.pendingSubagents.clear();
         }
 
         for (const event of normalizeAgyMessageSafe(parsed)) {
           if (event.kind === 'session_started' && event.agentSessionId) {
             this._agentSessionId = event.agentSessionId;
+          }
+          if (event.kind === 'tool_use' && event.name === 'invoke_subagent') {
+            this.pendingSubagents.add(event.id);
           }
           this.emitEvent(event);
         }
@@ -402,6 +431,20 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       const finish = (notice: string | null): void => {
         this.child = null;
         if (notice) this.emitEvent({ kind: 'notice', level: 'error', text: notice });
+        // Defensive twin of the flush above: this only does anything if the
+        // process ended (crashed, got killed) without ever producing a
+        // `result` line — the normal case already cleared the set.
+        for (const toolUseId of this.pendingSubagents) {
+          this.emitEvent({
+            kind: 'tool_result',
+            id: `agy_sub_end_${toolUseId}`,
+            toolUseId,
+            content: 'The turn ended before this sub-agent finished.',
+            truncated: false,
+            isError: true,
+          });
+        }
+        this.pendingSubagents.clear();
         // Busy is not reset here: `drain()` clears it once the whole queue is
         // empty, not after each individual turn, so two prompts sent back to
         // back read as one continuous "working" state rather than flickering

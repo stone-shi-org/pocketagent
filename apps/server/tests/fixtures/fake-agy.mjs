@@ -81,6 +81,85 @@ if (prompt === '/help') {
   process.exit(0);
 }
 
+// `invoke_subagent`'s real shape, captured live: its own step marks itself
+// `DONE` almost immediately (a premature "launched" acknowledgment, not the
+// sub-agent's actual completion — see `normalizeAgyStepUpdate`'s doc
+// comment), well before the turn's `result` line, which is delayed here to
+// give a test room to observe "still pending" in between.
+if (prompt === 'SUBAGENT') {
+  emit({
+    event: 'init',
+    conversation_id: conversationId,
+    init: { cwd: process.cwd(), tools: ['invoke_subagent'], permission_mode: 'always-proceed' },
+  });
+  emit({
+    event: 'step_update',
+    step_update: {
+      conversation_id: conversationId,
+      step_index: 1,
+      state: 'ACTIVE',
+      step_type: 'subagent',
+      tool_name: 'invoke_subagent',
+      subagent_info: {
+        subagents: [
+          {
+            type_name: 'self',
+            role: 'File Writer',
+            initial_prompt: 'write stuff',
+            conversation_id: 'sub-1',
+            log_uri: 'file:///tmp/sub-1/transcript.jsonl',
+          },
+        ],
+      },
+    },
+  });
+  emit({
+    event: 'step_update',
+    step_update: {
+      conversation_id: conversationId,
+      step_index: 1,
+      state: 'DONE',
+      step_type: 'subagent',
+      tool_name: 'invoke_subagent',
+      subagent_info: {
+        subagents: [
+          {
+            type_name: 'self',
+            role: 'File Writer',
+            initial_prompt: 'write stuff',
+            conversation_id: 'sub-1',
+            log_uri: 'file:///tmp/sub-1/transcript.jsonl',
+          },
+        ],
+      },
+    },
+  });
+  setTimeout(() => {
+    emit({
+      event: 'step_update',
+      step_update: {
+        conversation_id: conversationId,
+        step_index: 2,
+        state: 'DONE',
+        step_type: 'agent_response',
+        text_delta: 'The sub-agent finished.',
+      },
+    });
+    emit({
+      event: 'result',
+      result: {
+        conversation_id: conversationId,
+        status: 'SUCCESS',
+        response: 'The sub-agent finished.',
+        duration_seconds: 0.2,
+        num_turns: 1,
+        usage: { input_tokens: 10, output_tokens: 5 },
+      },
+    });
+    process.exit(0);
+  }, 150);
+} else {
+
 emit({
   event: 'init',
   conversation_id: conversationId,
@@ -153,5 +232,7 @@ if (prompt === 'SLOW') {
 } else {
   respond();
 }
+
+} // end of the `prompt === 'SUBAGENT'` branch opened above
 
 } // end of the `args[0] !== 'models'` branch opened above

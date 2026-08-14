@@ -168,6 +168,59 @@ describe('AgySession', () => {
     await waitFor(() => session?.busy === false);
   });
 
+  /**
+   * `invoke_subagent`'s own step marks itself DONE almost immediately —
+   * confirmed live not to mean the sub-agent's real work is done (see
+   * `normalizeAgyStepUpdate`'s doc comment) — so a fleet-view chip must stay
+   * open past that point. The fixture's `SUBAGENT` prompt reproduces exactly
+   * that shape, with the turn's own `result` line delayed so this test can
+   * observe "still pending" in between.
+   */
+  it('keeps a sub-agent tool_use open past its own premature DONE, resolving only at the turn\'s result', async () => {
+    session = new AgySession(makeSpec());
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('SUBAGENT');
+    await waitFor(() => events.some((e) => e.kind === 'tool_use' && e.name === 'invoke_subagent'));
+
+    // The premature DONE step_update has already fired by now too (the
+    // fixture emits it right after ACTIVE, synchronously) — confirm it did
+    // NOT produce a resolving tool_result.
+    const toolUse = events.find((e) => e.kind === 'tool_use');
+    expect(toolUse).toMatchObject({ name: 'invoke_subagent', summary: 'Subagent: File Writer' });
+    expect(events.some((e) => e.kind === 'tool_result')).toBe(false);
+
+    await waitFor(() => events.some((e) => e.kind === 'tool_result'));
+    const toolResult = events.find((e) => e.kind === 'tool_result');
+    expect(toolResult).toMatchObject({
+      toolUseId: toolUse && toolUse.kind === 'tool_use' ? toolUse.id : undefined,
+      isError: false,
+    });
+
+    // And it resolved before the turn ended, not after — the fleet-view chip
+    // this drives should never coexist with an idle dot.
+    const toolResultIndex = events.indexOf(toolResult);
+    const turnCompleteIndex = events.findIndex((e) => e.kind === 'turn_complete');
+    expect(toolResultIndex).toBeGreaterThanOrEqual(0);
+    expect(turnCompleteIndex).toBeGreaterThan(toolResultIndex);
+  });
+
+  it('resolves a still-pending sub-agent if the turn is killed before it ever reports back', async () => {
+    session = new AgySession(makeSpec());
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('SUBAGENT');
+    await waitFor(() => events.some((e) => e.kind === 'tool_use' && e.name === 'invoke_subagent'));
+    expect(events.some((e) => e.kind === 'tool_result')).toBe(false);
+
+    session.terminate();
+    await waitFor(() => events.some((e) => e.kind === 'tool_result'));
+    const toolResult = events.find((e) => e.kind === 'tool_result');
+    expect(toolResult).toMatchObject({ isError: true });
+  });
+
   it('carries the conversation id forward across turns via --conversation', async () => {
     session = new AgySession(makeSpec());
     await session.start();

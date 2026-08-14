@@ -38,4 +38,18 @@ describe('lastPlainLines', () => {
   it('returns an empty array for output with no visible lines', () => {
     expect(lastPlainLines('\x1b[2K\x1b[G   \n', 5)).toEqual([]);
   });
+
+  it('keeps only what comes after the last \\r on a line, not every overwrite concatenated', () => {
+    // A shell prompt redraws itself with a bare \r far more often than a
+    // real \n — every prompt-segment refresh does it. Regression for a bug
+    // where a real shell's prompt rendered as run-together garbage because
+    // every \r-redraw was kept instead of only the last one.
+    const raw = 'part1\rpart2\rfinal prompt$ \n';
+    expect(lastPlainLines(raw, 5)).toEqual(['final prompt$']);
+  });
+
+  it('collapses carriage returns independently on each line', () => {
+    const raw = 'aaa\rone\nbbb\rtwo\n';
+    expect(lastPlainLines(raw, 5)).toEqual(['one', 'two']);
+  });
 });

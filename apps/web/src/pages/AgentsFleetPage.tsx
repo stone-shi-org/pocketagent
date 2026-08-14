@@ -57,8 +57,19 @@ export function AgentsFleetPage({ onOpen, onApiError, onBack }: Props): JSX.Elem
     return () => clearInterval(timer);
   }, [load]);
 
+  const count = sessions?.length ?? 0;
+
   const content = (
     <div className="fleet-page">
+      <div className="fleet-header">
+        {/* The phone shell's own `.home-bar` already says "Agents" above this;
+            repeating the word right below it would just be noise there. */}
+        {!onBack && <h1>Agents</h1>}
+        <span className="fleet-count">
+          {sessions === null ? 'Loading…' : count === 0 ? 'Nothing running' : `${count} running`}
+        </span>
+      </div>
+
       {error && (
         <div className="error-box" role="alert">
           {error}

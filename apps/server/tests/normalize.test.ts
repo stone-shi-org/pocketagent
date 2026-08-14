@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  createBackgroundTaskState,
   extractAgyPath,
   extractOpencodePath,
   extractPath,
@@ -17,6 +18,7 @@ import {
   normalizePiModelValue,
   normalizeSdkMessage,
   normalizeSlashCommands,
+  reconcileBackgroundTasks,
   summarizeAgyTool,
   summarizeOpencodeTool,
   summarizePiTool,
@@ -363,6 +365,19 @@ describe('summarizeToolUse', () => {
     expect(summarizeToolUse('Bash', { command: 'cd /tmp\nls -la' })).toBe('Run cd /tmp');
   });
 
+  // "Agent" is the real sub-agent-launching tool name — confirmed by probing
+  // the live SDK query stream, where "Task" turned out to be an unrelated
+  // task-tracking tool. "Task" is kept as a second case for older CLI builds
+  // that may still use that name; both must produce the same summary.
+  it('summarizes a sub-agent launch under either tool name', () => {
+    expect(summarizeToolUse('Agent', { description: 'investigate the flaky test' })).toBe(
+      'Subagent: investigate the flaky test',
+    );
+    expect(summarizeToolUse('Task', { description: 'investigate the flaky test' })).toBe(
+      'Subagent: investigate the flaky test',
+    );
+  });
+
   it('falls back to something useful for unknown tools', () => {
     expect(summarizeToolUse('MysteryTool', { path: '/x/y.txt' })).toBe('MysteryTool y.txt');
     expect(summarizeToolUse('MysteryTool', { q: 'hello' })).toBe('MysteryTool hello');
@@ -394,6 +409,101 @@ describe('summarizeToolUse', () => {
 
   it('falls back gracefully when AskUserQuestion input is malformed', () => {
     expect(summarizeToolUse('AskUserQuestion', {})).toBe('Asking a question');
+  });
+});
+
+/**
+ * These payloads mirror the real SDK's background-task lifecycle for a
+ * sub-agent launched via the `Agent` tool — captured live, the same way as
+ * the rest of this file's fixtures. The sequence that matters: the tool's own
+ * `tool_result` arrives almost immediately ("Async agent launched
+ * successfully"), well before `task_started`'s sibling `task_notification`
+ * reports the sub-agent actually finishing, sometimes minutes later.
+ */
+describe('reconcileBackgroundTasks', () => {
+  const toolUse = {
+    kind: 'tool_use' as const,
+    id: 'tu1',
+    name: 'Agent',
+    input: { description: 'Sleep 30 seconds task' },
+    summary: 'Subagent: Sleep 30 seconds task',
+    filePath: null,
+  };
+  const prematureResult = {
+    kind: 'tool_result' as const,
+    id: 'tr1',
+    toolUseId: 'tu1',
+    content: 'Async agent launched successfully.',
+    truncated: false,
+    isError: false,
+  };
+  const taskStarted = {
+    type: 'system',
+    subtype: 'task_started',
+    task_id: 'task1',
+    tool_use_id: 'tu1',
+    description: 'Sleep 30 seconds task',
+  };
+  const taskNotification = (status = 'completed') => ({
+    type: 'system',
+    subtype: 'task_notification',
+    task_id: 'task1',
+    tool_use_id: 'tu1',
+    status,
+    summary: 'Done.',
+  });
+
+  it('passes through events for messages unrelated to any background task', () => {
+    const state = createBackgroundTaskState();
+    expect(reconcileBackgroundTasks({ type: 'assistant' }, [toolUse], state)).toEqual([toolUse]);
+  });
+
+  it('suppresses the premature tool_result once task_started has marked it pending', () => {
+    const state = createBackgroundTaskState();
+    reconcileBackgroundTasks(taskStarted, [], state);
+    expect(reconcileBackgroundTasks({ type: 'user' }, [prematureResult], state)).toEqual([]);
+  });
+
+  it('does not touch a tool_result for a tool_use_id that is not a pending background task', () => {
+    const state = createBackgroundTaskState();
+    expect(reconcileBackgroundTasks({ type: 'user' }, [prematureResult], state)).toEqual([prematureResult]);
+  });
+
+  it('appends the real tool_result once task_notification reports completion, and stops pending', () => {
+    const state = createBackgroundTaskState();
+    reconcileBackgroundTasks(taskStarted, [], state);
+    reconcileBackgroundTasks({ type: 'user' }, [prematureResult], state); // suppressed, as above
+
+    const events = reconcileBackgroundTasks(taskNotification(), [], state);
+    expect(events).toEqual([
+      { kind: 'tool_result', id: 'bgtask_task1', toolUseId: 'tu1', content: 'Done.', truncated: false, isError: false },
+    ]);
+    expect(state.pending.size).toBe(0);
+  });
+
+  it('marks the synthesized result as an error for a failed status', () => {
+    const state = createBackgroundTaskState();
+    reconcileBackgroundTasks(taskStarted, [], state);
+    const events = reconcileBackgroundTasks(taskNotification('failed'), [], state);
+    expect(events[0]).toMatchObject({ isError: true });
+  });
+
+  it('ignores task_notification for a tool_use_id it never saw task_started for', () => {
+    const state = createBackgroundTaskState();
+    expect(reconcileBackgroundTasks(taskNotification(), [], state)).toEqual([]);
+  });
+
+  it('is a no-op for the redundant lifecycle messages in between', () => {
+    const state = createBackgroundTaskState();
+    reconcileBackgroundTasks(taskStarted, [], state);
+    expect(
+      reconcileBackgroundTasks({ type: 'system', subtype: 'task_progress', tool_use_id: 'tu1' }, [], state),
+    ).toEqual([]);
+    expect(
+      reconcileBackgroundTasks({ type: 'system', subtype: 'background_tasks_changed', tasks: [] }, [], state),
+    ).toEqual([]);
+    // Still pending after both — neither is the real completion signal.
+    expect(state.pending.has('tu1')).toBe(true);
   });
 });
 
@@ -550,6 +660,113 @@ describe('normalizeAgyMessage: step_update', () => {
       }),
     ).toEqual([]);
   });
+
+  /**
+   * `invoke_subagent` — captured by running `agy --output-format stream-json`
+   * directly (bypassing normalization) and checking the file it was asked to
+   * write actually existed: a real sub-agent ran, but nothing in the event
+   * stream said so at all before this. It is not a `step_type: 'tool'` like
+   * every other tool call; it gets its own step type with a payload shaped
+   * nothing like `tool_info`.
+   */
+  describe('subagent steps (invoke_subagent)', () => {
+    it('maps an ACTIVE subagent step to tool_use', () => {
+      const events = normalizeAgyMessage({
+        event: 'step_update',
+        step_update: {
+          conversation_id: 'conv-1',
+          step_index: 3,
+          state: 'ACTIVE',
+          step_type: 'subagent',
+          tool_name: 'invoke_subagent',
+          subagent_info: {
+            subagents: [
+              {
+                type_name: 'self',
+                role: 'File Writer',
+                initial_prompt: 'Write 1, 2, 3 to out.txt',
+                conversation_id: 'sub-1',
+                log_uri: 'file:///tmp/sub-1/transcript.jsonl',
+              },
+            ],
+          },
+        },
+      });
+      expect(events).toEqual([
+        {
+          kind: 'tool_use',
+          id: 'agy_sub_sub-1',
+          name: 'invoke_subagent',
+          input: { role: 'File Writer', prompt: 'Write 1, 2, 3 to out.txt' },
+          summary: 'Subagent: File Writer',
+          filePath: null,
+        },
+      ]);
+    });
+
+    it('ignores a DONE subagent step — it is a premature dispatch acknowledgment, not real completion', () => {
+      // Confirmed live against a real ~15s background sub-agent: this step's
+      // own DONE fires within about a second of ACTIVE, long before the
+      // sub-agent's actual work finished. `AgySession.pendingSubagents`
+      // resolves the fleet-view chip against the turn's own `result` line
+      // instead — see its doc comment — so this normalizer must not
+      // synthesize a (misleadingly early) tool_result here.
+      const events = normalizeAgyMessage({
+        event: 'step_update',
+        step_update: {
+          conversation_id: 'conv-1',
+          step_index: 3,
+          state: 'DONE',
+          step_type: 'subagent',
+          tool_name: 'invoke_subagent',
+          subagent_info: {
+            subagents: [
+              {
+                type_name: 'self',
+                role: 'File Writer',
+                initial_prompt: 'Write 1, 2, 3 to out.txt',
+                conversation_id: 'sub-1',
+                log_uri: 'file:///tmp/sub-1/transcript.jsonl',
+              },
+            ],
+          },
+        },
+      });
+      expect(events).toEqual([]);
+    });
+
+    it('emits one event per subagent when a call dispatches more than one', () => {
+      const events = normalizeAgyMessage({
+        event: 'step_update',
+        step_update: {
+          conversation_id: 'conv-1',
+          step_index: 5,
+          state: 'ACTIVE',
+          step_type: 'subagent',
+          tool_name: 'invoke_subagent',
+          subagent_info: {
+            subagents: [
+              { role: 'Worker A', initial_prompt: 'do A', conversation_id: 'sub-a' },
+              { role: 'Worker B', initial_prompt: 'do B', conversation_id: 'sub-b' },
+            ],
+          },
+        },
+      });
+      expect(events.map((e) => (e.kind === 'tool_use' ? e.id : null))).toEqual([
+        'agy_sub_sub-a',
+        'agy_sub_sub-b',
+      ]);
+    });
+
+    it('is robust to a missing or empty subagents array', () => {
+      expect(
+        normalizeAgyMessage({
+          event: 'step_update',
+          step_update: { conversation_id: 'c', step_index: 1, state: 'ACTIVE', step_type: 'subagent' },
+        }),
+      ).toEqual([]);
+    });
+  });
 });
 
 describe('normalizeAgyMessage: result', () => {
@@ -651,6 +868,15 @@ describe('summarizeAgyTool', () => {
 
   it('falls back to something useful for unknown tools', () => {
     expect(summarizeAgyTool('mystery_tool', {})).toBe('mystery_tool');
+  });
+
+  it('summarizes a sub-agent launch by role, falling back to the prompt', () => {
+    expect(summarizeAgyTool('invoke_subagent', { role: 'File Writer', prompt: 'write stuff' })).toBe(
+      'Subagent: File Writer',
+    );
+    expect(summarizeAgyTool('invoke_subagent', { prompt: 'investigate the flaky test' })).toBe(
+      'Subagent: investigate the flaky test',
+    );
   });
 });
 
@@ -991,6 +1217,16 @@ describe('summarizeOpencodeTool', () => {
 
   it('falls back to something useful for unknown tools', () => {
     expect(summarizeOpencodeTool('mystery_tool', {})).toBe('mystery_tool');
+  });
+
+  // opencode's own sub-agent launcher — confirmed live: `{description,
+  // prompt, subagent_type}`, blocking until the sub-agent actually finishes
+  // (unlike Claude's `Agent` tool, whose own tool_result is a premature
+  // "launched" acknowledgment — see `reconcileBackgroundTasks`).
+  it('summarizes the task tool as a sub-agent launch', () => {
+    expect(summarizeOpencodeTool('task', { description: 'investigate the flaky test' })).toBe(
+      'Subagent: investigate the flaky test',
+    );
   });
 });
 

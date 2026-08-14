@@ -22,6 +22,21 @@ export function stripAnsi(input: string): string {
 }
 
 /**
+ * A shell prompt redraws itself with a bare `\r` (no `\n`) far more often
+ * than it prints a real new line — every prompt-library segment, spinner
+ * frame, and `PS1` refresh does it. Splitting on `\n` alone concatenates
+ * every one of those overwrites onto the same "line", which reads as
+ * garbage. This is not full VT100 cursor emulation (nothing here is,
+ * `create-terminal.ts` owns that for the real terminal view) — just the
+ * one rule that matters for a plain-text preview: only what comes after the
+ * *last* `\r` in a line is what a real terminal would still be showing.
+ */
+function collapseCarriageReturns(line: string): string {
+  const idx = line.lastIndexOf('\r');
+  return idx === -1 ? line : line.slice(idx + 1);
+}
+
+/**
  * The last `n` non-empty plain-text lines of raw (possibly ANSI-laden)
  * terminal output, newest last. A fleet card only has room for a handful of
  * lines and no interest in blank padding a spinner redraw tends to leave
@@ -30,7 +45,7 @@ export function stripAnsi(input: string): string {
 export function lastPlainLines(raw: string, n: number): string[] {
   const lines = stripAnsi(raw)
     .split('\n')
-    .map((line) => line.trimEnd())
+    .map((line) => collapseCarriageReturns(line).trimEnd())
     .filter((line) => line.length > 0);
   return lines.slice(-n);
 }

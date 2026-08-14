@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { SessionInfo } from '@pocketagent/protocol';
 import { TerminalConnection } from '../api/ws-client.js';
-import { agentIconName } from '../agent/agent-icon.js';
+import { agentAccentClass, agentIconName } from '../agent/agent-icon.js';
 import { lastPlainLines } from '../agent/strip-ansi.js';
 import { applyFleetEvent, applyFleetEvents, emptyFleetPreview, type FleetPreviewState } from '../agent/fleet-preview.js';
 import { Icon } from './Icon.js';
@@ -79,7 +79,7 @@ export function AgentCard({ session, onOpen }: Props): JSX.Element {
   return (
     <button type="button" className="agent-card" onClick={() => onOpen(session.id)}>
       <div className="agent-card-head">
-        <span className="agent-mascot">
+        <span className={`agent-mascot ${agentAccentClass(session.agent)}`}>
           <Icon name={agentIconName(session.agent)} size={20} />
         </span>
         <span className="agent-card-title">
@@ -96,28 +96,22 @@ export function AgentCard({ session, onOpen }: Props): JSX.Element {
       </div>
 
       <div className="agent-output">
-        {lines.length === 0 ? (
-          <div className="agent-output-line agent-output-empty">Waiting for output…</div>
-        ) : (
-          lines.map((line, i) => (
-            <div
-              key={i === lines.length - 1 ? `last-${flashSeq}` : i}
-              className={i === lines.length - 1 ? 'agent-output-line agent-output-line--new' : 'agent-output-line'}
-            >
-              {line}
-            </div>
-          ))
-        )}
+        {lines.map((line, i) => (
+          <div
+            key={i === lines.length - 1 ? `last-${flashSeq}` : i}
+            className={i === lines.length - 1 ? 'agent-output-line agent-output-line--new' : 'agent-output-line'}
+          >
+            {line}
+          </div>
+        ))}
       </div>
 
       {preview.subagents.length > 0 && (
         <div className="agent-subagents">
           {preview.subagents.map((s) => (
             <div className="agent-subagent" key={s.toolUseId}>
-              <span className="agent-mascot">
-                <Icon name="agent-generic" size={12} />
-              </span>
-              {s.summary}
+              <span className="agent-subagent-dot" aria-hidden="true" />
+              <span className="agent-subagent-label">{s.summary}</span>
             </div>
           ))}
         </div>

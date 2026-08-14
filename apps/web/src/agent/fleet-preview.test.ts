@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '@pocketagent/protocol';
 import { applyFleetEvent, applyFleetEvents, emptyFleetPreview } from './fleet-preview.js';
 
-const taskToolUse = (id: string, description: string): AgentEvent => ({
+const subagentToolUse = (id: string, description: string, name = 'Agent'): AgentEvent => ({
   kind: 'tool_use',
   id,
-  name: 'Task',
+  name,
   input: { description },
   summary: `Subagent: ${description}`,
   filePath: null,
@@ -53,6 +53,18 @@ describe('fleet-preview: lines', () => {
     expect(state.lines).toEqual(['working on it']);
   });
 
+  it('collapses an immediate repeat rather than burning a line slot on it', () => {
+    // opencode's SSE stream re-emits the same tool_use verbatim while a part
+    // is still "running" (see the sub-agent dedup test below) — without
+    // this, the exact same line would appear twice in a 5-line preview.
+    const state = applyFleetEvents(emptyFleetPreview(), [
+      { kind: 'notice', level: 'info', text: 'same line' },
+      { kind: 'notice', level: 'info', text: 'same line' },
+      { kind: 'notice', level: 'info', text: 'different line' },
+    ]);
+    expect(state.lines).toEqual(['same line', 'different line']);
+  });
+
   it('prefixes a user prompt so it reads distinctly from agent output', () => {
     const state = applyFleetEvent(emptyFleetPreview(), {
       kind: 'user_prompt',
@@ -64,26 +76,57 @@ describe('fleet-preview: lines', () => {
 });
 
 describe('fleet-preview: sub-agents', () => {
-  it('adds a sub-agent chip on a Task tool_use and removes it on the matching tool_result', () => {
+  it('adds a sub-agent chip on an Agent tool_use and removes it on the matching tool_result', () => {
+    // "Agent" is the real tool name — confirmed by probing the live
+    // @anthropic-ai/claude-agent-sdk query stream. Regression coverage: an
+    // earlier version of this code matched "Task" only (a name that turned
+    // out to belong to an unrelated tool in current SDK builds), so no
+    // sub-agent chip ever appeared for a real session.
     let state = emptyFleetPreview();
-    state = applyFleetEvent(state, taskToolUse('tu1', 'investigate the flaky test'));
+    state = applyFleetEvent(state, subagentToolUse('tu1', 'investigate the flaky test'));
     expect(state.subagents).toEqual([{ toolUseId: 'tu1', summary: 'Subagent: investigate the flaky test' }]);
 
     state = applyFleetEvent(state, toolResult('tu1'));
     expect(state.subagents).toEqual([]);
   });
 
+  it('also recognizes the older "Task" tool name, for CLI builds that still use it', () => {
+    const state = applyFleetEvent(emptyFleetPreview(), subagentToolUse('tu1', 'legacy name', 'Task'));
+    expect(state.subagents).toEqual([{ toolUseId: 'tu1', summary: 'Subagent: legacy name' }]);
+  });
+
+  it('recognizes opencode\'s lower-case "task" tool name', () => {
+    const state = applyFleetEvent(emptyFleetPreview(), subagentToolUse('tu1', 'opencode style', 'task'));
+    expect(state.subagents).toEqual([{ toolUseId: 'tu1', summary: 'Subagent: opencode style' }]);
+  });
+
+  it('recognizes agy\'s "invoke_subagent" tool name', () => {
+    const state = applyFleetEvent(emptyFleetPreview(), subagentToolUse('tu1', 'agy style', 'invoke_subagent'));
+    expect(state.subagents).toEqual([{ toolUseId: 'tu1', summary: 'Subagent: agy style' }]);
+  });
+
+  it('does not add a second chip when the same tool_use id is re-emitted while still running', () => {
+    // Regression: opencode's SSE stream re-emits `tool_use` for the same id
+    // every time the part's status is still "running" — confirmed live, a
+    // single sub-agent call produced two identical events before its
+    // tool_result. Without a dedup guard this doubled the chip.
+    let state = emptyFleetPreview();
+    state = applyFleetEvent(state, subagentToolUse('tu1', 'still running', 'task'));
+    state = applyFleetEvent(state, subagentToolUse('tu1', 'still running', 'task'));
+    expect(state.subagents).toEqual([{ toolUseId: 'tu1', summary: 'Subagent: still running' }]);
+  });
+
   it('tracks multiple concurrent sub-agents independently', () => {
     let state = emptyFleetPreview();
-    state = applyFleetEvent(state, taskToolUse('tu1', 'task one'));
-    state = applyFleetEvent(state, taskToolUse('tu2', 'task two'));
+    state = applyFleetEvent(state, subagentToolUse('tu1', 'task one'));
+    state = applyFleetEvent(state, subagentToolUse('tu2', 'task two'));
     expect(state.subagents.map((s) => s.toolUseId)).toEqual(['tu1', 'tu2']);
 
     state = applyFleetEvent(state, toolResult('tu1'));
     expect(state.subagents.map((s) => s.toolUseId)).toEqual(['tu2']);
   });
 
-  it('does not treat a non-Task tool_use as a sub-agent', () => {
+  it('does not treat an unrelated tool_use as a sub-agent', () => {
     const state = applyFleetEvent(emptyFleetPreview(), {
       kind: 'tool_use',
       id: 'tu1',

@@ -33,6 +33,91 @@ export function normalizeSdkMessage(message: unknown): AgentEvent[] {
   }
 }
 
+/**
+ * Tracks the SDK's own background-task lifecycle across the whole session,
+ * so `reconcileBackgroundTasks` (below) can tell a premature acknowledgment
+ * apart from a real completion. Keyed by `tool_use_id` — one background task
+ * always traces back to exactly one `Agent`/`Task` tool call.
+ */
+export interface BackgroundTaskState {
+  /** tool_use_id -> task_id, for a task whose real completion is still pending. */
+  pending: Map<string, string>;
+}
+
+export function createBackgroundTaskState(): BackgroundTaskState {
+  return { pending: new Map() };
+}
+
+/**
+ * Corrects a mismatch in how the SDK reports a background/async sub-agent
+ * (confirmed live against the real `@anthropic-ai/claude-agent-sdk`, since
+ * neither this message shape nor the tool's actual name — `Agent`, not the
+ * `Task` this file originally assumed — is documented anywhere): launching
+ * one via the `Agent`/`Task` tool gets a `tool_result` almost immediately
+ * ("Async agent launched successfully") — that is an acknowledgment that the
+ * task was *scheduled*, not that it finished. Read literally, a tool card (or
+ * a fleet-view sub-agent chip, which disappears on `tool_result`) would
+ * resolve within under a second — long before the real work, sometimes
+ * minutes of it, is actually done.
+ *
+ * `task_started`/`task_notification` are the SDK's own background-task
+ * lifecycle messages — not part of the documented message types
+ * `normalizeSdkMessage` otherwise switches on, so they otherwise vanish into
+ * its `default: []` for an unhandled `system` subtype. `task_started` records
+ * which tool call a background task belongs to; `task_notification` is its
+ * real completion, carrying a human-readable `summary` worth showing as the
+ * (corrected) tool result. Everything in between (`task_progress`,
+ * `background_tasks_changed`, `task_updated`) is redundant with those two for
+ * this purpose and is left alone.
+ *
+ * Takes `events` (this message's own output from `normalizeSdkMessage`)
+ * rather than recomputing anything, so the one thing this adds is exactly
+ * the correction described above — suppressing the premature `tool_result`
+ * for a tool_use_id currently pending, and appending the real one once
+ * `task_notification` arrives for it.
+ */
+export function reconcileBackgroundTasks(
+  message: unknown,
+  events: AgentEvent[],
+  state: BackgroundTaskState,
+): AgentEvent[] {
+  if (!isRecord(message)) return events;
+
+  if (str(message.type) !== 'system') {
+    return events.filter((e) => !(e.kind === 'tool_result' && state.pending.has(e.toolUseId)));
+  }
+
+  const subtype = str(message.subtype);
+
+  if (subtype === 'task_started') {
+    const taskId = str(message.task_id);
+    const toolUseId = str(message.tool_use_id);
+    if (taskId && toolUseId) state.pending.set(toolUseId, taskId);
+    return events;
+  }
+
+  if (subtype === 'task_notification') {
+    const toolUseId = str(message.tool_use_id);
+    if (!toolUseId || !state.pending.has(toolUseId)) return events;
+    const taskId = state.pending.get(toolUseId);
+    state.pending.delete(toolUseId);
+    const status = str(message.status);
+    return [
+      ...events,
+      {
+        kind: 'tool_result',
+        id: `bgtask_${taskId ?? toolUseId}`,
+        toolUseId,
+        content: str(message.summary) ?? 'The background sub-agent finished.',
+        truncated: false,
+        isError: status !== undefined && status !== 'completed',
+      },
+    ];
+  }
+
+  return events;
+}
+
 function normalizeSystem(message: Record<string, unknown>): AgentEvent[] {
   const subtype = str(message.subtype);
 
@@ -250,6 +335,15 @@ export function summarizeToolUse(name: string, input: Record<string, unknown>): 
       return `Fetch ${str(input.url) ?? 'URL'}`;
     case 'WebSearch':
       return `Search web: ${clamp(str(input.query) ?? '', 60)}`;
+    // The SDK's sub-agent-launching tool. Confirmed live (probing the real
+    // `@anthropic-ai/claude-agent-sdk` query stream) to be named `Agent`, with
+    // `AgentInput`'s own `description`/`prompt`/`subagent_type` fields — not
+    // `Task`, which in this SDK version is the harness's unrelated
+    // TaskCreate/TaskGet/... task-tracking tool. Kept as a second case rather
+    // than replaced outright: `Task` was presumably the real name in an
+    // older CLI build this file was written against, and matching both costs
+    // nothing against whichever a given install actually reports.
+    case 'Agent':
     case 'Task':
       return `Subagent: ${clamp(str(input.description) ?? '', 60)}`;
     case 'TodoWrite':
@@ -409,6 +503,54 @@ function normalizeAgyStepUpdate(message: Record<string, unknown>): AgentEvent[] 
     ];
   }
 
+  /**
+   * agy's real sub-agent launcher (`invoke_subagent`) — confirmed live by
+   * running `agy --output-format stream-json` directly, bypassing this
+   * normalizer entirely: it does NOT arrive as `step_type: 'tool'` the way
+   * every other tool call does. It gets its own step type, with a payload
+   * shaped nothing like `tool_info` — `subagent_info.subagents[]`, each
+   * `{role, initial_prompt, conversation_id, log_uri}`. Before this, that
+   * shape fell straight through to the catch-all below and vanished: no
+   * `tool_use`, so no fleet-view sub-agent chip and no tool card in the
+   * normal transcript either, even though the sub-agent genuinely ran
+   * (confirmed by checking the file it was asked to write).
+   *
+   * Only the `ACTIVE` half is handled here, deliberately — this step's own
+   * `DONE` (same `step_index`, moments later) is a second trap layered on
+   * the first: confirmed live with a real ~15s background task that it is
+   * *not* the subagent actually finishing, only the `invoke_subagent` call
+   * itself returning (fire-and-forget, same shape as Claude's `Agent` tool's
+   * premature "launched" acknowledgment). agy pushes no equivalent of
+   * Claude's `task_notification` for the real completion — the model can
+   * poll `manage_subagents` for status, but nothing says so unprompted — so
+   * `AgySession` resolves these itself against the one boundary that *is*
+   * reliable: the turn's own `result` line, since a turn observed live did
+   * not end until the background subagent genuinely finished. See
+   * `AgySession`'s `pendingSubagents`.
+   */
+  if (stepType === 'subagent') {
+    if (str(update.state) === 'DONE') return [];
+
+    const info = isRecord(update.subagent_info) ? update.subagent_info : {};
+    const subagents = Array.isArray(info.subagents) ? info.subagents : [];
+
+    return subagents
+      .map((raw, i): AgentEvent | null => {
+        if (!isRecord(raw)) return null;
+        const subConversationId = str(raw.conversation_id) ?? `${stepId}_${i}`;
+        const input = { role: str(raw.role) ?? '', prompt: str(raw.initial_prompt) ?? '' };
+        return {
+          kind: 'tool_use',
+          id: `agy_sub_${subConversationId}`,
+          name: 'invoke_subagent',
+          input,
+          summary: summarizeAgyTool('invoke_subagent', input),
+          filePath: null,
+        };
+      })
+      .filter((e): e is AgentEvent => e !== null);
+  }
+
   // user_input / checkpoint / unknown step types are internal bookkeeping —
   // we synthesize our own `user_prompt` event in `AgySession.prompt()`, and
   // the rest has nothing worth showing.
@@ -474,6 +616,16 @@ export function summarizeAgyTool(name: string, input: Record<string, unknown>): 
     case 'ask_permission':
     case 'ask_question':
       return 'Asking a question';
+    // agy's real sub-agent launcher — confirmed live via `agy --output-format
+    // stream-json` directly (bypassing normalization entirely): it does NOT
+    // appear as an ordinary tool step at all, see `normalizeAgyStepUpdate`'s
+    // `step_type === 'subagent'` branch, which is what actually calls this
+    // with `{role, prompt}` synthesized from that different event shape.
+    case 'invoke_subagent': {
+      const role = str(input.role);
+      const prompt = str(input.prompt);
+      return `Subagent: ${clamp(role || prompt || '', 60)}`;
+    }
     default: {
       if (base) return `${name} ${base}`;
       const first = Object.values(input).find(isString);
@@ -750,6 +902,13 @@ export function summarizeOpencodeTool(name: string, input: Record<string, unknow
       return `Search ${str(input.pattern) ?? ''}`.trim() || 'Search';
     case 'webfetch':
       return `Fetch ${str(input.url) ?? 'URL'}`;
+    // opencode's own sub-agent launcher — confirmed live, `{description,
+    // prompt, subagent_type}`, the same field names Claude's `Agent` tool
+    // uses. Unlike Claude's, this one blocks until the sub-agent actually
+    // finishes (its `tool_result` is real, not a premature "launched"
+    // acknowledgment), so it needs no equivalent of `reconcileBackgroundTasks`.
+    case 'task':
+      return `Subagent: ${clamp(str(input.description) ?? '', 60)}`;
     default: {
       if (base) return `${name} ${base}`;
       const first = Object.values(input).find(isString);
