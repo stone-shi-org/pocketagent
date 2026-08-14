@@ -180,13 +180,22 @@ export class ConversationStore {
   async history(id: string, maxEvents = 400): Promise<AgentEvent[] | null> {
     const info = await this.find(id);
     if (!info) return null;
+    return this.historyForConversation(info, maxEvents);
+  }
 
-    const file = path.join(this.projectsDir, encodeProjectDir(info.cwd), `${id}.jsonl`);
+  /**
+   * Same as `history()`, for a caller that already resolved the
+   * `ConversationInfo` — e.g. a route that wants both the metadata and the
+   * messages in one response. `find()`/`history()` each do a full directory
+   * scan; calling both back to back would pay for it twice for no reason.
+   */
+  async historyForConversation(info: ConversationInfo, maxEvents = 400): Promise<AgentEvent[]> {
+    const file = path.join(this.projectsDir, encodeProjectDir(info.cwd), `${info.id}.jsonl`);
     let text: string;
     try {
       text = await fs.readFile(file, 'utf8');
     } catch {
-      return null;
+      return [];
     }
 
     const events: AgentEvent[] = [];

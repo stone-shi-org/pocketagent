@@ -167,6 +167,16 @@ export const api = {
   listConversations: () =>
     request<{ conversations: ConversationInfo[] }>('/api/conversations'),
 
+  /**
+   * A conversation's own messages, read from its transcript directly — no
+   * session has to exist for this. Powers the read-only preview a finished
+   * chat opens into before anything is resumed.
+   */
+  conversationHistory: (id: string) =>
+    request<{ conversation: ConversationInfo; events: AgentEvent[] }>(
+      `/api/conversations/${encodeURIComponent(id)}/history`,
+    ),
+
   listAdoptable: () =>
     request<{ enabled: boolean; targets: AdoptableTarget[] }>('/api/adoptable'),
 

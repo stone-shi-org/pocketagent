@@ -221,6 +221,29 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     conversations: await conversations.list(),
   }));
 
+  /**
+   * A conversation's own messages and metadata, with no session involved.
+   *
+   * Opening a finished chat from the home screen used to resume it into a
+   * live session immediately, before anyone had typed a word — a real agent
+   * process for every idle tap. This is what that tap hits instead: the
+   * transcript read straight off disk, the same way `/api/sessions/:id/history`
+   * does for an already-resumed session, just keyed on the conversation
+   * itself because there is no session yet to key off of. Creating one is
+   * deferred to `POST /api/sessions` with `resumeAgentSessionId`, fired only
+   * when a prompt is actually sent from this view.
+   */
+  app.get<{ Params: { id: string } }>('/api/conversations/:id/history', async (request, reply) => {
+    const info = await conversations.find(request.params.id);
+    if (!info) {
+      return reply
+        .code(404)
+        .send({ error: { code: 'not_found', message: 'No such conversation.' } });
+    }
+    const events = await conversations.historyForConversation(info);
+    return reply.send({ conversation: info, events });
+  });
+
   /** Existing tmux panes that could be adopted. Empty unless enabled. */
   app.get('/api/adoptable', async () => ({
     enabled: adoption.isEnabled(),

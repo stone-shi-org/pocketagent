@@ -16,6 +16,8 @@ import { UsageBar } from '../components/UsageBar.js';
 
 interface Props {
   onOpen: (sessionId: string) => void;
+  /** A finished chat, opened to read before deciding to continue it. */
+  onOpenChat: (conversationId: string) => void;
   onCompose: (cwd?: string) => void;
   onOpenAgents: () => void;
   onApiError: (error: unknown) => void;
@@ -32,8 +34,15 @@ interface Props {
  * answer to that. So live sessions and finished conversations sit in one list,
  * distinguished by a dot rather than by being filed somewhere else.
  */
-export function ProjectsPage({ onOpen, onCompose, onOpenAgents, onApiError, onLogout }: Props): JSX.Element {
-  const state = useProjects(onOpen, onApiError);
+export function ProjectsPage({
+  onOpen,
+  onOpenChat,
+  onCompose,
+  onOpenAgents,
+  onApiError,
+  onLogout,
+}: Props): JSX.Element {
+  const state = useProjects(onOpen, onOpenChat, onApiError);
   const [search, setSearch] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);

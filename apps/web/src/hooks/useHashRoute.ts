@@ -3,6 +3,9 @@ import { useCallback, useEffect, useState } from 'react';
 export type Route =
   | { name: 'list' }
   | { name: 'terminal'; sessionId: string }
+  /** A finished chat, opened to read — not yet resumed into a session. See
+      `ChatPreviewPage`. */
+  | { name: 'chat'; conversationId: string }
   /** `cwd` preselects a workspace, e.g. when composing from a project header. */
   | { name: 'compose'; cwd?: string }
   /** The "Agents" fleet overview — every running agent, at a glance. */
@@ -11,6 +14,9 @@ export type Route =
 function parse(hash: string): Route {
   const session = /^#\/s\/([^/?]+)/.exec(hash);
   if (session?.[1]) return { name: 'terminal', sessionId: decodeURIComponent(session[1]) };
+
+  const chat = /^#\/c\/([^/?]+)/.exec(hash);
+  if (chat?.[1]) return { name: 'chat', conversationId: decodeURIComponent(chat[1]) };
 
   const compose = /^#\/new(?:\/(.*))?$/.exec(hash);
   if (compose) {
@@ -27,6 +33,8 @@ function toHash(route: Route): string {
   switch (route.name) {
     case 'terminal':
       return `#/s/${encodeURIComponent(route.sessionId)}`;
+    case 'chat':
+      return `#/c/${encodeURIComponent(route.conversationId)}`;
     case 'compose':
       return route.cwd ? `#/new/${encodeURIComponent(route.cwd)}` : '#/new';
     case 'agents':

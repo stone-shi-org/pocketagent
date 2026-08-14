@@ -13,9 +13,8 @@ export interface ProjectsState {
   projects: ProjectInfo[] | null;
   host: HostInfo | null;
   error: string | null;
-  resuming: string | null;
   refresh: () => Promise<void>;
-  open: (chat: ChatSummary) => Promise<void>;
+  open: (chat: ChatSummary) => void;
   removeChat: (chat: ChatSummary) => Promise<void>;
   clearFinished: (project: ProjectInfo) => Promise<void>;
   hideProject: (cwd: string) => Promise<void>;
@@ -32,12 +31,12 @@ export interface ProjectsState {
  */
 export function useProjects(
   onOpen: (sessionId: string) => void,
+  onOpenChat: (conversationId: string) => void,
   onApiError: (error: unknown) => void,
 ): ProjectsState {
   const [projects, setProjects] = useState<ProjectInfo[] | null>(null);
   const [host, setHost] = useState<HostInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [resuming, setResuming] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -61,46 +60,29 @@ export function useProjects(
   /**
    * Open a chat.
    *
-   * Only a *live* session is opened directly. A finished one has no process to
-   * attach to — after a server restart it is a database row and nothing else —
-   * so what the tap means is "continue this", and continuing means resuming the
-   * conversation. Resuming branches, which is non-destructive and therefore
-   * safe on a plain tap; appending to the original transcript needs a
-   * confirmation and lives in the advanced dialog.
+   * A live session is opened directly — there is a process to attach to. A
+   * finished one has none: after a server restart it is a database row and
+   * nothing else, and resuming it used to happen right here, on the tap
+   * itself — a real agent process spun up for every idle look at old history,
+   * and (per `projects/index.ts`'s home-screen merge rule) that transcript's
+   * row would show as live with nothing ever said to it. `onOpenChat` instead
+   * opens a read-only preview of the transcript; resuming — as a branch,
+   * `forkSession: false`, same as ever — happens only once a prompt is
+   * actually typed there, in `ChatPreviewPage`.
    *
    * A finished chat with no conversation behind it (a plain shell, say) has
-   * nothing to continue. It still opens, so its final state is reachable.
+   * nothing to preview or continue. It still opens by session id, so its
+   * final state is reachable.
    */
   const open = useCallback(
-    async (chat: ChatSummary) => {
+    (chat: ChatSummary) => {
       if (chat.sessionId && (chat.live || !chat.conversationId)) {
         onOpen(chat.sessionId);
         return;
       }
-      if (!chat.conversationId || resuming) return;
-
-      setResuming(chat.id);
-      try {
-        const session = await api.createSession({
-          agent: chat.agent ?? 'claude',
-          cwd: projects?.find((p) => p.chats.some((c) => c.id === chat.id))?.cwd ?? '',
-          cols: 80,
-          rows: 24,
-          transport: 'structured',
-          resumeAgentSessionId: chat.conversationId,
-          forkSession: false,
-          title: chat.title,
-        });
-        await refresh();
-        onOpen(session.id);
-      } catch (err) {
-        onApiError(err);
-        setError(err instanceof ApiError ? err.message : 'Could not resume that chat.');
-      } finally {
-        setResuming(null);
-      }
+      if (chat.conversationId) onOpenChat(chat.conversationId);
     },
-    [onOpen, onApiError, projects, resuming, refresh],
+    [onOpen, onOpenChat],
   );
 
   /**
@@ -175,7 +157,6 @@ export function useProjects(
     projects,
     host,
     error,
-    resuming,
     refresh,
     open,
     removeChat,
@@ -191,6 +172,8 @@ interface ListProps {
   onCompose: (cwd: string) => void;
   /** Highlighted in the sidebar so you can see which chat you are reading. */
   activeSessionId?: string | null;
+  /** Same highlight, for a chat opened as a preview that has no session yet. */
+  activeConversationId?: string | null;
   /** Wording differs: one is tapped, the other clicked. */
   emptyHint: string;
   onAddProject: () => void;
@@ -202,13 +185,14 @@ export function ProjectList({
   search,
   onCompose,
   activeSessionId,
+  activeConversationId,
   emptyHint,
   onAddProject,
 }: ListProps): JSX.Element {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [expandedChats, setExpandedChats] = useState<Set<string>>(() => new Set());
   const [menuFor, setMenuFor] = useState<string | null>(null);
-  const { projects, resuming, open } = state;
+  const { projects, open } = state;
 
   const visible = useMemo(() => filterProjects(projects ?? [], search), [projects, search]);
   const searching = search.trim().length > 0;
@@ -318,19 +302,20 @@ export function ProjectList({
                         className={[
                           'chat-row',
                           chat.live ? 'live' : '',
-                          resuming === chat.id ? 'pending' : '',
-                          activeSessionId && chat.sessionId === activeSessionId ? 'active' : '',
+                          (activeSessionId && chat.sessionId === activeSessionId) ||
+                          (activeConversationId && chat.conversationId === activeConversationId)
+                            ? 'active'
+                            : '',
                         ]
                           .filter(Boolean)
                           .join(' ')}
                         data-chat-id={chat.id}
-                        onClick={() => void open(chat)}
-                        disabled={resuming !== null}
+                        onClick={() => open(chat)}
                         title={chat.title}
                       >
                         <span className="chat-title">
                           {chat.live && <span className="live-dot" aria-label="running" />}
-                          {resuming === chat.id ? 'Resuming…' : chat.title}
+                          {chat.title}
                         </span>
                       </button>
                       {/* Running chats have no remove: stop them first, so the

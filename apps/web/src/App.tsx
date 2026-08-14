@@ -8,6 +8,7 @@ import { DesktopShell } from './pages/DesktopShell.js';
 import { useIsDesktop } from './hooks/useMediaQuery.js';
 import { TerminalPage } from './pages/TerminalPage.js';
 import { AgentPage } from './pages/AgentPage.js';
+import { ChatPreviewPage } from './pages/ChatPreviewPage.js';
 import { AgentsFleetPage } from './pages/AgentsFleetPage.js';
 import { api } from './api/client.js';
 
@@ -136,6 +137,15 @@ export function App(): JSX.Element {
             onResumed={(sessionId) => navigate({ name: 'terminal', sessionId })}
           />
         )}
+        {route.name === 'chat' && (
+          <ChatPreviewPage
+            key={route.conversationId}
+            conversationId={route.conversationId}
+            onBack={() => navigate({ name: 'list' })}
+            onApiError={handleApiError}
+            onStarted={(sessionId) => navigate({ name: 'terminal', sessionId })}
+          />
+        )}
       </DesktopShell>
     );
   }
@@ -147,6 +157,17 @@ export function App(): JSX.Element {
         onBack={() => navigate({ name: 'list' })}
         onApiError={handleApiError}
         onResumed={(sessionId) => navigate({ name: 'terminal', sessionId })}
+      />
+    );
+  }
+
+  if (route.name === 'chat') {
+    return (
+      <ChatPreviewPage
+        conversationId={route.conversationId}
+        onBack={() => navigate({ name: 'list' })}
+        onApiError={handleApiError}
+        onStarted={(sessionId) => navigate({ name: 'terminal', sessionId })}
       />
     );
   }
@@ -176,6 +197,7 @@ export function App(): JSX.Element {
   return (
     <ProjectsPage
       onOpen={(sessionId) => navigate({ name: 'terminal', sessionId })}
+      onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
       onCompose={(cwd) => navigate(cwd ? { name: 'compose', cwd } : { name: 'compose' })}
       onOpenAgents={() => navigate({ name: 'agents' })}
       onApiError={handleApiError}

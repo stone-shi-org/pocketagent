@@ -104,6 +104,14 @@ there is the *conversation*, not the process.
   (`/` → `-`) is **lossy and must never be inverted**: containment is decided by a
   forward-encoded prefix filter plus the `cwd` recorded *inside* the transcript. Resuming
   defaults to `forkSession: false` so continuing a conversation appends in-place without creating duplicate chats.
+  Reading a transcript and resuming it into a session are deliberately separate: tapping a
+  finished chat opens `ChatPreviewPage`, which reads history straight off disk via `GET
+  /api/conversations/:id/history` — no session, no agent process. `POST /api/sessions` with
+  `resumeAgentSessionId` only fires once a prompt is actually sent from there (same
+  `setPendingPrompt` handoff `ComposerPage` and `AgentPage`'s own resume-after-finish use).
+  Resuming eagerly on tap used to spawn a subprocess per idle look at old history, and made
+  that chat's row read as live (see the home screen's merge rule below) before anyone had
+  said anything to it.
 - `adopt/index.ts` — attaches to a pane on a *foreign* tmux socket. Off unless
   `POCKETAGENT_ADOPT_TMUX_SOCKET` is set. The browser only ever sends an opaque
   sha256-derived id; the server builds the argv. Adopted sessions always use the direct

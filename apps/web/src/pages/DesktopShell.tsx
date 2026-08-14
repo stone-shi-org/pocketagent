@@ -42,6 +42,7 @@ export function DesktopShell({
 }: Props): JSX.Element {
   const state = useProjects(
     (sessionId) => onNavigate({ name: 'terminal', sessionId }),
+    (conversationId) => onNavigate({ name: 'chat', conversationId }),
     onApiError,
   );
   const [search, setSearch] = useState('');
@@ -53,6 +54,7 @@ export function DesktopShell({
   const [showRunning, setShowRunning] = useState(false);
 
   const activeSessionId = route.name === 'terminal' ? route.sessionId : null;
+  const activeConversationId = route.name === 'chat' ? route.conversationId : null;
   const runningCount =
     state.projects?.reduce((n, p) => n + p.chats.filter((c) => c.live).length, 0) ?? 0;
 
@@ -139,6 +141,7 @@ export function DesktopShell({
             onCompose={(cwd) => onNavigate({ name: 'compose', cwd })}
           onAddProject={() => setShowAdd(true)}
             activeSessionId={activeSessionId}
+            activeConversationId={activeConversationId}
             emptyHint="Nothing here yet. Start a chat to see it listed."
           />
         </div>
@@ -162,7 +165,7 @@ export function DesktopShell({
             }}
             onApiError={onApiError}
           />
-        ) : route.name === 'terminal' ? (
+        ) : route.name === 'terminal' || route.name === 'chat' ? (
           children
         ) : route.name === 'agents' ? (
           <AgentsFleetPage
