@@ -90,6 +90,15 @@ describe('CodexSession', () => {
     expect(session.agentSessionId).toMatch(/^thread_test/);
   });
 
+  it('reports the real starting model from thread/start, not a hardcoded null', async () => {
+    server = makeServer();
+    session = new CodexSession(makeSpec(), server);
+    const events = collect(session);
+    await session.start();
+
+    expect(events.find((e) => e.kind === 'session_started')).toMatchObject({ model: 'gpt-5.6-terra' });
+  });
+
   it('runs one turn end to end: user_prompt, tool_use/result, text, turn_complete with usage', async () => {
     server = makeServer();
     session = new CodexSession(makeSpec(), server);
@@ -247,6 +256,95 @@ describe('CodexSession', () => {
     // Deliberately excluded: pure TUI/composer settings and multi-session
     // navigation commands — see `dispatchSlashCommand`'s doc comment.
     expect(names).not.toEqual(expect.arrayContaining(['vim', 'theme', 'exit', 'new', 'resume']));
+  });
+
+  describe('model/effort switching', () => {
+    it('fetches the model catalog at start via model/list', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      const events = collect(session);
+      await session.start();
+
+      await waitFor(() => events.some((e) => e.kind === 'models_available'));
+      expect(events.find((e) => e.kind === 'models_available')).toEqual({
+        kind: 'models_available',
+        models: [
+          {
+            value: 'gpt-5.6-terra',
+            displayName: 'GPT-5.6 Terra',
+            description: 'General purpose',
+            supportsEffort: true,
+            supportedEffortLevels: ['low', 'high'],
+          },
+          {
+            value: 'gpt-5.6-fast',
+            displayName: 'GPT-5.6 Fast',
+            description: 'Faster, less thorough',
+            supportsEffort: false,
+            supportedEffortLevels: [],
+          },
+        ],
+      });
+    });
+
+    it('switches model via thread/settings/update and confirms with model_changed', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      const events = collect(session);
+      await session.start();
+      // fetchInitialModels() is fire-and-forget from start(); wait for it to
+      // land so it does not race into `events` alongside this call's own.
+      await waitFor(() => events.some((e) => e.kind === 'models_available'));
+      events.length = 0;
+
+      await session.setModel('gpt-5.6-fast');
+
+      expect(events).toEqual([{ kind: 'model_changed', model: 'gpt-5.6-fast' }]);
+    });
+
+    it('switches effort via the same RPC and confirms with effort_changed', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      const events = collect(session);
+      await session.start();
+      await waitFor(() => events.some((e) => e.kind === 'models_available'));
+      events.length = 0;
+
+      await session.setEffort('high');
+
+      expect(events).toEqual([{ kind: 'effort_changed', effort: 'high' }]);
+    });
+
+    it('reports a notice instead of throwing when the underlying RPC fails', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      await session.start();
+      const events = collect(session);
+
+      await session.setModel('FAIL');
+      const modelNotice = events.find((e) => e.kind === 'notice');
+      expect(modelNotice).toMatchObject({ kind: 'notice', level: 'warn' });
+      expect((modelNotice as { text: string }).text).toContain('simulated settings-update failure');
+      expect(events.some((e) => e.kind === 'model_changed')).toBe(false);
+
+      events.length = 0;
+      await session.setEffort('FAIL');
+      const effortNotice = events.find((e) => e.kind === 'notice');
+      expect(effortNotice).toMatchObject({ kind: 'notice', level: 'warn' });
+      expect(events.some((e) => e.kind === 'effort_changed')).toBe(false);
+    });
+
+    it('is a no-op on a session that has already ended', async () => {
+      server = makeServer();
+      session = new CodexSession(makeSpec(), server);
+      await session.start();
+      session.terminate();
+      const events = collect(session);
+
+      await session.setModel('gpt-5.6-fast');
+      await session.setEffort('high');
+      expect(events).toEqual([]);
+    });
   });
 
   describe('slash commands', () => {

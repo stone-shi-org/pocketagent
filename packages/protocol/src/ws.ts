@@ -4,6 +4,7 @@ import {
   AgentEvent,
   AgentReplayPayload,
   AskUserQuestionAnswer,
+  EffortLevel,
   PermissionDecision,
 } from './agent-events.js';
 
@@ -21,8 +22,13 @@ import {
  * sit on "connecting" forever, so it has to renegotiate rather than guess.
  * v5 added `commands_available`/`command_output` agent events, for a slash-
  * command picker on structured sessions.
+ * v6 added the `model` client message and `models_available`/`model_changed`
+ * agent events, for a model picker on structured sessions.
+ * v7 added the `effort` client message and `effort_changed` agent event, plus
+ * `ModelInfo.resolvedModel`/`supportsEffort`/`supportedEffortLevels`, for an
+ * effort-level picker alongside the model picker.
  */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 7;
 
 /**
  * WebSocket close codes the server uses for conditions the client must not
@@ -145,6 +151,27 @@ export const InterruptMessage = z.object({
   sessionId: SessionId,
 });
 
+/**
+ * Switch the model a structured session uses, effective on its next prompt —
+ * see `ModelChangedEvent`'s doc comment for why "effective" is not "now".
+ */
+export const SetModelMessage = z.object({
+  type: z.literal('model'),
+  sessionId: SessionId,
+  model: z.string().min(1).max(200),
+});
+
+/**
+ * Switch the effort level a structured session's model uses, effective on its
+ * next prompt — same caveat as `SetModelMessage`. `null` resets to the
+ * model's own default rather than pinning a specific level.
+ */
+export const SetEffortMessage = z.object({
+  type: z.literal('effort'),
+  sessionId: SessionId,
+  effort: EffortLevel.nullable(),
+});
+
 export const ClientMessage = z.discriminatedUnion('type', [
   AttachMessage,
   DetachMessage,
@@ -155,6 +182,8 @@ export const ClientMessage = z.discriminatedUnion('type', [
   PromptMessage,
   PermissionMessage,
   InterruptMessage,
+  SetModelMessage,
+  SetEffortMessage,
 ]);
 export type ClientMessage = z.infer<typeof ClientMessage>;
 

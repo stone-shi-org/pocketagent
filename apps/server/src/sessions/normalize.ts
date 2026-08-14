@@ -1,5 +1,5 @@
 import path from 'node:path';
-import type { AgentEvent, SlashCommandInfo } from '@pocketagent/protocol';
+import type { AgentEvent, ModelInfo, SlashCommandInfo } from '@pocketagent/protocol';
 
 /** Tool results can be enormous; the UI only needs a readable preview. */
 const MAX_RESULT_CHARS = 8000;
@@ -93,6 +93,38 @@ export function normalizeSlashCommands(value: unknown): SlashCommandInfo[] {
     });
   }
   return commands;
+}
+
+/**
+ * Defensive re-validation of the SDK's own `ModelInfo[]` shape — same
+ * discipline as `normalizeSlashCommands` above: trust it once it has actually
+ * been checked, and drop anything that does not look right rather than throw.
+ */
+export function normalizeModels(value: unknown): ModelInfo[] {
+  if (!Array.isArray(value)) return [];
+  const models: ModelInfo[] = [];
+  for (const raw of value) {
+    if (!isRecord(raw)) continue;
+    const modelValue = str(raw.value);
+    if (!modelValue) continue;
+    const resolvedModel = str(raw.resolvedModel);
+    // `EffortLevel` is a free-form string (see its protocol doc comment) —
+    // this only rejects non-strings and empty ones, not "unrecognized"
+    // values, since the SDK's own vocabulary is the only thing that decides
+    // what a real effort level is here.
+    const supportedEffortLevels = Array.isArray(raw.supportedEffortLevels)
+      ? raw.supportedEffortLevels.filter(isString).filter((l) => l.length > 0)
+      : [];
+    models.push({
+      value: modelValue,
+      ...(resolvedModel ? { resolvedModel } : {}),
+      displayName: str(raw.displayName) ?? modelValue,
+      description: str(raw.description) ?? '',
+      supportsEffort: raw.supportsEffort === true,
+      supportedEffortLevels,
+    });
+  }
+  return models;
 }
 
 function normalizeAssistant(message: Record<string, unknown>): AgentEvent[] {
@@ -466,6 +498,36 @@ export function extractAgyPath(input: Record<string, unknown>): string | null {
   return null;
 }
 
+/**
+ * Parse agy's own `agy models` subcommand output — plain text, not JSON: a
+ * "Fetching available models..." status line followed by one `<id>\t<label>`
+ * pair per line (confirmed live, v1.1.12). Unlike every other agy shape in
+ * this file, `models` is a genuine top-level subcommand spawned on its own
+ * (`AgySession.fetchInitialModels`), not a `-p` conversational turn, so there
+ * is no `command_result`/`event` envelope to unwrap — just lines to split.
+ *
+ * agy has no live in-conversation model-switch call (its own `/model` slash
+ * command reports the current model but "takes no arguments" — confirmed
+ * live); `AgySession.setModel` instead respawns the *next* turn with
+ * `--model <value>`, so `supportsEffort`/`supportedEffortLevels` are left
+ * false/empty here rather than guessed — agy's separate `--effort` flag
+ * conflicts with the models here that already bake an effort tier into their
+ * id (e.g. `gemini-3.7-flash-high`), so there is no clean per-model effort
+ * axis to report.
+ */
+export function normalizeAgyModelList(stdout: string): ModelInfo[] {
+  const models: ModelInfo[] = [];
+  for (const line of stdout.split('\n')) {
+    const tab = line.indexOf('\t');
+    if (tab < 0) continue;
+    const value = line.slice(0, tab).trim();
+    const displayName = line.slice(tab + 1).trim();
+    if (!value || !displayName) continue;
+    models.push({ value, displayName, description: '', supportsEffort: false, supportedEffortLevels: [] });
+  }
+  return models;
+}
+
 // ---------------------------------------------------------------------------
 // opencode — `opencode serve`'s shared `GET /event` SSE stream
 // ---------------------------------------------------------------------------
@@ -729,6 +791,34 @@ export function normalizeOpencodeCommands(value: unknown): SlashCommandInfo[] {
   return commands;
 }
 
+/**
+ * opencode's own `GET /api/model` response (`ModelV2Info[]`) — confirmed live
+ * (v1.18.18) against a real `opencode serve` instance. `value` is a composite
+ * `providerID/id` (there is no single field that already carries both, and
+ * `POST /api/session/{id}/model`'s body wants them split back out again — see
+ * `OpencodeSession.setModel`). `ModelCapabilities` has no reasoning/effort
+ * field at all (only `tools`/`input`/`output`), so unlike codex or pi there is
+ * no per-model effort axis this can report — `supportsEffort` stays false.
+ */
+export function normalizeOpencodeModels(value: unknown): ModelInfo[] {
+  if (!Array.isArray(value)) return [];
+  const models: ModelInfo[] = [];
+  for (const raw of value) {
+    if (!isRecord(raw)) continue;
+    const id = str(raw.id);
+    const providerID = str(raw.providerID);
+    if (!id || !providerID) continue;
+    models.push({
+      value: `${providerID}/${id}`,
+      displayName: str(raw.name) ?? id,
+      description: str(raw.family) ?? '',
+      supportsEffort: false,
+      supportedEffortLevels: [],
+    });
+  }
+  return models;
+}
+
 function blockId(inner: Record<string, unknown> | null, index: number): string {
   const base = (inner && str(inner.id)) || 'msg';
   return `${base}_${index}`;
@@ -979,6 +1069,38 @@ function extractCodexErrorMessage(params: Record<string, unknown>): string {
   return 'Codex reported an error.';
 }
 
+/**
+ * `model/list`'s own `Model` shape — confirmed live against the real,
+ * installed app-server (v0.147.0): `{data: Model[], nextCursor}`, each with
+ * `id`, `displayName`, `description`, `supportedReasoningEfforts:
+ * [{reasoningEffort, description}]`. Used both by `CodexSession.
+ * fetchInitialModels()` and (as plain text, not `ModelInfo[]`) by the
+ * existing `/model` slash command's `dispatchSlashCommand` case above.
+ */
+export function normalizeCodexModels(value: unknown): ModelInfo[] {
+  if (!Array.isArray(value)) return [];
+  const models: ModelInfo[] = [];
+  for (const raw of value) {
+    if (!isRecord(raw)) continue;
+    const id = str(raw.id);
+    if (!id) continue;
+    const supportedEffortLevels = Array.isArray(raw.supportedReasoningEfforts)
+      ? raw.supportedReasoningEfforts
+          .filter(isRecord)
+          .map((o) => str(o.reasoningEffort))
+          .filter((s): s is string => Boolean(s))
+      : [];
+    models.push({
+      value: id,
+      displayName: str(raw.displayName) ?? id,
+      description: str(raw.description) ?? '',
+      supportsEffort: supportedEffortLevels.length > 0,
+      supportedEffortLevels,
+    });
+  }
+  return models;
+}
+
 // ---------------------------------------------------------------------------
 // pi — `pi --mode rpc`'s JSON event stream
 // ---------------------------------------------------------------------------
@@ -1160,4 +1282,60 @@ export function extractPiPath(input: Record<string, unknown>): string | null {
     if (isString(value) && value.length > 0) return value;
   }
   return null;
+}
+
+/**
+ * pi's own `Model` object (docs/rpc.md's `#model` type, confirmed live
+ * v0.84.1 via `get_available_models`/`get_state`/`set_model`): `{id, name,
+ * api, provider, baseUrl, reasoning, input, contextWindow, maxTokens, cost,
+ * compat?: {thinkingLevelMap}}`. `value` is a composite `provider/id` — the
+ * same format pi's own `--model <pattern>` flag documents ("supports
+ * provider/id") and the only thing `set_model`'s `{provider, modelId}` params
+ * round-trip against, since no single field carries both. Returns null for
+ * anything that does not even have the two fields a value needs, so a caller
+ * can filter rather than push a broken entry.
+ */
+function normalizePiModel(raw: unknown): ModelInfo | null {
+  if (!isRecord(raw)) return null;
+  const id = str(raw.id);
+  const provider = str(raw.provider);
+  if (!id || !provider) return null;
+  const compat = isRecord(raw.compat) ? raw.compat : null;
+  const thinkingLevelMap = compat && isRecord(compat.thinkingLevelMap) ? compat.thinkingLevelMap : null;
+  // Only the levels actually enabled for *this* model (a non-null mapped
+  // value) — `thinkingLevelMap` lists every level pi knows about, most mapped
+  // to `null` for a model that does not support them (confirmed live: a
+  // DeepSeek model's map had `medium: null` right next to `high: "high"`).
+  const supportedEffortLevels = thinkingLevelMap
+    ? Object.entries(thinkingLevelMap)
+        .filter(([, v]) => v !== null)
+        .map(([k]) => k)
+    : [];
+  return {
+    value: `${provider}/${id}`,
+    displayName: str(raw.name) ?? id,
+    description: '',
+    supportsEffort: raw.reasoning === true,
+    supportedEffortLevels,
+  };
+}
+
+/** `get_available_models`'s own `{models: Model[]}` payload, for the picker. */
+export function normalizePiModels(value: unknown): ModelInfo[] {
+  if (!Array.isArray(value)) return [];
+  const models: ModelInfo[] = [];
+  for (const raw of value) {
+    const model = normalizePiModel(raw);
+    if (model) models.push(model);
+  }
+  return models;
+}
+
+/**
+ * The composite `provider/id` value for a single already-known `Model`
+ * object, e.g. `get_state().model` — same key `normalizePiModels` gives each
+ * list entry, so the two agree on what "the current model" matches against.
+ */
+export function normalizePiModelValue(raw: unknown): string | null {
+  return normalizePiModel(raw)?.value ?? null;
 }

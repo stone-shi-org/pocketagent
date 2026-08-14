@@ -33,6 +33,23 @@ function collect(session: PiSession): AgentEvent[] {
   return events;
 }
 
+/**
+ * `start()` fires three independent, fire-and-forget RPC round trips
+ * (`fetchInitialCommands`/`fetchInitialModels`/`reportCurrentModelAndEffort`)
+ * that can resolve at any point after it returns. A test asserting exactly
+ * what one specific `setModel`/`setEffort` call emits has to wait for all
+ * three to land and clear them first, or risks a stray `models_available`/
+ * `model_changed`/`effort_changed` from *startup* interleaving into the
+ * array it is asserting on.
+ */
+async function waitForStartupNoise(events: AgentEvent[]): Promise<void> {
+  await waitFor(() => events.some((e) => e.kind === 'commands_available'));
+  await waitFor(() => events.some((e) => e.kind === 'models_available'));
+  await waitFor(() => events.some((e) => e.kind === 'model_changed'));
+  await waitFor(() => events.some((e) => e.kind === 'effort_changed'));
+  events.length = 0;
+}
+
 describe('PiSession', () => {
   let session: PiSession | null = null;
 
@@ -66,6 +83,123 @@ describe('PiSession', () => {
         { name: 'skill:brave-search', description: 'Web search via Brave API', argumentHint: '', aliases: [] },
       ],
     });
+  });
+
+  it('learns the model catalog at start via get_available_models', async () => {
+    session = new PiSession(makeSpec());
+    const events = collect(session);
+    await session.start();
+
+    await waitFor(() => events.some((e) => e.kind === 'models_available'));
+    expect(events.find((e) => e.kind === 'models_available')).toEqual({
+      kind: 'models_available',
+      models: [
+        {
+          value: 'deepseek/deepseek-v4-flash',
+          displayName: 'DeepSeek V4 Flash',
+          description: '',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'high', 'max'],
+        },
+        {
+          value: 'anthropic/claude-sonnet-4',
+          displayName: 'Claude Sonnet 4',
+          description: '',
+          supportsEffort: true,
+          supportedEffortLevels: [],
+        },
+      ],
+    });
+  });
+
+  it('reports the real starting model and effort via get_state, not session_started', async () => {
+    session = new PiSession(makeSpec());
+    const events = collect(session);
+    await session.start();
+
+    // session_started itself still reports null — see PiSession.start().
+    expect(events.find((e) => e.kind === 'session_started')).toMatchObject({ model: null });
+
+    await waitFor(() => events.some((e) => e.kind === 'model_changed'));
+    expect(events.find((e) => e.kind === 'model_changed')).toEqual({
+      kind: 'model_changed',
+      model: 'deepseek/deepseek-v4-flash',
+    });
+    expect(events.find((e) => e.kind === 'effort_changed')).toEqual({ kind: 'effort_changed', effort: 'high' });
+  });
+
+  it('switches model via set_model and confirms with model_changed', async () => {
+    session = new PiSession(makeSpec());
+    const events = collect(session);
+    await session.start();
+    await waitForStartupNoise(events);
+
+    await session.setModel('anthropic/claude-sonnet-4');
+
+    expect(events).toEqual([{ kind: 'model_changed', model: 'anthropic/claude-sonnet-4' }]);
+  });
+
+  it('rejects a model value with no "provider/id" separator instead of guessing', async () => {
+    session = new PiSession(makeSpec());
+    const events = collect(session);
+    await session.start();
+    await waitForStartupNoise(events);
+
+    await session.setModel('not-composite');
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'notice', level: 'warn' });
+    expect((events[0] as { text: string }).text).toContain('provider/id');
+  });
+
+  it('reports a notice instead of throwing when set_model fails', async () => {
+    session = new PiSession(makeSpec());
+    const events = collect(session);
+    await session.start();
+    await waitForStartupNoise(events);
+
+    await session.setModel('FAIL/whatever');
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'notice', level: 'warn' });
+    expect((events[0] as { text: string }).text).toContain('Model not found');
+  });
+
+  it('switches effort via set_thinking_level and confirms with effort_changed', async () => {
+    session = new PiSession(makeSpec());
+    const events = collect(session);
+    await session.start();
+    await waitForStartupNoise(events);
+
+    await session.setEffort('low');
+
+    expect(events).toEqual([{ kind: 'effort_changed', effort: 'low' }]);
+  });
+
+  it('reports a notice instead of throwing when set_thinking_level fails', async () => {
+    session = new PiSession(makeSpec());
+    const events = collect(session);
+    await session.start();
+    await waitForStartupNoise(events);
+
+    await session.setEffort('FAIL');
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'notice', level: 'warn' });
+    expect((events[0] as { text: string }).text).toContain('Unsupported thinking level');
+  });
+
+  it('reports there is no "reset to default" instead of guessing a level', async () => {
+    session = new PiSession(makeSpec());
+    const events = collect(session);
+    await session.start();
+    await waitForStartupNoise(events);
+
+    await session.setEffort(null);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'notice', level: 'warn' });
+    expect((events[0] as { text: string }).text).toContain('no "reset to default"');
   });
 
   it('always reports skipPermissions, matching the always-bypassed contract', () => {

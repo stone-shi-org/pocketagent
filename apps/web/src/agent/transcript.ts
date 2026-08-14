@@ -1,4 +1,10 @@
-import type { AgentEvent, PermissionRequestEvent, SlashCommandInfo } from '@pocketagent/protocol';
+import type {
+  AgentEvent,
+  EffortLevel,
+  ModelInfo,
+  PermissionRequestEvent,
+  SlashCommandInfo,
+} from '@pocketagent/protocol';
 
 /**
  * A renderable conversation, folded down from the raw event stream.
@@ -88,6 +94,17 @@ export interface TranscriptState {
   /** Slash commands this agent currently supports, for the `/` picker. Empty
       for an agent that never reports any — the composer just has no picker. */
   commands: SlashCommandInfo[];
+  /** Models this agent can be switched to, for the model picker. Empty for an
+      agent that never reports any — the composer just has no picker. */
+  models: ModelInfo[];
+  /**
+   * The effort level the user picked from the composer, or null for "the
+   * model's own default". There is no way to read the *actual* starting
+   * effort back from the SDK (see `EffortChangedEvent`'s doc comment), so
+   * null also covers "never changed it" — the picker shows that as "Default"
+   * rather than guessing a specific level.
+   */
+  effort: EffortLevel | null;
 }
 
 export function emptyTranscript(): TranscriptState {
@@ -99,7 +116,9 @@ export function emptyTranscript(): TranscriptState {
     agentSessionId: null,
     busy: false,
     totalCostUsd: 0,
+    effort: null,
     commands: [],
+    models: [],
   };
 }
 
@@ -278,9 +297,42 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
         items: [...state.items, { type: 'command_output', key: `co_${event.id}`, text: event.text }],
       };
 
+    // REPLACE semantics, matching `commands_available` — the full current
+    // list of choices, not a delta.
+    case 'models_available':
+      return { ...state, models: event.models };
+
+    // Confirms a switch the user made from the composer. See the event's own
+    // doc comment: this is the model the *next* prompt uses, not the one
+    // already in flight.
+    case 'model_changed':
+      return { ...state, model: event.model };
+
+    // Same caveat as model_changed: the *next* prompt's effort, not this
+    // turn's. Switching models does not itself reset this — the SDK has no
+    // way to tell us the new model silently downgraded an unsupported level,
+    // so the composer keeps showing what the user last picked.
+    case 'effort_changed':
+      return { ...state, effort: event.effort };
+
     default:
       return state;
   }
+}
+
+/**
+ * Human label for a model id: the curated `displayName` from `models` when
+ * the id matches an entry (by `value` or the resolved wire id — see
+ * `ModelInfo.resolvedModel`'s doc comment for why both are checked), falling
+ * back to the id itself with any leading "claude" vendor prefix stripped.
+ * `AgentPage`'s header already says "Claude Code"; repeating "claude" in the
+ * model name right next to it is just noise.
+ */
+export function modelDisplayName(models: ModelInfo[], model: string | null): string | null {
+  if (!model) return null;
+  const match = models.find((m) => m.value === model || m.resolvedModel === model);
+  if (match) return match.displayName;
+  return model.replace(/^claude[\s-]+/i, '');
 }
 
 export function applyEvents(state: TranscriptState, events: AgentEvent[]): TranscriptState {

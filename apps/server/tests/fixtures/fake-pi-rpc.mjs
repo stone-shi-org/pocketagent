@@ -132,6 +132,50 @@ function handleLine(line) {
     });
     return;
   }
+  // Shapes below match a live probe against the real, installed CLI
+  // (v0.84.1): `get_available_models`/`get_state`'s `model` field, and
+  // `set_model`/`set_thinking_level`'s request params, all confirmed over a
+  // real `pi --mode rpc` session.
+  const DEEPSEEK_MODEL = {
+    id: 'deepseek-v4-flash',
+    name: 'DeepSeek V4 Flash',
+    api: 'openai-completions',
+    baseUrl: 'https://api.deepseek.com',
+    provider: 'deepseek',
+    reasoning: true,
+    input: ['text'],
+    cost: { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
+    contextWindow: 1000000,
+    maxTokens: 384000,
+    compat: { thinkingLevelMap: { minimal: null, low: 'low', medium: null, high: 'high', max: 'max' } },
+  };
+  const OTHER_MODEL = { id: 'claude-sonnet-4', name: 'Claude Sonnet 4', api: 'anthropic-messages', provider: 'anthropic', reasoning: true, input: ['text'] };
+
+  if (msg.type === 'get_available_models') {
+    respond(msg.id, true, { command: 'get_available_models', data: { models: [DEEPSEEK_MODEL, OTHER_MODEL] } });
+    return;
+  }
+  if (msg.type === 'get_state') {
+    respond(msg.id, true, { command: 'get_state', data: { model: DEEPSEEK_MODEL, thinkingLevel: 'high', sessionId: 'test' } });
+    return;
+  }
+  if (msg.type === 'set_model') {
+    if (msg.provider === 'FAIL') {
+      respond(msg.id, false, { command: 'set_model', error: `Model not found: ${msg.provider}/${msg.modelId}` });
+      return;
+    }
+    respond(msg.id, true, { command: 'set_model', data: OTHER_MODEL });
+    return;
+  }
+  if (msg.type === 'set_thinking_level') {
+    if (msg.level === 'FAIL') {
+      respond(msg.id, false, { command: 'set_thinking_level', error: 'Unsupported thinking level' });
+      return;
+    }
+    respond(msg.id, true, { command: 'set_thinking_level' });
+    return;
+  }
+
   respond(msg.id, true, { command: msg.type, data: {} });
 }
 

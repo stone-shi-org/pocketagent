@@ -118,6 +118,79 @@ describe('OpencodeSession', () => {
     });
   });
 
+  it('learns the model catalog at start via GET /api/model', async () => {
+    server = makeServer();
+    session = new OpencodeSession(makeSpec(), server);
+    const events = collect(session);
+    await session.start();
+
+    await waitFor(() => events.some((e) => e.kind === 'models_available'));
+    expect(events.find((e) => e.kind === 'models_available')).toEqual({
+      kind: 'models_available',
+      models: [
+        {
+          value: 'omniroute/deepseek-v4-flash',
+          displayName: 'Deepseek v4 Flash',
+          description: 'deepseek',
+          supportsEffort: false,
+          supportedEffortLevels: [],
+        },
+        {
+          value: 'omniroute/deepseek-v4-pro',
+          displayName: 'Deepseek v4 Pro',
+          description: 'deepseek',
+          supportsEffort: false,
+          supportedEffortLevels: [],
+        },
+      ],
+    });
+  });
+
+  it('switches model via POST /api/session/{id}/model and confirms with model_changed', async () => {
+    server = makeServer();
+    session = new OpencodeSession(makeSpec(), server);
+    const events = collect(session);
+    await session.start();
+    // fetchInitialModels() is fire-and-forget from start(); wait for it to
+    // land so it does not race into `events` alongside this call's own.
+    await waitFor(() => events.some((e) => e.kind === 'models_available'));
+    events.length = 0;
+
+    await session.setModel('omniroute/deepseek-v4-pro');
+
+    expect(events).toEqual([{ kind: 'model_changed', model: 'omniroute/deepseek-v4-pro' }]);
+  });
+
+  it('rejects a model value with no "providerID/id" separator instead of guessing', async () => {
+    server = makeServer();
+    session = new OpencodeSession(makeSpec(), server);
+    const events = collect(session);
+    await session.start();
+    await waitFor(() => events.some((e) => e.kind === 'models_available'));
+    events.length = 0;
+
+    await session.setModel('not-composite');
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'notice', level: 'warn' });
+    expect((events[0] as { text: string }).text).toContain('providerID/id');
+  });
+
+  it('reports a notice instead of throwing when the switch fails', async () => {
+    server = makeServer();
+    session = new OpencodeSession(makeSpec(), server);
+    const events = collect(session);
+    await session.start();
+    await waitFor(() => events.some((e) => e.kind === 'models_available'));
+    events.length = 0;
+
+    await session.setModel('FAIL/whatever');
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'notice', level: 'warn' });
+    expect((events[0] as { text: string }).text).toContain('simulated switch failure');
+  });
+
   it('routes a known command to POST /session/{id}/command instead of prompt_async', async () => {
     server = makeServer();
     session = new OpencodeSession(makeSpec(), server);

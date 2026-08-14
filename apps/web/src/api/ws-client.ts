@@ -5,6 +5,7 @@ import {
   type AgentEvent,
   type AskUserQuestionAnswer,
   type ClientMessage,
+  type EffortLevel,
   type PermissionDecision,
   type PermissionRequestEvent,
   type SessionInfo,
@@ -343,6 +344,21 @@ export class TerminalConnection {
   sendInterrupt(): boolean {
     if (!this.sessionId) return false;
     return this.send({ type: 'interrupt', sessionId: this.sessionId });
+  }
+
+  /** Switch a structured session's model. Takes effect on its next prompt. */
+  sendModel(model: string): boolean {
+    if (!this.sessionId) return false;
+    return this.send({ type: 'model', sessionId: this.sessionId, model });
+  }
+
+  /**
+   * Switch the effort level the current model applies. Takes effect on its
+   * next prompt. `null` resets to the model's own default.
+   */
+  sendEffort(effort: EffortLevel | null): boolean {
+    if (!this.sessionId) return false;
+    return this.send({ type: 'effort', sessionId: this.sessionId, effort });
   }
 
   /** Detach and stop reconnecting. The server-side PTY keeps running. */

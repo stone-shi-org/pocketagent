@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { z } from 'zod';
 import {
   query,
+  type EffortLevel as SdkEffortLevel,
   type Options,
   type PermissionMode,
   type PermissionResult,
@@ -13,12 +14,13 @@ import {
   AskUserQuestionItem,
   type AgentEvent,
   type AskUserQuestionAnswer,
+  type EffortLevel,
   type PermissionDecision,
   type PermissionRequestEvent,
   type SessionStatus,
 } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
-import { normalizeSdkMessage, normalizeSlashCommands, summarizeToolUse } from './normalize.js';
+import { normalizeModels, normalizeSdkMessage, normalizeSlashCommands, summarizeToolUse } from './normalize.js';
 
 /** The exact tool name the SDK's built-in interactive question uses. */
 const ASK_USER_QUESTION_TOOL = 'AskUserQuestion';
@@ -244,6 +246,7 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
     this.setStatus('running');
     void this.pump();
     void this.fetchInitialCommands();
+    void this.fetchInitialModels();
   }
 
   /**
@@ -267,6 +270,87 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
       // silently do without the picker rather than emit a notice for
       // something the user never asked for.
     }
+  }
+
+  /**
+   * Fetch the model list once at startup, for the picker.
+   *
+   * Same shape as `fetchInitialCommands` and for the same reason: best-effort,
+   * since an older CLI build without `supportedModels()` should lose nothing
+   * beyond the picker itself. The *current* model comes from `session_started`
+   * (the SDK's own `init` message), not from here — this only supplies the
+   * choices.
+   */
+  private async fetchInitialModels(): Promise<void> {
+    const handle = this.queryHandle;
+    if (!handle) return;
+    try {
+      const models = await handle.supportedModels();
+      if (!this.isAlive()) return;
+      this.emitEvent({ kind: 'models_available', models: normalizeModels(models) });
+    } catch {
+      // Older CLI builds or an already-torn-down query may not support this;
+      // the composer just has no model picker.
+    }
+  }
+
+  /**
+   * Switch the model this session uses, effective on the next prompt — the
+   * SDK's `setModel` only changes what a subsequent turn requests, never one
+   * already streaming.
+   *
+   * Mirrors `applyGlobalSkipPermissions`'s shape: call straight into the live
+   * `Query` handle and turn a failure into a notice instead of a thrown error,
+   * since this is a user-facing convenience, not something correctness
+   * depends on. `setModel` is documented as available only in streaming input
+   * mode, which every structured session already uses (see `inputStream()`).
+   */
+  async setModel(model: string): Promise<void> {
+    if (!this.queryHandle || !this.isAlive()) return;
+    try {
+      await this.queryHandle.setModel(model);
+    } catch (err) {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text: `Failed to switch model: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    this.emitEvent({ kind: 'model_changed', model });
+  }
+
+  /**
+   * Switch the effort level the current model applies, effective on the next
+   * prompt — same caveat as `setModel`. `null` resets to the model's own
+   * default rather than pinning a specific level.
+   *
+   * Routed through `applyFlagSettings` rather than a dedicated `setEffort`:
+   * the SDK has no such method, and effort lives in the same flag-settings
+   * layer as everything else `Options`/`--settings` would configure at
+   * startup. Same failure handling as `setModel` — a notice, not a throw.
+   *
+   * `effort` is the protocol's own `EffortLevel` (a free-form string, since
+   * other structured backends use a different vocabulary than Claude's — see
+   * that type's doc comment) but the SDK's own `applyFlagSettings` only
+   * accepts its five known values. The cast below hands off to `catch`
+   * instead of the type checker for anything else: an unrecognized string
+   * reaches the real API call and comes back as a rejected promise, exactly
+   * like any other failure this method already turns into a notice.
+   */
+  async setEffort(effort: EffortLevel | null): Promise<void> {
+    if (!this.queryHandle || !this.isAlive()) return;
+    try {
+      await this.queryHandle.applyFlagSettings({ effortLevel: effort as SdkEffortLevel | null });
+    } catch (err) {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text: `Failed to switch effort: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    this.emitEvent({ kind: 'effort_changed', effort });
   }
 
   /**

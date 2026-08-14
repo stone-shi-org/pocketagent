@@ -15,6 +15,25 @@ import { isOriginAllowed } from '../auth/index.js';
 import type { ManagedSession, StructuredLikeSession } from '../sessions/manager.js';
 
 /**
+ * Only some structured backends can switch model/effort live (today: the
+ * Claude Agent SDK, codex, agy and pi for model; the same four minus agy for
+ * effort — opencode has neither). `StructuredLikeSession` is a bare union
+ * with no shared interface for either (see `manager.ts`), so this checks for
+ * the method at runtime instead of growing an `instanceof` chain that would
+ * need editing every time a backend gains the feature.
+ */
+function canSetModel(
+  session: StructuredLikeSession,
+): session is StructuredLikeSession & { setModel: (model: string) => Promise<void> } {
+  return typeof (session as { setModel?: unknown }).setModel === 'function';
+}
+function canSetEffort(
+  session: StructuredLikeSession,
+): session is StructuredLikeSession & { setEffort: (effort: string | null) => Promise<void> } {
+  return typeof (session as { setEffort?: unknown }).setEffort === 'function';
+}
+
+/**
  * Close codes. 4000+ is the application-defined range. Shared with the client
  * via `WsCloseCode` in the protocol package — see that export's doc comment
  * for why this must not be a private, server-only enum.
@@ -349,6 +368,28 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
           const session = requireStructured(message.sessionId);
           if (!session) break;
           void session.interrupt();
+          break;
+        }
+
+        case 'model': {
+          const session = requireStructured(message.sessionId);
+          if (!session) break;
+          if (!canSetModel(session)) {
+            sendError('bad_message', 'This agent does not support switching models.', message.sessionId);
+            break;
+          }
+          void session.setModel(message.model);
+          break;
+        }
+
+        case 'effort': {
+          const session = requireStructured(message.sessionId);
+          if (!session) break;
+          if (!canSetEffort(session)) {
+            sendError('bad_message', 'This agent does not support switching effort.', message.sessionId);
+            break;
+          }
+          void session.setEffort(message.effort);
           break;
         }
       }

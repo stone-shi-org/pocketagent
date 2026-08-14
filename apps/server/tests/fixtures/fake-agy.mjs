@@ -12,9 +12,20 @@ function argVal(flag) {
 
 const prompt = argVal('-p') ?? '';
 const conversationId = argVal('--conversation') ?? crypto.randomUUID();
+const model = argVal('--model');
 
 function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
+}
+
+// `agy models` is a genuine top-level subcommand, not `-p` print mode — plain
+// text, one `<id>\t<label>` pair per line after a status line, captured live
+// against v1.1.12. `AgySession.fetchInitialModels()` spawns exactly this.
+if (args[0] === 'models') {
+  process.stdout.write('Fetching available models...\n');
+  process.stdout.write('gemini-3.6-flash-high\tGemini 3.6 Flash (High)\n');
+  process.stdout.write('claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n');
+  process.exit(0);
 }
 
 if (prompt === 'FAIL') {
@@ -92,6 +103,10 @@ emit({
 });
 
 function respond() {
+  // Echoes the `--model` flag (when present) into the response text, so a
+  // test can confirm `AgySession.setModel()` actually reached the *next*
+  // turn's argv rather than just recording it internally.
+  const text = model ? `echo: ${prompt} model=${model}` : `echo: ${prompt}`;
   emit({
     event: 'step_update',
     step_update: {
@@ -99,7 +114,7 @@ function respond() {
       step_index: 2,
       state: 'DONE',
       step_type: 'agent_response',
-      text_delta: `echo: ${prompt}`,
+      text_delta: text,
     },
   });
   emit({
@@ -107,7 +122,7 @@ function respond() {
     result: {
       conversation_id: conversationId,
       status: 'SUCCESS',
-      response: `echo: ${prompt}`,
+      response: text,
       duration_seconds: 0.01,
       num_turns: 1,
       usage: { input_tokens: 10, output_tokens: 5 },

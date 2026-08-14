@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { promisify } from 'node:util';
 import type { AgentEvent, PermissionDecision, PermissionRequestEvent, SessionStatus } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
-import { normalizeCodexEvent, type CodexIncoming } from './normalize.js';
+import { normalizeCodexEvent, normalizeCodexModels, type CodexIncoming } from './normalize.js';
 import type { CodexServerManager } from './codex-server.js';
 import type { StructuredSessionEvents } from './structured-session.js';
 
@@ -162,14 +162,26 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
   // ---- Lifecycle -------------------------------------------------------------
 
   async start(): Promise<void> {
+    // `thread/start`'s response carries the real starting `model` directly on
+    // its result (confirmed live, v0.147.0) — not nested under `thread`, and
+    // never inspected before now, which is why `session_started.model` used
+    // to be hardcoded null. Read defensively rather than widening the request
+    // type: `thread/resume`'s response was not separately confirmed to carry
+    // the same field, so a resume that omits it still starts up fine with
+    // `startModel` staying null, exactly like before this change.
+    let startModel: string | null = null;
     try {
       if (this._threadId) {
-        await this.server.sendRequest('thread/resume', { threadId: this._threadId });
+        const result = await this.server.sendRequest<{ model?: unknown }>('thread/resume', {
+          threadId: this._threadId,
+        });
+        startModel = typeof result.model === 'string' ? result.model : null;
       } else {
-        const result = await this.server.sendRequest<{ thread: { id: string } }>('thread/start', {
+        const result = await this.server.sendRequest<{ thread: { id: string }; model?: unknown }>('thread/start', {
           cwd: this.spec.cwd,
         });
         this._threadId = result.thread.id;
+        startModel = typeof result.model === 'string' ? result.model : null;
       }
     } catch (err) {
       this._startError = err instanceof Error ? err.message : String(err);
@@ -187,7 +199,7 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
     this.emitEvent({
       kind: 'session_started',
       agentSessionId: this._threadId,
-      model: null,
+      model: startModel,
       cwd: this.spec.cwd,
       tools: [],
       permissionMode: this.spec.skipPermissions ? 'bypassPermissions' : 'default',
@@ -200,6 +212,26 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
       kind: 'commands_available',
       commands: CODEX_SLASH_COMMANDS.map((c) => ({ ...c, aliases: [] })),
     });
+
+    void this.fetchInitialModels();
+  }
+
+  /**
+   * Fetch the model catalog for the picker, mirroring `StructuredSession.
+   * fetchInitialModels` — `model/list` is a genuine, always-available RPC
+   * (confirmed live, v0.147.0); unlike `thread/settings/update` below it
+   * needs no `experimentalApi` capability. Best-effort, same discipline as
+   * every other structured session's initial fetch: a failure here costs the
+   * picker, never the session.
+   */
+  private async fetchInitialModels(): Promise<void> {
+    try {
+      const res = await this.server.sendRequest<{ data?: unknown[] }>('model/list', {});
+      if (!this.isAlive()) return;
+      this.emitEvent({ kind: 'models_available', models: normalizeCodexModels(res.data) });
+    } catch {
+      // See doc comment above.
+    }
   }
 
   private handleMessage(message: CodexIncoming): void {
@@ -587,6 +619,47 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
         text: `Interrupt failed: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
+  }
+
+  /**
+   * Switch this thread's model, effective on the next turn —
+   * `thread/settings/update`'s own doc string: "Override the model for
+   * subsequent turns." Requires the `experimentalApi` capability declared at
+   * `initialize` (see `codex-server.ts`); confirmed live (v0.147.0) that
+   * without it the app-server rejects the call outright ("requires
+   * experimentalApi capability") rather than silently ignoring it. Same
+   * failure handling as every other structured session's live switch: a
+   * notice, not a thrown error.
+   */
+  async setModel(model: string): Promise<void> {
+    if (!this.isAlive() || !this._threadId) return;
+    try {
+      await this.server.sendRequest('thread/settings/update', { threadId: this._threadId, model });
+    } catch (err) {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text: `Failed to switch model: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    this.emitEvent({ kind: 'model_changed', model });
+  }
+
+  /** Same RPC and caveats as `setModel`, for reasoning effort instead of model. */
+  async setEffort(effort: string | null): Promise<void> {
+    if (!this.isAlive() || !this._threadId) return;
+    try {
+      await this.server.sendRequest('thread/settings/update', { threadId: this._threadId, effort });
+    } catch (err) {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text: `Failed to switch effort: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    this.emitEvent({ kind: 'effort_changed', effort });
   }
 
   /** See `StructuredSession.applyGlobalSkipPermissions` — same override, same reasoning. */

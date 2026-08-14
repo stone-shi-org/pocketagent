@@ -70,6 +70,49 @@ describe('AgySession', () => {
     });
   });
 
+  it('learns the model catalog at start via the `models` subcommand', async () => {
+    session = new AgySession(makeSpec());
+    const events = collect(session);
+    await session.start();
+
+    await waitFor(() => events.some((e) => e.kind === 'models_available'));
+    expect(events.find((e) => e.kind === 'models_available')).toEqual({
+      kind: 'models_available',
+      models: [
+        {
+          value: 'gemini-3.6-flash-high',
+          displayName: 'Gemini 3.6 Flash (High)',
+          description: '',
+          supportsEffort: false,
+          supportedEffortLevels: [],
+        },
+        {
+          value: 'claude-sonnet-4-6',
+          displayName: 'Claude Sonnet 4.6 (Thinking)',
+          description: '',
+          supportsEffort: false,
+          supportedEffortLevels: [],
+        },
+      ],
+    });
+  });
+
+  it('switches model by respawning the next turn with --model, confirmed immediately with no round trip', async () => {
+    session = new AgySession(makeSpec());
+    await session.start();
+    const events = collect(session);
+
+    await session.setModel('claude-sonnet-4-6');
+    // No RPC/process to wait for — the switch is just recorded, so the
+    // confirmation is synchronous with the call, unlike every other backend.
+    expect(events).toEqual([{ kind: 'model_changed', model: 'claude-sonnet-4-6' }]);
+
+    session.prompt('hello');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+    const text = events.find((e) => e.kind === 'text');
+    expect(text).toMatchObject({ text: 'echo: hello model=claude-sonnet-4-6' });
+  });
+
   it('always reports skipPermissions, matching the always-bypassed contract', async () => {
     session = new AgySession(makeSpec());
     expect(session.spec.skipPermissions).toBe(true);
@@ -88,7 +131,14 @@ describe('AgySession', () => {
 
     await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
 
-    const kinds = events.map((e) => e.kind);
+    // `commands_available`/`models_available` come from two independent
+    // startup probes (`fetchInitialCommands`/`fetchInitialModels`) racing
+    // this turn with no ordering guarantee between them — see their own
+    // dedicated tests above. Filtered out here since this test is only about
+    // the turn's own event sequence.
+    const kinds = events
+      .filter((e) => e.kind !== 'commands_available' && e.kind !== 'models_available')
+      .map((e) => e.kind);
     expect(kinds).toEqual([
       'user_prompt',
       'session_started',

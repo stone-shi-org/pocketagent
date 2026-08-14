@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { AgentEvent, PermissionRequestEvent, SessionStatus } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
-import { normalizePiEvent, normalizeSlashCommands } from './normalize.js';
+import { normalizePiEvent, normalizePiModels, normalizePiModelValue, normalizeSlashCommands } from './normalize.js';
 import type { StructuredSessionEvents } from './structured-session.js';
 
 export interface PiSessionSpec {
@@ -241,6 +241,8 @@ export class PiSession extends EventEmitter<StructuredSessionEvents> {
     });
 
     void this.fetchInitialCommands();
+    void this.fetchInitialModels();
+    void this.reportCurrentModelAndEffort();
   }
 
   /**
@@ -259,17 +261,121 @@ export class PiSession extends EventEmitter<StructuredSessionEvents> {
    * (`/settings`, `/hotkeys`, etc.) are not included. They are handled only
    * in interactive mode **and would not execute if sent via `prompt`**"
    * (docs/rpc.md, verbatim; docs/extensions.md says the same). That last
-   * clause is the reason this class never hand-lists them the way one might
-   * be tempted to: pi's own maintainers confirm sending one through this
-   * session's `prompt()` would not do the thing its name suggests, so a
-   * picker entry for one would render but lie. What `get_commands` *does*
-   * return (extension commands, prompt templates, skills) is genuinely
-   * invocable via `prompt` and is exactly what this reports.
+   * clause is the reason this class never hand-lists the *TUI slash command*
+   * the way one might be tempted to: pi's own maintainers confirm sending one
+   * through this session's `prompt()` would not do the thing its name
+   * suggests, so a picker entry for one would render but lie. What
+   * `get_commands` *does* return (extension commands, prompt templates,
+   * skills) is genuinely invocable via `prompt` and is exactly what this
+   * reports.
+   *
+   * `/model` specifically is a different story from the RPC side, not the
+   * `prompt` side: `get_available_models`/`set_model`/`set_thinking_level`
+   * (confirmed live, v0.84.1) are genuine, scriptable, non-TUI RPC methods —
+   * see `fetchInitialModels`/`setModel`/`setEffort` below. Nothing above
+   * contradicts that; it only ever ruled out reaching the *TUI command* by
+   * typing `/model` as a message, which was never the channel those use.
    */
   private async fetchInitialCommands(): Promise<void> {
     const res = await this.sendCommand('get_commands');
     if (!res.success || !isRecord(res.data)) return;
     this.emitEvent({ kind: 'commands_available', commands: normalizeSlashCommands(res.data.commands) });
+  }
+
+  /** Fetch the model catalog for the picker, via pi's own `get_available_models` RPC (docs/rpc.md). Best-effort, same discipline as `fetchInitialCommands`. */
+  private async fetchInitialModels(): Promise<void> {
+    const res = await this.sendCommand('get_available_models');
+    if (!res.success || !isRecord(res.data)) return;
+    const models = normalizePiModels(res.data.models);
+    if (models.length > 0) this.emitEvent({ kind: 'models_available', models });
+  }
+
+  /**
+   * Report the model/effort pi actually started with, via `get_state`
+   * (docs/rpc.md) — unlike the other three structured sessions, this is not
+   * folded into `session_started`: that event already fired synchronously in
+   * `start()` before this RPC round trip could resolve, and every other field
+   * on it comes from the spawn args, not a query. Reusing `model_changed`/
+   * `effort_changed` to report it is not quite literal ("changed" from what?)
+   * but is exactly the update the composer needs to apply, and both events
+   * are already REPLACE-semantics in the UI reducer either way.
+   */
+  private async reportCurrentModelAndEffort(): Promise<void> {
+    const res = await this.sendCommand('get_state');
+    if (!res.success || !isRecord(res.data)) return;
+    const model = normalizePiModelValue(res.data.model);
+    if (model) this.emitEvent({ kind: 'model_changed', model });
+    if (typeof res.data.thinkingLevel === 'string' && res.data.thinkingLevel) {
+      this.emitEvent({ kind: 'effort_changed', effort: res.data.thinkingLevel });
+    }
+  }
+
+  /**
+   * Switch the model this session uses, via pi's own `set_model` RPC
+   * (docs/rpc.md: `{type: 'set_model', provider, modelId}`, confirmed live
+   * v0.84.1) — effective immediately in practice (pi applies it to the live
+   * session state), but reported with the same "next prompt" framing as
+   * every other backend's live switch since a turn already in flight is not
+   * retried against it. `model` is the composite `provider/id` value
+   * `normalizePiModel` produces; anything else is a caller bug, not a pi
+   * failure, so it is reported the same way as a real RPC error.
+   */
+  async setModel(model: string): Promise<void> {
+    if (!this.isAlive()) return;
+    const slash = model.indexOf('/');
+    if (slash < 0) {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text: `Failed to switch model: expected "provider/id", got "${model}".`,
+      });
+      return;
+    }
+    const res = await this.sendCommand('set_model', {
+      provider: model.slice(0, slash),
+      modelId: model.slice(slash + 1),
+    });
+    if (!res.success) {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text: `Failed to switch model: ${res.error ?? 'unknown error'}`,
+      });
+      return;
+    }
+    this.emitEvent({ kind: 'model_changed', model });
+  }
+
+  /**
+   * Switch the reasoning/thinking level, via pi's own `set_thinking_level`
+   * RPC (docs/rpc.md, confirmed live v0.84.1). `null` (the composer's
+   * "Default" option) has nothing to map onto: pi's levels are `"off"`,
+   * `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`, and there
+   * is no documented "clear the override" call — `"off"` is a real, distinct
+   * level (no reasoning at all), not a synonym for "whatever the model
+   * defaults to". Rather than silently guess one, this reports that there is
+   * nothing to do, the same way a real RPC failure would be reported.
+   */
+  async setEffort(effort: string | null): Promise<void> {
+    if (!this.isAlive()) return;
+    if (effort === null) {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text: 'pi has no "reset to default" effort — pick an explicit level instead.',
+      });
+      return;
+    }
+    const res = await this.sendCommand('set_thinking_level', { level: effort });
+    if (!res.success) {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text: `Failed to switch effort: ${res.error ?? 'unknown error'}`,
+      });
+      return;
+    }
+    this.emitEvent({ kind: 'effort_changed', effort });
   }
 
   private handleChunk(chunk: Buffer): void {

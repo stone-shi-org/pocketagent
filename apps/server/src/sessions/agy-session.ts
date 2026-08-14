@@ -4,7 +4,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import readline from 'node:readline';
 import type { AgentEvent, PermissionRequestEvent, SessionStatus } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
-import { normalizeAgyMessage } from './normalize.js';
+import { normalizeAgyMessage, normalizeAgyModelList } from './normalize.js';
 import type { StructuredSessionEvents } from './structured-session.js';
 
 export interface AgySessionSpec {
@@ -62,6 +62,8 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   private readonly queue: string[] = [];
   private draining = false;
   private closed = false;
+  /** Set by `setModel`; included in the next (and every later) turn's argv. */
+  private _desiredModel: string | null = null;
 
   private _status: SessionStatus = 'starting';
   private _agentSessionId: string | null = null;
@@ -152,6 +154,69 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this._lastActivityAt = this._startedAt;
     this.setStatus('running');
     this.fetchInitialCommands();
+    this.fetchInitialModels();
+    return Promise.resolve();
+  }
+
+  /**
+   * Learn agy's model catalog for the picker, via its own `models`
+   * subcommand — confirmed live (v1.1.12): plain text, one `<id>\t<label>`
+   * pair per line, not the `stream-json`/`-p` shape `fetchInitialCommands`
+   * uses, since `models` is a genuine top-level subcommand rather than an
+   * in-conversation slash command. Same best-effort discipline: a failure
+   * here costs the picker, never the session.
+   */
+  private fetchInitialModels(): void {
+    const bin = this.spec.executablePath ?? 'agy';
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(bin, ['models'], { cwd: this.spec.cwd, env: this.spec.env });
+    } catch {
+      return;
+    }
+
+    let stdout = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', () => {
+      // Nothing here is worth surfacing — see the doc comment above.
+    });
+    child.on('error', () => {});
+    child.on('close', (code) => {
+      if (code !== 0) return;
+      const models = normalizeAgyModelList(stdout);
+      if (models.length > 0) this.emitEvent({ kind: 'models_available', models });
+    });
+
+    // Same defensive backstop as `fetchInitialCommands`'s probe.
+    const killer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }, 10_000);
+    child.on('exit', () => clearTimeout(killer));
+  }
+
+  /**
+   * Switch the model agy uses starting with the *next* turn, by adding
+   * `--model <value>` to that turn's spawn argv — confirmed empirically that
+   * continuing a conversation (`--conversation <id>`) with a different
+   * `--model` on a later invocation actually changes the effective model for
+   * that and later turns. There is no live process between turns to call a
+   * switch on (see the class doc comment), so this is the "next prompt"
+   * contract every other backend confirms over a live channel, achieved
+   * instead by respawning — which means there is also no round trip to wait
+   * for: `model_changed` fires immediately rather than after a confirmation
+   * that will only ever arrive once that next turn actually starts.
+   */
+  setModel(model: string): Promise<void> {
+    if (this.isAlive()) {
+      this._desiredModel = model;
+      this.emitEvent({ kind: 'model_changed', model });
+    }
     return Promise.resolve();
   }
 
@@ -261,6 +326,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     return new Promise((resolve) => {
       const args = ['--output-format', 'stream-json', '--dangerously-skip-permissions', '-p', text];
       if (this._agentSessionId) args.push('--conversation', this._agentSessionId);
+      if (this._desiredModel) args.push('--model', this._desiredModel);
 
       const bin = this.spec.executablePath ?? 'agy';
       let child: ChildProcessWithoutNullStreams;

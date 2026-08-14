@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { AgentEvent, PermissionDecision, PermissionRequestEvent, SessionStatus } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
-import { normalizeOpencodeCommands, normalizeOpencodeEvent } from './normalize.js';
+import { normalizeOpencodeCommands, normalizeOpencodeEvent, normalizeOpencodeModels } from './normalize.js';
 import type { OpencodeServerManager } from './opencode-server.js';
 import type { StructuredSessionEvents } from './structured-session.js';
 
@@ -183,6 +183,41 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
     });
 
     void this.fetchInitialCommands();
+    void this.fetchInitialModels();
+  }
+
+  /**
+   * Learn opencode's model catalog for the picker, via its newer `/api/model`
+   * endpoint (`v2.model.list`, confirmed live against a real, running
+   * `opencode serve` instance — v1.18.18). Every other call in this class
+   * uses the legacy, unprefixed endpoints (`/session`, `/command`,
+   * `/session/{id}/prompt_async`, ...) since those are the ones this class
+   * was originally built against; `/api/model` and `setModel`'s `/api/session/
+   * {id}/model` are the one exception, reached only because there is no
+   * model-catalog/switch endpoint on the legacy surface at all — confirmed by
+   * enumerating the real server's own OpenAPI document, not assumed. The two
+   * surfaces share the same underlying session store (also confirmed live: a
+   * session created via legacy `POST /session` switches model successfully
+   * through the `/api/*` endpoint), so mixing them for just this one feature
+   * is safe rather than a half-migration.
+   *
+   * `location[directory]` uses PHP/OpenAPI "deepObject" query style — a
+   * literal `[directory]` in the key, not a nested object `URLSearchParams`
+   * could express any other way; `OpencodeServerManager.request`'s query
+   * type is a plain string map, so this passes the bracketed key through
+   * as-is rather than needing new plumbing.
+   */
+  private async fetchInitialModels(): Promise<void> {
+    try {
+      const res = await this.server.request<{ data?: unknown[] }>('/api/model', {
+        method: 'GET',
+        query: { 'location[directory]': this.spec.cwd },
+      });
+      if (!this.isAlive()) return;
+      this.emitEvent({ kind: 'models_available', models: normalizeOpencodeModels(res.data) });
+    } catch {
+      // Best-effort, same discipline as `fetchInitialCommands` above.
+    }
   }
 
   /**
@@ -342,6 +377,44 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
         text: `Interrupt failed: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
+  }
+
+  /**
+   * Switch this session's model, effective on the next prompt — opencode's
+   * own `v2.session.switchModel` doc string: "Switch the model used by
+   * subsequent provider turns." Confirmed live (v1.18.18) that this
+   * `/api/*`-surface call succeeds against a session id minted by the legacy
+   * `POST /session` this class actually creates sessions through — see
+   * `fetchInitialModels`'s doc comment for why the two surfaces are mixed
+   * just for this feature. `model` is the composite `providerID/id` value
+   * `normalizeOpencodeModels` produces; split back apart here since
+   * `ModelRef` (the request body's shape) wants them separate.
+   */
+  async setModel(model: string): Promise<void> {
+    if (!this.isAlive() || !this._opencodeSessionId) return;
+    const slash = model.indexOf('/');
+    if (slash < 0) {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text: `Failed to switch model: expected "providerID/id", got "${model}".`,
+      });
+      return;
+    }
+    try {
+      await this.server.request(`/api/session/${this._opencodeSessionId}/model`, {
+        method: 'POST',
+        body: { model: { providerID: model.slice(0, slash), id: model.slice(slash + 1) } },
+      });
+    } catch (err) {
+      this.emitEvent({
+        kind: 'notice',
+        level: 'warn',
+        text: `Failed to switch model: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    this.emitEvent({ kind: 'model_changed', model });
   }
 
   /** See `StructuredSession.applyGlobalSkipPermissions` — same override, same reasoning. */

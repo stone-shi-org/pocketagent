@@ -140,12 +140,28 @@ rl.on('line', (line) => {
     if (method === 'thread/start') {
       const threadId = `thread_test${threads.size + 1}`;
       threads.set(threadId, { cwd: params.cwd ?? '' });
-      return respond(id, { thread: { id: threadId, sessionId: threadId, status: { type: 'idle' } } });
+      // `model` lives directly on the result, not nested under `thread` —
+      // confirmed live (v0.147.0) — since `CodexSession.start()` reads it to
+      // report the real starting model instead of a hardcoded null.
+      return respond(id, { thread: { id: threadId, sessionId: threadId, status: { type: 'idle' } }, model: 'gpt-5.6-terra' });
     }
     if (method === 'thread/resume') {
       const threadId = params.threadId;
       if (!threads.has(threadId)) threads.set(threadId, { cwd: '' });
-      return respond(id, { thread: { id: threadId, sessionId: threadId, status: { type: 'idle' } } });
+      return respond(id, { thread: { id: threadId, sessionId: threadId, status: { type: 'idle' } }, model: 'gpt-5.6-terra' });
+    }
+    if (method === 'thread/settings/update') {
+      // A sentinel value, not a real model/effort, lets a test exercise
+      // `CodexSession.setModel`/`setEffort`'s failure path without needing a
+      // way to make the *transport* itself fail.
+      if (params.model === 'FAIL' || params.effort === 'FAIL') {
+        return write({ jsonrpc: '2.0', id, error: { code: -32600, message: 'simulated settings-update failure' } });
+      }
+      // Real response is just `{}` — the actual new settings arrive
+      // separately as a `thread/settings/updated` notification, which
+      // `CodexSession` does not currently listen for (it trusts its own
+      // request instead — see `setModel`/`setEffort`).
+      return respond(id, {});
     }
     if (method === 'turn/start') {
       respond(id, { turn: { id: 'turn_1', items: [], status: 'inProgress' } });
@@ -184,7 +200,16 @@ rl.on('line', (line) => {
     if (method === 'model/list') {
       return respond(id, {
         data: [
-          { id: 'gpt-5.6-terra', displayName: 'GPT-5.6 Terra', description: 'General purpose', isDefault: true },
+          {
+            id: 'gpt-5.6-terra',
+            displayName: 'GPT-5.6 Terra',
+            description: 'General purpose',
+            isDefault: true,
+            supportedReasoningEfforts: [
+              { reasoningEffort: 'low', description: 'Fast responses' },
+              { reasoningEffort: 'high', description: 'Deeper reasoning' },
+            ],
+          },
           { id: 'gpt-5.6-fast', displayName: 'GPT-5.6 Fast', description: 'Faster, less thorough', isDefault: false },
         ],
       });

@@ -611,7 +611,7 @@ describe('TerminalConnection: structured sessions', () => {
     expect(connection.getLastSeq()).toBe(3);
   });
 
-  it('sends prompt, permission and interrupt frames', () => {
+  it('sends prompt, permission, interrupt and model frames', () => {
     const { connection, socket } = setup();
     connection.open('abc');
     socket().open();
@@ -620,12 +620,14 @@ describe('TerminalConnection: structured sessions', () => {
     connection.sendPermission('p1', 'allow_session');
     connection.sendPermission('p2', 'deny', 'not that file');
     connection.sendInterrupt();
+    connection.sendModel('claude-opus-4-8');
 
     expect(socket().parsedSent().slice(1)).toEqual([
       { type: 'prompt', sessionId: 'abc', text: 'do the thing' },
       { type: 'permission', sessionId: 'abc', requestId: 'p1', decision: 'allow_session' },
       { type: 'permission', sessionId: 'abc', requestId: 'p2', decision: 'deny', message: 'not that file' },
       { type: 'interrupt', sessionId: 'abc' },
+      { type: 'model', sessionId: 'abc', model: 'claude-opus-4-8' },
     ]);
   });
 });

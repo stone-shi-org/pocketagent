@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentEvent } from '@pocketagent/protocol';
-import { applyEvent, applyEvents, emptyTranscript, groupIntoTurns, type ToolItem } from './transcript.js';
+import type { AgentEvent, ModelInfo } from '@pocketagent/protocol';
+import {
+  applyEvent,
+  applyEvents,
+  emptyTranscript,
+  groupIntoTurns,
+  modelDisplayName,
+  type ToolItem,
+} from './transcript.js';
 
 const toolUse = (id: string, name = 'Read', filePath: string | null = '/a/b.ts'): AgentEvent => ({
   kind: 'tool_use',
@@ -230,6 +237,108 @@ describe('transcript: slash commands', () => {
       text: 'Usage: 12.3k tokens',
     });
     expect(state.items).toEqual([{ type: 'command_output', key: 'co_u-1', text: 'Usage: 12.3k tokens' }]);
+  });
+});
+
+const MODEL_OPUS: ModelInfo = {
+  value: 'claude-opus-4-8',
+  displayName: 'Opus',
+  description: 'Most capable',
+  supportsEffort: true,
+  supportedEffortLevels: ['low', 'high'],
+};
+
+const MODEL_SONNET: ModelInfo = {
+  value: 'sonnet',
+  resolvedModel: 'claude-sonnet-5',
+  displayName: 'Sonnet',
+  description: 'Balanced',
+  supportsEffort: false,
+  supportedEffortLevels: [],
+};
+
+function modelFixture(value: string, displayName: string): ModelInfo {
+  return { value, displayName, description: '', supportsEffort: false, supportedEffortLevels: [] };
+}
+
+describe('transcript: models', () => {
+  it('starts with no models', () => {
+    expect(emptyTranscript().models).toEqual([]);
+  });
+
+  it('sets the model list from models_available', () => {
+    const state = applyEvent(emptyTranscript(), {
+      kind: 'models_available',
+      models: [MODEL_OPUS],
+    });
+    expect(state.models).toEqual([MODEL_OPUS]);
+  });
+
+  it('replaces rather than merges on a later models_available', () => {
+    const state = applyEvents(emptyTranscript(), [
+      { kind: 'models_available', models: [modelFixture('a', 'A')] },
+      { kind: 'models_available', models: [modelFixture('b', 'B')] },
+    ]);
+    expect(state.models).toEqual([modelFixture('b', 'B')]);
+  });
+
+  it('updates the current model on model_changed, effective for the next prompt', () => {
+    const state = applyEvents(emptyTranscript(), [
+      {
+        kind: 'session_started',
+        agentSessionId: 's1',
+        model: 'claude-sonnet-5',
+        cwd: '/tmp',
+        tools: [],
+        permissionMode: 'default',
+      },
+      { kind: 'model_changed', model: 'claude-opus-4-8' },
+    ]);
+    expect(state.model).toBe('claude-opus-4-8');
+  });
+});
+
+describe('transcript: effort', () => {
+  it('starts with no effort override (the model default)', () => {
+    expect(emptyTranscript().effort).toBeNull();
+  });
+
+  it('sets the effort level on effort_changed', () => {
+    const state = applyEvent(emptyTranscript(), { kind: 'effort_changed', effort: 'high' });
+    expect(state.effort).toBe('high');
+  });
+
+  it('clears back to null (the default) on effort_changed with null', () => {
+    const state = applyEvents(emptyTranscript(), [
+      { kind: 'effort_changed', effort: 'high' },
+      { kind: 'effort_changed', effort: null },
+    ]);
+    expect(state.effort).toBeNull();
+  });
+});
+
+describe('modelDisplayName', () => {
+  it('returns null when no model is known yet', () => {
+    expect(modelDisplayName([], null)).toBeNull();
+  });
+
+  it('matches by value and returns the curated display name', () => {
+    expect(modelDisplayName([MODEL_OPUS], 'claude-opus-4-8')).toBe('Opus');
+  });
+
+  it('matches by resolvedModel when the id is the resolved wire id, not the alias', () => {
+    // session_started reports the resolved id, while supportedModels() lists
+    // the alias as `value` — this is the case that requires checking both.
+    expect(modelDisplayName([MODEL_SONNET], 'claude-sonnet-5')).toBe('Sonnet');
+  });
+
+  it('falls back to the raw id, stripped of a leading claude- prefix, when nothing matches', () => {
+    expect(modelDisplayName([], 'claude-sonnet-4-5')).toBe('sonnet-4-5');
+    expect(modelDisplayName([], 'Claude Opus 4.1')).toBe('Opus 4.1');
+  });
+
+  it('leaves an id with no claude prefix alone when nothing matches', () => {
+    expect(modelDisplayName([], 'some-other-vendor-model')).toBe('some-other-vendor-model');
   });
 });
 

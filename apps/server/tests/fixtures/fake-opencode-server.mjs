@@ -195,6 +195,33 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, true);
   }
 
+  // Shape captured live against the real, installed server's `/api/*` v2
+  // surface (v1.18.18, via its own generated OpenAPI `/doc`) — the only two
+  // endpoints `OpencodeSession` reaches on that surface, since the legacy
+  // surface every other call here uses has no model-catalog/switch endpoint
+  // at all. `location[directory]` is deepObject-style query encoding, a
+  // literal bracketed key, not a nested object.
+  if (req.method === 'GET' && url.pathname === '/api/model') {
+    return send(res, 200, {
+      location: { directory: url.searchParams.get('location[directory]') ?? '' },
+      data: [
+        { id: 'deepseek-v4-flash', providerID: 'omniroute', family: 'deepseek', name: 'Deepseek v4 Flash' },
+        { id: 'deepseek-v4-pro', providerID: 'omniroute', family: 'deepseek', name: 'Deepseek v4 Pro' },
+      ],
+    });
+  }
+
+  const modelMatch = /^\/api\/session\/([^/]+)\/model$/.exec(url.pathname);
+  if (req.method === 'POST' && modelMatch) {
+    const body = await readBody(req);
+    if (body.model?.providerID === 'FAIL') {
+      return send(res, 400, { error: 'InvalidRequestError', message: 'simulated switch failure' });
+    }
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
   const replyMatch = /^\/permission\/([^/]+)\/reply$/.exec(url.pathname);
   if (req.method === 'POST' && replyMatch) {
     const permissionID = replyMatch[1];

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { CreateSessionRequest } from '@pocketagent/protocol';
 import { encodeProjectDir } from '../src/conversations/index.js';
-import { createTestApp, makeWorkspace, type TestApp } from './helpers.js';
+import { createTestApp, makeWorkspace, waitFor, type TestApp } from './helpers.js';
 
 /**
  * Resuming a conversation reaches into a transcript that another process may
@@ -16,6 +16,12 @@ import { createTestApp, makeWorkspace, type TestApp } from './helpers.js';
  */
 const captured: { options: any; prompt: unknown }[] = [];
 const permissionModeCalls: string[] = [];
+const setModelCalls: (string | undefined)[] = [];
+const applyFlagSettingsCalls: unknown[] = [];
+/** Undefined means "behave normally"; set per-test to exercise a failure path. */
+let supportedModelsResult: unknown[] | 'throw' = [];
+let setModelBehavior: 'resolve' | 'throw' = 'resolve';
+let applyFlagSettingsBehavior: 'resolve' | 'throw' = 'resolve';
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: ({ prompt, options }: { prompt: unknown; options: unknown }) => {
@@ -33,6 +39,18 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
       interrupt: async () => {},
       setPermissionMode: async (mode: string) => {
         permissionModeCalls.push(mode);
+      },
+      supportedModels: async () => {
+        if (supportedModelsResult === 'throw') throw new Error('not supported');
+        return supportedModelsResult;
+      },
+      setModel: async (model: string | undefined) => {
+        setModelCalls.push(model);
+        if (setModelBehavior === 'throw') throw new Error('model rejected');
+      },
+      applyFlagSettings: async (settings: unknown) => {
+        applyFlagSettingsCalls.push(settings);
+        if (applyFlagSettingsBehavior === 'throw') throw new Error('effort rejected');
       },
     };
   },
@@ -301,6 +319,176 @@ describe('AskUserQuestion: a question, not an approval', () => {
     session.resolvePermission(id, 'allow', undefined, { answers: { 'Which library should we use?': 'moment' } });
     await expect(resultPromise).resolves.toMatchObject({ behavior: 'allow' });
     await session.terminate();
+  });
+});
+
+/**
+ * Model listing and live switching, both riding the same `Query` handle the
+ * skip-permissions switch already reaches (`setPermissionMode` above) — see
+ * `StructuredSession.fetchInitialModels`/`setModel`.
+ */
+describe('model switching', () => {
+  beforeEach(() => {
+    captured.length = 0;
+    permissionModeCalls.length = 0;
+    setModelCalls.length = 0;
+    supportedModelsResult = [];
+    setModelBehavior = 'resolve';
+  });
+
+  it('emits models_available with the normalized list fetched at startup', async () => {
+    supportedModelsResult = [
+      { value: 'claude-opus-4-8', displayName: 'Opus', description: 'Most capable' },
+      { value: 'claude-sonnet-5', displayName: 'Sonnet', description: 'Balanced' },
+    ];
+    const session = makeSession();
+    const events: unknown[] = [];
+    session.on('event', (_seq, event) => events.push(event));
+    await session.start();
+
+    await waitFor(() => events.some((e: any) => e.kind === 'models_available'));
+    expect(events.find((e: any) => e.kind === 'models_available')).toEqual({
+      kind: 'models_available',
+      models: [
+        {
+          value: 'claude-opus-4-8',
+          displayName: 'Opus',
+          description: 'Most capable',
+          supportsEffort: false,
+          supportedEffortLevels: [],
+        },
+        {
+          value: 'claude-sonnet-5',
+          displayName: 'Sonnet',
+          description: 'Balanced',
+          supportsEffort: false,
+          supportedEffortLevels: [],
+        },
+      ],
+    });
+    await session.terminate();
+  });
+
+  it('does without a picker, rather than failing startup, when supportedModels is unavailable', async () => {
+    supportedModelsResult = 'throw';
+    const session = makeSession();
+    const events: unknown[] = [];
+    session.on('event', (_seq, event) => events.push(event));
+    await session.start();
+
+    // Give fetchInitialModels a turn to run and fail; nothing should surface.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(events.some((e: any) => e.kind === 'models_available')).toBe(false);
+    expect(events.some((e: any) => e.kind === 'notice')).toBe(false);
+    await session.terminate();
+  });
+
+  it('calls setModel on the live query and confirms with model_changed', async () => {
+    const session = makeSession();
+    const events: unknown[] = [];
+    session.on('event', (_seq, event) => events.push(event));
+    await session.start();
+
+    await session.setModel('claude-opus-4-8');
+
+    expect(setModelCalls).toEqual(['claude-opus-4-8']);
+    expect(events.find((e: any) => e.kind === 'model_changed')).toEqual({
+      kind: 'model_changed',
+      model: 'claude-opus-4-8',
+    });
+    await session.terminate();
+  });
+
+  it('reports a notice instead of throwing when the switch fails', async () => {
+    setModelBehavior = 'throw';
+    const session = makeSession();
+    const events: unknown[] = [];
+    session.on('event', (_seq, event) => events.push(event));
+    await session.start();
+
+    await session.setModel('claude-opus-4-8');
+
+    expect(events.some((e: any) => e.kind === 'model_changed')).toBe(false);
+    const notice = events.find((e: any) => e.kind === 'notice');
+    expect(notice).toMatchObject({ kind: 'notice', level: 'warn' });
+    expect((notice as any).text).toContain('model rejected');
+    await session.terminate();
+  });
+
+  it('is a no-op on a session that has already ended', async () => {
+    const session = makeSession();
+    await session.start();
+    await session.terminate();
+    setModelCalls.length = 0;
+
+    await session.setModel('claude-opus-4-8');
+    expect(setModelCalls).toEqual([]);
+  });
+});
+
+/**
+ * Effort-level switching. There is no dedicated `setEffort` on the SDK's
+ * `Query` — it rides `applyFlagSettings`, the same mid-session settings call
+ * everything else in the flag layer uses — so this pins the exact shape
+ * `StructuredSession.setEffort` sends, not just that *something* was called.
+ */
+describe('effort switching', () => {
+  beforeEach(() => {
+    captured.length = 0;
+    applyFlagSettingsCalls.length = 0;
+    applyFlagSettingsBehavior = 'resolve';
+  });
+
+  it('calls applyFlagSettings with effortLevel and confirms with effort_changed', async () => {
+    const session = makeSession();
+    const events: unknown[] = [];
+    session.on('event', (_seq, event) => events.push(event));
+    await session.start();
+
+    await session.setEffort('high');
+
+    expect(applyFlagSettingsCalls).toEqual([{ effortLevel: 'high' }]);
+    expect(events.find((e: any) => e.kind === 'effort_changed')).toEqual({
+      kind: 'effort_changed',
+      effort: 'high',
+    });
+    await session.terminate();
+  });
+
+  it('clears back to the model default by passing null through', async () => {
+    const session = makeSession();
+    await session.start();
+
+    await session.setEffort(null);
+
+    expect(applyFlagSettingsCalls).toEqual([{ effortLevel: null }]);
+    await session.terminate();
+  });
+
+  it('reports a notice instead of throwing when the switch fails', async () => {
+    applyFlagSettingsBehavior = 'throw';
+    const session = makeSession();
+    const events: unknown[] = [];
+    session.on('event', (_seq, event) => events.push(event));
+    await session.start();
+
+    await session.setEffort('high');
+
+    expect(events.some((e: any) => e.kind === 'effort_changed')).toBe(false);
+    const notice = events.find((e: any) => e.kind === 'notice');
+    expect(notice).toMatchObject({ kind: 'notice', level: 'warn' });
+    expect((notice as any).text).toContain('effort rejected');
+    await session.terminate();
+  });
+
+  it('is a no-op on a session that has already ended', async () => {
+    const session = makeSession();
+    await session.start();
+    await session.terminate();
+    applyFlagSettingsCalls.length = 0;
+
+    await session.setEffort('high');
+    expect(applyFlagSettingsCalls).toEqual([]);
   });
 });
 

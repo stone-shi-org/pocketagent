@@ -204,6 +204,86 @@ export const CommandOutputEvent = z.object({
   text: z.string(),
 });
 
+/**
+ * How much thinking/reasoning a model applies.
+ *
+ * Deliberately a free-form non-empty string, not a fixed enum: five
+ * structured backends now report effort levels, and their vocabularies do
+ * not agree — Claude's Agent SDK uses `'low'|'medium'|'high'|'xhigh'|'max'`,
+ * codex's app-server adds `'ultra'`, agy's `--effort` flag only recognizes
+ * three of those, and pi adds `'off'`/`'minimal'` on top (confirmed live
+ * against each installed CLI). A fixed union would reject a real value from
+ * whichever backend defined it last; a per-model `ModelInfo.supportedEffortLevels`
+ * (below) is what actually constrains the picker, not this type.
+ */
+export const EffortLevel = z.string().min(1);
+export type EffortLevel = z.infer<typeof EffortLevel>;
+
+/**
+ * One model an agent can be switched to.
+ *
+ * Modeled on the Claude Agent SDK's own `ModelInfo` — mirrored rather than
+ * invented so a picker offers exactly what a backend's own catalog reports,
+ * the same discipline as `SlashCommandInfo` above — and reused verbatim by
+ * every other structured backend that has since gained a model-picker
+ * feature: `value` is whatever *that* backend's own switch call expects back
+ * (codex's `id`, agy's model id, pi's composite `provider/id`), not a shape
+ * shared across backends.
+ */
+export const ModelInfo = z.object({
+  value: z.string(),
+  /**
+   * The canonical wire model id `value` resolves to (e.g. `'sonnet'` →
+   * `'claude-sonnet-5'`). Claude's `session_started.model` reports the
+   * *resolved* id, not the alias, so matching it back to a row in this list —
+   * to show that row's curated `displayName` instead of the raw wire id — has
+   * to check this field too, not just `value`. Other backends leave it unset.
+   */
+  resolvedModel: z.string().optional(),
+  displayName: z.string(),
+  description: z.string(),
+  /** Whether this model accepts an explicit effort level at all. */
+  supportsEffort: z.boolean(),
+  /** The effort levels this specific model accepts, when `supportsEffort` is true. */
+  supportedEffortLevels: z.array(EffortLevel),
+});
+export type ModelInfo = z.infer<typeof ModelInfo>;
+
+/**
+ * The full set of models usable right now. REPLACE semantics, matching
+ * `CommandsAvailableEvent` — fetched once at startup today, but nothing rules
+ * out a future push if a backend ever reports a mid-session change.
+ */
+export const ModelsAvailableEvent = z.object({
+  kind: z.literal('models_available'),
+  models: z.array(ModelInfo),
+});
+export type ModelsAvailableEvent = z.infer<typeof ModelsAvailableEvent>;
+
+/**
+ * The active model changed because the user switched it from the composer.
+ * Effective on the *next* prompt: the SDK's `setModel` only changes what a
+ * subsequent turn requests, never one already streaming, so this must not be
+ * read as "the current turn is now running on this model."
+ */
+export const ModelChangedEvent = z.object({
+  kind: z.literal('model_changed'),
+  model: z.string(),
+});
+export type ModelChangedEvent = z.infer<typeof ModelChangedEvent>;
+
+/**
+ * The effort level changed because the user picked one from the composer.
+ * `null` means "cleared back to the model's own default" — same effective-on-
+ * next-prompt caveat as `ModelChangedEvent`, since it rides the same
+ * mid-session settings call.
+ */
+export const EffortChangedEvent = z.object({
+  kind: z.literal('effort_changed'),
+  effort: EffortLevel.nullable(),
+});
+export type EffortChangedEvent = z.infer<typeof EffortChangedEvent>;
+
 export type SessionStartedEvent = z.infer<typeof SessionStartedEvent>;
 export type TextEvent = z.infer<typeof TextEvent>;
 export type TextDeltaEvent = z.infer<typeof TextDeltaEvent>;
@@ -232,6 +312,9 @@ export const AgentEvent = z.discriminatedUnion('kind', [
   UserPromptEvent,
   CommandsAvailableEvent,
   CommandOutputEvent,
+  ModelsAvailableEvent,
+  ModelChangedEvent,
+  EffortChangedEvent,
 ]);
 export type AgentEvent = z.infer<typeof AgentEvent>;
 

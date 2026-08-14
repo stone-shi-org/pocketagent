@@ -5,10 +5,16 @@ import {
   extractPath,
   extractPiPath,
   normalizeAgyMessage,
+  normalizeAgyModelList,
   normalizeCodexEvent,
+  normalizeCodexModels,
+  normalizeModels,
   normalizeOpencodeCommands,
   normalizeOpencodeEvent,
+  normalizeOpencodeModels,
   normalizePiEvent,
+  normalizePiModels,
+  normalizePiModelValue,
   normalizeSdkMessage,
   normalizeSlashCommands,
   summarizeAgyTool,
@@ -119,6 +125,95 @@ describe('normalizeSlashCommands', () => {
   it('returns [] for a non-array input', () => {
     expect(normalizeSlashCommands(undefined)).toEqual([]);
     expect(normalizeSlashCommands('nope')).toEqual([]);
+  });
+});
+
+describe('normalizeModels', () => {
+  it('maps supportedModels() results to ModelInfo entries', () => {
+    expect(
+      normalizeModels([
+        { value: 'claude-opus-4-8', displayName: 'Opus', description: 'Most capable' },
+        { value: 'claude-sonnet-5', displayName: 'Sonnet', description: 'Balanced' },
+      ]),
+    ).toEqual([
+      {
+        value: 'claude-opus-4-8',
+        displayName: 'Opus',
+        description: 'Most capable',
+        supportsEffort: false,
+        supportedEffortLevels: [],
+      },
+      {
+        value: 'claude-sonnet-5',
+        displayName: 'Sonnet',
+        description: 'Balanced',
+        supportsEffort: false,
+        supportedEffortLevels: [],
+      },
+    ]);
+  });
+
+  it('falls back to the model id when displayName/description are missing', () => {
+    expect(normalizeModels([{ value: 'claude-haiku-5' }])).toEqual([
+      {
+        value: 'claude-haiku-5',
+        displayName: 'claude-haiku-5',
+        description: '',
+        supportsEffort: false,
+        supportedEffortLevels: [],
+      },
+    ]);
+  });
+
+  it('drops malformed entries rather than throwing', () => {
+    expect(normalizeModels([{ displayName: 'no value field' }, 'not an object', { value: 'ok' }])).toEqual([
+      { value: 'ok', displayName: 'ok', description: '', supportsEffort: false, supportedEffortLevels: [] },
+    ]);
+  });
+
+  it('returns [] for a non-array input', () => {
+    expect(normalizeModels(undefined)).toEqual([]);
+    expect(normalizeModels('nope')).toEqual([]);
+  });
+
+  it('carries resolvedModel through when present', () => {
+    expect(
+      normalizeModels([{ value: 'sonnet', resolvedModel: 'claude-sonnet-5', displayName: 'Sonnet', description: '' }]),
+    ).toEqual([
+      {
+        value: 'sonnet',
+        resolvedModel: 'claude-sonnet-5',
+        displayName: 'Sonnet',
+        description: '',
+        supportsEffort: false,
+        supportedEffortLevels: [],
+      },
+    ]);
+  });
+
+  it('carries supportsEffort/supportedEffortLevels through, accepting any non-empty string', () => {
+    // EffortLevel is deliberately not a fixed enum — codex/pi report levels
+    // Claude's own SDK never uses (see the protocol type's doc comment) — so
+    // this only drops non-strings and empty ones, never an "unrecognized" one.
+    expect(
+      normalizeModels([
+        {
+          value: 'claude-opus-4-8',
+          displayName: 'Opus',
+          description: '',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'high', 'ultra', '', 3],
+        },
+      ]),
+    ).toEqual([
+      {
+        value: 'claude-opus-4-8',
+        displayName: 'Opus',
+        description: '',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'high', 'ultra'],
+      },
+    ]);
   });
 });
 
@@ -570,6 +665,36 @@ describe('extractAgyPath', () => {
   });
 });
 
+describe('normalizeAgyModelList', () => {
+  it('parses the plain-text "id\\tlabel" lines the real models subcommand prints', () => {
+    const stdout = 'Fetching available models...\ngemini-3.6-flash-high\tGemini 3.6 Flash (High)\nclaude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n';
+    expect(normalizeAgyModelList(stdout)).toEqual([
+      {
+        value: 'gemini-3.6-flash-high',
+        displayName: 'Gemini 3.6 Flash (High)',
+        description: '',
+        supportsEffort: false,
+        supportedEffortLevels: [],
+      },
+      {
+        value: 'claude-sonnet-4-6',
+        displayName: 'Claude Sonnet 4.6 (Thinking)',
+        description: '',
+        supportsEffort: false,
+        supportedEffortLevels: [],
+      },
+    ]);
+  });
+
+  it('skips lines with no tab, blank lines, and an empty id/label on either side', () => {
+    expect(normalizeAgyModelList('Fetching available models...\n\nno-tab-here\n\tno-id\nno-label\t\n')).toEqual([]);
+  });
+
+  it('returns [] for empty output', () => {
+    expect(normalizeAgyModelList('')).toEqual([]);
+  });
+});
+
 /**
  * These payloads mirror opencode's `GET /event` SSE stream (v1.17.18),
  * cross-checked against the real, installed `@opencode-ai/sdk` generated
@@ -826,6 +951,37 @@ describe('normalizeOpencodeCommands', () => {
   });
 });
 
+describe('normalizeOpencodeModels', () => {
+  it('maps the real GET /api/model shape to a composite providerID/id value', () => {
+    const models = normalizeOpencodeModels([
+      { id: 'deepseek-v4-flash', providerID: 'omniroute', family: 'deepseek', name: 'Deepseek v4 Flash' },
+      { id: 'deepseek-v4-pro', providerID: 'omniroute', family: 'deepseek', name: 'Deepseek v4 Pro' },
+    ]);
+    expect(models).toEqual([
+      {
+        value: 'omniroute/deepseek-v4-flash',
+        displayName: 'Deepseek v4 Flash',
+        description: 'deepseek',
+        supportsEffort: false,
+        supportedEffortLevels: [],
+      },
+      {
+        value: 'omniroute/deepseek-v4-pro',
+        displayName: 'Deepseek v4 Pro',
+        description: 'deepseek',
+        supportsEffort: false,
+        supportedEffortLevels: [],
+      },
+    ]);
+  });
+
+  it('drops entries missing id or providerID, and returns [] for a non-array input', () => {
+    expect(normalizeOpencodeModels([{ id: 'no-provider' }, { providerID: 'no-id' }])).toEqual([]);
+    expect(normalizeOpencodeModels(undefined)).toEqual([]);
+    expect(normalizeOpencodeModels('nope')).toEqual([]);
+  });
+});
+
 describe('summarizeOpencodeTool', () => {
   it('summarizes well-known tools readably', () => {
     expect(summarizeOpencodeTool('bash', { command: 'npm test' })).toBe('Run npm test');
@@ -1007,6 +1163,52 @@ describe('normalizeCodexEvent: robustness', () => {
   });
 });
 
+describe('normalizeCodexModels', () => {
+  it('maps the real model/list shape, deriving supportsEffort from supportedReasoningEfforts', () => {
+    const models = normalizeCodexModels([
+      {
+        id: 'gpt-5.6-terra',
+        displayName: 'GPT-5.6 Terra',
+        description: 'General purpose',
+        isDefault: true,
+        supportedReasoningEfforts: [
+          { reasoningEffort: 'low', description: 'Fast responses' },
+          { reasoningEffort: 'high', description: 'Deeper reasoning' },
+        ],
+      },
+      { id: 'gpt-5.6-fast', displayName: 'GPT-5.6 Fast', description: 'Faster, less thorough' },
+    ]);
+    expect(models).toEqual([
+      {
+        value: 'gpt-5.6-terra',
+        displayName: 'GPT-5.6 Terra',
+        description: 'General purpose',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'high'],
+      },
+      {
+        value: 'gpt-5.6-fast',
+        displayName: 'GPT-5.6 Fast',
+        description: 'Faster, less thorough',
+        supportsEffort: false,
+        supportedEffortLevels: [],
+      },
+    ]);
+  });
+
+  it('falls back to the id when displayName/description are missing', () => {
+    expect(normalizeCodexModels([{ id: 'gpt-5.5' }])).toEqual([
+      { value: 'gpt-5.5', displayName: 'gpt-5.5', description: '', supportsEffort: false, supportedEffortLevels: [] },
+    ]);
+  });
+
+  it('drops entries with no id, and returns [] for a non-array input', () => {
+    expect(normalizeCodexModels([{ displayName: 'no id field' }])).toEqual([]);
+    expect(normalizeCodexModels(undefined)).toEqual([]);
+    expect(normalizeCodexModels('nope')).toEqual([]);
+  });
+});
+
 /**
  * These payloads mirror `pi --mode rpc`'s JSON event stream, built from the
  * installed CLI's own shipped TypeScript declarations
@@ -1147,5 +1349,57 @@ describe('extractPiPath', () => {
 
   it('returns null when there is no path', () => {
     expect(extractPiPath({ command: 'ls' })).toBeNull();
+  });
+});
+
+const DEEPSEEK_MODEL = {
+  id: 'deepseek-v4-flash',
+  name: 'DeepSeek V4 Flash',
+  provider: 'deepseek',
+  reasoning: true,
+  compat: { thinkingLevelMap: { minimal: null, low: 'low', medium: null, high: 'high', max: 'max' } },
+};
+
+describe('normalizePiModels', () => {
+  it('builds a composite provider/id value and derives effort levels from thinkingLevelMap', () => {
+    expect(normalizePiModels([DEEPSEEK_MODEL])).toEqual([
+      {
+        value: 'deepseek/deepseek-v4-flash',
+        displayName: 'DeepSeek V4 Flash',
+        description: '',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'high', 'max'],
+      },
+    ]);
+  });
+
+  it('reports no effort levels for a model with no thinkingLevelMap, even if it reasons', () => {
+    expect(normalizePiModels([{ id: 'claude-sonnet-4', name: 'Claude Sonnet 4', provider: 'anthropic', reasoning: true }])).toEqual([
+      {
+        value: 'anthropic/claude-sonnet-4',
+        displayName: 'Claude Sonnet 4',
+        description: '',
+        supportsEffort: true,
+        supportedEffortLevels: [],
+      },
+    ]);
+  });
+
+  it('drops entries missing id or provider, and returns [] for a non-array input', () => {
+    expect(normalizePiModels([{ id: 'no-provider' }, { provider: 'no-id' }])).toEqual([]);
+    expect(normalizePiModels(undefined)).toEqual([]);
+    expect(normalizePiModels('nope')).toEqual([]);
+  });
+});
+
+describe('normalizePiModelValue', () => {
+  it('returns the same composite value a list entry for the same model would get', () => {
+    expect(normalizePiModelValue(DEEPSEEK_MODEL)).toBe('deepseek/deepseek-v4-flash');
+  });
+
+  it('returns null for a model with no id/provider, or a non-object', () => {
+    expect(normalizePiModelValue({})).toBeNull();
+    expect(normalizePiModelValue(null)).toBeNull();
+    expect(normalizePiModelValue('nope')).toBeNull();
   });
 });

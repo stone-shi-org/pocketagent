@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AskUserQuestionAnswer,
+  EffortLevel,
   PermissionDecision,
   PermissionRequestEvent,
   SessionInfo,
@@ -13,6 +14,7 @@ import {
   applyEvent,
   applyEvents,
   emptyTranscript,
+  modelDisplayName,
   type TranscriptItem,
   type TranscriptState,
 } from '../agent/transcript.js';
@@ -155,6 +157,14 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
     return connRef.current?.sendPrompt(text) ?? false;
   }, []);
 
+  const setModel = useCallback((model: string) => {
+    connRef.current?.sendModel(model);
+  }, []);
+
+  const setEffort = useCallback((effort: EffortLevel | null) => {
+    connRef.current?.sendEffort(effort);
+  }, []);
+
   const decide = useCallback(
     (decision: PermissionDecision, message?: string, answer?: AskUserQuestionAnswer) => {
       const request = transcript.pending[0];
@@ -236,6 +246,11 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
     if (queued) sendPrompt(queued);
   }, [inputDisabled, sessionId, sendPrompt]);
 
+  const modelLabel = useMemo(
+    () => modelDisplayName(transcript.models, transcript.model),
+    [transcript.models, transcript.model],
+  );
+
   const costLabel = useMemo(
     () => (transcript.totalCostUsd > 0 ? `$${transcript.totalCostUsd.toFixed(3)}` : null),
     [transcript.totalCostUsd],
@@ -251,7 +266,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           <strong>{session?.title ?? sessionId}</strong>
           <span>
             {session ? `${session.agentDisplayName} · ${session.workspaceLabel}` : 'Loading…'}
-            {transcript.model ? ` · ${transcript.model}` : ''}
+            {modelLabel ? ` · ${modelLabel}` : ''}
           </span>
         </div>
         <div className="row" style={{ flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
@@ -328,6 +343,11 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         onSend={handleSend}
         disabled={inputDisabled}
         commands={transcript.commands}
+        models={transcript.models}
+        currentModel={transcript.model}
+        onSetModel={setModel}
+        effort={transcript.effort}
+        onSetEffort={setEffort}
       />
 
       {confirmingStop && (

@@ -94,8 +94,20 @@ export class CodexServerManager extends EventEmitter<{ crashed: [] }> {
 
       // `clientInfo` is required by the real server; version/title are
       // cosmetic (shown in its own diagnostics), not load-bearing.
+      //
+      // `capabilities.experimentalApi: true` opts every session sharing this
+      // one process into codex's experimental RPC surface — confirmed live
+      // (v0.147.0) that `thread/settings/update` (the only call that lets
+      // `CodexSession` switch a thread's model/effort live — see
+      // `CodexSession.setModel`/`setEffort`) is otherwise rejected outright
+      // with "requires experimentalApi capability", not a soft no-op. This is
+      // a deliberate, process-wide opt-in into an API codex's own schema
+      // marks unstable, made once here rather than per-session, since the
+      // capability is negotiated at `initialize` and there is only one of
+      // those per shared process.
       this.sendRequestOn(child, 'initialize', {
         clientInfo: { name: 'pocketagent', title: 'PocketAgent', version: '1.0.0' },
+        capabilities: { experimentalApi: true },
       }).then(
         () => {
           if (settled) return;
