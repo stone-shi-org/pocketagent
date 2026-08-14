@@ -857,6 +857,54 @@ button:focus-visible {
 .turn-header.pinned {
   position: sticky;
   margin-top: 0;
+  /* Explicit (rather than the default `auto`) so this header's own box is a
+     local stacking context: the glass `::after` below uses a negative
+     z-index to duck behind this header's own text/copy-button, and without
+     an explicit z-index here that negative value would be resolved against
+     `.transcript`'s ancestor stacking context instead of just this header,
+     risking it painting behind unrelated page chrome. `0` keeps stacking
+     order between sibling pinned headers exactly as before (still resolved
+     by DOM order, since they're all at the same explicit level). */
+  z-index: 0;
+}
+
+/*
+ * A glass "tail" glued to each pinned header's own sticky box — not a
+ * separate element pinned independently. That distinction matters: an
+ * earlier version used one global backdrop anchored at the very top of
+ * `.transcript`, sized to the whole stack. It looked right once fully
+ * scrolled, but it went sticky (and rendered at full stack height)
+ * the instant *any* scrolling happened, while each real header only goes
+ * sticky once scrolled past its own — often much deeper — position in the
+ * document. The backdrop was showing the final size long before the actual
+ * headers had caught up to it, which read as the wrong panel resizing at
+ * the wrong time. Tying the glass to each header's own box (via `::after`)
+ * makes that impossible by construction: it can't be out of sync with a
+ * sticky state it doesn't have of its own.
+ *
+ * Sized to reach exactly through the gap after this header and into the
+ * next one's start (`bottom` here must stay >= Transcript.tsx's
+ * STICKY_GAP, or a sliver of scrolling content shows through again), plus a
+ * few px of bleed on the sides so the panel reads as a card with a small
+ * margin around it rather than a mask cut flush to the header. `top: 0`
+ * (no upward bleed) on purpose — the topmost pinned header sticks flush
+ * against the scroll container's own top edge, and bleeding above that
+ * would push the panel above the clipped, scrollable region.
+ */
+.turn-header.pinned::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  top: 0;
+  left: -6px;
+  right: -6px;
+  bottom: -10px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg) 65%, transparent);
+  backdrop-filter: blur(16px) saturate(160%);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  box-shadow: var(--shadow-sm);
 }
 
 .prompt-text {
