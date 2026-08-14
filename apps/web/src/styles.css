@@ -13,6 +13,9 @@
   --ok: #1fa855;
   --warn: #b26a00;
   --danger: #e02d23;
+  /* A real yellow, distinct from `--warn` (amber/orange) — the Agents fleet
+     view's idle dot asked for specifically that. */
+  --idle: #d9a900;
   --ink: #0b0b0d;
   --on-ink: #ffffff;
   --radius: 12px;
@@ -1978,6 +1981,8 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 
 .sidebar-actions {
   padding: 6px 14px 8px;
+  display: flex;
+  gap: 8px;
 }
 
 .new-chat-btn {
@@ -1985,7 +1990,7 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   align-items: center;
   justify-content: center;
   gap: 8px;
-  width: 100%;
+  flex: 1;
   padding: 10px 14px;
   border: none;
   border-radius: 12px;
@@ -1998,6 +2003,25 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   border-color: transparent;
   opacity: 0.9;
 }
+
+/* Secondary to `.new-chat-btn` — opens the Agents fleet view rather than
+   starting anything, so it reads as a lighter, outlined action next to it. */
+.agents-nav-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 13px;
+}
+.agents-nav-btn:hover { background: var(--bg-elev); }
+.agents-nav-btn.active { border-color: var(--accent); color: var(--accent); }
 
 .sidebar-search {
   padding: 0 14px 8px;
@@ -2424,4 +2448,168 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 1px 6px;
+}
+
+/* ---- Agents fleet view ----
+ * `AgentsFleetPage`/`AgentCard`. Deliberately new class names rather than
+ * reusing `.live-dot` — that name already has two same-specificity rules in
+ * this file (one pulsing, one not) where the later source order silently
+ * wins; not a fight worth inheriting here.
+ */
+.fleet-page {
+  height: 100%;
+  overflow-y: auto;
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+.fleet-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 200px;
+  color: var(--text-dim);
+  font-size: 14px;
+  text-align: center;
+}
+
+.fleet-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.agent-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 12px;
+  cursor: pointer;
+}
+
+.agent-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.agent-mascot {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.agent-card-title {
+  flex: 1;
+  min-width: 0;
+}
+.agent-card-title .title {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-card-title .meta {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+/* Reuses `@keyframes pulse` (defined above, next to `.tool-dot`) rather than
+   a second copy of the same glow. */
+.agent-dot--busy {
+  background: var(--ok);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.agent-dot--idle {
+  background: var(--idle);
+}
+
+.agent-output {
+  margin-top: 10px;
+  height: 96px;
+  background: var(--console);
+  color: var(--console-text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+.agent-output-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-output-line--new { animation: line-flash 900ms ease-out; }
+.agent-output-empty { color: #7d8590; font-style: italic; }
+@keyframes line-flash {
+  0% { color: #ffffff; }
+  100% { color: var(--console-text); }
+}
+
+/* A sub-agent list branching off a main card: a continuous vertical guide
+   (the container's own left border) with a short horizontal tick per chip
+   connecting it to that guide — the "line connecting them" the fleet view
+   asked for, done in CSS rather than an SVG graph layout. */
+.agent-subagents {
+  margin: 10px 0 0 17px;
+  padding-left: 16px;
+  border-left: 2px solid var(--border-strong);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.agent-subagent {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--bg-elev);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-subagent::before {
+  content: '';
+  position: absolute;
+  left: -16px;
+  top: 50%;
+  width: 12px;
+  height: 2px;
+  background: var(--border-strong);
+}
+.agent-subagent .agent-mascot {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
 }

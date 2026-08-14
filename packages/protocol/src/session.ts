@@ -82,6 +82,13 @@ export const SessionInfo = z.object({
    * stay visible, not just be a fire-and-forget checkbox at creation time.
    */
   skipPermissionsEnabled: z.boolean(),
+  /**
+   * True while the agent is mid-turn (structured backends) or the terminal
+   * classifier's last hint included `working` (raw PTY). Advisory only, same
+   * spirit as `TerminalHintKind` — a heuristic for a status dot, never a
+   * signal anything is gated on.
+   */
+  busy: z.boolean(),
 });
 export type SessionInfo = z.infer<typeof SessionInfo>;
 

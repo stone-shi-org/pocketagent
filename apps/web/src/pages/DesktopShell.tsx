@@ -11,6 +11,7 @@ import { HostChip, ProjectList, SearchField, useProjects } from '../components/P
 import { UsageBar } from '../components/UsageBar.js';
 import { OverflowMenu } from './ProjectsPage.js';
 import { ComposerPage } from './ComposerPage.js';
+import { AgentsFleetPage } from './AgentsFleetPage.js';
 
 interface Props {
   route: Route;
@@ -111,6 +112,15 @@ export function DesktopShell({
             <Icon name="compose" size={18} />
             New chat
           </button>
+          <button
+            type="button"
+            className={route.name === 'agents' ? 'agents-nav-btn active' : 'agents-nav-btn'}
+            onClick={() => onNavigate({ name: 'agents' })}
+            aria-pressed={route.name === 'agents'}
+          >
+            <Icon name="agents" size={16} />
+            Agents
+          </button>
         </div>
 
         <div className="sidebar-search">
@@ -154,6 +164,11 @@ export function DesktopShell({
           />
         ) : route.name === 'terminal' ? (
           children
+        ) : route.name === 'agents' ? (
+          <AgentsFleetPage
+            onOpen={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+            onApiError={onApiError}
+          />
         ) : (
           <WelcomePane onCompose={() => onNavigate({ name: 'compose' })} />
         )}

@@ -8,6 +8,7 @@ import { DesktopShell } from './pages/DesktopShell.js';
 import { useIsDesktop } from './hooks/useMediaQuery.js';
 import { TerminalPage } from './pages/TerminalPage.js';
 import { AgentPage } from './pages/AgentPage.js';
+import { AgentsFleetPage } from './pages/AgentsFleetPage.js';
 import { api } from './api/client.js';
 
 type AuthState = 'checking' | 'anonymous' | 'authenticated';
@@ -162,10 +163,21 @@ export function App(): JSX.Element {
     );
   }
 
+  if (route.name === 'agents') {
+    return (
+      <AgentsFleetPage
+        onBack={() => navigate({ name: 'list' })}
+        onOpen={(sessionId) => navigate({ name: 'terminal', sessionId })}
+        onApiError={handleApiError}
+      />
+    );
+  }
+
   return (
     <ProjectsPage
       onOpen={(sessionId) => navigate({ name: 'terminal', sessionId })}
       onCompose={(cwd) => navigate(cwd ? { name: 'compose', cwd } : { name: 'compose' })}
+      onOpenAgents={() => navigate({ name: 'agents' })}
       onApiError={handleApiError}
       onLogout={logout}
     />

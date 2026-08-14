@@ -17,6 +17,7 @@ import { UsageBar } from '../components/UsageBar.js';
 interface Props {
   onOpen: (sessionId: string) => void;
   onCompose: (cwd?: string) => void;
+  onOpenAgents: () => void;
   onApiError: (error: unknown) => void;
   onLogout: () => void;
 }
@@ -31,7 +32,7 @@ interface Props {
  * answer to that. So live sessions and finished conversations sit in one list,
  * distinguished by a dot rather than by being filed somewhere else.
  */
-export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props): JSX.Element {
+export function ProjectsPage({ onOpen, onCompose, onOpenAgents, onApiError, onLogout }: Props): JSX.Element {
   const state = useProjects(onOpen, onApiError);
   const [search, setSearch] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
@@ -81,6 +82,10 @@ export function ProjectsPage({ onOpen, onCompose, onApiError, onLogout }: Props)
               setShowRunning(true);
             }}
             runningCount={runningCount}
+            onAgents={() => {
+              setMenuOpen(false);
+              onOpenAgents();
+            }}
             onSettings={() => {
               setMenuOpen(false);
               setShowSettings(true);
@@ -169,6 +174,7 @@ export function OverflowMenu({
   onHidden,
   onRunning,
   runningCount = 0,
+  onAgents,
   onSettings,
   onLogout,
 }: {
@@ -179,6 +185,12 @@ export function OverflowMenu({
   onRunning: () => void;
   /** Shown next to the menu item so a growing pile of live sessions is noticed before opening it. */
   runningCount?: number;
+  /**
+   * Omitted on desktop, which already has a dedicated sidebar button for
+   * the same destination (`DesktopShell`'s `.agents-nav-btn`) — the phone
+   * shell has no such button, so this is its only way in.
+   */
+  onAgents?: () => void;
   onSettings: () => void;
   onLogout: () => void;
 }): JSX.Element {
@@ -212,6 +224,11 @@ export function OverflowMenu({
         <button type="button" role="menuitem" onClick={onRunning}>
           Active sessions{runningCount > 0 ? ` (${runningCount})` : ''}…
         </button>
+        {onAgents && (
+          <button type="button" role="menuitem" onClick={onAgents}>
+            Agents…
+          </button>
+        )}
         <button type="button" role="menuitem" onClick={onAdvanced}>
           More session options…
         </button>

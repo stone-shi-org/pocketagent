@@ -25,7 +25,15 @@ export type IconName =
   | 'branch'
   | 'copy'
   | 'check'
-  | 'close';
+  | 'close'
+  | 'agents'
+  | 'agent-claude'
+  | 'agent-codex'
+  | 'agent-agy'
+  | 'agent-opencode'
+  | 'agent-pi'
+  | 'agent-shell'
+  | 'agent-generic';
 
 interface Props {
   name: IconName;
@@ -156,4 +164,80 @@ const PATHS: Record<IconName, JSX.Element> = {
   check: <path d="m5 12.5 4.5 4.5L19 7" />,
 
   close: <path d="m6 6 12 12M18 6 6 18" />,
+
+  // Two overlapping cards with a pair of eyes on the front one: "a fleet",
+  // not one agent — distinct from `branch`'s three-node graph, which is
+  // about lineage rather than a set of running things.
+  agents: (
+    <>
+      <rect x="3" y="7" width="12" height="10" rx="2.5" />
+      <rect x="9" y="4" width="12" height="10" rx="2.5" />
+      <circle cx="13.3" cy="9" r="1" fill="currentColor" stroke="none" />
+      <circle cx="17.3" cy="9" r="1" fill="currentColor" stroke="none" />
+    </>
+  ),
+
+  // Mascots, one per agent id (`apps/server/src/agents/registry.ts`). Simple
+  // distinguishing motifs in the same stroke family, not literal art — a
+  // fleet card needs to tell agent types apart at a glance, not illustrate
+  // them.
+  'agent-claude': (
+    <>
+      <rect x="4" y="4" width="16" height="16" rx="5" />
+      <path d="M12 8v8M8.5 9.5l7 5M15.5 9.5l-7 5" />
+    </>
+  ),
+
+  'agent-codex': (
+    <>
+      <rect x="7" y="7" width="10" height="10" rx="1.5" />
+      <path d="M9 7V4M12 7V4M15 7V4M9 20v-3M12 20v-3M15 20v-3M7 9H4M7 12H4M7 15H4M20 9h-3M20 12h-3M20 15h-3" />
+    </>
+  ),
+
+  // Antigravity CLI: a rocket lifting off.
+  'agent-agy': (
+    <>
+      <path d="M12 3c2.5 2 3.5 5.5 3.5 8.5 0 2-1 4-3.5 6-2.5-2-3.5-4-3.5-6C8.5 8.5 9.5 5 12 3Z" />
+      <circle cx="12" cy="9" r="1.2" />
+      <path d="M8.5 13.5 6 16M15.5 13.5 18 16M10.5 17.5 9.5 20.5M13.5 17.5 14.5 20.5" />
+    </>
+  ),
+
+  // A face made of `<` `>`, for the agent whose name is literally "open code".
+  'agent-opencode': (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M9.5 9 7 12l2.5 3M14.5 9 17 12l-2.5 3" />
+    </>
+  ),
+
+  // A π glyph with two eyes above it — the agent is named after the symbol.
+  'agent-pi': (
+    <>
+      <circle cx="9.3" cy="6.7" r="1" fill="currentColor" stroke="none" />
+      <circle cx="14.7" cy="6.7" r="1" fill="currentColor" stroke="none" />
+      <path d="M7 10h10M9.5 10v7.5M14.5 10c0 3-.3 5.5-1 7.5" />
+    </>
+  ),
+
+  // A literal shell (nautilus spiral), for the plain shell/terminal agent.
+  'agent-shell': (
+    <>
+      <path d="M12 19c-4 0-6-2.5-6-6 0-3 2-5 5-5 2.4 0 4 1.6 4 3.8 0 1.8-1.2 3-2.8 3-1.4 0-2.4-1-2.4-2.3 0-1 .8-1.7 1.7-1.7" />
+      <path d="M4 19h16" />
+    </>
+  ),
+
+  // Fallback for an agent id the client does not specifically recognize —
+  // a plain robot head, since the registry can grow without a client update.
+  'agent-generic': (
+    <>
+      <rect x="5" y="6" width="14" height="12" rx="3" />
+      <circle cx="9.5" cy="12" r="1.2" fill="currentColor" stroke="none" />
+      <circle cx="14.5" cy="12" r="1.2" fill="currentColor" stroke="none" />
+      <path d="M12 3v3" />
+      <circle cx="12" cy="2.4" r="0.9" fill="currentColor" stroke="none" />
+    </>
+  ),
 };

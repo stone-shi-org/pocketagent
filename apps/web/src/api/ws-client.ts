@@ -94,6 +94,8 @@ export class TerminalConnection {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closedByUser = false;
   private pendingSize: { cols: number; rows: number } | null = null;
+  /** See `open`'s `peek` option. */
+  private peek = false;
 
   private readonly handlers: TerminalConnectionHandlers;
   private readonly createSocket: (url: string) => WebSocket;
@@ -117,8 +119,14 @@ export class TerminalConnection {
     return this.lastSeq;
   }
 
-  /** Attach to a session, connecting if necessary. */
-  open(sessionId: string, size?: { cols: number; rows: number }): void {
+  /**
+   * Attach to a session, connecting if necessary.
+   *
+   * `peek: true` is for a background "just watching" attach (a fleet-overview
+   * card) — it still gets full replay and live frames, but the server does
+   * not count it as a real viewer. See `AttachMessage.peek`'s doc comment.
+   */
+  open(sessionId: string, size?: { cols: number; rows: number }, opts?: { peek?: boolean }): void {
     if (this.sessionId !== sessionId) {
       // A different session means a different output stream; start from zero.
       this.lastSeq = 0;
@@ -126,6 +134,7 @@ export class TerminalConnection {
     }
     this.sessionId = sessionId;
     if (size) this.pendingSize = size;
+    this.peek = opts?.peek ?? false;
     this.closedByUser = false;
     this.connect();
   }
@@ -191,6 +200,7 @@ export class TerminalConnection {
       afterSeq: this.lastSeq,
       ...(this.epoch !== null ? { epoch: this.epoch } : {}),
       ...(this.pendingSize ?? {}),
+      ...(this.peek ? { peek: true } : {}),
     };
     this.send(message);
   }

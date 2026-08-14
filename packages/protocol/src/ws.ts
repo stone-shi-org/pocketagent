@@ -84,6 +84,16 @@ export const AttachMessage = z.object({
   epoch: z.string().max(64).optional(),
   cols: z.number().int().min(LIMITS.minCols).max(LIMITS.maxCols).optional(),
   rows: z.number().int().min(LIMITS.minRows).max(LIMITS.maxRows).optional(),
+  /**
+   * True for a background "just watching" attach (e.g. a fleet-overview
+   * card) that should still receive replay and live frames but must not
+   * count as a real viewer — omitting this, or `false`, keeps today's
+   * behaviour. Without it, every open fleet card would inflate
+   * `SessionInfo.attachedClients` and the "N viewer(s)" count an adopted
+   * pane's own owner sees, for a client that never actually looked at the
+   * session in any way a human would call "attached".
+   */
+  peek: z.boolean().optional(),
 });
 
 export const DetachMessage = z.object({

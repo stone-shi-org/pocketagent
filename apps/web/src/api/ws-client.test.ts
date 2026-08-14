@@ -66,6 +66,7 @@ const SESSION: SessionInfo = {
   cwd: '/home/me/src/demo',
   workspaceLabel: 'src/demo',
   status: 'running',
+  busy: false,
   cols: 80,
   rows: 24,
   pid: 123,

@@ -87,6 +87,16 @@ export class PtySession extends EventEmitter<PtySessionEvents> {
   private _lastActivityAt: number | null = null;
   private _startError: string | null = null;
   private _externalId: string | null = null;
+  /**
+   * Advisory only, same spirit as the `hint` events it is derived from: true
+   * once the classifier's current state includes `working`, false once it
+   * settles on `idle` or a state that is blocking on the human
+   * (`waiting_for_input`/`possible_approval_prompt`) rather than generating.
+   * Read via `currentHints()`, not the `hint` event payload — see that
+   * method's doc comment for why (the event is dedup-gated and would leave
+   * this stuck on a stale value).
+   */
+  private _busy = false;
 
   private pending: string[] = [];
   private pendingBytes = 0;
@@ -148,6 +158,9 @@ export class PtySession extends EventEmitter<PtySessionEvents> {
   }
   get survivesServerRestart(): boolean {
     return this.backend.survivesServerRestart;
+  }
+  get busy(): boolean {
+    return this._busy;
   }
 
   isAlive(): boolean {
@@ -223,7 +236,17 @@ export class PtySession extends EventEmitter<PtySessionEvents> {
     this.emit('output', seq, data);
 
     const hints = this.classifier.process(data);
+    this.updateBusy();
     if (hints.length > 0) this.emit('hint', hints);
+  }
+
+  /** See `_busy`'s doc comment for why this reads `currentHints()`, not `hints`. */
+  private updateBusy(): void {
+    const hints = this.classifier.currentHints();
+    if (hints.includes('working')) this._busy = true;
+    else if (hints.length > 0) this._busy = false;
+    // No hint at all yet (brand new session): leave the initial `false` rather
+    // than guessing from silence.
   }
 
   private handleExit(exitCode: number | null, signal: number | null): void {
@@ -317,6 +340,7 @@ export class PtySession extends EventEmitter<PtySessionEvents> {
   /** Advisory idle check, driven by the manager's sweep timer. */
   pollIdleHint(): void {
     const hints = this.classifier.checkIdle();
+    this.updateBusy();
     if (hints.length > 0) this.emit('hint', hints);
   }
 

@@ -1158,6 +1158,7 @@ export class SessionManager {
       cwd: session.spec.cwd,
       workspaceLabel: session.spec.workspaceLabel,
       status: session.status,
+      busy: session.busy,
       cols: session.cols,
       rows: session.rows,
       pid: session.pid,
@@ -1195,6 +1196,8 @@ export class SessionManager {
       cwd: row.cwd,
       workspaceLabel: this.opts.workspaces.labelFor(row.cwd),
       status: row.status,
+      // History rows are dead by definition; nothing to be busy about.
+      busy: false,
       cols: row.cols,
       rows: row.rows,
       pid: row.pid,

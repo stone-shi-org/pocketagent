@@ -2,6 +2,8 @@ import type { TerminalHintKind } from '@pocketagent/protocol';
 
 export interface TerminalClassifier {
   process(data: string): TerminalHintKind[];
+  /** The hint set as of the last call to `process`/`checkIdle`, emitted or not. */
+  currentHints(): TerminalHintKind[];
 }
 
 const ESC = '';
@@ -94,6 +96,18 @@ export class HeuristicTerminalClassifier implements TerminalClassifier {
     if (sameHints(['idle'], this.lastEmitted)) return [];
     this.lastEmitted = ['idle'];
     return ['idle'];
+  }
+
+  /**
+   * The classifier's current hint set, regardless of whether it was just
+   * emitted. `process`/`checkIdle` only return a value when the hint set
+   * *changes* (see the dedup in both above) — a caller that only reacted to
+   * non-empty returns would get stuck on a stale hint forever once the state
+   * settles without a further change. `PtySession.busy` needs this to avoid
+   * exactly that.
+   */
+  currentHints(): TerminalHintKind[] {
+    return this.lastEmitted;
   }
 }
 

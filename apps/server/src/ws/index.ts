@@ -58,6 +58,8 @@ const HEARTBEAT_MS = 30_000;
 interface Attachment {
   session: ManagedSession;
   detach: () => void;
+  /** See `attachTo`'s `peek` parameter. */
+  peek: boolean;
 }
 
 export const websocketRoutes: FastifyPluginAsync = async (app) => {
@@ -103,10 +105,20 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
       if (!attachment) return;
       attachment.detach();
       attachments.delete(sessionId);
-      sessions.detach(sessionId);
+      // Peek attaches never incremented the count in the first place — see
+      // `attachTo`'s `peek` parameter.
+      if (!attachment.peek) sessions.detach(sessionId);
     };
 
-    const attachTo = (sessionId: string, afterSeq: number, epoch?: string): void => {
+    /**
+     * `peek` is for a background "just watching" attach (a fleet-overview
+     * card, say): it still gets full replay and live frames, but must not
+     * count as a real viewer. Without this, `SessionInfo.attachedClients` —
+     * already shown to a user as "N viewer(s)" on an adopted pane — would
+     * read as inflated by clients nobody watching the session would call
+     * "attached".
+     */
+    const attachTo = (sessionId: string, afterSeq: number, epoch?: string, peek = false): void => {
       const session = sessions.get(sessionId);
       if (!session) {
         // A session the database remembers but this process does not: it ran
@@ -196,11 +208,12 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
 
       attachments.set(sessionId, {
         session,
+        peek,
         detach: () => {
           for (const off of unsubscribers) off();
         },
       });
-      sessions.attach(sessionId);
+      if (!peek) sessions.attach(sessionId);
 
       send(attached);
 
@@ -284,7 +297,7 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
           break;
 
         case 'attach': {
-          attachTo(message.sessionId, message.afterSeq ?? 0, message.epoch);
+          attachTo(message.sessionId, message.afterSeq ?? 0, message.epoch, message.peek === true);
           const attached = attachments.get(message.sessionId);
           if (attached?.session.transport === 'terminal' && message.cols && message.rows) {
             attached.session.resize(message.cols, message.rows);

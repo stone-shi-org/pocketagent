@@ -4,7 +4,9 @@ export type Route =
   | { name: 'list' }
   | { name: 'terminal'; sessionId: string }
   /** `cwd` preselects a workspace, e.g. when composing from a project header. */
-  | { name: 'compose'; cwd?: string };
+  | { name: 'compose'; cwd?: string }
+  /** The "Agents" fleet overview — every running agent, at a glance. */
+  | { name: 'agents' };
 
 function parse(hash: string): Route {
   const session = /^#\/s\/([^/?]+)/.exec(hash);
@@ -16,6 +18,8 @@ function parse(hash: string): Route {
     return cwd ? { name: 'compose', cwd } : { name: 'compose' };
   }
 
+  if (/^#\/agents$/.exec(hash)) return { name: 'agents' };
+
   return { name: 'list' };
 }
 
@@ -25,6 +29,8 @@ function toHash(route: Route): string {
       return `#/s/${encodeURIComponent(route.sessionId)}`;
     case 'compose':
       return route.cwd ? `#/new/${encodeURIComponent(route.cwd)}` : '#/new';
+    case 'agents':
+      return '#/agents';
     default:
       return '#/';
   }
