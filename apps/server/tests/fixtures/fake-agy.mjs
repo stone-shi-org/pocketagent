@@ -19,14 +19,30 @@ function emit(obj) {
 }
 
 // `agy models` is a genuine top-level subcommand, not `-p` print mode — plain
-// text, one `<id>\t<label>` pair per line after a status line, captured live
-// against v1.1.12. `AgySession.fetchInitialModels()` spawns exactly this.
+// text, one `<id>\t<label>` pair per line on stdout (its "Fetching..." status
+// line goes to stderr), captured live against v1.1.12.
+// `AgySession.fetchInitialModels()` spawns exactly this.
+//
+// Deliberately waits for stdin to close before answering: the real `agy
+// models` was confirmed live to hang forever — zero output, not even its own
+// status line — reading an open, unclosed stdin pipe (Node's default `spawn`
+// leaves one). `fetchInitialModels()` fixes this with `child.stdin.end()`
+// right after spawning; without this `await`, that bug could regress with
+// nothing here to catch it, since every other branch in this fixture answers
+// immediately regardless of stdin.
 if (args[0] === 'models') {
-  process.stdout.write('Fetching available models...\n');
-  process.stdout.write('gemini-3.6-flash-high\tGemini 3.6 Flash (High)\n');
-  process.stdout.write('claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n');
-  process.exit(0);
+  process.stdin.resume();
+  process.stdin.on('end', () => {
+    process.stderr.write('Fetching available models...\n');
+    process.stdout.write('gemini-3.6-flash-high\tGemini 3.6 Flash (High)\n');
+    process.stdout.write('claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n');
+    process.exit(0);
+  });
 }
+// Never reaches the rest of this file for `models`, since everything below
+// requires `-p`/`--conversation`/etc. — this early-returns via the `end`
+// handler above once stdin closes, rather than falling through.
+else {
 
 if (prompt === 'FAIL') {
   process.stderr.write('simulated failure\n');
@@ -137,3 +153,5 @@ if (prompt === 'SLOW') {
 } else {
   respond();
 }
+
+} // end of the `args[0] !== 'models'` branch opened above

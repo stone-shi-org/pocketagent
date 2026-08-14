@@ -161,10 +161,20 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   /**
    * Learn agy's model catalog for the picker, via its own `models`
    * subcommand — confirmed live (v1.1.12): plain text, one `<id>\t<label>`
-   * pair per line, not the `stream-json`/`-p` shape `fetchInitialCommands`
+   * pair per line on stdout (its "Fetching available models..." status line
+   * goes to stderr), not the `stream-json`/`-p` shape `fetchInitialCommands`
    * uses, since `models` is a genuine top-level subcommand rather than an
    * in-conversation slash command. Same best-effort discipline: a failure
    * here costs the picker, never the session.
+   *
+   * `child.stdin.end()` matters here specifically: unlike `-p` mode (used by
+   * `fetchInitialCommands`/`runTurn`, neither of which need this), `models`
+   * was confirmed live to hang forever reading an open, unclosed stdin pipe
+   * — with zero output, not even its own status line — when spawned exactly
+   * the way Node's default `stdio` leaves it. Closing stdin immediately
+   * (rather than passing `stdio: ['ignore', ...]` to `spawn`) keeps the
+   * result typed as `ChildProcessWithoutNullStreams`, since nothing else
+   * here needs `stdio` to change.
    */
   private fetchInitialModels(): void {
     const bin = this.spec.executablePath ?? 'agy';
@@ -174,6 +184,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     } catch {
       return;
     }
+    child.stdin.end();
 
     let stdout = '';
     child.stdout.on('data', (chunk: Buffer) => {
