@@ -190,11 +190,19 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   const picked = here.find((h) => h.chat.id === resumeId);
 
   const [agentId, transport] = flavour ? (flavour.split(':') as [string, 'terminal' | 'structured']) : ['', ''];
+  // A picked chat always resumes as whatever agent it already is — the
+  // "Agent" row above is only consulted for a brand new chat. Falling back to
+  // the row's own selection here used to mean picking a finished, say, `agy`
+  // chat and sending would resume it as Claude (or whatever the row happened
+  // to show), because `submit` below sent `agentId` unconditionally with
+  // `picked.chat.conversationId` as `resumeAgentSessionId` — an agent
+  // resuming a different agent's conversation id, which cannot work.
+  const effectiveAgentId = picked ? picked.chat.agent : agentId;
   const startingWorktree = !picked && isGitRepo && worktreeMode === 'new';
   const canSend =
     !busy &&
     !!cwd &&
-    !!agentId &&
+    !!effectiveAgentId &&
     (prompt.trim().length > 0 || !!attachedImage) &&
     !(startingWorktree && branchMode === 'new' && !branchName.trim());
 
@@ -252,7 +260,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
 
       const resumeFrom = picked?.chat.conversationId ?? null;
       const session = await api.createSession({
-        agent: agentId,
+        agent: effectiveAgentId,
         cwd: targetCwd,
         cols: 80,
         rows: 24,
@@ -270,7 +278,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
     }
   }, [
     canSend,
-    agentId,
+    effectiveAgentId,
     cwd,
     transport,
     picked,
@@ -323,14 +331,20 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
               options={workspaceOptions}
               onChange={setCwd}
             />
-            <SelectorRow
-              icon="laptop"
-              label="Agent"
-              ariaLabel="Agent and interface"
-              value={flavour}
-              options={flavourOptions}
-              onChange={(v) => setFlavour(v as Flavour)}
-            />
+            {/* A picked chat always resumes as whatever agent it already is
+                (see `effectiveAgentId`) — this row only matters for a brand
+                new chat, so it is hidden rather than left showing a choice
+                that submitting would silently ignore. */}
+            {!picked && (
+              <SelectorRow
+                icon="laptop"
+                label="Agent"
+                ariaLabel="Agent and interface"
+                value={flavour}
+                options={flavourOptions}
+                onChange={(v) => setFlavour(v as Flavour)}
+              />
+            )}
             <SelectorRow
               icon="branch"
               label="Chat"
@@ -385,7 +399,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
         <p className="composer-note">
           {picked.chat.live
             ? 'Already running — your prompt goes to that session.'
-            : 'Resuming as a new branch — the original transcript is left untouched.'}
+            : `Resuming as ${picked.chat.agentDisplayName} — a new branch; the original transcript is left untouched.`}
         </p>
       )}
 

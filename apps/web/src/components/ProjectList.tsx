@@ -73,10 +73,21 @@ export function useProjects(
    * A finished chat with no conversation behind it (a plain shell, say) has
    * nothing to preview or continue. It still opens by session id, so its
    * final state is reachable.
+   *
+   * The preview route only ever works for Claude: `onOpenChat` leads to
+   * `ChatPreviewPage`, which reads `GET /api/conversations/:id/history` —
+   * and that endpoint only discovers Claude Code's on-disk `.jsonl`
+   * transcripts (`conversations/index.ts`). A finished chat from any other
+   * agent (e.g. `agy`) has a `conversationId` too (its own agent-session id,
+   * for `resumeAgentSessionId`), but no transcript there to read — routing it
+   * to the preview page 404s and leaves it stuck with no way to continue.
+   * It still has a session row, though, so send it to `AgentPage` instead;
+   * that page's own `resumeAndSend` already resumes any agent generically
+   * from `SessionInfo.agentSessionId`.
    */
   const open = useCallback(
     (chat: ChatSummary) => {
-      if (chat.sessionId && (chat.live || !chat.conversationId)) {
+      if (chat.sessionId && (chat.live || chat.agent !== 'claude' || !chat.conversationId)) {
         onOpen(chat.sessionId);
         return;
       }
