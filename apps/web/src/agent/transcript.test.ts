@@ -6,6 +6,7 @@ import {
   emptyTranscript,
   groupIntoTurns,
   modelDisplayName,
+  resolveCurrentModel,
   type ToolItem,
 } from './transcript.js';
 
@@ -350,6 +351,32 @@ describe('modelDisplayName', () => {
 
   it('leaves an id with no claude prefix alone when nothing matches', () => {
     expect(modelDisplayName([], 'some-other-vendor-model')).toBe('some-other-vendor-model');
+  });
+});
+
+describe('resolveCurrentModel', () => {
+  it('returns null when nothing is known and no models are listed', () => {
+    expect(resolveCurrentModel([], null)).toBeNull();
+  });
+
+  it('matches the confirmed model by value', () => {
+    expect(resolveCurrentModel([MODEL_OPUS, MODEL_SONNET], 'claude-opus-4-8')).toBe(MODEL_OPUS);
+  });
+
+  it('matches by resolvedModel when the id is the resolved wire id, not the alias', () => {
+    expect(resolveCurrentModel([MODEL_SONNET], 'claude-sonnet-5')).toBe(MODEL_SONNET);
+  });
+
+  // agy's `init` line never reports a model (see `normalizeAgyInit`), so a
+  // fresh agy session has `model: null` until the user explicitly switches —
+  // this is the case that used to leave the picker with no highlighted row
+  // and the title bar blank.
+  it('falls back to the first listed model when nothing is confirmed yet', () => {
+    expect(resolveCurrentModel([MODEL_OPUS, MODEL_SONNET], null)).toBe(MODEL_OPUS);
+  });
+
+  it('falls back to the first listed model when the confirmed id matches nothing', () => {
+    expect(resolveCurrentModel([MODEL_OPUS, MODEL_SONNET], 'some-unknown-model')).toBe(MODEL_OPUS);
   });
 });
 

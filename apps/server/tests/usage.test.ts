@@ -12,7 +12,10 @@ import { createTestApp, type TestApp } from './helpers.js';
  * - Codex: JSON-RPC `account/rateLimits/read` over the same shared
  *   `codex app-server` connection a real Codex session would use.
  * - agy (Antigravity CLI): shells out to `agy -p "/usage" --output-format json`,
- *   picking the single most-depleted bucket across every model-family group.
+ *   which reports quota per model-family group (e.g. "Gemini Models" and
+ *   "Claude and GPT models"); each group's 5h/weekly buckets become their own
+ *   window so a healthy non-Gemini allowance is never hidden behind a more
+ *   depleted one.
  *
  * All three are pointed at throwaway fake binaries here instead of the real
  * CLIs, both so CI does not need any of them installed and so the exact
@@ -269,11 +272,18 @@ describe('GET /api/usage', () => {
       const res = await t.app.inject({ method: 'GET', url: '/api/usage', headers: headers(t) });
       const agy = findAgent(res.json().usage, 'agy') as Record<string, unknown>;
       expect(agy.available).toBe(true);
+      // The compact top-level number still reflects the worst bucket overall
+      // (Gemini's 5h window), for callers with room for only one number.
       expect(agy.percentUsed).toBe(20);
       const windows = agy.windows as Array<{ label: string; percentUsed: number }>;
-      expect(windows.length).toBe(2);
+      // One 5h and one weekly window per group — the healthy "Claude and GPT
+      // models" group must surface its own (0%-used) bars rather than being
+      // dropped just because Gemini's are more depleted.
+      expect(windows.length).toBe(4);
       expect(windows[0]).toMatchObject({ label: 'Gemini Models 5h', percentUsed: 20 });
       expect(windows[1]).toMatchObject({ label: 'Gemini Models weekly', percentUsed: 8 });
+      expect(windows[2]).toMatchObject({ label: 'Claude and GPT models 5h', percentUsed: 0 });
+      expect(windows[3]).toMatchObject({ label: 'Claude and GPT models weekly', percentUsed: 0 });
       expect(agy.resetsAtLabel).toMatch(/^[A-Za-z]{3} \d{1,2}, \d{1,2}:\d{2}(am|pm)$/);
       expect(typeof agy.timezone).toBe('string');
       expect(agy.error).toBeNull();

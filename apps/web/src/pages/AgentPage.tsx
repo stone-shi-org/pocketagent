@@ -15,7 +15,7 @@ import {
   applyEvent,
   applyEvents,
   emptyTranscript,
-  modelDisplayName,
+  resolveCurrentModel,
   type TranscriptItem,
   type TranscriptState,
 } from '../agent/transcript.js';
@@ -248,8 +248,12 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
     if (queued) sendPrompt(queued.text, queued.image);
   }, [inputDisabled, sessionId, sendPrompt]);
 
+  // Same fallback as the composer's model picker (see `resolveCurrentModel`'s
+  // doc comment) — without it the title bar showed nothing at all for an agy
+  // session until the user explicitly switched models, since agy's `init`
+  // line never reports one.
   const modelLabel = useMemo(
-    () => modelDisplayName(transcript.models, transcript.model),
+    () => resolveCurrentModel(transcript.models, transcript.model)?.displayName ?? null,
     [transcript.models, transcript.model],
   );
 

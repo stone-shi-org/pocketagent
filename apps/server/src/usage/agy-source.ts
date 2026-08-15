@@ -28,6 +28,28 @@ interface UsageCommandResult {
   command?: { data?: { groups?: UsageGroup[] } };
 }
 
+type GroupedBucket = UsageBucket & { groupName?: string };
+
+/**
+ * One `UsageWindowInfo` from a set of buckets that are all the same window
+ * type (5h or weekly) — normally one bucket per group, but reduced to the
+ * worst rather than just taking `[0]` in case a future `/usage` shape ever
+ * reports more than one per group per type.
+ */
+function buildWindow(buckets: GroupedBucket[], fallbackWindow: string): UsageWindowInfo {
+  const worst = buckets.reduce((a, b) =>
+    (b.remaining_fraction as number) < (a.remaining_fraction as number) ? b : a,
+  );
+  const resetsAt = worst.reset_time ? new Date(worst.reset_time) : null;
+  const validResetsAt = resetsAt && !Number.isNaN(resetsAt.getTime()) ? resetsAt : null;
+  return {
+    label: [worst.groupName, worst.window || fallbackWindow].filter(Boolean).join(' '),
+    percentUsed: Math.max(0, Math.min(100, Math.round((1 - (worst.remaining_fraction as number)) * 100))),
+    resetsAtLabel: validResetsAt ? formatResetLabel(validResetsAt) : null,
+    timezone: validResetsAt ? Intl.DateTimeFormat().resolvedOptions().timeZone : null,
+  };
+}
+
 function unavailable(error: string | null = null): AgentUsageInfo {
   return {
     agent: 'agy',
@@ -76,82 +98,49 @@ export function createAgyUsageSource(opts: AgyUsageSourceOptions): Polled<AgentU
         return unavailable('Could not find a usage bucket in `agy /usage` output.');
       }
 
+      // Antigravity multiplexes quota across model families — confirmed live,
+      // `/usage` returns separate groups like "Gemini Models" and "Claude and
+      // GPT models", each with its own 5h/weekly buckets. Collapsing to a
+      // single worst-of-all-groups window (the original approach here) hid a
+      // whole group's quota whenever another group was more depleted — a
+      // healthy non-Gemini allowance read as if it didn't exist. One window
+      // per (group, window-type) pair instead, so every group gets its own bar.
       const windows: UsageWindowInfo[] = [];
-      const fiveHourBuckets = buckets.filter(
-        (b) => b.window === '5h' || /5h|5-hour|five hour/i.test(b.window || b.name || ''),
-      );
-      const weeklyBuckets = buckets.filter(
-        (b) => b.window === 'weekly' || /weekly|7day|7-day/i.test(b.window || b.name || ''),
-      );
-
-      if (fiveHourBuckets.length > 0) {
-        const worst5h = fiveHourBuckets.reduce((a, b) =>
-          (b.remaining_fraction as number) < (a.remaining_fraction as number) ? b : a,
+      const groupNames = [
+        ...new Set(buckets.map((b) => b.groupName).filter((n): n is string => Boolean(n))),
+      ];
+      // Buckets with no group name at all (an older/simpler `/usage` shape)
+      // are still one implicit group, so the loop below runs at least once.
+      for (const groupName of groupNames.length > 0 ? groupNames : [undefined]) {
+        const groupBuckets = groupName ? buckets.filter((b) => b.groupName === groupName) : buckets;
+        const fiveHour = groupBuckets.filter(
+          (b) => b.window === '5h' || /5h|5-hour|five hour/i.test(b.window || b.name || ''),
         );
-        const resetsAt = worst5h.reset_time ? new Date(worst5h.reset_time) : null;
-        const validResetsAt = resetsAt && !Number.isNaN(resetsAt.getTime()) ? resetsAt : null;
-        windows.push({
-          label: [worst5h.groupName, worst5h.window || '5h'].filter(Boolean).join(' '),
-          percentUsed: Math.max(
-            0,
-            Math.min(100, Math.round((1 - (worst5h.remaining_fraction as number)) * 100)),
-          ),
-          resetsAtLabel: validResetsAt ? formatResetLabel(validResetsAt) : null,
-          timezone: validResetsAt ? Intl.DateTimeFormat().resolvedOptions().timeZone : null,
-        });
+        const weekly = groupBuckets.filter(
+          (b) => b.window === 'weekly' || /weekly|7day|7-day/i.test(b.window || b.name || ''),
+        );
+        if (fiveHour.length > 0) windows.push(buildWindow(fiveHour, '5h'));
+        if (weekly.length > 0) windows.push(buildWindow(weekly, 'weekly'));
       }
 
-      if (weeklyBuckets.length > 0) {
-        const worstWeekly = weeklyBuckets.reduce((a, b) =>
-          (b.remaining_fraction as number) < (a.remaining_fraction as number) ? b : a,
-        );
-        const resetsAt = worstWeekly.reset_time ? new Date(worstWeekly.reset_time) : null;
-        const validResetsAt = resetsAt && !Number.isNaN(resetsAt.getTime()) ? resetsAt : null;
-        windows.push({
-          label: [worstWeekly.groupName, worstWeekly.window || 'weekly'].filter(Boolean).join(' '),
-          percentUsed: Math.max(
-            0,
-            Math.min(100, Math.round((1 - (worstWeekly.remaining_fraction as number)) * 100)),
-          ),
-          resetsAtLabel: validResetsAt ? formatResetLabel(validResetsAt) : null,
-          timezone: validResetsAt ? Intl.DateTimeFormat().resolvedOptions().timeZone : null,
-        });
-      }
+      // Nothing matched the 5h/weekly patterns at all (an unrecognized
+      // `/usage` shape) — still surface the single worst bucket rather than
+      // an empty windows list.
+      if (windows.length === 0) windows.push(buildWindow(buckets, 'Limit'));
 
-      if (windows.length === 0) {
-        const worst = buckets.reduce((a, b) =>
-          (b.remaining_fraction as number) < (a.remaining_fraction as number) ? b : a,
-        );
-        const resetsAt = worst.reset_time ? new Date(worst.reset_time) : null;
-        const validResetsAt = resetsAt && !Number.isNaN(resetsAt.getTime()) ? resetsAt : null;
-        windows.push({
-          label: [worst.groupName, worst.window].filter(Boolean).join(' ') || 'Limit',
-          percentUsed: Math.max(
-            0,
-            Math.min(100, Math.round((1 - (worst.remaining_fraction as number)) * 100)),
-          ),
-          resetsAtLabel: validResetsAt ? formatResetLabel(validResetsAt) : null,
-          timezone: validResetsAt ? Intl.DateTimeFormat().resolvedOptions().timeZone : null,
-        });
-      }
-
-      const worstOverall = buckets.reduce((a, b) =>
-        (b.remaining_fraction as number) < (a.remaining_fraction as number) ? b : a,
-      );
-      const resetsAt = worstOverall.reset_time ? new Date(worstOverall.reset_time) : null;
-      const validResetsAt = resetsAt && !Number.isNaN(resetsAt.getTime()) ? resetsAt : null;
+      // The compact top-level summary (used where there is only room for one
+      // number, e.g. the fleet list) stays the single worst bucket across
+      // every group — `windows` above is what shows each group separately.
+      const overall = buildWindow(buckets, 'Limit');
 
       return {
         agent: 'agy',
         agentDisplayName: 'Antigravity CLI',
         available: true,
-        percentUsed: Math.max(
-          0,
-          Math.min(100, Math.round((1 - (worstOverall.remaining_fraction as number)) * 100)),
-        ),
-        windowLabel: [worstOverall.groupName, worstOverall.window].filter(Boolean).join(' ') || null,
-        resetsAtLabel: validResetsAt ? formatResetLabel(validResetsAt) : null,
-        timezone: validResetsAt ? Intl.DateTimeFormat().resolvedOptions().timeZone : null,
+        percentUsed: overall.percentUsed,
+        windowLabel: overall.label || null,
+        resetsAtLabel: overall.resetsAtLabel,
+        timezone: overall.timezone,
         windows,
         error: null,
         updatedAt: new Date().toISOString(),

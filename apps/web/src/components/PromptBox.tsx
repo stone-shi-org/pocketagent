@@ -8,7 +8,7 @@ import {
 } from 'react';
 import type { EffortLevel, ModelInfo, PromptImage, SlashCommandInfo } from '@pocketagent/protocol';
 import { readImageFile } from '../agent/image-attachment.js';
-import { modelDisplayName } from '../agent/transcript.js';
+import { resolveCurrentModel } from '../agent/transcript.js';
 import { AttachButton } from './AttachButton.js';
 import { Icon } from './Icon.js';
 
@@ -301,17 +301,14 @@ export function PromptBox({
     setModelPickerOpen(false);
   }
 
-  // The chip's own label: the current model's display name once it's known
-  // (vendor prefix stripped — see `modelDisplayName`), falling back to the
-  // first available choice so the chip is never blank while
-  // `session_started` is still in flight. Effort deliberately does not
-  // appear here — the chip is "just the model name", the picker is where
-  // effort lives.
-  const currentModelLabel = modelDisplayName(models, currentModel) ?? models[0]?.displayName ?? null;
-  // The model this session is actually on, if the list has caught up with
-  // `session_started` — its `supportedEffortLevels` decide what the effort
-  // section of the picker offers, since that varies per model.
-  const currentModelInfo = models.find((m) => m.value === currentModel || m.resolvedModel === currentModel) ?? null;
+  // The model this session is actually on — or, once the list has caught up
+  // with `session_started`/`models_available` but no explicit selection has
+  // been confirmed yet (agy never reports one in `init` — see
+  // `resolveCurrentModel`'s doc comment), the first available choice. Both
+  // the chip's own label and the picker's highlighted row read from this, so
+  // they never disagree about what "current" means.
+  const currentModelInfo = resolveCurrentModel(models, currentModel);
+  const currentModelLabel = currentModelInfo?.displayName ?? null;
   const effortLevels = currentModelInfo?.supportsEffort ? currentModelInfo.supportedEffortLevels : [];
   // The slash picker is text-triggered and spans the full width; showing both
   // at once would overlap it, so a `/` in progress wins.
@@ -358,26 +355,36 @@ export function PromptBox({
     <div className="promptbar">
       {modelPickerVisible && (
         <div className="model-picker" role="listbox" aria-label="Models" ref={modelPickerRef}>
-          {models.map((model) => (
-            <button
-              key={model.value}
-              type="button"
-              role="option"
-              aria-selected={model.value === currentModelInfo?.value}
-              className={model.value === currentModelInfo?.value ? 'active' : ''}
-              onMouseDown={(e) => {
-                // mousedown (not click) so this fires before the document-level
-                // pointerdown-based outside-click dismissal above resolves —
-                // both see the same press, but picking a row this way and
-                // being dismissed as "outside" would otherwise race.
-                e.preventDefault();
-                pickModel(model);
-              }}
-            >
-              <span className="model-name">{model.displayName}</span>
-              {model.description && <span className="model-desc">{model.description}</span>}
-            </button>
-          ))}
+          {models.map((model) => {
+            const isCurrent = model.value === currentModelInfo?.value;
+            return (
+              <button
+                key={model.value}
+                type="button"
+                role="option"
+                aria-selected={isCurrent}
+                className={isCurrent ? 'active' : ''}
+                onMouseDown={(e) => {
+                  // mousedown (not click) so this fires before the document-level
+                  // pointerdown-based outside-click dismissal above resolves —
+                  // both see the same press, but picking a row this way and
+                  // being dismissed as "outside" would otherwise race.
+                  e.preventDefault();
+                  pickModel(model);
+                }}
+              >
+                <span className="model-row">
+                  <span className="model-name">{model.displayName}</span>
+                  {/* The `.active` background alone reads as "hovered" at a
+                      glance on a phone, where there is no hover state to
+                      contrast it against — a checkmark is the one indicator
+                      that survives on a static screenshot too. */}
+                  {isCurrent && <Icon name="check" size={14} />}
+                </span>
+                {model.description && <span className="model-desc">{model.description}</span>}
+              </button>
+            );
+          })}
           {effortLevels.length > 0 && (
             <>
               <div className="model-picker-divider" role="separator">

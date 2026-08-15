@@ -616,6 +616,19 @@ button:focus-visible {
   background: var(--bg-elev);
 }
 
+.model-picker .model-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+
+.model-picker .model-row svg {
+  flex: none;
+  color: var(--accent);
+}
+
 .model-picker .model-name {
   font-size: 13px;
   font-weight: 600;
@@ -1581,6 +1594,34 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   font-size: 11.5px;
   font-weight: 650;
   color: var(--text-dim);
+}
+
+/* The whole title row is the toggle, not just the arrow — a bigger tap target
+   than the 13px icon alone, same reasoning as any other icon-plus-label
+   button in this file. */
+.usage-agent-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: left;
+}
+
+.usage-chevron {
+  flex: none;
+  color: var(--text-dim);
+  /* Collapsed (the default) points right, like a disclosure triangle;
+     expanded points down. One icon, rotated, rather than two chevron assets. */
+  transform: rotate(-90deg);
+  transition: transform 150ms ease;
+}
+
+.usage-chevron.expanded {
+  transform: rotate(0deg);
 }
 
 .usage-window-label {

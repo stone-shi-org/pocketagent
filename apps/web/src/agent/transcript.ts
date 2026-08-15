@@ -345,6 +345,29 @@ export function modelDisplayName(models: ModelInfo[], model: string | null): str
   return model.replace(/^claude[\s-]+/i, '');
 }
 
+/**
+ * The `ModelInfo` entry a session is actually on, falling back to the first
+ * entry in `models` when nothing is confirmed yet.
+ *
+ * `model` is only ever set here by a `session_started`/`model_changed` event
+ * (see `applyEvent` above), and not every backend's `session_started` carries
+ * one — agy's `init` line has no model field at all (`normalizeAgyInit`'s doc
+ * comment), so a fresh agy session has `model: null` until the user explicitly
+ * switches. Without this fallback the model picker highlighted nothing as
+ * current and the title bar showed no model at all, even though the session
+ * is really running `models[0]` (agy's own default, first in the list it
+ * reports). Every caller that needs "the current model" — the picker's
+ * highlighted row, its chip label, the title bar — should go through this
+ * rather than re-deriving the fallback ad hoc.
+ */
+export function resolveCurrentModel(models: ModelInfo[], model: string | null): ModelInfo | null {
+  if (model) {
+    const match = models.find((m) => m.value === model || m.resolvedModel === model);
+    if (match) return match;
+  }
+  return models[0] ?? null;
+}
+
 export function applyEvents(state: TranscriptState, events: AgentEvent[]): TranscriptState {
   return events.reduce(applyEvent, state);
 }
