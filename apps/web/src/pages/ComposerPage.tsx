@@ -53,6 +53,11 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   const [cwd, setCwd] = useState(initialCwd ?? '');
   const [flavour, setFlavour] = useState<Flavour | ''>('');
   const [resumeId, setResumeId] = useState<string>(NEW_CHAT);
+  /** 'main' is today's behaviour: run in the workspace directory as-is. Only
+      meaningful for a fresh chat — resuming always runs where the original did. */
+  const [worktreeMode, setWorktreeMode] = useState<'main' | 'new'>('main');
+  const [branchMode, setBranchMode] = useState<'new' | 'current'>('new');
+  const [branchName, setBranchName] = useState('');
   const [prompt, setPrompt] = useState('');
   const [attachedImage, setAttachedImage] = useState<PromptImage | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -88,6 +93,15 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   // A conversation belongs to one directory, so changing directory invalidates
   // the chosen one rather than silently resuming something from elsewhere.
   useEffect(() => setResumeId(NEW_CHAT), [cwd]);
+
+  // A worktree/branch choice is scoped to whichever directory was selected
+  // when it was made; switching to a different project should not silently
+  // carry it over to one that may not even be a git repo.
+  useEffect(() => {
+    setWorktreeMode('main');
+    setBranchMode('new');
+    setBranchName('');
+  }, [cwd]);
 
   const hostOptions: SelectorOption[] = host
     ? [{ value: host.id, label: host.name, detail: host.online ? 'online' : 'unreachable' }]
@@ -146,10 +160,18 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
     return out.sort((a, b) => b.chat.updatedAt - a.chat.updatedAt);
   }, [projects, cwd]);
 
-  const branch = useMemo(
-    () => projects.find((p) => p.cwd === cwd)?.gitBranch ?? null,
-    [projects, cwd],
-  );
+  const project = useMemo(() => projects.find((p) => p.cwd === cwd) ?? null, [projects, cwd]);
+  const branch = project?.gitBranch ?? null;
+  const isGitRepo = project?.isGitRepo ?? false;
+
+  const worktreeOptions: SelectorOption[] = [
+    { value: 'main', label: branch ? `Main — ${branch}` : 'Main' },
+    { value: 'new', label: 'New worktree…' },
+  ];
+  const branchModeOptions: SelectorOption[] = [
+    { value: 'new', label: 'New branch' },
+    { value: 'current', label: branch ? `Current (${branch})` : 'Current' },
+  ];
 
   const resumeOptions: SelectorOption[] = [
     { value: NEW_CHAT, label: branch ? `New chat · ${branch}` : 'New chat' },
@@ -168,7 +190,13 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   const picked = here.find((h) => h.chat.id === resumeId);
 
   const [agentId, transport] = flavour ? (flavour.split(':') as [string, 'terminal' | 'structured']) : ['', ''];
-  const canSend = !busy && !!cwd && !!agentId && (prompt.trim().length > 0 || !!attachedImage);
+  const startingWorktree = !picked && isGitRepo && worktreeMode === 'new';
+  const canSend =
+    !busy &&
+    !!cwd &&
+    !!agentId &&
+    (prompt.trim().length > 0 || !!attachedImage) &&
+    !(startingWorktree && branchMode === 'new' && !branchName.trim());
 
   // Only the Claude Agent SDK backend's structured transport understands an
   // image content block (see `ws/index.ts`'s `instanceof StructuredSession`
@@ -199,11 +227,33 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
         return;
       }
 
+      // A resumed chat runs where it was, not where the row above points; a
+      // fresh chat starting a new worktree runs there instead of the plain
+      // workspace directory. Worktree creation gets its own try/catch and its
+      // own message, since a failure here is a different problem (a git
+      // mutation that didn't happen) from a failure to start the session.
+      let targetCwd = picked?.cwd ?? cwd;
+      if (startingWorktree) {
+        try {
+          targetCwd = (
+            await api.createWorktree({
+              cwd,
+              branchMode,
+              ...(branchMode === 'new' ? { branchName } : {}),
+            })
+          ).cwd;
+        } catch (err) {
+          onApiError(err);
+          setError(err instanceof ApiError ? err.message : 'Could not create the worktree.');
+          setBusy(false);
+          return;
+        }
+      }
+
       const resumeFrom = picked?.chat.conversationId ?? null;
       const session = await api.createSession({
         agent: agentId,
-        // A resumed chat runs where it was, not where the row above points.
-        cwd: picked?.cwd ?? cwd,
+        cwd: targetCwd,
         cols: 80,
         rows: 24,
         // Resuming is only meaningful over the structured transport, which is
@@ -218,7 +268,20 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
       setError(err instanceof ApiError ? err.message : 'Could not start the chat.');
       setBusy(false);
     }
-  }, [canSend, agentId, cwd, transport, picked, prompt, attachedImage, onCreated, onApiError]);
+  }, [
+    canSend,
+    agentId,
+    cwd,
+    transport,
+    picked,
+    startingWorktree,
+    branchMode,
+    branchName,
+    prompt,
+    attachedImage,
+    onCreated,
+    onApiError,
+  ]);
 
   async function attach(file: File): Promise<void> {
     setAttachError(null);
@@ -276,9 +339,41 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
               options={resumeOptions}
               onChange={setResumeId}
             />
+            {!picked && isGitRepo && (
+              <SelectorRow
+                icon="branch"
+                label="Worktree"
+                ariaLabel="Run in the main checkout or a new worktree"
+                value={worktreeMode}
+                options={worktreeOptions}
+                onChange={(v) => setWorktreeMode(v as 'main' | 'new')}
+              />
+            )}
+            {startingWorktree && (
+              <SelectorRow
+                icon="branch"
+                label="Branch"
+                ariaLabel="New branch, or a new one off the current tip"
+                value={branchMode}
+                options={branchModeOptions}
+                onChange={(v) => setBranchMode(v as 'new' | 'current')}
+              />
+            )}
           </div>
         )}
       </div>
+
+      {startingWorktree && branchMode === 'new' && (
+        <div className="field">
+          <label htmlFor="composer-branch-name">Branch name</label>
+          <input
+            id="composer-branch-name"
+            value={branchName}
+            onChange={(e) => setBranchName(e.target.value)}
+            placeholder="feature/my-branch"
+          />
+        </div>
+      )}
 
       {error && (
         <div className="error-box" role="alert">
@@ -291,6 +386,19 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
           {picked.chat.live
             ? 'Already running — your prompt goes to that session.'
             : 'Resuming as a new branch — the original transcript is left untouched.'}
+        </p>
+      )}
+
+      {startingWorktree && branchMode === 'current' && (
+        <p className="composer-note">
+          Git can&rsquo;t check {branch ?? 'the current branch'} out in two worktrees at once, so
+          this creates a new branch from its current tip instead.
+        </p>
+      )}
+
+      {startingWorktree && (
+        <p className="composer-note">
+          New worktree at <code>.worktrees/</code> inside this project.
         </p>
       )}
 
