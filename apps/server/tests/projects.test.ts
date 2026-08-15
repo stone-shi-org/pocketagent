@@ -160,6 +160,56 @@ describe('ProjectService', () => {
     });
   });
 
+  it('collapses repeated resumes of the same chat into one row', async () => {
+    // A non-forked resume keeps writing to the same transcript, but each
+    // resume still mints a brand-new session row (finished ones are kept,
+    // not reused) — so the same agentSessionId can be shared by several rows.
+    // Only the live one should ever render as a chat.
+    writeTranscript(ws.project, 'conv-1', 'Original');
+    const [project] = await service.list([
+      makeSession({
+        id: 'first-resume',
+        cwd: ws.project,
+        agentSessionId: 'conv-1',
+        status: 'exited',
+        lastActivityAt: 1000,
+      }),
+      makeSession({
+        id: 'second-resume',
+        cwd: ws.project,
+        agentSessionId: 'conv-1',
+        status: 'running',
+        lastActivityAt: 2000,
+      }),
+    ]);
+
+    expect(project?.chats).toHaveLength(1);
+    expect(project?.chats[0]).toMatchObject({ sessionId: 'second-resume', live: true });
+  });
+
+  it('picks the most recently touched row when none of the duplicates are live', async () => {
+    writeTranscript(ws.project, 'conv-1', 'Original');
+    const [project] = await service.list([
+      makeSession({
+        id: 'older-resume',
+        cwd: ws.project,
+        agentSessionId: 'conv-1',
+        status: 'exited',
+        lastActivityAt: 1000,
+      }),
+      makeSession({
+        id: 'newer-resume',
+        cwd: ws.project,
+        agentSessionId: 'conv-1',
+        status: 'exited',
+        lastActivityAt: 2000,
+      }),
+    ]);
+
+    expect(project?.chats).toHaveLength(1);
+    expect(project?.chats[0]).toMatchObject({ sessionId: 'newer-resume', live: false });
+  });
+
   it('shows the transcript-derived title for a live session, not its fixed creation-time name', async () => {
     // A session's own title is set once at creation and never updated
     // (`Claude Code · <folder>` for every fresh chat); Claude Code writes a
