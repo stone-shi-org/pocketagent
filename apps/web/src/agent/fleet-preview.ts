@@ -140,6 +140,9 @@ export function applyFleetEvent(state: FleetPreviewState, event: AgentEvent): Fl
     case 'turn_complete':
       return pushLine(state, event.isError ? 'Turn ended with an error' : 'Idle — waiting for a prompt');
 
+    case 'conversation_reset':
+      return pushLine(state, 'Conversation cleared');
+
     default:
       return state;
   }

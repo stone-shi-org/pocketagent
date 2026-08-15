@@ -111,6 +111,24 @@ describe('normalizeSdkMessage: system', () => {
   });
 });
 
+describe('normalizeSdkMessage: conversation_reset', () => {
+  it('maps conversation_reset to a conversation_reset event', () => {
+    const events = normalizeSdkMessage({
+      type: 'conversation_reset',
+      new_conversation_id: 'conv-2',
+      uuid: 'u-1',
+      session_id: 'conv-1',
+    });
+    expect(events).toEqual([{ kind: 'conversation_reset', newConversationId: 'conv-2' }]);
+  });
+
+  it('falls back to an empty id rather than throwing on a malformed message', () => {
+    expect(normalizeSdkMessage({ type: 'conversation_reset' })).toEqual([
+      { kind: 'conversation_reset', newConversationId: '' },
+    ]);
+  });
+});
+
 describe('normalizeSlashCommands', () => {
   it('fills in missing optional fields', () => {
     expect(normalizeSlashCommands([{ name: 'help' }])).toEqual([

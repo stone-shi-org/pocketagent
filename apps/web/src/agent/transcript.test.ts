@@ -329,6 +329,32 @@ describe('transcript: effort', () => {
   });
 });
 
+describe('transcript: conversation_reset', () => {
+  it('drops prior history but keeps session-level facts (model, commands, effort)', () => {
+    const state = applyEvents(emptyTranscript(), [
+      {
+        kind: 'session_started',
+        agentSessionId: 's1',
+        model: 'claude-sonnet-5',
+        cwd: '/tmp',
+        tools: [],
+        permissionMode: 'default',
+      },
+      { kind: 'commands_available', commands: [{ name: 'help', description: '', argumentHint: '', aliases: [] }] },
+      { kind: 'effort_changed', effort: 'high' },
+      { kind: 'user_prompt', id: 'p1', text: 'hello' },
+      { kind: 'text', id: 't1', text: 'hi there' },
+      { kind: 'conversation_reset', newConversationId: 's2' },
+    ]);
+
+    expect(state.agentSessionId).toBe('s2');
+    expect(state.model).toBe('claude-sonnet-5');
+    expect(state.commands).toEqual([{ name: 'help', description: '', argumentHint: '', aliases: [] }]);
+    expect(state.effort).toBe('high');
+    expect(state.items).toEqual([{ type: 'notice', key: 'reset_s2', level: 'info', text: 'Conversation cleared.' }]);
+  });
+});
+
 describe('modelDisplayName', () => {
   it('returns null when no model is known yet', () => {
     expect(modelDisplayName([], null)).toBeNull();

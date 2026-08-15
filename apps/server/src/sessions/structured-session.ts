@@ -408,6 +408,14 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
           if (event.kind === 'session_started' && event.agentSessionId) {
             this._agentSessionId = event.agentSessionId;
           }
+          // `/clear` (and the other conversation_reset triggers) hand the SDK
+          // a fresh conversation id mid-session, without a matching
+          // `session_started` — miss this and `agentSessionId` (and the
+          // `session_id` `prompt()` stamps on the next turn, above) keeps
+          // pointing at the conversation that no longer exists.
+          if (event.kind === 'conversation_reset' && event.newConversationId) {
+            this._agentSessionId = event.newConversationId;
+          }
           if (event.kind === 'turn_complete') this._busy = false;
           this.emitEvent(event);
         }

@@ -28,6 +28,8 @@ export function normalizeSdkMessage(message: unknown): AgentEvent[] {
       return [normalizeResult(message)];
     case 'stream_event':
       return normalizeStreamEvent(message);
+    case 'conversation_reset':
+      return [{ kind: 'conversation_reset', newConversationId: str(message.new_conversation_id) ?? '' }];
     default:
       return [];
   }

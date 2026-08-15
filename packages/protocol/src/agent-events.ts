@@ -287,6 +287,20 @@ export const EffortChangedEvent = z.object({
 });
 export type EffortChangedEvent = z.infer<typeof EffortChangedEvent>;
 
+/**
+ * The agent's own context was reset — most commonly `/clear`, but the SDK's
+ * own doc comment on `SDKConversationResetMessage` also lists plan-mode exit
+ * and other fresh-session flows as triggers. `newConversationId` is the id a
+ * resume must use going forward: the SDK starts a new conversation at the
+ * same moment this fires, so `SessionStartedEvent.agentSessionId` from the
+ * original start is no longer the right id to resume against.
+ */
+export const ConversationResetEvent = z.object({
+  kind: z.literal('conversation_reset'),
+  newConversationId: z.string(),
+});
+export type ConversationResetEvent = z.infer<typeof ConversationResetEvent>;
+
 export type SessionStartedEvent = z.infer<typeof SessionStartedEvent>;
 export type TextEvent = z.infer<typeof TextEvent>;
 export type TextDeltaEvent = z.infer<typeof TextDeltaEvent>;
@@ -318,6 +332,7 @@ export const AgentEvent = z.discriminatedUnion('kind', [
   ModelsAvailableEvent,
   ModelChangedEvent,
   EffortChangedEvent,
+  ConversationResetEvent,
 ]);
 export type AgentEvent = z.infer<typeof AgentEvent>;
 

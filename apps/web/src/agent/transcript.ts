@@ -325,6 +325,23 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
     case 'effort_changed':
       return { ...state, effort: event.effort };
 
+    // `/clear` and the SDK's other conversation-reset triggers: the whole
+    // point is that history is gone, so this rebuilds from empty rather than
+    // filtering `items` — but model/commands/effort are session-level facts,
+    // not conversation history, and survive. `agentSessionId` moves to the
+    // new conversation id, matching what `StructuredSession` now resumes
+    // against (see structured-session.ts's own `conversation_reset` handler).
+    case 'conversation_reset':
+      return {
+        ...emptyTranscript(),
+        model: state.model,
+        agentSessionId: event.newConversationId,
+        commands: state.commands,
+        models: state.models,
+        effort: state.effort,
+        items: [{ type: 'notice', key: `reset_${event.newConversationId}`, level: 'info', text: 'Conversation cleared.' }],
+      };
+
     default:
       return state;
   }
