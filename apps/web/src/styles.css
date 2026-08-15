@@ -814,13 +814,18 @@ button:focus-visible {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
-  /* No top or horizontal inset here on purpose: a pinned prompt header's
-     `top: 0` needs to land exactly on this container's own top edge (so the
-     glass panel sits flush against the chat window's top, not floating 14px
-     below it), and its width needs to reach this container's own edges (so
-     the glass panel is exactly as wide as the chat window, not narrower).
-     The horizontal indent removed from here moves to `.turn-body` below —
-     prompts go edge-to-edge, replies stay indented. */
+  /* No horizontal inset here on purpose: a pinned prompt header's width
+     needs to reach this container's own edges (so the glass panel is
+     exactly as wide as the chat window, not narrower). The horizontal
+     indent removed from here moves to `.turn-body` below — prompts go
+     edge-to-edge, replies stay indented.
+     A small `padding-top` is kept (unlike the sides/bottom, which have none
+     added back) purely so the *topmost* pinned header has some breathing
+     room above it instead of sitting flush against the chat window's very
+     top edge — every other pinned header's spacing comes from the
+     JS-computed `top` stacking offsets (STICKY_GAP) in Transcript.tsx, not
+     from here. */
+  padding-top: 10px;
   padding-bottom: 20px;
   position: relative;
 }
@@ -837,13 +842,16 @@ button:focus-visible {
    different shape, and going edge-to-edge is what lets the glass panel
    below reach the window's own edges too. One row (prompt + copy icon side
    by side, prompt truncated) rather than prompt-then-actions-below, so a
-   stack of pinned prompts stays thin. */
+   stack of pinned prompts stays thin.
+   Square corners, not rounded — `.agent-strip` (the files-touched/cost bar,
+   also full-width) is the model for what an edge-to-edge bar should look
+   like here: plain and flat, with rounding reserved for things that read as
+   pills or floating cards, not for a bar that already spans the window. */
 .turn-header {
   display: flex;
   align-items: center;
   gap: 8px;
   border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border));
-  border-radius: 10px;
   background: color-mix(in srgb, var(--accent) 6%, var(--bg));
   /* Plain fixed padding, no `--safe-*` term here — `.transcript`'s own
      padding already insets its whole content box (this header's containing
@@ -938,7 +946,9 @@ button:focus-visible {
  *
  * `height` reaches exactly through the gap after this header and into the
  * next one's start (must stay >= Transcript.tsx's STICKY_GAP, or a sliver
- * of scrolling content shows through again).
+ * of scrolling content shows through again). No `border-radius` — same
+ * reasoning as `.turn-header` above, this is a flat edge-to-edge strip, not
+ * a floating card.
  */
 .turn-header.pinned::after {
   content: '';
@@ -948,7 +958,6 @@ button:focus-visible {
   left: 0;
   right: 0;
   height: 10px;
-  border-radius: var(--radius);
   background: color-mix(in srgb, var(--bg) 65%, transparent);
   backdrop-filter: blur(16px) saturate(160%);
   -webkit-backdrop-filter: blur(16px) saturate(160%);
