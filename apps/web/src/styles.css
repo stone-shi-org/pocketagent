@@ -922,24 +922,32 @@ button:focus-visible {
  * makes that impossible by construction: it can't be out of sync with a
  * sticky state it doesn't have of its own.
  *
- * Sized to reach exactly through the gap after this header and into the
- * next one's start (`bottom` here must stay >= Transcript.tsx's
- * STICKY_GAP, or a sliver of scrolling content shows through again) — no
- * more than that, since the header itself is already edge-to-edge with the
- * chat window (see `.turn-header` above) and the panel's max width is
- * meant to match it exactly, not bleed past it. `top: 0` (no upward bleed)
- * on purpose — the topmost pinned header sticks flush against the scroll
- * container's own top edge, and bleeding above that would push the panel
- * above the clipped, scrollable region.
+ * `top: 100%` is load-bearing, not decorative: it starts the tail exactly
+ * at this header's own bottom edge, never overlapping the header's own box.
+ * `top: 0` was tried first and was a real bug — because this pseudo has a
+ * negative z-index (to duck behind the header's own text, see the comment
+ * on `.turn-header.pinned` above), CSS paints negative-z-index descendants
+ * *above* their stacking-context root's own background (spec painting
+ * order: root background, then negative-z-index children, then normal
+ * content). With `top: 0` the tail spanned the header's *entire* height,
+ * so that step painted this translucent, blurred layer directly over the
+ * header's own solid tinted background for the header's whole box — the
+ * header read as half-replaced by glass instead of having a small glass
+ * tail below it. Starting flush at the bottom edge removes the overlap
+ * entirely, by construction, rather than by tuning opacity.
+ *
+ * `height` reaches exactly through the gap after this header and into the
+ * next one's start (must stay >= Transcript.tsx's STICKY_GAP, or a sliver
+ * of scrolling content shows through again).
  */
 .turn-header.pinned::after {
   content: '';
   position: absolute;
   z-index: -1;
-  top: 0;
+  top: 100%;
   left: 0;
   right: 0;
-  bottom: -10px;
+  height: 10px;
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--bg) 65%, transparent);
   backdrop-filter: blur(16px) saturate(160%);
