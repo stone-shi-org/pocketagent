@@ -334,7 +334,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         sessionId={sessionId}
         onSend={handleSend}
         disabled={inputDisabled}
-        supportsImageAttachment={session?.agent === 'claude'}
+        supportsImageAttachment={session?.transport === 'structured'}
         commands={transcript.commands}
         models={transcript.models}
         currentModel={transcript.model}

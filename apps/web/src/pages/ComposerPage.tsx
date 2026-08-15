@@ -183,7 +183,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
     : picked?.chat.conversationId
       ? true
       : transport === 'structured';
-  const supportsImageAttachment = agentId === 'claude' && willBeStructured;
+  const supportsImageAttachment = willBeStructured;
 
   const submit = useCallback(async () => {
     if (!canSend) return;

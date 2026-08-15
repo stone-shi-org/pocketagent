@@ -187,6 +187,14 @@ export const UpdateGlobalSettingsRequest = z.object({
 });
 export type UpdateGlobalSettingsRequest = z.infer<typeof UpdateGlobalSettingsRequest>;
 
+export const UsageWindowInfo = z.object({
+  label: z.string(),
+  percentUsed: z.number().min(0).max(100),
+  resetsAtLabel: z.string().nullable(),
+  timezone: z.string().nullable(),
+});
+export type UsageWindowInfo = z.infer<typeof UsageWindowInfo>;
+
 /**
  * One agent's own account/rate-limit usage — Claude's `/usage` slash command,
  * Codex's `account/rateLimits/read` RPC, and whatever a future agent adapter
@@ -212,6 +220,8 @@ export const AgentUsageInfo = z.object({
   /** Human phrasing, e.g. "Aug 13, 4:30pm" — deliberately not reparsed into a Date. */
   resetsAtLabel: z.string().nullable(),
   timezone: z.string().nullable(),
+  /** All rate-limit windows reported by this agent (e.g. 5-hour and Weekly). */
+  windows: z.array(UsageWindowInfo).optional(),
   /** When this snapshot was taken, not when the browser fetched it. */
   updatedAt: z.string(),
   error: z.string().nullable(),

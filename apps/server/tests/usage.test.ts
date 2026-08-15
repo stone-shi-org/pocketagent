@@ -129,10 +129,28 @@ describe('GET /api/usage', () => {
       const claude = findAgent(res.json().usage, 'claude') as Record<string, unknown>;
       expect(claude.available).toBe(true);
       expect(claude.percentUsed).toBe(46);
-      expect(claude.windowLabel).toBeNull();
+      expect(claude.windowLabel).toBe('5-hour');
       expect(claude.resetsAtLabel).toBe('Aug 13, 4:29pm');
       expect(claude.timezone).toBe('America/Los_Angeles');
       expect(claude.error).toBeNull();
+    });
+
+    it('parses multiple windows out of /usage output when present', async () => {
+      const fake = makeFakeClaude(
+        'Current session: 46% used · resets Aug 13, 4:29pm (America/Los_Angeles)\n' +
+          'Weekly limit: 30% used · resets Aug 20, 4:29pm (America/Los_Angeles)\n',
+      );
+      fakes.push(fake);
+      t = await createTestApp({ ...NO_CODEX, ...NO_AGY, POCKETAGENT_CLAUDE_BIN: fake.bin });
+
+      const res = await t.app.inject({ method: 'GET', url: '/api/usage', headers: headers(t) });
+      const claude = findAgent(res.json().usage, 'claude') as Record<string, unknown>;
+      expect(claude.available).toBe(true);
+      expect(Array.isArray(claude.windows)).toBe(true);
+      const windows = claude.windows as Array<{ label: string; percentUsed: number }>;
+      expect(windows.length).toBe(2);
+      expect(windows[0]).toMatchObject({ label: '5-hour', percentUsed: 46 });
+      expect(windows[1]).toMatchObject({ label: 'Weekly', percentUsed: 30 });
     });
 
     it('reports unavailable, rather than failing the request, when the binary cannot run', async () => {
@@ -161,7 +179,7 @@ describe('GET /api/usage', () => {
       const fake = makeFakeCodex({
         limitId: 'codex',
         primary: { usedPercent: 90, windowDurationMins: 10080, resetsAt: 1_786_752_702 },
-        secondary: null,
+        secondary: { usedPercent: 12, windowDurationMins: 300, resetsAt: 1_786_752_702 },
       });
       fakes.push(fake);
       t = await createTestApp({ ...NO_CLAUDE, ...NO_AGY, POCKETAGENT_CODEX_BIN: fake.bin });
@@ -174,6 +192,10 @@ describe('GET /api/usage', () => {
       expect(typeof codex.resetsAtLabel).toBe('string');
       expect(typeof codex.timezone).toBe('string');
       expect(codex.error).toBeNull();
+      const windows = codex.windows as Array<{ label: string; percentUsed: number }>;
+      expect(windows.length).toBe(2);
+      expect(windows[0]).toMatchObject({ label: '7-day', percentUsed: 90 });
+      expect(windows[1]).toMatchObject({ label: '5-hour', percentUsed: 12 });
     });
 
     it('falls back to the secondary window when there is no primary one', async () => {
@@ -204,7 +226,7 @@ describe('GET /api/usage', () => {
   });
 
   describe('Antigravity CLI (agy)', () => {
-    it('surfaces the single most-depleted bucket across every model-family group', async () => {
+    it('surfaces both 5-hour and weekly rate-limit windows across model groups', async () => {
       const fake = makeFakeAgy([
         {
           name: 'Gemini Models',
@@ -218,7 +240,7 @@ describe('GET /api/usage', () => {
             {
               name: 'Five Hour Limit Remaining',
               window: '5h',
-              remaining_fraction: 1,
+              remaining_fraction: 0.8,
               reset_time: '2026-08-14T03:25:03Z',
             },
           ],
@@ -246,13 +268,12 @@ describe('GET /api/usage', () => {
 
       const res = await t.app.inject({ method: 'GET', url: '/api/usage', headers: headers(t) });
       const agy = findAgent(res.json().usage, 'agy') as Record<string, unknown>;
-      // 92% remaining on Gemini's weekly bucket is the worst (lowest remaining)
-      // of the four, so it wins even though every other bucket is untouched.
       expect(agy.available).toBe(true);
-      expect(agy.percentUsed).toBe(8);
-      expect(agy.windowLabel).toBe('Gemini Models weekly');
-      // Not asserted as an exact string: `formatResetLabel` renders in the
-      // server's own local timezone, which is whatever the test host has.
+      expect(agy.percentUsed).toBe(20);
+      const windows = agy.windows as Array<{ label: string; percentUsed: number }>;
+      expect(windows.length).toBe(2);
+      expect(windows[0]).toMatchObject({ label: 'Gemini Models 5h', percentUsed: 20 });
+      expect(windows[1]).toMatchObject({ label: 'Gemini Models weekly', percentUsed: 8 });
       expect(agy.resetsAtLabel).toMatch(/^[A-Za-z]{3} \d{1,2}, \d{1,2}:\d{2}(am|pm)$/);
       expect(typeof agy.timezone).toBe('string');
       expect(agy.error).toBeNull();

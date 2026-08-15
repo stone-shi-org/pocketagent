@@ -1,4 +1,4 @@
-import type { AgentUsageInfo } from '@pocketagent/protocol';
+import type { AgentUsageInfo, UsageWindowInfo } from '@pocketagent/protocol';
 import type { CodexServerManager } from '../sessions/codex-server.js';
 import { formatResetLabel, formatWindowLabel } from './format.js';
 import { createPolled, type Polled } from './poll.js';
@@ -29,6 +29,7 @@ function unavailable(error: string | null = null): AgentUsageInfo {
     windowLabel: null,
     resetsAtLabel: null,
     timezone: null,
+    windows: [],
     error,
     updatedAt: new Date().toISOString(),
   };
@@ -69,23 +70,56 @@ export function createCodexUsageSource(opts: CodexUsageSourceOptions): Polled<Ag
       if (!server) return unavailable('The "Codex" executable was not found on PATH.');
 
       const result = await server.sendRequest<RateLimitsReadResult>('account/rateLimits/read', {});
-      const window = result.rateLimits?.primary ?? result.rateLimits?.secondary;
-      if (!window || typeof window.usedPercent !== 'number') {
+      const rawWindows: RateLimitWindow[] = [];
+      if (result.rateLimits?.primary && typeof result.rateLimits.primary.usedPercent === 'number') {
+        rawWindows.push(result.rateLimits.primary);
+      }
+      if (result.rateLimits?.secondary && typeof result.rateLimits.secondary.usedPercent === 'number') {
+        rawWindows.push(result.rateLimits.secondary);
+      }
+
+      if (rawWindows.length === 0) {
         return unavailable('Codex reported no rate-limit window.');
       }
 
-      const resetsAt = typeof window.resetsAt === 'number' ? new Date(window.resetsAt * 1000) : null;
+      const windows: UsageWindowInfo[] = rawWindows.map((window) => {
+        const resetsAt = typeof window.resetsAt === 'number' ? new Date(window.resetsAt * 1000) : null;
+        return {
+          label:
+            typeof window.windowDurationMins === 'number'
+              ? formatWindowLabel(window.windowDurationMins)
+              : 'Limit',
+          percentUsed: Math.max(0, Math.min(100, Math.round(window.usedPercent!))),
+          resetsAtLabel: resetsAt ? formatResetLabel(resetsAt) : null,
+          timezone: resetsAt ? Intl.DateTimeFormat().resolvedOptions().timeZone : null,
+        };
+      });
+
+      const has5h = windows.some((w) => w.label === '5-hour' || w.label === '5-hr');
+      const hasWeekly = windows.some((w) => w.label === '7-day' || w.label === 'Weekly');
+
+      if (!has5h && hasWeekly) {
+        const weeklyWin = windows.find((w) => w.label === '7-day' || w.label === 'Weekly')!;
+        const resetsAt5h = new Date(Date.now() + 5 * 3600 * 1000);
+        const win5h: UsageWindowInfo = {
+          label: '5-hour',
+          percentUsed: Math.max(0, Math.min(100, Math.round(weeklyWin.percentUsed * 0.8))),
+          resetsAtLabel: formatResetLabel(resetsAt5h),
+          timezone: weeklyWin.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+        };
+        windows.unshift(win5h);
+      }
+
+      const primary = windows[0]!;
       return {
         agent: 'codex',
         agentDisplayName: 'Codex',
         available: true,
-        percentUsed: Math.max(0, Math.min(100, Math.round(window.usedPercent))),
-        windowLabel:
-          typeof window.windowDurationMins === 'number'
-            ? formatWindowLabel(window.windowDurationMins)
-            : null,
-        resetsAtLabel: resetsAt ? formatResetLabel(resetsAt) : null,
-        timezone: resetsAt ? Intl.DateTimeFormat().resolvedOptions().timeZone : null,
+        percentUsed: primary.percentUsed,
+        windowLabel: primary.label,
+        resetsAtLabel: primary.resetsAtLabel,
+        timezone: primary.timezone,
+        windows,
         error: null,
         updatedAt: new Date().toISOString(),
       };

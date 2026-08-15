@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { AgentUsageInfo } from '@pocketagent/protocol';
+import type { AgentUsageInfo, UsageWindowInfo } from '@pocketagent/protocol';
 import { buildChildEnv } from '../sessions/env.js';
 import { formatResetLabel } from './format.js';
 import { createPolled, type Polled } from './poll.js';
@@ -37,6 +37,7 @@ function unavailable(error: string | null = null): AgentUsageInfo {
     windowLabel: null,
     resetsAtLabel: null,
     timezone: null,
+    windows: [],
     error,
     updatedAt: new Date().toISOString(),
   };
@@ -51,25 +52,6 @@ export interface AgyUsageSourceOptions {
   refreshMs?: number;
 }
 
-/**
- * Reads Antigravity CLI's own `/usage` slash command — intercepted locally in
- * print mode the same way Claude's `/usage` is (see `--disable-slash-commands`
- * in `agy --help`), confirmed live against agy 1.1.12:
- * `agy -p "/usage" --output-format json` answers in structured JSON with
- * `usage.total_tokens: 0` and `num_turns: 0`, so — like Claude and Codex — a
- * background poll never touches the model or the network.
- *
- * Unlike Claude and Codex, agy has no single quota number: usage splits into
- * named groups (model families — "Gemini Models" vs "Claude and GPT models")
- * each with its own weekly and 5-hour window, so a session can be nowhere
- * near one limit and about to hit another depending which models it uses.
- * This surfaces the single most-depleted bucket across every group as the
- * headline — the one that will actually stop you next — labelled with which
- * group and window it came from (`windowLabel`, e.g. "Gemini Models weekly").
- * The rest are not shown; a four-number breakdown does not fit the one-line
- * status area every other agent gets here, and the one number that matters
- * is the one closest to zero.
- */
 export function createAgyUsageSource(opts: AgyUsageSourceOptions): Polled<AgentUsageInfo> {
   return createPolled(unavailable(), opts.refreshMs ?? DEFAULT_REFRESH_MS, async () => {
     try {
@@ -94,10 +76,69 @@ export function createAgyUsageSource(opts: AgyUsageSourceOptions): Polled<AgentU
         return unavailable('Could not find a usage bucket in `agy /usage` output.');
       }
 
-      const worst = buckets.reduce((a, b) =>
+      const windows: UsageWindowInfo[] = [];
+      const fiveHourBuckets = buckets.filter(
+        (b) => b.window === '5h' || /5h|5-hour|five hour/i.test(b.window || b.name || ''),
+      );
+      const weeklyBuckets = buckets.filter(
+        (b) => b.window === 'weekly' || /weekly|7day|7-day/i.test(b.window || b.name || ''),
+      );
+
+      if (fiveHourBuckets.length > 0) {
+        const worst5h = fiveHourBuckets.reduce((a, b) =>
+          (b.remaining_fraction as number) < (a.remaining_fraction as number) ? b : a,
+        );
+        const resetsAt = worst5h.reset_time ? new Date(worst5h.reset_time) : null;
+        const validResetsAt = resetsAt && !Number.isNaN(resetsAt.getTime()) ? resetsAt : null;
+        windows.push({
+          label: [worst5h.groupName, worst5h.window || '5h'].filter(Boolean).join(' '),
+          percentUsed: Math.max(
+            0,
+            Math.min(100, Math.round((1 - (worst5h.remaining_fraction as number)) * 100)),
+          ),
+          resetsAtLabel: validResetsAt ? formatResetLabel(validResetsAt) : null,
+          timezone: validResetsAt ? Intl.DateTimeFormat().resolvedOptions().timeZone : null,
+        });
+      }
+
+      if (weeklyBuckets.length > 0) {
+        const worstWeekly = weeklyBuckets.reduce((a, b) =>
+          (b.remaining_fraction as number) < (a.remaining_fraction as number) ? b : a,
+        );
+        const resetsAt = worstWeekly.reset_time ? new Date(worstWeekly.reset_time) : null;
+        const validResetsAt = resetsAt && !Number.isNaN(resetsAt.getTime()) ? resetsAt : null;
+        windows.push({
+          label: [worstWeekly.groupName, worstWeekly.window || 'weekly'].filter(Boolean).join(' '),
+          percentUsed: Math.max(
+            0,
+            Math.min(100, Math.round((1 - (worstWeekly.remaining_fraction as number)) * 100)),
+          ),
+          resetsAtLabel: validResetsAt ? formatResetLabel(validResetsAt) : null,
+          timezone: validResetsAt ? Intl.DateTimeFormat().resolvedOptions().timeZone : null,
+        });
+      }
+
+      if (windows.length === 0) {
+        const worst = buckets.reduce((a, b) =>
+          (b.remaining_fraction as number) < (a.remaining_fraction as number) ? b : a,
+        );
+        const resetsAt = worst.reset_time ? new Date(worst.reset_time) : null;
+        const validResetsAt = resetsAt && !Number.isNaN(resetsAt.getTime()) ? resetsAt : null;
+        windows.push({
+          label: [worst.groupName, worst.window].filter(Boolean).join(' ') || 'Limit',
+          percentUsed: Math.max(
+            0,
+            Math.min(100, Math.round((1 - (worst.remaining_fraction as number)) * 100)),
+          ),
+          resetsAtLabel: validResetsAt ? formatResetLabel(validResetsAt) : null,
+          timezone: validResetsAt ? Intl.DateTimeFormat().resolvedOptions().timeZone : null,
+        });
+      }
+
+      const worstOverall = buckets.reduce((a, b) =>
         (b.remaining_fraction as number) < (a.remaining_fraction as number) ? b : a,
       );
-      const resetsAt = worst.reset_time ? new Date(worst.reset_time) : null;
+      const resetsAt = worstOverall.reset_time ? new Date(worstOverall.reset_time) : null;
       const validResetsAt = resetsAt && !Number.isNaN(resetsAt.getTime()) ? resetsAt : null;
 
       return {
@@ -106,11 +147,12 @@ export function createAgyUsageSource(opts: AgyUsageSourceOptions): Polled<AgentU
         available: true,
         percentUsed: Math.max(
           0,
-          Math.min(100, Math.round((1 - (worst.remaining_fraction as number)) * 100)),
+          Math.min(100, Math.round((1 - (worstOverall.remaining_fraction as number)) * 100)),
         ),
-        windowLabel: [worst.groupName, worst.window].filter(Boolean).join(' ') || null,
+        windowLabel: [worstOverall.groupName, worstOverall.window].filter(Boolean).join(' ') || null,
         resetsAtLabel: validResetsAt ? formatResetLabel(validResetsAt) : null,
         timezone: validResetsAt ? Intl.DateTimeFormat().resolvedOptions().timeZone : null,
+        windows,
         error: null,
         updatedAt: new Date().toISOString(),
       };

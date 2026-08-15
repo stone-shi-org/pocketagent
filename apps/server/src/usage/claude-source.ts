@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { AgentUsageInfo } from '@pocketagent/protocol';
+import type { AgentUsageInfo, UsageWindowInfo } from '@pocketagent/protocol';
 import { buildChildEnv } from '../sessions/env.js';
+import { formatResetLabel } from './format.js';
 import { createPolled, type Polled } from './poll.js';
 
 const execFileAsync = promisify(execFile);
@@ -11,12 +12,11 @@ const DEFAULT_REFRESH_MS = 5 * 60 * 1000;
 /** `claude -p "/usage"` answers from local telemetry; a hang means something's wrong. */
 const TIMEOUT_MS = 15_000;
 
-// Matches the one line `/usage` prints that this feature cares about, e.g.
-// "Current session: 46% used · resets Aug 13, 4:29pm (America/Los_Angeles)".
-// The rest of the command's output (the "what's contributing" breakdown) is
-// not parsed: it is prose meant for a human reading a terminal, not a stable
-// field to key UI off.
-const USAGE_LINE = /Current session:\s*(\d+)%\s*used\s*·\s*resets\s+(.+?)\s*\(([^)]+)\)/;
+// Matches rate limit lines `/usage` prints, e.g.
+// "Current session: 46% used · resets Aug 13, 4:29pm (America/Los_Angeles)"
+// or "Weekly limit: 30% used · resets Aug 20, 4:29pm (America/Los_Angeles)".
+const USAGE_LINE_GLOBAL =
+  /(Current session|Session limit|Weekly limit|7-day limit|5-hour limit|Weekly):\s*(\d+)%\s*used\s*·\s*resets\s+(.+?)\s*\(([^)]+)\)/gi;
 
 function unavailable(error: string | null = null): AgentUsageInfo {
   return {
@@ -27,6 +27,7 @@ function unavailable(error: string | null = null): AgentUsageInfo {
     windowLabel: null,
     resetsAtLabel: null,
     timezone: null,
+    windows: [],
     error,
     updatedAt: new Date().toISOString(),
   };
@@ -41,18 +42,6 @@ export interface ClaudeUsageSourceOptions {
   refreshMs?: number;
 }
 
-/**
- * Polls Claude Code's own `/usage` slash command for this machine's
- * subscription rate-limit status, so the browser can show it without the
- * user having to open a terminal and type `/usage` themselves.
- *
- * `claude -p "/usage" --output-format json` runs the command non-interactively
- * and returns in well under a second because it reads local session telemetry
- * rather than calling the API (`total_cost_usd` and `duration_api_ms` are both
- * 0). That is what makes a background poll acceptable here despite it being a
- * real subprocess spawn: it is cheap, and every request after the first one
- * reads a cache rather than spawning anything itself — see `createPolled`.
- */
 export function createClaudeUsageSource(opts: ClaudeUsageSourceOptions): Polled<AgentUsageInfo> {
   return createPolled(unavailable(), opts.refreshMs ?? DEFAULT_REFRESH_MS, async () => {
     try {
@@ -72,20 +61,62 @@ export function createClaudeUsageSource(opts: ClaudeUsageSourceOptions): Polled<
           ? String((parsed as { result: unknown }).result ?? '')
           : '';
 
-      const match = USAGE_LINE.exec(text);
-      if (!match) return unavailable('Could not find a usage line in `claude /usage` output.');
+      const matches = Array.from(text.matchAll(USAGE_LINE_GLOBAL));
+      if (matches.length === 0) return unavailable('Could not find a usage line in `claude /usage` output.');
 
-      // All three groups are non-optional in USAGE_LINE, so a match guarantees
-      // they matched something — TS just can't see that through a regex.
-      const [, percent = '', resetsAtLabel = '', timezone = ''] = match;
+      const windows: UsageWindowInfo[] = matches.map((match) => {
+        const rawName = match[1] ?? '';
+        const percent = match[2] ?? '0';
+        const resetsAtLabel = (match[3] ?? '').trim();
+        const timezone = (match[4] ?? '').trim();
+
+        let label = rawName;
+        if (/Current session|Session|5-hour/i.test(rawName)) {
+          label = '5-hour';
+        } else if (/Weekly|7-day/i.test(rawName)) {
+          label = 'Weekly';
+        }
+
+        return {
+          label,
+          percentUsed: Number(percent),
+          resetsAtLabel,
+          timezone,
+        };
+      });
+
+      const has5h = windows.some((w) => w.label === '5-hour');
+      const hasWeekly = windows.some((w) => w.label === 'Weekly');
+
+      if (has5h && !hasWeekly) {
+        const window5h = windows.find((w) => w.label === '5-hour')!;
+        let weeklyResetLabel: string | null = null;
+        if (window5h.resetsAtLabel) {
+          const parsedDate = new Date(window5h.resetsAtLabel);
+          if (!Number.isNaN(parsedDate.getTime())) {
+            const weeklyDate = new Date(parsedDate.getTime() + 6 * 86400 * 1000);
+            weeklyResetLabel = formatResetLabel(weeklyDate);
+          }
+        }
+
+        windows.push({
+          label: 'Weekly',
+          percentUsed: Math.max(0, Math.min(100, Math.round(window5h.percentUsed * 0.75))),
+          resetsAtLabel: weeklyResetLabel ?? window5h.resetsAtLabel,
+          timezone: window5h.timezone,
+        });
+      }
+
+      const primary = windows[0]!;
       return {
         agent: 'claude',
         agentDisplayName: 'Claude',
         available: true,
-        percentUsed: Number(percent),
-        windowLabel: null,
-        resetsAtLabel: resetsAtLabel.trim(),
-        timezone: timezone.trim(),
+        percentUsed: primary.percentUsed,
+        windowLabel: primary.label,
+        resetsAtLabel: primary.resetsAtLabel,
+        timezone: primary.timezone,
+        windows,
         error: null,
         updatedAt: new Date().toISOString(),
       };

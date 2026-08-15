@@ -14,6 +14,7 @@ import {
 import { isOriginAllowed } from '../auth/index.js';
 import type { ManagedSession, StructuredLikeSession } from '../sessions/manager.js';
 import { StructuredSession } from '../sessions/structured-session.js';
+import { saveAttachmentToWorkspace } from '../sessions/attachments.js';
 
 /**
  * Only some structured backends can switch model/effort live (today: the
@@ -361,25 +362,22 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
             sendError('bad_message', 'A prompt needs text, an image, or both.', message.sessionId);
             break;
           }
-          // Only the Claude Agent SDK backend understands an image content
-          // block — the others (codex, agy, opencode, pi) all declare the
-          // same `prompt(text: string)` shape, so this has to be a real
-          // instanceof check, not a duck-typed capability probe like
-          // `canSetModel`/`canSetEffort` above. Rejecting beats silently
-          // dropping the attachment: the user would otherwise watch their
-          // screenshot vanish with no explanation.
-          if (message.image && !(session instanceof StructuredSession)) {
-            sendError(
-              'bad_message',
-              'This agent does not support image attachments.',
-              message.sessionId,
-            );
-            break;
+
+          let promptText = message.text;
+          if (message.image) {
+            try {
+              const relPath = saveAttachmentToWorkspace(session.spec.cwd, message.image);
+              const fileNote = `[Attached image saved to: ${relPath}]`;
+              promptText = promptText ? `${promptText}\n\n${fileNote}` : fileNote;
+            } catch (err) {
+              app.log.warn({ err }, 'failed to save attachment to workspace');
+            }
           }
+
           if (session instanceof StructuredSession) {
-            session.prompt(message.text, message.image);
+            session.prompt(promptText, message.image);
           } else {
-            session.prompt(message.text);
+            session.prompt(promptText);
           }
           break;
         }
