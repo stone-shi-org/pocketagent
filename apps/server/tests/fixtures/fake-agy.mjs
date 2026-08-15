@@ -49,6 +49,28 @@ if (prompt === 'FAIL') {
   process.exit(1);
 }
 
+// Mirrors a live-captured quota failure: agy prints a well-formed `result`
+// line with the real reason in `result.error`, writes nothing to stderr, and
+// still exits 1. `AgySession` must surface `result.error`, not the opaque
+// `agy exited with code 1` fallback that an empty stderr would otherwise
+// leave it with.
+if (prompt === 'QUOTA') {
+  emit({
+    event: 'result',
+    result: {
+      conversation_id: conversationId,
+      status: 'ERROR',
+      response: '',
+      error:
+        'Eligibility check failed: RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).',
+      duration_seconds: 0,
+      num_turns: 0,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    },
+  });
+  process.exit(1);
+}
+
 // `/help` resolves locally in real agy — no `init` line, no tool step, zero
 // tokens/duration — captured live against v1.1.12. Handled before the normal
 // turn shape below since `AgySession.fetchInitialCommands()` sends exactly

@@ -566,20 +566,32 @@ function normalizeAgyResult(message: Record<string, unknown>): AgentEvent[] {
   const usage = isRecord(result.usage) ? result.usage : {};
   const status = str(result.status);
   const durationSeconds = num(result.duration_seconds);
+  const isError = status !== undefined && status !== 'SUCCESS';
+  const errorText = str(result.error);
 
-  return [
-    {
-      kind: 'turn_complete',
-      stopReason: status ?? null,
-      isError: status !== undefined && status !== 'SUCCESS',
-      numTurns: num(result.num_turns),
-      durationMs: durationSeconds !== null ? Math.round(durationSeconds * 1000) : null,
-      // Headless agy reports token counts, never a dollar figure.
-      costUsd: null,
-      inputTokens: num(usage.input_tokens),
-      outputTokens: num(usage.output_tokens),
-    },
-  ];
+  const events: AgentEvent[] = [];
+  // agy's own reason for a failed turn (e.g. a quota-exhausted
+  // "Eligibility check failed: RESOURCE_EXHAUSTED..." from the Antigravity
+  // backend) lives in this JSON field, not on stderr — confirmed live via
+  // the `/usage` poller hitting the same shape. Without surfacing it here,
+  // the process exiting non-zero moments later falls back to the opaque
+  // `agy exited with code 1` in `AgySession.runTurn`, discarding the one
+  // piece of text that actually explains what happened.
+  if (isError && errorText) {
+    events.push({ kind: 'notice', level: 'error', text: errorText });
+  }
+  events.push({
+    kind: 'turn_complete',
+    stopReason: status ?? null,
+    isError,
+    numTurns: num(result.num_turns),
+    durationMs: durationSeconds !== null ? Math.round(durationSeconds * 1000) : null,
+    // Headless agy reports token counts, never a dollar figure.
+    costUsd: null,
+    inputTokens: num(usage.input_tokens),
+    outputTokens: num(usage.output_tokens),
+  });
+  return events;
 }
 
 /**

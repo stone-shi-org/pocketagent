@@ -367,6 +367,14 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       this.child = child;
 
       let stderrTail = '';
+      // Set when the `result` line itself already surfaced agy's own error
+      // text as a notice (see `normalizeAgyResult`) — e.g. a quota-exhausted
+      // "Eligibility check failed: RESOURCE_EXHAUSTED..." from the
+      // Antigravity backend, which reliably exits non-zero with an *empty*
+      // stderr right after printing that JSON. Without this flag, `close`
+      // below would follow the real reason with a second, useless "agy
+      // exited with code 1" notice.
+      let resultErrorShown = false;
 
       const rl = readline.createInterface({ input: child.stdout });
       rl.on('line', (line) => {
@@ -396,6 +404,9 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
           const response = typeof result.response === 'string' ? result.response.trim() : '';
           if (response) {
             this.emitEvent({ kind: 'text', id: `agy_final_${this.id}_${Date.now()}`, text: response });
+          }
+          if (typeof result.status === 'string' && result.status !== 'SUCCESS' && typeof result.error === 'string' && result.error.trim()) {
+            resultErrorShown = true;
           }
           // See `pendingSubagents`'s doc comment: the turn's own `result`
           // line is the one point trusted as "the sub-agent is actually
@@ -463,7 +474,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
           return;
         }
         if (code !== 0 && code !== null) {
-          finish(stderrTail.trim() || `agy exited with code ${code}`);
+          finish(resultErrorShown ? null : stderrTail.trim() || `agy exited with code ${code}`);
           return;
         }
         finish(null);

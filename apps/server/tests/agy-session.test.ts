@@ -281,6 +281,25 @@ describe('AgySession', () => {
     await waitFor(() => session?.busy === false);
   });
 
+  it('surfaces agy\'s own result.error (e.g. a quota failure) instead of the generic exit-code notice', async () => {
+    session = new AgySession(makeSpec());
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('QUOTA');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    const notices = events.filter((e) => e.kind === 'notice' && e.level === 'error');
+    // Exactly one notice: the real reason from `result.error`, not a second
+    // generic "agy exited with code 1" piled on top of it.
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({
+      text: 'Eligibility check failed: RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).',
+    });
+    expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({ isError: true, stopReason: 'ERROR' });
+    await waitFor(() => session?.busy === false);
+  });
+
   it('terminate() kills an in-flight process and marks the session killed', async () => {
     session = new AgySession(makeSpec());
     await session.start();

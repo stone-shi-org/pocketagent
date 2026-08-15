@@ -821,6 +821,35 @@ describe('normalizeAgyMessage: result', () => {
     });
     expect(events[0]).toMatchObject({ isError: true, stopReason: 'FAILED' });
   });
+
+  it('surfaces result.error as a notice ahead of the turn_complete, instead of dropping it', () => {
+    const events = normalizeAgyMessage({
+      event: 'result',
+      result: {
+        conversation_id: 'conv-1',
+        status: 'ERROR',
+        response: '',
+        error: 'Eligibility check failed: RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).',
+        usage: {},
+      },
+    });
+    expect(events).toEqual([
+      {
+        kind: 'notice',
+        level: 'error',
+        text: 'Eligibility check failed: RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).',
+      },
+      expect.objectContaining({ kind: 'turn_complete', isError: true, stopReason: 'ERROR' }),
+    ]);
+  });
+
+  it('does not add a notice for a non-SUCCESS status with no error text', () => {
+    const events = normalizeAgyMessage({
+      event: 'result',
+      result: { conversation_id: 'conv-1', status: 'FAILED', usage: {} },
+    });
+    expect(events).toHaveLength(1);
+  });
 });
 
 describe('normalizeAgyMessage: command_result', () => {
