@@ -33,6 +33,9 @@ import {
 /** The exact tool name the SDK's built-in interactive question uses. */
 const ASK_USER_QUESTION_TOOL = 'AskUserQuestion';
 
+/** The exact tool name the SDK calls when the agent wants to leave plan mode. */
+const EXIT_PLAN_MODE_TOOL = 'ExitPlanMode';
+
 /**
  * Parse `AskUserQuestion`'s own input into typed questions, defensively.
  *
@@ -568,8 +571,14 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
       input,
       // Prefer the SDK's own rendered sentence so the phone shows exactly what
       // the terminal would have shown; fall back to the same summary the tool
-      // cards use, which reads far better than a bare tool name.
-      title: opts.title ?? `Allow: ${summarizeToolUse(toolName, input)}?`,
+      // cards use, which reads far better than a bare tool name. `ExitPlanMode`
+      // gets its own phrasing since "Allow: Review plan?" reads like every
+      // other tool call when this one is actually the plan-review moment.
+      title:
+        opts.title ??
+        (toolName === EXIT_PLAN_MODE_TOOL
+          ? 'Ready to code?'
+          : `Allow: ${summarizeToolUse(toolName, input)}?`),
       displayName: opts.displayName ?? null,
       filePath: opts.blockedPath ?? extractPathSafe(input),
       reason: opts.decisionReason ?? null,

@@ -1136,6 +1136,7 @@ button:focus-visible {
   color: var(--console-text);
 }
 .tool-result.error { color: #ff9d95; }
+.tool-plan { max-height: 320px; overflow-y: auto; }
 
 /* ---- Diffs ---- */
 .diff {
@@ -1236,11 +1237,12 @@ button:focus-visible {
   direction: rtl; unicode-bidi: plaintext; text-align: left;
 }
 .approval-reason { font-size: 13px; color: var(--text-dim); margin-bottom: 10px; }
-.approval-diff, .approval-input { margin-bottom: 14px; max-height: 40vh; }
+.approval-diff, .approval-input, .approval-plan { margin-bottom: 14px; max-height: 40vh; }
 .approval-input {
   font-family: ui-monospace, monospace; font-size: 12px; background: var(--console);
   border-radius: 6px; padding: 10px; overflow: auto; color: var(--console-text); white-space: pre-wrap;
 }
+.approval-plan { overflow-y: auto; }
 .approval-actions { display: flex; gap: 8px; }
 .approval-actions.column { flex-direction: column; }
 .approval-actions button { flex: 1; min-height: 46px; }

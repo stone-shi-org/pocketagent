@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ToolItem } from '../agent/transcript.js';
 import { collapseContext, diffFromToolInput, diffLines, diffStat } from '../agent/diff.js';
+import { renderMarkdown } from '../agent/markdown.js';
+import { planFromToolInput } from '../agent/plan.js';
 
-/** Tools whose result is noise once you can see the summary. */
-const QUIET_TOOLS = new Set(['TodoWrite']);
+/**
+ * Tools whose result is noise once you can see the summary. `ExitPlanMode`'s
+ * result just echoes the same plan text already rendered from its input, so
+ * showing it again under "Result" would be a second copy of the same markdown.
+ */
+const QUIET_TOOLS = new Set(['TodoWrite', 'ExitPlanMode']);
 
 /**
  * Past this, a running tool call gets flagged as long-running rather than just
@@ -15,7 +21,8 @@ const LONG_RUNNING_MS = 60_000;
 
 export function ToolCard({ item }: { item: ToolItem }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const diff = diffFromToolInput(item.name, item.input);
+  const plan = planFromToolInput(item.name, item.input);
+  const diff = plan ? null : diffFromToolInput(item.name, item.input);
   const lines = diff ? diffLines(diff.before, diff.after) : null;
   const stat = lines ? diffStat(lines) : null;
 
@@ -71,7 +78,9 @@ export function ToolCard({ item }: { item: ToolItem }): JSX.Element {
 
       {open && (
         <div className="tool-body">
-          {lines ? (
+          {plan ? (
+            <div className="tool-plan answer" dangerouslySetInnerHTML={{ __html: renderMarkdown(plan) }} />
+          ) : lines ? (
             <DiffView lines={lines} />
           ) : (
             <pre className="tool-input">{formatInput(item.input)}</pre>

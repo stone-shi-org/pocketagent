@@ -348,6 +348,8 @@ export function summarizeToolUse(name: string, input: Record<string, unknown>): 
       return `Subagent: ${clamp(str(input.description) ?? '', 60)}`;
     case 'TodoWrite':
       return 'Update task list';
+    case 'ExitPlanMode':
+      return 'Review plan';
     case 'AskUserQuestion': {
       const questions = Array.isArray(input.questions) ? input.questions : [];
       const first = isRecord(questions[0]) ? str(questions[0].question) : undefined;

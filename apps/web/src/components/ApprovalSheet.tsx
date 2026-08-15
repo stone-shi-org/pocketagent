@@ -6,6 +6,8 @@ import type {
   PermissionRequestEvent,
 } from '@pocketagent/protocol';
 import { collapseContext, diffFromToolInput, diffLines } from '../agent/diff.js';
+import { renderMarkdown } from '../agent/markdown.js';
+import { planFromToolInput } from '../agent/plan.js';
 
 interface Props {
   request: PermissionRequestEvent;
@@ -28,21 +30,28 @@ interface Props {
  * rather than as permission to proceed. `request.questions` is only ever
  * populated for that tool, so it is what selects the question form below
  * instead of the generic allow/deny body.
+ *
+ * A second one is approve/deny-shaped but not edit-shaped: the SDK's own
+ * `ExitPlanMode` hands over a markdown plan rather than a before/after pair, so
+ * `diffFromToolInput` never matches it and it gets its own render branch plus
+ * plan-flavored button copy ("Start coding" / "Keep planning…") instead of the
+ * generic "Allow once" / "Deny…".
  */
 export function ApprovalSheet({ request, queued, onDecide, disabled }: Props): JSX.Element {
   const [denying, setDenying] = useState(false);
   const [reason, setReason] = useState('');
 
   const isQuestion = request.questions !== null && request.questions.length > 0;
+  const plan = isQuestion ? null : planFromToolInput(request.toolName, request.input);
 
-  const diff = isQuestion ? null : diffFromToolInput(request.toolName, request.input);
+  const diff = isQuestion || plan ? null : diffFromToolInput(request.toolName, request.input);
   const lines = diff ? collapseContext(diffLines(diff.before, diff.after), 2) : null;
 
   return (
     <div className="approval-backdrop" role="dialog" aria-modal="true" aria-label="Approval required">
       <div className="approval-sheet">
         <div className="approval-head">
-          <span className="approval-badge">{isQuestion ? 'Question' : 'Approval needed'}</span>
+          <span className="approval-badge">{isQuestion ? 'Question' : plan ? 'Plan ready' : 'Approval needed'}</span>
           {queued > 0 && <span className="approval-queued">+{queued} more</span>}
         </div>
 
@@ -50,7 +59,14 @@ export function ApprovalSheet({ request, queued, onDecide, disabled }: Props): J
         {!isQuestion && request.filePath && <div className="approval-path">{request.filePath}</div>}
         {!isQuestion && request.reason && <div className="approval-reason">{request.reason}</div>}
 
-        {!isQuestion && lines && (
+        {plan && (
+          <div
+            className="approval-plan answer"
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(plan) }}
+          />
+        )}
+
+        {!isQuestion && !plan && lines && (
           <div className="approval-diff diff">
             {lines.map((line, index) =>
               line === null ? (
@@ -69,7 +85,7 @@ export function ApprovalSheet({ request, queued, onDecide, disabled }: Props): J
           </div>
         )}
 
-        {!isQuestion && !lines && (
+        {!isQuestion && !plan && !lines && (
           <pre className="approval-input">{JSON.stringify(request.input, null, 2).slice(0, 1200)}</pre>
         )}
 
@@ -89,7 +105,13 @@ export function ApprovalSheet({ request, queued, onDecide, disabled }: Props): J
                 value={reason}
                 onChange={(e) => setReason(e.target.value)}
                 rows={2}
-                placeholder={isQuestion ? 'e.g. neither option applies' : 'e.g. edit the config instead'}
+                placeholder={
+                  isQuestion
+                    ? 'e.g. neither option applies'
+                    : plan
+                      ? 'e.g. skip step 3, use a different approach'
+                      : 'e.g. edit the config instead'
+                }
                 autoFocus
               />
             </label>
@@ -103,7 +125,7 @@ export function ApprovalSheet({ request, queued, onDecide, disabled }: Props): J
                 onClick={() => onDecide('deny', reason)}
                 disabled={disabled}
               >
-                {isQuestion ? 'Decline' : 'Deny'}
+                {plan ? 'Keep planning' : isQuestion ? 'Decline' : 'Deny'}
               </button>
             </div>
           </>
@@ -126,7 +148,7 @@ export function ApprovalSheet({ request, queued, onDecide, disabled }: Props): J
               onClick={() => onDecide('allow')}
               disabled={disabled}
             >
-              Allow once
+              {plan ? 'Start coding' : 'Allow once'}
             </button>
             {request.canAllowForSession && (
               <button
@@ -144,7 +166,7 @@ export function ApprovalSheet({ request, queued, onDecide, disabled }: Props): J
               onClick={() => setDenying(true)}
               disabled={disabled}
             >
-              Deny…
+              {plan ? 'Keep planning…' : 'Deny…'}
             </button>
           </div>
         )}
