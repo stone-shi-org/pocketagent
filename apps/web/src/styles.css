@@ -702,6 +702,62 @@ button:focus-visible {
   opacity: 0.5;
 }
 
+/* The "+" button's popup menu — same floating-above-the-pill shape as
+   `.slash-picker`/`.model-picker`, anchored from the left since that's the
+   trigger's own edge (the model chip's picker anchors right for the same
+   reason — see its own comment above). Width-limited to its content rather
+   than spanning the pill: today it holds exactly one row. */
+.attach-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 8px;
+  min-width: 220px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-elev-2);
+  box-shadow: var(--shadow-md);
+  padding: 6px;
+}
+
+.attach-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  text-align: left;
+}
+
+.attach-menu button:hover {
+  background: var(--bg-elev);
+}
+
+.attach-menu button svg {
+  flex: none;
+  color: var(--text-dim);
+}
+
+.attach-menu-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.attach-menu-title {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.attach-menu-detail {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
 /* The pre-send thumbnail (or the error in its place) — floats above the pill
    it belongs to, same shape as `.slash-picker`/`.model-picker` above, so all
    three read as one family of "something extra above the input row" panels. */

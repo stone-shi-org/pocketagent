@@ -9,6 +9,7 @@ import {
 import type { EffortLevel, ModelInfo, PromptImage, SlashCommandInfo } from '@pocketagent/protocol';
 import { readImageFile } from '../agent/image-attachment.js';
 import { modelDisplayName } from '../agent/transcript.js';
+import { AttachButton } from './AttachButton.js';
 import { Icon } from './Icon.js';
 
 /**
@@ -159,7 +160,6 @@ export function PromptBox({
     }
   });
   const ref = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   // Not persisted to sessionStorage like `text` — an attached image surviving
   // a reload but pointing at nothing the user can see again would be worse
   // than just losing the draft, since there would be no way to tell it was
@@ -465,28 +465,7 @@ export function PromptBox({
         </div>
       )}
       {supportsImageAttachment && (
-        <>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/jpeg,image/png,image/gif,image/webp"
-            hidden
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              e.target.value = ''; // lets the same file be picked again later
-              if (file) void attach(file);
-            }}
-          />
-          <button
-            type="button"
-            className="attach-btn"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={disabled}
-            aria-label="Attach an image"
-          >
-            <Icon name="attach" size={19} />
-          </button>
-        </>
+        <AttachButton onFile={(file) => void attach(file)} disabled={disabled} />
       )}
       <textarea
         ref={ref}

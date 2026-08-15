@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   AgentInfo,
   ChatSummary,
@@ -9,6 +9,7 @@ import type {
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { SelectorRow, type SelectorOption } from '../components/SelectorRow.js';
+import { AttachButton } from '../components/AttachButton.js';
 import { Icon } from '../components/Icon.js';
 import { readImageFile } from '../agent/image-attachment.js';
 import { setPendingPrompt } from '../agent/pending-prompt.js';
@@ -55,7 +56,6 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   const [prompt, setPrompt] = useState('');
   const [attachedImage, setAttachedImage] = useState<PromptImage | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -334,29 +334,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
           aria-label="First prompt"
         />
         <div className="composer-actions">
-          {supportsImageAttachment && (
-            <>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/jpeg,image/png,image/gif,image/webp"
-                hidden
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  e.target.value = '';
-                  if (file) void attach(file);
-                }}
-              />
-              <button
-                type="button"
-                className="attach-btn"
-                onClick={() => fileInputRef.current?.click()}
-                aria-label="Attach an image"
-              >
-                <Icon name="attach" size={18} />
-              </button>
-            </>
-          )}
+          {supportsImageAttachment && <AttachButton onFile={(file) => void attach(file)} />}
           {/* Flexible spacer: with nothing to attach, this is the whole row
               (the rows above already say what will run); with the attach
               button present, it's what still pushes send to the right. */}
