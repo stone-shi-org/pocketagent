@@ -581,11 +581,13 @@ button:focus-visible {
 /* The model picker: same floating-above-the-pill shape as `.slash-picker`,
    but anchored to the chip's own edge and width-limited to its content
    rather than spanning the whole composer — the trigger is a small chip,
-   not the full input row. */
+   not the full input row. Anchored from the right, not the left: the chip
+   sits between the textarea and the send button now (see PromptBox.tsx),
+   close to the pill's right edge, not its left. */
 .model-picker {
   position: absolute;
   bottom: calc(100% + 8px);
-  left: 16px;
+  right: 8px;
   min-width: 200px;
   max-width: 320px;
   max-height: 220px;
@@ -727,6 +729,17 @@ button:focus-visible {
   transform: scale(0.94);
 }
 
+/* Stop mode — the same round button, recolored to `--danger` while a turn is
+   generating, replacing the old standalone "Stop generating" chip in
+   `.agent-strip`. Only the color changes (not shape/size), same reasoning as
+   `.turn-header.pinned` elsewhere in this file: swapping more than a color
+   between two states of the *same* control reads as a layout jump instead of
+   a state change. */
+.promptbar button.primary.stop {
+  background: var(--danger);
+  color: #fff;
+}
+
 .promptbar button.primary:disabled {
   background: var(--bg-elev);
   color: var(--text-dim);
@@ -814,18 +827,26 @@ button:focus-visible {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
-  /* No horizontal inset here on purpose: a pinned prompt header's width
-     needs to reach this container's own edges (so the glass panel is
-     exactly as wide as the chat window, not narrower). The horizontal
-     indent removed from here moves to `.turn-body` below — prompts go
-     edge-to-edge, replies stay indented.
-     A small `padding-top` is kept (unlike the sides/bottom, which have none
-     added back) purely so the *topmost* pinned header has some breathing
-     room above it instead of sitting flush against the chat window's very
-     top edge — every other pinned header's spacing comes from the
-     JS-computed `top` stacking offsets (STICKY_GAP) in Transcript.tsx, not
-     from here. */
-  padding-top: 10px;
+  /* Explicit (rather than relying on `position: relative` alone, which does
+     NOT establish one) so this container is its own stacking context: a
+     pinned header needs a z-index above its own and every later turn's
+     glass panel (see `.turn-header.pinned` below), and scoping that
+     comparison to just this container's children keeps it from ever being
+     compared against unrelated page-level z-index values (dialogs, sheets)
+     that live far outside `.transcript`. */
+  z-index: 0;
+  /* No padding here at all, on any side, on purpose: the glass panel (see
+     `.prompt-glass-anchor`/`.prompt-glass` below) is a direct child of this
+     container and needs to reach its edges exactly — top, left, and right —
+     the same way `.agent-strip`'s own background does, to read as "one
+     continuous bar" rather than a card floating with its own margin. Insets
+     that used to live here now live on the things that actually need them:
+     `.turn-header` carries its own margin (so the *header* is inset while
+     the glass behind it isn't), `.turn-body` carries its own padding (so
+     replies are inset too), and the header's *own* top offset gets a
+     constant added in Transcript.tsx (`TOP_INSET`) rather than relying on
+     padding here, because the glass and the header need different top
+     positions and a shared container padding can't give them that. */
   padding-bottom: 20px;
   position: relative;
 }
@@ -836,40 +857,41 @@ button:focus-visible {
    `.transcript` itself as its containing block, not a per-turn box, or it
    gets forced to release the moment its own (often short) turn scrolls past. */
 
-/* Full width of the chat window, not inset like a tool card or an answer
-   block — a prompt is told apart by a tinted background rather than by its
-   own box style, so pinning it to the top never has to reflow it into a
-   different shape, and going edge-to-edge is what lets the glass panel
-   below reach the window's own edges too. One row (prompt + copy icon side
-   by side, prompt truncated) rather than prompt-then-actions-below, so a
-   stack of pinned prompts stays thin.
-   Square corners, not rounded — `.agent-strip` (the files-touched/cost bar,
-   also full-width) is the model for what an edge-to-edge bar should look
-   like here: plain and flat, with rounding reserved for things that read as
-   pills or floating cards, not for a bar that already spans the window. */
+/* Same width as a tool card or an answer block, not a floating chat bubble —
+   a prompt is told apart by a tinted background rather than by its own box
+   style, so pinning it to the top never has to reflow it into a different
+   shape. One row (prompt + copy icon side by side, prompt truncated) rather
+   than prompt-then-actions-below, so a stack of pinned prompts stays thin.
+   Rounded, and inset from the edges via its own margin (not `.transcript`
+   padding, which is gone — see above) — the header is meant to read as a
+   pill floating on the glass panel behind it, the same way `.agent-strip`'s
+   own `.chip`s are rounded and inset from that bar's edges while the strip
+   itself is flat and edge-to-edge. */
 .turn-header {
   display: flex;
   align-items: center;
   gap: 8px;
   border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+  border-radius: 10px;
   background: color-mix(in srgb, var(--accent) 6%, var(--bg));
-  /* Plain fixed padding, no `--safe-*` term here — `.transcript`'s own
-     padding already insets its whole content box (this header's containing
-     block) past the safe area, so adding it again here would double it. */
   padding: 8px 10px;
-  margin-top: 10px;
+  margin: 10px calc(12px + var(--safe-right)) 0 calc(12px + var(--safe-left));
 }
 
 /* The small indent for "all agent reply" content — everything a turn
    rendered besides its own prompt header (messages, tool cards, thinking,
-   notices, command output). Lives here, not on `.transcript`, because the
-   header above needs to stay full-width while this needs to stay inset;
-   splitting the indent down to the one wrapper that's reply-only, rather
-   than back up at the container, is what lets the two differ. Plain fixed
-   padding, not `--safe-*` aware, for the same reason as `.turn-header`
-   above: `.transcript` already cleared the safe area for both of them. */
+   notices, command output). Lives here, not on `.transcript` (which has no
+   padding of its own now), because the glass panel needs to stay
+   edge-to-edge while this needs to stay inset; splitting the indent down to
+   the one wrapper that's reply-only is what lets the two differ. `--safe-*`
+   aware because, unlike before, nothing upstream clears the safe area for
+   it anymore.
+   Left indent (20px) is deliberately larger than right (12px) — a reply
+   reads as nested "under" its prompt, the way an outline indents a level at
+   a time, rather than as a centered block matching the prompt's own margins
+   on both sides. */
 .turn-body {
-  padding: 0 12px;
+  padding: 0 calc(12px + var(--safe-right)) 0 calc(20px + var(--safe-left));
 }
 
 /*
@@ -885,83 +907,87 @@ button:focus-visible {
  *
  * `margin-top` has to go to zero here specifically because Transcript.tsx's
  * stacking math already bakes an explicit gap into each header's `top`
- * value (STICKY_GAP) — leaving `margin-top: 10px` on as well would either
- * double it or get silently ignored depending on the browser's handling of
- * margin on a stuck sticky box, neither of which is the predictable "small
- * gap" this is going for. Letting the JS own the gap for pinned headers, and
- * CSS own it otherwise, keeps exactly one thing responsible for it at a time.
+ * value (STICKY_GAP, plus a constant TOP_INSET — see Transcript.tsx) —
+ * leaving `margin-top: 10px` on as well would either double it or get
+ * silently ignored depending on the browser's handling of margin on a stuck
+ * sticky box, neither of which is the predictable gap this is going for.
+ * Letting the JS own the gap for pinned headers, and CSS own it otherwise,
+ * keeps exactly one thing responsible for it at a time. (Horizontal margin
+ * is untouched here — it's identical between pinned and unpinned, from the
+ * base rule above, so it isn't part of this trade-off.)
  *
- * `margin-bottom` is real breathing room after the glass panel, deliberately
- * larger than the `::after` tail's own bleed below — the tail's job is
- * covering the JS-computed STICKY_GAP between two *stacked* headers (see
- * `::after` below), not creating visual space; without this, the reply text
- * for the *last* pinned turn started immediately at the glass panel's edge
- * with no margin of its own. Because it's a real margin rather than a
- * baked-in JS offset, it's free: it doesn't feed into the stacking math (that
- * only measures each header's own `getBoundingClientRect().height`, which
- * excludes margin) and doesn't shift where a stuck header's `top` lands.
+ * `margin-bottom` is real breathing room after the header, before the reply
+ * text starts — a genuine margin, not glass, so it doesn't feed into the
+ * stacking math (that only measures each header's own
+ * `getBoundingClientRect().height`, which excludes margin) and doesn't
+ * shift where a stuck header's `top` lands.
+ *
+ * `z-index: 1` is load-bearing, not decorative. `TOP_INSET` (10px, how far
+ * the header sits below its own glass segment's top) is deliberately larger
+ * than `STICKY_GAP` (8px, the space between two *stacked* headers) — the
+ * header needs its own breathing room from the glass above it, and the
+ * stack needs to read as tightly packed, and those are different numbers on
+ * purpose. The cost is that the *next* turn's glass segment (positioned at
+ * that turn's own un-inset `top`) starts 2px above *this* header's own
+ * bottom edge. Without an explicit z-index, that next segment — a later
+ * sibling in the DOM — would paint on top of this header in that sliver,
+ * erasing the last 2px of its border (this was a real, visible bug: the
+ * header's bottom border-line disappeared). `1`, compared against
+ * `.prompt-glass-anchor`'s `0` within `.transcript`'s own stacking context
+ * (see its `z-index: 0` above), guarantees every header paints above every
+ * glass segment — its own and any other turn's — regardless of DOM order.
  */
 .turn-header.pinned {
   position: sticky;
   margin-top: 0;
   margin-bottom: 16px;
-  /* Explicit (rather than the default `auto`) so this header's own box is a
-     local stacking context: the glass `::after` below uses a negative
-     z-index to duck behind this header's own text/copy-button, and without
-     an explicit z-index here that negative value would be resolved against
-     `.transcript`'s ancestor stacking context instead of just this header,
-     risking it painting behind unrelated page chrome. `0` keeps stacking
-     order between sibling pinned headers exactly as before (still resolved
-     by DOM order, since they're all at the same explicit level). */
-  z-index: 0;
+  z-index: 1;
 }
 
 /*
- * A glass "tail" glued to each pinned header's own sticky box — not a
- * separate element pinned independently. That distinction matters: an
- * earlier version used one global backdrop anchored at the very top of
- * `.transcript`, sized to the whole stack. It looked right once fully
- * scrolled, but it went sticky (and rendered at full stack height)
- * the instant *any* scrolling happened, while each real header only goes
- * sticky once scrolled past its own — often much deeper — position in the
- * document. The backdrop was showing the final size long before the actual
- * headers had caught up to it, which read as the wrong panel resizing at
- * the wrong time. Tying the glass to each header's own box (via `::after`)
- * makes that impossible by construction: it can't be out of sync with a
- * sticky state it doesn't have of its own.
+ * The glass backdrop for the pinned header this turn renders (see the
+ * render in Transcript.tsx's `TurnPanel`, and the comment there on why this
+ * is a true sibling element rather than a pseudo-element of the header).
+ * Split into an anchor (this rule) and the visible panel (`.prompt-glass`
+ * below) for the same reason the earlier per-header tail was: `height: 0`
+ * here means this element never reserves flow space, so a short
+ * conversation (every turn still inside STICKY_WINDOW, which is the common
+ * case) doesn't get its height reserved twice — once here, once again at
+ * the header's own position a few lines down.
  *
- * `top: 100%` is load-bearing, not decorative: it starts the tail exactly
- * at this header's own bottom edge, never overlapping the header's own box.
- * `top: 0` was tried first and was a real bug — because this pseudo has a
- * negative z-index (to duck behind the header's own text, see the comment
- * on `.turn-header.pinned` above), CSS paints negative-z-index descendants
- * *above* their stacking-context root's own background (spec painting
- * order: root background, then negative-z-index children, then normal
- * content). With `top: 0` the tail spanned the header's *entire* height,
- * so that step painted this translucent, blurred layer directly over the
- * header's own solid tinted background for the header's whole box — the
- * header read as half-replaced by glass instead of having a small glass
- * tail below it. Starting flush at the bottom edge removes the overlap
- * entirely, by construction, rather than by tuning opacity.
+ * Positioned at the turn's *raw* `top` (not `top + TOP_INSET`, unlike the
+ * header) — that's what makes the header read as inset *within* the glass
+ * rather than the glass being inset to match the header. It also means
+ * stacking several of these (one per pinned turn) via the same cumulative
+ * `tops[]` values the headers use produces one continuous strip: turn N's
+ * segment ends almost exactly where turn N+1's begins, because they're
+ * measured against the same offsets, just without the header's added inset.
  *
- * `height` reaches exactly through the gap after this header and into the
- * next one's start (must stay >= Transcript.tsx's STICKY_GAP, or a sliver
- * of scrolling content shows through again). No `border-radius` — same
- * reasoning as `.turn-header` above, this is a flat edge-to-edge strip, not
- * a floating card.
+ * `z-index: 0` — explicit, not the default `auto` — so it compares
+ * predictably against `.turn-header.pinned`'s own explicit `z-index: 1`
+ * (see the comment there): every header stays above every glass segment,
+ * including ones from later turns whose raw `top` lands a couple of px
+ * above this turn's own header thanks to `TOP_INSET`.
  */
-.turn-header.pinned::after {
-  content: '';
-  position: absolute;
-  z-index: -1;
-  top: 100%;
-  left: 0;
-  right: 0;
-  height: 10px;
+.prompt-glass-anchor {
+  position: sticky;
+  top: 0;
+  height: 0;
+  z-index: 0;
+}
+
+/* The actual visible panel — plain and edge-to-edge like `.agent-strip`
+   (the files-touched/cost bar), not a floating rounded card: no
+   `border-radius`, no horizontal margin, just a flat bar with a bottom edge
+   to separate it from ordinary scrolled content. `height` is set inline per
+   instance (this turn's own measured header height, plus a bridge past it —
+   see `GLASS_BRIDGE` in Transcript.tsx) so it always matches whatever this
+   turn's header actually rendered at, never a guess. */
+.prompt-glass {
   background: color-mix(in srgb, var(--bg) 65%, transparent);
   backdrop-filter: blur(16px) saturate(160%);
   -webkit-backdrop-filter: blur(16px) saturate(160%);
-  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   box-shadow: var(--shadow-sm);
 }
 

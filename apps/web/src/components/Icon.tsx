@@ -21,6 +21,7 @@ export type IconName =
   | 'ellipsis'
   | 'stepper'
   | 'arrow-up'
+  | 'stop'
   | 'laptop'
   | 'branch'
   | 'copy'
@@ -136,6 +137,11 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="m6 11.5 6-6 6 6" />
     </>
   ),
+
+  // A filled square: the universal "stop" glyph, distinct in silhouette from
+  // `arrow-up` (not just recolored) since the send button swaps between the
+  // two live while an agent is generating — see PromptBox.tsx.
+  stop: <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none" />,
 
   laptop: (
     <>

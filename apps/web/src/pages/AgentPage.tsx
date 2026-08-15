@@ -293,16 +293,6 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           </button>
         )}
         {costLabel && <span className="chip muted">{costLabel}</span>}
-        {transcript.busy && (
-          <button
-            type="button"
-            className="chip danger-chip"
-            onClick={() => connRef.current?.sendInterrupt()}
-            disabled={inputDisabled}
-          >
-            Stop generating
-          </button>
-        )}
       </div>
 
       {showFiles && transcript.files.length > 0 && (
@@ -348,6 +338,8 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         onSetModel={setModel}
         effort={transcript.effort}
         onSetEffort={setEffort}
+        busy={transcript.busy}
+        onInterrupt={() => connRef.current?.sendInterrupt()}
       />
 
       {confirmingStop && (

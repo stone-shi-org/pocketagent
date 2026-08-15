@@ -19,6 +19,30 @@ const STICKY_WINDOW = 3;
     here. */
 const STICKY_GAP = 8;
 
+/** Extra offset added to every pinned header's own `top`, on top of the
+    JS-computed stacking offset — gives the topmost pinned prompt some
+    breathing room instead of sitting flush against the glass panel's own
+    top edge. Uniform across all stacked headers (not just the first), so
+    the *relative* spacing between them — governed entirely by STICKY_GAP —
+    is unaffected by a constant added equally to all of them. The glass
+    panel itself is positioned at the raw, un-inset offset (see
+    `.prompt-glass-anchor` in styles.css), so this gap reads as "glass show-
+    ing behind the header," not as empty space above the stack. */
+const TOP_INSET = 10;
+
+/** Extra height each glass segment reaches beyond its own header's measured
+    height — bridges the STICKY_GAP into the next stacked header's segment
+    (or, for the last one, softens the edge into ordinary reply content).
+    Must stay >= STICKY_GAP (8) or a sliver of scrolling content shows
+    through between stacked headers; kept well above that, at roughly
+    TOP_INSET's own scale, so the glass panel reads as having its own
+    breathing room below it rather than stopping the instant its own
+    header's box ends — the header's `margin-bottom` gives *the header*
+    room before the reply text, but the glass is a visually separate,
+    wider panel now (see Transcript.tsx's TurnPanel and `.prompt-glass` in
+    styles.css) and needs that same breathing room on its own account. */
+const GLASS_BRIDGE = 16;
+
 export function Transcript({
   state,
   history,
@@ -60,7 +84,7 @@ export function Transcript({
     ];
     return combined.slice(windowStart);
   }, [historyTurns, liveTurns, windowStart]);
-  const { tops, setHeaderRef } = useStackedOffsets(eligibleKeys);
+  const { tops, heights, setHeaderRef } = useStackedOffsets(eligibleKeys);
 
   return (
     <div className="transcript" ref={scrollRef} onScroll={onScroll}>
@@ -77,6 +101,7 @@ export function Transcript({
             turn={turn}
             sticky={sticky}
             top={sticky ? tops[position] : undefined}
+            height={sticky ? heights[position] : undefined}
             setHeaderRef={sticky ? setHeaderRef(position) : undefined}
           />
         );
@@ -96,6 +121,7 @@ export function Transcript({
             turn={turn}
             sticky={sticky}
             top={sticky ? tops[position] : undefined}
+            height={sticky ? heights[position] : undefined}
             setHeaderRef={sticky ? setHeaderRef(position) : undefined}
           />
         );
@@ -135,23 +161,32 @@ export function Transcript({
  */
 function useStackedOffsets(keys: string[]): {
   tops: number[];
+  /** Each pinned header's own measured height — separate from `tops`
+      because the glass panel needs *its own* height per turn (see
+      `.prompt-glass` in styles.css), not just the cumulative offset that
+      positions it. */
+  heights: number[];
   setHeaderRef: (position: number) => (el: HTMLDivElement | null) => void;
 } {
   const refs = useRef<(HTMLDivElement | null)[]>([]);
   const [tops, setTops] = useState<number[]>([]);
+  const [heights, setHeights] = useState<number[]>([]);
 
   const recompute = (): void => {
-    const next: number[] = [];
+    const nextTops: number[] = [];
+    const nextHeights: number[] = [];
     let sum = 0;
     for (const el of refs.current) {
-      next.push(sum);
+      nextTops.push(sum);
       const height = el?.getBoundingClientRect().height ?? 0;
+      nextHeights.push(height);
       // No gap after a slot with nothing rendered into it yet (the leading,
       // prompt-less turn can occupy a window position early in a session) —
       // otherwise the next real header would start one gap too far down.
       if (height > 0) sum += height + STICKY_GAP;
     }
-    setTops(next);
+    setTops(nextTops);
+    setHeights(nextHeights);
   };
 
   const keySignature = keys.join('|');
@@ -174,36 +209,59 @@ function useStackedOffsets(keys: string[]): {
     refs.current[position] = el;
   };
 
-  return { tops, setHeaderRef };
+  return { tops, heights, setHeaderRef };
 }
 
 function TurnPanel({
   turn,
   sticky,
   top,
+  height,
   setHeaderRef,
 }: {
   turn: TurnNode;
   sticky: boolean;
   top: number | undefined;
+  /** This turn's own measured header height, once known — sizes its glass
+      segment (see the render below and `.prompt-glass` in styles.css). */
+  height: number | undefined;
   setHeaderRef: ((el: HTMLDivElement | null) => void) | undefined;
 }): JSX.Element {
   // No per-turn wrapper div: `position: sticky` can never escape its own
   // parent's box, so a header boxed inside "just this turn's own content"
   // gets forced to release the instant that (often short) box scrolls past —
-  // it can't stay pinned through a later turn's content. Header and body are
-  // siblings directly under `.transcript` instead, so `.transcript` itself
-  // (which spans the whole conversation) is every header's containing block,
-  // and a pinned header stays put for as long as the JS-computed sticky
-  // window (see Transcript.tsx) says it should, not for however tall its own
-  // turn happens to be.
+  // it can't stay pinned through a later turn's content. Header, glass
+  // anchor, and body are all siblings directly under `.transcript` instead,
+  // so `.transcript` itself (which spans the whole conversation) is every
+  // sticky element's containing block, and a pinned header stays put for as
+  // long as the JS-computed sticky window (see Transcript.tsx) says it
+  // should, not for however tall its own turn happens to be.
   return (
     <>
+      {turn.prompt && sticky && (
+        // The glass backdrop for this turn's pinned header — a genuine
+        // sibling *before* the header in the DOM, not a pseudo-element on
+        // it. That's load-bearing: a pseudo-element can never paint behind
+        // its own element's background (only behind its own *normal
+        // content*, which is a different, higher paint step — an earlier
+        // version tried a `::after` with a negative z-index for this and it
+        // ended up painting a translucent layer directly over the header's
+        // own solid tint, not just around it). A true sibling rendered
+        // first paints first, so the header's own opaque box — rendered
+        // right after it, in the same call — naturally paints on top of it,
+        // the same way an `.agent-strip` chip sits opaque on that bar's own
+        // background. Positioned at the raw (un-inset) `top`, one turn's
+        // worth of glass segments end up contiguous — see the comment on
+        // `.prompt-glass-anchor` in styles.css.
+        <div className="prompt-glass-anchor" style={{ top }} aria-hidden="true">
+          <div className="prompt-glass" style={{ height: (height ?? 0) + GLASS_BRIDGE }} />
+        </div>
+      )}
       {turn.prompt && (
         <header
           ref={setHeaderRef}
           className={`turn-header${sticky ? ' pinned' : ''}`}
-          style={sticky ? { top } : undefined}
+          style={sticky ? { top: (top ?? 0) + TOP_INSET } : undefined}
         >
           {/* Single line, icon on the same row: a stack of pinned prompts
               needs to stay thin, and a prompt is for "what did I ask"

@@ -63,6 +63,17 @@ interface Props {
   effort?: EffortLevel | null;
   /** Switch effort level. Same next-prompt timing as `onSetModel`. */
   onSetEffort?: (effort: EffortLevel | null) => void;
+  /**
+   * True while the agent is generating a turn. Swaps the send button into a
+   * stop button (see `onInterrupt`) instead of showing a separate control
+   * elsewhere — undefined/false is indistinguishable from "not generating",
+   * same optional-prop convention as `models`/`commands` above, so callers
+   * that never report this (TerminalPage, ChatPreviewPage) just keep the
+   * plain send button.
+   */
+  busy?: boolean;
+  /** Stops the in-flight turn. Only meaningful (and only rendered) while `busy`. */
+  onInterrupt?: () => void;
 }
 
 /**
@@ -114,6 +125,8 @@ export function PromptBox({
   onSetModel,
   effort = null,
   onSetEffort,
+  busy = false,
+  onInterrupt,
 }: Props): JSX.Element {
   const key = DRAFT_KEY_PREFIX + sessionId;
   const [text, setText] = useState(() => {
@@ -139,6 +152,12 @@ export function PromptBox({
   // The model picker is an independent toggle (a click, not a text trigger),
   // so it gets its own open flag rather than piggybacking on `dismissed`.
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  // Referenced by the outside-click dismissal below — a click on the chip
+  // itself must not count as "outside" (the chip's own onClick already
+  // toggles the picker; treating it as outside too would close it and then
+  // immediately reopen it, a no-op that looks like the picker is stuck).
+  const modelPickerRef = useRef<HTMLDivElement>(null);
+  const modelChipRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     try {
@@ -179,6 +198,32 @@ export function PromptBox({
   useEffect(() => {
     itemRefs.current[selected]?.scrollIntoView({ block: 'nearest' });
   }, [selected]);
+
+  // Dismiss the model picker on Escape or a click/tap outside it. It used to
+  // rely on the chip's own blur for this (a stale comment on the `onMouseDown`
+  // handlers below still claims that), but no blur handler ever existed, so
+  // the popover stayed open until an option was picked or the chip was
+  // clicked again. A document-level listener, not a blur handler, is also
+  // what makes Escape work regardless of which element currently has focus
+  // (the chip button, a picker row, or nothing) — the textarea's own
+  // `onKeyDown` only ever saw Escape while the textarea itself was focused.
+  useEffect(() => {
+    if (!modelPickerOpen) return;
+    function onKeyDown(event: globalThis.KeyboardEvent): void {
+      if (event.key === 'Escape') setModelPickerOpen(false);
+    }
+    function onPointerDown(event: PointerEvent): void {
+      const target = event.target as Node;
+      if (modelPickerRef.current?.contains(target) || modelChipRef.current?.contains(target)) return;
+      setModelPickerOpen(false);
+    }
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('pointerdown', onPointerDown);
+    };
+  }, [modelPickerOpen]);
 
   function send(): void {
     const value = text;
@@ -243,11 +288,9 @@ export function PromptBox({
       }
     }
 
-    if (modelPickerOpen && event.key === 'Escape') {
-      event.preventDefault();
-      setModelPickerOpen(false);
-      return;
-    }
+    // Model-picker Escape is handled by the document-level listener above —
+    // it needs to work regardless of focus, not just while the textarea has
+    // it, so it isn't duplicated here.
 
     // Enter sends; Shift+Enter is a newline — matches ComposerPage's convention
     // for the first-prompt composer, and the usual chat-app default.
@@ -260,7 +303,7 @@ export function PromptBox({
   return (
     <div className="promptbar">
       {modelPickerVisible && (
-        <div className="model-picker" role="listbox" aria-label="Models">
+        <div className="model-picker" role="listbox" aria-label="Models" ref={modelPickerRef}>
           {models.map((model) => (
             <button
               key={model.value}
@@ -269,8 +312,10 @@ export function PromptBox({
               aria-selected={model.value === currentModelInfo?.value}
               className={model.value === currentModelInfo?.value ? 'active' : ''}
               onMouseDown={(e) => {
-                // mousedown (not click), same reason as the slash picker below:
-                // this must fire before the chip's own blur closes the popover.
+                // mousedown (not click) so this fires before the document-level
+                // pointerdown-based outside-click dismissal above resolves —
+                // both see the same press, but picking a row this way and
+                // being dismissed as "outside" would otherwise race.
                 e.preventDefault();
                 pickModel(model);
               }}
@@ -343,20 +388,6 @@ export function PromptBox({
           ))}
         </div>
       )}
-      {models.length > 0 && (
-        <button
-          type="button"
-          className="model-chip"
-          onClick={() => setModelPickerOpen((v) => !v)}
-          disabled={disabled}
-          aria-haspopup="listbox"
-          aria-expanded={modelPickerOpen}
-          aria-label={`Model: ${currentModelLabel ?? 'unknown'}. Choose a different model.`}
-        >
-          <span>{currentModelLabel ?? '…'}</span>
-          <Icon name="chevron-down" size={14} />
-        </button>
-      )}
       <textarea
         ref={ref}
         value={text}
@@ -371,14 +402,35 @@ export function PromptBox({
         aria-label="Prompt"
         enterKeyHint="enter"
       />
+      {models.length > 0 && (
+        <button
+          type="button"
+          className="model-chip"
+          onClick={() => setModelPickerOpen((v) => !v)}
+          disabled={disabled}
+          aria-haspopup="listbox"
+          aria-expanded={modelPickerOpen}
+          aria-label={`Model: ${currentModelLabel ?? 'unknown'}. Choose a different model.`}
+          ref={modelChipRef}
+        >
+          <span>{currentModelLabel ?? '…'}</span>
+          <Icon name="chevron-down" size={14} />
+        </button>
+      )}
+      {/* Stop, not send, while a turn is in flight — one control instead of a
+          separate "Stop generating" chip elsewhere on the page (it used to
+          live in `.agent-strip`, disconnected from the box the user is
+          actually looking at while typing the next thing). `text.length`
+          never gates this in the busy state: stopping shouldn't require
+          having typed anything. */}
       <button
         type="button"
-        className="primary"
-        onClick={send}
-        disabled={disabled || text.length === 0}
-        aria-label="Send prompt"
+        className={busy ? 'primary stop' : 'primary'}
+        onClick={busy ? onInterrupt : send}
+        disabled={busy ? disabled : disabled || text.length === 0}
+        aria-label={busy ? 'Stop generating' : 'Send prompt'}
       >
-        <Icon name="arrow-up" size={18} />
+        <Icon name={busy ? 'stop' : 'arrow-up'} size={busy ? 16 : 18} />
       </button>
     </div>
   );
