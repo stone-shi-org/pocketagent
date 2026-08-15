@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AgentInfo,
   ChatSummary,
   HostInfo,
   ProjectInfo,
+  PromptImage,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { SelectorRow, type SelectorOption } from '../components/SelectorRow.js';
 import { Icon } from '../components/Icon.js';
+import { readImageFile } from '../agent/image-attachment.js';
 import { setPendingPrompt } from '../agent/pending-prompt.js';
 import { formatRelative } from '../components/StatusBadge.js';
 
@@ -51,6 +53,9 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   const [flavour, setFlavour] = useState<Flavour | ''>('');
   const [resumeId, setResumeId] = useState<string>(NEW_CHAT);
   const [prompt, setPrompt] = useState('');
+  const [attachedImage, setAttachedImage] = useState<PromptImage | null>(null);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -163,7 +168,22 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   const picked = here.find((h) => h.chat.id === resumeId);
 
   const [agentId, transport] = flavour ? (flavour.split(':') as [string, 'terminal' | 'structured']) : ['', ''];
-  const canSend = !busy && !!cwd && !!agentId && prompt.trim().length > 0;
+  const canSend = !busy && !!cwd && !!agentId && (prompt.trim().length > 0 || !!attachedImage);
+
+  // Only the Claude Agent SDK backend's structured transport understands an
+  // image content block (see `ws/index.ts`'s `instanceof StructuredSession`
+  // check) — the attach button has to know what this composer is *actually*
+  // about to create, which is one of three different things depending on
+  // what's picked in the "Chat" row above:
+  //  - joining an already-live chat: whatever transport it is already running as
+  //  - resuming a finished one: always forced to `structured` (see below)
+  //  - starting fresh: whatever the "Agent" row's flavour says
+  const willBeStructured = picked?.chat.live
+    ? picked.chat.transport === 'structured'
+    : picked?.chat.conversationId
+      ? true
+      : transport === 'structured';
+  const supportsImageAttachment = agentId === 'claude' && willBeStructured;
 
   const submit = useCallback(async () => {
     if (!canSend) return;
@@ -174,7 +194,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
       // process against the same conversation is the one thing resuming exists
       // to avoid.
       if (picked?.chat.live && picked.chat.sessionId) {
-        setPendingPrompt(picked.chat.sessionId, prompt);
+        setPendingPrompt(picked.chat.sessionId, prompt, attachedImage ?? undefined);
         onCreated(picked.chat.sessionId);
         return;
       }
@@ -191,14 +211,23 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
         transport: resumeFrom ? 'structured' : (transport as 'terminal' | 'structured'),
         ...(resumeFrom ? { resumeAgentSessionId: resumeFrom, forkSession: false } : {}),
       });
-      setPendingPrompt(session.id, prompt);
+      setPendingPrompt(session.id, prompt, attachedImage ?? undefined);
       onCreated(session.id);
     } catch (err) {
       onApiError(err);
       setError(err instanceof ApiError ? err.message : 'Could not start the chat.');
       setBusy(false);
     }
-  }, [canSend, agentId, cwd, transport, picked, prompt, onCreated, onApiError]);
+  }, [canSend, agentId, cwd, transport, picked, prompt, attachedImage, onCreated, onApiError]);
+
+  async function attach(file: File): Promise<void> {
+    setAttachError(null);
+    try {
+      setAttachedImage(await readImageFile(file));
+    } catch (err) {
+      setAttachError(err instanceof Error ? err.message : 'Could not attach that image.');
+    }
+  }
 
   return (
     <div className="app composer-page">
@@ -266,6 +295,28 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
       )}
 
       <div className="composer-dock">
+        {supportsImageAttachment && (attachedImage || attachError) && (
+          <div className="attach-preview">
+            {attachedImage ? (
+              <>
+                <img
+                  src={`data:${attachedImage.mediaType};base64,${attachedImage.data}`}
+                  alt="Attached"
+                />
+                <button
+                  type="button"
+                  className="attach-remove"
+                  onClick={() => setAttachedImage(null)}
+                  aria-label="Remove attached image"
+                >
+                  <Icon name="close" size={13} />
+                </button>
+              </>
+            ) : (
+              <span className="attach-error">{attachError}</span>
+            )}
+          </div>
+        )}
         <textarea
           className="composer-input"
           value={prompt}
@@ -283,7 +334,32 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
           aria-label="First prompt"
         />
         <div className="composer-actions">
-          {/* Deliberately empty: the rows above already say what will run. */}
+          {supportsImageAttachment && (
+            <>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/gif,image/webp"
+                hidden
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = '';
+                  if (file) void attach(file);
+                }}
+              />
+              <button
+                type="button"
+                className="attach-btn"
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Attach an image"
+              >
+                <Icon name="attach" size={18} />
+              </button>
+            </>
+          )}
+          {/* Flexible spacer: with nothing to attach, this is the whole row
+              (the rows above already say what will run); with the attach
+              button present, it's what still pushes send to the right. */}
           <span className="composer-hint" />
           <button
             type="button"

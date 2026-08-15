@@ -8,6 +8,7 @@ import {
   type EffortLevel,
   type PermissionDecision,
   type PermissionRequestEvent,
+  type PromptImage,
   type SessionInfo,
   type SessionStatus,
   type TerminalHintKind,
@@ -327,9 +328,9 @@ export class TerminalConnection {
   }
 
   /** Send a conversational turn to a structured session. */
-  sendPrompt(text: string): boolean {
+  sendPrompt(text: string, image?: PromptImage): boolean {
     if (!this.sessionId) return false;
-    return this.send({ type: 'prompt', sessionId: this.sessionId, text });
+    return this.send({ type: 'prompt', sessionId: this.sessionId, text, ...(image ? { image } : {}) });
   }
 
   /** Answer a pending approval. `answer` carries the choice for a question-shaped tool. */

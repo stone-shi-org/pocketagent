@@ -4,6 +4,7 @@ import type {
   EffortLevel,
   PermissionDecision,
   PermissionRequestEvent,
+  PromptImage,
   SessionInfo,
   SessionStatus,
 } from '@pocketagent/protocol';
@@ -153,8 +154,8 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
     };
   }, [sessionId]);
 
-  const sendPrompt = useCallback((text: string): boolean => {
-    return connRef.current?.sendPrompt(text) ?? false;
+  const sendPrompt = useCallback((text: string, image?: PromptImage): boolean => {
+    return connRef.current?.sendPrompt(text, image) ?? false;
   }, []);
 
   const setModel = useCallback((model: string) => {
@@ -201,7 +202,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   // path so this does not pile up duplicate chats.
   const canResume = !alive && !!session?.agentSessionId;
   const resumeAndSend = useCallback(
-    (text: string): boolean => {
+    (text: string, image?: PromptImage): boolean => {
       if (!session?.agentSessionId || resuming) return false;
       setResuming(true);
       void api
@@ -216,7 +217,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           title: session.title,
         })
         .then((created) => {
-          setPendingPrompt(created.id, text);
+          setPendingPrompt(created.id, text, image);
           onResumed(created.id);
         })
         .catch((err) => {
@@ -230,7 +231,8 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   );
 
   const handleSend = useCallback(
-    (text: string): boolean => (alive ? sendPrompt(text) : resumeAndSend(text)),
+    (text: string, image?: PromptImage): boolean =>
+      alive ? sendPrompt(text, image) : resumeAndSend(text, image),
     [alive, sendPrompt, resumeAndSend],
   );
 
@@ -243,7 +245,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   useEffect(() => {
     if (inputDisabled) return;
     const queued = takePendingPrompt(sessionId);
-    if (queued) sendPrompt(queued);
+    if (queued) sendPrompt(queued.text, queued.image);
   }, [inputDisabled, sessionId, sendPrompt]);
 
   const modelLabel = useMemo(
@@ -332,6 +334,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         sessionId={sessionId}
         onSend={handleSend}
         disabled={inputDisabled}
+        supportsImageAttachment={session?.agent === 'claude'}
         commands={transcript.commands}
         models={transcript.models}
         currentModel={transcript.model}

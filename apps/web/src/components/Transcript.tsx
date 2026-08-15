@@ -265,10 +265,23 @@ function TurnPanel({
         >
           {/* Single line, icon on the same row: a stack of pinned prompts
               needs to stay thin, and a prompt is for "what did I ask"
-              at a glance, not for re-reading in full here. */}
-          <div className="prompt-text">{turn.prompt.text}</div>
-          <CopyButton text={turn.prompt.text} label="Copy prompt" />
+              at a glance, not for re-reading in full here. The thumbnail
+              itself renders below, outside this header, so a pinned prompt
+              never grows past one line while scrolling through its turn. */}
+          <div className="prompt-text">
+            {turn.prompt.text || (turn.prompt.image ? 'Sent an image' : '')}
+          </div>
+          {turn.prompt.text && <CopyButton text={turn.prompt.text} label="Copy prompt" />}
         </header>
+      )}
+      {turn.prompt?.image && (
+        <div className="prompt-image-row">
+          <img
+            className="prompt-image"
+            src={`data:${turn.prompt.image.mediaType};base64,${turn.prompt.image.data}`}
+            alt="Attached screenshot"
+          />
+        </div>
       )}
       <div className="turn-body">
         {turn.leaves.map((leaf) => (

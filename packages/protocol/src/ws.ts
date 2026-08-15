@@ -7,6 +7,7 @@ import {
   EffortLevel,
   PermissionDecision,
 } from './agent-events.js';
+import { MAX_IMAGE_BASE64_CHARS, MAX_IMAGE_BYTES, PromptImage } from './prompt-image.js';
 
 /**
  * Wire protocol version. The client sends it as a query parameter on the
@@ -27,8 +28,10 @@ import {
  * v7 added the `effort` client message and `effort_changed` agent event, plus
  * `ModelInfo.resolvedModel`/`supportsEffort`/`supportedEffortLevels`, for an
  * effort-level picker alongside the model picker.
+ * v8 added the optional `image` field on `PromptMessage` and `UserPromptEvent`,
+ * for attaching a screenshot to a prompt.
  */
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 
 /**
  * WebSocket close codes the server uses for conditions the client must not
@@ -47,10 +50,17 @@ export const WsCloseCode = {
 
 /** Hard caps, enforced on the server before any frame is acted on. */
 export const LIMITS = {
-  /** Max bytes of a single raw WebSocket message. */
-  maxMessageBytes: 256 * 1024,
+  // A base64'd 5 MB image runs ~6.7 MB of text, plus JSON overhead — this
+  // used to be 256 KiB (plenty for a terminal keystroke or a paragraph of
+  // prompt text) but has to cover the largest single frame the protocol now
+  // carries, which is an image-bearing prompt.
+  maxMessageBytes: 8 * 1024 * 1024,
   /** Max characters of a single `input` payload. */
   maxInputChars: 128 * 1024,
+  /** Raw file size cap for a prompt's attached image, before base64 encoding. */
+  maxImageBytes: MAX_IMAGE_BYTES,
+  /** Base64 inflates by 4/3; this is the cap actually applied to `image.data`. */
+  maxImageBase64Chars: MAX_IMAGE_BASE64_CHARS,
   minCols: 2,
   maxCols: 1000,
   minRows: 2,
@@ -131,11 +141,17 @@ export const PingMessage = z.object({
  *
  * Distinct from `input`: `input` is raw bytes for a PTY, whereas this is a
  * complete conversational turn. A structured session has no keyboard.
+ *
+ * `text` may be empty when `image` is present — an image-only send is a
+ * valid turn. `ClientMessage` is a `z.discriminatedUnion`, which requires a
+ * plain object schema per arm, so "text or image, not neither" is validated
+ * at the call site (`ws/index.ts`) rather than with a `.refine()` here.
  */
 export const PromptMessage = z.object({
   type: z.literal('prompt'),
   sessionId: SessionId,
-  text: z.string().min(1).max(LIMITS.maxInputChars),
+  text: z.string().max(LIMITS.maxInputChars),
+  image: PromptImage.optional(),
 });
 
 /** Answer a pending `permission_request`. */

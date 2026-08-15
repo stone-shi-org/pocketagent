@@ -346,6 +346,75 @@ describe('transcriptRecordToEvents', () => {
     ]);
   });
 
+  it('reconstructs an image-and-text prompt from array content, not just a string', () => {
+    // This is the regression case: `StructuredSession.prompt()` writes an
+    // image-bearing turn as array content (image block + text block), not a
+    // plain string. Before this branch existed, array content fell straight
+    // through to `normalizeSdkMessage`, which does not understand user
+    // prompts at all — the whole turn silently vanished from history.
+    const events = transcriptRecordToEvents({
+      type: 'user',
+      uuid: 'u2',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' },
+          },
+          { type: 'text', text: 'what is this?' },
+        ],
+      },
+    });
+    expect(events).toEqual([
+      {
+        kind: 'user_prompt',
+        id: 'hist_u2',
+        text: 'what is this?',
+        image: { mediaType: 'image/png', data: 'aGVsbG8=' },
+      },
+    ]);
+  });
+
+  it('reconstructs an image-only prompt (no text block at all)', () => {
+    // No `uuid` here on purpose — it exercises the id fallback for an
+    // image-only turn (`text || 'image'`, since `text` is empty).
+    const events = transcriptRecordToEvents({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/jpeg', data: 'aGVsbG8=' },
+          },
+        ],
+      },
+    });
+    expect(events).toEqual([
+      {
+        kind: 'user_prompt',
+        id: 'hist_image',
+        text: '',
+        image: { mediaType: 'image/jpeg', data: 'aGVsbG8=' },
+      },
+    ]);
+  });
+
+  it('still routes a tool_result echoed as array content through the normalizer, not the prompt branch', () => {
+    // Same regression as above, checked from the other direction: adding the
+    // array-content branch must not swallow the one array-content shape that
+    // already worked (`keeps tool calls and their results`, below).
+    const events = transcriptRecordToEvents({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'tu9', content: 'ok' }],
+      },
+    });
+    expect(events[0]).toMatchObject({ kind: 'tool_result', toolUseId: 'tu9' });
+  });
+
   it('reads assistant text through the same normalizer the live stream uses', () => {
     const events = transcriptRecordToEvents({
       type: 'assistant',

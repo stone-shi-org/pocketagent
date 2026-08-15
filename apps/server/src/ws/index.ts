@@ -13,6 +13,7 @@ import {
 } from '@pocketagent/protocol';
 import { isOriginAllowed } from '../auth/index.js';
 import type { ManagedSession, StructuredLikeSession } from '../sessions/manager.js';
+import { StructuredSession } from '../sessions/structured-session.js';
 
 /**
  * Only some structured backends can switch model/effort live (today: the
@@ -356,7 +357,30 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
         case 'prompt': {
           const session = requireStructured(message.sessionId);
           if (!session) break;
-          session.prompt(message.text);
+          if (message.text.length === 0 && !message.image) {
+            sendError('bad_message', 'A prompt needs text, an image, or both.', message.sessionId);
+            break;
+          }
+          // Only the Claude Agent SDK backend understands an image content
+          // block — the others (codex, agy, opencode, pi) all declare the
+          // same `prompt(text: string)` shape, so this has to be a real
+          // instanceof check, not a duck-typed capability probe like
+          // `canSetModel`/`canSetEffort` above. Rejecting beats silently
+          // dropping the attachment: the user would otherwise watch their
+          // screenshot vanish with no explanation.
+          if (message.image && !(session instanceof StructuredSession)) {
+            sendError(
+              'bad_message',
+              'This agent does not support image attachments.',
+              message.sessionId,
+            );
+            break;
+          }
+          if (session instanceof StructuredSession) {
+            session.prompt(message.text, message.image);
+          } else {
+            session.prompt(message.text);
+          }
           break;
         }
 

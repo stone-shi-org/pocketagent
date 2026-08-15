@@ -1,5 +1,6 @@
 export * from './agent-events.js';
 export * from './session.js';
+export * from './prompt-image.js';
 export * from './ws.js';
 export * from './http.js';
 

@@ -1,5 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import type { EffortLevel, ModelInfo, SlashCommandInfo } from '@pocketagent/protocol';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type KeyboardEvent,
+} from 'react';
+import type { EffortLevel, ModelInfo, PromptImage, SlashCommandInfo } from '@pocketagent/protocol';
+import { readImageFile } from '../agent/image-attachment.js';
 import { modelDisplayName } from '../agent/transcript.js';
 import { Icon } from './Icon.js';
 
@@ -30,9 +38,22 @@ const MAX_PICKER_RESULTS = 8;
 
 interface Props {
   sessionId: string;
-  /** Returns false when the socket is down, so the draft is kept. */
-  onSend: (text: string) => boolean;
+  /**
+   * Returns false when the socket is down, so the draft (and any attached
+   * image) is kept rather than cleared. `image` is only ever set for a
+   * structured Claude Agent SDK session — see `readImageFile`'s caller here
+   * for the only place one gets attached.
+   */
+  onSend: (text: string, image?: PromptImage) => boolean;
   disabled: boolean;
+  /**
+   * Shows the attach button (file picker + paste-an-image). Only the Claude
+   * Agent SDK backend's `prompt()` actually understands an image content
+   * block — `ws/index.ts` rejects one from any other backend outright — so
+   * this defaults to hidden rather than showing an affordance that would
+   * just error for every other agent and for terminal sessions.
+   */
+  supportsImageAttachment?: boolean;
   /**
    * Slash commands this agent currently supports, for the `/` picker.
    * Undefined/empty just means no picker — the box still sends whatever text
@@ -119,6 +140,7 @@ export function PromptBox({
   sessionId,
   onSend,
   disabled,
+  supportsImageAttachment = false,
   commands = [],
   models = [],
   currentModel = null,
@@ -137,6 +159,13 @@ export function PromptBox({
     }
   });
   const ref = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // Not persisted to sessionStorage like `text` — an attached image surviving
+  // a reload but pointing at nothing the user can see again would be worse
+  // than just losing the draft, since there would be no way to tell it was
+  // still going to be sent.
+  const [attachedImage, setAttachedImage] = useState<PromptImage | null>(null);
+  const [attachError, setAttachError] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
   // One entry per currently-rendered picker row, so the active one can be
   // scrolled into view on arrow-key navigation — `.slash-picker` scrolls
@@ -227,8 +256,33 @@ export function PromptBox({
 
   function send(): void {
     const value = text;
-    if (value.length === 0 || disabled) return;
-    if (onSend(value)) setText('');
+    if ((value.length === 0 && !attachedImage) || disabled) return;
+    if (onSend(value, attachedImage ?? undefined)) {
+      setText('');
+      setAttachedImage(null);
+    }
+  }
+
+  /** Shared by the attach button's file input and pasting an image directly. */
+  async function attach(file: File): Promise<void> {
+    setAttachError(null);
+    try {
+      setAttachedImage(await readImageFile(file));
+    } catch (err) {
+      setAttachError(err instanceof Error ? err.message : 'Could not attach that image.');
+    }
+  }
+
+  function onPaste(event: ClipboardEvent<HTMLTextAreaElement>): void {
+    const item = Array.from(event.clipboardData.items).find((i) => i.type.startsWith('image/'));
+    if (!item) return; // an ordinary text paste — let the browser handle it
+    const file = item.getAsFile();
+    if (!file) return;
+    // A pasted image is not also text, so nothing here competes with a normal
+    // paste — but prevent it anyway in case the OS also puts a filename or a
+    // data URL on the clipboard as a text fallback.
+    event.preventDefault();
+    void attach(file);
   }
 
   function pick(command: SlashCommandInfo): void {
@@ -388,6 +442,52 @@ export function PromptBox({
           ))}
         </div>
       )}
+      {supportsImageAttachment && !pickerOpen && (attachedImage || attachError) && (
+        <div className="attach-preview">
+          {attachedImage ? (
+            <>
+              <img
+                src={`data:${attachedImage.mediaType};base64,${attachedImage.data}`}
+                alt="Attached"
+              />
+              <button
+                type="button"
+                className="attach-remove"
+                onClick={() => setAttachedImage(null)}
+                aria-label="Remove attached image"
+              >
+                <Icon name="close" size={13} />
+              </button>
+            </>
+          ) : (
+            <span className="attach-error">{attachError}</span>
+          )}
+        </div>
+      )}
+      {supportsImageAttachment && (
+        <>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/gif,image/webp"
+            hidden
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              e.target.value = ''; // lets the same file be picked again later
+              if (file) void attach(file);
+            }}
+          />
+          <button
+            type="button"
+            className="attach-btn"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={disabled}
+            aria-label="Attach an image"
+          >
+            <Icon name="attach" size={19} />
+          </button>
+        </>
+      )}
       <textarea
         ref={ref}
         value={text}
@@ -397,6 +497,7 @@ export function PromptBox({
           setModelPickerOpen(false);
         }}
         onKeyDown={onKeyDown}
+        onPaste={supportsImageAttachment ? onPaste : undefined}
         placeholder="Type a prompt…"
         rows={1}
         aria-label="Prompt"
@@ -427,7 +528,7 @@ export function PromptBox({
         type="button"
         className={busy ? 'primary stop' : 'primary'}
         onClick={busy ? onInterrupt : send}
-        disabled={busy ? disabled : disabled || text.length === 0}
+        disabled={busy ? disabled : disabled || (text.length === 0 && !attachedImage)}
         aria-label={busy ? 'Stop generating' : 'Send prompt'}
       >
         <Icon name={busy ? 'stop' : 'arrow-up'} size={busy ? 16 : 18} />

@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { AgentEvent, ConversationInfo } from '@pocketagent/protocol';
+import { PromptImage, type AgentEvent, type ConversationInfo } from '@pocketagent/protocol';
 import { normalizeSdkMessage } from '../sessions/normalize.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 
@@ -241,9 +241,63 @@ export function transcriptRecordToEvents(record: unknown): AgentEvent[] {
       if (!text || text.startsWith('<')) return [];
       return [{ kind: 'user_prompt', id: `hist_${String(r.uuid ?? text.slice(0, 24))}`, text }];
     }
+    // A multimodal turn (an attached screenshot, most likely) — the SDK
+    // records it as an array of content blocks, not a plain string. This
+    // must not just fall through to `normalizeSdkMessage` below: that
+    // normalizer does not cover user prompts at all (see this function's own
+    // doc comment), so an unhandled array here would silently drop the whole
+    // turn from history instead of raising an error.
+    //
+    // A `tool_result` echoed back as a user-role message is also array
+    // content, though, and that one *does* need `normalizeSdkMessage` (it is
+    // what turns it into a `tool_result` event) — so this only intercepts an
+    // array that actually looks like a prompt (text and/or image blocks),
+    // not tool plumbing shaped like one.
+    if (Array.isArray(content)) {
+      const hasToolResult = content.some(
+        (block) =>
+          typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'tool_result',
+      );
+      if (!hasToolResult) {
+        const text = userText(message) ?? '';
+        const image = imageFromContentBlocks(content);
+        if (image || (text && !text.startsWith('<'))) {
+          return [
+            {
+              kind: 'user_prompt',
+              id: `hist_${String(r.uuid ?? (text || 'image').slice(0, 24))}`,
+              text,
+              ...(image ? { image } : {}),
+            },
+          ];
+        }
+        return [];
+      }
+    }
   }
 
   return normalizeSdkMessage(record);
+}
+
+/**
+ * Pull the first base64-sourced image block out of a content array, in the
+ * same shape `StructuredSession.prompt()` sends one in. `null` for text-only
+ * content, or an image shape PocketAgent itself never produces (a URL
+ * source, say) — nothing else writes to these transcripts today, but a
+ * conversation resumed from the real Claude Code CLI could contain one.
+ */
+function imageFromContentBlocks(content: unknown[]): PromptImage | null {
+  for (const block of content) {
+    if (typeof block !== 'object' || block === null) continue;
+    if ((block as { type?: unknown }).type !== 'image') continue;
+    const source = (block as { source?: unknown }).source;
+    if (typeof source !== 'object' || source === null) continue;
+    const s = source as { type?: unknown; media_type?: unknown; data?: unknown };
+    if (s.type !== 'base64') continue;
+    const parsed = PromptImage.safeParse({ mediaType: s.media_type, data: s.data });
+    if (parsed.success) return parsed.data;
+  }
+  return null;
 }
 
 /**

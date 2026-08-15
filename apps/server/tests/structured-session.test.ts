@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { waitFor } from './helpers.js';
 
 /**
@@ -13,11 +13,17 @@ import { waitFor } from './helpers.js';
  * input stream into one `result` message back, which is enough to drive a
  * real prompt -> turn_complete cycle without hand-rolled synchronization.
  */
+// Populated as `prompt()` pushes into the SDK's input stream, so tests below
+// can inspect exactly what shape a call built without reaching into private
+// state — cleared per test in `beforeEach`.
+const received: unknown[] = [];
+
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: ({ prompt }: { prompt: AsyncIterable<unknown> }) => ({
     async *[Symbol.asyncIterator]() {
       yield { type: 'system', subtype: 'init', session_id: 'sess_test' };
-      for await (const _msg of prompt) {
+      for await (const msg of prompt) {
+        received.push(msg);
         yield {
           type: 'result',
           subtype: 'success',
@@ -87,5 +93,71 @@ describe('StructuredSession.busy', () => {
     session.prompt('second');
     expect(session.busy).toBe(true);
     await waitFor(() => session?.busy === false);
+  });
+});
+
+describe('StructuredSession.prompt image attachment', () => {
+  let session: InstanceType<typeof StructuredSession> | null = null;
+  const image = { mediaType: 'image/png' as const, data: 'aGVsbG8=' };
+
+  beforeEach(() => {
+    received.length = 0;
+  });
+
+  afterEach(() => {
+    session?.terminate();
+    session = null;
+  });
+
+  it('sends an image alongside a caption as a leading content block', async () => {
+    session = makeSession();
+    await session.start();
+
+    session.prompt('what is this?', image);
+    await waitFor(() => session?.busy === false);
+
+    expect(received).toHaveLength(1);
+    const sdkMessage = received[0] as { message: { content: unknown } };
+    expect(sdkMessage.message.content).toEqual([
+      { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } },
+      { type: 'text', text: 'what is this?' },
+    ]);
+  });
+
+  it('sends an image-only prompt without a trailing empty text block', async () => {
+    session = makeSession();
+    await session.start();
+
+    session.prompt('', image);
+    await waitFor(() => session?.busy === false);
+
+    const sdkMessage = received[0] as { message: { content: unknown } };
+    expect(sdkMessage.message.content).toEqual([
+      { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } },
+    ]);
+  });
+
+  it('still sends a plain string for a text-only prompt, unchanged', async () => {
+    session = makeSession();
+    await session.start();
+
+    session.prompt('just text');
+    await waitFor(() => session?.busy === false);
+
+    const sdkMessage = received[0] as { message: { content: unknown } };
+    expect(sdkMessage.message.content).toBe('just text');
+  });
+
+  it('echoes the image on the emitted user_prompt event, for replay', async () => {
+    session = makeSession();
+    await session.start();
+
+    const events: unknown[] = [];
+    session.on('event', (_seq: number, event: unknown) => events.push(event));
+
+    session.prompt('what is this?', image);
+    await waitFor(() => session?.busy === false);
+
+    expect(events[0]).toMatchObject({ kind: 'user_prompt', text: 'what is this?', image });
   });
 });

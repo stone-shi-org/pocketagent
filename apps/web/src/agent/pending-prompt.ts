@@ -1,3 +1,5 @@
+import type { PromptImage } from '@pocketagent/protocol';
+
 /**
  * The prompt typed on the composer screen, handed to the session page that is
  * about to mount.
@@ -8,17 +10,21 @@
  * mid-navigation — the text is simply not sent, which is recoverable. Sending
  * it twice is not.
  */
-let pending: { sessionId: string; text: string } | null = null;
+let pending: { sessionId: string; text: string; image?: PromptImage } | null = null;
 
-export function setPendingPrompt(sessionId: string, text: string): void {
+export function setPendingPrompt(sessionId: string, text: string, image?: PromptImage): void {
   const trimmed = text.trim();
-  pending = trimmed ? { sessionId, text: trimmed } : null;
+  // An attached image makes an otherwise-empty prompt worth sending — only
+  // drop the whole thing when there is truly nothing to hand off.
+  pending = trimmed || image ? { sessionId, text: trimmed, image } : null;
 }
 
 /** Returns the prompt for this session exactly once, then forgets it. */
-export function takePendingPrompt(sessionId: string): string | null {
+export function takePendingPrompt(
+  sessionId: string,
+): { text: string; image?: PromptImage } | null {
   if (pending?.sessionId !== sessionId) return null;
-  const { text } = pending;
+  const { text, image } = pending;
   pending = null;
-  return text;
+  return { text, image };
 }

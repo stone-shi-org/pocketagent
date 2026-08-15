@@ -27,6 +27,7 @@ export type IconName =
   | 'copy'
   | 'check'
   | 'close'
+  | 'attach'
   | 'agents'
   | 'agent-claude'
   | 'agent-codex'
@@ -170,6 +171,12 @@ const PATHS: Record<IconName, JSX.Element> = {
   check: <path d="m5 12.5 4.5 4.5L19 7" />,
 
   close: <path d="m6 6 12 12M18 6 6 18" />,
+
+  // A paperclip: "attach a file" — used for the prompt box's image attach
+  // button, so it reads distinctly from `compose`'s pencil-in-square.
+  attach: (
+    <path d="M16.5 6.5v9a4 4 0 0 1-8 0v-10a2.5 2.5 0 0 1 5 0v9a1 1 0 0 1-2 0v-8" />
+  ),
 
   // Two overlapping cards with a pair of eyes on the front one: "a fleet",
   // not one agent — distinct from `branch`'s three-node graph, which is

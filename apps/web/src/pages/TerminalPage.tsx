@@ -246,7 +246,12 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
   useEffect(() => {
     if (inputDisabled || !sawOutput) return;
     const queued = takePendingPrompt(sessionId);
-    if (queued) sendPrompt(queued);
+    // A terminal session has no attach button (`supportsImageAttachment` is
+    // never set below), so `queued.image` should never be set here — but if
+    // a prompt composed for a structured chat somehow ends up delivered to a
+    // terminal one, dropping the image silently beats sending raw keystrokes
+    // it can't do anything with.
+    if (queued) sendPrompt(queued.text);
   }, [inputDisabled, sawOutput, sessionId, sendPrompt]);
 
   return (

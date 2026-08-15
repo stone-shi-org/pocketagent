@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { ConversationInfo } from '@pocketagent/protocol';
+import type { ConversationInfo, PromptImage } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { applyEvents, emptyTranscript, type TranscriptItem } from '../agent/transcript.js';
 import { Transcript } from '../components/Transcript.js';
@@ -62,7 +62,7 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
   const liveState = useMemo(() => emptyTranscript(), []);
 
   const start = useCallback(
-    (text: string): boolean => {
+    (text: string, image?: PromptImage): boolean => {
       if (!conversation || starting) return false;
       setStarting(true);
       void api
@@ -80,7 +80,7 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
           title: conversation.title,
         })
         .then((created) => {
-          setPendingPrompt(created.id, text);
+          setPendingPrompt(created.id, text, image);
           onStarted(created.id);
         })
         .catch((err) => {
@@ -123,6 +123,10 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
           sessionId={`conversation:${conversationId}`}
           onSend={start}
           disabled={!conversation || starting}
+          // Every conversation here came from `ConversationStore`, which only
+          // discovers Claude Code transcripts — see the `agent: 'claude'`
+          // comment in `start` above.
+          supportsImageAttachment
         />
       )}
     </div>

@@ -674,6 +674,78 @@ button:focus-visible {
   opacity: 0.6;
 }
 
+/* The image-attach button — shared between `.promptbar` (a live/resumed
+   chat) and `.composer-dock`'s `.composer-actions` (starting a new one), so
+   one rule covers both rather than duplicating it per context. A plain round
+   icon button, same footprint as `.send-btn`/`button.primary` but never
+   filled — this is a secondary action next to the one that actually submits. */
+.attach-btn {
+  flex: none;
+  align-self: flex-end;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-dim);
+}
+
+.attach-btn:hover:not(:disabled) {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+
+.attach-btn:disabled {
+  opacity: 0.5;
+}
+
+/* The pre-send thumbnail (or the error in its place) — floats above the pill
+   it belongs to, same shape as `.slash-picker`/`.model-picker` above, so all
+   three read as one family of "something extra above the input row" panels. */
+.attach-preview {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-elev-2);
+  box-shadow: var(--shadow-md);
+}
+
+.attach-preview img {
+  display: block;
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 8px;
+}
+
+.attach-remove {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  color: var(--text-dim);
+}
+
+.attach-error {
+  padding: 4px 8px;
+  font-size: 12.5px;
+  color: var(--danger);
+}
+
 /* A subtle border/shadow lift on focus, not a colour ring — the accent outline
    from the global input:focus rule reads as a stray blue rectangle inside a
    pill that already has its own border. */
@@ -1001,6 +1073,25 @@ button:focus-visible {
 }
 
 .turn-header .copy-btn { flex: none; }
+
+/* The screenshot a prompt attached, if any — a true sibling of `.turn-header`
+   rather than something inside it, so it never becomes part of the sticky
+   pinned header (see the comment in Transcript.tsx's `TurnPanel`): a pinned
+   prompt has to stay one thin line regardless of what it attached. Same
+   horizontal margins as `.turn-header` so the thumbnail reads as belonging
+   to that prompt, not to the reply indented further right below it. */
+.prompt-image-row {
+  margin: 8px calc(12px + var(--safe-right)) 0 calc(12px + var(--safe-left));
+}
+
+.prompt-image {
+  display: block;
+  max-width: 220px;
+  max-height: 220px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  object-fit: contain;
+}
 
 .answer { margin: 12px 0; overflow-wrap: anywhere; }
 .answer.streaming::after {
@@ -1853,6 +1944,9 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 }
 
 .composer-dock {
+  /* Anchors `.attach-preview`, which floats above this pill the same way
+     `.slash-picker`/`.model-picker` float above `.promptbar`. */
+  position: relative;
   flex: none;
   margin: 0 calc(14px + var(--safe-right)) calc(12px + var(--safe-bottom))
     calc(14px + var(--safe-left));

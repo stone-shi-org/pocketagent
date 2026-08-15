@@ -42,6 +42,17 @@ describe('transcript: text', () => {
     expect(state.items[1]).toMatchObject({ role: 'assistant', text: 'hi there' });
   });
 
+  it('carries an attached image on a user prompt through to its item', () => {
+    const image = { mediaType: 'image/png' as const, data: 'aGVsbG8=' };
+    const state = applyEvent(emptyTranscript(), {
+      kind: 'user_prompt',
+      id: 'u1',
+      text: 'look at this',
+      image,
+    });
+    expect(state.items[0]).toMatchObject({ role: 'user', text: 'look at this', image });
+  });
+
   it('accumulates deltas into one block', () => {
     const state = applyEvents(emptyTranscript(), [
       { kind: 'text_delta', id: 'd1', text: 'Hel' },

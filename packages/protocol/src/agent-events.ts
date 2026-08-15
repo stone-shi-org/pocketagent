@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PromptImage } from './prompt-image.js';
 
 /**
  * Normalized agent events.
@@ -163,6 +164,8 @@ export const UserPromptEvent = z.object({
   kind: z.literal('user_prompt'),
   id: z.string(),
   text: z.string(),
+  /** Present when the turn attached a screenshot — see `PromptImage`. */
+  image: PromptImage.optional(),
 });
 
 /**

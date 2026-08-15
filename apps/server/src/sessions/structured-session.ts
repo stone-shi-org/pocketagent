@@ -17,6 +17,7 @@ import {
   type EffortLevel,
   type PermissionDecision,
   type PermissionRequestEvent,
+  type PromptImage,
   type SessionStatus,
 } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
@@ -462,17 +463,35 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
 
   // ---- Conversation --------------------------------------------------------
 
-  /** Queue a user turn. Safe to call while the agent is still working. */
-  prompt(text: string): boolean {
+  /**
+   * Queue a user turn. Safe to call while the agent is still working.
+   *
+   * `image` rides as a leading content block alongside `text` — the SDK's own
+   * `MessageParam.content` accepts an array of blocks, not just a string, so
+   * this is the same request shape a multimodal turn from any Anthropic
+   * client would use. `text` may be empty when `image` is set (an image-only
+   * send); `ws/index.ts` is what actually guarantees at least one is present.
+   */
+  prompt(text: string, image?: PromptImage): boolean {
     if (!this.isAlive()) return false;
     this._lastActivityAt = Date.now();
     this._busy = true;
 
-    this.emitEvent({ kind: 'user_prompt', id: crypto.randomBytes(6).toString('hex'), text });
+    this.emitEvent({ kind: 'user_prompt', id: crypto.randomBytes(6).toString('hex'), text, image });
+
+    const content = image
+      ? [
+          {
+            type: 'image' as const,
+            source: { type: 'base64' as const, media_type: image.mediaType, data: image.data },
+          },
+          ...(text ? [{ type: 'text' as const, text }] : []),
+        ]
+      : text;
 
     this.inbox.push({
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content },
       parent_tool_use_id: null,
       session_id: this._agentSessionId ?? '',
     } as SDKUserMessage);

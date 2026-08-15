@@ -631,4 +631,23 @@ describe('TerminalConnection: structured sessions', () => {
       { type: 'model', sessionId: 'abc', model: 'claude-opus-4-8' },
     ]);
   });
+
+  it('includes an attached image on the prompt frame, and omits the field entirely without one', () => {
+    const { connection, socket } = setup();
+    connection.open('abc');
+    socket().open();
+
+    connection.sendPrompt('what is this?', { mediaType: 'image/png', data: 'aGVsbG8=' });
+    connection.sendPrompt('no picture here');
+
+    expect(socket().parsedSent().slice(1)).toEqual([
+      {
+        type: 'prompt',
+        sessionId: 'abc',
+        text: 'what is this?',
+        image: { mediaType: 'image/png', data: 'aGVsbG8=' },
+      },
+      { type: 'prompt', sessionId: 'abc', text: 'no picture here' },
+    ]);
+  });
 });

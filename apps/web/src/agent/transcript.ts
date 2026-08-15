@@ -3,6 +3,7 @@ import type {
   EffortLevel,
   ModelInfo,
   PermissionRequestEvent,
+  PromptImage,
   SlashCommandInfo,
 } from '@pocketagent/protocol';
 
@@ -39,6 +40,8 @@ export interface TextItem {
   text: string;
   /** True while deltas are still arriving for this block. */
   streaming: boolean;
+  /** Set on a user turn that attached a screenshot. Never set for `assistant`. */
+  image?: PromptImage;
 }
 
 export interface ThinkingItem {
@@ -144,7 +147,14 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
         busy: true,
         items: [
           ...state.items,
-          { type: 'text', key: `u_${event.id}`, role: 'user', text: event.text, streaming: false },
+          {
+            type: 'text',
+            key: `u_${event.id}`,
+            role: 'user',
+            text: event.text,
+            streaming: false,
+            image: event.image,
+          },
         ],
       };
 
