@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
   AdoptableTarget,
   AgentInfo,
   ConversationInfo,
+  ProjectInfo,
   SessionTransport,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
@@ -24,6 +25,8 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
   const [adoptable, setAdoptable] = useState<AdoptableTarget[]>([]);
   const [adoptEnabled, setAdoptEnabled] = useState(false);
+  /** Only fetched for its `gitBranch` field, to label the "Main" and "Current" worktree options. */
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
 
   const [agent, setAgent] = useState('');
   const [cwd, setCwd] = useState('');
@@ -32,6 +35,11 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
       `supportsSkipPermissions`; reset whenever a different agent is picked so
       the choice never silently carries over to one that ignores it. */
   const [skipPermissions, setSkipPermissions] = useState(false);
+
+  /** 'main' is today's behaviour: run in the project directory as-is. */
+  const [worktreeMode, setWorktreeMode] = useState<'main' | 'new'>('main');
+  const [branchMode, setBranchMode] = useState<'new' | 'current'>('new');
+  const [branchName, setBranchName] = useState('');
 
   /** Set while a resume or adopt needs an extra, explicit confirmation. */
   const [confirming, setConfirming] = useState<
@@ -49,14 +57,16 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
       api.listWorkspaces(),
       api.listConversations().catch(() => ({ conversations: [] })),
       api.listAdoptable().catch(() => ({ enabled: false, targets: [] })),
+      api.listProjects().catch(() => ({ projects: [] as ProjectInfo[] })),
     ])
-      .then(([a, w, c, ad]) => {
+      .then(([a, w, c, ad, p]) => {
         if (cancelled) return;
         setAgents(a.agents);
         setWorkspaces(w.workspaces);
         setConversations(c.conversations);
         setAdoptable(ad.targets);
         setAdoptEnabled(ad.enabled);
+        setProjects(p.projects);
         const initial = a.agents.find((x) => x.available) ?? a.agents[0];
         setAgent(initial?.id ?? '');
         setTransport(initial?.defaultTransport ?? 'terminal');
@@ -76,6 +86,20 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
   }, [onApiError]);
 
   const selected = agents.find((a) => a.id === agent) ?? null;
+  const selectedWorkspace = workspaces.find((w) => w.path === cwd) ?? null;
+  const branchLabel = useMemo(
+    () => projects.find((p) => p.cwd === cwd)?.gitBranch ?? null,
+    [projects, cwd],
+  );
+
+  // A worktree/branch choice is scoped to whichever directory was selected
+  // when it was made; switching to a different project should not silently
+  // carry it over to one that may not even be a git repo.
+  useEffect(() => {
+    setWorktreeMode('main');
+    setBranchMode('new');
+    setBranchName('');
+  }, [cwd]);
 
   async function submit(body: Parameters<typeof api.createSession>[0]): Promise<void> {
     if (busy) return;
@@ -92,8 +116,28 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
     }
   }
 
-  const startFresh = (): Promise<void> =>
-    submit({ agent, cwd, cols: 80, rows: 24, transport, skipPermissions });
+  const startFresh = async (): Promise<void> => {
+    let targetCwd = cwd;
+    if (worktreeMode === 'new') {
+      setBusy(true);
+      setError(null);
+      try {
+        targetCwd = (
+          await api.createWorktree({
+            cwd,
+            branchMode,
+            ...(branchMode === 'new' ? { branchName } : {}),
+          })
+        ).cwd;
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not create the worktree.');
+        setBusy(false);
+        return;
+      }
+    }
+    return submit({ agent, cwd: targetCwd, cols: 80, rows: 24, transport, skipPermissions });
+  };
 
   /** Fork is the default: it never touches the original transcript. */
   const resume = (conversation: ConversationInfo, fork: boolean): Promise<void> =>
@@ -216,6 +260,57 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
                   </select>
                 </div>
 
+                {selectedWorkspace?.isGitRepo && (
+                  <div className="field">
+                    <label htmlFor="worktree">Worktree</label>
+                    <select
+                      id="worktree"
+                      value={worktreeMode}
+                      onChange={(e) => setWorktreeMode(e.target.value as 'main' | 'new')}
+                    >
+                      <option value="main">Main{branchLabel ? ` — ${branchLabel}` : ''}</option>
+                      <option value="new">New worktree…</option>
+                    </select>
+                  </div>
+                )}
+
+                {selectedWorkspace?.isGitRepo && worktreeMode === 'new' && (
+                  <>
+                    <div className="field">
+                      <label htmlFor="branch-mode">Branch</label>
+                      <select
+                        id="branch-mode"
+                        value={branchMode}
+                        onChange={(e) => setBranchMode(e.target.value as 'new' | 'current')}
+                      >
+                        <option value="new">New branch</option>
+                        <option value="current">Current{branchLabel ? ` (${branchLabel})` : ''}</option>
+                      </select>
+                    </div>
+                    {branchMode === 'new' ? (
+                      <div className="field">
+                        <label htmlFor="branch-name">Branch name</label>
+                        <input
+                          id="branch-name"
+                          value={branchName}
+                          onChange={(e) => setBranchName(e.target.value)}
+                          placeholder="feature/my-branch"
+                        />
+                      </div>
+                    ) : (
+                      <p className="transport-hint">
+                        Git cannot check {branchLabel ?? 'the current branch'} out in two
+                        worktrees at once, so this creates a new branch from its current tip
+                        instead — a real, committable branch, just not named{' '}
+                        {branchLabel ?? 'the same'}.
+                      </p>
+                    )}
+                    <p className="transport-hint">
+                      New worktree at <code>.worktrees/</code> inside this project.
+                    </p>
+                  </>
+                )}
+
                 {selected && selected.transports.length > 1 && (
                   <>
                     <div className="field">
@@ -283,9 +378,14 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
                     type="button"
                     className="primary"
                     onClick={() => void startFresh()}
-                    disabled={busy || !agent || !cwd}
+                    disabled={
+                      busy ||
+                      !agent ||
+                      !cwd ||
+                      (worktreeMode === 'new' && branchMode === 'new' && !branchName.trim())
+                    }
                   >
-                    {busy ? 'Starting…' : 'Start'}
+                    {busy ? 'Starting…' : worktreeMode === 'new' ? 'Create & start' : 'Start'}
                   </button>
                 </div>
               </>

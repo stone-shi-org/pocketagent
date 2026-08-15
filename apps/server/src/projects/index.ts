@@ -271,19 +271,42 @@ const TERMINAL = new Set(['exited', 'killed', 'error', 'interrupted']);
  * Spawning a process per project on every poll of the home screen is a real
  * cost, and the file is a one-line read. A detached HEAD has no branch name, so
  * it reports null rather than a bare commit hash nobody recognizes.
+ *
+ * In a worktree (or a submodule), `.git` is a *file* containing
+ * `gitdir: <path/to/main/.git/worktrees/<name>>` rather than a directory — the
+ * worktree-creation feature makes this the common case for anything under
+ * `.worktrees/`, not a rare one, so it is followed one level rather than
+ * treated as "not a repo".
  */
 export async function readGitBranch(dir: string): Promise<string | null> {
-  let head: string;
+  const gitPath = path.join(dir, '.git');
+  let gitDir = gitPath;
+  let stat;
   try {
-    head = await fs.readFile(path.join(dir, '.git', 'HEAD'), 'utf8');
+    stat = await fs.stat(gitPath);
   } catch {
-    // Also covers a worktree or submodule, where `.git` is a file. Those are
-    // rare enough that not showing a branch is better than parsing gitdir
-    // indirection here.
     return null;
   }
-  const match = /^ref:\s*refs\/heads\/(.+)$/m.exec(head.trim());
-  return match?.[1]?.trim() || null;
+  if (!stat.isDirectory()) {
+    let indirection: string;
+    try {
+      indirection = await fs.readFile(gitPath, 'utf8');
+    } catch {
+      return null;
+    }
+    const match = /^gitdir:\s*(.+)$/m.exec(indirection.trim());
+    if (!match?.[1]) return null;
+    gitDir = path.isAbsolute(match[1]) ? match[1] : path.resolve(dir, match[1]);
+  }
+
+  let head: string;
+  try {
+    head = await fs.readFile(path.join(gitDir, 'HEAD'), 'utf8');
+  } catch {
+    return null;
+  }
+  const branchMatch = /^ref:\s*refs\/heads\/(.+)$/m.exec(head.trim());
+  return branchMatch?.[1]?.trim() || null;
 }
 
 async function isGitRepo(dir: string): Promise<boolean> {

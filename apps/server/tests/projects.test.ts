@@ -59,6 +59,21 @@ describe('readGitBranch', () => {
   it('reports no branch outside a repository', async () => {
     expect(await readGitBranch('/tmp')).toBeNull();
   });
+
+  it('follows a worktree .git file to find the branch', async () => {
+    // A real `git worktree add` leaves `.git` as a *file* containing
+    // `gitdir: <path>`, pointing at a directory under the main repo's
+    // `.git/worktrees/<name>` that holds this worktree's own HEAD.
+    const gitDir = fs.mkdtempSync('/tmp/pa-git-wt-');
+    fs.writeFileSync(path.join(gitDir, 'HEAD'), 'ref: refs/heads/feature/wt\n');
+    fs.rmSync(path.join(dir, '.git'), { recursive: true, force: true });
+    fs.writeFileSync(path.join(dir, '.git'), `gitdir: ${gitDir}\n`);
+    try {
+      expect(await readGitBranch(dir)).toBe('feature/wt');
+    } finally {
+      fs.rmSync(gitDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('ProjectService', () => {

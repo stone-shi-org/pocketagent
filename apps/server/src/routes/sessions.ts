@@ -11,6 +11,7 @@ import { browseDirectory, discoverFolders } from '../discover/index.js';
 import { SessionError } from '../sessions/manager.js';
 import { WorkspaceError } from '../workspaces/index.js';
 import { hideChat } from '../db/index.js';
+import { resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
   const { sessions, workspaces, agents, conversations, adoption, projects } = app.pocket;
@@ -102,16 +103,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       });
       return null;
     }
-    try {
-      return await workspaces.resolveWorkspacePath(parsed.data.cwd);
-    } catch (err) {
-      if (err instanceof WorkspaceError) {
-        const status = err.code === 'forbidden' ? 403 : err.code === 'not_found' ? 404 : 400;
-        void reply.code(status).send({ error: { code: err.code, message: err.message } });
-        return null;
-      }
-      throw err;
-    }
+    return resolveWorkspaceCwdOrReply(workspaces, parsed.data.cwd, reply);
   }
 
   /** One entry until a front server can register others. */
@@ -320,16 +312,8 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       body.cwd = target.cwd;
     }
 
-    let cwd: string;
-    try {
-      cwd = await workspaces.resolveWorkspacePath(body.cwd);
-    } catch (err) {
-      if (err instanceof WorkspaceError) {
-        const status = err.code === 'forbidden' ? 403 : err.code === 'not_found' ? 404 : 400;
-        return reply.code(status).send({ error: { code: err.code, message: err.message } });
-      }
-      throw err;
-    }
+    const cwd = await resolveWorkspaceCwdOrReply(workspaces, body.cwd, reply);
+    if (cwd === null) return reply;
 
     try {
       const session = await sessions.create({

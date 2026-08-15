@@ -3,6 +3,8 @@ import type {
   AgentEvent,
   AgentUsageInfo,
   BrowseEntry,
+  CreateWorktreeRequest,
+  CreateWorktreeResponse,
   DiscoveredFolder,
   AgentInfo,
   ConversationInfo,
@@ -161,6 +163,13 @@ export const api = {
     }>(`/api/browse${path ? `?path=${encodeURIComponent(path)}` : ''}`),
 
   listWorkspaces: () => request<{ workspaces: WorkspaceEntry[] }>('/api/workspaces'),
+
+  /** Creates a new git worktree for a project; the returned `cwd` feeds `createSession`. */
+  createWorktree: (body: CreateWorktreeRequest) =>
+    request<CreateWorktreeResponse>('/api/projects/worktree', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 
   listAgents: () => request<{ agents: AgentInfo[] }>('/api/agents'),
 

@@ -10,6 +10,7 @@ import type { ConversationStore } from './conversations/index.js';
 import type { AdoptionService } from './adopt/index.js';
 import type { ProjectService } from './projects/index.js';
 import type { UsageService } from './usage/index.js';
+import type { WorktreeService } from './git/worktree.js';
 
 export interface PocketContext {
   config: Config;
@@ -24,6 +25,7 @@ export interface PocketContext {
   adoption: AdoptionService;
   projects: ProjectService;
   usage: UsageService;
+  worktrees: WorktreeService;
 }
 
 declare module 'fastify' {

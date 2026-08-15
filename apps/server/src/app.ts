@@ -27,6 +27,7 @@ import { PushService } from './push/index.js';
 import { ConversationStore } from './conversations/index.js';
 import { AdoptionService } from './adopt/index.js';
 import { ProjectService } from './projects/index.js';
+import { WorktreeService } from './git/worktree.js';
 import {
   UsageService,
   createClaudeUsageSource,
@@ -38,6 +39,7 @@ import { pushRoutes } from './routes/push.js';
 import { sessionRoutes } from './routes/sessions.js';
 import { settingsRoutes } from './routes/settings.js';
 import { usageRoutes } from './routes/usage.js';
+import { worktreeRoutes } from './routes/worktrees.js';
 import { websocketRoutes } from './ws/index.js';
 import type { PocketContext } from './types.js';
 
@@ -151,6 +153,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   }
 
   const projects = new ProjectService({ workspaces, conversations, db, version: VERSION });
+  const worktrees = new WorktreeService({ workspaces });
 
   const sessions = new SessionManager({
     db,
@@ -205,6 +208,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     adoption,
     projects,
     usage,
+    worktrees,
   };
   app.decorate('pocket', context);
 
@@ -285,6 +289,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   await app.register(authRoutes);
   await app.register(sessionRoutes);
+  await app.register(worktreeRoutes);
   await app.register(settingsRoutes);
   await app.register(pushRoutes);
   await app.register(usageRoutes);

@@ -66,6 +66,42 @@ export const CreateSessionRequest = z.object({
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 
+/**
+ * Create a git worktree for an existing project, on its own branch.
+ *
+ * A separate, explicit step from `CreateSessionRequest` rather than fields on
+ * it: it mutates the filesystem (and the project's git state) where session
+ * creation otherwise never does, so it gets its own audit point — the same
+ * reasoning that keeps `POST /api/workspaces/add` separate from starting a
+ * session. The resulting `cwd` is handed to `POST /api/sessions` afterward
+ * like any other directory.
+ *
+ * `current` never reuses the branch already checked out in the project's main
+ * worktree — git refuses to check the same branch out twice — so the server
+ * mints a new branch name off its tip instead.
+ */
+export const CreateWorktreeRequest = z
+  .object({
+    /** The existing project directory to branch from. */
+    cwd: z.string().min(1).max(4096),
+    branchMode: z.enum(['new', 'current']),
+    /** Required when `branchMode` is `"new"`; validated against git's own ref-name rules. */
+    branchName: z.string().min(1).max(200).optional(),
+  })
+  .refine((v) => v.branchMode !== 'new' || !!v.branchName?.trim(), {
+    message: 'branchName is required when creating a new branch.',
+    path: ['branchName'],
+  });
+export type CreateWorktreeRequest = z.infer<typeof CreateWorktreeRequest>;
+
+export const CreateWorktreeResponse = z.object({
+  /** Canonical path of the new worktree; pass this as `cwd` to `POST /api/sessions`. */
+  cwd: z.string(),
+  /** The branch actually checked out there — may differ from a requested `branchName`. */
+  branch: z.string(),
+});
+export type CreateWorktreeResponse = z.infer<typeof CreateWorktreeResponse>;
+
 export const SessionListResponse = z.object({
   sessions: z.array(SessionInfo),
 });
