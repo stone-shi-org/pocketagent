@@ -71,6 +71,8 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   private _endedAt: number | null = null;
   private _lastActivityAt: number | null = null;
   private _busy = false;
+  /** See `busySince` getter. */
+  private _busySince: number | null = null;
   /**
    * `tool_use` ids of `invoke_subagent` calls still awaiting resolution.
    * agy's own step lifecycle for that tool call marks itself `DONE` almost
@@ -141,6 +143,10 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   }
   get busy(): boolean {
     return this._busy;
+  }
+  /** See `StructuredSession.busySince`'s doc comment. */
+  get busySince(): number | null {
+    return this._busySince;
   }
   /** No global-bypass concept here: every session is already maximally bypassed. */
   get globalBypassActive(): boolean {
@@ -310,6 +316,13 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this.emit('status', status);
   }
 
+  /** Stamps `busySince` only on an actual false->true transition. */
+  private setBusy(busy: boolean): void {
+    if (this._busy === busy) return;
+    this._busy = busy;
+    this._busySince = busy ? Date.now() : null;
+  }
+
   private emitEvent(event: AgentEvent): void {
     const entry = this.buffer.append(event);
     this.emit('event', entry.seq, entry.event);
@@ -321,7 +334,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   prompt(text: string): boolean {
     if (!this.isAlive()) return false;
     this._lastActivityAt = Date.now();
-    this._busy = true;
+    this.setBusy(true);
 
     this.emitEvent({ kind: 'user_prompt', id: crypto.randomBytes(6).toString('hex'), text });
     this.queue.push(text);
@@ -341,7 +354,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       }
     } finally {
       this.draining = false;
-      if (!this.closed) this._busy = false;
+      if (!this.closed) this.setBusy(false);
     }
   }
 

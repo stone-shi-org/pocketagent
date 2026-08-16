@@ -61,6 +61,8 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
   private _endedAt: number | null = null;
   private _lastActivityAt: number | null = null;
   private _busy = false;
+  /** See `busySince` getter. */
+  private _busySince: number | null = null;
   private _globalBypass = false;
   private _startError: string | null = null;
   /** Cached from the latest `message.updated` for the assistant, since `session.idle` carries no usage of its own. */
@@ -128,6 +130,10 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
   }
   get busy(): boolean {
     return this._busy;
+  }
+  /** See `StructuredSession.busySince`'s doc comment. */
+  get busySince(): number | null {
+    return this._busySince;
   }
   get globalBypassActive(): boolean {
     return this._globalBypass;
@@ -290,12 +296,12 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
         continue;
       }
       if (event.kind === 'turn_complete') {
-        this._busy = false;
+        this.setBusy(false);
         this.emitEvent(this._lastUsage ? { ...event, ...usageFields(this._lastUsage) } : event);
         this._lastUsage = null;
         continue;
       }
-      if (isRecord(raw) && raw.type === 'session.error') this._busy = false;
+      if (isRecord(raw) && raw.type === 'session.error') this.setBusy(false);
       this.emitEvent(event);
     }
   }
@@ -325,12 +331,19 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
     this.emit('status', status);
   }
 
+  /** Stamps `busySince` only on an actual false->true transition. */
+  private setBusy(busy: boolean): void {
+    if (this._busy === busy) return;
+    this._busy = busy;
+    this._busySince = busy ? Date.now() : null;
+  }
+
   // ---- Conversation ------------------------------------------------------------
 
   prompt(text: string): boolean {
     if (!this.isAlive() || !this._opencodeSessionId) return false;
     this._lastActivityAt = Date.now();
-    this._busy = true;
+    this.setBusy(true);
     this.emitEvent({ kind: 'user_prompt', id: crypto.randomBytes(6).toString('hex'), text });
 
     // A leading `/name` only routes to the dedicated command endpoint when
@@ -352,7 +365,7 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
         body,
       })
       .catch((err) => {
-        this._busy = false;
+        this.setBusy(false);
         this.emitEvent({
           kind: 'notice',
           level: 'error',
@@ -523,7 +536,7 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
     if (!this.isAlive()) return;
     this.pending.clear();
     this.emit('permission', []);
-    this._busy = false;
+    this.setBusy(false);
     this._startError = 'The opencode server process exited unexpectedly.';
     this._endedAt = Date.now();
     this.setStatus('error');

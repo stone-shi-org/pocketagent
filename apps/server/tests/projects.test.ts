@@ -17,6 +17,8 @@ function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
     cwd: '/w',
     workspaceLabel: 'w',
     status: 'running',
+    busy: false,
+    busySince: null,
     cols: 80,
     rows: 24,
     pid: 1,
@@ -280,6 +282,36 @@ describe('ProjectService', () => {
     // Directories with work come first, newest first; empty ones follow.
     expect(projects.slice(0, 2).map((p) => p.name)).toEqual(['project', 'older']);
     expect(projects.slice(2).every((p) => p.chats.length === 0)).toBe(true);
+  });
+
+  it('keeps a busy project on top of an idle one even with an older busySince than the idle one\'s lastActivityAt', async () => {
+    // Regression for the reorder-churn bug: a session mid-turn ticks
+    // `lastActivityAt` on every streamed chunk, so sorting on that directly
+    // made the list flip constantly whenever two agents were both producing
+    // output. Sorting a busy chat by `busySince` (stamped once, at turn
+    // start) instead means it stays on top for the whole turn regardless of
+    // how recently the *idle* project below it finished.
+    const older = path.join(ws.root, 'older');
+    fs.mkdirSync(older);
+    const projects = await service.list([
+      makeSession({ id: 'busy', cwd: older, busy: true, busySince: 1000, lastActivityAt: 1500 }),
+      makeSession({ id: 'idle', cwd: ws.project, busy: false, busySince: null, lastActivityAt: 9000 }),
+    ]);
+    expect(projects.slice(0, 2).map((p) => p.name)).toEqual(['older', 'project']);
+  });
+
+  it('keeps two concurrently-busy projects in a stable relative order regardless of their latest lastActivityAt', async () => {
+    const a = path.join(ws.root, 'a-project');
+    const b = path.join(ws.root, 'b-project');
+    fs.mkdirSync(a);
+    fs.mkdirSync(b);
+    // 'a' became busy first, so it should stay on top even though 'b' has
+    // since emitted a later chunk (a higher lastActivityAt).
+    const projects = await service.list([
+      makeSession({ id: 'a', cwd: a, busy: true, busySince: 1000, lastActivityAt: 5000 }),
+      makeSession({ id: 'b', cwd: b, busy: true, busySince: 2000, lastActivityAt: 4000 }),
+    ]);
+    expect(projects.slice(0, 2).map((p) => p.name)).toEqual(['b-project', 'a-project']);
   });
 
   it('lists an added folder that has no chats yet', async () => {

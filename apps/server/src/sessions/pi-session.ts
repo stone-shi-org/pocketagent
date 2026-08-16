@@ -74,6 +74,8 @@ export class PiSession extends EventEmitter<StructuredSessionEvents> {
   private _exitSignal: number | null = null;
   private _startError: string | null = null;
   private _busy = false;
+  /** See `busySince` getter. */
+  private _busySince: number | null = null;
 
   constructor(spec: PiSessionSpec, epoch?: string) {
     super();
@@ -135,6 +137,10 @@ export class PiSession extends EventEmitter<StructuredSessionEvents> {
   }
   get busy(): boolean {
     return this._busy;
+  }
+  /** See `StructuredSession.busySince`'s doc comment. */
+  get busySince(): number | null {
+    return this._busySince;
   }
   /** No bypass concept here: every session is already maximally (and permanently) bypassed. */
   get globalBypassActive(): boolean {
@@ -211,7 +217,7 @@ export class PiSession extends EventEmitter<StructuredSessionEvents> {
       this._exitCode = code;
       this._exitSignal = signal ? 1 : null;
       this._endedAt = Date.now();
-      this._busy = false;
+      this.setBusy(false);
       if (signal) {
         this.setStatus('killed');
       } else if (code === 0) {
@@ -415,7 +421,7 @@ export class PiSession extends EventEmitter<StructuredSessionEvents> {
 
     for (const event of normalizePiEventSafe(message, this.messageSeq)) {
       if (event.kind === 'turn_complete') {
-        this._busy = false;
+        this.setBusy(false);
         this.emitEvent(this.lastAssistant ? { ...event, ...this.usageFields() } : event);
         this.lastAssistant = null;
         continue;
@@ -460,6 +466,13 @@ export class PiSession extends EventEmitter<StructuredSessionEvents> {
     this.emit('status', status);
   }
 
+  /** Stamps `busySince` only on an actual false->true transition. */
+  private setBusy(busy: boolean): void {
+    if (this._busy === busy) return;
+    this._busy = busy;
+    this._busySince = busy ? Date.now() : null;
+  }
+
   private sendCommand(type: string, params: Record<string, unknown> = {}): Promise<CommandResponse> {
     const id = `pa_${this.nextRequestId++}`;
     return new Promise((resolve) => {
@@ -477,12 +490,12 @@ export class PiSession extends EventEmitter<StructuredSessionEvents> {
   prompt(text: string): boolean {
     if (!this.isAlive()) return false;
     this._lastActivityAt = Date.now();
-    this._busy = true;
+    this.setBusy(true);
     this.emitEvent({ kind: 'user_prompt', id: crypto.randomBytes(6).toString('hex'), text });
 
     void this.sendCommand('prompt', { message: text }).then((res) => {
       if (!res.success) {
-        this._busy = false;
+        this.setBusy(false);
         this.emitEvent({
           kind: 'notice',
           level: 'error',

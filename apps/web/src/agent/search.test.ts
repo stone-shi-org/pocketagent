@@ -16,6 +16,7 @@ function chat(title: string): ChatSummary {
     updatedAt: 0,
     messageCount: null,
     directoryBusy: false,
+    busySince: null,
   };
 }
 

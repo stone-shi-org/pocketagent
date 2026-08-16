@@ -141,6 +141,8 @@ export class ProjectService {
         updatedAt: conversation.updatedAt,
         messageCount: conversation.messageCount,
         directoryBusy: conversation.directoryBusy,
+        // A disk-only transcript has no live session, so nothing to be busy about.
+        busySince: null,
       });
     }
 
@@ -157,7 +159,7 @@ export class ProjectService {
 
       const hidden = isHidden(cwd, visibility);
       if (hidden && !includeHidden) continue;
-      chats.sort((a, b) => b.updatedAt - a.updatedAt);
+      chats.sort((a, b) => compareByRecency(chatSortKey(a), chatSortKey(b)));
       projects.push({
         cwd,
         name: path.basename(cwd) || cwd,
@@ -173,10 +175,13 @@ export class ProjectService {
     // Anything with work in it first, most recent at the top; then the rest
     // alphabetically. An empty directory has no timestamp to sort by, and
     // ordering those by chance would make the list shuffle between polls.
+    // Projects whose top chat is mid-turn bucket above idle ones and sort
+    // among themselves by `busySince` — see `chatSortKey` for why.
     projects.sort((a, b) => {
-      const at = a.chats[0]?.updatedAt ?? 0;
-      const bt = b.chats[0]?.updatedAt ?? 0;
-      if (at !== bt) return bt - at;
+      const ak = a.chats[0] ? chatSortKey(a.chats[0]) : { busy: false, ts: 0 };
+      const bk = b.chats[0] ? chatSortKey(b.chats[0]) : { busy: false, ts: 0 };
+      const cmp = compareByRecency(ak, bk);
+      if (cmp !== 0) return cmp;
       return a.workspaceLabel.localeCompare(b.workspaceLabel);
     });
     return projects;
@@ -217,7 +222,26 @@ function chatFromSession(session: SessionInfo, transcriptTitle?: string): ChatSu
     updatedAt: sessionUpdatedAt(session),
     messageCount: null,
     directoryBusy: false,
+    busySince: session.busySince,
   };
+}
+
+/**
+ * Sort key for a chat/project row. While a session is mid-turn, `updatedAt`
+ * (backed by `lastActivityAt`) ticks on every streamed chunk — sorting on it
+ * directly made the list reorder several times a second whenever two agents
+ * in different projects were both producing output at once. `busySince` only
+ * moves at turn boundaries, so two concurrently-busy rows hold a fixed
+ * relative order for the life of their turn; busy rows bucket above idle
+ * ones, which keep sorting by `updatedAt` as before.
+ */
+function chatSortKey(chat: ChatSummary): { busy: boolean; ts: number } {
+  return chat.busySince != null ? { busy: true, ts: chat.busySince } : { busy: false, ts: chat.updatedAt };
+}
+
+function compareByRecency(a: { busy: boolean; ts: number }, b: { busy: boolean; ts: number }): number {
+  if (a.busy !== b.busy) return a.busy ? -1 : 1;
+  return b.ts - a.ts;
 }
 
 /**

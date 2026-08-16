@@ -132,6 +132,8 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   private _startError: string | null = null;
   /** True while the agent is mid-turn, as opposed to idle awaiting a prompt. */
   private _busy = false;
+  /** See `busySince` getter. */
+  private _busySince: number | null = null;
   /** True while the operator's global skip-permissions switch is applied here. */
   private _globalBypass = false;
   /**
@@ -200,6 +202,14 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   }
   get busy(): boolean {
     return this._busy;
+  }
+  /**
+   * Epoch ms when `busy` last flipped false -> true; null while idle. Stable
+   * for the whole turn, unlike `lastActivityAt` — see the protocol doc comment
+   * for why the project list sorts on this instead.
+   */
+  get busySince(): number | null {
+    return this._busySince;
   }
   /** True while the operator's global skip-permissions switch is applied here. */
   get globalBypassActive(): boolean {
@@ -416,7 +426,7 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
           if (event.kind === 'conversation_reset' && event.newConversationId) {
             this._agentSessionId = event.newConversationId;
           }
-          if (event.kind === 'turn_complete') this._busy = false;
+          if (event.kind === 'turn_complete') this.setBusy(false);
           this.emitEvent(event);
         }
       }
@@ -453,7 +463,7 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
     }
     this.backgroundTasks.pending.clear();
     this._endedAt = Date.now();
-    this._busy = false;
+    this.setBusy(false);
     this.setStatus(this.abort.signal.aborted ? 'killed' : 'exited');
     this.emit('exit', this._exitCode, null);
   }
@@ -467,6 +477,13 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
     if (this._status === status) return;
     this._status = status;
     this.emit('status', status);
+  }
+
+  /** Stamps `busySince` only on an actual false->true transition. */
+  private setBusy(busy: boolean): void {
+    if (this._busy === busy) return;
+    this._busy = busy;
+    this._busySince = busy ? Date.now() : null;
   }
 
   // ---- Conversation --------------------------------------------------------
@@ -483,7 +500,7 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   prompt(text: string, image?: PromptImage): boolean {
     if (!this.isAlive()) return false;
     this._lastActivityAt = Date.now();
-    this._busy = true;
+    this.setBusy(true);
 
     this.emitEvent({ kind: 'user_prompt', id: crypto.randomBytes(6).toString('hex'), text, image });
 

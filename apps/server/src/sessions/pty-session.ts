@@ -97,6 +97,8 @@ export class PtySession extends EventEmitter<PtySessionEvents> {
    * this stuck on a stale value).
    */
   private _busy = false;
+  /** See `busySince` getter. */
+  private _busySince: number | null = null;
 
   private pending: string[] = [];
   private pendingBytes = 0;
@@ -161,6 +163,10 @@ export class PtySession extends EventEmitter<PtySessionEvents> {
   }
   get busy(): boolean {
     return this._busy;
+  }
+  /** See `StructuredSession.busySince`'s doc comment. */
+  get busySince(): number | null {
+    return this._busySince;
   }
 
   isAlive(): boolean {
@@ -243,10 +249,23 @@ export class PtySession extends EventEmitter<PtySessionEvents> {
   /** See `_busy`'s doc comment for why this reads `currentHints()`, not `hints`. */
   private updateBusy(): void {
     const hints = this.classifier.currentHints();
-    if (hints.includes('working')) this._busy = true;
-    else if (hints.length > 0) this._busy = false;
+    if (hints.includes('working')) this.setBusy(true);
+    else if (hints.length > 0) this.setBusy(false);
     // No hint at all yet (brand new session): leave the initial `false` rather
     // than guessing from silence.
+  }
+
+  /**
+   * Stamps `busySince` only on an actual false->true transition. Guarding here
+   * matters more than in the structured backends: `updateBusy()` runs on every
+   * flush regardless of whether the hint actually changed, and an unguarded
+   * write would restamp `busySince` continuously while `working` persists —
+   * exactly the churn this field exists to avoid.
+   */
+  private setBusy(busy: boolean): void {
+    if (this._busy === busy) return;
+    this._busy = busy;
+    this._busySince = busy ? Date.now() : null;
   }
 
   private handleExit(exitCode: number | null, signal: number | null): void {

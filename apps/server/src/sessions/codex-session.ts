@@ -77,6 +77,8 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
   private _endedAt: number | null = null;
   private _lastActivityAt: number | null = null;
   private _busy = false;
+  /** See `busySince` getter. */
+  private _busySince: number | null = null;
   private _globalBypass = false;
   private _startError: string | null = null;
   /** Cached from the latest `thread/tokenUsage/updated` — `turn/completed` carries none of its own. */
@@ -143,6 +145,10 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
   }
   get busy(): boolean {
     return this._busy;
+  }
+  /** See `StructuredSession.busySince`'s doc comment. */
+  get busySince(): number | null {
+    return this._busySince;
   }
   get globalBypassActive(): boolean {
     return this._globalBypass;
@@ -257,7 +263,7 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
         continue;
       }
       if (event.kind === 'turn_complete') {
-        this._busy = false;
+        this.setBusy(false);
         this.emitEvent(this._lastUsage ? { ...event, ...usageFields(this._lastUsage) } : event);
         this._lastUsage = null;
         continue;
@@ -292,6 +298,13 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
     this.emit('status', status);
   }
 
+  /** Stamps `busySince` only on an actual false->true transition. */
+  private setBusy(busy: boolean): void {
+    if (this._busy === busy) return;
+    this._busy = busy;
+    this._busySince = busy ? Date.now() : null;
+  }
+
   // ---- Conversation ------------------------------------------------------------
 
   prompt(text: string): boolean {
@@ -313,11 +326,11 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
       return true;
     }
 
-    this._busy = true;
+    this.setBusy(true);
     void this.server
       .sendRequest('turn/start', { threadId: this._threadId, input: [{ type: 'text', text }] })
       .catch((err: unknown) => {
-        this._busy = false;
+        this.setBusy(false);
         this.emitEvent({
           kind: 'notice',
           level: 'error',
@@ -337,10 +350,10 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
    */
   private startReview(args: string): void {
     if (!this._threadId) return;
-    this._busy = true;
+    this.setBusy(true);
     const target = args.trim() ? { type: 'baseBranch' as const, branch: args.trim() } : { type: 'uncommittedChanges' as const };
     void this.server.sendRequest('review/start', { threadId: this._threadId, target }).catch((err: unknown) => {
-      this._busy = false;
+      this.setBusy(false);
       this.emitEvent({
         kind: 'notice',
         level: 'error',
@@ -355,7 +368,7 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
    * unlike a real turn, nothing async follows it.
    */
   private async runSlashCommand(name: string, args: string): Promise<void> {
-    this._busy = true;
+    this.setBusy(true);
     let isError = false;
     let endsSession = false;
     try {
@@ -374,7 +387,7 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
         text: `/${name} failed: ${err instanceof Error ? err.message : String(err)}`,
       });
     } finally {
-      this._busy = false;
+      this.setBusy(false);
     }
 
     // No real turn ran, but the browser's "three dots" busy indicator is
@@ -735,7 +748,7 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
     if (!this.isAlive()) return;
     this.pending.clear();
     this.emit('permission', []);
-    this._busy = false;
+    this.setBusy(false);
     this._startError = 'The codex app-server process exited unexpectedly.';
     this._endedAt = Date.now();
     this.setStatus('error');

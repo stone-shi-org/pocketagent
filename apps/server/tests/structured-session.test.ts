@@ -73,14 +73,17 @@ describe('StructuredSession.busy', () => {
     session = makeSession();
     await session.start();
     expect(session.busy).toBe(false);
+    expect(session.busySince).toBeNull();
 
     expect(session.prompt('hello')).toBe(true);
     // Synchronous: `prompt()` sets `_busy` itself, before the SDK reports
     // anything back. A UI dot flipping only on the *next* event would lag by
     // a full round trip for no reason.
     expect(session.busy).toBe(true);
+    expect(session.busySince).not.toBeNull();
 
     await waitFor(() => session?.busy === false);
+    expect(session.busySince).toBeNull();
   });
 
   it('goes busy again for a second turn on the same session', async () => {
@@ -92,7 +95,9 @@ describe('StructuredSession.busy', () => {
 
     session.prompt('second');
     expect(session.busy).toBe(true);
+    expect(session.busySince).not.toBeNull();
     await waitFor(() => session?.busy === false);
+    expect(session.busySince).toBeNull();
   });
 });
 

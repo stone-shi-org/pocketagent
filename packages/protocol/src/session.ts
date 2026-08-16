@@ -89,6 +89,14 @@ export const SessionInfo = z.object({
    * signal anything is gated on.
    */
   busy: z.boolean(),
+  /**
+   * Epoch ms when `busy` last flipped false -> true; null while idle. Unlike
+   * `lastActivityAt`, this does not move again until the current turn ends, so
+   * it is a stable sort key while streaming — `lastActivityAt` ticks on every
+   * chunk and made the project list reorder mid-stream, which is confusing
+   * when two agents are running in different projects at once.
+   */
+  busySince: z.number().int().nullable(),
 });
 export type SessionInfo = z.infer<typeof SessionInfo>;
 
@@ -207,6 +215,8 @@ export const ChatSummary = z.object({
   messageCount: z.number().int().nonnegative().nullable(),
   /** An agent process is running in this directory, though maybe not this chat. */
   directoryBusy: z.boolean(),
+  /** See `SessionInfo.busySince`. Null for a chat that is not this session. */
+  busySince: z.number().int().nullable(),
 });
 export type ChatSummary = z.infer<typeof ChatSummary>;
 
