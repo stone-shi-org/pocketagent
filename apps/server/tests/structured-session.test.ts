@@ -18,12 +18,21 @@ import { waitFor } from './helpers.js';
 // state — cleared per test in `beforeEach`.
 const received: unknown[] = [];
 
+// Flipped by the pump-error tests below to make the mocked SDK's message
+// stream throw mid-turn instead of yielding its usual `result` message —
+// simulating the transient stream failure this file otherwise cannot
+// reproduce, since `query()` is mocked file-wide. Reset per test.
+let throwOnNextPrompt = false;
+
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: ({ prompt }: { prompt: AsyncIterable<unknown> }) => ({
     async *[Symbol.asyncIterator]() {
       yield { type: 'system', subtype: 'init', session_id: 'sess_test' };
       for await (const msg of prompt) {
         received.push(msg);
+        if (throwOnNextPrompt) {
+          throw new Error('simulated stream failure');
+        }
         yield {
           type: 'result',
           subtype: 'success',
@@ -164,5 +173,55 @@ describe('StructuredSession.prompt image attachment', () => {
     await waitFor(() => session?.busy === false);
 
     expect(events[0]).toMatchObject({ kind: 'user_prompt', text: 'what is this?', image });
+  });
+});
+
+/**
+ * Regression coverage for the "reported an error and stuck" bug: `pump()`'s
+ * `for await` loop can throw mid-turn (a transient failure consuming the
+ * SDK's message stream) before the SDK's own final `result` message — and
+ * the `turn_complete` normalize.ts would derive from it — ever arrives. Before
+ * this fix, that left `busy` stuck `true` forever (nothing else clears it)
+ * while the session's status silently became `exited`, at odds with the error
+ * notice already in the transcript. See structured-session.ts's `pump()`/
+ * `finish()` for the fix: a synthetic `turn_complete` clears `busy`, and
+ * status becomes `error`, not `exited`.
+ */
+describe('StructuredSession pump-loop error handling', () => {
+  let session: InstanceType<typeof StructuredSession> | null = null;
+
+  beforeEach(() => {
+    throwOnNextPrompt = false;
+  });
+
+  afterEach(() => {
+    throwOnNextPrompt = false;
+    session?.terminate();
+    session = null;
+  });
+
+  it('clears busy and reports status "error" instead of hanging as "exited"', async () => {
+    session = makeSession();
+    await session.start();
+
+    const events: unknown[] = [];
+    session.on('event', (_seq: number, event: unknown) => events.push(event));
+
+    throwOnNextPrompt = true;
+    session.prompt('this turn will blow up mid-stream');
+    expect(session.busy).toBe(true);
+
+    await waitFor(() => session?.status === 'error');
+
+    // The stuck symptom: without the fix, nothing ever flips this back.
+    expect(session.busy).toBe(false);
+    expect(session.busySince).toBeNull();
+
+    expect(events).toContainEqual(
+      expect.objectContaining({ kind: 'turn_complete', isError: true }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({ kind: 'notice', level: 'error' }),
+    );
   });
 });

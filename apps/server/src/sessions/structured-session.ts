@@ -130,6 +130,9 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   private _lastActivityAt: number | null = null;
   private _exitCode: number | null = null;
   private _startError: string | null = null;
+  /** Set when `pump()`'s `for await` loop itself threw, as opposed to a clean
+      end of stream — see `finish()`'s status choice below. */
+  private _pumpErrored = false;
   /** True while the agent is mid-turn, as opposed to idle awaiting a prompt. */
   private _busy = false;
   /** See `busySince` getter. */
@@ -432,12 +435,36 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
       }
     } catch (err) {
       if (!this.abort.signal.aborted) {
+        this._pumpErrored = true;
         this.emitEvent({
           kind: 'notice',
           level: 'error',
           text: err instanceof Error ? err.message : String(err),
         });
         this._startError = err instanceof Error ? err.message : String(err);
+        // The thrown error broke out of `for await` before the SDK's own
+        // final `result` message could arrive, so the `turn_complete` that
+        // would have cleared `busy` never gets emitted — the browser's
+        // spinner would otherwise sit on "thinking" forever, indistinguishable
+        // from a session that is still genuinely working. This is a best-effort
+        // signal, not a claim about what actually happened server-side: the
+        // agent process itself may have gone on to finish the turn (its own
+        // transcript on disk is unaffected by us losing the stream), but we
+        // have no way to reconcile against that here, so we report the only
+        // thing we actually know — our view of this turn ended in error.
+        if (this._busy) {
+          this.setBusy(false);
+          this.emitEvent({
+            kind: 'turn_complete',
+            stopReason: null,
+            isError: true,
+            numTurns: null,
+            durationMs: null,
+            costUsd: null,
+            inputTokens: null,
+            outputTokens: null,
+          });
+        }
       }
     } finally {
       this.finish();
@@ -464,7 +491,13 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
     this.backgroundTasks.pending.clear();
     this._endedAt = Date.now();
     this.setBusy(false);
-    this.setStatus(this.abort.signal.aborted ? 'killed' : 'exited');
+    // A pump-loop exception is reported as `error`, not `exited` — `exited`
+    // reads as a clean stop, which contradicts the error notice already in
+    // the transcript and previously left the status badge and the visible
+    // error at odds with each other.
+    this.setStatus(
+      this.abort.signal.aborted ? 'killed' : this._pumpErrored ? 'error' : 'exited',
+    );
     this.emit('exit', this._exitCode, null);
   }
 
