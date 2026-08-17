@@ -25,7 +25,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { PromptBox } from '../components/PromptBox.js';
 import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
 import { Icon } from '../components/Icon.js';
-import { notifyApproval, ensureNotificationPermission } from '../agent/notifications.js';
+import { notifyApproval, notifyTurnComplete, ensureNotificationPermission } from '../agent/notifications.js';
 import { takePendingPrompt, setPendingPrompt } from '../agent/pending-prompt.js';
 
 interface Props {
@@ -61,23 +61,37 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   const [history, setHistory] = useState<TranscriptItem[]>([]);
 
   useEffect(() => {
+    // Plain closure variable, not a ref: every handler below is recreated
+    // together whenever this effect re-runs (on `sessionId` change), so they
+    // always see the latest write here without the staleness a `session`
+    // state read would have inside this same closure.
+    let latestTitle: string | null = null;
     const conn = new TerminalConnection({
       handlers: {
         onConnectionState: setConnection,
         onAttached: (info) => {
+          latestTitle = info.title;
           setSession(info);
           setStatus(info.status);
           setFatal(null);
         },
         onStatus: (next, info) => {
           setStatus(next);
-          if (info) setSession(info);
+          if (info) {
+            latestTitle = info.title;
+            setSession(info);
+          }
         },
         onAgentEvent: (event) => {
           setTranscript((prev) => applyEvent(prev, event));
           if (event.kind === 'permission_request') {
             // Only fires when the tab is hidden; the sheet is enough otherwise.
             void notifyApproval(event.title, sessionId);
+          }
+          if (event.kind === 'turn_complete') {
+            // Same tab-hidden gate as the approval alert above; a fully
+            // detached client is covered by the server's own push instead.
+            void notifyTurnComplete(latestTitle ?? 'Session', sessionId);
           }
         },
         onAgentReplay: (events, truncated) => {

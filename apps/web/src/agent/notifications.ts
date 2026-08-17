@@ -59,6 +59,61 @@ export async function notifyApproval(title: string, sessionId: string): Promise<
 }
 
 /**
+ * Fire a local notification when a turn finishes, if the tab is hidden.
+ *
+ * Unlike `notifyApproval`, nothing is blocked on this — the agent is simply
+ * idle and ready for the next prompt — so it does not set
+ * `requireInteraction`; the notification can be dismissed by the OS/browser
+ * like any other passive alert instead of insisting on being acted on.
+ */
+export async function notifyTurnComplete(title: string, sessionId: string): Promise<void> {
+  if (!notificationsSupported()) return;
+  if (Notification.permission !== 'granted') return;
+  if (document.visibilityState === 'visible') return;
+
+  try {
+    const registration = swRegistration ?? (await navigator.serviceWorker?.getRegistration());
+    const options: NotificationOptions = {
+      body: `${title} finished and is waiting for your next prompt.`,
+      tag: `turn-complete-${sessionId}`,
+      data: { url: `/#/s/${encodeURIComponent(sessionId)}` },
+    };
+    if (registration) await registration.showNotification('PocketAgent — turn complete', options);
+    else new Notification('PocketAgent — turn complete', options);
+  } catch {
+    // Notifications are a convenience; never let one break the session UI.
+  }
+}
+
+/**
+ * Fire a local notification when a terminal session goes quiet, if the tab
+ * is hidden.
+ *
+ * There is no structured end-of-turn event for a raw PTY — only the
+ * classifier's advisory `idle` hint (see `terminal/classifier.ts`). It is
+ * heuristic, so this is worded as an observation ("looks like") rather than a
+ * claim, matching the server-side push sent for the same case.
+ */
+export async function notifyIdle(title: string, sessionId: string): Promise<void> {
+  if (!notificationsSupported()) return;
+  if (Notification.permission !== 'granted') return;
+  if (document.visibilityState === 'visible') return;
+
+  try {
+    const registration = swRegistration ?? (await navigator.serviceWorker?.getRegistration());
+    const options: NotificationOptions = {
+      body: `${title} looks like it's waiting for you.`,
+      tag: `idle-${sessionId}`,
+      data: { url: `/#/s/${encodeURIComponent(sessionId)}` },
+    };
+    if (registration) await registration.showNotification('PocketAgent — session idle', options);
+    else new Notification('PocketAgent — session idle', options);
+  } catch {
+    // Notifications are a convenience; never let one break the session UI.
+  }
+}
+
+/**
  * Register the service worker and subscribe to Web Push.
  *
  * Returns a human-readable status so the UI can explain why it is unavailable

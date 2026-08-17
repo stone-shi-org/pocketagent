@@ -12,6 +12,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
 import { Icon } from '../components/Icon.js';
 import { takePendingPrompt } from '../agent/pending-prompt.js';
+import { notifyIdle, ensureNotificationPermission } from '../agent/notifications.js';
 
 interface Props {
   sessionId: string;
@@ -58,6 +59,11 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
     termRef.current = bundle.term;
     fitRef.current = bundle.fit;
 
+    // Plain closure variable, not a ref: every handler below is recreated
+    // together whenever this effect re-runs, so they always see the latest
+    // write here without the staleness a `session` state read would have
+    // inside this same closure.
+    let latestTitle: string | null = null;
     const connection = new TerminalConnection({
       handlers: {
         onConnectionState: setConnection,
@@ -79,6 +85,7 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
         },
 
         onAttached: (info) => {
+          latestTitle = info.title;
           setSession(info);
           setStatus(info.status);
           setFatal(null);
@@ -89,7 +96,10 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
 
         onStatus: (next, info) => {
           setStatus(next);
-          if (info) setSession(info);
+          if (info) {
+            latestTitle = info.title;
+            setSession(info);
+          }
         },
 
         onExit: (exitCode, exitSignal) => {
@@ -101,7 +111,16 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
           );
         },
 
-        onHint: setHints,
+        onHint: (nextHints) => {
+          setHints(nextHints);
+          if (nextHints.includes('idle')) {
+            // Same tab-hidden gate the approval alert uses on the structured
+            // side; a fully detached client is covered by the server's own
+            // push instead. `checkIdle` on the server only emits this once
+            // per quiet stretch, so this does not fire on every poll.
+            void notifyIdle(latestTitle ?? 'Session', sessionId);
+          }
+        },
 
         onError: (code, message) => {
           if (code === 'not_found') setFatal(message);
@@ -131,6 +150,7 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
     });
 
     connection.open(sessionId);
+    void ensureNotificationPermission();
 
     return () => {
       inputDisposable.dispose();

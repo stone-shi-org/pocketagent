@@ -321,6 +321,13 @@ export class SessionManager {
 
     if (session.transport === 'structured') {
       session.on('permission', (pending) => this.onPermissionChange(session.id, pending.length));
+      session.on('event', (_seq, event) => {
+        if (event.kind === 'turn_complete') this.onTurnComplete(session);
+      });
+    } else {
+      session.on('hint', (hints) => {
+        if (hints.includes('idle')) this.onIdleHint(session);
+      });
     }
   }
 
@@ -367,6 +374,61 @@ export class SessionManager {
     const timer = this.approvalTimers.get(sessionId);
     if (timer) clearTimeout(timer);
     this.approvalTimers.delete(sessionId);
+  }
+
+  /**
+   * Notify when a structured turn finishes and nobody is attached.
+   *
+   * Unlike an approval, a finished turn does not block the agent, so there is
+   * no "still deciding" window worth waiting out — if a client is attached at
+   * all, the transcript already shows the turn ending live, and a
+   * backgrounded tab covers itself with its own local notification (see
+   * `notifyTurnComplete` on the client). This only fires the one case neither
+   * of those reach: nobody attached whatsoever, e.g. the browser is closed.
+   * `turn_complete` itself is emitted at most once per turn (including the
+   * synthesized one on a pump-loop error — see `structured-session.ts`), so
+   * no debouncing is needed here the way `onPermissionChange` needs it.
+   */
+  private onTurnComplete(session: StructuredLikeSession): void {
+    const push = this.opts.push;
+    if (!push?.isEnabled()) return;
+    if (this.attachedCount(session.id) !== 0) return;
+
+    void push
+      .send({
+        title: 'PocketAgent — turn complete',
+        body: `${this.displayTitle(session)} finished and is waiting for your next prompt.`,
+        url: `/#/s/${encodeURIComponent(session.id)}`,
+        tag: `turn-complete-${session.id}`,
+      })
+      .catch(() => undefined);
+  }
+
+  /**
+   * Notify when a terminal session goes quiet and nobody is attached.
+   *
+   * There is no structured end-of-turn signal for a raw PTY, only the
+   * classifier's advisory `idle` hint (30s of no output — see
+   * `terminal/classifier.ts`). That hint is heuristic and must never gate a
+   * decision, but a push notification doesn't decide anything either; it just
+   * tells someone who has walked away that the pane looks done. The
+   * classifier only emits `idle` once per quiet period (`checkIdle`
+   * deduplicates against the last emitted hint set), so this fires at most
+   * once per idle stretch, not on every sweep tick.
+   */
+  private onIdleHint(session: PtySession): void {
+    const push = this.opts.push;
+    if (!push?.isEnabled()) return;
+    if (this.attachedCount(session.id) !== 0) return;
+
+    void push
+      .send({
+        title: 'PocketAgent — session idle',
+        body: `${this.displayTitle(session)} looks like it's waiting for you.`,
+        url: `/#/s/${encodeURIComponent(session.id)}`,
+        tag: `idle-${session.id}`,
+      })
+      .catch(() => undefined);
   }
 
   async create(input: CreateSessionInput): Promise<ManagedSession> {

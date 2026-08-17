@@ -484,8 +484,9 @@ running, or provide multi-user isolation. It is single-user by design. Anyone wh
 authenticates has your full user privileges.
 
 The optional terminal classifier emits advisory hints (`working`, `waiting_for_input`,
-`possible_approval_prompt`, `idle`) intended for future push notifications. These hints
-**never** cause input to be sent and can never approve anything.
+`possible_approval_prompt`, `idle`) that drive a best-effort push notification when a
+terminal session goes quiet (see below). These hints **never** cause input to be sent and
+can never approve anything.
 
 ---
 
@@ -761,7 +762,7 @@ pocketagent/
 │   │   │   ├── agents/                 # adapter registry: shell, claude
 │   │   │   ├── auth/                   # token check, cookie sessions, origin policy
 │   │   │   ├── backends/               # direct (node-pty) and tmux process backends
-│   │   │   ├── push/                   # Web Push (VAPID) for pending approvals
+│   │   │   ├── push/                   # Web Push (VAPID): approvals + turn-complete/idle
 │   │   │   ├── config/                 # typed env loading
 │   │   │   ├── db/                     # SQLite schema, migrations, stale recovery
 │   │   │   ├── routes/                 # auth + session REST
@@ -895,8 +896,10 @@ should have told you. Raise `OUTPUT_BUFFER_BYTES`, or press `^L` to redraw.
    headless terminal would solve this properly.
 7. **Linux-first.** macOS is untested; Windows is not supported.
 8. **Push notifications need HTTPS**, and on iOS the site must be installed to the home
-   screen before the browser will allow them at all. Approval alerts also fire in-page
-   whenever the tab is merely backgrounded, which needs no push service.
+   screen before the browser will allow them at all. PocketAgent pushes for two events —
+   a pending approval, and a structured agent finishing its turn (or, best-effort, a
+   terminal session going quiet) — always to a fully detached client only; both also fire
+   in-page whenever the tab is merely backgrounded, which needs no push service.
 9. **Terminal output is never persisted.** Buffers are in-memory only, so a restart loses
    scrollback along with the session.
 10. **Conversation liveness is directory-level.** Claude does not keep its transcript file
