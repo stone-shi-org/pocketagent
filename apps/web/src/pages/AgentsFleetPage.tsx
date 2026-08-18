@@ -85,7 +85,13 @@ export function AgentsFleetPage({ onOpen, onApiError, onBack }: Props): JSX.Elem
           {sessions.map((session) => (
             // Keyed on id alone: `AgentCard` owns a live WS attach per card,
             // and a session that ends just falls out of the next poll.
-            <AgentCard key={session.id} session={session} onOpen={onOpen} />
+            <AgentCard
+              key={session.id}
+              session={session}
+              onOpen={onOpen}
+              onApiError={onApiError}
+              onStopped={() => void load()}
+            />
           ))}
         </div>
       )}

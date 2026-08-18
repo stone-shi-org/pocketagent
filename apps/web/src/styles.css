@@ -2842,21 +2842,61 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 }
 
 .agent-card {
+  position: relative;
   display: block;
   width: 100%;
-  text-align: left;
   background: var(--bg-elev-2);
   border: 1px solid var(--border);
   border-radius: 16px;
   box-shadow: var(--shadow-sm);
-  padding: 16px;
-  cursor: pointer;
   transition: box-shadow 150ms ease, border-color 150ms ease, transform 150ms ease;
 }
 .agent-card:hover {
   box-shadow: var(--shadow-md);
   border-color: var(--border-strong);
   transform: translateY(-1px);
+}
+
+/* The card's actual "open" hit area. A plain `<button>` inside the styled
+   `.agent-card` div rather than the div itself being the button — the stop
+   control below is a real `<button>` too, and a button cannot legally
+   contain another one. */
+.agent-card-open {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 16px;
+  padding-right: 44px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* Overlaid on the open button's top-right corner rather than laid out in
+   `.agent-card-head`'s flex row, so it stays reachable without stealing
+   space from the title/meta text — same "corner control over a full-width
+   row" shape as `.chat-remove`. */
+.agent-card-stop {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.agent-card-stop:hover {
+  background: var(--bg-elev);
+  color: var(--danger);
 }
 
 .agent-card-head {
