@@ -62,6 +62,15 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   private readonly queue: string[] = [];
   private draining = false;
   private closed = false;
+  /**
+   * Set only while waiting out a transient-error backoff between retries
+   * (see `MAX_TURN_RETRIES`), i.e. exactly when `child` is null but a turn
+   * is still logically in flight. `interrupt()` checks this first: without
+   * it, hitting stop during that window found no `child` to kill, did
+   * nothing visible, and the scheduled retry fired anyway right after —
+   * indistinguishable from interrupt being silently ignored.
+   */
+  private cancelPendingRetry: (() => void) | null = null;
   /** Set by `setModel`; included in the next (and every later) turn's argv. */
   private _desiredModel: string | null = null;
 
@@ -85,6 +94,37 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
    * fleet-view chip stuck open forever either.
    */
   private readonly pendingSubagents = new Set<string>();
+
+  /**
+   * How many times a turn is silently re-run before its error is finally
+   * shown to the user, when that error looks transient (see
+   * `TRANSIENT_ERROR_PATTERN`). Kept small: a *persistent* problem (the host
+   * genuinely cannot reach the Antigravity backend) should still surface
+   * within a few seconds rather than stall the turn indefinitely behind
+   * silent retries.
+   */
+  private static readonly MAX_TURN_RETRIES = 2;
+
+  /**
+   * Backoff before each retry, indexed by attempt number (0-based); the last
+   * entry repeats for any attempt beyond its length.
+   */
+  private static readonly RETRY_BACKOFF_MS = [1000, 3000];
+
+  /**
+   * Matches agy's own `result.error` text for a turn that failed for an
+   * infrastructure reason — a network hiccup or a timeout talking to the
+   * Antigravity backend — rather than something a retry can never fix (a
+   * quota error, a bad prompt, an auth failure; see the `QUOTA` case
+   * `normalizeAgyResult` already surfaces verbatim, which must NOT match
+   * this). Confirmed live on a prod host: "timeout waiting for response"
+   * surfaced from an otherwise healthy conversation, and a plain re-run of
+   * the same turn succeeded — so retrying automatically here trades a few
+   * seconds of silent delay for not dropping the user's prompt on a hiccup
+   * that had nothing to do with what they asked.
+   */
+  private static readonly TRANSIENT_ERROR_PATTERN =
+    /\btimed?\s*out\b|deadline exceeded|econnreset|etimedout|eai_again|enotfound|econnrefused|socket hang up|network error|connection reset|\bunavailable\b/i;
 
   constructor(spec: AgySessionSpec, epoch?: string) {
     super();
@@ -358,7 +398,15 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     }
   }
 
-  private runTurn(text: string): Promise<void> {
+  /**
+   * `attempt` is 0 for the user's original request and increments on each
+   * silent retry of a transient failure (see `TRANSIENT_ERROR_PATTERN`) —
+   * `drain()` and `child.on('close')`'s retry branch below are the only two
+   * callers, and both always pass the same `text`, so the whole retry chain
+   * is one logical turn from the outside: one `user_prompt`, one eventual
+   * `turn_complete`.
+   */
+  private runTurn(text: string, attempt = 0): Promise<void> {
     return new Promise((resolve) => {
       const args = ['--output-format', 'stream-json', '--dangerously-skip-permissions', '-p', text];
       if (this._agentSessionId) args.push('--conversation', this._agentSessionId);
@@ -388,6 +436,11 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       // below would follow the real reason with a second, useless "agy
       // exited with code 1" notice.
       let resultErrorShown = false;
+      // Set instead of `resultErrorShown` when this `result` line's error
+      // looks transient and there is retry budget left — see
+      // `TRANSIENT_ERROR_PATTERN`. `close` below reads this to respawn the
+      // same turn rather than surfacing the error.
+      let pendingRetryText: string | null = null;
 
       const rl = readline.createInterface({ input: child.stdout });
       rl.on('line', (line) => {
@@ -414,37 +467,64 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
         // arrived — not just the fallback for when they didn't.
         if (isRecord(parsed) && parsed.event === 'result') {
           const result = isRecord(parsed.result) ? parsed.result : {};
-          const response = typeof result.response === 'string' ? result.response.trim() : '';
-          if (response) {
-            this.emitEvent({ kind: 'text', id: `agy_final_${this.id}_${Date.now()}`, text: response });
+          const status = typeof result.status === 'string' ? result.status : undefined;
+          const errorText = typeof result.error === 'string' ? result.error.trim() : '';
+          const isRetryable =
+            status !== undefined &&
+            status !== 'SUCCESS' &&
+            errorText.length > 0 &&
+            attempt < AgySession.MAX_TURN_RETRIES &&
+            AgySession.TRANSIENT_ERROR_PATTERN.test(errorText);
+
+          if (isRetryable) {
+            // Don't show the response or count this as the shown error: a
+            // retry is coming, and the generic normalizer below is skipped
+            // entirely for this line so no premature `turn_complete` fires
+            // either. See `pendingRetryText`'s doc comment.
+            pendingRetryText = errorText;
+          } else {
+            const response = typeof result.response === 'string' ? result.response.trim() : '';
+            if (response) {
+              this.emitEvent({ kind: 'text', id: `agy_final_${this.id}_${Date.now()}`, text: response });
+            }
+            if (status !== undefined && status !== 'SUCCESS' && errorText) {
+              resultErrorShown = true;
+            }
           }
-          if (typeof result.status === 'string' && result.status !== 'SUCCESS' && typeof result.error === 'string' && result.error.trim()) {
-            resultErrorShown = true;
-          }
+
           // See `pendingSubagents`'s doc comment: the turn's own `result`
           // line is the one point trusted as "the sub-agent is actually
           // done" — the step's own `DONE` moments after it started is not.
+          // A retry restarts the whole turn, so any sub-agent tool card left
+          // open by this attempt closes as ended-early rather than
+          // "finished", the same distinction `finish()`'s defensive flush
+          // below draws for a hard crash mid-flight.
           for (const toolUseId of this.pendingSubagents) {
             this.emitEvent({
               kind: 'tool_result',
               id: `agy_sub_end_${toolUseId}`,
               toolUseId,
-              content: 'Subagent finished.',
+              content: isRetryable ? 'The turn hit a transient error and is being retried.' : 'Subagent finished.',
               truncated: false,
-              isError: false,
+              isError: isRetryable,
             });
           }
           this.pendingSubagents.clear();
         }
 
-        for (const event of normalizeAgyMessageSafe(parsed)) {
-          if (event.kind === 'session_started' && event.agentSessionId) {
-            this._agentSessionId = event.agentSessionId;
+        // Skipped when retrying: the generic normalizer would turn this same
+        // `result` line into a user-visible `notice`/`turn_complete` for an
+        // error the retry may well erase a moment later.
+        if (!pendingRetryText) {
+          for (const event of normalizeAgyMessageSafe(parsed)) {
+            if (event.kind === 'session_started' && event.agentSessionId) {
+              this._agentSessionId = event.agentSessionId;
+            }
+            if (event.kind === 'tool_use' && event.name === 'invoke_subagent') {
+              this.pendingSubagents.add(event.id);
+            }
+            this.emitEvent(event);
           }
-          if (event.kind === 'tool_use' && event.name === 'invoke_subagent') {
-            this.pendingSubagents.add(event.id);
-          }
-          this.emitEvent(event);
         }
       });
 
@@ -481,9 +561,38 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       });
 
       child.on('close', (code, signal) => {
-        if (signal) {
-          // Our own interrupt()/terminate() already emitted a notice.
+        if (signal || this.closed) {
+          // Our own interrupt()/terminate() already emitted a notice, or the
+          // session was torn down mid-turn — never schedule a retry either
+          // way.
           finish(null);
+          return;
+        }
+        if (pendingRetryText) {
+          this.child = null;
+          const backoffMs =
+            AgySession.RETRY_BACKOFF_MS[Math.min(attempt, AgySession.RETRY_BACKOFF_MS.length - 1)];
+          this.emitEvent({
+            kind: 'notice',
+            level: 'warn',
+            text: `agy hit a transient error (${pendingRetryText}) — retrying (${attempt + 1}/${AgySession.MAX_TURN_RETRIES})…`,
+          });
+          const retryTimer = setTimeout(() => {
+            this.cancelPendingRetry = null;
+            if (this.closed) {
+              resolve();
+              return;
+            }
+            this.runTurn(text, attempt + 1).then(resolve);
+          }, backoffMs);
+          retryTimer.unref?.();
+          // See `cancelPendingRetry`'s doc comment — `interrupt()` calls this
+          // instead of killing a `child` that does not exist right now.
+          this.cancelPendingRetry = () => {
+            clearTimeout(retryTimer);
+            this.cancelPendingRetry = null;
+            resolve();
+          };
           return;
         }
         if (code !== 0 && code !== null) {
@@ -496,6 +605,11 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   }
 
   async interrupt(): Promise<void> {
+    if (this.cancelPendingRetry) {
+      this.cancelPendingRetry();
+      this.emitEvent({ kind: 'notice', level: 'info', text: 'Interrupted.' });
+      return;
+    }
     if (!this.child) return;
     this.child.kill('SIGINT');
     this.emitEvent({ kind: 'notice', level: 'info', text: 'Interrupted.' });
@@ -524,6 +638,14 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this.queue.length = 0;
     this.setStatus('killed');
     this._endedAt = Date.now();
+
+    // Otherwise this would sit out the rest of the backoff window before the
+    // retryTimer callback notices `closed` on its own — harmless, but pointless
+    // to wait for.
+    if (this.cancelPendingRetry) {
+      this.cancelPendingRetry();
+      return;
+    }
 
     const child = this.child;
     if (!child) return;

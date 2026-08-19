@@ -1,3 +1,6 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -297,6 +300,72 @@ describe('AgySession', () => {
       text: 'Eligibility check failed: RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).',
     });
     expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({ isError: true, stopReason: 'ERROR' });
+    await waitFor(() => session?.busy === false);
+  });
+
+  it('silently retries a transient error (e.g. a backend timeout) and succeeds without surfacing it as a failure', async () => {
+    const stateFile = path.join(os.tmpdir(), `agy-timeout-once-${crypto.randomUUID()}.state`);
+    session = new AgySession(
+      makeSpec({ env: { ...process.env, AGY_FIXTURE_TIMEOUT_ONCE_FILE: stateFile } as Record<string, string> }),
+    );
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('TIMEOUT_ONCE');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    // A warning about the retry, never an error notice — the retry papered
+    // over the failure before the user ever saw it as one.
+    expect(events.some((e) => e.kind === 'notice' && e.level === 'error')).toBe(false);
+    const warnings = events.filter((e) => e.kind === 'notice' && e.level === 'warn');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({ text: expect.stringContaining('timeout waiting for response') });
+
+    const turnComplete = events.find((e) => e.kind === 'turn_complete');
+    expect(turnComplete).toMatchObject({ isError: false });
+    const text = events.find((e) => e.kind === 'text');
+    expect(text).toMatchObject({ text: 'echo: TIMEOUT_ONCE' });
+
+    fs.rmSync(stateFile, { force: true });
+    await waitFor(() => session?.busy === false);
+  });
+
+  it('gives up after exhausting retry budget on a persistent transient-looking error', async () => {
+    session = new AgySession(makeSpec());
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('TIMEOUT_ALWAYS');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'), { timeout: 15_000 });
+
+    const warnings = events.filter((e) => e.kind === 'notice' && e.level === 'warn');
+    // Two retries attempted (the class's `MAX_TURN_RETRIES`), each warned
+    // about, before the final attempt's failure is shown for real.
+    expect(warnings).toHaveLength(2);
+
+    const errors = events.filter((e) => e.kind === 'notice' && e.level === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ text: 'timeout waiting for response' });
+    expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({ isError: true });
+    await waitFor(() => session?.busy === false);
+  }, 20_000);
+
+  it('interrupt() during a retry backoff cancels the pending retry instead of silently doing nothing', async () => {
+    session = new AgySession(makeSpec());
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('TIMEOUT_ALWAYS');
+    await waitFor(() => events.some((e) => e.kind === 'notice' && e.level === 'warn'));
+
+    await session.interrupt();
+    await waitFor(() => events.some((e) => e.kind === 'notice' && e.text === 'Interrupted.'));
+
+    // Cancelled before a second attempt could spawn: only the one warning
+    // from the first failed attempt, no eventual turn_complete/error.
+    expect(events.filter((e) => e.kind === 'notice' && e.level === 'warn')).toHaveLength(1);
+    expect(events.some((e) => e.kind === 'turn_complete')).toBe(false);
+    expect(session.isAlive()).toBe(true);
     await waitFor(() => session?.busy === false);
   });
 

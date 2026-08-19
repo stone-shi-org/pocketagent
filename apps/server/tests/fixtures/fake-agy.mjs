@@ -3,6 +3,7 @@
 // Real agy costs real inference and network access, so this fixture emits the
 // same line shapes captured from a live probe of v1.1.12 without either.
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 
 const args = process.argv.slice(2);
 function argVal(flag) {
@@ -69,6 +70,54 @@ if (prompt === 'QUOTA') {
     },
   });
   process.exit(1);
+}
+
+// Mirrors a live-captured infrastructure hiccup: a network/backend timeout
+// talking to the Antigravity service, reported the same way as `QUOTA`
+// (a well-formed `result` line, empty stderr, non-zero exit) but with error
+// text `AgySession.TRANSIENT_ERROR_PATTERN` recognizes as worth retrying
+// automatically instead of surfacing straight to the user. `TIMEOUT_ALWAYS`
+// fails every attempt, to exercise giving up once retry budget runs out.
+if (prompt === 'TIMEOUT_ALWAYS') {
+  emit({
+    event: 'result',
+    result: {
+      conversation_id: conversationId,
+      status: 'ERROR',
+      response: '',
+      error: 'timeout waiting for response',
+      duration_seconds: 0,
+      num_turns: 0,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    },
+  });
+  process.exit(1);
+}
+
+// Same shape as `TIMEOUT_ALWAYS`, but only for the *first* attempt — later
+// invocations (retries) succeed normally. Statefulness across attempts has
+// to live outside the process, since each retry is a fresh `agy` spawn: the
+// test passes a scratch file path via `AGY_FIXTURE_TIMEOUT_ONCE_FILE`, and
+// this fixture's own presence/absence of that file is the counter.
+if (prompt === 'TIMEOUT_ONCE') {
+  const stateFile = process.env.AGY_FIXTURE_TIMEOUT_ONCE_FILE;
+  if (stateFile && !fs.existsSync(stateFile)) {
+    fs.writeFileSync(stateFile, 'seen');
+    emit({
+      event: 'result',
+      result: {
+        conversation_id: conversationId,
+        status: 'ERROR',
+        response: '',
+        error: 'timeout waiting for response',
+        duration_seconds: 0,
+        num_turns: 0,
+        usage: { input_tokens: 0, output_tokens: 0 },
+      },
+    });
+    process.exit(1);
+  }
+  // Falls through to the normal echo turn below once the state file exists.
 }
 
 // `/help` resolves locally in real agy — no `init` line, no tool step, zero
