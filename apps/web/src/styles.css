@@ -1360,10 +1360,17 @@ button:focus-visible {
 }
 
 /* ---- Approval sheet ---- */
+/*
+ * `pointer-events: none` on the backdrop is the point: earlier this was a
+ * full-screen click catcher, so the transcript underneath couldn't be
+ * scrolled or read while a decision was pending. Only the sheet (and the
+ * minimized pill) opt back into `auto`, so the backdrop is now just a
+ * positioning box, not a scrim — nothing dims the chat behind it.
+ */
 .approval-backdrop {
   position: fixed;
   inset: 0;
-  background: rgb(0 0 0 / 28%);
+  pointer-events: none;
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -1372,9 +1379,11 @@ button:focus-visible {
 @media (min-width: 600px) { .approval-backdrop { align-items: center; } }
 
 .approval-sheet {
+  pointer-events: auto;
   background: var(--bg-elev);
   border: 1px solid var(--warn);
   border-radius: 16px 16px 0 0;
+  box-shadow: var(--shadow-md);
   width: 100%;
   max-width: 520px;
   padding: 18px calc(18px + var(--safe-right)) calc(18px + var(--safe-bottom)) calc(18px + var(--safe-left));
@@ -1383,12 +1392,39 @@ button:focus-visible {
 }
 @media (min-width: 600px) { .approval-sheet { border-radius: 16px; } }
 
-.approval-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+/* The drag handle for `startDrag`/`drag`/`endDrag` in ApprovalSheet.tsx. */
+.approval-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; cursor: grab; touch-action: none; }
+.approval-head:active { cursor: grabbing; }
 .approval-badge {
   font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--warn); border: 1px solid var(--warn); border-radius: 999px; padding: 3px 9px;
 }
 .approval-queued { font-size: 11px; color: var(--text-dim); }
+.approval-minimize {
+  margin-left: auto;
+  display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; min-height: 0; flex: none;
+  padding: 0; border: none; background: transparent; color: var(--text-dim);
+}
+.approval-minimize:hover { color: var(--text); }
+
+/* The collapsed state: a small pill, still positioned by `approval-backdrop`
+   and still draggable, so it reopens wherever it was left. */
+.approval-pill {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--warn);
+  border-radius: 999px;
+  box-shadow: var(--shadow-md);
+  padding: 8px 14px;
+  margin: 0 0 calc(12px + var(--safe-bottom));
+  cursor: pointer;
+}
+@media (min-width: 600px) { .approval-pill { margin-bottom: 0; } }
+.approval-pill-hint { font-size: 12px; color: var(--text-dim); }
 .approval-title { margin: 0 0 8px; font-size: 17px; line-height: 1.35; }
 .approval-path {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

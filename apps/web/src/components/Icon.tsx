@@ -29,6 +29,7 @@ export type IconName =
   | 'close'
   | 'attach'
   | 'plus'
+  | 'minimize'
   | 'agents'
   | 'agent-claude'
   | 'agent-codex'
@@ -186,6 +187,11 @@ const PATHS: Record<IconName, JSX.Element> = {
   plus: (
     <path d="M12 5v14M5 12h14" />
   ),
+
+  // A single low line: the OS-standard "minimize" glyph, distinct in
+  // silhouette from `close`'s X so the approval sheet's collapse control
+  // can't be mistaken for dismissing the request outright.
+  minimize: <path d="M5 18h14" />,
 
   // Two overlapping cards with a pair of eyes on the front one: "a fleet",
   // not one agent — distinct from `branch`'s three-node graph, which is

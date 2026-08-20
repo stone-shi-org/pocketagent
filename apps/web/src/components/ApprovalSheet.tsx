@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type {
   AskUserQuestionAnswer,
   AskUserQuestionItem,
@@ -8,6 +8,7 @@ import type {
 import { collapseContext, diffFromToolInput, diffLines } from '../agent/diff.js';
 import { renderMarkdown } from '../agent/markdown.js';
 import { planFromToolInput } from '../agent/plan.js';
+import { Icon } from './Icon.js';
 
 interface Props {
   request: PermissionRequestEvent;
@@ -36,23 +37,100 @@ interface Props {
  * `diffFromToolInput` never matches it and it gets its own render branch plus
  * plan-flavored button copy ("Start coding" / "Keep planning…") instead of the
  * generic "Allow once" / "Deny…".
+ *
+ * The sheet used to be a fixed, click-through-blocking overlay: a long plan or
+ * a question with a wall of options could sit on top of the very transcript
+ * message the user needed to reread before deciding, with no way to see past
+ * it. `approval-backdrop` is `pointer-events: none` and only the sheet itself
+ * (and the minimized pill) opt back in with `pointer-events: auto`, so the
+ * transcript stays scrollable underneath at all times. `approval-head`
+ * doubles as a drag handle (pointer capture, not `draggable` — that API
+ * fights touch scroll and image dragging) so the sheet can be pulled aside
+ * without dismissing it, and the minimize button collapses it to a small
+ * pill in the corner that reopens exactly where it was left. Nothing here
+ * answers the request early — minimizing only hides the buttons, it never
+ * substitutes a decision, matching the "never answer for the user" rule.
  */
 export function ApprovalSheet({ request, queued, onDecide, disabled }: Props): JSX.Element {
   const [denying, setDenying] = useState(false);
   const [reason, setReason] = useState('');
+  const [minimized, setMinimized] = useState(false);
+  const [offset, setOffset] = useState<{ x: number; y: number } | null>(null);
+  const dragOrigin = useRef<{ pointerX: number; pointerY: number; startX: number; startY: number } | null>(null);
+
+  function startDrag(e: React.PointerEvent<HTMLDivElement>): void {
+    // A click on the minimize button lands here first (it's inside the head);
+    // let it through as a click instead of arming a drag.
+    if ((e.target as HTMLElement).closest('button')) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragOrigin.current = {
+      pointerX: e.clientX,
+      pointerY: e.clientY,
+      startX: offset?.x ?? 0,
+      startY: offset?.y ?? 0,
+    };
+  }
+
+  function drag(e: React.PointerEvent<HTMLDivElement>): void {
+    const origin = dragOrigin.current;
+    if (!origin) return;
+    setOffset({ x: origin.startX + (e.clientX - origin.pointerX), y: origin.startY + (e.clientY - origin.pointerY) });
+  }
+
+  function endDrag(e: React.PointerEvent<HTMLDivElement>): void {
+    if (!dragOrigin.current) return;
+    dragOrigin.current = null;
+    e.currentTarget.releasePointerCapture(e.pointerId);
+  }
 
   const isQuestion = request.questions !== null && request.questions.length > 0;
   const plan = isQuestion ? null : planFromToolInput(request.toolName, request.input);
+  const badge = isQuestion ? 'Question' : plan ? 'Plan ready' : 'Approval needed';
 
   const diff = isQuestion || plan ? null : diffFromToolInput(request.toolName, request.input);
   const lines = diff ? collapseContext(diffLines(diff.before, diff.after), 2) : null;
 
+  const dragStyle = offset ? { transform: `translate(${offset.x}px, ${offset.y}px)` } : undefined;
+
+  if (minimized) {
+    return (
+      <div className="approval-backdrop">
+        <button
+          type="button"
+          className="approval-pill"
+          style={dragStyle}
+          onClick={() => setMinimized(false)}
+        >
+          <span className="approval-badge">{badge}</span>
+          {queued > 0 && <span className="approval-queued">+{queued} more</span>}
+          <span className="approval-pill-hint">Tap to resume</span>
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="approval-backdrop" role="dialog" aria-modal="true" aria-label="Approval required">
-      <div className="approval-sheet">
-        <div className="approval-head">
-          <span className="approval-badge">{isQuestion ? 'Question' : plan ? 'Plan ready' : 'Approval needed'}</span>
+      <div className="approval-sheet" style={dragStyle}>
+        <div
+          className="approval-head"
+          onPointerDown={startDrag}
+          onPointerMove={drag}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+        >
+          <span className="approval-badge">{badge}</span>
           {queued > 0 && <span className="approval-queued">+{queued} more</span>}
+          <button
+            type="button"
+            className="approval-minimize"
+            onClick={() => setMinimized(true)}
+            disabled={disabled}
+            aria-label="Minimize"
+            title="Minimize — the request keeps waiting, restore it anytime"
+          >
+            <Icon name="minimize" size={16} />
+          </button>
         </div>
 
         {!isQuestion && <h2 className="approval-title">{request.title}</h2>}

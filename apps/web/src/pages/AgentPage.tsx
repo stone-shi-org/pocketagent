@@ -341,6 +341,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
 
       {pending && (
         <ApprovalSheet
+          key={pending.id}
           request={pending}
           queued={transcript.pending.length - 1}
           onDecide={decide}
