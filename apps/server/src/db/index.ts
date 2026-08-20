@@ -33,6 +33,16 @@ export interface SessionRow {
   agent_session_id: string | null;
   /** 1 when this session was started with approvals bypassed. */
   skip_permissions: number;
+  /**
+   * Stable id of the tmux pane this session adopted (`AdoptableTarget.id`),
+   * or null for a session that started its own process. Persisted — not just
+   * used transiently to resolve the attach request — so a session row keeps
+   * a durable link back to the pane it came from even after the process
+   * behind it (the tmux *client*, not the pane) has exited. That link is
+   * what lets the home screen collapse repeated detach/reattach cycles on
+   * the same pane into one chat instead of a new row every time.
+   */
+  adopt_target_id: string | null;
 }
 
 export interface AuthSessionRow {
@@ -135,6 +145,15 @@ const MIGRATIONS: readonly string[] = [
   // live session view can show it persistently rather than only at creation.
   `
   ALTER TABLE sessions ADD COLUMN skip_permissions INTEGER NOT NULL DEFAULT 0;
+  `,
+  // Durable identity for an adopted tmux pane. Before this, `adoptTargetId`
+  // only ever lived on the create request long enough to resolve which pane
+  // to attach to — nothing tied a session row back to that pane afterwards,
+  // so detaching and re-attaching from the Shell dialog minted an unrelated
+  // new row every time instead of reusing the one that already represented
+  // this pane. See `ProjectService`'s grouping in `projects/index.ts`.
+  `
+  ALTER TABLE sessions ADD COLUMN adopt_target_id TEXT;
   `,
 ];
 

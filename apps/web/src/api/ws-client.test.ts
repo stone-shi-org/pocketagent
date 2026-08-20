@@ -84,6 +84,7 @@ const SESSION: SessionInfo = {
   agentSessionId: null,
   durable: false,
   adopted: false,
+  adoptTargetId: null,
   skipPermissionsEnabled: false,
 };
 

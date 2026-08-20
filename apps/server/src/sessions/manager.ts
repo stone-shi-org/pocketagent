@@ -89,6 +89,13 @@ export interface CreateSessionInput {
     cols: number;
     rows: number;
     label: string;
+    /**
+     * The pane's stable `AdoptableTarget.id`, persisted onto the session row.
+     * Distinct from using it to resolve the target (that already happened in
+     * the route handler): this is what lets a later attach to the same pane
+     * be recognized as the same chat rather than a new one.
+     */
+    targetId: string;
   };
 }
 
@@ -612,6 +619,7 @@ export class SessionManager {
         workspaceLabel,
         outputBufferBytes: this.opts.outputBufferBytes,
         adopted: input.adopt !== undefined,
+        adoptTargetId: input.adopt?.targetId ?? null,
         skipPermissions,
       },
       // Adoption always runs the attach client as our own child: the thing we
@@ -1238,6 +1246,7 @@ export class SessionManager {
       agentSessionId: session.agentSessionId,
       durable: session.survivesServerRestart,
       adopted: session.transport === 'terminal' && session.spec.adopted === true,
+      adoptTargetId: session.transport === 'terminal' ? session.spec.adoptTargetId ?? null : null,
       // `spec.skipPermissions` is the honest record of what this session was
       // created with; a structured session can additionally have the global
       // switch applied to it live after the fact (see
@@ -1278,7 +1287,16 @@ export class SessionManager {
       transport: row.transport === 'structured' ? 'structured' : 'terminal',
       agentSessionId: row.agent_session_id,
       durable: false,
-      adopted: false,
+      // Was unconditionally `false` here: a history row has no live `spec` to
+      // read `adopted` off of, so this used to forget that a finished shell
+      // session had ever been adopted the moment it was evicted from memory
+      // (`sweep()`, ~10 minutes after it ends) — it would then leak out of the
+      // "Shell" virtual project into whatever `cwd` the pane happened to be
+      // in, permanently, since nothing else ever deletes the row. Deriving it
+      // from the persisted `adopt_target_id` instead keeps a dead adopted
+      // session classified as a shell chat for as long as the row exists.
+      adopted: row.adopt_target_id !== null,
+      adoptTargetId: row.adopt_target_id,
       skipPermissionsEnabled: row.skip_permissions === 1,
     };
   }
@@ -1290,8 +1308,8 @@ export class SessionManager {
            (id, title, agent, command, args_json, cwd, env_keys_json, status, pid,
             cols, rows, exit_code, exit_signal, created_at, started_at, ended_at,
             last_activity_at, backend, external_id, transport, agent_session_id,
-            skip_permissions)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            skip_permissions, adopt_target_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         session.id,
@@ -1317,6 +1335,7 @@ export class SessionManager {
         session.transport,
         session.agentSessionId,
         session.spec.skipPermissions === true ? 1 : 0,
+        session.transport === 'terminal' ? session.spec.adoptTargetId ?? null : null,
       );
   }
 

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SessionInfo } from '@pocketagent/protocol';
-import { ProjectService, findMainRepoCwd, readGitBranch } from '../src/projects/index.js';
+import { ProjectService, VIRTUAL_SHELL_CWD, findMainRepoCwd, readGitBranch } from '../src/projects/index.js';
 import { ConversationStore, encodeProjectDir } from '../src/conversations/index.js';
 import { hideChat, openDatabase } from '../src/db/index.js';
 import { WorkspaceRegistry } from '../src/workspaces/index.js';
@@ -35,6 +35,7 @@ function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
     agentSessionId: null,
     durable: false,
     adopted: false,
+    adoptTargetId: null,
     skipPermissionsEnabled: false,
     ...overrides,
   };
@@ -270,6 +271,46 @@ describe('ProjectService', () => {
 
     expect(project?.chats).toHaveLength(1);
     expect(project?.chats[0]).toMatchObject({ sessionId: 'newer-resume', live: false });
+  });
+
+  it('collapses repeated attach/reattach of the same tmux pane into one Shell chat', async () => {
+    // Regression: detaching and reattaching to the same pane from the Shell
+    // dialog mints a brand-new session row each time (same as a resumed
+    // conversation does), but it is still the same pane. Grouped by
+    // `adoptTargetId` the same way a resumed conversation is grouped by
+    // `agentSessionId`, so the home screen doesn't grow one "Shell" entry
+    // per attach — see `representativeSessions`/`groupKey`.
+    const projects = await service.list([
+      makeSession({
+        id: 'first-attach',
+        cwd: '/somewhere',
+        adopted: true,
+        adoptTargetId: 'pane-1',
+        status: 'killed',
+        lastActivityAt: 1000,
+      }),
+      makeSession({
+        id: 'second-attach',
+        cwd: '/somewhere',
+        adopted: true,
+        adoptTargetId: 'pane-1',
+        status: 'running',
+        lastActivityAt: 2000,
+      }),
+    ]);
+
+    const shell = projects.find((p) => p.cwd === VIRTUAL_SHELL_CWD);
+    expect(shell?.chats).toHaveLength(1);
+    expect(shell?.chats[0]).toMatchObject({ sessionId: 'second-attach', live: true });
+  });
+
+  it('does not group two different tmux panes into the same Shell chat', async () => {
+    const projects = await service.list([
+      makeSession({ id: 'pane-a-sess', adopted: true, adoptTargetId: 'pane-a' }),
+      makeSession({ id: 'pane-b-sess', adopted: true, adoptTargetId: 'pane-b' }),
+    ]);
+    const shell = projects.find((p) => p.cwd === VIRTUAL_SHELL_CWD);
+    expect(shell?.chats.map((c) => c.sessionId).sort()).toEqual(['pane-a-sess', 'pane-b-sess']);
   });
 
   it('shows the transcript-derived title for a live session, not its fixed creation-time name', async () => {

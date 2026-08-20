@@ -377,4 +377,70 @@ describeTmux('adopting a pane on a foreign tmux server', () => {
 
     expect(await userSessionExists('outlives-us')).toBe(true);
   });
+
+  it('reports the adopted pane\'s stable id, and keeps it filed under Shell after a restart', async () => {
+    // Regression for: detaching a shell chat and reopening the Shell dialog
+    // used to always create an unrelated new "Shell" entry, because nothing
+    // tied a session row back to the tmux pane it came from once the row
+    // stopped being live. `adoptTargetId` is that missing link — it must
+    // survive on the row (not just live in memory) so a session read back
+    // from disk after a restart is still recognized as the same pane, and
+    // still filed under the "Shell" virtual project rather than leaking into
+    // whatever real directory the pane happened to be in.
+    const workspaceRoot = t.workspaceRoot;
+    const db = t.db;
+
+    await startUserSession('reattach-me', t.projectDir, ['sleep', '120']);
+    const target = (await listTargets()).targets.find((x) => x.sessionName === 'reattach-me');
+
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: target.id },
+    });
+    expect(created.statusCode).toBe(201);
+    const info = created.json();
+    expect(info.adopted).toBe(true);
+    // Persisted, not just used to resolve the request — this is the field
+    // that lets a later attach recognize it is the same pane.
+    expect(info.adoptTargetId).toBe(target.id);
+    const id = info.id as string;
+
+    // Detach, the way the "Detach" button in the Shell dialog does.
+    await t.app.inject({
+      method: 'DELETE',
+      url: `/api/sessions/${id}`,
+      headers: { cookie: t.cookie },
+    });
+    await waitFor(() => {
+      const found = t.context.sessions.find(id);
+      return found !== null && found.status !== 'running' && found.status !== 'starting';
+    });
+
+    // ---- restart, same database ---------------------------------------
+    // Forces `sessions.find(id)` to read the row back from SQLite
+    // (`rowToInfo`) instead of the live in-memory object (`toInfo`) — the
+    // code path that used to hardcode `adopted: false` unconditionally.
+    await t.app.close();
+    t = await createTestApp(
+      { POCKETAGENT_ADOPT_TMUX_SOCKET: USER_SOCKET, POCKETAGENT_WORKSPACE_ROOTS: workspaceRoot },
+      db,
+    );
+
+    const revived = t.context.sessions.find(id);
+    expect(revived).not.toBeNull();
+    expect(revived!.adopted).toBe(true);
+    expect(revived!.adoptTargetId).toBe(target.id);
+
+    // And the home screen still files it under "Shell", not under the real
+    // project directory the pane happened to be in.
+    const listed = await t.app.inject({
+      method: 'GET',
+      url: '/api/projects',
+      headers: { cookie: t.cookie },
+    });
+    const shell = listed.json().projects.find((p: { cwd: string }) => p.cwd === 'virtual:shell');
+    expect(shell?.chats.map((c: { sessionId: string | null }) => c.sessionId)).toContain(id);
+  });
 });

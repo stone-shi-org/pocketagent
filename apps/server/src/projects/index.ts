@@ -304,27 +304,38 @@ function projectSortKey(project: ProjectInfo): { busy: boolean; ts: number } {
 }
 
 /**
- * One row per session, but one chat per underlying conversation.
+ * One row per session, but one chat per underlying conversation — or, for an
+ * adopted terminal session, per tmux pane.
  *
- * Sessions with no `agentSessionId` (not yet reported, or a non-Claude agent)
- * pass through unchanged — there is nothing to group them by. Sessions that
- * share an `agentSessionId` are collapsed to a single representative: the
- * live one if any of the group is still running (there should be at most
- * one, but a race is cheaper to tolerate than to prevent), otherwise
- * whichever was touched most recently. The rest are superseded history for
- * the same conversation, not chats of their own.
+ * Sessions with neither an `agentSessionId` nor an `adoptTargetId` (not yet
+ * reported, or a plain non-adopted terminal) pass through unchanged — there
+ * is nothing to group them by. Sessions that share a group key are collapsed
+ * to a single representative: the live one if any of the group is still
+ * running (there should be at most one, but a race is cheaper to tolerate
+ * than to prevent), otherwise whichever was touched most recently. The rest
+ * are superseded history for the same conversation or pane, not chats of
+ * their own.
+ *
+ * The tmux case is what makes repeatedly detaching and re-attaching to the
+ * same pane from the Shell dialog read as one chat instead of a fresh one
+ * every time: `adoptTargetId` is the pane's own stable id
+ * (`AdoptableTarget.id`), persisted on the row rather than only used
+ * transiently to resolve the attach request, so it survives across the
+ * several session rows one pane accumulates over its life the same way
+ * `agentSessionId` already does for a resumed conversation.
  */
 function representativeSessions(sessions: SessionInfo[]): SessionInfo[] {
   const groups = new Map<string, SessionInfo[]>();
   const ungrouped: SessionInfo[] = [];
   for (const session of sessions) {
-    if (!session.agentSessionId) {
+    const key = groupKey(session);
+    if (!key) {
       ungrouped.push(session);
       continue;
     }
-    const group = groups.get(session.agentSessionId);
+    const group = groups.get(key);
     if (group) group.push(session);
-    else groups.set(session.agentSessionId, [session]);
+    else groups.set(key, [session]);
   }
 
   const representatives = ungrouped;
@@ -340,6 +351,17 @@ function representativeSessions(sessions: SessionInfo[]): SessionInfo[] {
     );
   }
   return representatives;
+}
+
+/**
+ * What ties several session rows back to the same underlying conversation or
+ * tmux pane. Namespaced so the two id spaces (an agent's own conversation ids
+ * vs. tmux's pane hashes) can never collide if they ever happened to match.
+ */
+function groupKey(session: SessionInfo): string | null {
+  if (session.agentSessionId) return `agent:${session.agentSessionId}`;
+  if (session.adopted && session.adoptTargetId) return `adopt:${session.adoptTargetId}`;
+  return null;
 }
 
 function sessionUpdatedAt(session: SessionInfo): number {

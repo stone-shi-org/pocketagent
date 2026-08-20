@@ -312,6 +312,10 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         cols: target.cols,
         rows: target.rows,
         label: `${target.command} · ${target.sessionName}`,
+        // Persisted on the session row (not just used to resolve `target`
+        // above) so a later attach to this same pane can be recognized as
+        // the same chat — see `ProjectService`'s grouping.
+        targetId: target.id,
       };
       body.cwd = target.cwd;
     }

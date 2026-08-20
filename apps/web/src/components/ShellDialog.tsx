@@ -108,13 +108,18 @@ export function ShellDialog({ onClose, onCreated, onApiError }: Props): JSX.Elem
         {targets && targets.length > 0 && (
           <div className="pick-list">
             {targets.map((target) => {
+              // Matched on the pane's own stable id, not a substring of the
+              // title: a title match could cross-match a differently-named
+              // pane (or miss a truncated one), which is what let this
+              // dialog think a pane was not yet attached when it actually
+              // was, and offer "Attach" again instead of "Detach".
               const attachedSession = sessions?.find(
                 (s) =>
                   s.adopted &&
+                  s.adoptTargetId === target.id &&
                   s.status !== 'exited' &&
                   s.status !== 'killed' &&
-                  s.status !== 'error' &&
-                  s.title.includes(target.sessionName),
+                  s.status !== 'error',
               );
 
               return (

@@ -27,6 +27,12 @@ export interface PtySessionSpec {
    */
   adopted?: boolean;
   /**
+   * Stable id of the adopted tmux pane (`AdoptableTarget.id`), persisted so a
+   * later attach to the same pane can be recognized as the same chat. Null
+   * for a session that is not adopted.
+   */
+  adoptTargetId?: string | null;
+  /**
    * True when `args` already includes the adapter's auto-approve flag. Pure
    * metadata for display (`SessionInfo.skipPermissionsEnabled`) — the flag
    * itself was baked into `args` by the adapter's `buildCommand`, not applied

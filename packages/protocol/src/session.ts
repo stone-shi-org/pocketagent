@@ -77,6 +77,15 @@ export const SessionInfo = z.object({
    */
   adopted: z.boolean(),
   /**
+   * The stable id of the tmux pane this session adopted (`AdoptableTarget.id`),
+   * null otherwise. Unlike `adopted`, this survives detaching: it is what lets
+   * the home screen recognize that a fresh "Attach" in the Shell dialog is the
+   * *same* pane as one already represented by a finished session row, so the
+   * two collapse into a single chat instead of piling up a duplicate every
+   * time you detach and reattach.
+   */
+  adoptTargetId: z.string().nullable(),
+  /**
    * True when this session was started with approvals bypassed. Surfaced so
    * the UI can show it persistently while the session runs — the opt-in must
    * stay visible, not just be a fire-and-forget checkbox at creation time.
