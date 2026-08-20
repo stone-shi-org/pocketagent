@@ -120,6 +120,26 @@ if (prompt === 'TIMEOUT_ONCE') {
   // Falls through to the normal echo turn below once the state file exists.
 }
 
+if (prompt === 'CONTEXT_CANCELED_ONCE') {
+  const stateFile = process.env.AGY_FIXTURE_TIMEOUT_ONCE_FILE;
+  if (stateFile && !fs.existsSync(stateFile)) {
+    fs.writeFileSync(stateFile, 'seen');
+    emit({
+      event: 'result',
+      result: {
+        conversation_id: conversationId,
+        status: 'ERROR',
+        response: '',
+        error: 'context canceled',
+        duration_seconds: 0,
+        num_turns: 0,
+        usage: { input_tokens: 0, output_tokens: 0 },
+      },
+    });
+    process.exit(1);
+  }
+}
+
 // `/help` resolves locally in real agy — no `init` line, no tool step, zero
 // tokens/duration — captured live against v1.1.12. Handled before the normal
 // turn shape below since `AgySession.fetchInitialCommands()` sends exactly

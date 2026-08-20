@@ -330,6 +330,29 @@ describe('AgySession', () => {
     await waitFor(() => session?.busy === false);
   });
 
+  it('silently retries a context canceled error and succeeds without surfacing it as a failure', async () => {
+    const stateFile = path.join(os.tmpdir(), `agy-canceled-once-${crypto.randomUUID()}.state`);
+    session = new AgySession(
+      makeSpec({ env: { ...process.env, AGY_FIXTURE_TIMEOUT_ONCE_FILE: stateFile } as Record<string, string> }),
+    );
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('CONTEXT_CANCELED_ONCE');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    expect(events.some((e) => e.kind === 'notice' && e.level === 'error')).toBe(false);
+    const warnings = events.filter((e) => e.kind === 'notice' && e.level === 'warn');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({ text: expect.stringContaining('context canceled') });
+
+    const turnComplete = events.find((e) => e.kind === 'turn_complete');
+    expect(turnComplete).toMatchObject({ isError: false });
+
+    fs.rmSync(stateFile, { force: true });
+    await waitFor(() => session?.busy === false);
+  });
+
   it('gives up after exhausting retry budget on a persistent transient-looking error', async () => {
     session = new AgySession(makeSpec());
     await session.start();
