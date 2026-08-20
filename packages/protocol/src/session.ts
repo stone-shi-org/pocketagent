@@ -317,5 +317,12 @@ export const AdoptableTarget = z.object({
   rows: z.number().int().nonnegative(),
   /** True when another client is already attached — adopting will share size. */
   attachedClients: z.number().int().nonnegative(),
+  /**
+   * True when the pane's window is already zoomed (`tmux resize-pane -Z`).
+   * Attaching zooms the target pane so picking one pane doesn't hand you the
+   * whole split window — but `-Z` toggles, so the server must know the
+   * current state to avoid un-zooming a window someone already zoomed.
+   */
+  zoomed: z.boolean(),
 });
 export type AdoptableTarget = z.infer<typeof AdoptableTarget>;

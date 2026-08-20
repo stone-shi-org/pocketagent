@@ -75,6 +75,7 @@ export class AdoptionService {
         '#{session_attached}',
         '#{pane_dead}',
         '#{window_name}',
+        '#{window_zoomed_flag}',
       ].join(SEP);
       ({ stdout } = await execFileAsync(
         this.opts.bin,
@@ -121,6 +122,7 @@ export class AdoptionService {
         cols: parsed.cols,
         rows: parsed.rows,
         attachedClients: parsed.attached,
+        zoomed: parsed.zoomed,
       });
     }
 
@@ -139,18 +141,23 @@ export class AdoptionService {
    * `=` anchors the session name so a prefix match cannot select a different
    * session. Built server-side from a validated target — the browser only ever
    * supplies an opaque id.
+   *
+   * tmux's unit of display is the *window*, not the pane: attaching to a
+   * single pane still renders every pane in its window (`.pane` only picks
+   * which one gets focus). Picking one pane in the Shell dialog is supposed to
+   * show just that pane, so we zoom it (`resize-pane -Z`) as part of the same
+   * invocation, chained with a literal `;` the way `ensureServer` chains
+   * options. `-Z` *toggles* zoom, so we only send it when the window is not
+   * already zoomed — otherwise this would un-zoom a view someone else set up.
    */
   attachCommand(target: AdoptableTarget): { command: string; args: string[] } {
-    return {
-      command: this.opts.bin,
-      args: [
-        '-L',
-        target.socket,
-        'attach-session',
-        '-t',
-        `=${target.sessionName}:${target.windowIndex}.${target.paneIndex}`,
-      ],
-    };
+    const paneTarget = `=${target.sessionName}:${target.windowIndex}.${target.paneIndex}`;
+    const args = ['-L', target.socket];
+    if (!target.zoomed) {
+      args.push('resize-pane', '-Z', '-t', paneTarget, ';');
+    }
+    args.push('attach-session', '-t', paneTarget);
+    return { command: this.opts.bin, args };
   }
 }
 
@@ -165,15 +172,17 @@ interface ParsedPane {
   attached: number;
   dead: boolean;
   windowName: string;
+  zoomed: boolean;
 }
 
 export function parsePaneLine(line: string): ParsedPane | null {
   if (!line.trim()) return null;
   const parts = line.split(SEP);
-  if (parts.length < 10) return null;
+  if (parts.length < 11) return null;
 
   // Parse from the right: a user's session name may itself contain the
   // separator, but the trailing fields are ours and fixed in number.
+  const zoomed = parts.pop() === '1';
   const windowName = parts.pop() ?? '';
   const dead = parts.pop() === '1';
   const attached = int(parts.pop());
@@ -186,7 +195,7 @@ export function parsePaneLine(line: string): ParsedPane | null {
   const sessionName = parts.join(SEP);
 
   if (!sessionName || !cwd) return null;
-  return { sessionName, windowIndex, paneIndex, command, cwd, cols, rows, attached, dead, windowName };
+  return { sessionName, windowIndex, paneIndex, command, cwd, cols, rows, attached, dead, windowName, zoomed };
 }
 
 function int(value: string | undefined): number {

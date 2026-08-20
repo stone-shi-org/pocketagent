@@ -90,8 +90,20 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
           setStatus(info.status);
           setFatal(null);
           adoptedRef.current = info.adopted;
-          // Adopt whatever size the browser actually has, right now.
-          queueMicrotask(() => applyFit(true));
+          if (info.adopted && !takeOverSizeRef.current) {
+            // Mirror the pane's real grid instead of fitting the viewport. The
+            // byte stream tmux sends (status line, splits, any full-screen TUI
+            // inside) is laid out for that exact width/height; shrinking the
+            // local xterm.js grid to a phone-sized container while replaying
+            // it produces exactly the corrupted redraws — cursor moves and
+            // background fills landing on the wrong cells — that "fit to this
+            // screen anyway" exists to opt out of.
+            bundle.term.resize(info.cols, info.rows);
+            lastSizeRef.current = { cols: info.cols, rows: info.rows };
+          } else {
+            // Adopt whatever size the browser actually has, right now.
+            queueMicrotask(() => applyFit(true));
+          }
         },
 
         onStatus: (next, info) => {
@@ -192,6 +204,11 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
     const term = termRef.current;
     const conn = connRef.current;
     if (!fit || !term || !conn) return;
+
+    // A fixed-grid adopted pane (see onAttached) keeps the real pane's
+    // dimensions; refitting it to the container on every window/orientation
+    // resize would undo that and scramble the next full-screen redraw.
+    if (adoptedRef.current && !takeOverSizeRef.current) return;
 
     try {
       fit.fit();
@@ -331,6 +348,9 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
             type="button"
             className="inline-link"
             onClick={() => {
+              // Set the ref synchronously too: applyFit reads it immediately,
+              // before this render's state update would otherwise land.
+              takeOverSizeRef.current = true;
               setTakeOverSize(true);
               applyFit(true);
             }}

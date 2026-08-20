@@ -305,8 +305,8 @@ describe('ConversationStore', () => {
 });
 
 describe('parsePaneLine', () => {
-  const line = (sessionName: string) =>
-    `${sessionName}|0|0|claude|/home/me/src/app|192|57|1|0|win`;
+  const line = (sessionName: string, zoomed = '0') =>
+    `${sessionName}|0|0|claude|/home/me/src/app|192|57|1|0|win|${zoomed}`;
 
   it('parses a pane', () => {
     expect(parsePaneLine(line('work'))).toEqual({
@@ -320,7 +320,12 @@ describe('parsePaneLine', () => {
       attached: 1,
       dead: false,
       windowName: 'win',
+      zoomed: false,
     });
+  });
+
+  it('reports an already-zoomed window', () => {
+    expect(parsePaneLine(line('work', '1'))?.zoomed).toBe(true);
   });
 
   it('tolerates a separator inside the user\'s session name', () => {

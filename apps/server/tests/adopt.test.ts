@@ -240,6 +240,65 @@ describeTmux('adopting a pane on a foreign tmux server', () => {
     expect(await attachedClients('shared')).toBeGreaterThanOrEqual(1);
   });
 
+  it('zooms the chosen pane instead of handing over the whole split window', async () => {
+    await startUserSession('splitroom', t.projectDir, ['sleep', '120']);
+    // Give the new pane its own cwd and long-lived command explicitly rather
+    // than relying on inherited state, for the same reason `startUserSession`
+    // waits for the real cwd: tmux reports the pre-exec state briefly.
+    await tmux('split-window', '-t', 'splitroom', '-c', t.projectDir, '--', 'sleep', '120');
+
+    let panes: any[] = [];
+    await waitFor(async () => {
+      panes = (await listTargets()).targets.filter((x) => x.sessionName === 'splitroom');
+      return panes.length === 2;
+    }, { timeout: 5000 });
+
+    const paneZero = panes.find((x) => x.paneIndex === 0);
+    expect(paneZero).toBeDefined();
+    // Nobody has zoomed this window yet.
+    expect(paneZero.zoomed).toBe(false);
+
+    const first = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: paneZero.id },
+    });
+    expect(first.statusCode).toBe(201);
+    const firstId = first.json().id as string;
+
+    // Attaching to one pane zoomed the window, so only that pane is visible —
+    // picking pane 0 no longer hands over the whole split.
+    await waitFor(async () => (await paneField('splitroom', '#{window_zoomed_flag}')) === '1', {
+      timeout: 10_000,
+    });
+
+    await t.app.inject({
+      method: 'DELETE',
+      url: `/api/sessions/${firstId}`,
+      headers: { cookie: t.cookie },
+    });
+    await waitFor(async () => (await attachedClients('splitroom')) === 0, { timeout: 10_000 });
+
+    // The dialog would now offer this pane as already zoomed...
+    const relisted = (await listTargets()).targets.find(
+      (x) => x.sessionName === 'splitroom' && x.paneIndex === 0,
+    );
+    expect(relisted?.zoomed).toBe(true);
+
+    // ...and attaching again must not toggle zoom back off (`-Z` toggles; a
+    // naive re-send would un-zoom the window and bring the other pane back).
+    const second = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: relisted!.id },
+    });
+    expect(second.statusCode).toBe(201);
+    await waitFor(async () => (await attachedClients('splitroom')) >= 1, { timeout: 10_000 });
+    expect(await paneField('splitroom', '#{window_zoomed_flag}')).toBe('1');
+  });
+
   it('runs the attach client as a direct child, not inside our own tmux', async () => {
     // Whatever the configured backend is, an adopted session must spawn the
     // tmux *client* directly — otherwise killing it would kill a pane we own
