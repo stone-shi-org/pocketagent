@@ -292,7 +292,7 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
         </div>
         {alive && (
           <button type="button" className="danger icon-btn" onClick={() => setConfirmingStop(true)}>
-            Stop
+            {session?.adopted ? 'Detach' : 'Stop'}
           </button>
         )}
       </header>
@@ -353,9 +353,21 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
 
       {confirmingStop && (
         <ConfirmDialog
-          title="Terminate this session?"
-          body="The running process will be stopped."
-          confirmLabel={stopping ? 'Stopping…' : 'Terminate'}
+          title={session?.adopted ? 'Detach from tmux session?' : 'Terminate this session?'}
+          body={
+            session?.adopted
+              ? 'The terminal client will detach. Your tmux session will remain running.'
+              : 'The running process will be stopped.'
+          }
+          confirmLabel={
+            stopping
+              ? session?.adopted
+                ? 'Detaching…'
+                : 'Stopping…'
+              : session?.adopted
+                ? 'Detach'
+                : 'Terminate'
+          }
           busy={stopping}
           onConfirm={() => void terminate()}
           onCancel={() => setConfirmingStop(false)}

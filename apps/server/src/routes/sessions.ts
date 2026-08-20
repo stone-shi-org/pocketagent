@@ -237,10 +237,14 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
   });
 
   /** Existing tmux panes that could be adopted. Empty unless enabled. */
-  app.get('/api/adoptable', async () => ({
-    enabled: adoption.isEnabled(),
-    targets: await adoption.list(),
-  }));
+  app.get<{ Querystring: { all?: string } }>('/api/adoptable', async (request) => {
+    const includeUnrestricted = request.query.all === '1' || request.query.all === 'true';
+    const targets = await adoption.list(includeUnrestricted);
+    return {
+      enabled: adoption.isEnabled() || includeUnrestricted,
+      targets,
+    };
+  });
 
   /**
    * The conversation a session was resumed from, as renderable events.
@@ -284,7 +288,8 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     // not from the request body.
     let adopt: Parameters<typeof sessions.create>[0]['adopt'];
     if (body.adoptTargetId) {
-      if (!adoption.isEnabled()) {
+      const target = await adoption.resolve(body.adoptTargetId, true);
+      if (!target && !adoption.isEnabled()) {
         return reply.code(400).send({
           error: {
             code: 'adoption_disabled',
@@ -292,12 +297,11 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
           },
         });
       }
-      const target = await adoption.resolve(body.adoptTargetId);
       if (!target) {
         return reply.code(404).send({
           error: {
             code: 'not_found',
-            message: 'That pane is gone, or is no longer inside a workspace root.',
+            message: 'That pane is gone, or is no longer available for adoption.',
           },
         });
       }
@@ -312,8 +316,17 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       body.cwd = target.cwd;
     }
 
-    const cwd = await resolveWorkspaceCwdOrReply(workspaces, body.cwd, reply);
-    if (cwd === null) return reply;
+    let cwd: string | null;
+    if (adopt) {
+      try {
+        cwd = await workspaces.canonicalDirectory(body.cwd);
+      } catch {
+        cwd = body.cwd;
+      }
+    } else {
+      cwd = await resolveWorkspaceCwdOrReply(workspaces, body.cwd, reply);
+      if (cwd === null) return reply;
+    }
 
     try {
       const session = await sessions.create({

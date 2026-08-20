@@ -2445,6 +2445,23 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 .agents-nav-btn:hover { background: var(--bg-elev); }
 .agents-nav-btn.active { border-color: var(--accent); color: var(--accent); }
 
+.shell-nav-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 13px;
+}
+.shell-nav-btn:hover { background: var(--bg-elev); }
+.shell-nav-btn.active { border-color: var(--accent); color: var(--accent); }
+
 .sidebar-search {
   padding: 0 14px 8px;
 }

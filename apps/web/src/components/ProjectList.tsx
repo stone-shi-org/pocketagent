@@ -16,6 +16,7 @@ export interface ProjectsState {
   refresh: () => Promise<void>;
   open: (chat: ChatSummary) => void;
   removeChat: (chat: ChatSummary) => Promise<void>;
+  detachChat: (chat: ChatSummary) => Promise<void>;
   clearFinished: (project: ProjectInfo) => Promise<void>;
   hideProject: (cwd: string) => Promise<void>;
   removeProject: (cwd: string) => Promise<void>;
@@ -164,6 +165,22 @@ export function useProjects(
     [onApiError, refresh],
   );
 
+  const detachChat = useCallback(
+    async (chat: ChatSummary) => {
+      if (chat.sessionId) {
+        try {
+          await api.deleteSession(chat.sessionId);
+        } catch (err) {
+          onApiError(err);
+          setError(err instanceof ApiError ? err.message : 'Could not detach that session.');
+        } finally {
+          await refresh();
+        }
+      }
+    },
+    [onApiError, refresh],
+  );
+
   return {
     projects,
     host,
@@ -171,6 +188,7 @@ export function useProjects(
     refresh,
     open,
     removeChat,
+    detachChat,
     clearFinished,
     hideProject,
     removeProject,
@@ -324,7 +342,7 @@ function ProjectSection({
           onClick={() => toggle(project.cwd)}
           aria-expanded={!isCollapsed}
         >
-          <Icon name={nested ? 'branch' : 'folder'} className="folder" />
+          <Icon name={project.cwd === 'virtual:shell' ? 'agent-shell' : nested ? 'branch' : 'folder'} className="folder" />
           <span className="project-label">
             {nested ? project.gitBranch ?? project.name : project.name}
           </span>
@@ -406,18 +424,28 @@ function ProjectSection({
                       {chat.title}
                     </span>
                   </button>
-                  {/* Running chats have no remove: stop them first, so the
-                      process is never orphaned by losing its record. */}
-                  {!chat.live && (
+                  {chat.live && project.cwd === 'virtual:shell' ? (
                     <button
                       type="button"
                       className="chat-remove"
-                      onClick={() => void state.removeChat(chat)}
-                      aria-label={`Remove ${chat.title} from the list`}
-                      title="Remove from list"
+                      onClick={() => void state.detachChat(chat)}
+                      aria-label={`Detach ${chat.title}`}
+                      title="Detach from tmux session"
                     >
                       <Icon name="close" size={14} />
                     </button>
+                  ) : (
+                    !chat.live && (
+                      <button
+                        type="button"
+                        className="chat-remove"
+                        onClick={() => void state.removeChat(chat)}
+                        aria-label={`Remove ${chat.title} from the list`}
+                        title="Remove from list"
+                      >
+                        <Icon name="close" size={14} />
+                      </button>
+                    )
                   )}
                 </div>
               ))}

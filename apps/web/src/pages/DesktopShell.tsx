@@ -13,6 +13,8 @@ import { OverflowMenu } from './ProjectsPage.js';
 import { ComposerPage } from './ComposerPage.js';
 import { AgentsFleetPage } from './AgentsFleetPage.js';
 
+import { ShellDialog } from '../components/ShellDialog.js';
+
 interface Props {
   route: Route;
   onNavigate: (route: Route) => void;
@@ -52,6 +54,7 @@ export function DesktopShell({
   const [showAdd, setShowAdd] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showRunning, setShowRunning] = useState(false);
+  const [showShell, setShowShell] = useState(false);
 
   const activeSessionId = route.name === 'terminal' ? route.sessionId : null;
   const activeConversationId = route.name === 'chat' ? route.conversationId : null;
@@ -95,6 +98,10 @@ export function DesktopShell({
                 setMenuOpen(false);
                 setShowRunning(true);
               }}
+              onShell={() => {
+                setMenuOpen(false);
+                setShowShell(true);
+              }}
               runningCount={runningCount}
               onSettings={() => {
                 setMenuOpen(false);
@@ -113,6 +120,14 @@ export function DesktopShell({
           >
             <Icon name="compose" size={18} />
             New chat
+          </button>
+          <button
+            type="button"
+            className="shell-nav-btn"
+            onClick={() => setShowShell(true)}
+          >
+            <Icon name="agent-shell" size={16} />
+            Shell
           </button>
           <button
             type="button"
@@ -211,6 +226,18 @@ export function DesktopShell({
           onApiError={onApiError}
           onCreated={(id) => {
             setShowAdvanced(false);
+            void state.refresh();
+            onNavigate({ name: 'terminal', sessionId: id });
+          }}
+        />
+      )}
+
+      {showShell && (
+        <ShellDialog
+          onClose={() => setShowShell(false)}
+          onApiError={onApiError}
+          onCreated={(id) => {
+            setShowShell(false);
             void state.refresh();
             onNavigate({ name: 'terminal', sessionId: id });
           }}

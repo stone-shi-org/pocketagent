@@ -186,8 +186,10 @@ export const api = {
       `/api/conversations/${encodeURIComponent(id)}/history`,
     ),
 
-  listAdoptable: () =>
-    request<{ enabled: boolean; targets: AdoptableTarget[] }>('/api/adoptable'),
+  listAdoptable: (all = false) =>
+    request<{ enabled: boolean; targets: AdoptableTarget[] }>(
+      all ? '/api/adoptable?all=1' : '/api/adoptable',
+    ),
 
   pushPublicKey: () => request<{ publicKey: string | null }>('/api/push/key'),
 

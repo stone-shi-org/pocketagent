@@ -5,6 +5,7 @@ import { AddProject } from '../components/AddProject.js';
 import { PushToggle } from '../components/PushToggle.js';
 import { SettingsDialog } from '../components/SettingsDialog.js';
 import { RunningSessions } from '../components/RunningSessions.js';
+import { ShellDialog } from '../components/ShellDialog.js';
 import { Icon } from '../components/Icon.js';
 import {
   HostChip,
@@ -50,6 +51,7 @@ export function ProjectsPage({
   const [showAdd, setShowAdd] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showRunning, setShowRunning] = useState(false);
+  const [showShell, setShowShell] = useState(false);
 
   const runningCount =
     state.projects?.reduce((n, p) => n + p.chats.filter((c) => c.live).length, 0) ?? 0;
@@ -90,6 +92,10 @@ export function ProjectsPage({
               setMenuOpen(false);
               setShowRunning(true);
             }}
+            onShell={() => {
+              setMenuOpen(false);
+              setShowShell(true);
+            }}
             runningCount={runningCount}
             onAgents={() => {
               setMenuOpen(false);
@@ -124,6 +130,16 @@ export function ProjectsPage({
       <div className="home-dock">
         <SearchField value={search} onChange={setSearch} />
         <PushToggle compact />
+        <button
+          type="button"
+          className="round-btn plain"
+          onClick={() => setShowShell(true)}
+          aria-label="Shell"
+          title="Shell tmux sessions"
+          style={{ width: 38, height: 38, flexShrink: 0 }}
+        >
+          <Icon name="agent-shell" size={20} />
+        </button>
         <button
           type="button"
           className="compose-fab"
@@ -172,6 +188,18 @@ export function ProjectsPage({
           }}
         />
       )}
+
+      {showShell && (
+        <ShellDialog
+          onClose={() => setShowShell(false)}
+          onApiError={onApiError}
+          onCreated={(id) => {
+            setShowShell(false);
+            void state.refresh();
+            onOpen(id);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -182,6 +210,7 @@ export function OverflowMenu({
   onRefresh,
   onHidden,
   onRunning,
+  onShell,
   runningCount = 0,
   onAgents,
   onSettings,
@@ -192,6 +221,7 @@ export function OverflowMenu({
   onRefresh: () => void;
   onHidden: () => void;
   onRunning: () => void;
+  onShell?: () => void;
   /** Shown next to the menu item so a growing pile of live sessions is noticed before opening it. */
   runningCount?: number;
   /**
@@ -227,6 +257,11 @@ export function OverflowMenu({
         <button type="button" role="menuitem" onClick={onRefresh}>
           Refresh
         </button>
+        {onShell && (
+          <button type="button" role="menuitem" onClick={onShell}>
+            Shell (Tmux sessions)…
+          </button>
+        )}
         <button type="button" role="menuitem" onClick={onHidden}>
           Hidden projects…
         </button>

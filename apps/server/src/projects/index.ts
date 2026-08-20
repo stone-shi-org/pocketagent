@@ -22,6 +22,8 @@ import {
  * phone should not pay three round trips to draw its first screen.
  */
 
+export const VIRTUAL_SHELL_CWD = 'virtual:shell';
+
 export interface ProjectServiceOptions {
   workspaces: WorkspaceRegistry;
   conversations: ConversationStore;
@@ -115,7 +117,8 @@ export class ProjectService {
       const liveConversation = session.agentSessionId
         ? conversationById.get(session.agentSessionId)
         : undefined;
-      push(byCwd, session.cwd, chatFromSession(session, liveConversation?.title));
+      const targetCwd = session.adopted ? VIRTUAL_SHELL_CWD : session.cwd;
+      push(byCwd, targetCwd, chatFromSession(session, liveConversation?.title));
     }
 
     // Every configured directory gets a place, even an empty one.
@@ -151,7 +154,28 @@ export class ProjectService {
     // `mainRepoCwd` rides along with each draft only long enough to decide
     // where it belongs; it is stripped before anything is returned.
     const drafts: (ProjectInfo & { mainRepoCwd: string | null })[] = [];
+
+    if (byCwd.has(VIRTUAL_SHELL_CWD)) {
+      const shellChats = byCwd.get(VIRTUAL_SHELL_CWD) ?? [];
+      if (shellChats.length > 0) {
+        shellChats.sort((a, b) => compareByRecency(chatSortKey(a), chatSortKey(b)));
+        drafts.push({
+          cwd: VIRTUAL_SHELL_CWD,
+          name: 'Shell',
+          workspaceLabel: 'Shell',
+          isGitRepo: false,
+          gitBranch: null,
+          hidden: false,
+          isWorkspace: true,
+          chats: shellChats,
+          worktrees: [],
+          mainRepoCwd: null,
+        });
+      }
+    }
+
     for (const [cwd, chats] of byCwd) {
+      if (cwd === VIRTUAL_SHELL_CWD) continue;
       // A project is a folder you added, or a directory inside one. Chats in a
       // directory that is no longer either are not shown: "remove this folder"
       // has to actually remove it, and a folder with history in it is exactly
