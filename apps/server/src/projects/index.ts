@@ -148,7 +148,9 @@ export class ProjectService {
 
     const roots = this.workspaces.getRoots();
     const added = new Set(roots);
-    const projects: ProjectInfo[] = [];
+    // `mainRepoCwd` rides along with each draft only long enough to decide
+    // where it belongs; it is stripped before anything is returned.
+    const drafts: (ProjectInfo & { mainRepoCwd: string | null })[] = [];
     for (const [cwd, chats] of byCwd) {
       // A project is a folder you added, or a directory inside one. Chats in a
       // directory that is no longer either are not shown: "remove this folder"
@@ -160,7 +162,7 @@ export class ProjectService {
       const hidden = isHidden(cwd, visibility);
       if (hidden && !includeHidden) continue;
       chats.sort((a, b) => compareByRecency(chatSortKey(a), chatSortKey(b)));
-      projects.push({
+      drafts.push({
         cwd,
         name: path.basename(cwd) || cwd,
         workspaceLabel: this.workspaces.labelFor(cwd),
@@ -169,18 +171,38 @@ export class ProjectService {
         hidden,
         isWorkspace: added.has(cwd),
         chats,
+        worktrees: [],
+        mainRepoCwd: await findMainRepoCwd(cwd),
       });
+    }
+
+    // Fold a linked worktree into its main checkout's card rather than
+    // listing it as an unrelated project — see the doc comment on
+    // `ProjectInfo.worktrees`. Only worktrees whose main checkout is itself
+    // visible get folded; one that points at a hidden or never-added
+    // directory has nowhere to nest and is shown as its own top-level row
+    // instead, same as before this grouping existed.
+    const draftsByCwd = new Map(drafts.map((d) => [d.cwd, d]));
+    const projects: ProjectInfo[] = [];
+    for (const draft of drafts) {
+      const { mainRepoCwd, ...info } = draft;
+      const parent = mainRepoCwd ? draftsByCwd.get(mainRepoCwd) : undefined;
+      if (parent) parent.worktrees.push(info);
+      else projects.push(info);
+    }
+    for (const project of projects) {
+      project.worktrees.sort((a, b) => a.name.localeCompare(b.name));
     }
 
     // Anything with work in it first, most recent at the top; then the rest
     // alphabetically. An empty directory has no timestamp to sort by, and
     // ordering those by chance would make the list shuffle between polls.
     // Projects whose top chat is mid-turn bucket above idle ones and sort
-    // among themselves by `busySince` — see `chatSortKey` for why.
+    // among themselves by `busySince` — see `chatSortKey` for why. A folded
+    // worktree's own activity counts too: it would be backwards for a card to
+    // sink to the bottom while a worktree nested inside it is mid-turn.
     projects.sort((a, b) => {
-      const ak = a.chats[0] ? chatSortKey(a.chats[0]) : { busy: false, ts: 0 };
-      const bk = b.chats[0] ? chatSortKey(b.chats[0]) : { busy: false, ts: 0 };
-      const cmp = compareByRecency(ak, bk);
+      const cmp = compareByRecency(projectSortKey(a), projectSortKey(b));
       if (cmp !== 0) return cmp;
       return a.workspaceLabel.localeCompare(b.workspaceLabel);
     });
@@ -245,6 +267,19 @@ function compareByRecency(a: { busy: boolean; ts: number }, b: { busy: boolean; 
 }
 
 /**
+ * A project's sort key is the best (busiest, then most recent) key among its
+ * own top chat and each folded worktree's top chat — each of those lists is
+ * already sorted by `chatSortKey`, so only the first of each needs checking.
+ */
+function projectSortKey(project: ProjectInfo): { busy: boolean; ts: number } {
+  const tops = [project.chats[0], ...project.worktrees.map((w) => w.chats[0])].filter(
+    (c): c is ChatSummary => c !== undefined,
+  );
+  if (tops.length === 0) return { busy: false, ts: 0 };
+  return tops.map(chatSortKey).reduce((best, k) => (compareByRecency(k, best) < 0 ? k : best));
+}
+
+/**
  * One row per session, but one chat per underlying conversation.
  *
  * Sessions with no `agentSessionId` (not yet reported, or a non-Claude agent)
@@ -290,47 +325,78 @@ function sessionUpdatedAt(session: SessionInfo): number {
 const TERMINAL = new Set(['exited', 'killed', 'error', 'interrupted']);
 
 /**
- * Current branch, read from `.git/HEAD` rather than by running git.
+ * Where a directory's git metadata actually lives, and whether it is a linked
+ * worktree of some other checkout.
  *
- * Spawning a process per project on every poll of the home screen is a real
- * cost, and the file is a one-line read. A detached HEAD has no branch name, so
- * it reports null rather than a bare commit hash nobody recognizes.
- *
- * In a worktree (or a submodule), `.git` is a *file* containing
- * `gitdir: <path/to/main/.git/worktrees/<name>>` rather than a directory — the
- * worktree-creation feature makes this the common case for anything under
- * `.worktrees/`, not a rare one, so it is followed one level rather than
- * treated as "not a repo".
+ * `.git` is usually a directory. In a worktree (or a submodule) it is instead
+ * a *file* containing `gitdir: <path>` — the worktree-creation feature makes
+ * this the common case for anything under `.worktrees/`, not a rare one, so
+ * it is followed one level rather than treated as "not a repo". A worktree's
+ * target looks like `<main>/.git/worktrees/<name>`; a submodule's looks like
+ * `<super>/.git/modules/<name>` — same indirection mechanism, different
+ * meaning, so the parent directory's name (`worktrees` vs. anything else) is
+ * what tells them apart, not just the fact that `.git` was a file.
  */
-export async function readGitBranch(dir: string): Promise<string | null> {
+async function resolveGitDir(
+  dir: string,
+): Promise<{ gitDir: string; mainRepoCwd: string | null } | null> {
   const gitPath = path.join(dir, '.git');
-  let gitDir = gitPath;
   let stat;
   try {
     stat = await fs.stat(gitPath);
   } catch {
     return null;
   }
-  if (!stat.isDirectory()) {
-    let indirection: string;
-    try {
-      indirection = await fs.readFile(gitPath, 'utf8');
-    } catch {
-      return null;
-    }
-    const match = /^gitdir:\s*(.+)$/m.exec(indirection.trim());
-    if (!match?.[1]) return null;
-    gitDir = path.isAbsolute(match[1]) ? match[1] : path.resolve(dir, match[1]);
+  if (stat.isDirectory()) return { gitDir: gitPath, mainRepoCwd: null };
+
+  let indirection: string;
+  try {
+    indirection = await fs.readFile(gitPath, 'utf8');
+  } catch {
+    return null;
   }
+  const match = /^gitdir:\s*(.+)$/m.exec(indirection.trim());
+  if (!match?.[1]) return null;
+  const gitDir = path.isAbsolute(match[1]) ? match[1] : path.resolve(dir, match[1]);
+
+  const worktreesDir = path.dirname(gitDir);
+  const dotGit = path.dirname(worktreesDir);
+  const mainRepoCwd =
+    path.basename(worktreesDir) === 'worktrees' && path.basename(dotGit) === '.git'
+      ? path.dirname(dotGit)
+      : null;
+  return { gitDir, mainRepoCwd };
+}
+
+/**
+ * Current branch, read from `.git/HEAD` rather than by running git.
+ *
+ * Spawning a process per project on every poll of the home screen is a real
+ * cost, and the file is a one-line read. A detached HEAD has no branch name, so
+ * it reports null rather than a bare commit hash nobody recognizes.
+ */
+export async function readGitBranch(dir: string): Promise<string | null> {
+  const info = await resolveGitDir(dir);
+  if (!info) return null;
 
   let head: string;
   try {
-    head = await fs.readFile(path.join(gitDir, 'HEAD'), 'utf8');
+    head = await fs.readFile(path.join(info.gitDir, 'HEAD'), 'utf8');
   } catch {
     return null;
   }
   const branchMatch = /^ref:\s*refs\/heads\/(.+)$/m.exec(head.trim());
   return branchMatch?.[1]?.trim() || null;
+}
+
+/**
+ * The main checkout's working directory, when `dir` is a linked git worktree
+ * of it. Null for a main checkout, a bare/absent repo, or a submodule — see
+ * `resolveGitDir` for how a worktree is told apart from a submodule.
+ */
+export async function findMainRepoCwd(dir: string): Promise<string | null> {
+  const info = await resolveGitDir(dir);
+  return info?.mainRepoCwd ?? null;
 }
 
 async function isGitRepo(dir: string): Promise<boolean> {

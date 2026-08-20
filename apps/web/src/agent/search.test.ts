@@ -20,7 +20,7 @@ function chat(title: string): ChatSummary {
   };
 }
 
-function project(name: string, titles: string[]): ProjectInfo {
+function project(name: string, titles: string[], worktrees: ProjectInfo[] = []): ProjectInfo {
   return {
     cwd: `/w/${name}`,
     name,
@@ -30,7 +30,12 @@ function project(name: string, titles: string[]): ProjectInfo {
     hidden: false,
     isWorkspace: true,
     chats: titles.map(chat),
+    worktrees,
   };
+}
+
+function worktree(branch: string, titles: string[]): ProjectInfo {
+  return { ...project(branch, titles), name: `wt-${branch}`, gitBranch: branch, isWorkspace: false };
 }
 
 const projects = [
@@ -72,5 +77,32 @@ describe('filterProjects', () => {
   it('does not mutate the input', () => {
     filterProjects(projects, 'dark');
     expect(projects[0]?.chats).toHaveLength(2);
+  });
+});
+
+describe('filterProjects with folded worktrees', () => {
+  const withWorktrees = [
+    project('agents-remote-control', ['fix the sync bug'], [
+      worktree('feature-x', ['add dark mode']),
+      worktree('feature-y', ['where is the oauth callback set?']),
+    ]),
+  ];
+
+  it('narrows to only the worktree whose chats match, dropping its sibling', () => {
+    const result = filterProjects(withWorktrees, 'oauth');
+    expect(result).toHaveLength(1);
+    expect(result[0]?.chats).toHaveLength(0);
+    expect(result[0]?.worktrees.map((w) => w.gitBranch)).toEqual(['feature-y']);
+  });
+
+  it('matching a worktree by its branch name keeps all of that worktree’s chats', () => {
+    const result = filterProjects(withWorktrees, 'feature-x');
+    expect(result[0]?.worktrees).toHaveLength(1);
+    expect(result[0]?.worktrees[0]?.chats).toHaveLength(1);
+  });
+
+  it('matching the main project keeps every worktree untouched', () => {
+    const result = filterProjects(withWorktrees, 'agents-remote-control');
+    expect(result[0]?.worktrees).toHaveLength(2);
   });
 });

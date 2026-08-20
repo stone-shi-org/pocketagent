@@ -220,27 +220,54 @@ export const ChatSummary = z.object({
 });
 export type ChatSummary = z.infer<typeof ChatSummary>;
 
-/** A workspace directory, with everything that has happened in it. */
-export const ProjectInfo = z.object({
+/**
+ * A workspace directory, with everything that has happened in it.
+ *
+ * `worktrees` folds in any linked git worktree of this checkout that would
+ * otherwise show up as an unrelated project of its own — `git worktree add`
+ * is how you fork a *branch* of work you already have a card for, not a new
+ * project, and a phone-sized list has no room for one row per branch. A
+ * worktree entry is itself a full `ProjectInfo` (so the client can reuse the
+ * same row/menu rendering), but its own `worktrees` is always empty: a linked
+ * worktree's `.git` is a file, not a directory, so nothing can ever point
+ * *into* it the way a worktree points at its main checkout — there is no
+ * second level to represent.
+ */
+export interface ProjectInfo {
   /** Absolute canonical path; also the row key. */
-  cwd: z.string(),
+  cwd: string;
   /** Basename, which is what reads well on a phone. */
-  name: z.string(),
+  name: string;
   /** Root-relative path, for disambiguating two projects with one basename. */
-  workspaceLabel: z.string(),
-  isGitRepo: z.boolean(),
-  gitBranch: z.string().nullable(),
+  workspaceLabel: string;
+  isGitRepo: boolean;
+  gitBranch: string | null;
   /** Excluded from the list unless explicitly asked for. */
-  hidden: z.boolean(),
+  hidden: boolean;
   /**
    * True when this is a folder the user added, rather than a subdirectory that
    * merely happens to have had a session run in it. Only the former can be
    * removed; the latter can only be hidden.
    */
-  isWorkspace: z.boolean(),
-  chats: z.array(ChatSummary),
-});
-export type ProjectInfo = z.infer<typeof ProjectInfo>;
+  isWorkspace: boolean;
+  chats: ChatSummary[];
+  worktrees: ProjectInfo[];
+}
+// `z.lazy` plus the explicit interface above is zod's documented pattern for a
+// self-referencing schema — inference alone cannot see through the recursion.
+export const ProjectInfo: z.ZodType<ProjectInfo> = z.lazy(() =>
+  z.object({
+    cwd: z.string(),
+    name: z.string(),
+    workspaceLabel: z.string(),
+    isGitRepo: z.boolean(),
+    gitBranch: z.string().nullable(),
+    hidden: z.boolean(),
+    isWorkspace: z.boolean(),
+    chats: z.array(ChatSummary),
+    worktrees: z.array(ProjectInfo),
+  }),
+);
 
 /**
  * A folder found in an agent's own history.

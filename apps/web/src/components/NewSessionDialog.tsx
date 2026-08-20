@@ -8,6 +8,7 @@ import type {
   WorkspaceEntry,
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
+import { flattenProjects } from '../agent/search.js';
 import { formatRelative } from './StatusBadge.js';
 
 interface Props {
@@ -87,9 +88,14 @@ export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JS
 
   const selected = agents.find((a) => a.id === agent) ?? null;
   const selectedWorkspace = workspaces.find((w) => w.path === cwd) ?? null;
+  // A workspace root can itself be a linked worktree of another added root,
+  // in which case `ProjectService.list` folds it under that root's card
+  // rather than listing it as its own top-level entry — flatten first so its
+  // `gitBranch` is still found by cwd (see `flattenProjects`).
+  const flatProjects = useMemo(() => flattenProjects(projects), [projects]);
   const branchLabel = useMemo(
-    () => projects.find((p) => p.cwd === cwd)?.gitBranch ?? null,
-    [projects, cwd],
+    () => flatProjects.find((p) => p.cwd === cwd)?.gitBranch ?? null,
+    [flatProjects, cwd],
   );
 
   // A worktree/branch choice is scoped to whichever directory was selected

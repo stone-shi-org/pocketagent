@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SessionInfo } from '@pocketagent/protocol';
-import { ProjectService, readGitBranch } from '../src/projects/index.js';
+import { ProjectService, findMainRepoCwd, readGitBranch } from '../src/projects/index.js';
 import { ConversationStore, encodeProjectDir } from '../src/conversations/index.js';
 import { hideChat, openDatabase } from '../src/db/index.js';
 import { WorkspaceRegistry } from '../src/workspaces/index.js';
@@ -74,6 +74,51 @@ describe('readGitBranch', () => {
       expect(await readGitBranch(dir)).toBe('feature/wt');
     } finally {
       fs.rmSync(gitDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('findMainRepoCwd', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync('/tmp/pa-git-');
+  });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  it('reports no main checkout for an ordinary repo', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    expect(await findMainRepoCwd(dir)).toBeNull();
+  });
+
+  it('reports no main checkout outside a repository', async () => {
+    expect(await findMainRepoCwd('/tmp')).toBeNull();
+  });
+
+  it('resolves a linked worktree back to its main checkout', async () => {
+    // Shape a real `git worktree add` leaves behind: `<main>/.git/worktrees/<name>`.
+    const main = fs.mkdtempSync('/tmp/pa-git-main-');
+    const gitDir = path.join(main, '.git', 'worktrees', 'feature-x');
+    fs.mkdirSync(gitDir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '.git'), `gitdir: ${gitDir}\n`);
+    try {
+      expect(await findMainRepoCwd(dir)).toBe(main);
+    } finally {
+      fs.rmSync(main, { recursive: true, force: true });
+    }
+  });
+
+  it('does not mistake a submodule for a worktree', async () => {
+    // A submodule uses the same `gitdir:` indirection, but its target lives
+    // under `.git/modules/<name>` rather than `.git/worktrees/<name>` — that
+    // segment is what tells the two apart.
+    const superproject = fs.mkdtempSync('/tmp/pa-git-super-');
+    const gitDir = path.join(superproject, '.git', 'modules', 'lib');
+    fs.mkdirSync(gitDir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '.git'), `gitdir: ${gitDir}\n`);
+    try {
+      expect(await findMainRepoCwd(dir)).toBeNull();
+    } finally {
+      fs.rmSync(superproject, { recursive: true, force: true });
     }
   });
 });
@@ -400,6 +445,127 @@ describe('ProjectService', () => {
     fs.writeFileSync(path.join(ws.project, '.git', 'HEAD'), 'ref: refs/heads/main\n');
     const [project] = await service.list([makeSession({ cwd: ws.project })]);
     expect(project).toMatchObject({ isGitRepo: true, gitBranch: 'main' });
+  });
+
+  describe('folding worktrees into their main checkout', () => {
+    // Lays down `.git` (main) + `.git/worktrees/<name>` + a worktree
+    // directory whose own `.git` file points at it — the shape a real
+    // `git worktree add` produces, without spawning git.
+    function addWorktree(worktreePath: string, branch: string): void {
+      fs.mkdirSync(worktreePath, { recursive: true });
+      const gitDir = path.join(ws.project, '.git', 'worktrees', branch);
+      fs.mkdirSync(gitDir, { recursive: true });
+      fs.writeFileSync(path.join(gitDir, 'HEAD'), `ref: refs/heads/${branch}\n`);
+      fs.writeFileSync(path.join(worktreePath, '.git'), `gitdir: ${gitDir}\n`);
+    }
+
+    beforeEach(() => {
+      fs.mkdirSync(path.join(ws.project, '.git'));
+      fs.writeFileSync(path.join(ws.project, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    });
+
+    it('folds a worktree nested under the project into its card instead of listing it separately', async () => {
+      const worktreePath = path.join(ws.project, '.worktrees', 'feature-x');
+      addWorktree(worktreePath, 'feature-x');
+
+      const projects = await service.list([
+        makeSession({ id: 'main-sess', cwd: ws.project }),
+        makeSession({ id: 'wt-sess', cwd: worktreePath, title: 'Worktree chat' }),
+      ]);
+
+      // `ws.root` itself is always present too — an added folder gets a place
+      // even when empty — so this asserts the worktree isn't *also* its own
+      // top-level row, not that the whole list has exactly one entry.
+      expect(projects.some((p) => p.cwd === worktreePath)).toBe(false);
+      const main = projects.find((p) => p.cwd === ws.project);
+      expect(main?.worktrees).toHaveLength(1);
+      expect(main?.worktrees[0]).toMatchObject({
+        cwd: worktreePath,
+        gitBranch: 'feature-x',
+        isWorkspace: false,
+        worktrees: [],
+      });
+      expect(main?.worktrees[0]?.chats.map((c) => c.title)).toEqual(['Worktree chat']);
+    });
+
+    it('folds a worktree even when it lives under a completely different workspace root', async () => {
+      // The scenario a manually-created worktree hits: it was never nested
+      // under the main checkout at all, just added (or already contained) as
+      // its own directory elsewhere. Grouping is decided by the `.git`
+      // indirection, not by directory containment.
+      const otherRoot = fs.mkdtempSync('/tmp/pa-other-root-');
+      const otherWorktree = path.join(otherRoot, 'test-1');
+      addWorktree(otherWorktree, 'test-1');
+
+      const registry = new WorkspaceRegistry([ws.root, otherRoot]);
+      const svc = new ProjectService({
+        workspaces: registry,
+        conversations: new ConversationStore({
+          projectsDir,
+          workspaces: registry,
+          listRunningCwds: async () => [],
+        }),
+        db,
+        version: '1',
+      });
+
+      try {
+        const projects = await svc.list([
+          makeSession({ id: 'main-sess', cwd: ws.project }),
+          makeSession({ id: 'other-sess', cwd: otherWorktree, title: 'Elsewhere chat' }),
+        ]);
+        // Neither the worktree itself, nor the bare root it happens to sit
+        // under, shows up as an unrelated top-level project.
+        expect(projects.some((p) => p.cwd === otherWorktree)).toBe(false);
+        const main = projects.find((p) => p.cwd === ws.project);
+        expect(main?.worktrees[0]).toMatchObject({ cwd: otherWorktree, gitBranch: 'test-1' });
+      } finally {
+        fs.rmSync(otherRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('leaves a worktree as its own top-level project when its main checkout is hidden', async () => {
+      service.setHidden(ws.project, true);
+      const worktreePath = path.join(ws.project, '.worktrees', 'orphan');
+      addWorktree(worktreePath, 'orphan');
+
+      // Default `includeHidden = false`, so the main checkout never becomes a
+      // draft to fold into — the worktree has nowhere to nest and stays a
+      // standalone row instead of silently disappearing.
+      const projects = await service.list([makeSession({ cwd: worktreePath })]);
+      expect(projects.some((p) => p.cwd === ws.project)).toBe(false);
+      const orphan = projects.find((p) => p.cwd === worktreePath);
+      expect(orphan).toMatchObject({ cwd: worktreePath, gitBranch: 'orphan', worktrees: [] });
+    });
+
+    it('sorts a project above idle ones while a folded worktree is mid-turn', async () => {
+      const worktreePath = path.join(ws.project, '.worktrees', 'busy-branch');
+      addWorktree(worktreePath, 'busy-branch');
+      // Just needs to be its own visible project under the same root — not
+      // itself a workspace root — for the sort comparison below.
+      const other = path.join(ws.root, 'other-project');
+      fs.mkdirSync(other);
+
+      const projects = await service.list([
+        makeSession({ id: 'main-sess', cwd: ws.project, lastActivityAt: 5000 }),
+        makeSession({
+          id: 'wt-sess',
+          cwd: worktreePath,
+          busy: true,
+          busySince: 9000,
+          lastActivityAt: 9000,
+        }),
+        makeSession({ id: 'other-sess', cwd: other, lastActivityAt: 8000 }),
+      ]);
+
+      // `other` was touched more recently than the main checkout's own chat,
+      // but the worktree folded into the main checkout is busy right now —
+      // that has to outrank a merely-idle-but-recent chat elsewhere. Compared
+      // by relative position rather than the exact array, since the always-
+      // present (empty) `ws.root` entry sorts in too.
+      const indexOf = (cwd: string) => projects.findIndex((p) => p.cwd === cwd);
+      expect(indexOf(ws.project)).toBeLessThan(indexOf(other));
+    });
   });
 
   it('drops a directory once its folder is no longer a project', async () => {

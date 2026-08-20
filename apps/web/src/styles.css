@@ -1811,6 +1811,28 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   color: var(--text-dim);
 }
 
+/* A folded worktree renders as a smaller project section indented under its
+   main checkout's card, connected by a rule rather than a border — it is
+   part of that project, not a sibling of equal weight. Its label shows the
+   branch rather than the folder name (often just an auto-slugified branch
+   already), which is the thing that actually distinguishes it. */
+.project--worktree {
+  margin-top: 2px;
+  margin-left: 11px;
+  padding-left: 15px;
+  border-left: 1px solid var(--border);
+}
+
+.project--worktree .project-name {
+  padding: 6px 0;
+  font-size: 15.5px;
+  font-weight: 550;
+}
+
+.project--worktree .project-name .folder {
+  opacity: 0.7;
+}
+
 .chat-row {
   display: block;
   width: 100%;
@@ -2255,6 +2277,62 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   border-color: transparent;
 }
 
+/* Worktree dialog ---------------------------------------------------------- */
+
+.worktree-dialog .sheet-title {
+  padding-left: 2px;
+  padding-right: 2px;
+}
+
+.worktree-dialog .field {
+  margin: 4px 2px 14px;
+}
+
+.worktree-dialog .transport-hint {
+  margin: 0 2px 14px;
+}
+
+.worktree-dialog .dialog-actions {
+  margin: 4px 2px 0;
+}
+
+/* A two- or three-way toggle, styled like a picker sheet grown a divider
+   instead of a list — one tap, no separate sheet, since the options here are
+   few and fixed rather than data-driven like everything SelectorRow renders. */
+.segmented {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  margin: 2px 2px 14px;
+  border-radius: 12px;
+  background: var(--bg-elev);
+}
+
+.segmented button {
+  flex: 1;
+  padding: 9px 8px;
+  border: none;
+  border-radius: 9px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.segmented button:hover:not(:disabled) {
+  border-color: transparent;
+}
+
+.segmented button.active {
+  background: var(--bg-elev-2);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
 /* Marks where the conversation you resumed ends and this session begins. */
 .history-divider {
   display: flex;
@@ -2412,6 +2490,19 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 .sidebar .project-caret {
   width: 13px;
   height: 13px;
+}
+
+/* `.sidebar .project-name` above and `.project--worktree .project-name`
+   (defined earlier in this file) tie on specificity, so without this the
+   sidebar's rule would win by source order alone and a folded worktree would
+   read at the same size as a top-level project — only the indent would show. */
+.sidebar .project--worktree {
+  margin-left: 9px;
+  padding-left: 12px;
+}
+
+.sidebar .project--worktree .project-name {
+  font-size: 13.5px;
 }
 
 .sidebar .chat-row {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ProjectInfo } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
+import { flattenProjects } from '../agent/search.js';
 
 /**
  * The way back from hiding something.
@@ -25,7 +26,11 @@ export function HiddenProjects({
   const load = useCallback(async () => {
     try {
       const { projects } = await api.listProjects(true);
-      setHidden(projects.filter((p) => p.hidden));
+      // A hidden worktree is folded under its (visible) main checkout's card
+      // rather than listed at the top level, so it would never surface here
+      // without flattening first — and a filter you can't see is exactly the
+      // bug this dialog exists to avoid.
+      setHidden(flattenProjects(projects).filter((p) => p.hidden));
     } catch (err) {
       onApiError(err);
       setError(err instanceof ApiError ? err.message : 'Could not load hidden projects.');

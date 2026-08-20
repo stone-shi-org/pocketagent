@@ -9,9 +9,11 @@ import type {
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { SelectorRow, type SelectorOption } from '../components/SelectorRow.js';
+import { WorktreeDialog, type WorktreeChoice } from '../components/WorktreeDialog.js';
 import { AttachButton } from '../components/AttachButton.js';
 import { Icon } from '../components/Icon.js';
 import { readImageFile } from '../agent/image-attachment.js';
+import { flattenProjects } from '../agent/search.js';
 import { setPendingPrompt } from '../agent/pending-prompt.js';
 import { formatRelative } from '../components/StatusBadge.js';
 
@@ -58,6 +60,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   const [worktreeMode, setWorktreeMode] = useState<'main' | 'new'>('main');
   const [branchMode, setBranchMode] = useState<'new' | 'current'>('new');
   const [branchName, setBranchName] = useState('');
+  const [worktreeDialogOpen, setWorktreeDialogOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [attachedImage, setAttachedImage] = useState<PromptImage | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -142,10 +145,16 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
    * directory, so picking one from a subdirectory runs it where it belongs
    * rather than where the row above happens to point.
    */
+  // A folded worktree is still a real, addressable directory (see
+  // `flattenProjects`) — flattening first is what lets a worktree nested
+  // under the chosen folder still show up in `here`, and lets `project` below
+  // resolve even when `cwd` itself is a worktree rather than a top-level row.
+  const flatProjects = useMemo(() => flattenProjects(projects), [projects]);
+
   const here = useMemo(() => {
     if (!cwd) return [];
     const out: { chat: ChatSummary; cwd: string; label: string }[] = [];
-    for (const project of projects) {
+    for (const project of flatProjects) {
       if (project.cwd !== cwd && !project.cwd.startsWith(`${cwd}/`)) continue;
       for (const chat of project.chats) {
         // A finished chat with no transcript has nothing to continue from.
@@ -158,20 +167,24 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
       }
     }
     return out.sort((a, b) => b.chat.updatedAt - a.chat.updatedAt);
-  }, [projects, cwd]);
+  }, [flatProjects, cwd]);
 
-  const project = useMemo(() => projects.find((p) => p.cwd === cwd) ?? null, [projects, cwd]);
+  const project = useMemo(() => flatProjects.find((p) => p.cwd === cwd) ?? null, [flatProjects, cwd]);
   const branch = project?.gitBranch ?? null;
   const isGitRepo = project?.isGitRepo ?? false;
 
-  const worktreeOptions: SelectorOption[] = [
-    { value: 'main', label: branch ? `Main — ${branch}` : 'Main' },
-    { value: 'new', label: 'New worktree…' },
-  ];
-  const branchModeOptions: SelectorOption[] = [
-    { value: 'new', label: 'New branch' },
-    { value: 'current', label: branch ? `Current (${branch})` : 'Current' },
-  ];
+  // Summarised into one line for the row; the picking itself happens in
+  // WorktreeDialog, which is where all three of these are actually chosen.
+  const worktreeSummary =
+    worktreeMode === 'main'
+      ? branch
+        ? `Main — ${branch}`
+        : 'Main'
+      : branchMode === 'new'
+        ? branchName.trim()
+          ? `New worktree — ${branchName.trim()}`
+          : 'New worktree…'
+        : `New worktree — off ${branch ?? 'current tip'}`;
 
   const resumeOptions: SelectorOption[] = [
     { value: NEW_CHAT, label: branch ? `New chat · ${branch}` : 'New chat' },
@@ -354,39 +367,35 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
               onChange={setResumeId}
             />
             {!picked && isGitRepo && (
-              <SelectorRow
-                icon="branch"
-                label="Worktree"
-                ariaLabel="Run in the main checkout or a new worktree"
-                value={worktreeMode}
-                options={worktreeOptions}
-                onChange={(v) => setWorktreeMode(v as 'main' | 'new')}
-              />
-            )}
-            {startingWorktree && (
-              <SelectorRow
-                icon="branch"
-                label="Branch"
-                ariaLabel="New branch, or a new one off the current tip"
-                value={branchMode}
-                options={branchModeOptions}
-                onChange={(v) => setBranchMode(v as 'new' | 'current')}
-              />
+              <button
+                type="button"
+                className="selector-row"
+                onClick={() => setWorktreeDialogOpen(true)}
+                aria-label={`Worktree: ${worktreeSummary}`}
+                aria-haspopup="dialog"
+                data-selector="Worktree"
+              >
+                <Icon name="branch" className="leading" />
+                <span className="selector-value">{worktreeSummary}</span>
+                <Icon name="stepper" className="stepper" />
+              </button>
             )}
           </div>
         )}
       </div>
 
-      {startingWorktree && branchMode === 'new' && (
-        <div className="field">
-          <label htmlFor="composer-branch-name">Branch name</label>
-          <input
-            id="composer-branch-name"
-            value={branchName}
-            onChange={(e) => setBranchName(e.target.value)}
-            placeholder="feature/my-branch"
-          />
-        </div>
+      {worktreeDialogOpen && (
+        <WorktreeDialog
+          branch={branch}
+          initial={{ mode: worktreeMode, branchMode, branchName }}
+          onCancel={() => setWorktreeDialogOpen(false)}
+          onConfirm={(choice: WorktreeChoice) => {
+            setWorktreeMode(choice.mode);
+            setBranchMode(choice.branchMode);
+            setBranchName(choice.branchName);
+            setWorktreeDialogOpen(false);
+          }}
+        />
       )}
 
       {error && (
@@ -400,19 +409,6 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
           {picked.chat.live
             ? 'Already running — your prompt goes to that session.'
             : `Resuming as ${picked.chat.agentDisplayName} — a new branch; the original transcript is left untouched.`}
-        </p>
-      )}
-
-      {startingWorktree && branchMode === 'current' && (
-        <p className="composer-note">
-          Git can&rsquo;t check {branch ?? 'the current branch'} out in two worktrees at once, so
-          this creates a new branch from its current tip instead.
-        </p>
-      )}
-
-      {startingWorktree && (
-        <p className="composer-note">
-          New worktree at <code>.worktrees/</code> inside this project.
         </p>
       )}
 

@@ -219,6 +219,26 @@ export function ProjectList({
   const showMoreChats = (cwd: string): void =>
     setExpandedChats((prev) => new Set(prev).add(cwd));
 
+  // Collapse, "show more" and the open menu are all keyed by whichever
+  // project's own `cwd` they belong to — a folded worktree has its own real
+  // cwd, so the same `Set`/nullable-string state that already tracks
+  // top-level projects tracks worktree rows for free, with no parallel state
+  // to keep in sync.
+  const sectionProps = {
+    state,
+    open,
+    searching,
+    collapsed,
+    toggle,
+    expandedChats,
+    showMoreChats,
+    menuFor,
+    setMenuFor,
+    onCompose,
+    activeSessionId,
+    activeConversationId,
+  };
+
   return (
     <>
       {projects === null && <div className="spinner">Loading…</div>}
@@ -233,134 +253,9 @@ export function ProjectList({
         </div>
       )}
 
-      {visible.map((project) => {
-        // A search that hid a folder's other chats should not also hide the
-        // ones it matched, so collapsing is ignored while searching.
-        const isCollapsed = !searching && collapsed.has(project.cwd);
-        return (
-          <section key={project.cwd} className="project" data-project={project.cwd}>
-            <div className="project-head">
-              <button
-                type="button"
-                className="project-name"
-                onClick={() => toggle(project.cwd)}
-                aria-expanded={!isCollapsed}
-              >
-                <Icon name="folder" className="folder" />
-                <span className="project-label">{project.name}</span>
-                <Icon
-                  name="chevron-down"
-                  className={`project-caret${isCollapsed ? ' closed' : ''}`}
-                />
-                {isCollapsed && <span className="project-count">{project.chats.length}</span>}
-              </button>
-              <button
-                type="button"
-                className="round-btn plain"
-                onClick={() => onCompose(project.cwd)}
-                aria-label={`New chat in ${project.name}`}
-                title={`New chat in ${project.name}`}
-              >
-                <Icon name="compose" size={19} />
-              </button>
-              <button
-                type="button"
-                className="round-btn plain"
-                onClick={() => setMenuFor(menuFor === project.cwd ? null : project.cwd)}
-                aria-label={`Options for ${project.name}`}
-                aria-expanded={menuFor === project.cwd}
-              >
-                <Icon name="ellipsis" size={18} />
-              </button>
-              {menuFor === project.cwd && (
-                <ProjectMenu
-                  project={project}
-                  onClose={() => setMenuFor(null)}
-                  onClear={() => {
-                    setMenuFor(null);
-                    void state.clearFinished(project);
-                  }}
-                  onHide={() => {
-                    setMenuFor(null);
-                    void state.hideProject(project.cwd);
-                  }}
-                  onRemove={() => {
-                    setMenuFor(null);
-                    void state.removeProject(project.cwd);
-                  }}
-                />
-              )}
-            </div>
-
-            {!isCollapsed && project.chats.length === 0 && (
-              <div className="project-empty">No chats yet</div>
-            )}
-
-            {(() => {
-              // A search that hid a folder's other chats already narrowed
-              // this to what matched, so the page limit only applies while
-              // browsing — truncating a search result would hide a hit.
-              const isExpanded = searching || expandedChats.has(project.cwd);
-              const shown = isExpanded ? project.chats : project.chats.slice(0, CHAT_PAGE_SIZE);
-              const remaining = project.chats.length - shown.length;
-              return (
-                !isCollapsed && (
-                  <>
-                    {shown.map((chat) => (
-                      <div key={chat.id} className={`chat-line${chat.live ? ' live' : ''}`}>
-                      <button
-                        type="button"
-                        className={[
-                          'chat-row',
-                          chat.live ? 'live' : '',
-                          (activeSessionId && chat.sessionId === activeSessionId) ||
-                          (activeConversationId && chat.conversationId === activeConversationId)
-                            ? 'active'
-                            : '',
-                        ]
-                          .filter(Boolean)
-                          .join(' ')}
-                        data-chat-id={chat.id}
-                        onClick={() => open(chat)}
-                        title={chat.title}
-                      >
-                        <span className="chat-title">
-                          {chat.live && <span className="live-dot" aria-label="running" />}
-                          {chat.title}
-                        </span>
-                      </button>
-                      {/* Running chats have no remove: stop them first, so the
-                          process is never orphaned by losing its record. */}
-                      {!chat.live && (
-                        <button
-                          type="button"
-                          className="chat-remove"
-                          onClick={() => void state.removeChat(chat)}
-                          aria-label={`Remove ${chat.title} from the list`}
-                          title="Remove from list"
-                        >
-                          <Icon name="close" size={14} />
-                        </button>
-                      )}
-                      </div>
-                    ))}
-                    {remaining > 0 && (
-                      <button
-                        type="button"
-                        className="chats-more"
-                        onClick={() => showMoreChats(project.cwd)}
-                      >
-                        <Icon name="chevron-down" size={16} />
-                        Show {remaining} more
-                      </button>
-                    )}
-                  </>
-                )
-              );
-            })()}
-          </section>
-        );
-      })}
+      {visible.map((project) => (
+        <ProjectSection key={project.cwd} project={project} nested={false} {...sectionProps} />
+      ))}
 
       {!searching && projects !== null && (
         <button type="button" className="add-project" onClick={onAddProject}>
@@ -369,6 +264,197 @@ export function ProjectList({
         </button>
       )}
     </>
+  );
+}
+
+interface ProjectSectionProps {
+  project: ProjectInfo;
+  /** A folded worktree renders smaller and indented under its main checkout. */
+  nested: boolean;
+  state: ProjectsState;
+  open: (chat: ChatSummary) => void;
+  searching: boolean;
+  collapsed: Set<string>;
+  toggle: (cwd: string) => void;
+  expandedChats: Set<string>;
+  showMoreChats: (cwd: string) => void;
+  menuFor: string | null;
+  setMenuFor: (cwd: string | null) => void;
+  onCompose: (cwd: string) => void;
+  activeSessionId?: string | null;
+  activeConversationId?: string | null;
+}
+
+/**
+ * One project's card: its head, its chats, and — unless this section is
+ * itself a worktree — any of its own worktrees, each rendered as another
+ * `ProjectSection` one level down. Worktrees never nest further (see
+ * `ProjectInfo.worktrees`'s doc comment for why), so recursion here always
+ * bottoms out after one level; `nested` only exists to vary presentation.
+ */
+function ProjectSection({
+  project,
+  nested,
+  state,
+  open,
+  searching,
+  collapsed,
+  toggle,
+  expandedChats,
+  showMoreChats,
+  menuFor,
+  setMenuFor,
+  onCompose,
+  activeSessionId,
+  activeConversationId,
+}: ProjectSectionProps): JSX.Element {
+  // A search that hid a folder's other chats should not also hide the ones it
+  // matched, so collapsing is ignored while searching.
+  const isCollapsed = !searching && collapsed.has(project.cwd);
+
+  return (
+    <section
+      className={`project${nested ? ' project--worktree' : ''}`}
+      data-project={project.cwd}
+    >
+      <div className="project-head">
+        <button
+          type="button"
+          className="project-name"
+          onClick={() => toggle(project.cwd)}
+          aria-expanded={!isCollapsed}
+        >
+          <Icon name={nested ? 'branch' : 'folder'} className="folder" />
+          <span className="project-label">
+            {nested ? project.gitBranch ?? project.name : project.name}
+          </span>
+          <Icon name="chevron-down" className={`project-caret${isCollapsed ? ' closed' : ''}`} />
+          {isCollapsed && <span className="project-count">{project.chats.length}</span>}
+        </button>
+        <button
+          type="button"
+          className="round-btn plain"
+          onClick={() => onCompose(project.cwd)}
+          aria-label={`New chat in ${project.name}`}
+          title={`New chat in ${project.name}`}
+        >
+          <Icon name="compose" size={19} />
+        </button>
+        <button
+          type="button"
+          className="round-btn plain"
+          onClick={() => setMenuFor(menuFor === project.cwd ? null : project.cwd)}
+          aria-label={`Options for ${project.name}`}
+          aria-expanded={menuFor === project.cwd}
+        >
+          <Icon name="ellipsis" size={18} />
+        </button>
+        {menuFor === project.cwd && (
+          <ProjectMenu
+            project={project}
+            onClose={() => setMenuFor(null)}
+            onClear={() => {
+              setMenuFor(null);
+              void state.clearFinished(project);
+            }}
+            onHide={() => {
+              setMenuFor(null);
+              void state.hideProject(project.cwd);
+            }}
+            onRemove={() => {
+              setMenuFor(null);
+              void state.removeProject(project.cwd);
+            }}
+          />
+        )}
+      </div>
+
+      {!isCollapsed && project.chats.length === 0 && (
+        <div className="project-empty">No chats yet</div>
+      )}
+
+      {(() => {
+        // A search that hid a folder's other chats already narrowed this to
+        // what matched, so the page limit only applies while browsing —
+        // truncating a search result would hide a hit.
+        const isExpanded = searching || expandedChats.has(project.cwd);
+        const shown = isExpanded ? project.chats : project.chats.slice(0, CHAT_PAGE_SIZE);
+        const remaining = project.chats.length - shown.length;
+        return (
+          !isCollapsed && (
+            <>
+              {shown.map((chat) => (
+                <div key={chat.id} className={`chat-line${chat.live ? ' live' : ''}`}>
+                  <button
+                    type="button"
+                    className={[
+                      'chat-row',
+                      chat.live ? 'live' : '',
+                      (activeSessionId && chat.sessionId === activeSessionId) ||
+                      (activeConversationId && chat.conversationId === activeConversationId)
+                        ? 'active'
+                        : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                    data-chat-id={chat.id}
+                    onClick={() => open(chat)}
+                    title={chat.title}
+                  >
+                    <span className="chat-title">
+                      {chat.live && <span className="live-dot" aria-label="running" />}
+                      {chat.title}
+                    </span>
+                  </button>
+                  {/* Running chats have no remove: stop them first, so the
+                      process is never orphaned by losing its record. */}
+                  {!chat.live && (
+                    <button
+                      type="button"
+                      className="chat-remove"
+                      onClick={() => void state.removeChat(chat)}
+                      aria-label={`Remove ${chat.title} from the list`}
+                      title="Remove from list"
+                    >
+                      <Icon name="close" size={14} />
+                    </button>
+                  )}
+                </div>
+              ))}
+              {remaining > 0 && (
+                <button type="button" className="chats-more" onClick={() => showMoreChats(project.cwd)}>
+                  <Icon name="chevron-down" size={16} />
+                  Show {remaining} more
+                </button>
+              )}
+            </>
+          )
+        );
+      })()}
+
+      {/* Collapsing a project hides its worktrees along with its own chats —
+          the two are one card, not siblings. */}
+      {!isCollapsed &&
+        project.worktrees.map((worktree) => (
+          <ProjectSection
+            key={worktree.cwd}
+            project={worktree}
+            nested
+            state={state}
+            open={open}
+            searching={searching}
+            collapsed={collapsed}
+            toggle={toggle}
+            expandedChats={expandedChats}
+            showMoreChats={showMoreChats}
+            menuFor={menuFor}
+            setMenuFor={setMenuFor}
+            onCompose={onCompose}
+            activeSessionId={activeSessionId}
+            activeConversationId={activeConversationId}
+          />
+        ))}
+    </section>
   );
 }
 

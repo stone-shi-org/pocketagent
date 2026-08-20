@@ -43,8 +43,10 @@ export interface WorktreeServiceOptions {
  * folder that is already a workspace root automatically satisfies
  * `WorkspaceRegistry.resolveWorkspacePath`'s containment check, so this needs
  * no new registration step and no new place the browser can point a session
- * at. It also means a created worktree shows up as its own project row for
- * free (a project is a folder you added, or a directory inside one).
+ * at. It also means `ProjectService.list`'s `gitdir:`-based detection finds
+ * its way back to the main checkout for free, so the worktree folds into that
+ * project's card (`ProjectInfo.worktrees`) instead of showing up as an
+ * unrelated one.
  */
 export class WorktreeService {
   private readonly workspaces: WorkspaceRegistry;
