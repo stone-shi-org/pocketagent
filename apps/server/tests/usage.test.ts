@@ -226,6 +226,32 @@ describe('GET /api/usage', () => {
       expect(codex.percentUsed).toBeNull();
       expect(typeof codex.error).toBe('string');
     });
+
+    it('reports the real weekly window as-is, without inventing a 5-hour one, when Codex has no secondary window', async () => {
+      // Confirmed live against an actual account on codex-cli 0.148.0: some
+      // accounts genuinely get `secondary: null` back from
+      // `account/rateLimits/read` — only a weekly limit, no 5-hour one. This
+      // source used to fabricate a synthetic 5-hour window in that case
+      // (80% of the weekly percentage, "resets in 5 hours" recomputed every
+      // poll), which looked stuck around a fixed percentage and never
+      // actually reached its reset time. It must not do that.
+      const fake = makeFakeCodex({
+        limitId: 'codex',
+        primary: { usedPercent: 63, windowDurationMins: 10080, resetsAt: 1_786_752_702 },
+        secondary: null,
+      });
+      fakes.push(fake);
+      t = await createTestApp({ ...NO_CLAUDE, ...NO_AGY, POCKETAGENT_CODEX_BIN: fake.bin });
+
+      const res = await t.app.inject({ method: 'GET', url: '/api/usage', headers: headers(t) });
+      const codex = findAgent(res.json().usage, 'codex') as Record<string, unknown>;
+      expect(codex.available).toBe(true);
+      expect(codex.percentUsed).toBe(63);
+      expect(codex.windowLabel).toBe('7-day');
+      const windows = codex.windows as Array<{ label: string; percentUsed: number }>;
+      expect(windows).toEqual([{ label: '7-day', percentUsed: 63, resetsAtLabel: expect.any(String), timezone: expect.any(String) }]);
+      expect(windows.some((w) => w.label === '5-hour')).toBe(false);
+    });
   });
 
   describe('Antigravity CLI (agy)', () => {

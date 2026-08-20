@@ -51,11 +51,30 @@ export interface CodexUsageSourceOptions {
  * Reads OpenAI's own `account/rateLimits/read` RPC over the same JSON-RPC
  * connection a real Codex session drives (see `CodexServerManager`). Unlike
  * Claude's `/usage`, this is structured data straight from the API rather
- * than parsed terminal prose — confirmed live against codex-cli 0.147.0:
- * `{ rateLimits: { primary: { usedPercent, windowDurationMins, resetsAt } } }`.
- * `secondary` is a second, differently-sized window (e.g. a short session
- * limit alongside a weekly one) when the account has one; `primary` is shown
+ * than parsed terminal prose — confirmed live against codex-cli 0.148.0:
+ * `{ rateLimits: { primary: { usedPercent, windowDurationMins, resetsAt },
+ * secondary, rateLimitsByLimitId, rateLimitResetCredits } }`. `secondary` is
+ * a second, differently-sized window (e.g. a 5-hour session limit alongside
+ * the weekly one) *when the account currently has one*; `primary` is shown
  * whenever both are absent-or-present, since it is the one always populated.
+ * `rateLimitsByLimitId`/`rateLimitResetCredits` are newer additions (part of
+ * OpenAI's mid-2026 rework of the rolling-limit rollout) this source does not
+ * yet read — `rateLimits` is documented as "backward-compatible" and still
+ * carries the same primary/secondary shape.
+ *
+ * This used to fabricate a synthetic 5-hour window (80% of the weekly
+ * percentage, reset time pinned to "5 hours from whenever this poll ran") any
+ * time Codex reported no real `secondary` window, on the assumption that
+ * every account has a 5-hour limit and Codex was just failing to report it.
+ * That assumption doesn't hold — confirmed live against this account, which
+ * genuinely has `secondary: null` and only a weekly limit — and the synthetic
+ * math produces exactly the "stuck around 50%, never resets" symptom a fake
+ * value recomputed from a slow-moving weekly percentage every poll would:
+ * the percentage barely moves and the reset countdown is recalculated fresh
+ * every 5 minutes, so it never counts down to zero. When Codex doesn't report
+ * a 5-hour window, don't invent one — `collapsedWindows()` in `UsageBar.tsx`
+ * already falls back to showing whatever real window *is* present (weekly)
+ * when no 5-hour one matches.
  *
  * Reusing the shared server means the very first Codex usage poll on a fresh
  * boot pays the cost of starting `codex app-server` — see the "Codex usage
@@ -94,21 +113,6 @@ export function createCodexUsageSource(opts: CodexUsageSourceOptions): Polled<Ag
           timezone: resetsAt ? Intl.DateTimeFormat().resolvedOptions().timeZone : null,
         };
       });
-
-      const has5h = windows.some((w) => w.label === '5-hour' || w.label === '5-hr');
-      const hasWeekly = windows.some((w) => w.label === '7-day' || w.label === 'Weekly');
-
-      if (!has5h && hasWeekly) {
-        const weeklyWin = windows.find((w) => w.label === '7-day' || w.label === 'Weekly')!;
-        const resetsAt5h = new Date(Date.now() + 5 * 3600 * 1000);
-        const win5h: UsageWindowInfo = {
-          label: '5-hour',
-          percentUsed: Math.max(0, Math.min(100, Math.round(weeklyWin.percentUsed * 0.8))),
-          resetsAtLabel: formatResetLabel(resetsAt5h),
-          timezone: weeklyWin.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
-        };
-        windows.unshift(win5h);
-      }
 
       const primary = windows[0]!;
       return {
