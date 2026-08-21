@@ -68,6 +68,21 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
     // write here without the staleness a `session` state read would have
     // inside this same closure.
     let latestTitle: string | null = null;
+    // True while `bundle.term.write()` is still processing a *replay* chunk
+    // (scrollback sent on attach), as opposed to live output. xterm.js
+    // auto-answers terminal capability queries it decodes in anything it is
+    // given to parse — Device Attributes (`CSI c` / `CSI > c`), the ones a
+    // shell prompt or tmux itself issues at startup to detect terminal
+    // features — regardless of whether that byte came from a genuinely live
+    // stream or from replayed history. A query baked into old scrollback is
+    // stale; nothing is still waiting on its answer, but xterm.js cannot
+    // tell the difference and answers anyway via `onData`, same as a real
+    // keystroke — and unlike a real keystroke, nothing consumes it, so it
+    // lands as literal garbage on whatever is reading the pane right now.
+    // Since this replays on every attach, the garbage reappeared every time
+    // the page was opened. Only *live* queries get answered; see the
+    // `onData` handler below.
+    let replaying = false;
     const connection = new TerminalConnection({
       handlers: {
         onConnectionState: setConnection,
@@ -79,7 +94,10 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
             bundle.term.reset();
             setNotice('Older output was dropped from the server buffer.');
           }
-          bundle.term.write(data);
+          replaying = true;
+          bundle.term.write(data, () => {
+            replaying = false;
+          });
           if (data.length > 0) setSawOutput(true);
         },
 
@@ -159,6 +177,10 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
     connRef.current = connection;
 
     const inputDisposable = bundle.term.onData((data) => {
+      // Not a real keystroke — xterm.js's own automatic reply to a terminal
+      // capability query it just decoded out of replayed scrollback. See
+      // `replaying`'s doc comment above for why this must not be forwarded.
+      if (replaying) return;
       let payload = data;
       if (ctrlActiveRef.current) {
         const mapped = ctrlSequence(data);
