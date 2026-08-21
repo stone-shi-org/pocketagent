@@ -17,6 +17,7 @@ function chat(title: string): ChatSummary {
     messageCount: null,
     directoryBusy: false,
     busySince: null,
+    adoptTargetId: null,
   };
 }
 

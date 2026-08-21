@@ -226,6 +226,13 @@ export const ChatSummary = z.object({
   directoryBusy: z.boolean(),
   /** See `SessionInfo.busySince`. Null for a chat that is not this session. */
   busySince: z.number().int().nullable(),
+  /**
+   * See `SessionInfo.adoptTargetId`. Carried through to a finished chat so the
+   * client can offer an in-place "Re-attach" action for a detached tmux pane
+   * without having to reopen the Shell picker — the id is all `POST
+   * /api/sessions` needs to resolve the same pane again.
+   */
+  adoptTargetId: z.string().nullable(),
 });
 export type ChatSummary = z.infer<typeof ChatSummary>;
 

@@ -17,6 +17,7 @@ export interface ProjectsState {
   open: (chat: ChatSummary) => void;
   removeChat: (chat: ChatSummary) => Promise<void>;
   detachChat: (chat: ChatSummary) => Promise<void>;
+  reattachChat: (chat: ChatSummary) => Promise<void>;
   clearFinished: (project: ProjectInfo) => Promise<void>;
   hideProject: (cwd: string) => Promise<void>;
   removeProject: (cwd: string) => Promise<void>;
@@ -181,6 +182,40 @@ export function useProjects(
     [onApiError, refresh],
   );
 
+  /**
+   * Re-attach to the tmux pane behind a finished Shell chat, in place —
+   * without going back through the Shell dialog's picker. `adoptTargetId` is
+   * the pane's own stable id (see `SessionInfo.adoptTargetId`'s doc comment),
+   * so the server resolves the same pane it was ever attached to; the new
+   * session row this creates shares that id, so the home screen's grouping
+   * (`representativeSessions` in `projects/index.ts`) collapses it with the
+   * old, now-superseded row into the same chat rather than adding a second
+   * one. `cwd` here is a placeholder: `POST /api/sessions` overwrites it with
+   * the resolved target's real directory before doing anything else.
+   */
+  const reattachChat = useCallback(
+    async (chat: ChatSummary) => {
+      if (!chat.adoptTargetId) return;
+      try {
+        const created = await api.createSession({
+          agent: 'shell',
+          cwd: 'virtual:shell',
+          cols: 80,
+          rows: 24,
+          transport: 'terminal',
+          adoptTargetId: chat.adoptTargetId,
+        });
+        onOpen(created.id);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not re-attach to that tmux session.');
+      } finally {
+        await refresh();
+      }
+    },
+    [onApiError, onOpen, refresh],
+  );
+
   return {
     projects,
     host,
@@ -189,6 +224,7 @@ export function useProjects(
     open,
     removeChat,
     detachChat,
+    reattachChat,
     clearFinished,
     hideProject,
     removeProject,
@@ -424,7 +460,7 @@ function ProjectSection({
                       {chat.title}
                     </span>
                   </button>
-                  {chat.live && project.cwd === 'virtual:shell' ? (
+                  {chat.live && project.cwd === 'virtual:shell' && (
                     <button
                       type="button"
                       className="chat-remove"
@@ -434,18 +470,32 @@ function ProjectSection({
                     >
                       <Icon name="close" size={14} />
                     </button>
-                  ) : (
-                    !chat.live && (
-                      <button
-                        type="button"
-                        className="chat-remove"
-                        onClick={() => void state.removeChat(chat)}
-                        aria-label={`Remove ${chat.title} from the list`}
-                        title="Remove from list"
-                      >
-                        <Icon name="close" size={14} />
-                      </button>
-                    )
+                  )}
+                  {/* A finished Shell chat still points at a real tmux pane
+                      (unless it was actually killed) — offer to rejoin it
+                      directly, in place, rather than sending the user back
+                      through the Shell dialog's picker. */}
+                  {!chat.live && project.cwd === 'virtual:shell' && chat.adoptTargetId && (
+                    <button
+                      type="button"
+                      className="chat-remove"
+                      onClick={() => void state.reattachChat(chat)}
+                      aria-label={`Re-attach ${chat.title}`}
+                      title="Re-attach to this tmux pane"
+                    >
+                      <Icon name="terminal" size={14} />
+                    </button>
+                  )}
+                  {!chat.live && (
+                    <button
+                      type="button"
+                      className="chat-remove"
+                      onClick={() => void state.removeChat(chat)}
+                      aria-label={`Remove ${chat.title} from the list`}
+                      title="Remove from list"
+                    >
+                      <Icon name="close" size={14} />
+                    </button>
                   )}
                 </div>
               ))}

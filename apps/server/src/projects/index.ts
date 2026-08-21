@@ -146,6 +146,8 @@ export class ProjectService {
         directoryBusy: conversation.directoryBusy,
         // A disk-only transcript has no live session, so nothing to be busy about.
         busySince: null,
+        // A disk-only transcript is a Claude conversation, never an adopted pane.
+        adoptTargetId: null,
       });
     }
 
@@ -269,6 +271,7 @@ function chatFromSession(session: SessionInfo, transcriptTitle?: string): ChatSu
     messageCount: null,
     directoryBusy: false,
     busySince: session.busySince,
+    adoptTargetId: session.adoptTargetId,
   };
 }
 
