@@ -334,11 +334,26 @@ export const AdoptableTarget = z.object({
   /** True when another client is already attached — adopting will share size. */
   attachedClients: z.number().int().nonnegative(),
   /**
-   * True when the pane's window is already zoomed (`tmux resize-pane -Z`).
-   * Attaching zooms the target pane so picking one pane doesn't hand you the
-   * whole split window — but `-Z` toggles, so the server must know the
-   * current state to avoid un-zooming a window someone already zoomed.
+   * True when *this exact pane* is the one its window is currently zoomed on
+   * (`tmux resize-pane -Z`) — not merely whether the window is zoomed at
+   * all. A window can have only one zoomed pane at a time, shared by every
+   * client attached to it; a *different* pane being zoomed must not read as
+   * this one already being it, or attaching to this pane would wrongly skip
+   * re-zooming and leave the view stuck on whichever pane actually was
+   * zoomed. Attaching zooms the target pane so picking one pane doesn't hand
+   * you the whole split window — but `-Z` toggles, so the server must know
+   * this pane's own current state to avoid un-zooming it right back off.
    */
   zoomed: z.boolean(),
+  /**
+   * True when the window is zoomed on *some* pane, which may or may not be
+   * this one — see `zoomed` for the pane-specific version. Needed alongside
+   * it because `-Z` is a pure toggle: switching zoom from one pane to
+   * another needs two toggles (off, then on again targeting the pane
+   * actually wanted), not one — verified against a real tmux server that a
+   * single `-Z -t <inactive pane>` while already zoomed just turns zoom off
+   * rather than moving it, leaving whichever pane was zoomed still active.
+   */
+  windowZoomed: z.boolean(),
 });
 export type AdoptableTarget = z.infer<typeof AdoptableTarget>;

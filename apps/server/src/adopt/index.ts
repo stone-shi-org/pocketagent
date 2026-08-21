@@ -76,6 +76,7 @@ export class AdoptionService {
         '#{pane_dead}',
         '#{window_name}',
         '#{window_zoomed_flag}',
+        '#{pane_active}',
       ].join(SEP);
       ({ stdout } = await execFileAsync(
         this.opts.bin,
@@ -122,7 +123,16 @@ export class AdoptionService {
         cols: parsed.cols,
         rows: parsed.rows,
         attachedClients: parsed.attached,
-        zoomed: parsed.zoomed,
+        // `windowZoomed` alone is per-window, not per-pane — every pane in a
+        // split window reports the same value regardless of which one is
+        // actually zoomed. A target is truly "already zoomed" only when it
+        // is *also* the window's active pane, since zooming onto a pane
+        // always makes it active too. Without `paneActive` here, attaching
+        // to pane B while pane A was the zoomed one saw "window is zoomed"
+        // and skipped re-zooming — the view stayed on A instead of switching
+        // to the pane actually requested.
+        zoomed: parsed.windowZoomed && parsed.paneActive,
+        windowZoomed: parsed.windowZoomed,
       });
     }
 
@@ -147,13 +157,32 @@ export class AdoptionService {
    * which one gets focus). Picking one pane in the Shell dialog is supposed to
    * show just that pane, so we zoom it (`resize-pane -Z`) as part of the same
    * invocation, chained with a literal `;` the way `ensureServer` chains
-   * options. `-Z` *toggles* zoom, so we only send it when the window is not
-   * already zoomed — otherwise this would un-zoom a view someone else set up.
+   * options.
+   *
+   * `-Z` is a pure toggle of the *window's* zoom flag, not a "zoom onto this
+   * pane" command — verified against a real tmux server: sending it once
+   * while the window is already zoomed on a *different* pane just turns zoom
+   * off, leaving that other pane active and nothing zoomed, rather than
+   * switching zoom onto the one just requested. Only when the toggle is the
+   * one turning zoom *on* does the targeted `-t` pane actually get selected
+   * and zoomed. So there are three cases:
+   *  - This pane is already the zoomed one (`zoomed`): send nothing, or a
+   *    single toggle would un-zoom it.
+   *  - The window is zoomed on some *other* pane (`windowZoomed`, not
+   *    `zoomed`): two toggles — off, then back on targeting this pane —
+   *    which reliably lands zoomed on the pane actually requested. This is
+   *    what fixes attaching to one pane while a different one in the same
+   *    window was already zoomed: a single naive toggle here (checking only
+   *    "is the window zoomed" as this used to) sees `true` and skips
+   *    zooming entirely, leaving the view stuck on whichever pane already
+   *    had it.
+   *  - Not zoomed at all: one toggle zooms straight onto this pane.
    */
   attachCommand(target: AdoptableTarget): { command: string; args: string[] } {
     const paneTarget = `=${target.sessionName}:${target.windowIndex}.${target.paneIndex}`;
     const args = ['-L', target.socket];
     if (!target.zoomed) {
+      if (target.windowZoomed) args.push('resize-pane', '-Z', '-t', paneTarget, ';');
       args.push('resize-pane', '-Z', '-t', paneTarget, ';');
     }
     args.push('attach-session', '-t', paneTarget);
@@ -172,17 +201,21 @@ interface ParsedPane {
   attached: number;
   dead: boolean;
   windowName: string;
-  zoomed: boolean;
+  /** `#{window_zoomed_flag}` — whether the *window* is zoomed at all, on whichever pane is active. */
+  windowZoomed: boolean;
+  /** `#{pane_active}` — whether this specific pane is the window's active one. */
+  paneActive: boolean;
 }
 
 export function parsePaneLine(line: string): ParsedPane | null {
   if (!line.trim()) return null;
   const parts = line.split(SEP);
-  if (parts.length < 11) return null;
+  if (parts.length < 12) return null;
 
   // Parse from the right: a user's session name may itself contain the
   // separator, but the trailing fields are ours and fixed in number.
-  const zoomed = parts.pop() === '1';
+  const paneActive = parts.pop() === '1';
+  const windowZoomed = parts.pop() === '1';
   const windowName = parts.pop() ?? '';
   const dead = parts.pop() === '1';
   const attached = int(parts.pop());
@@ -195,7 +228,20 @@ export function parsePaneLine(line: string): ParsedPane | null {
   const sessionName = parts.join(SEP);
 
   if (!sessionName || !cwd) return null;
-  return { sessionName, windowIndex, paneIndex, command, cwd, cols, rows, attached, dead, windowName, zoomed };
+  return {
+    sessionName,
+    windowIndex,
+    paneIndex,
+    command,
+    cwd,
+    cols,
+    rows,
+    attached,
+    dead,
+    windowName,
+    windowZoomed,
+    paneActive,
+  };
 }
 
 function int(value: string | undefined): number {

@@ -299,6 +299,69 @@ describeTmux('adopting a pane on a foreign tmux server', () => {
     expect(await paneField('splitroom', '#{window_zoomed_flag}')).toBe('1');
   });
 
+  it('switches the zoom to a different pane when attaching to it, instead of leaving an unrelated pane zoomed', async () => {
+    // Regression: the zoom flag used to reflect only "is the window zoomed
+    // at all" (`#{window_zoomed_flag}`), which reads identically for every
+    // pane in a split window no matter which one is actually zoomed.
+    // Attaching to pane 1 while pane 0 was the zoomed one read as "already
+    // zoomed, nothing to do" and left the view stuck on pane 0 — reported as
+    // "can't reliably attach to a selected pane, panes mixed together".
+    await startUserSession('multipane', t.projectDir, ['sleep', '120']);
+    await tmux('split-window', '-t', 'multipane', '-c', t.projectDir, '--', 'sleep', '120');
+
+    let panes: any[] = [];
+    await waitFor(async () => {
+      panes = (await listTargets()).targets.filter((x) => x.sessionName === 'multipane');
+      return panes.length === 2;
+    }, { timeout: 5000 });
+
+    const paneZero = panes.find((x) => x.paneIndex === 0);
+    const paneOne = panes.find((x) => x.paneIndex === 1);
+    expect(paneZero).toBeDefined();
+    expect(paneOne).toBeDefined();
+
+    // Attach to (and zoom) pane 0, then detach. Detaching does not un-zoom —
+    // the window stays zoomed on pane 0.
+    const first = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: paneZero.id },
+    });
+    expect(first.statusCode).toBe(201);
+    await waitFor(async () => (await paneField('multipane', '#{window_zoomed_flag}')) === '1', {
+      timeout: 10_000,
+    });
+    await t.app.inject({
+      method: 'DELETE',
+      url: `/api/sessions/${first.json().id}`,
+      headers: { cookie: t.cookie },
+    });
+    await waitFor(async () => (await attachedClients('multipane')) === 0, { timeout: 10_000 });
+
+    // The window is still zoomed, but specifically on pane 0 — the listing
+    // must say so per pane, not just per window.
+    const relisted = (await listTargets()).targets.filter((x) => x.sessionName === 'multipane');
+    expect(relisted.find((x) => x.paneIndex === 0)?.zoomed).toBe(true);
+    expect(relisted.find((x) => x.paneIndex === 1)?.zoomed).toBe(false);
+
+    // Attaching to pane 1 now must actually re-zoom onto pane 1, not
+    // silently skip it because "the window was already zoomed" (on 0).
+    const paneOneTarget = relisted.find((x) => x.paneIndex === 1)!;
+    const second = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: paneOneTarget.id },
+    });
+    expect(second.statusCode).toBe(201);
+    await waitFor(async () => (await attachedClients('multipane')) >= 1, { timeout: 10_000 });
+
+    const final = (await listTargets()).targets.filter((x) => x.sessionName === 'multipane');
+    expect(final.find((x) => x.paneIndex === 1)?.zoomed).toBe(true);
+    expect(final.find((x) => x.paneIndex === 0)?.zoomed).toBe(false);
+  });
+
   it('runs the attach client as a direct child, not inside our own tmux', async () => {
     // Whatever the configured backend is, an adopted session must spawn the
     // tmux *client* directly — otherwise killing it would kill a pane we own
