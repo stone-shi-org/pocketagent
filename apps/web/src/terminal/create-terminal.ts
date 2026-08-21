@@ -1,6 +1,8 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { copyText } from '../agent/clipboard.js';
+import { decodeOsc52Payload } from './osc52.js';
 
 export interface TerminalBundle {
   term: Terminal;
@@ -60,9 +62,29 @@ export function createTerminal(element: HTMLElement): TerminalBundle {
     /* element not laid out yet; the first resize observation will fix it */
   }
 
+  // OSC 52 ("set clipboard") is how a remote mouse-copy — tmux's
+  // `set -g mouse on` copy-mode included — reaches whatever terminal is
+  // actually rendering the byte stream. Over a plain ssh+iTerm2 session that
+  // terminal is iTerm2 itself, which intercepts OSC 52 and writes to the
+  // macOS pasteboard; here it is xterm.js in the browser, and core xterm.js
+  // has no built-in OSC 52 handler at all (only `@xterm/addon-clipboard`
+  // adds one, and it is not installed) — so without this, the escape
+  // sequence arrives byte-for-byte (see `TerminalPage`'s plain `term.write`)
+  // and is silently dropped. `copyText` is the same fallback the app's own
+  // copy buttons use, so this also works over the plain-HTTP, non-secure-
+  // context deployment this app is written for.
+  const oscClipboardHandler = term.parser.registerOscHandler(52, (data) => {
+    const text = decodeOsc52Payload(data);
+    if (text) void copyText(text);
+    return true;
+  });
+
   return {
     term,
     fit,
-    dispose: () => term.dispose(),
+    dispose: () => {
+      oscClipboardHandler.dispose();
+      term.dispose();
+    },
   };
 }
