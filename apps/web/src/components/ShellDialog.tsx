@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { AdoptableTarget, SessionInfo } from '@pocketagent/protocol';
+import { isTerminalStatus, type AdoptableTarget, type SessionInfo } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 
 const REFRESH_MS = 4000;
@@ -113,13 +113,19 @@ export function ShellDialog({ onClose, onCreated, onApiError }: Props): JSX.Elem
               // pane (or miss a truncated one), which is what let this
               // dialog think a pane was not yet attached when it actually
               // was, and offer "Attach" again instead of "Detach".
+              //
+              // `isTerminalStatus` (not a hand-rolled exclusion list) is
+              // what actually matters here: 'interrupted' — what an adopted
+              // session that was running when the server restarted gets
+              // marked as, since it's a direct-backend process and can never
+              // survive one — was missing from an earlier, narrower check.
+              // That stale, already-dead row still matched as "attached",
+              // so the dialog kept showing "Detach" for a target nothing was
+              // actually attached to, and clicking it was a server-side
+              // no-op (terminating an already-finished session does
+              // nothing) — "always Detach, no effect" from the outside.
               const attachedSession = sessions?.find(
-                (s) =>
-                  s.adopted &&
-                  s.adoptTargetId === target.id &&
-                  s.status !== 'exited' &&
-                  s.status !== 'killed' &&
-                  s.status !== 'error',
+                (s) => s.adopted && s.adoptTargetId === target.id && !isTerminalStatus(s.status),
               );
 
               return (
