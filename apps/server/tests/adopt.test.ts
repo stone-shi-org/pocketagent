@@ -536,6 +536,62 @@ describeTmux('adopting a pane on a foreign tmux server', () => {
     });
   });
 
+  it('never zooms a single-pane window, so attaching again does not disturb an already-attached viewer', async () => {
+    // Regression: `resize-pane -Z` on a single-pane window never actually
+    // enters a zoomed state — verified against a real tmux server that
+    // `window_zoomed_flag` stays 0 regardless — so `zoomed`/`windowZoomed`
+    // read false forever for such a window. The old code's `if
+    // (!target.zoomed)` guard therefore fired the zoom toggle on every
+    // single attach. Also verified against a real tmux server: that toggle
+    // still broadcasts a full redraw (ending in a fresh copy of the
+    // shell's own prompt) to every OTHER client already attached to that
+    // window, even though nothing visually changes for the attaching one.
+    // Reported as the same prompt line duplicated dozens of times in an
+    // already-open browser tab, on a window with only one pane.
+    await startUserSession('singlepane', t.projectDir, ['sleep', '120']);
+
+    const target = (await listTargets()).targets.find((x) => x.sessionName === 'singlepane');
+    expect(target).toBeDefined();
+    expect(target.zoomed).toBe(false);
+
+    const first = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: target.id },
+    });
+    expect(first.statusCode).toBe(201);
+    const firstId = first.json().id as string;
+    await waitFor(async () => (await totalAttachedInGroup('singlepane')) >= 1, { timeout: 10_000 });
+
+    // A single-pane window must never actually become zoomed.
+    expect(await paneField('singlepane', '#{window_zoomed_flag}')).toBe('0');
+
+    const firstSession = t.context.sessions.getOrThrow(firstId);
+    await waitFor(() => firstSession.buffer.replayAfter(0).data.length > 0, { timeout: 10_000 });
+    const bytesBeforeSecondAttach = firstSession.buffer.replayAfter(0).data.length;
+
+    // Attach a second, independent viewer of the SAME window while the
+    // first is still attached — exactly what a second browser tab, or a
+    // detach-then-reattach cycle observed from an already-open tab, does.
+    const targetAgain = (await listTargets()).targets.find((x) => x.sessionName === 'singlepane');
+    const second = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: targetAgain.id },
+    });
+    expect(second.statusCode).toBe(201);
+    await waitFor(async () => (await totalAttachedInGroup('singlepane')) >= 2, { timeout: 10_000 });
+
+    // Give any (unwanted) redraw broadcast time to arrive, then confirm the
+    // FIRST client's own output buffer received nothing new as a result of
+    // the second one attaching.
+    await sleep(500);
+    expect(firstSession.buffer.replayAfter(0).data.length).toBe(bytesBeforeSecondAttach);
+    expect(await paneField('singlepane', '#{window_zoomed_flag}')).toBe('0');
+  });
+
   it('runs the attach client as a direct child, not inside our own tmux', async () => {
     // Whatever the configured backend is, an adopted session must spawn the
     // tmux *client* directly — otherwise killing it would kill a pane we own

@@ -355,5 +355,16 @@ export const AdoptableTarget = z.object({
    * rather than moving it, leaving whichever pane was zoomed still active.
    */
   windowZoomed: z.boolean(),
+  /**
+   * How many panes this pane's window has. When it's exactly 1, attaching
+   * must never zoom: verified against a real tmux server that zooming a
+   * single-pane window never actually enters a zoomed state (there is
+   * nothing else in the window to hide), yet the command still broadcasts a
+   * full redraw to every other client already attached to that window. With
+   * `zoomed`/`windowZoomed` therefore permanently false for such a window,
+   * skipping this on `windowPanes <= 1` is what stops every single attach
+   * from re-sending that pointless, disruptive redraw forever.
+   */
+  windowPanes: z.number().int().positive(),
 });
 export type AdoptableTarget = z.infer<typeof AdoptableTarget>;

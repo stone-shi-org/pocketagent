@@ -89,6 +89,7 @@ export class AdoptionService {
         '#{window_name}',
         '#{window_zoomed_flag}',
         '#{pane_active}',
+        '#{window_panes}',
       ].join(SEP);
       ({ stdout } = await execFileAsync(
         this.opts.bin,
@@ -158,6 +159,7 @@ export class AdoptionService {
         // to the pane actually requested.
         zoomed: parsed.windowZoomed && parsed.paneActive,
         windowZoomed: parsed.windowZoomed,
+        windowPanes: parsed.windowPanes,
       });
     }
 
@@ -232,13 +234,38 @@ export class AdoptionService {
    *    `zoomed`): two toggles — off, then back on targeting this pane —
    *    which reliably lands zoomed on the pane actually requested.
    *  - Not zoomed at all: one toggle zooms straight onto this pane.
+   *
+   * None of this runs at all when the window has only one pane
+   * (`windowPanes &lt;= 1`) — there is nothing else in the window to hide, so
+   * zooming is pointless, and it is actively harmful: verified against a
+   * real tmux server that `resize-pane -Z` on a single-pane window never
+   * actually enters a zoomed state (`window_zoomed_flag` stays `0`) — so
+   * `target.zoomed`/`windowZoomed` are permanently `false` for such a
+   * window, and the toggle above would fire on *every single attach,
+   * forever*. Critically, the command still triggers tmux's own redraw
+   * broadcast to every other client already attached to that window even
+   * though nothing visually changes for *this* one — confirmed by attaching
+   * a second client to an already-attached single-pane window and watching
+   * the first one receive a full repaint (ending in a fresh copy of the
+   * shell's own prompt) it never asked for. Repeated attaches — multiple
+   * browser tabs on the same window, or reattaching after a detach — each
+   * appended one more copy of the prompt to whichever tab was already open,
+   * which is the literal "same prompt line duplicated dozens of times" bug
+   * this guards against.
    */
-  attachCommand(target: AdoptableTarget): {
+  async attachCommand(target: AdoptableTarget): Promise<{
     command: string;
     args: string[];
     /** Passed back to `cleanupView` once this attach's client disconnects. */
     viewSession: { socket: string; name: string };
-  } {
+    /**
+     * The size to actually spawn this attaching client's own PTY at — see
+     * `sizeToAttachAt`'s doc comment for why this is not simply
+     * `target.cols`/`target.rows`.
+     */
+    clientCols: number;
+    clientRows: number;
+  }> {
     const viewSessionName = `${VIEW_SESSION_PREFIX}${crypto.randomBytes(9).toString('base64url')}`;
     // Session-only targets (unlike pane/window ones) do not accept the `=`
     // exact-match anchor — verified against a real tmux server that `-t
@@ -253,14 +280,81 @@ export class AdoptionService {
     const args = ['-L', target.socket];
     args.push('new-session', '-d', '-t', target.sessionName, '-s', viewSessionName, ';');
     args.push('select-window', '-t', windowTarget, ';');
-    if (!target.zoomed) {
+    if (target.windowPanes > 1 && !target.zoomed) {
       if (target.windowZoomed) args.push('resize-pane', '-Z', '-t', paneTarget, ';');
       args.push('resize-pane', '-Z', '-t', paneTarget, ';');
     }
     args.push('select-pane', '-t', paneTarget, ';');
     args.push('attach-session', '-t', `=${viewSessionName}`);
 
-    return { command: this.opts.bin, args, viewSession: { socket: target.socket, name: viewSessionName } };
+    const { cols: clientCols, rows: clientRows } = await this.sizeToAttachAt(target);
+    return {
+      command: this.opts.bin,
+      args,
+      viewSession: { socket: target.socket, name: viewSessionName },
+      clientCols,
+      clientRows,
+    };
+  }
+
+  /**
+   * The size to request for *this* attaching client's own PTY.
+   *
+   * Naively spawning at the window's own listed size (`target.cols`/`rows`,
+   * i.e. `#{window_width}`/`#{window_height}`) is wrong: those already
+   * reflect the *content* area — the pane area minus whatever tmux's status
+   * line reserves — not a full client terminal. `window-size`'s default
+   * policy, `latest`, makes the window follow whichever client had the most
+   * recent activity; spawning a new client at the (shorter) content-area
+   * size makes tmux treat that new, shorter client as authoritative and
+   * shrink the window by exactly the status line's height. Every later
+   * attach then repeats the same mistake against the now-smaller value —
+   * verified against a real tmux server that three attaches in a row, each
+   * naively using the previous one's listed size, shrank a 30-row window to
+   * 27, one row at a time, and each shrink broadcasts a full redraw to every
+   * other client already attached to that window — the mechanism behind
+   * "the same prompt line duplicated dozens of times" in an already-open tab.
+   *
+   * The fix: reuse an *already-attached* client's own full terminal size
+   * when one exists — verified against a real tmux server that this keeps
+   * the window's size completely stable across repeated attaches, whatever
+   * the user's own status-line configuration reserves (this deliberately
+   * never inspects or assumes a specific number of status-line rows, since
+   * that is exactly the kind of server option this feature must never
+   * touch). Scoped to clients whose session is *currently showing this
+   * window* — a session-group member parked on a different window is not
+   * relevant to this one's size. Only when nobody is attached to this
+   * window at all (the very first attach, or everyone else has detached) is
+   * there nothing to match, so the window's own listed size is used as a
+   * reasonable starting point instead — there is no one else to disturb.
+   */
+  private async sizeToAttachAt(target: AdoptableTarget): Promise<{ cols: number; rows: number }> {
+    try {
+      const { stdout } = await execFileAsync(
+        this.opts.bin,
+        [
+          '-L', target.socket, 'list-clients', '-F',
+          ['#{client_width}', '#{client_height}', '#{window_index}', '#{session_group}', '#{session_name}'].join(SEP),
+        ],
+        { env: this.opts.env },
+      );
+      for (const line of stdout.split('\n')) {
+        if (!line.trim()) continue;
+        const [width, height, windowIndex, sessionGroup, sessionName] = line.split(SEP);
+        // A session's own group defaults to its own name once grouped (and
+        // is empty for a session with no group at all yet) — see
+        // `AdoptionService.attachCommand`'s use of `new-session -t`, which is
+        // what creates that group in the first place.
+        const inSameGroup = sessionGroup === target.sessionName || sessionName === target.sessionName;
+        if (!inSameGroup || Number.parseInt(windowIndex ?? '', 10) !== target.windowIndex) continue;
+        const cols = Number.parseInt(width ?? '', 10);
+        const rows = Number.parseInt(height ?? '', 10);
+        if (Number.isFinite(cols) && Number.isFinite(rows) && cols > 0 && rows > 0) return { cols, rows };
+      }
+    } catch {
+      // No server, or no clients at all — fall through.
+    }
+    return { cols: target.cols, rows: target.rows };
   }
 
   /**
@@ -303,15 +397,18 @@ interface ParsedPane {
   windowZoomed: boolean;
   /** `#{pane_active}` — whether this specific pane is the window's active one. */
   paneActive: boolean;
+  /** `#{window_panes}` — how many panes this pane's window has (>=1). */
+  windowPanes: number;
 }
 
 export function parsePaneLine(line: string): ParsedPane | null {
   if (!line.trim()) return null;
   const parts = line.split(SEP);
-  if (parts.length < 12) return null;
+  if (parts.length < 13) return null;
 
   // Parse from the right: a user's session name may itself contain the
   // separator, but the trailing fields are ours and fixed in number.
+  const windowPanes = int(parts.pop());
   const paneActive = parts.pop() === '1';
   const windowZoomed = parts.pop() === '1';
   const windowName = parts.pop() ?? '';
@@ -339,6 +436,7 @@ export function parsePaneLine(line: string): ParsedPane | null {
     windowName,
     windowZoomed,
     paneActive,
+    windowPanes,
   };
 }
 

@@ -305,12 +305,15 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
           },
         });
       }
-      const attach = adoption.attachCommand(target);
+      const attach = await adoption.attachCommand(target);
       adopt = {
         command: attach.command,
         args: attach.args,
-        cols: target.cols,
-        rows: target.rows,
+        // Not `target.cols`/`rows` — see `attachCommand`'s doc comment on
+        // `sizeToAttachAt` for why spawning at the window's own listed
+        // (content-area) size makes it shrink by one row on every attach.
+        cols: attach.clientCols,
+        rows: attach.clientRows,
         label: `${target.command} · ${target.sessionName}`,
         // Persisted on the session row (not just used to resolve `target`
         // above) so a later attach to this same pane can be recognized as
