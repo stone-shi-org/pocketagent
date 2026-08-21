@@ -74,13 +74,30 @@ async function paneField(name: string, format: string): Promise<string | null> {
 const panePath = (name: string): Promise<string | null> =>
   paneField(name, '#{pane_current_path}');
 
-async function attachedClients(name: string): Promise<number> {
-  const out = await tmux('list-sessions', '-F', '#{session_name}|#{session_attached}');
-  for (const line of out.split('\n')) {
-    const [session, value] = line.split('|');
-    if (session === name) return Number(value);
-  }
-  return -1;
+/**
+ * Total attached clients across a whole tmux "session group" — the real
+ * session plus any `pocketagent-view-*` sibling `attachCommand` created for
+ * it (see that method's doc comment). PocketAgent's own client is attached
+ * to a view session, not the real one, so the real session's own
+ * `#{session_attached}` alone reads 0 even while genuinely attached; this is
+ * the check that actually answers "is a client connected to this session
+ * (group) right now". `session_group` is the empty string for an ungrouped
+ * session, which would incorrectly match every other ungrouped session — a
+ * session's own name is used as its group key in that case, same as tmux
+ * does internally.
+ */
+async function totalAttachedInGroup(name: string): Promise<number> {
+  const out = await tmux('list-sessions', '-F', '#{session_name}|#{session_group}|#{session_attached}');
+  const rows = out
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const [session, group, attached] = line.split('|');
+      return { session: session ?? '', group: group || session || '', attached: Number(attached ?? 0) };
+    });
+  const target = rows.find((r) => r.session === name);
+  if (!target) return 0;
+  return rows.filter((r) => r.group === target.group).reduce((sum, r) => sum + r.attached, 0);
 }
 
 async function userSessionExists(name: string): Promise<boolean> {
@@ -90,6 +107,47 @@ async function userSessionExists(name: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** `pocketagent-view-*` siblings currently grouped with the named session. */
+async function viewSessionsFor(name: string): Promise<{ name: string; activeWindow: number }[]> {
+  const out = await tmux(
+    'list-sessions', '-F',
+    '#{session_name}|#{session_group}|#{session_windows}',
+  );
+  const rows = out
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const [session, group] = line.split('|');
+      return { session: session ?? '', group: group || session || '' };
+    });
+  const target = rows.find((r) => r.session === name);
+  if (!target) return [];
+  const viewNames = rows
+    .filter((r) => r.group === target.group && r.session.startsWith('pocketagent-view-'))
+    .map((r) => r.session);
+
+  const result: { name: string; activeWindow: number }[] = [];
+  for (const viewName of viewNames) {
+    // `cleanupView` can remove this exact session between the listing above
+    // and this per-session query — e.g. a detach that raced this call — in
+    // which case tmux's own "can't find session" is the correct, expected
+    // outcome, not a bug to surface: treat it the same as never having been
+    // listed, rather than letting the whole poll fail on a real teardown.
+    let windows: string;
+    try {
+      windows = await tmux('list-windows', '-t', `=${viewName}`, '-F', '#{window_index}|#{window_active}');
+    } catch {
+      continue;
+    }
+    const active = windows
+      .split('\n')
+      .filter(Boolean)
+      .find((line) => line.endsWith('|1'));
+    result.push({ name: viewName, activeWindow: active ? Number(active.split('|')[0]) : -1 });
+  }
+  return result;
 }
 
 describe('adoption is off unless configured', () => {
@@ -236,8 +294,10 @@ describeTmux('adopting a pane on a foreign tmux server', () => {
       { timeout: 10_000 },
     );
 
-    // And tmux now sees a client, which is what makes this a shared view.
-    expect(await attachedClients('shared')).toBeGreaterThanOrEqual(1);
+    // And tmux now sees a client, which is what makes this a shared view —
+    // attached to a `pocketagent-view-*` sibling of 'shared', not 'shared'
+    // itself (see `attachCommand`'s doc comment), hence the group-wide check.
+    expect(await totalAttachedInGroup('shared')).toBeGreaterThanOrEqual(1);
   });
 
   it('zooms the chosen pane instead of handing over the whole split window', async () => {
@@ -278,7 +338,7 @@ describeTmux('adopting a pane on a foreign tmux server', () => {
       url: `/api/sessions/${firstId}`,
       headers: { cookie: t.cookie },
     });
-    await waitFor(async () => (await attachedClients('splitroom')) === 0, { timeout: 10_000 });
+    await waitFor(async () => (await totalAttachedInGroup('splitroom')) === 0, { timeout: 10_000 });
 
     // The dialog would now offer this pane as already zoomed...
     const relisted = (await listTargets()).targets.find(
@@ -295,7 +355,7 @@ describeTmux('adopting a pane on a foreign tmux server', () => {
       payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: relisted!.id },
     });
     expect(second.statusCode).toBe(201);
-    await waitFor(async () => (await attachedClients('splitroom')) >= 1, { timeout: 10_000 });
+    await waitFor(async () => (await totalAttachedInGroup('splitroom')) >= 1, { timeout: 10_000 });
     expect(await paneField('splitroom', '#{window_zoomed_flag}')).toBe('1');
   });
 
@@ -337,7 +397,7 @@ describeTmux('adopting a pane on a foreign tmux server', () => {
       url: `/api/sessions/${first.json().id}`,
       headers: { cookie: t.cookie },
     });
-    await waitFor(async () => (await attachedClients('multipane')) === 0, { timeout: 10_000 });
+    await waitFor(async () => (await totalAttachedInGroup('multipane')) === 0, { timeout: 10_000 });
 
     // The window is still zoomed, but specifically on pane 0 — the listing
     // must say so per pane, not just per window.
@@ -355,11 +415,125 @@ describeTmux('adopting a pane on a foreign tmux server', () => {
       payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: paneOneTarget.id },
     });
     expect(second.statusCode).toBe(201);
-    await waitFor(async () => (await attachedClients('multipane')) >= 1, { timeout: 10_000 });
+    await waitFor(async () => (await totalAttachedInGroup('multipane')) >= 1, { timeout: 10_000 });
 
     const final = (await listTargets()).targets.filter((x) => x.sessionName === 'multipane');
     expect(final.find((x) => x.paneIndex === 1)?.zoomed).toBe(true);
     expect(final.find((x) => x.paneIndex === 0)?.zoomed).toBe(false);
+  });
+
+  it('attaches to different windows of the same session independently, without dragging other clients along', async () => {
+    // Regression: tmux's "current window" belongs to the session, shared by
+    // every client attached to that session object — verified against a
+    // real tmux server that a second `attach-session -t session:window`
+    // forces *every* client of that session (including the user's own real
+    // terminal) to jump to the newly requested window, rather than each
+    // client independently viewing what it asked for. Reported as windows
+    // "sticking to one" or "mixing together" when adopting more than one
+    // window of the same multi-window session. `attachCommand` fixes this
+    // by attaching each request to its own tmux "session group" member
+    // instead of the shared session directly.
+    await startUserSession('multiwindow', t.projectDir, ['sleep', '120']);
+    // `-d` keeps window 0 active — `new-window` without it activates the
+    // window it just created, which would make the "untouched" baseline
+    // below 1 instead of a legible 0.
+    await tmux('new-window', '-d', '-t', 'multiwindow', '-c', t.projectDir, '--', 'sleep', '120');
+
+    const originalActiveWindow = async (): Promise<number> => {
+      const windows = await tmux('list-windows', '-t', 'multiwindow', '-F', '#{window_index}|#{window_active}');
+      const active = windows.split('\n').filter(Boolean).find((l) => l.endsWith('|1'));
+      return active ? Number(active.split('|')[0]) : -1;
+    };
+
+    let targets: any[] = [];
+    await waitFor(async () => {
+      targets = (await listTargets()).targets.filter((x) => x.sessionName === 'multiwindow');
+      return targets.some((x) => x.windowIndex === 0) && targets.some((x) => x.windowIndex === 1);
+    }, { timeout: 5000 });
+    // The real session's own current window before PocketAgent touches anything.
+    expect(await originalActiveWindow()).toBe(0);
+
+    const windowZero = targets.find((x) => x.windowIndex === 0);
+    const windowOne = targets.find((x) => x.windowIndex === 1);
+
+    // Attach to window 0 first, and leave it attached...
+    const first = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: windowZero.id },
+    });
+    expect(first.statusCode).toBe(201);
+    await waitFor(async () => (await totalAttachedInGroup('multiwindow')) >= 1, { timeout: 10_000 });
+
+    // ...then, while it is still attached, attach to window 1.
+    const second = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: windowOne.id },
+    });
+    expect(second.statusCode).toBe(201);
+    await waitFor(async () => (await totalAttachedInGroup('multiwindow')) >= 2, { timeout: 10_000 });
+
+    // The real session's own current window must be completely untouched —
+    // this is what a real terminal (iTerm2 over ssh) attached to
+    // 'multiwindow' itself would see, and it must not have been yanked to
+    // either window PocketAgent asked for.
+    expect(await originalActiveWindow()).toBe(0);
+
+    // Each PocketAgent client independently shows the window it was
+    // actually given, not whichever was attached most recently.
+    const views = await viewSessionsFor('multiwindow');
+    expect(views).toHaveLength(2);
+    const activeWindows = new Set(views.map((v) => v.activeWindow));
+    expect(activeWindows.has(0)).toBe(true);
+    expect(activeWindows.has(1)).toBe(true);
+
+    // Detaching both cleans up their view sessions rather than leaking them.
+    await t.app.inject({
+      method: 'DELETE',
+      url: `/api/sessions/${first.json().id}`,
+      headers: { cookie: t.cookie },
+    });
+    await t.app.inject({
+      method: 'DELETE',
+      url: `/api/sessions/${second.json().id}`,
+      headers: { cookie: t.cookie },
+    });
+    await waitFor(async () => (await viewSessionsFor('multiwindow')).length === 0, { timeout: 10_000 });
+
+    // The real session, both its windows, and their processes are untouched.
+    expect(await userSessionExists('multiwindow')).toBe(true);
+    const windowsAfter = await tmux('list-windows', '-t', 'multiwindow', '-F', '#{window_index}');
+    expect(windowsAfter.split('\n').filter(Boolean)).toHaveLength(2);
+  });
+
+  it('never lists its own ephemeral view sessions as adoptable targets', async () => {
+    await startUserSession('noleak', t.projectDir, ['sleep', '120']);
+    const target = (await listTargets()).targets.find((x) => x.sessionName === 'noleak');
+
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: target.id },
+    });
+    expect(created.statusCode).toBe(201);
+    await waitFor(async () => (await totalAttachedInGroup('noleak')) >= 1, { timeout: 10_000 });
+
+    // The view session it just created is real, in tmux's own listing...
+    expect(await viewSessionsFor('noleak')).toHaveLength(1);
+    // ...but must never itself show up as something the Shell dialog could
+    // offer to attach to — it would just duplicate 'noleak's own pane.
+    const allTargets = (await listTargets()).targets;
+    expect(allTargets.some((x) => x.sessionName.startsWith('pocketagent-view-'))).toBe(false);
+
+    await t.app.inject({
+      method: 'DELETE',
+      url: `/api/sessions/${created.json().id}`,
+      headers: { cookie: t.cookie },
+    });
   });
 
   it('runs the attach client as a direct child, not inside our own tmux', async () => {
@@ -399,7 +573,7 @@ describeTmux('adopting a pane on a foreign tmux server', () => {
     });
     const id = created.json().id as string;
 
-    await waitFor(async () => (await attachedClients('survivor')) >= 1, { timeout: 10_000 });
+    await waitFor(async () => (await totalAttachedInGroup('survivor')) >= 1, { timeout: 10_000 });
 
     const deleted = await t.app.inject({
       method: 'DELETE',
@@ -414,9 +588,11 @@ describeTmux('adopting a pane on a foreign tmux server', () => {
       return info !== null && info.status !== 'running' && info.status !== 'starting';
     }, { timeout: 10_000 });
 
-    // ...but the user's session is untouched, with the client simply gone.
+    // ...but the user's session is untouched, with the client simply gone —
+    // including PocketAgent's own view-session sibling, which `cleanupView`
+    // (wired to this session's own `exit` event) tears down right along with it.
     expect(await userSessionExists('survivor')).toBe(true);
-    await waitFor(async () => (await attachedClients('survivor')) === 0, { timeout: 10_000 });
+    await waitFor(async () => (await totalAttachedInGroup('survivor')) === 0, { timeout: 10_000 });
 
     // The process the user started is still running.
     const panePid = Number(await paneField('survivor', '#{pane_pid}'));
@@ -434,7 +610,7 @@ describeTmux('adopting a pane on a foreign tmux server', () => {
       headers: { cookie: t.cookie },
       payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: target.id },
     });
-    await waitFor(async () => (await attachedClients('outlives-us')) >= 1, { timeout: 10_000 });
+    await waitFor(async () => (await totalAttachedInGroup('outlives-us')) >= 1, { timeout: 10_000 });
 
     await t.app.close();
 

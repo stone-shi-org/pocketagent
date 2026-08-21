@@ -9,6 +9,18 @@ const execFileAsync = promisify(execFile);
 /** Field separator for `list-panes -F`. Tabs do not survive tmux formats. */
 const SEP = '|';
 
+/**
+ * Prefix for the ephemeral "session group" sessions `attachCommand` creates
+ * so each attach can pick its own window independently — see that method's
+ * doc comment for why. A session with this prefix is PocketAgent's own
+ * bookkeeping, never a real user session: `list()` filters these out so they
+ * never appear as (duplicate) adoptable targets, and opportunistically kills
+ * any left with nobody attached — cleanup that would otherwise only happen
+ * on a clean detach (see `cleanupView`), so a crash or an ungraceful
+ * shutdown between attach and detach would otherwise leak one forever.
+ */
+const VIEW_SESSION_PREFIX = 'pocketagent-view-';
+
 export interface AdoptionOptions {
   /**
    * tmux socket to look at, e.g. `default` for the user's own server. Empty
@@ -89,9 +101,22 @@ export class AdoptionService {
     }
 
     const targets: AdoptableTarget[] = [];
+    const staleViews = new Set<string>();
     for (const line of stdout.split('\n')) {
       const parsed = parsePaneLine(line);
       if (!parsed || parsed.dead) continue;
+
+      if (parsed.sessionName.startsWith(VIEW_SESSION_PREFIX)) {
+        // Our own bookkeeping, not a real user session — it shares its
+        // windows with whatever real session it was created from, so
+        // listing it too would just duplicate every pane already listed
+        // under that real session's own name. `attached === 0` means the
+        // client that created it is gone without going through
+        // `cleanupView` (crash, force-kill, a server restart mid-session —
+        // adopted sessions never survive one); queue it for removal.
+        if (parsed.attached === 0) staleViews.add(parsed.sessionName);
+        continue;
+      }
 
       let cwd: string;
       if (includeUnrestricted) {
@@ -136,6 +161,12 @@ export class AdoptionService {
       });
     }
 
+    // Best-effort, and deliberately not awaited: garbage-collecting a leaked
+    // bookkeeping session is never on the critical path of answering "what
+    // can I adopt right now", and `killSessionBestEffort` already swallows
+    // its own errors.
+    for (const name of staleViews) void this.killSessionBestEffort(socket, name);
+
     return targets;
   }
 
@@ -146,47 +177,114 @@ export class AdoptionService {
   }
 
   /**
-   * The argv that attaches to a target.
+   * The argv that attaches to a target, and the bookkeeping needed to
+   * detach cleanly afterward.
    *
-   * `=` anchors the session name so a prefix match cannot select a different
-   * session. Built server-side from a validated target — the browser only ever
+   * Built server-side from a validated target — the browser only ever
    * supplies an opaque id.
+   *
+   * ### Why a new session, not `attach-session -t` on the real one
+   *
+   * A tmux session has exactly one "current window", shared by every client
+   * attached to *that session object* — verified against a real tmux
+   * server: attaching a second client to the same session at a different
+   * window does not give each client its own view, it forces the window
+   * that was already displayed (to every other client of that session,
+   * including the user's own real terminal) to jump to whatever the new
+   * client asked for. Attaching to a different window later just repeats
+   * this, which is what reads as "sticks to one window" / "windows mixed
+   * together" when adopting more than one window of the same session.
+   *
+   * The fix is tmux's own mechanism for this: a "session group" — a second,
+   * independent session created with `new-session -t <existing>` that
+   * shares the *same* windows (literally the same objects, not copies) but
+   * tracks its own current-window pointer, verified independent of the
+   * original's. We create one of these (named with `VIEW_SESSION_PREFIX` so
+   * `list()` can find and exclude/garbage-collect it) per attach, select the
+   * requested window and pane on it specifically, and attach the client to
+   * that instead of the real session. `kill-session` on it later — see
+   * `cleanupView` — only ever drops *this* session's reference to the
+   * shared windows; verified against a real tmux server that the windows
+   * (and whatever is running in them) survive as long as any other session
+   * in the group still references them, same as the real session being
+   * killed while a lingering view session is the one left holding the
+   * group together.
+   *
+   * ### Zooming a specific pane within that window
    *
    * tmux's unit of display is the *window*, not the pane: attaching to a
    * single pane still renders every pane in its window (`.pane` only picks
-   * which one gets focus). Picking one pane in the Shell dialog is supposed to
-   * show just that pane, so we zoom it (`resize-pane -Z`) as part of the same
-   * invocation, chained with a literal `;` the way `ensureServer` chains
-   * options.
+   * which one gets focus). Picking one pane in the Shell dialog is supposed
+   * to show just that pane, so it is zoomed (`resize-pane -Z`) as part of
+   * the same command chain, joined with a literal `;` the way `ensureServer`
+   * chains options.
    *
    * `-Z` is a pure toggle of the *window's* zoom flag, not a "zoom onto this
    * pane" command — verified against a real tmux server: sending it once
-   * while the window is already zoomed on a *different* pane just turns zoom
-   * off, leaving that other pane active and nothing zoomed, rather than
-   * switching zoom onto the one just requested. Only when the toggle is the
-   * one turning zoom *on* does the targeted `-t` pane actually get selected
-   * and zoomed. So there are three cases:
+   * while the window is already zoomed on a *different* pane just turns
+   * zoom off, leaving that other pane active and nothing zoomed, rather
+   * than switching zoom onto the one just requested. Only when the toggle
+   * is the one turning zoom *on* does the targeted `-t` pane actually get
+   * selected and zoomed. So there are three cases:
    *  - This pane is already the zoomed one (`zoomed`): send nothing, or a
    *    single toggle would un-zoom it.
    *  - The window is zoomed on some *other* pane (`windowZoomed`, not
    *    `zoomed`): two toggles — off, then back on targeting this pane —
-   *    which reliably lands zoomed on the pane actually requested. This is
-   *    what fixes attaching to one pane while a different one in the same
-   *    window was already zoomed: a single naive toggle here (checking only
-   *    "is the window zoomed" as this used to) sees `true` and skips
-   *    zooming entirely, leaving the view stuck on whichever pane already
-   *    had it.
+   *    which reliably lands zoomed on the pane actually requested.
    *  - Not zoomed at all: one toggle zooms straight onto this pane.
    */
-  attachCommand(target: AdoptableTarget): { command: string; args: string[] } {
-    const paneTarget = `=${target.sessionName}:${target.windowIndex}.${target.paneIndex}`;
+  attachCommand(target: AdoptableTarget): {
+    command: string;
+    args: string[];
+    /** Passed back to `cleanupView` once this attach's client disconnects. */
+    viewSession: { socket: string; name: string };
+  } {
+    const viewSessionName = `${VIEW_SESSION_PREFIX}${crypto.randomBytes(9).toString('base64url')}`;
+    // Session-only targets (unlike pane/window ones) do not accept the `=`
+    // exact-match anchor — verified against a real tmux server that `-t
+    // =name` on `new-session` fails outright ("session not found") where
+    // plain `-t name` succeeds. `target.sessionName` came from `list()`
+    // moments ago, so the residual prefix-match ambiguity this leaves is the
+    // same class of risk `list()`/`resolve()` already carry generally, not
+    // something new.
+    const windowTarget = `=${viewSessionName}:${target.windowIndex}`;
+    const paneTarget = `=${viewSessionName}:${target.windowIndex}.${target.paneIndex}`;
+
     const args = ['-L', target.socket];
+    args.push('new-session', '-d', '-t', target.sessionName, '-s', viewSessionName, ';');
+    args.push('select-window', '-t', windowTarget, ';');
     if (!target.zoomed) {
       if (target.windowZoomed) args.push('resize-pane', '-Z', '-t', paneTarget, ';');
       args.push('resize-pane', '-Z', '-t', paneTarget, ';');
     }
-    args.push('attach-session', '-t', paneTarget);
-    return { command: this.opts.bin, args };
+    args.push('select-pane', '-t', paneTarget, ';');
+    args.push('attach-session', '-t', `=${viewSessionName}`);
+
+    return { command: this.opts.bin, args, viewSession: { socket: target.socket, name: viewSessionName } };
+  }
+
+  /**
+   * Tear down the ephemeral view session an `attachCommand` created, once
+   * its client has disconnected. Best-effort and silent: the session may
+   * already be gone (the real session it was grouped with was itself killed
+   * while this was the only other member, in which case tmux already
+   * destroyed it along with the windows — see `attachCommand`'s doc comment
+   * for why that specific edge case is an acceptable, pre-existing class of
+   * risk rather than one this introduces), and there is nothing further to
+   * do about that either way.
+   */
+  async cleanupView(view: { socket: string; name: string }): Promise<void> {
+    await this.killSessionBestEffort(view.socket, view.name);
+  }
+
+  private async killSessionBestEffort(socket: string, name: string): Promise<void> {
+    try {
+      await execFileAsync(this.opts.bin, ['-L', socket, 'kill-session', '-t', `=${name}`], {
+        env: this.opts.env,
+      });
+    } catch {
+      // Already gone — nothing to clean up.
+    }
   }
 }
 
