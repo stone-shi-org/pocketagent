@@ -347,10 +347,6 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         // above) so a later attach to this same pane can be recognized as
         // the same chat — see `ProjectService`'s grouping.
         targetId: target.id,
-        // Torn down once this session's process exits — see
-        // `AdoptionService.attachCommand`'s doc comment and
-        // `SessionManager`'s wiring of `adoption.cleanupView`.
-        viewSession: attach.viewSession,
       };
       body.cwd = target.cwd;
     }

@@ -305,14 +305,12 @@ describe('ConversationStore', () => {
 });
 
 describe('parsePaneLine', () => {
-  const line = (sessionName: string, windowZoomed = '0', paneActive = '1', windowPanes = '1') =>
-    `${sessionName}|0|0|claude|/home/me/src/app|192|57|1|0|win|${windowZoomed}|${paneActive}|${windowPanes}`;
+  const line = (sessionName: string, windowActive = '1', paneActive = '1') =>
+    `${sessionName}|claude|/home/me/src/app|192|57|1|0|win|${windowActive}|${paneActive}`;
 
   it('parses a pane', () => {
     expect(parsePaneLine(line('work'))).toEqual({
       sessionName: 'work',
-      windowIndex: 0,
-      paneIndex: 0,
       command: 'claude',
       cwd: '/home/me/src/app',
       cols: 192,
@@ -320,24 +318,19 @@ describe('parsePaneLine', () => {
       attached: 1,
       dead: false,
       windowName: 'win',
-      windowZoomed: false,
+      windowActive: true,
       paneActive: true,
-      windowPanes: 1,
     });
   });
 
-  it('reports an already-zoomed window', () => {
-    expect(parsePaneLine(line('work', '1'))?.windowZoomed).toBe(true);
+  it("reports whether this pane's window is the session's current one", () => {
+    expect(parsePaneLine(line('work', '0'))?.windowActive).toBe(false);
+    expect(parsePaneLine(line('work', '1'))?.windowActive).toBe(true);
   });
 
-  it('reports whether this specific pane is the one that is active — a window-level zoom flag alone cannot say which pane it applies to', () => {
+  it('reports whether this specific pane is its window\'s active one', () => {
     expect(parsePaneLine(line('work', '1', '0'))?.paneActive).toBe(false);
     expect(parsePaneLine(line('work', '1', '1'))?.paneActive).toBe(true);
-  });
-
-  it('reports how many panes the window has', () => {
-    expect(parsePaneLine(line('work', '0', '1', '1'))?.windowPanes).toBe(1);
-    expect(parsePaneLine(line('work', '0', '1', '3'))?.windowPanes).toBe(3);
   });
 
   it('tolerates a separator inside the user\'s session name', () => {

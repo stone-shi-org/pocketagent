@@ -108,10 +108,10 @@ export function ShellDialog({ onClose, onCreated, onApiError }: Props): JSX.Elem
         {targets && targets.length > 0 && (
           <div className="pick-list">
             {targets.map((target) => {
-              // Matched on the pane's own stable id, not a substring of the
+              // Matched on the session's own stable id, not a substring of the
               // title: a title match could cross-match a differently-named
-              // pane (or miss a truncated one), which is what let this
-              // dialog think a pane was not yet attached when it actually
+              // session (or miss a truncated one), which is what let this
+              // dialog think a session was not yet attached when it actually
               // was, and offer "Attach" again instead of "Detach".
               //
               // `isTerminalStatus` (not a hand-rolled exclusion list) is
@@ -133,10 +133,9 @@ export function ShellDialog({ onClose, onCreated, onApiError }: Props): JSX.Elem
                   <div className="pick-main">
                     <div className="pick-title">
                       <strong>{target.sessionName}</strong>
-                      <span style={{ opacity: 0.7, marginLeft: 6 }}>
-                        ({target.windowIndex}.{target.paneIndex}
-                        {target.title ? ` · ${target.title}` : ''})
-                      </span>
+                      {target.title && (
+                        <span style={{ opacity: 0.7, marginLeft: 6 }}>({target.title})</span>
+                      )}
                     </div>
                     <div className="pick-detail">
                       {target.command} · {target.workspaceLabel || target.cwd} · {target.cols}×

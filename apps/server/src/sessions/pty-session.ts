@@ -33,13 +33,6 @@ export interface PtySessionSpec {
    */
   adoptTargetId?: string | null;
   /**
-   * The ephemeral "session group" view `AdoptionService.attachCommand`
-   * created for this attach, if any — passed back to
-   * `AdoptionService.cleanupView` once this session's process exits (see
-   * `SessionManager.wire`). Null for a session that is not adopted.
-   */
-  adoptViewSession?: { socket: string; name: string } | null;
-  /**
    * True when `args` already includes the adapter's auto-approve flag. Pure
    * metadata for display (`SessionInfo.skipPermissionsEnabled`) — the flag
    * itself was baked into `args` by the adapter's `buildCommand`, not applied

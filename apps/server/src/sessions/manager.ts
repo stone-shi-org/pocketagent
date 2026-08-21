@@ -96,13 +96,6 @@ export interface CreateSessionInput {
      * be recognized as the same chat rather than a new one.
      */
     targetId: string;
-    /**
-     * The ephemeral "session group" view created for this attach — see
-     * `AdoptionService.attachCommand`'s doc comment. Persisted onto
-     * `PtySessionSpec` (not just used here) so `wire()` can tear it down via
-     * `opts.adoption.cleanupView` once this session's process exits.
-     */
-    viewSession: { socket: string; name: string };
   };
 }
 
@@ -135,13 +128,6 @@ export interface ManagerOptions {
    * fixed creation-time title forever, which is the pre-existing behaviour.
    */
   titleFor?: (cwd: string, agentSessionId: string) => Promise<string | null>;
-  /**
-   * Tears down the ephemeral tmux "session group" view an adopted session's
-   * `attachCommand` created, once that session's process exits. Optional so
-   * tests that never adopt anything can omit it; every real adopted session
-   * always has one (see `CreateSessionInput.adopt.viewSession`).
-   */
-  adoption?: { cleanupView(view: { socket: string; name: string }): Promise<void> };
 }
 
 const SWEEP_INTERVAL_MS = 15_000;
@@ -349,14 +335,6 @@ export class SessionManager {
       session.on('hint', (hints) => {
         if (hints.includes('idle')) this.onIdleHint(session);
       });
-
-      // The ephemeral "session group" view `attachCommand` created for this
-      // attach (see its doc comment) is scoped to this one PocketAgent
-      // session, not to the underlying tmux pane — it must go away exactly
-      // when this session's own process does, whether that is an explicit
-      // detach or the process simply exiting on its own.
-      const view = session.spec.adoptViewSession;
-      if (view) session.on('exit', () => void this.opts.adoption?.cleanupView(view));
     }
   }
 
@@ -642,7 +620,6 @@ export class SessionManager {
         outputBufferBytes: this.opts.outputBufferBytes,
         adopted: input.adopt !== undefined,
         adoptTargetId: input.adopt?.targetId ?? null,
-        adoptViewSession: input.adopt?.viewSession ?? null,
         skipPermissions,
       },
       // Adoption always runs the attach client as our own child: the thing we

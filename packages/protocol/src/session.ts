@@ -313,58 +313,39 @@ export const BrowseEntry = z.object({
 export type BrowseEntry = z.infer<typeof BrowseEntry>;
 
 /**
- * An existing tmux pane that PocketAgent could attach to.
+ * An existing tmux *session* that PocketAgent could attach to.
  *
- * Only populated when adoption is explicitly enabled, and only for panes whose
- * working directory is inside a configured workspace root.
+ * Deliberately session-level only: PocketAgent does not enumerate, target, or
+ * resize individual windows or panes within a session. Attaching runs a plain
+ * `attach-session`, and whatever tmux would show a real terminal client —
+ * splits, extra windows, the works — shows here unmodified. Window navigation
+ * is native tmux (the user's own prefix key), shared with every other client
+ * of the session exactly the way a second real terminal attaching to the same
+ * session would be. This was a deliberate simplification: an earlier design
+ * modeled individual panes and windows (per-pane targets, zoom-to-isolate-a-
+ * pane, a tmux "session group" per attach so each window selection stayed
+ * independent), and the machinery required to make that safe kept surfacing
+ * new tmux-level edge cases — not worth it against just showing the session
+ * as-is.
+ *
+ * Only populated when adoption is explicitly enabled, and only for sessions
+ * whose (representative pane's) working directory is inside a configured
+ * workspace root.
  */
 export const AdoptableTarget = z.object({
   /** Opaque handle the client passes back; the server never trusts free text. */
   id: z.string(),
   socket: z.string(),
   sessionName: z.string(),
-  windowIndex: z.number().int(),
-  paneIndex: z.number().int(),
+  /** The active window's active pane's own running command, for display. */
   command: z.string(),
   cwd: z.string(),
   workspaceLabel: z.string(),
+  /** The active window's name, for display. */
   title: z.string(),
   cols: z.number().int().nonnegative(),
   rows: z.number().int().nonnegative(),
   /** True when another client is already attached — adopting will share size. */
   attachedClients: z.number().int().nonnegative(),
-  /**
-   * True when *this exact pane* is the one its window is currently zoomed on
-   * (`tmux resize-pane -Z`) — not merely whether the window is zoomed at
-   * all. A window can have only one zoomed pane at a time, shared by every
-   * client attached to it; a *different* pane being zoomed must not read as
-   * this one already being it, or attaching to this pane would wrongly skip
-   * re-zooming and leave the view stuck on whichever pane actually was
-   * zoomed. Attaching zooms the target pane so picking one pane doesn't hand
-   * you the whole split window — but `-Z` toggles, so the server must know
-   * this pane's own current state to avoid un-zooming it right back off.
-   */
-  zoomed: z.boolean(),
-  /**
-   * True when the window is zoomed on *some* pane, which may or may not be
-   * this one — see `zoomed` for the pane-specific version. Needed alongside
-   * it because `-Z` is a pure toggle: switching zoom from one pane to
-   * another needs two toggles (off, then on again targeting the pane
-   * actually wanted), not one — verified against a real tmux server that a
-   * single `-Z -t <inactive pane>` while already zoomed just turns zoom off
-   * rather than moving it, leaving whichever pane was zoomed still active.
-   */
-  windowZoomed: z.boolean(),
-  /**
-   * How many panes this pane's window has. When it's exactly 1, attaching
-   * must never zoom: verified against a real tmux server that zooming a
-   * single-pane window never actually enters a zoomed state (there is
-   * nothing else in the window to hide), yet the command still broadcasts a
-   * full redraw to every other client already attached to that window. With
-   * `zoomed`/`windowZoomed` therefore permanently false for such a window,
-   * skipping this on `windowPanes <= 1` is what stops every single attach
-   * from re-sending that pointless, disruptive redraw forever.
-   */
-  windowPanes: z.number().int().positive(),
 });
 export type AdoptableTarget = z.infer<typeof AdoptableTarget>;

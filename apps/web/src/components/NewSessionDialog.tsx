@@ -534,13 +534,14 @@ function AdoptList({
   return (
     <>
       <p className="transport-hint">
-        Attaches to a tmux pane you started yourself, mirroring it here. Your terminal keeps
-        working; closing this session only detaches.
+        Attaches to a tmux session you started yourself, mirroring it here exactly — including
+        any extra windows or split panes already in it. Your terminal keeps working; closing
+        this session only detaches.
       </p>
 
       {targets.length === 0 ? (
         <div className="empty">
-          No panes found inside your workspace roots on that tmux socket.
+          No sessions found inside your workspace roots on that tmux socket.
         </div>
       ) : (
         <div className="pick-list">
@@ -553,7 +554,7 @@ function AdoptList({
               disabled={busy}
             >
               <div className="pick-title">
-                {t.command} · {t.sessionName}:{t.windowIndex}.{t.paneIndex}
+                {t.sessionName} · {t.command}
               </div>
               <div className="pick-detail">
                 {t.workspaceLabel} · {t.cols}×{t.rows}
@@ -596,7 +597,7 @@ function ConfirmStep({
 
   return (
     <>
-      <h2>{inPlace ? 'Continue in place?' : 'Attach to this pane?'}</h2>
+      <h2>{inPlace ? 'Continue in place?' : 'Attach to this session?'}</h2>
 
       {inPlace ? (
         <>
@@ -631,11 +632,13 @@ function ConfirmStep({
             </li>
             <li>
               <strong>Your tmux prefix is live.</strong> This is your server, with your
-              config, so keys sent from here can drive tmux itself.
+              config, so keys sent from here can drive tmux itself — including switching
+              windows, which is shared with every other client of this session, the same as a
+              second real terminal attached to it would be.
             </li>
             <li>
-              Closing the session here <strong>detaches only</strong> — your pane keeps
-              running.
+              Closing the session here <strong>detaches only</strong> — your tmux session
+              keeps running.
             </li>
           </ul>
         </>
