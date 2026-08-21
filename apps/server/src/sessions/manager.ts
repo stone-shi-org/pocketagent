@@ -1148,6 +1148,35 @@ export class SessionManager {
   }
 
   /**
+   * Forget every finished adopted (Shell) session, regardless of which real
+   * directory its pane happened to be in. Running ones are left.
+   *
+   * The Shell virtual project groups adopted sessions by a synthetic
+   * `'virtual:shell'` cwd that `ProjectService` computes for display and
+   * never persists (see `VIRTUAL_SHELL_CWD` in `projects/index.ts`) — the
+   * row's own `cwd` column is always the pane's *real* directory. Clearing
+   * "finished chats" for that card therefore cannot go through
+   * `forgetFinishedIn`, which matches on the literal `cwd` column and would
+   * either match nothing or (worse, if `'virtual:shell'` were ever resolved
+   * as a real path) match the wrong directory entirely. This matches on
+   * `adopt_target_id` instead, the one column that is actually true of every
+   * adopted session regardless of its real cwd.
+   */
+  forgetFinishedAdopted(): number {
+    for (const [id, session] of this.live) {
+      if (session.transport === 'terminal' && session.spec.adopted === true && !session.isAlive()) {
+        this.live.delete(id);
+      }
+    }
+    return this.opts.db
+      .prepare(
+        `DELETE FROM sessions
+          WHERE adopt_target_id IS NOT NULL AND status NOT IN ('starting', 'running')`,
+      )
+      .run().changes;
+  }
+
+  /**
    * The conversation this session was asked to continue, if any.
    *
    * Note this is the id it *resumed from*, not the id it is writing to — a

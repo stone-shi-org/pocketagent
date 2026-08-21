@@ -11,6 +11,7 @@ import { browseDirectory, discoverFolders } from '../discover/index.js';
 import { SessionError } from '../sessions/manager.js';
 import { WorkspaceError } from '../workspaces/index.js';
 import { hideChat } from '../db/index.js';
+import { VIRTUAL_SHELL_CWD } from '../projects/index.js';
 import { resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
@@ -59,12 +60,39 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     return reply.send({ ok: true });
   });
 
-  /** Forget every finished chat in a directory. Running ones are left alone. */
+  /**
+   * Forget every finished chat in a directory. Running ones are left alone.
+   *
+   * The Shell virtual project is a special case: `VIRTUAL_SHELL_CWD` is a
+   * display-only label `ProjectService` computes for adopted sessions and
+   * never persists — the row's own `cwd` column is always the pane's real
+   * directory (see `forgetFinishedAdopted`'s doc comment) — so it cannot go
+   * through the normal `resolveWorkspaceCwdOrReply` path at all: that
+   * resolves `cwd` as a real filesystem path, and `'virtual:shell'` is not
+   * one. Before this check, clicking "Clear finished chats" on the Shell
+   * card 404'd (`ENOENT` resolving it as a directory) without clearing
+   * anything, even though the button was shown and enabled the same as any
+   * other project.
+   */
   app.post('/api/projects/clear-finished', async (request, reply) => {
-    const cwd = await resolveProjectCwd(request.body, reply);
-    if (cwd === null) return reply;
+    const parsed = ProjectRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: { code: 'bad_request', message: parsed.error.issues[0]?.message ?? 'Invalid body.' },
+      });
+    }
 
-    const removedSessions = sessions.forgetFinishedIn(cwd);
+    const isShell = parsed.data.cwd === VIRTUAL_SHELL_CWD;
+    let cwd: string;
+    if (isShell) {
+      cwd = VIRTUAL_SHELL_CWD;
+    } else {
+      const resolved = await resolveWorkspaceCwdOrReply(workspaces, parsed.data.cwd, reply);
+      if (resolved === null) return reply;
+      cwd = resolved;
+    }
+
+    const removedSessions = isShell ? sessions.forgetFinishedAdopted() : sessions.forgetFinishedIn(cwd);
     let removedConversations = 0;
     for (const project of await projects.list(sessions.list(), true)) {
       if (project.cwd !== cwd) continue;

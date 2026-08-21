@@ -738,4 +738,53 @@ describeTmux('adopting a pane on a foreign tmux server', () => {
     const shell = listed.json().projects.find((p: { cwd: string }) => p.cwd === 'virtual:shell');
     expect(shell?.chats.map((c: { sessionId: string | null }) => c.sessionId)).toContain(id);
   });
+
+  it('clears finished chats from the Shell virtual project via /api/projects/clear-finished', async () => {
+    // Regression: the Shell card's "Clear finished chats" button is shown
+    // and enabled the same as any other project's, but `'virtual:shell'` is
+    // a display-only label `ProjectService` computes for adopted sessions
+    // and never persists — the row's own `cwd` column is always the pane's
+    // real directory — so resolving it as a real filesystem path (what every
+    // other project's "clear finished" goes through) 404'd and cleared
+    // nothing, even though the button looked identical to a working one.
+    await startUserSession('clearable', t.projectDir, ['sleep', '120']);
+    const target = (await listTargets()).targets.find((x) => x.sessionName === 'clearable');
+
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: target.id },
+    });
+    expect(created.statusCode).toBe(201);
+    const id = created.json().id as string;
+
+    // Detach so the chat is finished, not running.
+    await t.app.inject({
+      method: 'DELETE',
+      url: `/api/sessions/${id}`,
+      headers: { cookie: t.cookie },
+    });
+    await waitFor(() => {
+      const found = t.context.sessions.find(id);
+      return found !== null && found.status !== 'running' && found.status !== 'starting';
+    });
+
+    const shellChatIds = async (): Promise<(string | null)[]> => {
+      const res = await t.app.inject({ method: 'GET', url: '/api/projects', headers: { cookie: t.cookie } });
+      const shell = res.json().projects.find((p: { cwd: string }) => p.cwd === 'virtual:shell');
+      return (shell?.chats ?? []).map((c: { sessionId: string | null }) => c.sessionId);
+    };
+    expect(await shellChatIds()).toContain(id);
+
+    const cleared = await t.app.inject({
+      method: 'POST',
+      url: '/api/projects/clear-finished',
+      headers: { cookie: t.cookie },
+      payload: { cwd: 'virtual:shell' },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json().removedSessions).toBeGreaterThanOrEqual(1);
+    expect(await shellChatIds()).not.toContain(id);
+  });
 });
