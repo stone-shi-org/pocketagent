@@ -84,6 +84,19 @@ export class HeuristicTerminalClassifier implements TerminalClassifier {
     }
 
     const unique = [...new Set(hints)];
+
+    // Nothing recognizable in this chunk must not, by itself, end an `idle`
+    // stretch. An *adopted* tmux pane keeps producing output nobody typed:
+    // tmux's default status line redraws on its own `status-interval` timer
+    // (15s by default) and includes a clock by default, so a pane nobody has
+    // touched still emits bytes every so often. Before this guard, that
+    // untargeted redraw reset `lastEmitted` away from `['idle']` just like
+    // any other output, which re-armed `checkIdle` to fire `idle` again on
+    // the next quiet spell — and again after that, forever, on a session
+    // nobody is looking at. A real state change (working/approval/waiting-
+    // for-input) still ends the stretch via the checks below, same as ever.
+    if (unique.length === 0 && sameHints(this.lastEmitted, ['idle'])) return [];
+
     if (sameHints(unique, this.lastEmitted)) return [];
     this.lastEmitted = unique;
     return unique;

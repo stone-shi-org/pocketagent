@@ -54,4 +54,39 @@ describe('HeuristicTerminalClassifier', () => {
   it('returns no hints before any output', () => {
     expect(new HeuristicTerminalClassifier().checkIdle()).toEqual([]);
   });
+
+  it('does not re-fire idle after unrelated output that matches no pattern', () => {
+    // Regression: an adopted tmux pane keeps producing bytes nobody typed —
+    // the default status line redraws on its own `status-interval` timer
+    // (15s by default) and shows a clock by default. That redraw does not
+    // match any working/approval/prompt pattern, but it used to reset the
+    // classifier's internal state the same as any other output, which
+    // re-armed `checkIdle` and fired `idle` again on the next quiet spell —
+    // forever, on a session nobody was touching.
+    const classifier = new HeuristicTerminalClassifier(4096, 1000);
+    const t0 = 1_000_000;
+    classifier.process('user@host:~$ ', t0);
+    expect(classifier.checkIdle(t0 + 2000)).toEqual(['idle']);
+
+    // A status-line-only redraw: no recognizable pattern, so `process` itself
+    // reports nothing new...
+    expect(classifier.process('some unrelated text', t0 + 2100)).toEqual([]);
+    // ...and the still-idle pane must not be re-notified after another quiet
+    // spell just because that redraw happened.
+    expect(classifier.checkIdle(t0 + 4200)).toEqual([]);
+  });
+
+  it('still reports idle again once real activity resumes and quiets down', () => {
+    // The guard above must not make `idle` sticky forever — a genuine new
+    // state (a fresh prompt, here) still ends the idle stretch, so a later
+    // quiet spell notifies again.
+    const classifier = new HeuristicTerminalClassifier(4096, 1000);
+    const t0 = 1_000_000;
+    classifier.process('user@host:~$ ', t0);
+    expect(classifier.checkIdle(t0 + 2000)).toEqual(['idle']);
+
+    classifier.process('user@host:~/other$ ', t0 + 2100);
+    expect(classifier.checkIdle(t0 + 2600)).toEqual([]);
+    expect(classifier.checkIdle(t0 + 3200)).toEqual(['idle']);
+  });
 });
