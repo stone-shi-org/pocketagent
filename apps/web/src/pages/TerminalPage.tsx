@@ -13,6 +13,7 @@ import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
 import { Icon } from '../components/Icon.js';
 import { takePendingPrompt } from '../agent/pending-prompt.js';
 import { notifyIdle, ensureNotificationPermission } from '../agent/notifications.js';
+import { getTakeOverSizePref, setTakeOverSizePref } from '../agent/adopted-size-prefs.js';
 
 interface Props {
   sessionId: string;
@@ -93,6 +94,16 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
           setStatus(info.status);
           setFatal(null);
           adoptedRef.current = info.adopted;
+          // Already decided "fit to this screen anyway" for this exact pane
+          // before — on an earlier visit, or a previous attach that this one
+          // superseded (see `adopted-size-prefs.ts`). Apply that now, before
+          // deciding below whether to mirror the pane's real grid, so the
+          // notice explaining the tradeoff does not reappear for a choice
+          // that was already made.
+          if (info.adopted && info.adoptTargetId && getTakeOverSizePref(info.adoptTargetId)) {
+            takeOverSizeRef.current = true;
+            setTakeOverSize(true);
+          }
           if (info.adopted && !takeOverSizeRef.current) {
             // Mirror the pane's real grid instead of fitting the viewport. The
             // byte stream tmux sends (status line, splits, any full-screen TUI
@@ -392,6 +403,10 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
               // before this render's state update would otherwise land.
               takeOverSizeRef.current = true;
               setTakeOverSize(true);
+              // Remembered by pane, not by this session id, so re-attaching
+              // to the same pane later (a new session id every time — see
+              // `adopted-size-prefs.ts`) does not ask again.
+              if (session.adoptTargetId) setTakeOverSizePref(session.adoptTargetId);
               applyFit(true);
             }}
           >
