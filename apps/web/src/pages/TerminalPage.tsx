@@ -18,11 +18,13 @@ interface Props {
   sessionId: string;
   onBack: () => void;
   onApiError: (error: unknown) => void;
+  /** Navigates to a newly created session — see `reattach` below. */
+  onResumed: (sessionId: string) => void;
 }
 
 const RESIZE_DEBOUNCE_MS = 150;
 
-export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Element {
+export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -46,6 +48,7 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
   const [takeOverSize, setTakeOverSize] = useState(false);
   const [confirmingStop, setConfirmingStop] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [reattaching, setReattaching] = useState(false);
 
   const ctrlActiveRef = useRef(false);
   ctrlActiveRef.current = ctrlActive;
@@ -274,6 +277,34 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
     }
   }, [sessionId, onApiError]);
 
+  /**
+   * Re-attach to the tmux pane this session adopted, without going back
+   * through the Shell dialog's picker. `adoptTargetId` is the pane's own
+   * stable id (see `SessionInfo.adoptTargetId`'s doc comment): the new
+   * session this creates shares it with the one that just died here, so the
+   * home screen's grouping (`representativeSessions` in `projects/index.ts`)
+   * collapses the two into one chat instead of piling up a duplicate.
+   */
+  const reattach = useCallback(async () => {
+    if (!session?.adoptTargetId) return;
+    setReattaching(true);
+    try {
+      const created = await api.createSession({
+        agent: session.agent,
+        cwd: session.cwd,
+        cols: session.cols,
+        rows: session.rows,
+        transport: 'terminal',
+        adoptTargetId: session.adoptTargetId,
+      });
+      onResumed(created.id);
+    } catch (err) {
+      onApiError(err);
+      setNotice(err instanceof ApiError ? err.message : 'Could not re-attach to that tmux session.');
+      setReattaching(false);
+    }
+  }, [session, onApiError, onResumed]);
+
   const alive = !isTerminalStatus(status);
   const inputDisabled = !alive || connection !== 'connected';
 
@@ -310,6 +341,15 @@ export function TerminalPage({ sessionId, onBack, onApiError }: Props): JSX.Elem
         {alive && (
           <button type="button" className="danger icon-btn" onClick={() => setConfirmingStop(true)}>
             {session?.adopted ? 'Detach' : 'Stop'}
+          </button>
+        )}
+        {/* The tmux pane behind a detached/killed shell chat is usually still
+            there — offer to rejoin it right where the status badge shows
+            "Killed", instead of only from the Shell dialog's picker or the
+            (easy to miss) button buried in the project tree. */}
+        {!alive && session?.adoptTargetId && (
+          <button type="button" className="icon-btn" onClick={() => void reattach()} disabled={reattaching}>
+            {reattaching ? 'Re-attaching…' : 'Re-attach'}
           </button>
         )}
       </header>

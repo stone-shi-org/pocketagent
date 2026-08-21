@@ -73,7 +73,9 @@ function SessionRoute({
       <AgentPage sessionId={sessionId} onBack={onBack} onApiError={onApiError} onResumed={onResumed} />
     );
   }
-  return <TerminalPage sessionId={sessionId} onBack={onBack} onApiError={onApiError} />;
+  return (
+    <TerminalPage sessionId={sessionId} onBack={onBack} onApiError={onApiError} onResumed={onResumed} />
+  );
 }
 
 export function App(): JSX.Element {
