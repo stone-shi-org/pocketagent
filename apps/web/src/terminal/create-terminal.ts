@@ -3,6 +3,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { copyText } from '../agent/clipboard.js';
 import { decodeOsc52Payload } from './osc52.js';
+import { resolveFontFamily } from './font-family.js';
 
 export interface TerminalBundle {
   term: Terminal;
@@ -22,7 +23,7 @@ export function createTerminal(element: HTMLElement): TerminalBundle {
     convertEol: false,
     scrollback: 5000,
     fontSize: window.innerWidth < 480 ? 12 : 13,
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+    fontFamily: resolveFontFamily(),
     lineHeight: 1.15,
     macOptionIsMeta: true,
     // The terminal stays dark inside a light app, deliberately: ANSI palettes
@@ -62,6 +63,23 @@ export function createTerminal(element: HTMLElement): TerminalBundle {
     /* element not laid out yet; the first resize observation will fix it */
   }
 
+  // The very first `fit()` above can run before the bundled Nerd Font (or an
+  // override) has actually loaded — nothing awaits it, deliberately, so a
+  // slow font fetch never delays the terminal's first paint. Until it loads,
+  // the browser measures cell size against whatever fallback font matched
+  // instead, which can be a slightly different width and leaves `fit()`'s
+  // column/row count a little off. `document.fonts` does not exist outside a
+  // real browser (the demo scripts' Playwright pages aside), hence the guard.
+  let disposed = false;
+  void document.fonts?.ready?.then(() => {
+    if (disposed) return;
+    try {
+      fit.fit();
+    } catch {
+      /* still not laid out; nothing more to correct here */
+    }
+  });
+
   // OSC 52 ("set clipboard") is how a remote mouse-copy — tmux's
   // `set -g mouse on` copy-mode included — reaches whatever terminal is
   // actually rendering the byte stream. Over a plain ssh+iTerm2 session that
@@ -83,6 +101,7 @@ export function createTerminal(element: HTMLElement): TerminalBundle {
     term,
     fit,
     dispose: () => {
+      disposed = true;
       oscClipboardHandler.dispose();
       term.dispose();
     },

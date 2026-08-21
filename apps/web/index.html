@@ -25,6 +25,18 @@
     <link rel="icon" href="/favicon.ico" sizes="32x32" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 
+    <!-- The terminal's bundled Nerd Font (styles.css's @font-face block) is
+         on the critical path for the first terminal a session opens; only
+         the regular weight is preloaded; bold/italic are rarer and load
+         lazily on first use instead. -->
+    <link
+      rel="preload"
+      href="/fonts/jetbrains-mono-nerd-font-mono-regular.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+
     <title>PocketAgent</title>
   </head>
   <body>

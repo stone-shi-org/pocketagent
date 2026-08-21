@@ -1,3 +1,45 @@
+/*
+ * Self-hosted terminal font: JetBrainsMono Nerd Font Mono, subsetted to
+ * Latin text, box-drawing/braille (tmux borders, spinners), and the Private
+ * Use Area icon sets a shell prompt actually uses (Powerline, Devicons,
+ * Font Awesome, Octicons, Seti-UI, and friends) — see
+ * public/fonts/LICENSE.txt for the exact subsetting command and the
+ * license (SIL OFL 1.1). Bundled rather than left to `fontFamily`'s system
+ * fallback list so Powerline/Nerd Font glyphs in a tmux prompt render
+ * correctly on any device this app is opened from, a phone included,
+ * without anyone having to install a font first — see `create-terminal.ts`.
+ * `font-display: swap` rather than `block`: a brief fallback-font render on
+ * first paint reads better than a blank terminal while a ~570KB file loads.
+ */
+@font-face {
+  font-family: 'JetBrainsMono Nerd Font Mono';
+  src: url('/fonts/jetbrains-mono-nerd-font-mono-regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrainsMono Nerd Font Mono';
+  src: url('/fonts/jetbrains-mono-nerd-font-mono-bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrainsMono Nerd Font Mono';
+  src: url('/fonts/jetbrains-mono-nerd-font-mono-italic.woff2') format('woff2');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrainsMono Nerd Font Mono';
+  src: url('/fonts/jetbrains-mono-nerd-font-mono-bolditalic.woff2') format('woff2');
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+
 :root {
   /* Light, and only light. A phone in dark mode would otherwise get a theme
      nobody designed, so `color-scheme` is pinned rather than left to the OS. */
