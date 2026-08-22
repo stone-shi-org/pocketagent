@@ -217,7 +217,11 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
     const resizeDisposable = bundle.term.onResize(({ cols, rows }) => {
       lastSizeRef.current = { cols, rows };
       if (knowsAdoptedRef.current && (!adoptedRef.current || takeOverSizeRef.current)) {
-        connection.sendResize(cols, rows);
+        // `force` tells the server this is the deliberate "take over" opt-in
+        // for an adopted pane, not this client's own guess — see
+        // `ResizeMessage.force`'s doc comment. Harmless to send unconditionally
+        // for a non-adopted session, which the server never checks it for.
+        connection.sendResize(cols, rows, takeOverSizeRef.current);
       }
     });
 
@@ -287,7 +291,11 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
     // rather than guess "not adopted" and push a size at what might turn out
     // to be someone else's shared pane.
     if (knowsAdoptedRef.current && (!adoptedRef.current || takeOverSizeRef.current)) {
-      conn.sendResize(cols, rows);
+      // Second argument is the wire-level opt-in `ResizeMessage.force` — an
+      // unrelated "force" from this function's own `force` parameter above
+      // (that one means "resend even if unchanged"; this one means "yes,
+      // really resize a pane I do not own").
+      conn.sendResize(cols, rows, takeOverSizeRef.current);
     }
   }, []);
 

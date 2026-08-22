@@ -94,7 +94,7 @@ export class TerminalConnection {
   private state: ConnectionState = 'disconnected';
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closedByUser = false;
-  private pendingSize: { cols: number; rows: number } | null = null;
+  private pendingSize: { cols: number; rows: number; force?: boolean } | null = null;
   /** See `open`'s `peek` option. */
   private peek = false;
 
@@ -324,10 +324,18 @@ export class TerminalConnection {
     return this.send({ type: 'input', sessionId: this.sessionId, data });
   }
 
-  sendResize(cols: number, rows: number): boolean {
+  /**
+   * `force` is the wire-level opt-in the server requires before it will
+   * apply `cols`/`rows` to an adopted session (see `ResizeMessage.force`'s
+   * doc comment) — pass `true` only for the "Fit to this screen anyway"
+   * path. Remembered alongside the size itself so a reconnect's `attach`
+   * (which resends `pendingSize`) carries the same opt-in rather than
+   * silently downgrading to a plain, ignored resize.
+   */
+  sendResize(cols: number, rows: number, force?: boolean): boolean {
     if (!this.sessionId) return false;
-    this.pendingSize = { cols, rows };
-    return this.send({ type: 'resize', sessionId: this.sessionId, cols, rows });
+    this.pendingSize = { cols, rows, ...(force ? { force } : {}) };
+    return this.send({ type: 'resize', sessionId: this.sessionId, cols, rows, ...(force ? { force } : {}) });
   }
 
   sendSignal(signal: 'SIGINT' | 'SIGTERM' | 'SIGHUP' | 'SIGQUIT' | 'SIGKILL'): boolean {

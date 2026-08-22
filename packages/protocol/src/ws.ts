@@ -104,6 +104,11 @@ export const AttachMessage = z.object({
    * session in any way a human would call "attached".
    */
   peek: z.boolean().optional(),
+  /**
+   * See `ResizeMessage.force`'s doc comment — applies identically to the
+   * `cols`/`rows` carried here, which a reconnect resends on every `attach`.
+   */
+  force: z.boolean().optional(),
 });
 
 export const DetachMessage = z.object({
@@ -122,6 +127,20 @@ export const ResizeMessage = z.object({
   sessionId: SessionId,
   cols: z.number().int().min(LIMITS.minCols).max(LIMITS.maxCols),
   rows: z.number().int().min(LIMITS.minRows).max(LIMITS.maxRows),
+  /**
+   * Explicit opt-in to resize a pane this client did not start — an adopted
+   * tmux pane, shared with whatever real terminal (or other client) is also
+   * attached to it. tmux sizes a shared window to its most recently active
+   * client, so an unwanted resize here does not stay local: it reaches every
+   * other client of that pane, including someone's actual desktop terminal.
+   * The server refuses `cols`/`rows` against an adopted session unless this
+   * is `true`, rather than trusting every caller to have already decided not
+   * to send one — a browser tab's own local re-fit (font metrics settling,
+   * a container resize mid-layout, ...) must never reach a pane it does not
+   * own. Ignored for a session that is not adopted, where there is nothing
+   * to protect and this stays `false`/omitted.
+   */
+  force: z.boolean().optional(),
 });
 
 export const SignalMessage = z.object({

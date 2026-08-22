@@ -2,8 +2,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { AddressInfo } from 'node:net';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { WebSocket } from 'ws';
+import { PROTOCOL_VERSION } from '@pocketagent/protocol';
 import { createTestApp, waitFor, sleep, type TestApp } from './helpers.js';
 
 const execFileAsync = promisify(execFile);
@@ -256,6 +259,69 @@ describeTmux('adopting a tmux session on a foreign server', () => {
     // tmux now sees a real client attached to the session directly — no
     // ephemeral bookkeeping session in between.
     expect(await sessionAttached('shared')).toBeGreaterThanOrEqual(1);
+  });
+
+  it('ignores a resize against an adopted session unless the client explicitly opts in with force', async () => {
+    // The browser is expected to withhold resize for a pane it does not own
+    // (see TerminalPage.tsx's knowsAdoptedRef), but that is one client's
+    // discipline, not a guarantee — the server must refuse it independently,
+    // since tmux would otherwise size the shared window to whichever client
+    // asked, resizing a real terminal sitting on the same pane. Regression
+    // for exactly that: a resize race in the browser once slipped past the
+    // client-side guard and reached here anyway.
+    await startUserSession('resize-guard', t.projectDir, ['sleep', '120']);
+
+    const target = (await listTargets()).targets.find((x) => x.sessionName === 'resize-guard');
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: target.id },
+    });
+    expect(created.statusCode).toBe(201);
+    const info = created.json();
+    expect(info.cols).toBe(100);
+    expect(info.rows).toBe(30);
+    const session = t.context.sessions.getOrThrow(info.id);
+
+    await t.app.listen({ host: '127.0.0.1', port: 0 });
+    const address = t.app.server.address() as AddressInfo;
+    const ws = new WebSocket(`ws://127.0.0.1:${address.port}/api/ws?v=${PROTOCOL_VERSION}`, {
+      headers: { cookie: t.cookie },
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        ws.once('open', () => resolve());
+        ws.once('error', reject);
+      });
+      const send = (message: unknown): void => ws.send(JSON.stringify(message));
+
+      // A same-size `attach` first, so the plain `resize` below is exercised
+      // on its own rather than folded into the attach path.
+      send({ type: 'attach', sessionId: info.id, cols: 100, rows: 30 });
+      await sleep(200); // let the attach land
+
+      send({ type: 'resize', sessionId: info.id, cols: 80, rows: 24 });
+      await sleep(200);
+      expect(session.cols).toBe(100);
+      expect(session.rows).toBe(30);
+
+      send({ type: 'resize', sessionId: info.id, cols: 80, rows: 24, force: true });
+      await waitFor(() => session.cols === 80 && session.rows === 24);
+
+      // The same guard applies to the size an `attach` (e.g. on reconnect)
+      // carries — not just the standalone `resize` message.
+      send({ type: 'detach', sessionId: info.id });
+      send({ type: 'attach', sessionId: info.id, cols: 90, rows: 28 });
+      await sleep(200);
+      expect(session.cols).toBe(80);
+      expect(session.rows).toBe(24);
+
+      send({ type: 'attach', sessionId: info.id, cols: 90, rows: 28, force: true });
+      await waitFor(() => session.cols === 90 && session.rows === 28);
+    } finally {
+      ws.terminate();
+    }
   });
 
   it('attaches directly to the session — no bookkeeping session is created, and window navigation is shared like any other client', async () => {

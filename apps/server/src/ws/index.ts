@@ -14,6 +14,7 @@ import {
 import { isOriginAllowed } from '../auth/index.js';
 import type { ManagedSession, StructuredLikeSession } from '../sessions/manager.js';
 import { StructuredSession } from '../sessions/structured-session.js';
+import type { PtySession } from '../sessions/pty-session.js';
 import { saveAttachmentToWorkspace } from '../sessions/attachments.js';
 
 /**
@@ -33,6 +34,23 @@ function canSetEffort(
   session: StructuredLikeSession,
 ): session is StructuredLikeSession & { setEffort: (effort: string | null) => Promise<void> } {
   return typeof (session as { setEffort?: unknown }).setEffort === 'function';
+}
+
+/**
+ * Authoritative half of "adopted panes are not resized unless the user
+ * explicitly opts in" — the browser is expected to already withhold `resize`/
+ * `attach`-with-size for an adopted session it has not been told to take over
+ * (see `TerminalPage.tsx`'s `knowsAdoptedRef`), but that is one client's
+ * discipline, not a guarantee. tmux sizes a shared window to its most
+ * recently active client, so a resize this server actually applies reaches
+ * every other client of that pane too — including a real terminal on
+ * someone's desktop, not just whoever asked. `force` is the wire-level
+ * evidence that a human actually chose to do that (the "Fit to this screen
+ * anyway" opt-in), not a client's own guess; a non-adopted session has
+ * nothing to protect and is always allowed through unconditionally.
+ */
+function mayResize(session: PtySession, force: boolean): boolean {
+  return session.spec.adopted !== true || force;
 }
 
 /**
@@ -301,7 +319,12 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
         case 'attach': {
           attachTo(message.sessionId, message.afterSeq ?? 0, message.epoch, message.peek === true);
           const attached = attachments.get(message.sessionId);
-          if (attached?.session.transport === 'terminal' && message.cols && message.rows) {
+          if (
+            attached?.session.transport === 'terminal' &&
+            message.cols &&
+            message.rows &&
+            mayResize(attached.session, message.force === true)
+          ) {
             attached.session.resize(message.cols, message.rows);
           }
           break;
@@ -333,6 +356,7 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
           // so a client that resizes indiscriminately is not punished.
           if (session.transport !== 'terminal') break;
           const terminal = session;
+          if (!mayResize(terminal, message.force === true)) break;
           if (terminal.resize(message.cols, message.rows)) {
             app.pocket.sessions.persist(terminal);
           }
