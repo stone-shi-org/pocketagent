@@ -15,6 +15,8 @@ export function ShellDialog({ onClose, onCreated, onApiError }: Props): JSX.Elem
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [newName, setNewName] = useState('');
+  const [creating, setCreating] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -65,6 +67,36 @@ export function ShellDialog({ onClose, onCreated, onApiError }: Props): JSX.Elem
     }
   };
 
+  /**
+   * Create a brand-new named tmux session, then immediately attach to it —
+   * the same two calls `attach()` above makes for a pre-existing target, just
+   * with a `POST /api/adoptable` in front to create the target first.
+   */
+  const createAndAttach = async () => {
+    const name = newName.trim();
+    if (!name || creating) return;
+    setCreating(true);
+    setError(null);
+    try {
+      const target = await api.createAdoptableSession(name);
+      const created = await api.createSession({
+        agent: 'shell',
+        cwd: target.cwd,
+        cols: target.cols,
+        rows: target.rows,
+        transport: 'terminal',
+        adoptTargetId: target.id,
+      });
+      setNewName('');
+      onCreated(created.id);
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not create tmux session.');
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const detachSession = async (sessionId: string) => {
     setBusyId(sessionId);
     try {
@@ -92,6 +124,33 @@ export function ShellDialog({ onClose, onCreated, onApiError }: Props): JSX.Elem
           Select any running tmux session on this host to attach to it. Attaching mirrors your
           terminal without stopping your work.
         </p>
+
+        <div className="field">
+          <label htmlFor="new-tmux-name">New tmux session</label>
+          <div className="row">
+            <input
+              id="new-tmux-name"
+              type="text"
+              style={{ flex: 1, minWidth: 0 }}
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void createAndAttach();
+              }}
+              placeholder="Name, e.g. build"
+              maxLength={64}
+              disabled={creating}
+            />
+            <button
+              type="button"
+              className="primary"
+              onClick={() => void createAndAttach()}
+              disabled={creating || busyId !== null || !newName.trim()}
+            >
+              {creating ? 'Creating…' : 'Create'}
+            </button>
+          </div>
+        </div>
 
         {error && (
           <div className="error-box" role="alert">

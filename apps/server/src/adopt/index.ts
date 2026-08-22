@@ -9,6 +9,15 @@ const execFileAsync = promisify(execFile);
 /** Field separator for `list-panes -F`. Tabs do not survive tmux formats. */
 const SEP = '|';
 
+/**
+ * A conservative, printable subset rather than tmux's actual (very permissive)
+ * session-name rules: this is a name a human typed on a phone keyboard, not a
+ * tmux target string, so there is no reason to let `:` (meaningful in tmux's
+ * own target syntax, even though `=<name>` exact-match sidesteps that here)
+ * or control characters through into an argv tmux itself will interpret.
+ */
+const TMUX_NAME_PATTERN = /^[A-Za-z0-9 ._-]{1,64}$/;
+
 export interface AdoptionOptions {
   /**
    * tmux socket to look at, e.g. `default` for the user's own server. Empty
@@ -147,6 +156,64 @@ export class AdoptionService {
   async resolve(id: string, includeUnrestricted = false): Promise<AdoptableTarget | null> {
     const targets = await this.list(includeUnrestricted);
     return targets.find((t) => t.id === id) ?? null;
+  }
+
+  /**
+   * Start a brand-new, user-named tmux session on the adoption socket and
+   * return it as an adoptable target, ready to attach to.
+   *
+   * This runs on the same `effectiveSocket()` as `list()`/`attachCommand()` —
+   * deliberately not PocketAgent's own private tmux backend socket, whose
+   * session names are an internal `pocketagent-<random id>` scheme with its
+   * own recovery invariants (see `backends/tmux.ts`). A session created here
+   * is a real, independent tmux session under the name the user chose: it
+   * shows up to a plain `tmux -L <socket> attach -t <name>` from an actual
+   * terminal on this host, the same as one created by hand. That symmetry is
+   * the point — "start it from your phone, pick it up at your desk" is only
+   * true if this is the user's own tmux, not a hidden one of ours.
+   *
+   * Unlike listing (which silently drops nothing), a name collision with a
+   * session already on that socket is refused outright rather than adopted
+   * or reused — reusing it would either hijack someone else's session or
+   * silently wipe it via `kill-session`, and neither is a mistake this
+   * should make quietly.
+   */
+  async create(name: string, cwd: string): Promise<AdoptableTarget> {
+    const trimmed = name.trim();
+    if (!TMUX_NAME_PATTERN.test(trimmed)) {
+      throw new Error(
+        'Session name must be 1-64 characters of letters, numbers, spaces, "-", "_", or ".".',
+      );
+    }
+
+    const socket = this.effectiveSocket();
+    if (await this.hasSession(socket, trimmed)) {
+      throw new Error(`A tmux session named "${trimmed}" already exists.`);
+    }
+
+    await execFileAsync(this.opts.bin, [...this.socketArgs(socket), 'new-session', '-d', '-s', trimmed, '-c', cwd], {
+      env: this.opts.env,
+    });
+
+    // Re-resolve rather than constructing the target by hand: this reads back
+    // whatever tmux actually did (size, resolved cwd) instead of assuming our
+    // request was honoured verbatim.
+    const target = await this.resolve(AdoptionService.idFor(socket, trimmed), true);
+    if (!target) {
+      throw new Error('The tmux session was created but could not be found afterward.');
+    }
+    return target;
+  }
+
+  private async hasSession(socket: string, name: string): Promise<boolean> {
+    try {
+      await execFileAsync(this.opts.bin, [...this.socketArgs(socket), 'has-session', '-t', `=${name}`], {
+        env: this.opts.env,
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**

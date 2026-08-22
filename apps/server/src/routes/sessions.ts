@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import {
+  CreateAdoptableSessionRequest,
   CreateSessionRequest,
   ProjectRequest,
   RemoveChatRequest,
@@ -272,6 +273,41 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       enabled: adoption.isEnabled() || includeUnrestricted,
       targets,
     };
+  });
+
+  /**
+   * Start a brand-new named tmux session on the adoption socket and hand back
+   * the target for it, the same shape `GET /api/adoptable` returns for one
+   * that already existed. The "Shell" dialog immediately follows this with
+   * `POST /api/sessions` + `adoptTargetId` to attach — this endpoint only
+   * creates, it never attaches, so the two failure modes (tmux rejected the
+   * name vs. the attach itself failed) stay distinguishable to the caller.
+   *
+   * No `adoption.isEnabled()` gate: `GET /api/adoptable?all=1` (what the
+   * Shell dialog always polls) already reads this same socket unconditionally
+   * — see its own comment — so refusing to *create* there while happily
+   * listing and attaching would be a gate with nothing behind it.
+   */
+  app.post('/api/adoptable', async (request, reply) => {
+    const parsed = CreateAdoptableSessionRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: { code: 'bad_request', message: parsed.error.issues[0]?.message ?? 'Invalid body.' },
+      });
+    }
+
+    try {
+      const cwd = workspaces.getRoots()[0] ?? process.cwd();
+      const target = await adoption.create(parsed.data.name, cwd);
+      return reply.code(201).send(target);
+    } catch (err) {
+      return reply.code(409).send({
+        error: {
+          code: 'create_failed',
+          message: err instanceof Error ? err.message : 'Could not create tmux session.',
+        },
+      });
+    }
   });
 
   /**

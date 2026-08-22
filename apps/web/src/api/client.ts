@@ -191,6 +191,13 @@ export const api = {
       all ? '/api/adoptable?all=1' : '/api/adoptable',
     ),
 
+  /** Start a brand-new named tmux session on the adoption socket. */
+  createAdoptableSession: (name: string) =>
+    request<AdoptableTarget>('/api/adoptable', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
   pushPublicKey: () => request<{ publicKey: string | null }>('/api/push/key'),
 
   pushStatus: () => request<{ enabled: boolean; subscriptions: number }>('/api/push/status'),

@@ -627,6 +627,11 @@ even when `POCKETAGENT_BACKEND=tmux`, precisely so that killing it can only ever
 Only panes whose working directory resolves inside a workspace root are offered, and the
 browser receives an opaque id rather than a tmux target string.
 
+The **Shell** dialog (the round terminal button on the home screen) can also start a
+brand-new, user-named session on that same socket and attach to it immediately — the reverse
+of the above: create one from your phone, then pick it up later with
+`tmux -L <socket> attach -t <name>` from your desk.
+
 > **Bare terminals cannot be taken over.** If you started `claude` in a plain terminal
 > rather than tmux, there is no second client to add — its PTY has one master, held by that
 > terminal. Reparenting it needs `ptrace`-level tricks (`reptyr`), which are blocked by

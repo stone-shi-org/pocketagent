@@ -120,6 +120,18 @@ export const AdoptableListResponse = z.object({
 export type AdoptableListResponse = z.infer<typeof AdoptableListResponse>;
 
 /**
+ * Start a brand-new named tmux session on the adoption socket (the same one
+ * `GET /api/adoptable` lists), rather than attaching to one that already
+ * exists. The name becomes the real tmux session name, so it is also what a
+ * plain `tmux attach -t <name>` on that socket would use from a real
+ * terminal — this is meant to be a two-way door, not a PocketAgent-only one.
+ */
+export const CreateAdoptableSessionRequest = z.object({
+  name: z.string().min(1).max(64),
+});
+export type CreateAdoptableSessionRequest = z.infer<typeof CreateAdoptableSessionRequest>;
+
+/**
  * Everything the home screen needs, in one round trip.
  *
  * Composed server-side rather than by the client joining three endpoints: the

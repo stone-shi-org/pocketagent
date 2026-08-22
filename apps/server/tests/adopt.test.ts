@@ -476,6 +476,79 @@ describeTmux('adopting a tmux session on a foreign server', () => {
     expect(shell?.chats.map((c: { sessionId: string | null }) => c.sessionId)).toContain(id);
   });
 
+  it('creates a brand-new named tmux session and lists it like any other', async () => {
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/adoptable',
+      headers: { cookie: t.cookie },
+      payload: { name: 'fresh-one' },
+    });
+    expect(created.statusCode).toBe(201);
+    const target = created.json();
+    expect(target.sessionName).toBe('fresh-one');
+    // The new session starts in the first configured workspace root — there
+    // is no other cwd to infer one from a plain "create" request.
+    expect(target.cwd).toBe(t.workspaceRoot);
+
+    // It is a real session on the "user's" socket, not something scoped to
+    // PocketAgent — a plain terminal on that socket would see it too.
+    expect(await userSessionExists('fresh-one')).toBe(true);
+
+    const listed = (await listTargets()).targets.map((x) => x.sessionName);
+    expect(listed).toContain('fresh-one');
+  });
+
+  it('refuses to create a session whose name is already taken', async () => {
+    await startUserSession('taken', t.projectDir, ['sleep', '120']);
+
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/adoptable',
+      headers: { cookie: t.cookie },
+      payload: { name: 'taken' },
+    });
+    expect(res.statusCode).toBe(409);
+  });
+
+  it('rejects a name with characters outside the allowed set', async () => {
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/adoptable',
+      headers: { cookie: t.cookie },
+      payload: { name: 'not:a:valid:name' },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(await userSessionExists('not:a:valid:name')).toBe(false);
+  });
+
+  it('creates a new session and attaches to it in one flow, the way the Shell dialog does', async () => {
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/adoptable',
+      headers: { cookie: t.cookie },
+      payload: { name: 'create-and-attach' },
+    });
+    expect(created.statusCode).toBe(201);
+    const target = created.json();
+
+    const session = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: {
+        agent: 'shell',
+        cwd: target.cwd,
+        cols: target.cols,
+        rows: target.rows,
+        transport: 'terminal',
+        adoptTargetId: target.id,
+      },
+    });
+    expect(session.statusCode).toBe(201);
+    expect(session.json().adopted).toBe(true);
+    await waitFor(async () => (await sessionAttached('create-and-attach')) >= 1, { timeout: 10_000 });
+  });
+
   it('clears finished chats from the Shell virtual project via /api/projects/clear-finished', async () => {
     // Regression: the Shell card's "Clear finished chats" button is shown
     // and enabled the same as any other project's, but `'virtual:shell'` is
