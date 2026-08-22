@@ -353,6 +353,34 @@ describe('AgySession', () => {
     await waitFor(() => session?.busy === false);
   });
 
+  it('drops a permanently wedged conversation and retries fresh once the normal retry budget is spent', async () => {
+    session = new AgySession(makeSpec({ resumeAgentSessionId: 'stuck-conversation-id' }));
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('WEDGED_CONVERSATION');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'), { timeout: 15_000 });
+
+    // Never shown as a failure: the two normal retries against the stuck
+    // conversation, then the one conversation-reset retry against a fresh
+    // one, all stay warnings.
+    expect(events.some((e) => e.kind === 'notice' && e.level === 'error')).toBe(false);
+    const warnings = events.filter((e) => e.kind === 'notice' && e.level === 'warn');
+    expect(warnings).toHaveLength(3);
+    expect(warnings[0]).toMatchObject({ text: expect.stringContaining('context canceled') });
+    expect(warnings[1]).toMatchObject({ text: expect.stringContaining('context canceled') });
+    expect(warnings[2]).toMatchObject({ text: expect.stringContaining('new conversation') });
+
+    expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({ isError: false });
+    const text = events.find((e) => e.kind === 'text');
+    expect(text).toMatchObject({ text: 'echo: WEDGED_CONVERSATION' });
+
+    // The wedged id was actually replaced, not just papered over for this
+    // one turn — later turns must not keep hitting the same dead end.
+    expect(session.agentSessionId).not.toBe('stuck-conversation-id');
+    await waitFor(() => session?.busy === false);
+  }, 20_000);
+
   it('gives up after exhausting retry budget on a persistent transient-looking error', async () => {
     session = new AgySession(makeSpec());
     await session.start();

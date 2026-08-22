@@ -12,7 +12,8 @@ function argVal(flag) {
 }
 
 const prompt = argVal('-p') ?? '';
-const conversationId = argVal('--conversation') ?? crypto.randomUUID();
+const providedConversationId = argVal('--conversation');
+const conversationId = providedConversationId ?? crypto.randomUUID();
 const model = argVal('--model');
 
 function emit(obj) {
@@ -138,6 +139,38 @@ if (prompt === 'CONTEXT_CANCELED_ONCE') {
     });
     process.exit(1);
   }
+}
+
+// Mirrors a permanently wedged conversation, captured live: replaying a turn
+// against a specific `--conversation <id>` twice outside PocketAgent, both
+// times, finished in a few seconds with the model's answer already in
+// `result.response` — yet `result.status` was `ERROR`/`"context canceled"`,
+// exit code 0, and `result.duration_seconds` sat above 600 and climbed by
+// wall-clock time rather than either replay's own runtime, pointing at a
+// deadline attached to the conversation itself. No amount of retrying that
+// same `--conversation` id ever succeeds; only dropping it for a fresh one
+// does — this fixture fails whenever a `--conversation` was actually passed,
+// and answers normally the moment one isn't (see `AgySession`'s
+// conversation-reset path).
+if (prompt === 'WEDGED_CONVERSATION' && providedConversationId) {
+  emit({
+    event: 'init',
+    conversation_id: conversationId,
+    init: { cwd: process.cwd(), tools: ['run_command'], permission_mode: 'always-proceed' },
+  });
+  emit({
+    event: 'result',
+    result: {
+      conversation_id: conversationId,
+      status: 'ERROR',
+      response: 'OK',
+      error: 'context canceled',
+      duration_seconds: 608.19,
+      num_turns: 7,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    },
+  });
+  process.exit(0);
 }
 
 // `/help` resolves locally in real agy — no `init` line, no tool step, zero

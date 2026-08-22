@@ -112,6 +112,14 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   private static readonly RETRY_BACKOFF_MS = [1000, 3000];
 
   /**
+   * Backoff before the one conversation-reset retry described on
+   * `runTurn`'s `conversationResetTried` parameter. Deliberately the same as
+   * the first normal retry's backoff — this is not a slower path, just a
+   * different one.
+   */
+  private static readonly CONVERSATION_RESET_BACKOFF_MS = AgySession.RETRY_BACKOFF_MS[0];
+
+  /**
    * Matches agy's own `result.error` text for a turn that failed for an
    * infrastructure reason — a network hiccup or a timeout talking to the
    * Antigravity backend — rather than something a retry can never fix (a
@@ -402,14 +410,38 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
    * `attempt` is 0 for the user's original request and increments on each
    * silent retry of a transient failure (see `TRANSIENT_ERROR_PATTERN`) —
    * `drain()` and `child.on('close')`'s retry branch below are the only two
-   * callers, and both always pass the same `text`, so the whole retry chain
-   * is one logical turn from the outside: one `user_prompt`, one eventual
-   * `turn_complete`.
+   * regular callers, and both always pass the same `text`, so the whole
+   * retry chain is one logical turn from the outside: one `user_prompt`, one
+   * eventual `turn_complete`.
+   *
+   * `conversationResetTried` guards a separate, one-shot escape hatch: some
+   * `--conversation <id>` gets permanently wedged server-side and returns a
+   * transient-*looking* error (see `TRANSIENT_ERROR_PATTERN`) on every turn
+   * forever, not just this one — confirmed live by replaying a turn against
+   * such a conversation twice outside PocketAgent: both replays finished in
+   * a few seconds with the model's answer already in `result.response`, yet
+   * `result.status` was still `ERROR`/`"context canceled"` and
+   * `result.duration_seconds` (600+, climbing by wall-clock between the two
+   * replays rather than by either replay's own runtime) pointed at a
+   * deadline attached to the conversation itself, not to any one process.
+   * Retrying that conversation, however many times, can never succeed. Once
+   * the normal retry budget above is exhausted *and* this attempt was
+   * continuing an existing conversation, the `close` handler below drops
+   * `_agentSessionId` and spends this one extra attempt on a brand-new
+   * conversation instead of surfacing the error — set here (not left to
+   * default) precisely so that fresh attempt can never trigger a second
+   * reset if it also happens to fail.
    */
-  private runTurn(text: string, attempt = 0): Promise<void> {
+  private runTurn(text: string, attempt = 0, conversationResetTried = false): Promise<void> {
     return new Promise((resolve) => {
+      // Captured once per attempt: `this._agentSessionId` only changes when
+      // this attempt's own `init` line reports one (see the `!pendingRetryText`
+      // branch below), so every retry of the *same* wedged conversation still
+      // sees the id it started with, and a post-reset fresh attempt correctly
+      // sees `null`.
+      const resumedConversationId = this._agentSessionId;
       const args = ['--output-format', 'stream-json', '--dangerously-skip-permissions', '-p', text];
-      if (this._agentSessionId) args.push('--conversation', this._agentSessionId);
+      if (resumedConversationId) args.push('--conversation', resumedConversationId);
       if (this._desiredModel) args.push('--model', this._desiredModel);
 
       const bin = this.spec.executablePath ?? 'agy';
@@ -437,10 +469,16 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       // exited with code 1" notice.
       let resultErrorShown = false;
       // Set instead of `resultErrorShown` when this `result` line's error
-      // looks transient and there is retry budget left — see
-      // `TRANSIENT_ERROR_PATTERN`. `close` below reads this to respawn the
-      // same turn rather than surfacing the error.
+      // looks transient and either there is retry budget left, or this is
+      // the one-shot conversation-reset case (see `pendingWedgedReset`) —
+      // see `TRANSIENT_ERROR_PATTERN`. `close` below reads this to respawn
+      // rather than surfacing the error.
       let pendingRetryText: string | null = null;
+      // Set alongside `pendingRetryText` specifically for the wedged-
+      // conversation case (`runTurn`'s `conversationResetTried` doc comment):
+      // distinguishes "respawn against the same conversation" from "drop the
+      // conversation id and respawn fresh" in the `close` handler below.
+      let pendingWedgedReset = false;
 
       const rl = readline.createInterface({ input: child.stdout });
       rl.on('line', (line) => {
@@ -469,19 +507,27 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
           const result = isRecord(parsed.result) ? parsed.result : {};
           const status = typeof result.status === 'string' ? result.status : undefined;
           const errorText = typeof result.error === 'string' ? result.error.trim() : '';
-          const isRetryable =
+          const looksTransient =
             status !== undefined &&
             status !== 'SUCCESS' &&
             errorText.length > 0 &&
-            attempt < AgySession.MAX_TURN_RETRIES &&
             AgySession.TRANSIENT_ERROR_PATTERN.test(errorText);
+          const isRetryable = looksTransient && attempt < AgySession.MAX_TURN_RETRIES;
+          // The normal retry budget is spent, but this still looks like the
+          // infrastructure-error pattern rather than something a retry can
+          // never fix, and this attempt was continuing a real conversation
+          // (a already-fresh attempt failing this way is a genuine dead
+          // end — see `runTurn`'s `conversationResetTried` doc comment).
+          const looksWedged =
+            looksTransient && !isRetryable && resumedConversationId !== null && !conversationResetTried;
 
-          if (isRetryable) {
+          if (isRetryable || looksWedged) {
             // Don't show the response or count this as the shown error: a
             // retry is coming, and the generic normalizer below is skipped
             // entirely for this line so no premature `turn_complete` fires
             // either. See `pendingRetryText`'s doc comment.
             pendingRetryText = errorText;
+            pendingWedgedReset = looksWedged;
           } else {
             const response = typeof result.response === 'string' ? result.response.trim() : '';
             if (response) {
@@ -504,9 +550,12 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
               kind: 'tool_result',
               id: `agy_sub_end_${toolUseId}`,
               toolUseId,
-              content: isRetryable ? 'The turn hit a transient error and is being retried.' : 'Subagent finished.',
+              content:
+                isRetryable || looksWedged
+                  ? 'The turn hit a transient error and is being retried.'
+                  : 'Subagent finished.',
               truncated: false,
-              isError: isRetryable,
+              isError: isRetryable || looksWedged,
             });
           }
           this.pendingSubagents.clear();
@@ -566,6 +615,35 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
           // session was torn down mid-turn — never schedule a retry either
           // way.
           finish(null);
+          return;
+        }
+        if (pendingRetryText && pendingWedgedReset) {
+          // See `runTurn`'s `conversationResetTried` doc comment: the normal
+          // retry budget is spent and this conversation still looks wedged,
+          // so drop it and spend one extra attempt on a brand-new one rather
+          // than surface an error a retry against the *same* conversation
+          // could never fix.
+          this.child = null;
+          this._agentSessionId = null;
+          this.emitEvent({
+            kind: 'notice',
+            level: 'warn',
+            text: `agy's conversation looks stuck (${pendingRetryText}) — starting a new conversation and retrying…`,
+          });
+          const retryTimer = setTimeout(() => {
+            this.cancelPendingRetry = null;
+            if (this.closed) {
+              resolve();
+              return;
+            }
+            this.runTurn(text, 0, true).then(resolve);
+          }, AgySession.CONVERSATION_RESET_BACKOFF_MS);
+          retryTimer.unref?.();
+          this.cancelPendingRetry = () => {
+            clearTimeout(retryTimer);
+            this.cancelPendingRetry = null;
+            resolve();
+          };
           return;
         }
         if (pendingRetryText) {
