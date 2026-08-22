@@ -23,7 +23,7 @@ export function AddProject({
   onApiError,
 }: {
   onClose: () => void;
-  onAdded: () => void;
+  onAdded: (path: string) => void;
   onApiError: (error: unknown) => void;
 }): JSX.Element {
   const [tab, setTab] = useState<Tab>('suggested');
@@ -39,16 +39,22 @@ export function AddProject({
   }, [onClose]);
 
   const add = useCallback(
-    async (path: string) => {
+    async (path: string, opts?: { create?: boolean }) => {
       setBusy(path);
       setError(null);
       try {
-        await api.addWorkspace(path);
-        onAdded();
+        await api.addWorkspace(path, opts);
+        onAdded(path);
         onClose();
       } catch (err) {
         onApiError(err);
-        setError(err instanceof ApiError ? err.message : 'Could not add that folder.');
+        setError(
+          err instanceof ApiError
+            ? err.message
+            : opts?.create
+              ? 'Could not create that folder.'
+              : 'Could not add that folder.',
+        );
       } finally {
         setBusy(null);
       }
@@ -175,13 +181,18 @@ function Suggested({
   );
 }
 
+/** Join a browsed directory with a leaf name; `state.path` is always absolute. */
+function joinPath(dir: string, name: string): string {
+  return dir.endsWith('/') ? `${dir}${name}` : `${dir}/${name}`;
+}
+
 /** Navigate the host's directories. */
 function Browser({
   onAdd,
   busy,
   onApiError,
 }: {
-  onAdd: (path: string) => void;
+  onAdd: (path: string, opts?: { create?: boolean }) => void;
   busy: string | null;
   onApiError: (error: unknown) => void;
 }): JSX.Element {
@@ -193,6 +204,7 @@ function Browser({
     added: boolean;
     entries: BrowseEntry[];
   } | null>(null);
+  const [newFolder, setNewFolder] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -211,6 +223,8 @@ function Browser({
   }, [at, onApiError]);
 
   if (state === null) return <div className="spinner">Loading…</div>;
+
+  const trimmedNewFolder = newFolder.trim();
 
   return (
     <>
@@ -236,6 +250,27 @@ function Browser({
           {state.added ? 'Added' : 'Add this'}
         </button>
       </div>
+
+      <form
+        className="browse-create"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!trimmedNewFolder || trimmedNewFolder.includes('/') || busy !== null) return;
+          onAdd(joinPath(state.path, trimmedNewFolder), { create: true });
+        }}
+      >
+        <input
+          type="text"
+          value={newFolder}
+          onChange={(e) => setNewFolder(e.target.value)}
+          placeholder={`New folder in ${state.label}`}
+          aria-label="New folder name"
+          disabled={busy !== null}
+        />
+        <button type="submit" disabled={busy !== null || !trimmedNewFolder || trimmedNewFolder.includes('/')}>
+          Create &amp; use
+        </button>
+      </form>
 
       {state.entries.length === 0 ? (
         <div className="empty">No subdirectories here.</div>

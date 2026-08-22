@@ -147,6 +147,10 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
    * but note what it means: from here on, sessions may be started inside it.
    * The check at session creation has not gone away, it now consults a list the
    * user curates rather than one fixed in the environment.
+   *
+   * `create: true` in the body lets the folder not exist yet — the picker uses
+   * this to offer "new folder" alongside picking an existing one, still as one
+   * explicit, logged act rather than a silent mkdir.
    */
   app.post('/api/workspaces/add', async (request, reply) => {
     const parsed = WorkspaceRequest.safeParse(request.body);
@@ -156,8 +160,11 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       });
     }
     try {
-      const added = await workspaces.add(parsed.data.path);
-      app.log.warn({ path: added }, 'project folder added; sessions may now run here');
+      const added = await workspaces.add(parsed.data.path, { create: parsed.data.create });
+      app.log.warn(
+        { path: added, created: !!parsed.data.create },
+        'project folder added; sessions may now run here',
+      );
       return reply.send({ ok: true, path: added, label: workspaces.labelFor(added) });
     } catch (err) {
       if (err instanceof WorkspaceError) {

@@ -127,6 +127,27 @@ describe('WorkspaceRegistry', () => {
     await expect(registry.add(file)).rejects.toThrow(WorkspaceError);
   });
 
+  it('creates a missing folder and adds it when create is true', async () => {
+    const fresh = path.join(ws.root, 'brand-new', 'nested');
+    await expect(registry.add(fresh, { create: true })).resolves.toBe(fresh);
+    expect(fs.statSync(fresh).isDirectory()).toBe(true);
+    expect((await registry.list()).map((e) => e.path)).toContain(fresh);
+  });
+
+  it('still refuses a missing folder when create is not set', async () => {
+    const fresh = path.join(ws.root, 'not-created');
+    await expect(registry.add(fresh)).rejects.toMatchObject({ code: 'not_found' });
+    expect(fs.existsSync(fresh)).toBe(false);
+  });
+
+  it('create does not paper over a path that exists but is a file', async () => {
+    const file = path.join(ws.root, 'already-a-file');
+    fs.writeFileSync(file, 'x');
+    await expect(registry.add(file, { create: true })).rejects.toMatchObject({
+      code: 'not_a_directory',
+    });
+  });
+
   it('adding the same folder twice is not an error and does not duplicate it', async () => {
     await registry.add(ws.root);
     expect((await registry.list()).filter((e) => e.path === ws.root)).toHaveLength(1);

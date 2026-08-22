@@ -69,10 +69,35 @@ export class WorkspaceRegistry {
    * Add a folder. Any absolute directory on this host is allowed — that is the
    * point — but it must exist, be a directory, and be readable, and `/` is
    * refused because "every file on the machine" is never a project.
+   *
+   * `create: true` makes a missing folder no longer an error: this is how the
+   * picker offers "make a new folder and use it" without a separate mkdir
+   * endpoint. Only a `not_found` is retried this way — a path that exists but
+   * is not a directory, or is not accessible, fails exactly as before.
    */
-  async add(requested: string): Promise<string> {
+  async add(requested: string, opts: { create?: boolean } = {}): Promise<string> {
     assertWellFormed(requested);
-    const real = await this.canonicalDirectory(requested);
+    let real: string;
+    try {
+      real = await this.canonicalDirectory(requested);
+    } catch (err) {
+      if (opts.create && err instanceof WorkspaceError && err.code === 'not_found') {
+        const absolute = path.resolve(
+          requested.startsWith('~') ? path.join(homedir(), requested.slice(1)) : requested,
+        );
+        try {
+          await fs.mkdir(absolute, { recursive: true });
+        } catch (mkdirErr) {
+          throw new WorkspaceError(
+            `Could not create folder: ${(mkdirErr as Error).message}`,
+            'forbidden',
+          );
+        }
+        real = await this.canonicalDirectory(requested);
+      } else {
+        throw err;
+      }
+    }
     if (real === '/') {
       throw new WorkspaceError('Refusing to use "/" as a project folder.', 'forbidden');
     }

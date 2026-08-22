@@ -2948,6 +2948,22 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   color: var(--text-dim);
 }
 
+.browse-create {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.browse-create input {
+  flex: 1;
+  width: auto;
+}
+
+.browse-create button {
+  flex: none;
+}
+
 .browse-row {
   display: flex;
   align-items: center;

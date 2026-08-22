@@ -138,10 +138,11 @@ export const api = {
       `/api/sessions/${encodeURIComponent(id)}/history`,
     ),
 
-  addWorkspace: (path: string) =>
+  /** `create: true` makes a not-yet-existing folder no longer an error — see `WorkspaceRequest`. */
+  addWorkspace: (path: string, opts?: { create?: boolean }) =>
     request<{ ok: true; path: string; label: string }>('/api/workspaces/add', {
       method: 'POST',
-      body: JSON.stringify({ path }),
+      body: JSON.stringify({ path, ...(opts?.create ? { create: true } : {}) }),
     }),
 
   removeWorkspace: (path: string) =>

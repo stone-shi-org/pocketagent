@@ -9,6 +9,7 @@ import type {
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { SelectorRow, type SelectorOption } from '../components/SelectorRow.js';
+import { AddProject } from '../components/AddProject.js';
 import { WorktreeDialog, type WorktreeChoice } from '../components/WorktreeDialog.js';
 import { AttachButton } from '../components/AttachButton.js';
 import { Icon } from '../components/Icon.js';
@@ -35,6 +36,8 @@ function basename(p: string): string {
 type Flavour = `${string}:${'terminal' | 'structured'}`;
 
 const NEW_CHAT = '__new__';
+/** Sentinel option in the Workspace picker that opens `AddProject` instead of selecting a value. */
+const ADD_WORKSPACE = '__add_workspace__';
 
 /**
  * Start a chat: pick where it runs and what it runs, type the first prompt.
@@ -64,6 +67,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   const [prompt, setPrompt] = useState('');
   const [attachedImage, setAttachedImage] = useState<PromptImage | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
+  const [showAddWorkspace, setShowAddWorkspace] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -113,11 +117,17 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   // A root's `name` is its full path, which is unreadable on a phone. Show the
   // basename and keep the path as the detail line, where it disambiguates two
   // roots that happen to end in the same folder name.
-  const workspaceOptions: SelectorOption[] = workspaces.map((w) => ({
-    value: w.path,
-    label: w.isRoot ? basename(w.path) : w.name,
-    detail: w.isRoot ? w.path : w.isGitRepo ? 'git' : undefined,
-  }));
+  const workspaceOptions: SelectorOption[] = [
+    ...workspaces.map((w) => ({
+      value: w.path,
+      label: w.isRoot ? basename(w.path) : w.name,
+      detail: w.isRoot ? w.path : w.isGitRepo ? 'git' : undefined,
+    })),
+    // Browsing to (or creating) a folder is one modal away rather than a trip
+    // back to the Projects page — that used to be the only way to widen this
+    // list before starting a chat.
+    { value: ADD_WORKSPACE, label: 'Add workspace…', detail: 'browse or create a folder' },
+  ];
 
   const flavourOptions: SelectorOption[] = useMemo(
     () =>
@@ -336,14 +346,32 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
                 /* one host until a front server registers others */
               }}
             />
-            <SelectorRow
-              icon="folder"
-              label="Workspace"
-              ariaLabel="Workspace"
-              value={cwd}
-              options={workspaceOptions}
-              onChange={setCwd}
-            />
+            {/* With zero workspaces, `workspaceOptions` holds only the sentinel
+                — SelectorRow collapses a single-option row into a no-op tap
+                (the right call for e.g. the one-host row), which would make
+                this the one place a first-run user could never get past. */}
+            {workspaces.length === 0 ? (
+              <button
+                type="button"
+                className="selector-row"
+                onClick={() => setShowAddWorkspace(true)}
+                aria-label="Workspace: add a folder to get started"
+                data-selector="Workspace"
+              >
+                <Icon name="folder" className="leading" />
+                <span className="selector-value">Add a workspace…</span>
+                <Icon name="stepper" className="stepper" />
+              </button>
+            ) : (
+              <SelectorRow
+                icon="folder"
+                label="Workspace"
+                ariaLabel="Workspace"
+                value={cwd}
+                options={workspaceOptions}
+                onChange={(v) => (v === ADD_WORKSPACE ? setShowAddWorkspace(true) : setCwd(v))}
+              />
+            )}
             {/* A picked chat always resumes as whatever agent it already is
                 (see `effectiveAgentId`) — this row only matters for a brand
                 new chat, so it is hidden rather than left showing a choice
@@ -383,6 +411,20 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
           </div>
         )}
       </div>
+
+      {showAddWorkspace && (
+        <AddProject
+          onClose={() => setShowAddWorkspace(false)}
+          onAdded={(path) => {
+            setCwd(path);
+            api
+              .listWorkspaces()
+              .then((w) => setWorkspaces(w.workspaces))
+              .catch(onApiError);
+          }}
+          onApiError={onApiError}
+        />
+      )}
 
       {worktreeDialogOpen && (
         <WorktreeDialog

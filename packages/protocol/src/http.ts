@@ -172,6 +172,14 @@ export type ProjectRequest = z.infer<typeof ProjectRequest>;
 /** Add or forget a project folder. Any absolute directory on the host. */
 export const WorkspaceRequest = z.object({
   path: z.string().min(1).max(4096),
+  /**
+   * Only consulted by `/api/workspaces/add`: create `path` (and any missing
+   * parents) if it does not exist yet, instead of failing with `not_found`.
+   * Lets the picker offer "new folder" without a separate mkdir endpoint —
+   * creating and registering a project folder are still one deliberate act,
+   * just one that no longer requires the folder to pre-exist.
+   */
+  create: z.boolean().optional(),
 });
 export type WorkspaceRequest = z.infer<typeof WorkspaceRequest>;
 
