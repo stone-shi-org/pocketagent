@@ -46,6 +46,25 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
    * not push our own dimensions at it — that would resize their terminal.
    */
   const adoptedRef = useRef(false);
+  /**
+   * Whether `onAttached` has fired at least once for this mount. `adoptedRef`
+   * defaults to `false`, indistinguishable from "confirmed not adopted" —
+   * but xterm.js can fire `onResize` before that first server round trip
+   * completes (the font-load re-`fit()` in `createTerminal` in particular:
+   * it resolves whenever `document.fonts.ready` does, on its own clock,
+   * independent of the WebSocket handshake). Without this gate, that early
+   * resize reads `adoptedRef.current` while it is still just the initial
+   * value, not a real answer, and — for a session that turns out to *be*
+   * adopted — sends the browser's own guessed-at, pre-font-metrics size to
+   * the server before anything has said "don't". Confirmed against a real
+   * tmux server as the mechanism behind "reattaching sometimes duplicates
+   * the shell prompt dozens of times": that early resize lands on a shared
+   * pane and forces every other attached client (including a real terminal
+   * on someone's desktop) through a resize-triggered redraw, which a prompt
+   * with its own `precmd`/`SIGWINCH` handling reprints from scratch. Once
+   * this is `true`, `adoptedRef.current` is a real answer and safe to act on.
+   */
+  const knowsAdoptedRef = useRef(false);
   const [takeOverSize, setTakeOverSize] = useState(false);
   const [confirmingStop, setConfirmingStop] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -112,6 +131,7 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
           setStatus(info.status);
           setFatal(null);
           adoptedRef.current = info.adopted;
+          knowsAdoptedRef.current = true;
           // Already decided "fit to this screen anyway" for this exact pane
           // before — on an earlier visit, or a previous attach that this one
           // superseded (see `adopted-size-prefs.ts`). Apply that now, before
@@ -191,10 +211,14 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
     });
 
     // Full-screen TUIs request the size; answer with the real one — unless this
-    // is someone else's pane, in which case we are a guest and stay quiet.
+    // is someone else's pane, in which case we are a guest and stay quiet. Also
+    // stays quiet before the first `onAttached` — see `knowsAdoptedRef`'s doc
+    // comment — since `adoptedRef.current` is not yet a real answer.
     const resizeDisposable = bundle.term.onResize(({ cols, rows }) => {
       lastSizeRef.current = { cols, rows };
-      if (!adoptedRef.current || takeOverSizeRef.current) connection.sendResize(cols, rows);
+      if (knowsAdoptedRef.current && (!adoptedRef.current || takeOverSizeRef.current)) {
+        connection.sendResize(cols, rows);
+      }
     });
 
     connection.open(sessionId);
@@ -258,7 +282,13 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
     // fires a burst of events that would otherwise become a resize storm.
     if (!force && cols === last.cols && rows === last.rows) return;
     lastSizeRef.current = { cols, rows };
-    if (!adoptedRef.current || takeOverSizeRef.current) conn.sendResize(cols, rows);
+    // See `knowsAdoptedRef`'s doc comment: before the first `onAttached`,
+    // `adoptedRef.current` is not yet a real answer, so this must stay quiet
+    // rather than guess "not adopted" and push a size at what might turn out
+    // to be someone else's shared pane.
+    if (knowsAdoptedRef.current && (!adoptedRef.current || takeOverSizeRef.current)) {
+      conn.sendResize(cols, rows);
+    }
   }, []);
 
   useEffect(() => {
