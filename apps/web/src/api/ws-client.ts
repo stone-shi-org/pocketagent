@@ -231,6 +231,15 @@ export class TerminalConnection {
           this.epoch = message.session.epoch;
           this.lastSeq = 0;
         }
+        // Size the terminal to the session's real grid before writing any
+        // replayed bytes into it. An adopted pane's `onAttached` handler
+        // resizes xterm.js synchronously to match the pane's actual size;
+        // doing that after `onReplay` has already written buffered output
+        // (very likely to include a full-screen redraw, since adoption
+        // targets a pane that may already have something like vim running)
+        // parses that stream against the wrong grid dimensions, and a later
+        // resize cannot repair cells that already landed in the wrong place.
+        this.handlers.onAttached?.(message.session);
         if (agentReplay) {
           if (agentReplay.events.length > 0 || agentReplay.truncated) {
             this.handlers.onAgentReplay?.(
@@ -252,7 +261,6 @@ export class TerminalConnection {
             ),
           );
         }
-        this.handlers.onAttached?.(message.session);
         break;
       }
       case 'output': {

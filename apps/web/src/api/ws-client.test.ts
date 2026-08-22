@@ -429,6 +429,30 @@ describe('TerminalConnection: replay handling', () => {
 
     expect(onReplay).not.toHaveBeenCalled();
   });
+
+  it('fires onAttached before onReplay, so a caller can size the terminal before writing replayed bytes into it', () => {
+    // Regression test: an adopted session's onAttached handler resizes the
+    // local terminal to match the real pane's grid before any content is
+    // written. If onReplay fired first, buffered output — very likely a
+    // full-screen redraw, since adoption targets a pane that may already
+    // have something like vim running — would be parsed against the wrong
+    // grid, and a later resize cannot fix cells already placed wrong.
+    const events: string[] = [];
+    const { connection, socket } = setup({
+      onAttached: (s) => events.push(`attached:${s.id}`),
+      onReplay: () => events.push('replay'),
+    });
+    connection.open('abc');
+    socket().open();
+
+    socket().emit({
+      type: 'attached',
+      session: SESSION,
+      replay: { data: 'some history', fromSeq: 0, toSeq: 1, truncated: false },
+    });
+
+    expect(events).toEqual(['attached:abc', 'replay']);
+  });
 });
 
 describe('TerminalConnection: message handling', () => {
