@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { SessionInfo } from '@pocketagent/protocol';
 import { ProjectService, VIRTUAL_SHELL_CWD, findMainRepoCwd, readGitBranch } from '../src/projects/index.js';
 import { ConversationStore, encodeProjectDir } from '../src/conversations/index.js';
+import { AgyTranscriptStore } from '../src/conversations/agy.js';
 import { hideChat, openDatabase } from '../src/db/index.js';
 import { WorkspaceRegistry } from '../src/workspaces/index.js';
 import { createTestApp, makeWorkspace, waitFor, type TestApp } from './helpers.js';
@@ -737,6 +738,88 @@ describe('GET /api/sessions/:id/history', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().events).toEqual([]);
+  });
+
+  /**
+   * A session no longer tracked in memory (evicted, or the process ended
+   * before a server restart) used to report no conversation at all, however
+   * long its own DB row had been sitting there with `agent_session_id`
+   * filled in — `resumedConversationId` only ever checked the live map.
+   * Regression: reopening an old, already-finished chat from the home
+   * screen looked permanently empty, confirmed live against a real deployed
+   * instance for an agy chat several server restarts old.
+   */
+  function insertFinishedStructuredSession(
+    t: TestApp,
+    id: string,
+    agent: string,
+    agentSessionId: string,
+  ): void {
+    t.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, command, args_json, cwd, env_keys_json,
+                               status, cols, rows, created_at, transport, agent_session_id)
+         VALUES (?, ?, ?, '', '[]', ?, '[]', 'killed', 0, 0, ?, 'structured', ?)`,
+      )
+      .run(id, `${agent} chat`, agent, t.projectDir, Date.now(), agentSessionId);
+  }
+
+  it("falls back to the database's own agent_session_id once a session is no longer live", async () => {
+    insertFinishedStructuredSession(t, 'long-gone', 'claude', 'claude-convo-id');
+
+    const res = await t.app.inject({
+      method: 'GET',
+      url: '/api/sessions/long-gone/history',
+      headers: { cookie: t.cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    // No real transcript on disk for a made-up id, so events stay empty —
+    // what matters here is that the conversation was even identified at all.
+    expect(res.json().conversationId).toBe('claude-convo-id');
+  });
+
+  it("reads an agy session's own local transcript instead of the Claude-only ConversationStore", async () => {
+    const brainDir = fs.mkdtempSync('/tmp/pa-agy-brain-route-');
+    try {
+      const logsDir = path.join(brainDir, 'agy-convo-id', '.system_generated', 'logs');
+      fs.mkdirSync(logsDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(logsDir, 'transcript.jsonl'),
+        [
+          JSON.stringify({
+            source: 'USER_EXPLICIT',
+            type: 'USER_INPUT',
+            content: '<USER_REQUEST>\nwhat happened here?\n</USER_REQUEST>',
+          }),
+          JSON.stringify({
+            source: 'MODEL',
+            type: 'PLANNER_RESPONSE',
+            content: 'Here is what happened.',
+          }),
+        ].join('\n'),
+      );
+
+      const withAgy = await createTestApp({}, undefined, new AgyTranscriptStore({ brainDir }));
+      try {
+        insertFinishedStructuredSession(withAgy, 'agy-chat', 'agy', 'agy-convo-id');
+        const res = await withAgy.app.inject({
+          method: 'GET',
+          url: '/api/sessions/agy-chat/history',
+          headers: { cookie: withAgy.cookie },
+        });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body.conversationId).toBe('agy-convo-id');
+        expect(body.events).toEqual([
+          { kind: 'user_prompt', id: 'hist_agy_agy-convo-id_0', text: 'what happened here?' },
+          { kind: 'text', id: 'hist_agy_agy-convo-id_1', text: 'Here is what happened.' },
+        ]);
+      } finally {
+        await withAgy.cleanup();
+      }
+    } finally {
+      fs.rmSync(brainDir, { recursive: true, force: true });
+    }
   });
 });
 

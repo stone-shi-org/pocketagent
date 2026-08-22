@@ -25,6 +25,7 @@ import { SessionManager } from './sessions/manager.js';
 import { buildChildEnv } from './sessions/env.js';
 import { PushService } from './push/index.js';
 import { ConversationStore } from './conversations/index.js';
+import { AgyTranscriptStore } from './conversations/agy.js';
 import { AdoptionService } from './adopt/index.js';
 import { ProjectService } from './projects/index.js';
 import { WorktreeService } from './git/worktree.js';
@@ -53,6 +54,8 @@ export interface BuildAppOptions {
   config: Config;
   /** Injected in tests so each run gets an isolated database. */
   db?: Db;
+  /** Injected in tests to point at a fixture directory instead of a real `~/.gemini`. */
+  agyTranscripts?: AgyTranscriptStore;
   serveStatic?: boolean;
 }
 
@@ -138,6 +141,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   const childEnv = buildChildEnv({ cwd: config.workspaceRoots[0] ?? process.cwd() });
   const conversations = new ConversationStore({ workspaces });
+  const agyTranscripts = options.agyTranscripts ?? new AgyTranscriptStore();
   const adoption = new AdoptionService({
     socket: config.adoptTmuxSocket,
     bin: config.tmuxBin,
@@ -205,6 +209,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     backend,
     push,
     conversations,
+    agyTranscripts,
     adoption,
     projects,
     usage,

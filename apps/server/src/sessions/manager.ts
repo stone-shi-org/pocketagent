@@ -1154,16 +1154,34 @@ export class SessionManager {
   }
 
   /**
-   * The conversation this session was asked to continue, if any.
+   * The conversation worth showing backstory for, if any.
    *
-   * Note this is the id it *resumed from*, not the id it is writing to — a
-   * forked resume writes elsewhere, and the history worth showing is the one
-   * that already existed.
+   * A *live* session in `this.live` uses the id it *resumed from*, not the
+   * id it is writing to — a forked resume writes elsewhere, and prepending
+   * anything but the conversation that already existed would duplicate what
+   * the live `EventBuffer` is about to replay over the same socket.
+   *
+   * A session no longer in `this.live` (evicted, or the process ended before
+   * a server restart — see `AgySession`'s `survivesServerRestart`) has no
+   * `EventBuffer` left to duplicate, live or otherwise: whatever it once held
+   * is gone. Falling back to the DB row's own `agent_session_id` — the
+   * conversation this session *was*, not just one it resumed from — is what
+   * makes reopening an old, already-finished chat show anything at all
+   * instead of looking silently empty. Confirmed live: an agy chat several
+   * restarts old reported `resumedConversationId() === null` unconditionally
+   * before this fallback existed, even though its own conversation was still
+   * sitting on disk the whole time (`AgyTranscriptStore`) — the row was never
+   * consulted at all once the session left memory.
    */
   resumedConversationId(id: string): string | null {
     const session = this.live.get(id);
-    if (!session || session.transport !== 'structured') return null;
-    return session.spec.resumeAgentSessionId ?? null;
+    if (session) {
+      return session.transport === 'structured' ? (session.spec.resumeAgentSessionId ?? null) : null;
+    }
+    const row = this.opts.db.prepare('SELECT agent_session_id FROM sessions WHERE id = ?').get(id) as
+      | { agent_session_id: string | null }
+      | undefined;
+    return row?.agent_session_id ?? null;
   }
 
   countAlive(): number {

@@ -5,6 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { loadConfig, type Config } from '../src/config/index.js';
 import { openDatabase, type Db } from '../src/db/index.js';
+import type { AgyTranscriptStore } from '../src/conversations/agy.js';
 import type { PocketContext } from '../src/types.js';
 
 export const TEST_TOKEN = 'test-token-that-is-long-enough-1234567890';
@@ -46,6 +47,8 @@ export interface TestApp {
 export async function createTestApp(
   configOverrides: Record<string, string> = {},
   existingDb?: Db,
+  /** Injected so a test can point agy history reads at a fixture directory instead of a real `~/.gemini`. */
+  agyTranscripts?: AgyTranscriptStore,
 ): Promise<TestApp> {
   const ws = makeWorkspace();
   const config = makeConfig({
@@ -53,7 +56,7 @@ export async function createTestApp(
     ...configOverrides,
   });
   const db = existingDb ?? openDatabase(':memory:');
-  const { app, context } = await buildApp({ config, db, serveStatic: false });
+  const { app, context } = await buildApp({ config, db, agyTranscripts, serveStatic: false });
   await app.ready();
 
   const login = await app.inject({

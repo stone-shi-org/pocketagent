@@ -16,7 +16,7 @@ import { VIRTUAL_SHELL_CWD } from '../projects/index.js';
 import { resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
-  const { sessions, workspaces, agents, conversations, adoption, projects } = app.pocket;
+  const { sessions, workspaces, agents, conversations, agyTranscripts, adoption, projects } = app.pocket;
 
   app.get('/api/agents', async () => ({ agents: agents.list() }));
 
@@ -311,23 +311,38 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
   });
 
   /**
-   * The conversation a session was resumed from, as renderable events.
+   * The conversation behind a session, as renderable events.
    *
    * Keyed on the session rather than the conversation so the *server* decides
-   * which transcript is in play; the browser never names a file. A session that
-   * is not a resume has no history to show — its events are being streamed
-   * live, and replaying them from disk would double every message.
+   * which transcript is in play; the browser never names a file. A *live*
+   * session that is not itself a resume has no history to show here — its
+   * events are being streamed live, and replaying them from disk would
+   * double every message (see `resumedConversationId`'s doc comment). A
+   * session no longer live has no such buffer to double: whatever its own
+   * conversation was, this is the only place left to find it, which is what
+   * lets reopening an old, already-finished chat show anything instead of
+   * looking empty.
+   *
+   * Which store reads it back depends on the agent, since each keeps its own
+   * transcript in a different place and shape: `ConversationStore` only ever
+   * finds Claude's `~/.claude/projects/**.jsonl`; agy mirrors conversations
+   * locally too, just under `~/.gemini/antigravity-cli/brain/<id>/...`, in a
+   * format `ConversationStore` cannot parse (`AgyTranscriptStore` doc
+   * comment). Every other backend has no known on-disk mirror yet, so this
+   * falls through to the same "no history, still works" outcome as ever.
    */
   app.get<{ Params: { id: string } }>('/api/sessions/:id/history', async (request, reply) => {
     const resumedFrom = sessions.resumedConversationId(request.params.id);
     if (!resumedFrom) return reply.send({ events: [] });
 
-    const events = await conversations.history(resumedFrom);
-    if (events === null) {
-      // The transcript is gone or outside a workspace root. Not fatal: the
-      // session still works, it just opens without its backstory.
-      return reply.send({ events: [] });
-    }
+    const info = sessions.find(request.params.id);
+    const events =
+      info?.agent === 'agy'
+        ? await agyTranscripts.history(resumedFrom)
+        : ((await conversations.history(resumedFrom)) ?? []);
+    // The transcript is gone, unreadable, or (for `conversations`) outside a
+    // workspace root. Not fatal either way: the session still works, it just
+    // opens without its backstory.
     return reply.send({ conversationId: resumedFrom, events });
   });
 
