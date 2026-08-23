@@ -20,6 +20,28 @@ function codeServerLink(base: string, cwd: string): string {
   return `${root}?folder=${encodeURIComponent(cwd)}`;
 }
 
+/**
+ * A folder's basename, narrowed to the characters a real tmux session name
+ * may use (`AdoptionService`'s `TMUX_NAME_PATTERN`, a conservative printable
+ * subset — not tmux's own much looser rules). Anything else — most often
+ * spaces are fine but punctuation like `()[]` shows up in real folder names —
+ * becomes `-` rather than failing "New tmux session" outright over a name
+ * tmux itself would likely accept from a terminal anyway.
+ */
+function tmuxNameFor(projectName: string): string {
+  const cleaned = projectName.replace(/[^A-Za-z0-9 ._-]/g, '-').trim();
+  return (cleaned || 'session').slice(0, 64);
+}
+
+/** Every chat in a project and its folded worktrees, flattened. */
+function allChats(projects: ProjectInfo[]): ChatSummary[] {
+  const out: ChatSummary[] = [];
+  for (const project of projects) {
+    out.push(...project.chats, ...allChats(project.worktrees));
+  }
+  return out;
+}
+
 export interface ProjectsState {
   projects: ProjectInfo[] | null;
   host: HostInfo | null;
@@ -29,6 +51,7 @@ export interface ProjectsState {
   removeChat: (chat: ChatSummary) => Promise<void>;
   detachChat: (chat: ChatSummary) => Promise<void>;
   reattachChat: (chat: ChatSummary) => Promise<void>;
+  newTmuxSession: (project: ProjectInfo) => Promise<void>;
   clearFinished: (project: ProjectInfo) => Promise<void>;
   hideProject: (cwd: string) => Promise<void>;
   removeProject: (cwd: string) => Promise<void>;
@@ -227,6 +250,67 @@ export function useProjects(
     [onApiError, onOpen, refresh],
   );
 
+  /**
+   * "New tmux session" from a project's three-dot menu: a real, human-visible
+   * tmux session named after the folder, rooted in it — not PocketAgent's own
+   * private backend (`backends/tmux.ts`'s `pocketagent-<id>` sessions), the
+   * same `AdoptionService` socket the Shell dialog's picker and free-form
+   * "create" already use.
+   *
+   * Idempotent by name rather than by some id the client remembers: a second
+   * tap (or one from another tab) finds the same tmux session already exists
+   * and reattaches to it — or, if a session is already live for it, just
+   * opens that instead of spawning a second attaching client — rather than
+   * erroring or leaving an orphaned attach process behind.
+   */
+  const newTmuxSession = useCallback(
+    async (project: ProjectInfo) => {
+      const name = tmuxNameFor(project.name);
+      try {
+        let target = (await api.listAdoptable(true)).targets.find((t) => t.sessionName === name);
+
+        if (!target) {
+          try {
+            target = await api.createAdoptableSession(name, project.cwd);
+          } catch (err) {
+            // Lost a race with another tab (or another poll of this same
+            // action) creating the same name between the list above and this
+            // call — the session it made is exactly as good as the one this
+            // call would have made, so look it up instead of failing.
+            if (err instanceof ApiError && err.status === 409) {
+              target = (await api.listAdoptable(true)).targets.find((t) => t.sessionName === name);
+            }
+            if (!target) throw err;
+          }
+        }
+
+        const live = allChats(projects ?? []).find(
+          (chat) => chat.live && chat.adoptTargetId === target!.id,
+        );
+        if (live?.sessionId) {
+          onOpen(live.sessionId);
+          return;
+        }
+
+        const created = await api.createSession({
+          agent: 'shell',
+          cwd: 'virtual:shell',
+          cols: 80,
+          rows: 24,
+          transport: 'terminal',
+          adoptTargetId: target.id,
+        });
+        onOpen(created.id);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not start that tmux session.');
+      } finally {
+        await refresh();
+      }
+    },
+    [onApiError, onOpen, projects, refresh],
+  );
+
   return {
     projects,
     host,
@@ -236,6 +320,7 @@ export function useProjects(
     removeChat,
     detachChat,
     reattachChat,
+    newTmuxSession,
     clearFinished,
     hideProject,
     removeProject,
@@ -413,6 +498,18 @@ function ProjectSection({
         >
           <Icon name="compose" size={19} />
         </button>
+        {codeServerHref && (
+          <a
+            className="round-btn plain"
+            href={codeServerHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={`Open ${project.name} in code-server`}
+            title={`Open ${project.name} in code-server`}
+          >
+            <Icon name="code" size={19} />
+          </a>
+        )}
         <button
           type="button"
           className="round-btn plain"
@@ -425,7 +522,6 @@ function ProjectSection({
         {menuFor === project.cwd && (
           <ProjectMenu
             project={project}
-            codeServerHref={codeServerHref}
             onClose={() => setMenuFor(null)}
             onClear={() => {
               setMenuFor(null);
@@ -439,6 +535,14 @@ function ProjectSection({
               setMenuFor(null);
               void state.removeProject(project.cwd);
             }}
+            onNewTmuxSession={
+              project.cwd === 'virtual:shell'
+                ? undefined
+                : () => {
+                    setMenuFor(null);
+                    void state.newTmuxSession(project);
+                  }
+            }
           />
         )}
       </div>
@@ -600,22 +704,22 @@ export function SearchField({
   );
 }
 
-/** Per-folder actions. Both are reversible-ish; neither touches a transcript. */
+/** Per-folder actions. All reversible-ish; none touches a transcript. */
 function ProjectMenu({
   project,
-  codeServerHref,
   onClose,
   onClear,
   onHide,
   onRemove,
+  onNewTmuxSession,
 }: {
   project: ProjectInfo;
-  /** Null when code-server isn't configured for this host, or this row has no real folder. */
-  codeServerHref: string | null;
   onClose: () => void;
   onClear: () => void;
   onHide: () => void;
   onRemove: () => void;
+  /** Undefined for the virtual Shell "project", which has no real folder to root a tmux session in. */
+  onNewTmuxSession: (() => void) | undefined;
 }): JSX.Element {
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -638,16 +742,10 @@ function ProjectMenu({
             ? 'Nothing finished to clear'
             : `Clear ${finished} finished chat${finished === 1 ? '' : 's'}`}
         </button>
-        {codeServerHref && (
-          <a
-            role="menuitem"
-            href={codeServerHref}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={onClose}
-          >
-            Open in code-server
-          </a>
+        {onNewTmuxSession && (
+          <button type="button" role="menuitem" onClick={onNewTmuxSession}>
+            New tmux session
+          </button>
         )}
         {/* A folder you added can be removed outright. A directory that merely
             had a session run in it is not yours to remove — only to hide. */}

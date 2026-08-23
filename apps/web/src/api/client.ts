@@ -192,11 +192,15 @@ export const api = {
       all ? '/api/adoptable?all=1' : '/api/adoptable',
     ),
 
-  /** Start a brand-new named tmux session on the adoption socket. */
-  createAdoptableSession: (name: string) =>
+  /**
+   * Start a brand-new named tmux session on the adoption socket. `cwd`
+   * defaults server-side to the first workspace root when omitted; pass it
+   * explicitly to land the session in a particular project's own folder.
+   */
+  createAdoptableSession: (name: string, cwd?: string) =>
     request<AdoptableTarget>('/api/adoptable', {
       method: 'POST',
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(cwd !== undefined ? { name, cwd } : { name }),
     }),
 
   pushPublicKey: () => request<{ publicKey: string | null }>('/api/push/key'),

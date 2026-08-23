@@ -128,6 +128,15 @@ export type AdoptableListResponse = z.infer<typeof AdoptableListResponse>;
  */
 export const CreateAdoptableSessionRequest = z.object({
   name: z.string().min(1).max(64),
+  /**
+   * Working directory the new tmux session starts in. Optional and validated
+   * the same way `CreateSessionRequest.cwd` is (must resolve inside a
+   * configured workspace root) — omitted by the Shell dialog's free-form
+   * "create" flow, which falls back to the first workspace root, but set by
+   * a project row's "New tmux session" action so the session actually lands
+   * in that project's own folder rather than an arbitrary one.
+   */
+  cwd: z.string().min(1).max(4096).optional(),
 });
 export type CreateAdoptableSessionRequest = z.infer<typeof CreateAdoptableSessionRequest>;
 

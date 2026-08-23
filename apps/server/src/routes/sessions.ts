@@ -303,8 +303,19 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       });
     }
 
+    // A caller-supplied cwd (a project row's "New tmux session") is
+    // validated the same way `POST /api/sessions` validates one; omitting it
+    // (the Shell dialog's free-form create) keeps the old fallback.
+    let cwd: string;
+    if (parsed.data.cwd !== undefined) {
+      const resolved = await resolveWorkspaceCwdOrReply(workspaces, parsed.data.cwd, reply);
+      if (resolved === null) return reply;
+      cwd = resolved;
+    } else {
+      cwd = workspaces.getRoots()[0] ?? process.cwd();
+    }
+
     try {
-      const cwd = workspaces.getRoots()[0] ?? process.cwd();
       const target = await adoption.create(parsed.data.name, cwd);
       return reply.code(201).send(target);
     } catch (err) {

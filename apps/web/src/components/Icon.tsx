@@ -14,6 +14,7 @@ export type IconName =
   | 'chevron-down'
   | 'chevron-left'
   | 'compose'
+  | 'code'
   | 'terminal'
   | 'search'
   | 'bell'
@@ -92,6 +93,14 @@ const PATHS: Record<IconName, JSX.Element> = {
       <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
       <path d="M7.5 9.5 10.5 12l-3 2.5" />
       <path d="M13 15h4" />
+    </>
+  ),
+
+  // A `</>` pair: the "Open in code-server" link next to a folder's name.
+  code: (
+    <>
+      <path d="M9.5 7 4 12l5.5 5" />
+      <path d="M14.5 7 20 12l-5.5 5" />
     </>
   ),
 
