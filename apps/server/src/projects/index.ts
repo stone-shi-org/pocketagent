@@ -33,6 +33,8 @@ export interface ProjectServiceOptions {
   hostname?: string;
   /** How many transcripts to scan. Bounds the cost on a long-lived install. */
   conversationLimit?: number;
+  /** See `Config.codeServerBaseUrl`. Null when not configured. */
+  codeServerBaseUrl?: string | null;
 }
 
 export class ProjectService {
@@ -42,6 +44,7 @@ export class ProjectService {
   private readonly version: string;
   private readonly hostname: string;
   private readonly conversationLimit: number;
+  private readonly codeServerBaseUrl: string | null;
 
   constructor(options: ProjectServiceOptions) {
     this.workspaces = options.workspaces;
@@ -50,6 +53,7 @@ export class ProjectService {
     this.version = options.version;
     this.hostname = options.hostname ?? os.hostname();
     this.conversationLimit = options.conversationLimit ?? 60;
+    this.codeServerBaseUrl = options.codeServerBaseUrl ?? null;
   }
 
   /**
@@ -66,6 +70,7 @@ export class ProjectService {
       name: shortHostname(this.hostname),
       version: this.version,
       online: true,
+      codeServerBaseUrl: this.codeServerBaseUrl,
     };
   }
 

@@ -62,6 +62,14 @@ const RawEnv = z.object({
   POCKETAGENT_COOKIE_SECURE: z.string().optional(),
   POCKETAGENT_TRUST_PROXY: boolish(false),
 
+  /**
+   * Base URL of a code-server instance reachable from the browser, e.g.
+   * `https://host/code/`. Optional: unset hides the "Open in code-server"
+   * action entirely rather than defaulting to some guessed local URL, since a
+   * wrong guess would silently link to nothing.
+   */
+  POCKETAGENT_CODE_SERVER_URL: z.string().optional(),
+
   POCKETAGENT_SHELL: z.string().optional(),
   POCKETAGENT_CLAUDE_BIN: z.string().default('claude'),
   POCKETAGENT_AGY_BIN: z.string().default('agy'),
@@ -130,6 +138,12 @@ export interface Config {
   pushContact: string;
   /** True when bound to something other than loopback. */
   isNetworkExposed: boolean;
+  /**
+   * Base URL of a code-server instance for this machine, or null if none is
+   * configured. Varies per machine, so it rides on `HostInfo` rather than a
+   * global response field — see `ProjectService.host()`.
+   */
+  codeServerBaseUrl: string | null;
 }
 
 const MIN_TOKEN_LENGTH = 24;
@@ -264,5 +278,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     adoptTmuxSocket: e.POCKETAGENT_ADOPT_TMUX_SOCKET.trim(),
     pushContact: e.POCKETAGENT_PUSH_CONTACT.trim(),
     isNetworkExposed,
+    codeServerBaseUrl: e.POCKETAGENT_CODE_SERVER_URL?.trim() || null,
   };
 }

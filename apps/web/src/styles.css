@@ -2077,7 +2077,9 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   box-shadow: var(--shadow-md);
 }
 
-.menu button {
+.menu button,
+.menu a {
+  display: block;
   padding: 11px 12px;
   background: none;
   border: none;
@@ -2085,9 +2087,11 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   color: var(--text);
   font: inherit;
   text-align: left;
+  text-decoration: none;
 }
 
-.menu button:hover:not(:disabled) {
+.menu button:hover:not(:disabled),
+.menu a:hover {
   background: var(--bg-elev);
   border-color: transparent;
 }

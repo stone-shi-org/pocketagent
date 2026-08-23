@@ -9,6 +9,17 @@ const REFRESH_MS = 5000;
 /** Chats shown per project before a "show more" row appears. */
 const CHAT_PAGE_SIZE = 5;
 
+/**
+ * A deep link into code-server for a project's folder, or null if no
+ * code-server base URL is configured for this host (`HostInfo.codeServerBaseUrl`)
+ * — see `POCKETAGENT_CODE_SERVER_URL` in `.env.example`. code-server opens the
+ * folder named in `?folder=`, appended to whatever path it is served under.
+ */
+function codeServerLink(base: string, cwd: string): string {
+  const root = base.endsWith('/') ? base : `${base}/`;
+  return `${root}?folder=${encodeURIComponent(cwd)}`;
+}
+
 export interface ProjectsState {
   projects: ProjectInfo[] | null;
   host: HostInfo | null;
@@ -366,6 +377,14 @@ function ProjectSection({
   // matched, so collapsing is ignored while searching.
   const isCollapsed = !searching && collapsed.has(project.cwd);
 
+  // The virtual Shell "project" has no real folder on disk, so there is
+  // nothing for code-server to open.
+  const codeServerBase = state.host?.codeServerBaseUrl;
+  const codeServerHref =
+    codeServerBase && project.cwd !== 'virtual:shell'
+      ? codeServerLink(codeServerBase, project.cwd)
+      : null;
+
   return (
     <section
       className={`project${nested ? ' project--worktree' : ''}`}
@@ -406,6 +425,7 @@ function ProjectSection({
         {menuFor === project.cwd && (
           <ProjectMenu
             project={project}
+            codeServerHref={codeServerHref}
             onClose={() => setMenuFor(null)}
             onClear={() => {
               setMenuFor(null);
@@ -583,12 +603,15 @@ export function SearchField({
 /** Per-folder actions. Both are reversible-ish; neither touches a transcript. */
 function ProjectMenu({
   project,
+  codeServerHref,
   onClose,
   onClear,
   onHide,
   onRemove,
 }: {
   project: ProjectInfo;
+  /** Null when code-server isn't configured for this host, or this row has no real folder. */
+  codeServerHref: string | null;
   onClose: () => void;
   onClear: () => void;
   onHide: () => void;
@@ -615,6 +638,17 @@ function ProjectMenu({
             ? 'Nothing finished to clear'
             : `Clear ${finished} finished chat${finished === 1 ? '' : 's'}`}
         </button>
+        {codeServerHref && (
+          <a
+            role="menuitem"
+            href={codeServerHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={onClose}
+          >
+            Open in code-server
+          </a>
+        )}
         {/* A folder you added can be removed outright. A directory that merely
             had a session run in it is not yours to remove — only to hide. */}
         {project.isWorkspace ? (

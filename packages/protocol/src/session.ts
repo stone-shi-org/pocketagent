@@ -191,6 +191,12 @@ export const HostInfo = z.object({
   version: z.string(),
   /** False once a front server can report a back it cannot currently reach. */
   online: z.boolean(),
+  /**
+   * Base URL of a code-server instance on this host (e.g. `https://host/code/`),
+   * or null if none is configured. Null hides the "Open in code-server" action
+   * in the client rather than the client guessing at a URL.
+   */
+  codeServerBaseUrl: z.string().nullable(),
 });
 export type HostInfo = z.infer<typeof HostInfo>;
 

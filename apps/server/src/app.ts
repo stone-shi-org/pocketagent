@@ -156,7 +156,13 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     );
   }
 
-  const projects = new ProjectService({ workspaces, conversations, db, version: VERSION });
+  const projects = new ProjectService({
+    workspaces,
+    conversations,
+    db,
+    version: VERSION,
+    codeServerBaseUrl: config.codeServerBaseUrl,
+  });
   const worktrees = new WorktreeService({ workspaces });
 
   const sessions = new SessionManager({
