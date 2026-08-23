@@ -242,9 +242,14 @@ describeTmux('adopting a tmux session on a foreign server', () => {
 
     expect(info.adopted).toBe(true);
     // The session's size wins over whatever the browser asked for; adopting
-    // must not resize a terminal the user is sitting at.
+    // must not resize a terminal the user is sitting at. 31, not 30: nobody
+    // else was attached, so this falls back to the window's content area
+    // (`-y 30` above) plus the one row tmux's default status line reserves —
+    // see `AdoptionService.liveClientSize`. Attaching this client's raw PTY
+    // at exactly 30 would make tmux carve a status row out of it again,
+    // shrinking the shared window by one row.
     expect(info.cols).toBe(100);
-    expect(info.rows).toBe(30);
+    expect(info.rows).toBe(31);
 
     const session = t.context.sessions.getOrThrow(info.id);
     await waitFor(() => session.buffer.replayAfter(0).data.length > 0, { timeout: 10_000 });
@@ -280,8 +285,10 @@ describeTmux('adopting a tmux session on a foreign server', () => {
     });
     expect(created.statusCode).toBe(201);
     const info = created.json();
+    // See the equivalent assertion above: content area (30) + the default
+    // status line's one row.
     expect(info.cols).toBe(100);
-    expect(info.rows).toBe(30);
+    expect(info.rows).toBe(31);
     const session = t.context.sessions.getOrThrow(info.id);
 
     await t.app.listen({ host: '127.0.0.1', port: 0 });
@@ -298,13 +305,13 @@ describeTmux('adopting a tmux session on a foreign server', () => {
 
       // A same-size `attach` first, so the plain `resize` below is exercised
       // on its own rather than folded into the attach path.
-      send({ type: 'attach', sessionId: info.id, cols: 100, rows: 30 });
+      send({ type: 'attach', sessionId: info.id, cols: 100, rows: 31 });
       await sleep(200); // let the attach land
 
       send({ type: 'resize', sessionId: info.id, cols: 80, rows: 24 });
       await sleep(200);
       expect(session.cols).toBe(100);
-      expect(session.rows).toBe(30);
+      expect(session.rows).toBe(31);
 
       send({ type: 'resize', sessionId: info.id, cols: 80, rows: 24, force: true });
       await waitFor(() => session.cols === 80 && session.rows === 24);

@@ -12,6 +12,7 @@ import {
 import type { AgentRegistry } from '../agents/registry.js';
 import { resolveExecutable } from '../agents/registry.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
+import type { AdoptionService } from '../adopt/index.js';
 import type { ProcessBackend } from '../backends/index.js';
 import { PtySession } from './pty-session.js';
 import { StructuredSession } from './structured-session.js';
@@ -119,6 +120,12 @@ export interface ManagerOptions {
   push?: { isEnabled(): boolean; send(p: { title: string; body: string; url: string; tag?: string }): Promise<unknown> };
   /** Rows of finished sessions kept in the history table. */
   historyLimit?: number;
+  /**
+   * Optional so tests can omit it. Without it, an adopted session's `cols`/
+   * `rows` are simply whatever they were at attach time forever — see
+   * `reconcileAdoptedSize`'s doc comment for what that costs.
+   */
+  adoption?: AdoptionService;
   logger?: { info: (o: object, m?: string) => void; warn: (o: object, m?: string) => void };
   /** Boot-time seed for the global skip-permissions switch; the database wins after that. */
   globalSkipPermissionsDefault?: boolean;
@@ -1428,6 +1435,12 @@ export class SessionManager {
         session.pollIdleHint();
         this.persist(session);
 
+        if (session.transport === 'terminal' && session.spec.adopted) {
+          // Fire-and-forget: a tmux exec failure here must only skip this
+          // round's reconciliation, never affect the session itself.
+          void this.reconcileAdoptedSize(session);
+        }
+
         if (idleMs > 0 && this.attachedCount(id) === 0) {
           const last = session.lastActivityAt ?? session.startedAt ?? now;
           if (now - last > idleMs) {
@@ -1444,6 +1457,46 @@ export class SessionManager {
         session.dispose();
         this.live.delete(id);
       }
+    }
+  }
+
+  /**
+   * Catch an adopted session's cached `cols`/`rows` back up to tmux's live
+   * window size.
+   *
+   * Those dimensions are otherwise fixed once, at attach time
+   * (`sizeToAttachAt`), and nothing revisits them afterward: a WebSocket
+   * `resize` is refused for an adopted session unless the user opted into
+   * "take over size" (`mayResize` in `ws/index.ts`), and a fresh `attached`
+   * message is built straight from this same cached value. But tmux's own
+   * `window-size=latest` policy means the *live* shared window can change
+   * size at any time because of a client this session never saw — a real
+   * desktop terminal resizing, or another attach entirely. Once that drift
+   * happens, this session's frozen size permanently disagrees with where
+   * tmux actually paints its status line: it settles one or more rows above
+   * this client's true last row, with whatever was on screen before left
+   * untouched underneath it.
+   *
+   * Safe to run unconditionally on every sweep tick: `PtySession.resize`
+   * only touches the underlying PTY when the value actually changed, and
+   * this never *sets* the shared window size — `AdoptionService.liveClientSize`
+   * only ever reports what it already is, so a session that took over its
+   * own size (which itself already changed the real shared window to match)
+   * reads back the same value it already has and this is a no-op.
+   */
+  private async reconcileAdoptedSize(session: PtySession): Promise<void> {
+    const adoption = this.opts.adoption;
+    const targetId = session.spec.adoptTargetId;
+    if (!adoption || !targetId) return;
+    try {
+      const target = await adoption.resolve(targetId, true);
+      if (!target) return; // Pane is gone; nothing to reconcile against.
+      const expected = await adoption.liveClientSize(target);
+      if (session.resize(expected.cols, expected.rows)) {
+        this.persist(session);
+      }
+    } catch {
+      // Best-effort — see the fire-and-forget call site in `sweep`.
     }
   }
 

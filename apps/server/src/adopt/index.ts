@@ -295,7 +295,61 @@ export class AdoptionService {
     } catch {
       // No server, or nobody attached yet — fall through.
     }
-    return { cols: target.cols, rows: target.rows };
+    // Nobody attached: there is no other client's size to copy, so derive one
+    // from the window's own content area instead of returning it verbatim.
+    // Returning `target.cols`/`target.rows` unmodified here is exactly the
+    // "naive" mistake this function's own doc comment above describes:
+    // `#{window_width}`/`#{window_height}` already exclude the status line,
+    // so feeding it straight back in as a full client size makes tmux carve
+    // the status line's height out a second time, shrinking the window by
+    // however many rows the status line reserves. Verified against a real
+    // tmux server as the mechanism behind the status line settling one row
+    // above the client's true last row, with whatever was previously drawn
+    // there — a stale build-log line, most memorably — left untouched below
+    // it. `liveClientSize` adds those rows back so this is a real full-client
+    // height, not a content-area size masquerading as one.
+    return this.liveClientSize(target);
+  }
+
+  /**
+   * The full client PTY size that currently matches `target`'s live shared
+   * window: its content area (`target.cols`/`target.rows`) plus however many
+   * rows the status line presently reserves. Used both as the last-resort
+   * size for a brand-new attach (`sizeToAttachAt` above) and to catch an
+   * already-attached session's cached size back up to tmux's live state (see
+   * `SessionManager`'s adopted-size reconciliation) after some other client
+   * changes the shared window — `window-size=latest` means that can happen
+   * at any time, from a client this attach never saw.
+   */
+  async liveClientSize(target: AdoptableTarget): Promise<{ cols: number; rows: number }> {
+    const statusLines = await this.statusLines(target.socket, target.sessionName);
+    return { cols: target.cols, rows: target.rows + statusLines };
+  }
+
+  /**
+   * How many rows tmux's status line currently reserves for this session: 0
+   * when it is off, the configured count for a multi-line status (`status
+   * 2`..`5`), otherwise 1. `-A` resolves through to the global option when
+   * the session has not overridden it, matching what a real attach actually
+   * sees. Defaults to 1 (tmux's own out-of-the-box default) on any lookup
+   * failure rather than 0 — guessing "off" is exactly the shrink-by-one-row
+   * mistake this exists to avoid.
+   */
+  private async statusLines(socket: string, sessionName: string): Promise<number> {
+    try {
+      const { stdout } = await execFileAsync(
+        this.opts.bin,
+        ['-L', socket, 'show-options', '-t', `=${sessionName}`, '-A', 'status'],
+        { env: this.opts.env },
+      );
+      const value = stdout.trim().split(/\s+/)[1];
+      if (value === 'off') return 0;
+      if (value === undefined || value === 'on') return 1;
+      const n = Number.parseInt(value, 10);
+      return Number.isFinite(n) && n > 0 ? n : 1;
+    } catch {
+      return 1;
+    }
   }
 }
 

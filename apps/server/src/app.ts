@@ -170,6 +170,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     outputBufferBytes: config.outputBufferBytes,
     idleTimeoutSeconds: config.sessionIdleTimeoutSeconds,
     logger: app.log,
+    adoption,
     globalSkipPermissionsDefault: config.globalSkipPermissionsDefault,
     titleFor: (cwd, agentSessionId) => conversations.titleFor(cwd, agentSessionId),
   });
