@@ -138,6 +138,19 @@ export const AgentInfo = z.object({
 });
 export type AgentInfo = z.infer<typeof AgentInfo>;
 
+/**
+ * Working-tree/ahead-behind state for a project or worktree directory.
+ *
+ * `unpushed` covers both "no upstream configured" and "local commits ahead of
+ * it" — both mean the same thing to someone glancing at a folder icon: this
+ * work only exists on this machine. A repo that is only *behind* its upstream
+ * (nothing local to lose) reports `clean`, since nothing here is unpushed;
+ * that is a deliberate simplification, not an oversight — "needs a pull" is a
+ * different concern from "has changes only I have".
+ */
+export const GitStatus = z.enum(['clean', 'unpushed', 'dirty']);
+export type GitStatus = z.infer<typeof GitStatus>;
+
 export const WorkspaceEntry = z.object({
   /** Absolute, canonicalized path. */
   path: z.string(),
@@ -264,6 +277,14 @@ export interface ProjectInfo {
   workspaceLabel: string;
   isGitRepo: boolean;
   gitBranch: string | null;
+  /**
+   * Working-tree/ahead-behind state, or null when `isGitRepo` is false.
+   * Computed by actually spawning `git status` (unlike `gitBranch`, which is
+   * a raw `.git/HEAD` read) and cached for a while server-side — see
+   * `GitStatusTracker` — so it can lag a live change by up to that cache
+   * window rather than always being exact.
+   */
+  gitStatus: GitStatus | null;
   /** Excluded from the list unless explicitly asked for. */
   hidden: boolean;
   /**
@@ -284,6 +305,7 @@ export const ProjectInfo: z.ZodType<ProjectInfo> = z.lazy(() =>
     workspaceLabel: z.string(),
     isGitRepo: z.boolean(),
     gitBranch: z.string().nullable(),
+    gitStatus: GitStatus.nullable(),
     hidden: z.boolean(),
     isWorkspace: z.boolean(),
     chats: z.array(ChatSummary),

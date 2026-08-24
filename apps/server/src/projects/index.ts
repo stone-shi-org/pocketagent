@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { ChatSummary, HostInfo, ProjectInfo, SessionInfo } from '@pocketagent/protocol';
 import type { ConversationStore } from '../conversations/index.js';
+import { GitStatusTracker } from '../git/status.js';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
 import {
   AUTO_HIDDEN_DIRS,
@@ -35,6 +36,8 @@ export interface ProjectServiceOptions {
   conversationLimit?: number;
   /** See `Config.codeServerBaseUrl`. Null when not configured. */
   codeServerBaseUrl?: string | null;
+  /** Overridable in tests, so a scenario can force a fresh `git status` between two `list()` calls. */
+  gitStatusTtlMs?: number;
 }
 
 export class ProjectService {
@@ -45,6 +48,7 @@ export class ProjectService {
   private readonly hostname: string;
   private readonly conversationLimit: number;
   private readonly codeServerBaseUrl: string | null;
+  private readonly gitStatus: GitStatusTracker;
 
   constructor(options: ProjectServiceOptions) {
     this.workspaces = options.workspaces;
@@ -54,6 +58,7 @@ export class ProjectService {
     this.hostname = options.hostname ?? os.hostname();
     this.conversationLimit = options.conversationLimit ?? 60;
     this.codeServerBaseUrl = options.codeServerBaseUrl ?? null;
+    this.gitStatus = new GitStatusTracker(options.gitStatusTtlMs);
   }
 
   /**
@@ -172,6 +177,7 @@ export class ProjectService {
           workspaceLabel: 'Shell',
           isGitRepo: false,
           gitBranch: null,
+          gitStatus: null,
           hidden: false,
           isWorkspace: true,
           chats: shellChats,
@@ -193,12 +199,16 @@ export class ProjectService {
       const hidden = isHidden(cwd, visibility);
       if (hidden && !includeHidden) continue;
       chats.sort((a, b) => compareByRecency(chatSortKey(a), chatSortKey(b)));
+      const isRepo = await isGitRepo(cwd);
       drafts.push({
         cwd,
         name: path.basename(cwd) || cwd,
         workspaceLabel: this.workspaces.labelFor(cwd),
-        isGitRepo: await isGitRepo(cwd),
+        isGitRepo: isRepo,
         gitBranch: await readGitBranch(cwd),
+        // Only spawns `git status` for a directory already known to be a
+        // repo — an empty/non-repo folder never pays for the attempt.
+        gitStatus: isRepo ? await this.gitStatus.get(cwd) : null,
         hidden,
         isWorkspace: added.has(cwd),
         chats,

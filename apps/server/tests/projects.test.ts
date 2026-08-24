@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -498,6 +499,99 @@ describe('ProjectService', () => {
     fs.writeFileSync(path.join(ws.project, '.git', 'HEAD'), 'ref: refs/heads/main\n');
     const [project] = await service.list([makeSession({ cwd: ws.project })]);
     expect(project).toMatchObject({ isGitRepo: true, gitBranch: 'main' });
+  });
+
+  it('reports null gitStatus outside a repository, and never spawns git for it', async () => {
+    const [project] = await service.list([makeSession({ cwd: ws.project })]);
+    expect(project).toMatchObject({ isGitRepo: false, gitStatus: null });
+  });
+
+  describe('gitStatus', () => {
+    // Real repos, matching this codebase's preference (see `worktree.test.ts`)
+    // for spawning real git over faking `.git/HEAD` the way the branch tests
+    // above do — unlike the branch, status has no cheap file-based equivalent.
+    function initRepo(cwd: string): void {
+      execFileSync('git', ['init', '-q'], { cwd });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd });
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd });
+      fs.writeFileSync(path.join(cwd, 'file.txt'), 'one\n');
+      execFileSync('git', ['add', 'file.txt'], { cwd });
+      execFileSync('git', ['commit', '-q', '-m', 'initial'], { cwd });
+    }
+
+    // A fresh instance per test, with the cache TTL disabled so a second
+    // `list()` call always re-spawns `git status` instead of serving a
+    // stale answer — the point of the shared `service`'s default TTL is
+    // exactly the opposite of what these tests need to assert.
+    let liveService: ProjectService;
+    beforeEach(() => {
+      liveService = new ProjectService({
+        workspaces: new WorkspaceRegistry([ws.root]),
+        conversations: new ConversationStore({
+          projectsDir,
+          workspaces: new WorkspaceRegistry([ws.root]),
+          listRunningCwds: async () => [],
+        }),
+        db,
+        version: '9.9.9',
+        gitStatusTtlMs: 0,
+      });
+    });
+
+    it('reports unpushed for a repo with no remote configured', async () => {
+      initRepo(ws.project);
+      const [project] = await liveService.list([makeSession({ cwd: ws.project })]);
+      expect(project).toMatchObject({ isGitRepo: true, gitStatus: 'unpushed' });
+    });
+
+    it('reports dirty for an uncommitted change', async () => {
+      initRepo(ws.project);
+      fs.writeFileSync(path.join(ws.project, 'file.txt'), 'two\n');
+      const [project] = await liveService.list([makeSession({ cwd: ws.project })]);
+      expect(project).toMatchObject({ gitStatus: 'dirty' });
+    });
+
+    it('reports clean once pushed and in sync, then unpushed again after a new local commit', async () => {
+      const remote = fs.mkdtempSync('/tmp/pa-git-remote-');
+      execFileSync('git', ['init', '-q', '--bare'], { cwd: remote });
+      initRepo(ws.project);
+      execFileSync('git', ['remote', 'add', 'origin', remote], { cwd: ws.project });
+      const branch = execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: ws.project })
+        .toString()
+        .trim();
+      execFileSync('git', ['push', '-q', '-u', 'origin', branch], { cwd: ws.project });
+
+      try {
+        const [clean] = await liveService.list([makeSession({ cwd: ws.project })]);
+        expect(clean).toMatchObject({ gitStatus: 'clean' });
+
+        fs.writeFileSync(path.join(ws.project, 'file.txt'), 'two\n');
+        execFileSync('git', ['commit', '-qam', 'second'], { cwd: ws.project });
+        const [ahead] = await liveService.list([makeSession({ cwd: ws.project })]);
+        expect(ahead).toMatchObject({ gitStatus: 'unpushed' });
+      } finally {
+        fs.rmSync(remote, { recursive: true, force: true });
+      }
+    });
+
+    it('gives a folded worktree its own independent gitStatus', async () => {
+      initRepo(ws.project);
+      const worktreePath = path.join(ws.project, '.worktrees', 'feature-x');
+      execFileSync('git', ['worktree', 'add', '-b', 'feature-x', worktreePath], { cwd: ws.project });
+      // Real worktree creation (`WorktreeService.create`) excludes `.worktrees/`
+      // from the main checkout's own `git status` — without it, the nested
+      // worktree directory would read as an untracked change of the *main*
+      // repo, which is exactly the cosmetic problem that exclude exists to avoid.
+      fs.writeFileSync(path.join(ws.project, '.git', 'info', 'exclude'), '.worktrees/\n');
+      fs.writeFileSync(path.join(worktreePath, 'file.txt'), 'edited in the worktree\n');
+
+      const [project] = await liveService.list([
+        makeSession({ id: 'main', cwd: ws.project }),
+        makeSession({ id: 'wt', cwd: worktreePath }),
+      ]);
+      expect(project).toMatchObject({ gitStatus: 'unpushed' });
+      expect(project?.worktrees[0]).toMatchObject({ cwd: worktreePath, gitStatus: 'dirty' });
+    });
   });
 
   describe('folding worktrees into their main checkout', () => {

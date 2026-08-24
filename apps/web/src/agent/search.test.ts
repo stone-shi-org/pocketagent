@@ -28,6 +28,7 @@ function project(name: string, titles: string[], worktrees: ProjectInfo[] = []):
     workspaceLabel: name,
     isGitRepo: false,
     gitBranch: null,
+    gitStatus: null,
     hidden: false,
     isWorkspace: true,
     chats: titles.map(chat),

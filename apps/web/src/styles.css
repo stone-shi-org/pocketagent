@@ -1862,6 +1862,37 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   opacity: 0.9;
 }
 
+/* Wraps the folder/branch icon so a git-status dot can pin to its corner.
+   Purely a positioning box — `.icon.folder` sizing rules (including the
+   `.sidebar` override below) still apply through it via descendant
+   selectors, since this adds a wrapper, not a replacement. */
+.project-icon {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+/* Attention-only, the same rule `.live-dot` already follows: a clean,
+   fully-pushed repo shows nothing here — the dot exists to be noticed on the
+   two states that want a glance, not to also confirm the common case. */
+.git-status-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--bg);
+}
+
+.git-status-dot--dirty {
+  background: var(--danger);
+}
+
+.git-status-dot--unpushed {
+  background: var(--idle);
+}
+
 .project-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2584,6 +2615,17 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 .sidebar .project-name .icon.folder {
   width: 17px;
   height: 17px;
+}
+
+/* Smaller icon, smaller dot, and the ring matches the sidebar's own
+   background (`--bg-elev`) rather than the main list's `--bg` — see
+   `.git-status-dot` above. */
+.sidebar .git-status-dot {
+  width: 7px;
+  height: 7px;
+  right: -1px;
+  bottom: -1px;
+  border-color: var(--bg-elev);
 }
 
 .sidebar .project-caret {

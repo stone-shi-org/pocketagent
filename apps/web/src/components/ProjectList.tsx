@@ -10,6 +10,16 @@ const REFRESH_MS = 5000;
 const CHAT_PAGE_SIZE = 5;
 
 /**
+ * Labels for the two `GitStatus` values that actually render a dot — `clean`
+ * shows nothing at all, same as a chat row with no `live-dot` (see the corner
+ * dot's own comment in styles.css for why absence is the point).
+ */
+const GIT_STATUS_LABEL: Record<'dirty' | 'unpushed', string> = {
+  dirty: 'Uncommitted changes',
+  unpushed: 'Commits not pushed',
+};
+
+/**
  * A deep link into code-server for a project's folder, or null if no
  * code-server base URL is configured for this host (`HostInfo.codeServerBaseUrl`)
  * — see `POCKETAGENT_CODE_SERVER_URL` in `.env.example`. code-server opens the
@@ -488,7 +498,17 @@ function ProjectSection({
           onClick={() => toggle(project.cwd)}
           aria-expanded={!isCollapsed}
         >
-          <Icon name={project.cwd === 'virtual:shell' ? 'agent-shell' : nested ? 'branch' : 'folder'} className="folder" />
+          <span className="project-icon">
+            <Icon name={project.cwd === 'virtual:shell' ? 'agent-shell' : nested ? 'branch' : 'folder'} className="folder" />
+            {project.gitStatus && project.gitStatus !== 'clean' && (
+              <span
+                className={`git-status-dot git-status-dot--${project.gitStatus}`}
+                role="img"
+                aria-label={GIT_STATUS_LABEL[project.gitStatus]}
+                title={GIT_STATUS_LABEL[project.gitStatus]}
+              />
+            )}
+          </span>
           <span className="project-label">
             {nested ? project.gitBranch ?? project.name : project.name}
           </span>
