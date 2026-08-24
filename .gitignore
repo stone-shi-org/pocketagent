@@ -1,4 +1,5 @@
 node_modules/
+.pocketagent/
 dist/
 data/
 *.log
