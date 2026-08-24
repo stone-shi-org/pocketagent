@@ -13,6 +13,8 @@ export interface CreateBackendOptions {
   /** Sanitized environment for the tmux server. */
   serverEnv?: Record<string, string>;
   logger?: { warn: (o: object, m?: string) => void; info: (o: object, m?: string) => void };
+  /** See `TmuxBackendOptions.sessionScopeSlice`. */
+  tmuxSessionScopeSlice?: string;
 }
 
 export function createBackend(options: CreateBackendOptions): ProcessBackend {
@@ -22,6 +24,7 @@ export function createBackend(options: CreateBackendOptions): ProcessBackend {
       ...(options.tmuxSocket !== undefined ? { socket: options.tmuxSocket } : {}),
       ...(options.serverEnv !== undefined ? { serverEnv: options.serverEnv } : {}),
       ...(options.logger !== undefined ? { logger: options.logger } : {}),
+      ...(options.tmuxSessionScopeSlice !== undefined ? { sessionScopeSlice: options.tmuxSessionScopeSlice } : {}),
     });
   }
   return new DirectPtyBackend();

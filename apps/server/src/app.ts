@@ -130,6 +130,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     // must never see the master token.
     serverEnv: buildChildEnv({ cwd: config.workspaceRoots[0] ?? process.cwd() }),
     logger: app.log,
+    ...(config.tmuxSessionScopeSlice !== null ? { tmuxSessionScopeSlice: config.tmuxSessionScopeSlice } : {}),
   });
 
   const backendStatus = await backend.checkAvailable();

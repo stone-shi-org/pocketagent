@@ -38,7 +38,15 @@ export class CodexServerManager extends EventEmitter<{ crashed: [] }> {
 
   async ensureStarted(): Promise<void> {
     if (this.ready) return;
-    if (!this.starting) this.starting = this.spawnAndInitialize();
+    // Cleared once this attempt settles, success or failure, so a later
+    // crash (child exits after `ready` was true) or a failed spawn both
+    // leave the next call free to retry instead of replaying a stale
+    // rejected promise forever.
+    if (!this.starting) {
+      this.starting = this.spawnAndInitialize().finally(() => {
+        this.starting = null;
+      });
+    }
     return this.starting;
   }
 

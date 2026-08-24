@@ -90,6 +90,14 @@ const RawEnv = z.object({
   POCKETAGENT_TMUX_BIN: z.string().default('tmux'),
   POCKETAGENT_TMUX_SOCKET: z.string().default('pocketagent'),
   POCKETAGENT_ADOPT_TMUX_SOCKET: z.string().default(''),
+
+  /**
+   * systemd slice to start the tmux server's own transient scope in (via
+   * `systemd-run --user --scope`), instead of as a direct child of this
+   * process. See `Config.tmuxSessionScopeSlice`. Empty disables it — the
+   * tmux server is then just a normal child, as it always was.
+   */
+  POCKETAGENT_TMUX_SESSION_SCOPE_SLICE: z.string().default(''),
 });
 
 export interface Config {
@@ -134,6 +142,18 @@ export interface Config {
    * user's own server. Empty disables adoption.
    */
   adoptTmuxSocket: string;
+  /**
+   * When set, the tmux backend's server is started inside a transient
+   * `systemd-run --user --scope` unit under this slice rather than as a
+   * direct child of this process. Without it, the server (and everything
+   * anyone later forks inside it — the whole point of a backend that
+   * survives a restart) stays glued to this process's own cgroup forever,
+   * across every future restart, since cgroup membership is inherited on
+   * fork and nothing here ever moves a process out of it. null outside of
+   * a systemd-managed deployment, where there is no such user manager to
+   * delegate to.
+   */
+  tmuxSessionScopeSlice: string | null;
   /** VAPID `sub` claim: a mailto: or https: URL identifying this deployment. */
   pushContact: string;
   /** True when bound to something other than loopback. */
@@ -276,6 +296,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     tmuxBin: e.POCKETAGENT_TMUX_BIN.trim(),
     tmuxSocket: e.POCKETAGENT_TMUX_SOCKET.trim(),
     adoptTmuxSocket: e.POCKETAGENT_ADOPT_TMUX_SOCKET.trim(),
+    tmuxSessionScopeSlice: e.POCKETAGENT_TMUX_SESSION_SCOPE_SLICE.trim() || null,
     pushContact: e.POCKETAGENT_PUSH_CONTACT.trim(),
     isNetworkExposed,
     codeServerBaseUrl: e.POCKETAGENT_CODE_SERVER_URL?.trim() || null,

@@ -23,6 +23,25 @@ export interface TmuxBackendOptions {
   /** Base environment for the tmux server. Must already be sanitized. */
   serverEnv?: Record<string, string>;
   logger?: { warn: (o: object, m?: string) => void; info: (o: object, m?: string) => void };
+  /**
+   * When set, the one tmux invocation that starts the server (see
+   * `ensureServer`) runs inside a transient `systemd-run --user --scope`
+   * unit under this slice instead of as a direct child of this process.
+   *
+   * The server is deliberately long-lived — that's the entire point of this
+   * backend — but cgroup membership is inherited on fork and nothing ever
+   * moves a process out of one, so without this the daemon (and every agent,
+   * shell, or stray process anyone forks inside it for as long as the
+   * machine stays up) is billed to this service's own cgroup forever, across
+   * every future restart. `systemd-run` places it under the user's systemd
+   * instance instead, where it belongs.
+   *
+   * Off by default: this requires a running systemd `--user` manager for
+   * whichever user runs this process, which tests and non-systemd hosts
+   * don't have. Every tmux call *after* this one just talks to the already-
+   * running daemon over its socket and needs no such wrapping.
+   */
+  sessionScopeSlice?: string;
 }
 
 interface PaneState {
@@ -187,6 +206,7 @@ export class TmuxBackend implements ProcessBackend {
   private readonly socket: string;
   private readonly serverEnv: Record<string, string>;
   private readonly logger: TmuxBackendOptions['logger'];
+  private readonly sessionScopeSlice: string | null;
 
   private readonly handles = new Map<string, TmuxProcessHandle>();
   private poller: NodeJS.Timeout | null = null;
@@ -197,6 +217,7 @@ export class TmuxBackend implements ProcessBackend {
     this.socket = options.socket ?? 'pocketagent';
     this.serverEnv = options.serverEnv ?? {};
     this.logger = options.logger;
+    this.sessionScopeSlice = options.sessionScopeSlice ?? null;
   }
 
   private socketArgs(): string[] {
@@ -209,6 +230,36 @@ export class TmuxBackend implements ProcessBackend {
       env: this.serverEnv,
       maxBuffer: 16 * 1024 * 1024,
     });
+    return stdout;
+  }
+
+  /**
+   * Runs the single tmux invocation responsible for creating the server if
+   * it doesn't already exist (see `ensureServer`). When `sessionScopeSlice`
+   * is set, wraps it in `systemd-run --user --scope` so the daemon tmux
+   * forks off lands in that scope's cgroup rather than this process's own —
+   * see `TmuxBackendOptions.sessionScopeSlice` for why that matters. A no-op
+   * reconnect to an already-running server (the common case across restarts)
+   * still goes through the wrapper harmlessly; it only matters the first
+   * time a given server actually gets created.
+   */
+  private async startServer(args: string[]): Promise<string> {
+    if (!this.sessionScopeSlice) return this.tmux(args);
+    const { stdout } = await execFileAsync(
+      'systemd-run',
+      [
+        '--user',
+        '--scope',
+        '--quiet',
+        '--collect',
+        `--slice=${this.sessionScopeSlice}`,
+        '--',
+        this.bin,
+        ...this.socketArgs(),
+        ...args,
+      ],
+      { env: this.serverEnv, maxBuffer: 16 * 1024 * 1024 },
+    );
     return stdout;
   }
 
@@ -243,7 +294,7 @@ export class TmuxBackend implements ProcessBackend {
    */
   private async ensureServer(): Promise<void> {
     if (this.serverReady) return;
-    await this.tmux([
+    await this.startServer([
       'start-server',
       ';',
       'set-option', '-g', 'exit-empty', 'off',
