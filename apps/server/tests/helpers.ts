@@ -6,6 +6,7 @@ import { buildApp } from '../src/app.js';
 import { loadConfig, type Config } from '../src/config/index.js';
 import { openDatabase, type Db } from '../src/db/index.js';
 import type { AgyTranscriptStore } from '../src/conversations/agy.js';
+import type { PiTranscriptStore } from '../src/conversations/pi.js';
 import type { PocketContext } from '../src/types.js';
 
 export const TEST_TOKEN = 'test-token-that-is-long-enough-1234567890';
@@ -49,6 +50,8 @@ export async function createTestApp(
   existingDb?: Db,
   /** Injected so a test can point agy history reads at a fixture directory instead of a real `~/.gemini`. */
   agyTranscripts?: AgyTranscriptStore,
+  /** Injected so a test can point pi history reads at a fixture directory instead of a real `~/.pi`. */
+  piTranscripts?: PiTranscriptStore,
 ): Promise<TestApp> {
   const ws = makeWorkspace();
   const config = makeConfig({
@@ -56,7 +59,7 @@ export async function createTestApp(
     ...configOverrides,
   });
   const db = existingDb ?? openDatabase(':memory:');
-  const { app, context } = await buildApp({ config, db, agyTranscripts, serveStatic: false });
+  const { app, context } = await buildApp({ config, db, agyTranscripts, piTranscripts, serveStatic: false });
   await app.ready();
 
   const login = await app.inject({

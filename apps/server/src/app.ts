@@ -26,6 +26,7 @@ import { buildChildEnv } from './sessions/env.js';
 import { PushService } from './push/index.js';
 import { ConversationStore } from './conversations/index.js';
 import { AgyTranscriptStore } from './conversations/agy.js';
+import { PiTranscriptStore } from './conversations/pi.js';
 import { AdoptionService } from './adopt/index.js';
 import { ProjectService } from './projects/index.js';
 import { WorktreeService } from './git/worktree.js';
@@ -56,6 +57,8 @@ export interface BuildAppOptions {
   db?: Db;
   /** Injected in tests to point at a fixture directory instead of a real `~/.gemini`. */
   agyTranscripts?: AgyTranscriptStore;
+  /** Injected in tests to point at a fixture directory instead of a real `~/.pi`. */
+  piTranscripts?: PiTranscriptStore;
   serveStatic?: boolean;
 }
 
@@ -142,6 +145,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const childEnv = buildChildEnv({ cwd: config.workspaceRoots[0] ?? process.cwd() });
   const conversations = new ConversationStore({ workspaces });
   const agyTranscripts = options.agyTranscripts ?? new AgyTranscriptStore();
+  const piTranscripts = options.piTranscripts ?? new PiTranscriptStore();
   const adoption = new AdoptionService({
     socket: config.adoptTmuxSocket,
     bin: config.tmuxBin,
@@ -217,6 +221,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     push,
     conversations,
     agyTranscripts,
+    piTranscripts,
     adoption,
     projects,
     usage,

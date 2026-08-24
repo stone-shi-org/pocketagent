@@ -1,13 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { SessionInfo } from '@pocketagent/protocol';
 import { ProjectService, VIRTUAL_SHELL_CWD, findMainRepoCwd, readGitBranch } from '../src/projects/index.js';
 import { ConversationStore, encodeProjectDir } from '../src/conversations/index.js';
 import { AgyTranscriptStore } from '../src/conversations/agy.js';
+import { PiTranscriptStore } from '../src/conversations/pi.js';
 import { hideChat, openDatabase } from '../src/db/index.js';
 import { WorkspaceRegistry } from '../src/workspaces/index.js';
 import { createTestApp, makeWorkspace, waitFor, type TestApp } from './helpers.js';
+
+const OPENCODE_FIXTURE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'fixtures/fake-opencode-server.mjs',
+);
+const CODEX_FIXTURE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'fixtures/fake-codex-app-server.mjs',
+);
 
 function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
   return {
@@ -820,6 +831,103 @@ describe('GET /api/sessions/:id/history', () => {
     } finally {
       fs.rmSync(brainDir, { recursive: true, force: true });
     }
+  });
+
+  it("reads a pi session's own local transcript instead of the Claude-only ConversationStore", async () => {
+    const sessionsDir = fs.mkdtempSync('/tmp/pa-pi-sessions-route-');
+    try {
+      // `insertFinishedStructuredSession` records `t.projectDir` as the
+      // session's own cwd — `PiTranscriptStore` needs that exact cwd to find
+      // the right project directory, the same way a real resume would.
+      const withPi = await createTestApp({}, undefined, undefined, new PiTranscriptStore({ sessionsDir }));
+      try {
+        const dir = path.join(
+          sessionsDir,
+          `--${withPi.projectDir.replace(/^\//, '').replace(/\//g, '-')}--`,
+        );
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(
+          path.join(dir, '2026-08-14T18-05-57-898Z_pi-convo-id.jsonl'),
+          [
+            JSON.stringify({ type: 'session', version: 3, id: 'pi-convo-id', timestamp: '2026-08-14T18:05:57.898Z', cwd: withPi.projectDir }),
+            JSON.stringify({ type: 'message', id: 'm1', parentId: null, timestamp: '2026-08-14T18:05:57.971Z', message: { role: 'user', content: 'what happened here?' } }),
+            JSON.stringify({ type: 'message', id: 'm2', parentId: 'm1', timestamp: '2026-08-14T18:05:58.971Z', message: { role: 'assistant', content: [{ type: 'text', text: 'Here is what happened.' }] } }),
+          ].join('\n'),
+        );
+
+        insertFinishedStructuredSession(withPi, 'pi-chat', 'pi', 'pi-convo-id');
+        const res = await withPi.app.inject({
+          method: 'GET',
+          url: '/api/sessions/pi-chat/history',
+          headers: { cookie: withPi.cookie },
+        });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body.conversationId).toBe('pi-convo-id');
+        expect(body.events).toEqual([
+          { kind: 'user_prompt', id: 'pi_hist_0', text: 'what happened here?' },
+          { kind: 'text', id: 'pi_hist_1_0', text: 'Here is what happened.' },
+          {
+            kind: 'turn_complete',
+            stopReason: null,
+            isError: false,
+            numTurns: null,
+            durationMs: null,
+            costUsd: null,
+            inputTokens: null,
+            outputTokens: null,
+          },
+        ]);
+      } finally {
+        await withPi.cleanup();
+      }
+    } finally {
+      fs.rmSync(sessionsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a codex session's history over the shared app-server instead of the Claude-only ConversationStore", async () => {
+    // See tests/fixtures/fake-codex-app-server.mjs: `thread/resume` always
+    // returns one canned turn with real content, regardless of threadId.
+    const withCodex = await createTestApp({ POCKETAGENT_CODEX_BIN: CODEX_FIXTURE });
+    insertFinishedStructuredSession(withCodex, 'codex-chat', 'codex', 'thread_existing');
+    const res = await withCodex.app.inject({
+      method: 'GET',
+      url: '/api/sessions/codex-chat/history',
+      headers: { cookie: withCodex.cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.conversationId).toBe('thread_existing');
+    expect(body.events).toEqual(
+      expect.arrayContaining([
+        { kind: 'user_prompt', id: 'item_hist_1', text: 'what does this repo do?' },
+        { kind: 'text', id: 'item_hist_2', text: 'It is a remote-control server for coding agents.' },
+      ]),
+    );
+    await withCodex.cleanup();
+  });
+
+  it("reads an opencode session's history over the shared server instead of the Claude-only ConversationStore", async () => {
+    // See tests/fixtures/fake-opencode-server.mjs: `GET /session/:id/message`
+    // always returns the same canned history, regardless of session id.
+    const withOpencode = await createTestApp({ POCKETAGENT_OPENCODE_BIN: OPENCODE_FIXTURE });
+    insertFinishedStructuredSession(withOpencode, 'opencode-chat', 'opencode', 'ses_existing');
+    const res = await withOpencode.app.inject({
+      method: 'GET',
+      url: '/api/sessions/opencode-chat/history',
+      headers: { cookie: withOpencode.cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.conversationId).toBe('ses_existing');
+    expect(body.events).toEqual(
+      expect.arrayContaining([
+        { kind: 'user_prompt', id: 'msg_hist_u', text: 'what is in this dir?' },
+        { kind: 'text', id: 'prt_hist_text', text: 'Just file.txt.' },
+      ]),
+    );
+    await withOpencode.cleanup();
   });
 });
 

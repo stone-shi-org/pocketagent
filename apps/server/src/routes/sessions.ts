@@ -5,6 +5,7 @@ import {
   ProjectRequest,
   RemoveChatRequest,
   WorkspaceRequest,
+  type AgentEvent,
 } from '@pocketagent/protocol';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,7 +17,8 @@ import { VIRTUAL_SHELL_CWD } from '../projects/index.js';
 import { resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
-  const { sessions, workspaces, agents, conversations, agyTranscripts, adoption, projects } = app.pocket;
+  const { sessions, workspaces, agents, conversations, agyTranscripts, piTranscripts, adoption, projects } =
+    app.pocket;
 
   app.get('/api/agents', async () => ({ agents: agents.list() }));
 
@@ -343,26 +345,48 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
    *
    * Which store reads it back depends on the agent, since each keeps its own
    * transcript in a different place and shape: `ConversationStore` only ever
-   * finds Claude's `~/.claude/projects/**.jsonl`; agy mirrors conversations
-   * locally too, just under `~/.gemini/antigravity-cli/brain/<id>/...`, in a
-   * format `ConversationStore` cannot parse (`AgyTranscriptStore` doc
-   * comment). Every other backend has no known on-disk mirror yet, so this
-   * falls through to the same "no history, still works" outcome as ever.
+   * finds Claude's `~/.claude/projects/**.jsonl`; agy and pi each mirror
+   * conversations locally too, agy under
+   * `~/.gemini/antigravity-cli/brain/<id>/...` and pi under
+   * `~/.pi/agent/sessions/<encoded-cwd>/...`, in formats `ConversationStore`
+   * cannot parse (`AgyTranscriptStore`/`PiTranscriptStore` doc comments).
+   * codex and opencode have no on-disk format worth reading directly (codex's
+   * own rollout format is an internal, unstable implementation detail; see
+   * `SessionManager.codexHistory`'s doc comment) — those two instead read
+   * back through the same shared daemon process a live session would talk
+   * to, lazily started if needed.
    */
   app.get<{ Params: { id: string } }>('/api/sessions/:id/history', async (request, reply) => {
     const resumedFrom = sessions.resumedConversationId(request.params.id);
     if (!resumedFrom) return reply.send({ events: [] });
 
     const info = sessions.find(request.params.id);
-    const events =
-      info?.agent === 'agy'
-        ? await agyTranscripts.history(resumedFrom)
-        : ((await conversations.history(resumedFrom)) ?? []);
+    const events = await historyForAgent(info?.agent, resumedFrom, info?.cwd);
     // The transcript is gone, unreadable, or (for `conversations`) outside a
     // workspace root. Not fatal either way: the session still works, it just
     // opens without its backstory.
     return reply.send({ conversationId: resumedFrom, events });
   });
+
+  /** See the `/api/sessions/:id/history` route above for why the store differs per agent. */
+  async function historyForAgent(
+    agent: string | undefined,
+    conversationId: string,
+    cwd: string | undefined,
+  ): Promise<AgentEvent[]> {
+    switch (agent) {
+      case 'agy':
+        return agyTranscripts.history(conversationId);
+      case 'pi':
+        return cwd ? piTranscripts.history(conversationId, cwd) : [];
+      case 'codex':
+        return sessions.codexHistory(conversationId);
+      case 'opencode':
+        return sessions.opencodeHistory(conversationId);
+      default:
+        return (await conversations.history(conversationId)) ?? [];
+    }
+  }
 
   app.get<{ Params: { id: string } }>('/api/sessions/:id', async (request, reply) => {
     const info = sessions.find(request.params.id);

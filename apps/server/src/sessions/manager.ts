@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import type { SessionInfo, SessionStatus, SessionTransport } from '@pocketagent/protocol';
+import type { AgentEvent, SessionInfo, SessionStatus, SessionTransport } from '@pocketagent/protocol';
 import type { Db, SessionRow } from '../db/index.js';
 import {
   GLOBAL_SKIP_PERMISSIONS_KEY,
@@ -23,6 +23,7 @@ import { CodexSession } from './codex-session.js';
 import { CodexServerManager } from './codex-server.js';
 import { PiSession } from './pi-session.js';
 import { buildChildEnv } from './env.js';
+import { codexHistoryEvents, opencodeHistoryEvents } from './normalize.js';
 
 /**
  * Any engine behind the `structured` transport. `StructuredSession` holds the
@@ -988,6 +989,77 @@ export class SessionManager {
 
     const env = buildChildEnv({ cwd, overrides: built.env });
     return this.getOrCreateCodexServer(executable, env);
+  }
+
+  /**
+   * The same shared `opencode serve` process a real `OpencodeSession` would
+   * use, for reading a session's history when it has none of its own left —
+   * see `opencodeHistory` below. Same "started on first call, null when the
+   * binary is not configured" contract as `getCodexServerForUsage`.
+   */
+  private getOpencodeServerForHistory(): OpencodeServerManager | null {
+    const adapter = this.opts.agents.get('opencode');
+    if (!adapter) return null;
+
+    const cwd = this.opts.workspaces.getRoots()[0] ?? process.cwd();
+    const built = adapter.buildCommand({ cwd, cols: 80, rows: 24, skipPermissions: false });
+    const executable = resolveExecutable(built.command);
+    if (!executable) return null;
+
+    const env = buildChildEnv({ cwd, overrides: built.env });
+    return this.getOrCreateOpencodeServer(executable, env);
+  }
+
+  /**
+   * Prior conversation for a codex thread that has no live `EventBuffer`
+   * left to read — evicted after the idle grace window (`sweep()`), or lost
+   * across a server restart (`this.live` starts empty on boot). This is a
+   * *different* gap from `CodexSession.start()`'s own history backfill: that
+   * one only fires while a resumed session is actually being created; this
+   * one is for reopening a session that already exists and is not being
+   * resumed by anyone right now — `routes/sessions.ts`'s `/history` route is
+   * the only caller.
+   *
+   * codex's own on-disk rollout format is an internal, explicitly
+   * "[UNSTABLE]" implementation detail (confirmed against the real,
+   * installed app-server's own generated JSON schema: `Thread.path`'s doc
+   * string) and an entirely different, lower-level shape than the
+   * `ThreadItem`s `codexHistoryEvents` already knows how to read — so rather
+   * than parse that file directly, this reads codex's history the same way
+   * a live resume does, over `thread/resume`'s own RPC, via the same shared
+   * process `getCodexServerForUsage` already uses for account-level reads.
+   * `[]` on any failure (binary not configured, unknown thread, RPC error) —
+   * same "no history, still works" contract as every other transcript
+   * source in this codebase.
+   */
+  async codexHistory(threadId: string): Promise<AgentEvent[]> {
+    const server = this.getCodexServerForUsage();
+    if (!server) return [];
+    try {
+      const result = await server.sendRequest<{ thread?: { turns?: unknown } }>('thread/resume', { threadId });
+      return codexHistoryEvents(result.thread?.turns ?? null);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Prior conversation for an opencode session with no live `EventBuffer`
+   * left — same reasoning and same distinction from `OpencodeSession.start()`'s
+   * own backfill as `codexHistory`'s doc comment above. Reads via
+   * `GET /session/{id}/message` on the shared `opencode serve` process,
+   * confirmed to be scoped purely by session id — unlike `/event`'s SSE
+   * stream, no `directory` query param is needed to get a real answer back.
+   */
+  async opencodeHistory(sessionId: string): Promise<AgentEvent[]> {
+    const server = this.getOpencodeServerForHistory();
+    if (!server) return [];
+    try {
+      const raw = await server.request<unknown>(`/session/${sessionId}/message`, { method: 'GET' });
+      return opencodeHistoryEvents(raw);
+    } catch {
+      return [];
+    }
   }
 
   /**

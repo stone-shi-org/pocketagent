@@ -8,6 +8,7 @@ import type { Db } from './db/index.js';
 import type { PushService } from './push/index.js';
 import type { ConversationStore } from './conversations/index.js';
 import type { AgyTranscriptStore } from './conversations/agy.js';
+import type { PiTranscriptStore } from './conversations/pi.js';
 import type { AdoptionService } from './adopt/index.js';
 import type { ProjectService } from './projects/index.js';
 import type { UsageService } from './usage/index.js';
@@ -24,6 +25,7 @@ export interface PocketContext {
   push: PushService;
   conversations: ConversationStore;
   agyTranscripts: AgyTranscriptStore;
+  piTranscripts: PiTranscriptStore;
   adoption: AdoptionService;
   projects: ProjectService;
   usage: UsageService;
