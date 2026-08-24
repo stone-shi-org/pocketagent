@@ -103,6 +103,32 @@ describe('OpencodeSession', () => {
     expect(session.agentSessionId).toMatch(/^ses_test/);
   });
 
+  it('backfills prior conversation via GET /session/:id/message when resuming, before start() resolves', async () => {
+    server = makeServer();
+    session = new OpencodeSession(makeSpec({ resumeAgentSessionId: 'ses_existing' }), server);
+    const events = collect(session);
+    await session.start();
+
+    // Awaited inside start() — no waitFor needed, unlike fetchInitialCommands/
+    // fetchInitialModels (the two fire-and-forget calls this start() also
+    // kicks off).
+    expect(events.find((e) => e.kind === 'user_prompt')).toMatchObject({ text: 'what is in this dir?' });
+    expect(events.find((e) => e.kind === 'tool_use')).toMatchObject({ name: 'bash', input: { command: 'ls' } });
+    expect(events.find((e) => e.kind === 'tool_result')).toMatchObject({ content: 'file.txt\n', isError: false });
+    expect(events.find((e) => e.kind === 'text')).toMatchObject({ text: 'Just file.txt.' });
+    expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({ stopReason: null, isError: false });
+    expect(session.busy).toBe(false);
+  });
+
+  it('does not backfill history for a brand-new session with nothing to resume', async () => {
+    server = makeServer();
+    session = new OpencodeSession(makeSpec(), server);
+    const events = collect(session);
+    await session.start();
+
+    expect(events.some((e) => e.kind === 'user_prompt')).toBe(false);
+  });
+
   it('learns the command list at start via GET /command', async () => {
     server = makeServer();
     session = new OpencodeSession(makeSpec(), server);

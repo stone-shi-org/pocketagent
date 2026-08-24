@@ -99,6 +99,31 @@ describe('CodexSession', () => {
     expect(events.find((e) => e.kind === 'session_started')).toMatchObject({ model: 'gpt-5.6-terra' });
   });
 
+  it('backfills prior conversation from thread/resume when resuming, before start() resolves', async () => {
+    server = makeServer();
+    session = new CodexSession(makeSpec({ resumeAgentSessionId: 'thread_existing' }), server);
+    const events = collect(session);
+    await session.start();
+
+    // Awaited inside start() — no waitFor needed, unlike fetchInitialModels
+    // (the only fire-and-forget call this start() also kicks off).
+    expect(events.find((e) => e.kind === 'user_prompt')).toMatchObject({ text: 'what does this repo do?' });
+    expect(events.find((e) => e.kind === 'text')).toMatchObject({
+      text: 'It is a remote-control server for coding agents.',
+    });
+    expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({ stopReason: null, isError: false });
+    expect(session.busy).toBe(false);
+  });
+
+  it('does not backfill history for a brand-new thread with nothing to resume', async () => {
+    server = makeServer();
+    session = new CodexSession(makeSpec(), server);
+    const events = collect(session);
+    await session.start();
+
+    expect(events.some((e) => e.kind === 'user_prompt')).toBe(false);
+  });
+
   it('runs one turn end to end: user_prompt, tool_use/result, text, turn_complete with usage', async () => {
     server = makeServer();
     session = new CodexSession(makeSpec(), server);

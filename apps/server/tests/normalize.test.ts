@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  codexHistoryEvents,
   createBackgroundTaskState,
   extractAgyPath,
   extractOpencodePath,
@@ -18,6 +19,8 @@ import {
   normalizePiModelValue,
   normalizeSdkMessage,
   normalizeSlashCommands,
+  opencodeHistoryEvents,
+  piHistoryEvents,
   reconcileBackgroundTasks,
   summarizeAgyTool,
   summarizeOpencodeTool,
@@ -1684,5 +1687,246 @@ describe('normalizePiModelValue', () => {
     expect(normalizePiModelValue({})).toBeNull();
     expect(normalizePiModelValue(null)).toBeNull();
     expect(normalizePiModelValue('nope')).toBeNull();
+  });
+});
+
+describe('opencodeHistoryEvents', () => {
+  it('reconstructs a user prompt, a completed tool call, and a final answer, closed by one turn_complete', () => {
+    const events = opencodeHistoryEvents([
+      {
+        info: { id: 'msg_u', role: 'user' },
+        parts: [{ id: 'prt_u', type: 'text', text: 'what is in this dir?' }],
+      },
+      {
+        info: { id: 'msg_a', role: 'assistant' },
+        parts: [
+          {
+            id: 'prt_tool',
+            type: 'tool',
+            callID: 'prt_tool',
+            tool: 'bash',
+            state: { status: 'completed', input: { command: 'ls' }, output: 'file.txt\n' },
+          },
+          { id: 'prt_text', type: 'text', text: 'Just file.txt.' },
+        ],
+      },
+    ]);
+
+    expect(events).toEqual([
+      { kind: 'user_prompt', id: 'msg_u', text: 'what is in this dir?' },
+      {
+        kind: 'tool_use',
+        id: 'prt_tool',
+        name: 'bash',
+        input: { command: 'ls' },
+        summary: 'Run ls',
+        filePath: null,
+      },
+      {
+        kind: 'tool_result',
+        id: 'oc_hist_tr_prt_tool',
+        toolUseId: 'prt_tool',
+        content: 'file.txt\n',
+        truncated: false,
+        isError: false,
+      },
+      { kind: 'text', id: 'prt_text', text: 'Just file.txt.' },
+      {
+        kind: 'turn_complete',
+        stopReason: null,
+        isError: false,
+        numTurns: null,
+        durationMs: null,
+        costUsd: null,
+        inputTokens: null,
+        outputTokens: null,
+      },
+    ]);
+  });
+
+  it('closes out one turn before opening the next when there is more than one', () => {
+    const events = opencodeHistoryEvents([
+      { info: { id: 'msg_u1', role: 'user' }, parts: [{ type: 'text', text: 'first' }] },
+      { info: { id: 'msg_a1', role: 'assistant' }, parts: [{ id: 'p1', type: 'text', text: 'one' }] },
+      { info: { id: 'msg_u2', role: 'user' }, parts: [{ type: 'text', text: 'second' }] },
+      { info: { id: 'msg_a2', role: 'assistant' }, parts: [{ id: 'p2', type: 'text', text: 'two' }] },
+    ]);
+    expect(events.map((e) => e.kind)).toEqual([
+      'user_prompt',
+      'text',
+      'turn_complete',
+      'user_prompt',
+      'text',
+      'turn_complete',
+    ]);
+  });
+
+  it('drops an in-progress tool call and unknown part types, and tolerates malformed input', () => {
+    expect(
+      opencodeHistoryEvents([
+        {
+          info: { id: 'msg_a', role: 'assistant' },
+          parts: [
+            { id: 'p1', type: 'tool', callID: 'p1', tool: 'bash', state: { status: 'running', input: {} } },
+            { id: 'p2', type: 'stepStart' },
+          ],
+        },
+      ]),
+    ).toEqual([]);
+    expect(opencodeHistoryEvents(null)).toEqual([]);
+    expect(opencodeHistoryEvents('nope')).toEqual([]);
+    expect(opencodeHistoryEvents([{ info: null, parts: [] }])).toEqual([]);
+  });
+});
+
+describe('codexHistoryEvents', () => {
+  it('reconstructs a userMessage and reuses normalizeCodexItem for agentMessage/commandExecution, closed by turn_complete', () => {
+    const events = codexHistoryEvents([
+      {
+        id: 'turn_1',
+        status: 'completed',
+        items: [
+          { id: 'item_1', type: 'userMessage', content: [{ type: 'text', text: 'what does this do?' }] },
+          { id: 'item_2', type: 'agentMessage', text: 'It runs tests.' },
+        ],
+      },
+    ]);
+    expect(events).toEqual([
+      { kind: 'user_prompt', id: 'item_1', text: 'what does this do?' },
+      { kind: 'text', id: 'item_2', text: 'It runs tests.' },
+      {
+        kind: 'turn_complete',
+        stopReason: null,
+        isError: false,
+        numTurns: null,
+        durationMs: null,
+        costUsd: null,
+        inputTokens: null,
+        outputTokens: null,
+      },
+    ]);
+  });
+
+  it('flattens items across multiple turns and only synthesizes turn_complete once per turn', () => {
+    const events = codexHistoryEvents([
+      { id: 't1', status: 'completed', items: [{ id: 'i1', type: 'userMessage', content: [{ type: 'text', text: 'first' }] }, { id: 'i2', type: 'agentMessage', text: 'one' }] },
+      { id: 't2', status: 'completed', items: [{ id: 'i3', type: 'userMessage', content: [{ type: 'text', text: 'second' }] }, { id: 'i4', type: 'agentMessage', text: 'two' }] },
+    ]);
+    expect(events.map((e) => e.kind)).toEqual([
+      'user_prompt',
+      'text',
+      'turn_complete',
+      'user_prompt',
+      'text',
+      'turn_complete',
+    ]);
+  });
+
+  it('drops non-text userMessage content and tolerates malformed input', () => {
+    expect(codexHistoryEvents(null)).toEqual([]);
+    expect(codexHistoryEvents('nope')).toEqual([]);
+    expect(codexHistoryEvents([{ items: [{ id: 'i1', type: 'userMessage', content: [{ type: 'image', url: 'x' }] }] }])).toEqual([]);
+    expect(codexHistoryEvents([null, { items: null }])).toEqual([]);
+  });
+});
+
+describe('piHistoryEvents', () => {
+  it('reconstructs a user message, a tool call/result pair, and a final answer, closed by turn_complete', () => {
+    const events = piHistoryEvents([
+      { role: 'user', content: 'what is in this dir?' },
+      { role: 'assistant', content: [{ type: 'toolCall', id: 'call_1', name: 'bash', arguments: { command: 'ls' } }] },
+      { role: 'toolResult', toolCallId: 'call_1', toolName: 'bash', content: [{ type: 'text', text: 'file.txt\n' }], isError: false },
+      { role: 'assistant', content: [{ type: 'text', text: 'Just file.txt.' }] },
+    ]);
+
+    expect(events).toEqual([
+      { kind: 'user_prompt', id: 'pi_hist_0', text: 'what is in this dir?' },
+      {
+        kind: 'tool_use',
+        id: 'call_1',
+        name: 'bash',
+        input: { command: 'ls' },
+        summary: 'Run ls',
+        filePath: null,
+      },
+      {
+        kind: 'tool_result',
+        id: 'pi_hist_tr_call_1',
+        toolUseId: 'call_1',
+        content: 'file.txt\n',
+        truncated: false,
+        isError: false,
+      },
+      { kind: 'text', id: 'pi_hist_3_0', text: 'Just file.txt.' },
+      {
+        kind: 'turn_complete',
+        stopReason: null,
+        isError: false,
+        numTurns: null,
+        durationMs: null,
+        costUsd: null,
+        inputTokens: null,
+        outputTokens: null,
+      },
+    ]);
+  });
+
+  it('reconstructs a bashExecution record as a synthetic tool_use/tool_result pair', () => {
+    const events = piHistoryEvents([
+      { role: 'user', content: 'run ls' },
+      { role: 'bashExecution', command: 'ls', output: 'file.txt\n', exitCode: 0 },
+    ]);
+    expect(events).toEqual([
+      { kind: 'user_prompt', id: 'pi_hist_0', text: 'run ls' },
+      {
+        kind: 'tool_use',
+        id: 'pi_hist_bash_1',
+        name: 'bash',
+        input: { command: 'ls' },
+        summary: 'Run ls',
+        filePath: null,
+      },
+      {
+        kind: 'tool_result',
+        id: 'pi_hist_tr_pi_hist_bash_1',
+        toolUseId: 'pi_hist_bash_1',
+        content: 'file.txt\n',
+        truncated: false,
+        isError: false,
+      },
+      {
+        kind: 'turn_complete',
+        stopReason: null,
+        isError: false,
+        numTurns: null,
+        durationMs: null,
+        costUsd: null,
+        inputTokens: null,
+        outputTokens: null,
+      },
+    ]);
+  });
+
+  it('closes out one turn before opening the next when there is more than one', () => {
+    const events = piHistoryEvents([
+      { role: 'user', content: 'first' },
+      { role: 'assistant', content: [{ type: 'text', text: 'one' }] },
+      { role: 'user', content: 'second' },
+      { role: 'assistant', content: [{ type: 'text', text: 'two' }] },
+    ]);
+    expect(events.map((e) => e.kind)).toEqual([
+      'user_prompt',
+      'text',
+      'turn_complete',
+      'user_prompt',
+      'text',
+      'turn_complete',
+    ]);
+  });
+
+  it('tolerates malformed input', () => {
+    expect(piHistoryEvents(null)).toEqual([]);
+    expect(piHistoryEvents('nope')).toEqual([]);
+    expect(piHistoryEvents([null, 'nope', { role: 'user', content: '' }])).toEqual([]);
   });
 });

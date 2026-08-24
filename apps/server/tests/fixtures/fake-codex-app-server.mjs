@@ -148,7 +148,32 @@ rl.on('line', (line) => {
     if (method === 'thread/resume') {
       const threadId = params.threadId;
       if (!threads.has(threadId)) threads.set(threadId, { cwd: '' });
-      return respond(id, { thread: { id: threadId, sessionId: threadId, status: { type: 'idle' } }, model: 'gpt-5.6-terra' });
+      // `thread/resume`'s real response carries `thread.turns` unconditionally
+      // (confirmed against the real, installed app-server's own generated
+      // schema — `Thread.turns`'s doc string: "Only populated on
+      // `thread/resume`, ... responses") — one canned turn here, with a
+      // `userMessage` item (never mapped by the live `item/*` normalizer,
+      // only by history reconstruction) plus an `agentMessage`, so
+      // `CodexSession.start()`'s history backfill has something real to
+      // exercise end to end.
+      return respond(id, {
+        thread: {
+          id: threadId,
+          sessionId: threadId,
+          status: { type: 'idle' },
+          turns: [
+            {
+              id: 'turn_hist_1',
+              status: 'completed',
+              items: [
+                { id: 'item_hist_1', type: 'userMessage', content: [{ type: 'text', text: 'what does this repo do?' }] },
+                { id: 'item_hist_2', type: 'agentMessage', text: 'It is a remote-control server for coding agents.' },
+              ],
+            },
+          ],
+        },
+        model: 'gpt-5.6-terra',
+      });
     }
     if (method === 'thread/settings/update') {
       // A sentinel value, not a real model/effort, lets a test exercise

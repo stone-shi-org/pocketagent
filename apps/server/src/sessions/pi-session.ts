@@ -3,7 +3,13 @@ import { EventEmitter } from 'node:events';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { AgentEvent, PermissionRequestEvent, SessionStatus } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
-import { normalizePiEvent, normalizePiModels, normalizePiModelValue, normalizeSlashCommands } from './normalize.js';
+import {
+  normalizePiEvent,
+  normalizePiModels,
+  normalizePiModelValue,
+  normalizeSlashCommands,
+  piHistoryEvents,
+} from './normalize.js';
 import type { StructuredSessionEvents } from './structured-session.js';
 
 export interface PiSessionSpec {
@@ -246,9 +252,34 @@ export class PiSession extends EventEmitter<StructuredSessionEvents> {
       permissionMode: null,
     });
 
+    if (this.spec.resumeAgentSessionId) {
+      await this.fetchHistory();
+    }
+
     void this.fetchInitialCommands();
     void this.fetchInitialModels();
     void this.reportCurrentModelAndEffort();
+  }
+
+  /**
+   * Backfill this resumed session's own prior conversation into its buffer,
+   * via pi's own `get_messages` RPC (docs/rpc.md: "Get all messages in the
+   * conversation") — see normalize.ts's `piHistoryEvents` doc comment for the
+   * shape and what it does and does not reconstruct. Awaited — unlike
+   * `fetchInitialCommands`/`fetchInitialModels`/`reportCurrentModelAndEffort`
+   * below — so every history event lands in the buffer, in order, before this
+   * session is usable: the WebSocket layer replays the buffer in append
+   * order, and a live turn's own events must never interleave with
+   * backfilled ones.
+   */
+  private async fetchHistory(): Promise<void> {
+    const res = await this.sendCommand('get_messages');
+    if (!res.success || !isRecord(res.data)) return;
+    try {
+      for (const event of piHistoryEvents(res.data.messages)) this.emitEvent(event);
+    } catch {
+      // A resumed session without its backstory still works.
+    }
   }
 
   /**

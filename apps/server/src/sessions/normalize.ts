@@ -1019,6 +1019,128 @@ function num(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+/**
+ * A synthesized turn boundary for a reconstructed history (`*HistoryEvents`
+ * below), all-null/false the same way `CodexSession.runSlashCommand`'s own
+ * local-command completion is: there is no real usage/duration to report for
+ * a turn that already happened, but the browser's busy indicator is armed by
+ * `user_prompt` and disarmed only by `turn_complete` (see that method's doc
+ * comment for the same contract), so a replayed conversation must still close
+ * out every turn it opens or the composer looks stuck "thinking" forever.
+ */
+function historyTurnComplete(): AgentEvent {
+  return {
+    kind: 'turn_complete',
+    stopReason: null,
+    isError: false,
+    numTurns: null,
+    durationMs: null,
+    costUsd: null,
+    inputTokens: null,
+    outputTokens: null,
+  };
+}
+
+/**
+ * Reconstruct a resumed opencode session's prior conversation from `GET
+ * /session/{id}/message` (confirmed live against a real, installed `opencode
+ * serve`: an array of `{info, parts}`, the same `Message`/`Part` shapes
+ * `normalizeOpencodeEvent` already parses live via `message.updated`/
+ * `message.part.updated`) — see `OpencodeSession.fetchHistory`'s doc comment
+ * for why this exists.
+ *
+ * Unlike the live event stream, there is no separate "tool started" snapshot
+ * to reconstruct here: a completed or errored tool part is the only record of
+ * that call this endpoint gives, so it is expanded into both its `tool_use`
+ * and `tool_result` at once, in that order, rather than only the `tool_result`
+ * half `normalizeOpencodePart` emits for an already-finished live call.
+ * `subtask`/`file`/`stepStart`/`stepFinish`/`snapshot`/`patch`/`agent`/`retry`/
+ * `compaction` parts are dropped, same discipline as `AgyTranscriptStore`'s
+ * "readable what-was-said, not a full re-render" for agy's own disk history.
+ */
+export function opencodeHistoryEvents(messagesRaw: unknown): AgentEvent[] {
+  if (!Array.isArray(messagesRaw)) return [];
+  const events: AgentEvent[] = [];
+  let openTurn = false;
+
+  for (const entry of messagesRaw) {
+    if (!isRecord(entry)) continue;
+    const info = isRecord(entry.info) ? entry.info : null;
+    const parts = Array.isArray(entry.parts) ? entry.parts.filter(isRecord) : [];
+    if (!info) continue;
+    const role = str(info.role);
+
+    if (role === 'user') {
+      const text = parts
+        .filter((p) => str(p.type) === 'text')
+        .map((p) => str(p.text) ?? '')
+        .filter((t) => t.trim().length > 0)
+        .join('\n');
+      if (text) {
+        if (openTurn) {
+          events.push(historyTurnComplete());
+          openTurn = false;
+        }
+        events.push({ kind: 'user_prompt', id: str(info.id) ?? `oc_hist_${events.length}`, text });
+      }
+      continue;
+    }
+
+    if (role !== 'assistant') continue;
+
+    for (const partRaw of parts) {
+      const partType = str(partRaw.type);
+      const id = str(partRaw.id) ?? str(partRaw.callID) ?? `oc_hist_part_${events.length}`;
+
+      if (partType === 'text') {
+        const text = str(partRaw.text) ?? '';
+        if (text.trim().length === 0) continue;
+        events.push({ kind: 'text', id, text: clamp(text, MAX_TEXT_CHARS) });
+        openTurn = true;
+        continue;
+      }
+
+      if (partType === 'reasoning') {
+        const text = str(partRaw.text) ?? '';
+        if (text.trim().length === 0) continue;
+        events.push({ kind: 'thinking', id, text: clamp(text, MAX_TEXT_CHARS) });
+        openTurn = true;
+        continue;
+      }
+
+      if (partType === 'tool') {
+        const state = isRecord(partRaw.state) ? partRaw.state : null;
+        const status = state ? str(state.status) : null;
+        if (status !== 'completed' && status !== 'error') continue;
+        const name = str(partRaw.tool) ?? 'tool';
+        const input = state && isRecord(state.input) ? state.input : {};
+        events.push({
+          kind: 'tool_use',
+          id,
+          name,
+          input,
+          summary: summarizeOpencodeTool(name, input),
+          filePath: extractOpencodePath(input),
+        });
+        const isError = status === 'error';
+        const content = state ? str(isError ? state.error : state.output) ?? '' : '';
+        events.push({
+          kind: 'tool_result',
+          id: `oc_hist_tr_${id}`,
+          toolUseId: id,
+          content: clamp(content, MAX_RESULT_CHARS),
+          truncated: content.length > MAX_RESULT_CHARS,
+          isError,
+        });
+        openTurn = true;
+      }
+    }
+  }
+
+  if (openTurn) events.push(historyTurnComplete());
+  return events;
+}
+
 // ---------------------------------------------------------------------------
 // codex — `codex app-server`'s JSON-RPC notifications and requests
 // ---------------------------------------------------------------------------
@@ -1276,6 +1398,70 @@ export function normalizeCodexModels(value: unknown): ModelInfo[] {
   return models;
 }
 
+/**
+ * Reconstruct a resumed codex thread's prior conversation from `thread/resume`
+ * (or `thread/read` with `includeTurns: true`)'s own `thread.turns` — each a
+ * `Turn` with `items: ThreadItem[]`, confirmed against the real, installed
+ * app-server's own generated JSON schema (`codex app-server
+ * generate-json-schema --experimental`, v0.147.0): `Thread.turns`'s own doc
+ * string says it is "Only populated on `thread/resume`, `thread/rollback`,
+ * `thread/fork`, and `thread/read` (when `includeTurns` is true) responses" —
+ * i.e. already present on the very `thread/resume` call `CodexSession.start()`
+ * makes to attach to an existing thread, no second round trip needed.
+ *
+ * Each item is the same `ThreadItem` shape `normalizeCodexItem` already
+ * parses live via `item/started`/`item/completed`, reused here as-is for
+ * every type except `userMessage`: the live path never maps that one (
+ * `CodexSession.prompt()` already echoes its own `user_prompt` locally for a
+ * turn just sent), but history has no other source for what the user typed,
+ * so it is the one case handled here instead. Every item is treated as
+ * `'completed'` — a resumed turn is by definition done. `turn_complete` is
+ * synthesized once per turn, not once per item, for the busy-indicator reason
+ * `historyTurnComplete`'s own doc comment explains.
+ */
+export function codexHistoryEvents(turnsRaw: unknown): AgentEvent[] {
+  if (!Array.isArray(turnsRaw)) return [];
+  const events: AgentEvent[] = [];
+  let openTurn = false;
+
+  for (const turnRaw of turnsRaw) {
+    if (!isRecord(turnRaw)) continue;
+    const items = Array.isArray(turnRaw.items) ? turnRaw.items.filter(isRecord) : [];
+    for (const itemRaw of items) {
+      if (str(itemRaw.type) === 'userMessage') {
+        if (openTurn) {
+          events.push(historyTurnComplete());
+          openTurn = false;
+        }
+        const text = codexUserInputText(itemRaw.content);
+        if (text) events.push({ kind: 'user_prompt', id: str(itemRaw.id) ?? `cx_hist_${events.length}`, text });
+        continue;
+      }
+      const before = events.length;
+      events.push(...normalizeCodexItem(itemRaw, 'completed'));
+      if (events.length > before) openTurn = true;
+    }
+  }
+  if (openTurn) events.push(historyTurnComplete());
+  return events;
+}
+
+/**
+ * `UserMessageThreadItem.content`'s own `UserInput[]` — only the `text`
+ * variant renders; `image`/`localImage`/`audio` inputs have no text to show
+ * and are dropped, same discipline as everywhere else history is
+ * reconstructed in this file.
+ */
+function codexUserInputText(contentRaw: unknown): string {
+  if (!Array.isArray(contentRaw)) return '';
+  return contentRaw
+    .filter(isRecord)
+    .filter((c) => str(c.type) === 'text')
+    .map((c) => str(c.text) ?? '')
+    .filter((t) => t.trim().length > 0)
+    .join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // pi — `pi --mode rpc`'s JSON event stream
 // ---------------------------------------------------------------------------
@@ -1513,4 +1699,130 @@ export function normalizePiModels(value: unknown): ModelInfo[] {
  */
 export function normalizePiModelValue(raw: unknown): string | null {
   return normalizePiModel(raw)?.value ?? null;
+}
+
+/**
+ * Reconstruct a resumed pi session's prior conversation from `get_messages`
+ * (docs/rpc.md: `{messages: AgentMessage[]}`) — see `PiSession.fetchHistory`'s
+ * doc comment for why this exists. `AgentMessage` shapes are the same
+ * `UserMessage`/`AssistantMessage`/`ToolResultMessage`/`BashExecutionMessage`
+ * ones `docs/rpc.md` documents; unverified against a live conversation (no
+ * provider in this environment had working credentials for `pi` — same
+ * caveat as `normalizePiEvent`'s own doc comment), so this reads defensively
+ * off the documented shape rather than an observed one. `turn_complete` is
+ * synthesized once per user message, same reasoning as `codexHistoryEvents`/
+ * `opencodeHistoryEvents`.
+ */
+export function piHistoryEvents(messagesRaw: unknown): AgentEvent[] {
+  if (!Array.isArray(messagesRaw)) return [];
+  const events: AgentEvent[] = [];
+  let openTurn = false;
+
+  const flushTurn = (): void => {
+    if (openTurn) {
+      events.push(historyTurnComplete());
+      openTurn = false;
+    }
+  };
+
+  messagesRaw.forEach((messageRaw, index) => {
+    if (!isRecord(messageRaw)) return;
+    const role = str(messageRaw.role);
+
+    if (role === 'user') {
+      flushTurn();
+      const text = piMessageContentText(messageRaw.content);
+      if (text) events.push({ kind: 'user_prompt', id: `pi_hist_${index}`, text });
+      return;
+    }
+
+    if (role === 'assistant') {
+      const content = Array.isArray(messageRaw.content) ? messageRaw.content.filter(isRecord) : [];
+      content.forEach((block, blockIndex) => {
+        const type = str(block.type);
+        const id = `pi_hist_${index}_${blockIndex}`;
+        if (type === 'text') {
+          const text = str(block.text) ?? '';
+          if (text.trim().length === 0) return;
+          events.push({ kind: 'text', id, text: clamp(text, MAX_TEXT_CHARS) });
+          openTurn = true;
+        } else if (type === 'thinking') {
+          const text = str(block.thinking) ?? '';
+          if (text.trim().length === 0) return;
+          events.push({ kind: 'thinking', id, text: clamp(text, MAX_TEXT_CHARS) });
+          openTurn = true;
+        } else if (type === 'toolCall') {
+          const toolCallId = str(block.id) ?? id;
+          const name = str(block.name) ?? 'tool';
+          const input = isRecord(block.arguments) ? block.arguments : {};
+          events.push({
+            kind: 'tool_use',
+            id: toolCallId,
+            name,
+            input,
+            summary: summarizePiTool(name, input),
+            filePath: extractPiPath(input),
+          });
+          openTurn = true;
+        }
+      });
+      return;
+    }
+
+    if (role === 'toolResult') {
+      const toolCallId = str(messageRaw.toolCallId);
+      if (!toolCallId) return;
+      const content = stringifyToolResult(messageRaw.content);
+      events.push({
+        kind: 'tool_result',
+        id: `pi_hist_tr_${toolCallId}`,
+        toolUseId: toolCallId,
+        content: clamp(content, MAX_RESULT_CHARS),
+        truncated: content.length > MAX_RESULT_CHARS,
+        isError: messageRaw.isError === true,
+      });
+      openTurn = true;
+      return;
+    }
+
+    if (role === 'bashExecution') {
+      const command = str(messageRaw.command) ?? '';
+      const id = `pi_hist_bash_${index}`;
+      events.push({
+        kind: 'tool_use',
+        id,
+        name: 'bash',
+        input: { command },
+        summary: summarizePiTool('bash', { command }),
+        filePath: null,
+      });
+      const output = str(messageRaw.output) ?? '';
+      events.push({
+        kind: 'tool_result',
+        id: `pi_hist_tr_${id}`,
+        toolUseId: id,
+        content: clamp(output, MAX_RESULT_CHARS),
+        truncated: output.length > MAX_RESULT_CHARS,
+        isError: typeof messageRaw.exitCode === 'number' && messageRaw.exitCode !== 0,
+      });
+      openTurn = true;
+    }
+  });
+
+  flushTurn();
+  return events;
+}
+
+/** `UserMessage.content`: a plain string, or an array of `TextContent`/`ImageContent` blocks (docs/rpc.md) — only the text ones render. */
+function piMessageContentText(contentRaw: unknown): string {
+  if (isString(contentRaw)) return contentRaw;
+  if (Array.isArray(contentRaw)) {
+    return contentRaw
+      .filter(isRecord)
+      .filter((c) => str(c.type) === 'text')
+      .map((c) => str(c.text) ?? '')
+      .filter((t) => t.trim().length > 0)
+      .join('\n');
+  }
+  return '';
 }

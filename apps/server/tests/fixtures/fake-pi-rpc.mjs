@@ -159,6 +159,27 @@ function handleLine(line) {
     respond(msg.id, true, { command: 'get_state', data: { model: DEEPSEEK_MODEL, thinkingLevel: 'high', sessionId: 'test' } });
     return;
   }
+  if (msg.type === 'get_messages') {
+    // A canned prior conversation for `PiSession.fetchHistory` — one full
+    // turn (user prompt, a tool call and its result, a final answer) — so a
+    // resumed session's own history-reconstruction can be exercised end to
+    // end without a real provider. Shapes match docs/rpc.md's `AgentMessage`.
+    respond(msg.id, true, {
+      command: 'get_messages',
+      data: {
+        messages: [
+          { role: 'user', content: 'what is in this dir?' },
+          {
+            role: 'assistant',
+            content: [{ type: 'toolCall', id: 'call_hist_1', name: 'bash', arguments: { command: 'ls' } }],
+          },
+          { role: 'toolResult', toolCallId: 'call_hist_1', toolName: 'bash', content: [{ type: 'text', text: 'file.txt\n' }], isError: false },
+          { role: 'assistant', content: [{ type: 'text', text: 'Just file.txt.' }] },
+        ],
+      },
+    });
+    return;
+  }
   if (msg.type === 'set_model') {
     if (msg.provider === 'FAIL') {
       respond(msg.id, false, { command: 'set_model', error: `Model not found: ${msg.provider}/${msg.modelId}` });

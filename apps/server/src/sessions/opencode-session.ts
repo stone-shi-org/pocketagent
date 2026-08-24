@@ -2,7 +2,12 @@ import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { AgentEvent, PermissionDecision, PermissionRequestEvent, SessionStatus } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
-import { normalizeOpencodeCommands, normalizeOpencodeEvent, normalizeOpencodeModels } from './normalize.js';
+import {
+  normalizeOpencodeCommands,
+  normalizeOpencodeEvent,
+  normalizeOpencodeModels,
+  opencodeHistoryEvents,
+} from './normalize.js';
 import type { OpencodeServerManager } from './opencode-server.js';
 import type { StructuredSessionEvents } from './structured-session.js';
 
@@ -188,8 +193,36 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
       permissionMode: this.spec.skipPermissions ? 'bypassPermissions' : 'default',
     });
 
+    if (this.spec.resumeAgentSessionId) {
+      await this.fetchHistory();
+    }
+
     void this.fetchInitialCommands();
     void this.fetchInitialModels();
+  }
+
+  /**
+   * Backfill this resumed session's own prior conversation into its buffer,
+   * via opencode's own `GET /session/{id}/message` (see normalize.ts's
+   * `opencodeHistoryEvents` doc comment for the shape and what it does and
+   * does not reconstruct). Awaited — unlike `fetchInitialCommands`/
+   * `fetchInitialModels` below — so every history event lands in the buffer,
+   * in order, before this session is usable: the WebSocket layer replays the
+   * buffer in append order, and a live turn's own events must never
+   * interleave with backfilled ones.
+   */
+  private async fetchHistory(): Promise<void> {
+    if (!this._opencodeSessionId) return;
+    try {
+      const raw = await this.server.request<unknown>(`/session/${this._opencodeSessionId}/message`, {
+        method: 'GET',
+        query: { directory: this.spec.cwd },
+      });
+      for (const event of opencodeHistoryEvents(raw)) this.emitEvent(event);
+    } catch {
+      // A resumed session without its backstory still works — same
+      // best-effort discipline as fetchInitialCommands/fetchInitialModels.
+    }
   }
 
   /**

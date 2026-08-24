@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { promisify } from 'node:util';
 import type { AgentEvent, PermissionDecision, PermissionRequestEvent, SessionStatus } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
-import { normalizeCodexEvent, normalizeCodexModels, type CodexIncoming } from './normalize.js';
+import { codexHistoryEvents, normalizeCodexEvent, normalizeCodexModels, type CodexIncoming } from './normalize.js';
 import type { CodexServerManager } from './codex-server.js';
 import type { StructuredSessionEvents } from './structured-session.js';
 
@@ -176,12 +176,21 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
     // the same field, so a resume that omits it still starts up fine with
     // `startModel` staying null, exactly like before this change.
     let startModel: string | null = null;
+    // Populated only by `thread/resume` (see `historyTurnsRaw`'s use below) —
+    // `Thread.turns`'s own doc string says it is "Only populated on
+    // `thread/resume`, `thread/rollback`, `thread/fork`, and `thread/read`
+    // (when `includeTurns` is true) responses", so a genuine resume already
+    // carries this thread's full history in the very call that attaches to
+    // it — no second `thread/read` round trip needed.
+    let historyTurnsRaw: unknown = null;
     try {
       if (this._threadId) {
-        const result = await this.server.sendRequest<{ model?: unknown }>('thread/resume', {
-          threadId: this._threadId,
-        });
+        const result = await this.server.sendRequest<{ model?: unknown; thread?: { turns?: unknown } }>(
+          'thread/resume',
+          { threadId: this._threadId },
+        );
         startModel = typeof result.model === 'string' ? result.model : null;
+        historyTurnsRaw = result.thread?.turns ?? null;
       } else {
         const result = await this.server.sendRequest<{ thread: { id: string }; model?: unknown }>('thread/start', {
           cwd: this.spec.cwd,
@@ -218,6 +227,21 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
       kind: 'commands_available',
       commands: CODEX_SLASH_COMMANDS.map((c) => ({ ...c, aliases: [] })),
     });
+
+    // Backfill this resumed thread's prior conversation into its own buffer —
+    // see normalize.ts's `codexHistoryEvents` doc comment. Emitted directly
+    // (not via a fire-and-forget fetch, unlike `fetchInitialModels` below)
+    // since `historyTurnsRaw` already came back with `thread/resume` above;
+    // this only converts and appends it, in order, before the session is
+    // usable — the WebSocket layer replays the buffer in append order, and a
+    // live turn's own events must never interleave with backfilled ones.
+    if (historyTurnsRaw) {
+      try {
+        for (const event of codexHistoryEvents(historyTurnsRaw)) this.emitEvent(event);
+      } catch {
+        // A resumed session without its backstory still works.
+      }
+    }
 
     void this.fetchInitialModels();
   }

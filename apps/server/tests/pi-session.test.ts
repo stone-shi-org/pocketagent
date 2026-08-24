@@ -215,6 +215,39 @@ describe('PiSession', () => {
     expect(session.agentSessionId).toBe('existing-session-id');
   });
 
+  it('backfills prior conversation via get_messages when resuming, before start() resolves', async () => {
+    session = new PiSession(makeSpec({ resumeAgentSessionId: 'existing-session-id' }));
+    const events = collect(session);
+    await session.start();
+
+    // Awaited inside start() — no waitFor needed, unlike the fire-and-forget
+    // commands/models/effort fetches this same start() also kicks off.
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toEqual(
+      expect.arrayContaining(['session_started', 'user_prompt', 'tool_use', 'tool_result', 'text', 'turn_complete']),
+    );
+
+    expect(events.find((e) => e.kind === 'user_prompt')).toMatchObject({ text: 'what is in this dir?' });
+    expect(events.find((e) => e.kind === 'tool_use')).toMatchObject({ name: 'bash', input: { command: 'ls' } });
+    expect(events.find((e) => e.kind === 'tool_result')).toMatchObject({ content: 'file.txt\n', isError: false });
+    expect(events.find((e) => e.kind === 'text')).toMatchObject({ text: 'Just file.txt.' });
+    // The synthesized turn_complete must land before the real session_started
+    // was followed only by history, not by anything a live turn would add.
+    expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({ stopReason: null, isError: false });
+
+    // The busy flag a real turn would set is never armed by backfilled
+    // history — the synthesized turn_complete already closed it out.
+    expect(session.busy).toBe(false);
+  });
+
+  it('does not fetch history for a brand-new session with nothing to resume', async () => {
+    session = new PiSession(makeSpec());
+    const events = collect(session);
+    await session.start();
+
+    expect(events.some((e) => e.kind === 'user_prompt')).toBe(false);
+  });
+
   it('runs one turn end to end: user_prompt, tool_use/result, text, turn_complete with usage', async () => {
     session = new PiSession(makeSpec());
     await session.start();

@@ -182,6 +182,38 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { info: { id: 'msg_a', sessionID, role: 'assistant' }, parts: [] });
   }
 
+  // Shape captured live against the real, installed server's own OpenAPI
+  // `/doc` (`GET /session/{sessionID}/message` -> `Array<{info, parts}>`) —
+  // see normalize.ts's `opencodeHistoryEvents` doc comment. Canned for
+  // `OpencodeSession.fetchHistory`'s test: one full turn (user text, a
+  // completed tool call, a final answer) so history reconstruction has
+  // something real to exercise end to end without a live model provider.
+  const messageMatch = /^\/session\/([^/]+)\/message$/.exec(url.pathname);
+  if (req.method === 'GET' && messageMatch) {
+    const sessionID = messageMatch[1];
+    return send(res, 200, [
+      {
+        info: { id: 'msg_hist_u', sessionID, role: 'user', time: { created: 0 } },
+        parts: [{ id: 'prt_hist_u', sessionID, messageID: 'msg_hist_u', type: 'text', text: 'what is in this dir?' }],
+      },
+      {
+        info: { id: 'msg_hist_a', sessionID, role: 'assistant', modelID: 'test', providerID: 'test', time: { created: 0, completed: 1 } },
+        parts: [
+          {
+            id: 'prt_hist_tool',
+            sessionID,
+            messageID: 'msg_hist_a',
+            type: 'tool',
+            callID: 'prt_hist_tool',
+            tool: 'bash',
+            state: { status: 'completed', input: { command: 'ls' }, output: 'file.txt\n', title: 'ls', metadata: {}, time: { start: 0, end: 1 } },
+          },
+          { id: 'prt_hist_text', sessionID, messageID: 'msg_hist_a', type: 'text', text: 'Just file.txt.', time: { start: 1, end: 2 } },
+        ],
+      },
+    ]);
+  }
+
   const abortMatch = /^\/session\/([^/]+)\/abort$/.exec(url.pathname);
   if (req.method === 'POST' && abortMatch) {
     const flag = pendingAborts.get(abortMatch[1]);
