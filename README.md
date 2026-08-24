@@ -187,6 +187,7 @@ WorkingDirectory=%h/src/pocketagent
 ExecStart=/usr/bin/node apps/server/dist/server.js
 Restart=on-failure
 Environment=NODE_ENV=production
+Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 [Install]
 WantedBy=default.target

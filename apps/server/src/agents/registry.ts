@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { AgentInfo } from '@pocketagent/protocol';
 import type { AgentAdapter } from './types.js';
@@ -54,15 +55,21 @@ export function createDefaultRegistry(options: RegistryOptions): AgentRegistry {
   return registry;
 }
 
-/** Resolve a bare name against PATH, or validate an absolute path. */
+/** Resolve a bare name against PATH and standard user bin dirs, or validate an absolute path. */
 export function resolveExecutable(bin: string): string | null {
-  if (bin.includes('/')) {
-    return isExecutable(bin) ? path.resolve(bin) : null;
+  const expanded = bin.startsWith('~') ? path.join(os.homedir(), bin.slice(1)) : bin;
+  if (expanded.includes('/') || expanded.includes(path.sep)) {
+    return isExecutable(expanded) ? path.resolve(expanded) : null;
   }
   const pathEnv = process.env.PATH ?? '';
-  for (const dir of pathEnv.split(path.delimiter)) {
-    if (!dir) continue;
-    const candidate = path.join(dir, bin);
+  const searchDirs = [
+    ...pathEnv.split(path.delimiter).filter(Boolean),
+    path.join(os.homedir(), '.local', 'bin'),
+    path.join(os.homedir(), '.cargo', 'bin'),
+    path.join(os.homedir(), '.npm-global', 'bin'),
+  ];
+  for (const dir of searchDirs) {
+    const candidate = path.join(dir, expanded);
     if (isExecutable(candidate)) return candidate;
   }
   return null;
@@ -76,3 +83,4 @@ function isExecutable(candidate: string): boolean {
     return false;
   }
 }
+

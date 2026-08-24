@@ -198,7 +198,18 @@ export class AdoptionService {
     // Re-resolve rather than constructing the target by hand: this reads back
     // whatever tmux actually did (size, resolved cwd) instead of assuming our
     // request was honoured verbatim.
-    const target = await this.resolve(AdoptionService.idFor(socket, trimmed), true);
+    // `new-session -d` returns before the pane has finished exec'ing; poll briefly
+    // for tmux to report the requested cwd.
+    const deadline = Date.now() + 2000;
+    let target: AdoptableTarget | null = null;
+    while (Date.now() < deadline) {
+      target = await this.resolve(AdoptionService.idFor(socket, trimmed), true);
+      if (target && target.cwd === cwd) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    if (!target) {
+      target = await this.resolve(AdoptionService.idFor(socket, trimmed), true);
+    }
     if (!target) {
       throw new Error('The tmux session was created but could not be found afterward.');
     }
