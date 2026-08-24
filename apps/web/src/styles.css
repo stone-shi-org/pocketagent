@@ -2696,6 +2696,7 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 
 /* Browser-style tab strip -------------------------------------------------- */
 
+/* No `border-bottom` here on purpose — see `.tab.active`'s doc comment. */
 .tab-bar {
   display: flex;
   align-items: stretch;
@@ -2703,7 +2704,6 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   overflow-x: auto;
   flex-shrink: 0;
   background: var(--bg-elev);
-  border-bottom: 1px solid var(--border);
   padding: 6px 8px 0;
 }
 
@@ -2720,6 +2720,17 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   touch-action: none;
 }
 
+/* Background contrast, not a drawn line, separates the strip from the pane —
+   same approach `.sidebar .chat-row.active` already uses. A `border-bottom`
+   on `.tab-bar` was tried first: it ran under every tab, active one included,
+   leaving a 1px seam of `--border` between the active tab and the content it
+   belongs to ("this tab isn't really part of that pane"). Painting over just
+   that seam with a pseudo-element looked right in isolation but silently did
+   nothing here: `.tab-bar` sets `overflow-x: auto`, and the CSS Overflow spec
+   computes an unset `overflow-y` to `auto` too whenever its `overflow-x`
+   sibling isn't `visible` — so anything bleeding past the tab's own box
+   (however slightly, to reach the border pixel) was being clipped away by
+   `.tab-bar`'s own scroll container before it could paint over anything. */
 .tab.active {
   background: var(--bg);
   color: var(--text);
