@@ -59,9 +59,18 @@ export function useHashRoute(): [Route, (route: Route) => void] {
   }, []);
 
   const navigate = useCallback((next: Route) => {
+    // Update state right away rather than waiting on `hashchange`, which the
+    // browser fires as a separate, later task — not synchronously within this
+    // call. A caller that reads its own props again in the same tick right
+    // after calling `navigate` (e.g. `DesktopShell` closing a tab and falling
+    // back to a neighbor) would otherwise still see the *old* route for one
+    // more render, with nothing to say a new one is already on its way. The
+    // `hashchange` listener still fires when the hash actually changes; it
+    // just re-parses to the same route this already set, which is a harmless
+    // no-op re-render.
+    setRoute(next);
     const hash = toHash(next);
-    if (window.location.hash === hash) setRoute(next);
-    else window.location.hash = hash;
+    if (window.location.hash !== hash) window.location.hash = hash;
   }, []);
 
   return [route, navigate];

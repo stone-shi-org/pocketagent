@@ -33,8 +33,14 @@ function tmuxNameFor(projectName: string): string {
   return (cleaned || 'session').slice(0, 64);
 }
 
-/** Every chat in a project and its folded worktrees, flattened. */
-function allChats(projects: ProjectInfo[]): ChatSummary[] {
+/**
+ * Every chat in a project and its folded worktrees, flattened.
+ *
+ * Exported for `DesktopShell`'s tab strip, which needs to look a chat's title
+ * and live status up by session/conversation id without re-walking the
+ * project tree itself.
+ */
+export function allChats(projects: ProjectInfo[]): ChatSummary[] {
   const out: ChatSummary[] = [];
   for (const project of projects) {
     out.push(...project.chats, ...allChats(project.worktrees));

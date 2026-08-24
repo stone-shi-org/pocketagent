@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { Route } from '../hooks/useHashRoute.js';
 import { NewSessionDialog } from '../components/NewSessionDialog.js';
 import { HiddenProjects } from '../components/HiddenProjects.js';
@@ -7,11 +7,16 @@ import { PushToggle } from '../components/PushToggle.js';
 import { SettingsDialog } from '../components/SettingsDialog.js';
 import { RunningSessions } from '../components/RunningSessions.js';
 import { Icon } from '../components/Icon.js';
-import { HostChip, ProjectList, SearchField, useProjects } from '../components/ProjectList.js';
+import { HostChip, ProjectList, SearchField, allChats, useProjects } from '../components/ProjectList.js';
+import { TabBar, type Tab } from '../components/TabBar.js';
 import { UsageBar } from '../components/UsageBar.js';
 import { OverflowMenu } from './ProjectsPage.js';
 import { ComposerPage } from './ComposerPage.js';
 import { AgentsFleetPage } from './AgentsFleetPage.js';
+import { SessionRoute } from './SessionRoute.js';
+import { ChatPreviewPage } from './ChatPreviewPage.js';
+import { loadOpenTabRoutes, saveOpenTabRoutes, type StoredTabRoute } from '../agent/open-tabs-pref.js';
+import { fallbackAfterClose, isTabRoute, tabIdFor, tabListReducer, type TabRoute } from '../agent/tab-list.js';
 
 import { ShellDialog } from '../components/ShellDialog.js';
 
@@ -20,28 +25,42 @@ interface Props {
   onNavigate: (route: Route) => void;
   onApiError: (error: unknown) => void;
   onLogout: () => void;
-  /** The session pane, resolved by the router so transport choice stays there. */
-  children: React.ReactNode;
+}
+
+function storedToRoute(stored: StoredTabRoute): TabRoute {
+  return stored.name === 'terminal'
+    ? { name: 'terminal', sessionId: stored.sessionId }
+    : { name: 'chat', conversationId: stored.conversationId };
+}
+
+function routeToStored(route: TabRoute): StoredTabRoute {
+  return route.name === 'terminal'
+    ? { name: 'terminal', sessionId: route.sessionId }
+    : { name: 'chat', conversationId: route.conversationId };
 }
 
 /**
- * Desktop layout: the chat list stays put and the session opens beside it.
+ * Desktop layout: the chat list stays put and sessions open beside it, as
+ * browser-style tabs.
  *
  * On a phone the list and a session compete for the one screen, so opening a
  * chat has to replace the list. Given width there is no reason to keep paying
  * that cost — you can see what else is running while you read one of them, and
  * switching chats is a click instead of a round trip through the home screen.
+ * Multiple tabs push that further: every open session/chat stays mounted at
+ * once (only the active one is visible) so a background tab keeps its socket
+ * connected instead of dropping it, and switching to it is instant rather
+ * than a reconnect. Closing a tab only ever removes it from the strip — the
+ * session itself keeps running, same "remove ≠ end the process" split the
+ * sidebar's own "Remove from list" action already relies on.
+ *
+ * Compose and the Agents fleet view are deliberately *not* tabbable: they are
+ * single panes that replace whatever's showing, exactly as before.
  *
  * Which layout you get is decided by viewport width and pointer type, never by
  * sniffing the user agent. See `useMediaQuery`.
  */
-export function DesktopShell({
-  route,
-  onNavigate,
-  onApiError,
-  onLogout,
-  children,
-}: Props): JSX.Element {
+export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props): JSX.Element {
   const state = useProjects(
     (sessionId) => onNavigate({ name: 'terminal', sessionId }),
     (conversationId) => onNavigate({ name: 'chat', conversationId }),
@@ -55,6 +74,97 @@ export function DesktopShell({
   const [showSettings, setShowSettings] = useState(false);
   const [showRunning, setShowRunning] = useState(false);
   const [showShell, setShowShell] = useState(false);
+
+  const [tabs, dispatch] = useReducer(tabListReducer, undefined, () =>
+    loadOpenTabRoutes().map((stored) => {
+      const tabRoute = storedToRoute(stored);
+      return { id: tabIdFor(tabRoute), route: tabRoute };
+    }),
+  );
+
+  // Computed synchronously during render — not in an effect — so navigating to
+  // a session shows its tab immediately, with no one-frame flash of the
+  // welcome pane while an effect catches up.
+  const openTabs = useMemo(() => tabListReducer(tabs, { type: 'sync', route }), [tabs, route]);
+
+  // Reconcile the persisted reducer state once the merge above actually added
+  // a tab (or a close/reorder below has run).
+  useEffect(() => {
+    if (openTabs !== tabs) dispatch({ type: 'sync', route });
+  }, [openTabs, tabs, route]);
+
+  useEffect(() => {
+    saveOpenTabRoutes(tabs.map((t) => routeToStored(t.route)));
+  }, [tabs]);
+
+  const activeTabId = isTabRoute(route) ? tabIdFor(route) : null;
+
+  // Mirrors of the two pieces of state `closeTab` needs to reason about,
+  // updated on every render *and* eagerly by `closeTab` itself. Plain render
+  // values would go stale between two calls in the same tick — e.g. closing a
+  // tab and then, before React has re-rendered, closing the very neighbor it
+  // just fell back to. `useCallback`'s closure over `activeTabId` would still
+  // name the *first* tab in that second call, silently skip the fallback
+  // navigation the second close actually needs, and leave `route` pointing at
+  // a tab no longer in the list — which the sync effect above would then read
+  // as "missing" and add straight back, resurrecting it as an inert ghost tab.
+  // Reading and writing these refs synchronously, in the same call, keeps
+  // consecutive same-tick closes each seeing the true result of the one
+  // before it instead of a render that hasn't happened yet.
+  const openTabsRef = useRef(openTabs);
+  openTabsRef.current = openTabs;
+  const routeRef = useRef(route);
+  routeRef.current = route;
+
+  /** Removes a tab from the strip only — never an API call, so the session
+      underneath keeps running exactly as it would if the strip did not exist. */
+  const closeTab = useCallback(
+    (id: string) => {
+      const current = openTabsRef.current;
+      if (!current.some((t) => t.id === id)) return;
+
+      const activeId = isTabRoute(routeRef.current) ? tabIdFor(routeRef.current) : null;
+      const next = tabListReducer(current, { type: 'close', id });
+      openTabsRef.current = next;
+      dispatch({ type: 'close', id });
+
+      if (activeId === id) {
+        // Same "closing a tab focuses a neighbor" affordance as a browser.
+        const fallback = fallbackAfterClose(current, id);
+        const fallbackRoute = fallback ? fallback.route : ({ name: 'list' } as const);
+        routeRef.current = fallbackRoute;
+        onNavigate(fallbackRoute);
+      }
+    },
+    [onNavigate],
+  );
+
+  const reorderTabs = useCallback((orderedIds: string[]) => {
+    openTabsRef.current = tabListReducer(openTabsRef.current, { type: 'reorder', orderedIds });
+    dispatch({ type: 'reorder', orderedIds });
+  }, []);
+
+  // Title and live status for the tab strip come from the same polled project
+  // list the sidebar already renders from — no separate fetch per tab.
+  const chatById = useMemo(() => {
+    const map = new Map<string, { title: string; live: boolean }>();
+    for (const chat of allChats(state.projects ?? [])) {
+      if (chat.sessionId) map.set(`t:${chat.sessionId}`, { title: chat.title, live: chat.live });
+      if (chat.conversationId) map.set(`c:${chat.conversationId}`, { title: chat.title, live: chat.live });
+    }
+    return map;
+  }, [state.projects]);
+
+  const tabsForBar: Tab[] = openTabs.map((tab) => {
+    const found = chatById.get(tab.id);
+    if (found) return { id: tab.id, title: found.title, live: found.live };
+    // Not (yet, or any longer) in the polled project list — same fallback
+    // `AgentPage`'s own topbar uses (`session?.title ?? sessionId`). Resolves
+    // itself on the next poll, or the tab closes itself via the "this session
+    // no longer exists" screen.
+    const fallback = tab.route.name === 'terminal' ? tab.route.sessionId : tab.route.conversationId;
+    return { id: tab.id, title: fallback, live: tab.route.name === 'terminal' };
+  });
 
   const activeSessionId = route.name === 'terminal' ? route.sessionId : null;
   const activeConversationId = route.name === 'chat' ? route.conversationId : null;
@@ -165,6 +275,46 @@ export function DesktopShell({
       </aside>
 
       <main className="workspace">
+        {openTabs.length > 0 && (
+          <TabBar
+            tabs={tabsForBar}
+            activeId={activeTabId}
+            onSelect={(id) => {
+              const tab = openTabs.find((t) => t.id === id);
+              if (tab) onNavigate(tab.route);
+            }}
+            onClose={closeTab}
+            onReorder={reorderTabs}
+          />
+        )}
+
+        {openTabs.length > 0 && (
+          <div className={`tab-panels${activeTabId === null ? ' collapsed' : ''}`}>
+            {openTabs.map((tab) => (
+              <div
+                key={tab.id}
+                className={`tab-panel${tab.id === activeTabId ? '' : ' inactive'}`}
+              >
+                {tab.route.name === 'terminal' ? (
+                  <SessionRoute
+                    sessionId={tab.route.sessionId}
+                    onBack={() => closeTab(tab.id)}
+                    onApiError={onApiError}
+                    onResumed={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+                  />
+                ) : (
+                  <ChatPreviewPage
+                    conversationId={tab.route.conversationId}
+                    onBack={() => closeTab(tab.id)}
+                    onApiError={onApiError}
+                    onStarted={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
         {route.name === 'compose' ? (
           <ComposerPage
             // Keyed on cwd so picking a different project's "new chat" while the
@@ -180,16 +330,14 @@ export function DesktopShell({
             }}
             onApiError={onApiError}
           />
-        ) : route.name === 'terminal' || route.name === 'chat' ? (
-          children
         ) : route.name === 'agents' ? (
           <AgentsFleetPage
             onOpen={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
             onApiError={onApiError}
           />
-        ) : (
+        ) : activeTabId === null ? (
           <WelcomePane onCompose={() => onNavigate({ name: 'compose' })} />
-        )}
+        ) : null}
       </main>
 
       {showAdd && (

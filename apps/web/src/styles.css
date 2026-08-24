@@ -2642,11 +2642,116 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 }
 
 /* The session pages assume they own the viewport; inside the shell they own
-   the pane instead. */
+   the pane instead. Reaches one level deeper too, for a session mounted
+   inside a `.tab-panel` (see below) rather than directly under `.workspace`. */
 .workspace > .terminal-page,
-.workspace > .app {
+.workspace > .app,
+.workspace .tab-panel > .terminal-page,
+.workspace .tab-panel > .app {
   height: 100%;
   min-height: 0;
+}
+
+/* Browser-style tab strip -------------------------------------------------- */
+
+.tab-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  overflow-x: auto;
+  flex-shrink: 0;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px 0;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 220px;
+  padding: 8px 8px 8px 12px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+  touch-action: none;
+}
+
+.tab.active {
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 550;
+}
+
+.tab.dragging {
+  opacity: 0.6;
+}
+
+.tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: inherit;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.tab:hover .tab-close,
+.tab.active .tab-close,
+.tab-close:focus-visible {
+  opacity: 1;
+}
+
+.tab-close:hover {
+  background: var(--border);
+  color: var(--danger);
+}
+
+/* One panel per open tab, stacked in the same box. `visibility`, not
+   `display: none` — `TerminalPage`'s `ResizeObserver` would read a
+   `display:none` panel's collapse to 0x0 as a real resize and push it at a
+   live PTY the instant a tab is backgrounded (see `DesktopShell`'s doc
+   comment). `visibility: hidden` never changes the box, so switching tabs
+   never looks like a resize; the panel simply keeps its last real size. */
+.tab-panels {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+/* `flex: 1` claims space in the column regardless of whether any child is
+   actually visible — `position: absolute` children don't contribute to
+   intrinsic size, so an all-hidden `.tab-panels` (background tabs exist, but
+   Compose/Agents/the welcome pane is what's showing) would otherwise still
+   eat half the pane, squeezing whatever's rendered beside it for nothing. */
+.tab-panels.collapsed {
+  flex: 0 0 0;
+}
+
+.tab-panel {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.tab-panel.inactive {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 /* Safe-area padding is for a phone edge, not a pane in the middle of a screen. */
