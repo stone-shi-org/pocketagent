@@ -10,6 +10,7 @@ import { Icon } from '../components/Icon.js';
 import { HostChip, ProjectList, SearchField, allChats, useProjects } from '../components/ProjectList.js';
 import { TabBar, type Tab } from '../components/TabBar.js';
 import { UsageBar } from '../components/UsageBar.js';
+import { formatBuildInfo } from '../version.js';
 import { OverflowMenu } from './ProjectsPage.js';
 import { ComposerPage } from './ComposerPage.js';
 import { AgentsFleetPage } from './AgentsFleetPage.js';
@@ -221,6 +222,12 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
           <div className="sidebar-brand">
             <strong>Remote</strong>
             <HostChip host={state.host} />
+            {/* Which exact build is running, at a glance — same string
+                Settings shows (`formatBuildInfo`), but visible without
+                opening a dialog. Desktop-only: the phone header's
+                `.home-title` reuses the same `HostChip` but has no room for
+                a second line without wrapping the host name. */}
+            <span className="sidebar-version">{formatBuildInfo()}</span>
           </div>
           <PushToggle compact />
           <button

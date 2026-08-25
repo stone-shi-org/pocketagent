@@ -2511,6 +2511,17 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   letter-spacing: -0.015em;
 }
 
+/* Same size/color family as `.version-footer` (Settings' own copy of this
+   string), just left-aligned and not stacked below a whole dialog. */
+.sidebar-version {
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sidebar-head .menu {
   top: 52px;
   right: 12px;
