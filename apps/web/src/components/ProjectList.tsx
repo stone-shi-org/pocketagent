@@ -99,7 +99,16 @@ export function useProjects(
     } catch (err) {
       onApiError(err);
       setError(err instanceof ApiError ? err.message : 'Could not load projects.');
-      setProjects([]);
+      // A transient failure on this 5s poll (a proxy hiccup, a momentary
+      // network blip) used to blank `projects` to `[]` unconditionally,
+      // wiping every already-loaded chat and, with it, every open desktop
+      // tab's title — DesktopShell falls back to the raw session/
+      // conversation id for anything not in the current list. Keep whatever
+      // was last loaded successfully instead; only fall back to an empty
+      // list if nothing has ever loaded, so the sidebar's "Loading…" state
+      // (gated on `projects === null`) doesn't spin forever when the very
+      // first request fails.
+      setProjects((prev) => prev ?? []);
     }
   }, [onApiError]);
 

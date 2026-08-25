@@ -180,13 +180,31 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
     return map;
   }, [state.projects]);
 
+  // Every title/live pair this tab bar has ever seen for a given id, kept
+  // around after `chatById` stops carrying it. `ProjectService.list` only
+  // loads the `conversationLimit` (60) most recently touched transcripts —
+  // an intentional bound on a long-lived install's disk-scan cost, not a
+  // bug — so a tab left open on an old, otherwise-idle chat is expected to
+  // silently age out of every future poll once enough newer chats pile up
+  // elsewhere. Without this cache that tab's title decayed to its raw
+  // session/conversation id and stayed that way, because nothing about an
+  // idle chat ever bumps it back into the top 60. A `Map` ref, not state:
+  // updating it must never itself trigger a render, only make the next one
+  // (already scheduled by the `state.projects` change that fed `chatById`)
+  // more informed.
+  const knownTitles = useRef(new Map<string, { title: string; live: boolean }>());
+  useEffect(() => {
+    for (const [id, entry] of chatById) knownTitles.current.set(id, entry);
+  }, [chatById]);
+
   const tabsForBar: Tab[] = openTabs.map((tab) => {
-    const found = chatById.get(tab.id);
+    const found = chatById.get(tab.id) ?? knownTitles.current.get(tab.id);
     if (found) return { id: tab.id, title: found.title, live: found.live };
-    // Not (yet, or any longer) in the polled project list — same fallback
-    // `AgentPage`'s own topbar uses (`session?.title ?? sessionId`). Resolves
-    // itself on the next poll, or the tab closes itself via the "this session
-    // no longer exists" screen.
+    // Never seen at all — a tab restored from `open-tabs-pref` whose chat had
+    // already aged out of the poll window before this tab bar ever mounted.
+    // Same fallback `AgentPage`'s own topbar uses (`session?.title ??
+    // sessionId`); the tab closes itself via the "this session no longer
+    // exists" screen if it really is gone rather than just unpolled.
     const fallback = tab.route.name === 'terminal' ? tab.route.sessionId : tab.route.conversationId;
     return { id: tab.id, title: fallback, live: tab.route.name === 'terminal' };
   });
