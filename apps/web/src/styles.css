@@ -2715,7 +2715,6 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 
 /* Fixed-width, so it never competes with `.tab`'s own shrinking for space. */
 .tab-list-dropdown {
-  position: relative;
   flex: none;
   display: flex;
   align-items: center;
@@ -2739,11 +2738,15 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   color: var(--text);
 }
 
-/* Anchored to the trigger's own wrapper, not the page corner — same
-   `.project-menu`-over-`.menu` override `ProjectList.tsx` uses. */
+/* `position: fixed` at explicit `top`/`left` coordinates (set inline, from
+   the trigger button's own `getBoundingClientRect()`), not `.menu`'s default
+   `absolute`-anchored-to-a-relative-ancestor: both `.tab-bar` and `.workspace`
+   above it clip their overflow (see `.tab-bar`'s doc comment), so an
+   absolutely-positioned popup nested inside either would render and then
+   immediately vanish, clipped before it could ever be seen. Same fix
+   `.tab-context-menu` below needs, for the same reason. */
 .tab-list-menu {
-  top: 100%;
-  left: 0;
+  position: fixed;
   right: auto;
   max-height: 60vh;
   overflow-y: auto;

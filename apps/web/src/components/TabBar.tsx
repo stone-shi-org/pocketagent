@@ -55,28 +55,45 @@ export function TabBar({
   onCloseOthers,
 }: Props): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
+  const listTriggerRef = useRef<HTMLButtonElement>(null);
   const dragId = useRef<string | null>(null);
   const [liveOrder, setLiveOrder] = useState<string[] | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [listOpen, setListOpen] = useState(false);
+  // Position, not just a boolean: both this and the right-click menu below
+  // render `position: fixed` at explicit viewport coordinates rather than
+  // `position: absolute` anchored to a relative ancestor — `.tab-bar` clips
+  // its own overflow (see its doc comment) and `.workspace` above it does
+  // too, so an absolutely-positioned popup nested inside either would render
+  // and then immediately vanish, clipped before it could ever be seen.
+  const [listMenuAt, setListMenuAt] = useState<{ x: number; y: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
   const order = liveOrder ?? tabs.map((t) => t.id);
   const byId = new Map(tabs.map((t) => [t.id, t]));
   const ordered = order.map((id) => byId.get(id)).filter((t): t is Tab => t !== undefined);
 
+  function toggleTabList(): void {
+    if (listMenuAt) {
+      setListMenuAt(null);
+      return;
+    }
+    const rect = listTriggerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setListMenuAt({ x: rect.left, y: rect.bottom });
+  }
+
   // Same Escape-to-close as `ProjectMenu`/`OverflowMenu`, shared across
   // whichever of the two popups (tab list, right-click menu) is open.
   useEffect(() => {
-    if (!listOpen && !contextMenu) return;
+    if (!listMenuAt && !contextMenu) return;
     function onKeyDown(e: KeyboardEvent): void {
       if (e.key !== 'Escape') return;
-      setListOpen(false);
+      setListMenuAt(null);
       setContextMenu(null);
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [listOpen, contextMenu]);
+  }, [listMenuAt, contextMenu]);
 
   function startDrag(e: React.PointerEvent<HTMLDivElement>, id: string): void {
     // A click on the close button lands here first (it's inside the tab); let
@@ -129,18 +146,23 @@ export function TabBar({
         <div className="tab-list-dropdown">
           <button
             type="button"
+            ref={listTriggerRef}
             className="tab-list-trigger"
-            onClick={() => setListOpen((v) => !v)}
+            onClick={toggleTabList}
             aria-label="List all tabs"
             aria-haspopup="menu"
-            aria-expanded={listOpen}
+            aria-expanded={listMenuAt !== null}
           >
             <Icon name="chevron-down" size={14} />
           </button>
-          {listOpen && (
+          {listMenuAt && (
             <>
-              <div className="menu-backdrop" onClick={() => setListOpen(false)} role="presentation" />
-              <div className="menu tab-list-menu" role="menu">
+              <div className="menu-backdrop" onClick={() => setListMenuAt(null)} role="presentation" />
+              <div
+                className="menu tab-list-menu"
+                role="menu"
+                style={{ top: listMenuAt.y, left: listMenuAt.x }}
+              >
                 {ordered.map((tab) => (
                   <button
                     key={tab.id}
@@ -148,7 +170,7 @@ export function TabBar({
                     role="menuitem"
                     className={tab.id === activeId ? 'active' : ''}
                     onClick={() => {
-                      setListOpen(false);
+                      setListMenuAt(null);
                       onSelect(tab.id);
                     }}
                   >
