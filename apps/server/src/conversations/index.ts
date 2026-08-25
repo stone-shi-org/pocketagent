@@ -426,7 +426,14 @@ export async function readTranscriptMeta(file: string): Promise<TranscriptMeta> 
         break;
       case 'user': {
         meta.messageCount++;
-        if (firstPrompt === null) firstPrompt = userText(r.message);
+        if (firstPrompt === null) {
+          const candidate = userText(r.message);
+          // Same rule as transcriptRecordToEvents: a slash command or other
+          // tool plumbing is echoed into the transcript as a user message
+          // wrapped in a tag (`<command-name>`, `<local-command-caveat>`,
+          // ...). It is noise in a chat view, and doubly so as a title.
+          if (candidate && !candidate.startsWith('<')) firstPrompt = candidate;
+        }
         break;
       }
       case 'assistant':

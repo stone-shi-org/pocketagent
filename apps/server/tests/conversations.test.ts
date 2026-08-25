@@ -81,6 +81,26 @@ describe('readTranscriptMeta', () => {
     expect((await readTranscriptMeta(file)).title).toBe('Do the thing');
   });
 
+  it('skips slash-command plumbing when picking the opening-prompt title', async () => {
+    // A conversation that opens with a slash command has its first "user"
+    // record filled with tag-wrapped tool plumbing (`<command-name>`,
+    // `<local-command-caveat>`, ...) rather than anything a human typed. That
+    // is exactly the noise transcriptRecordToEvents already drops from the
+    // chat view; the title fallback must skip it the same way instead of
+    // surfacing the raw tag text in the project tree.
+    const file = write('slash-command.jsonl', [
+      { type: 'user', sessionId: 's', cwd: '/w', message: { content: '<command-name>/clear</command-name>' } },
+      {
+        type: 'user',
+        sessionId: 's',
+        cwd: '/w',
+        message: { content: '<local-command-caveat>Caveat: ...</local-command-caveat>' },
+      },
+      { type: 'user', sessionId: 's', cwd: '/w', message: { content: 'Fix the flaky login test' } },
+    ]);
+    expect((await readTranscriptMeta(file)).title).toBe('Fix the flaky login test');
+  });
+
   it('treats HEAD as no branch at all', async () => {
     // Claude Code writes `HEAD` outside a repo; showing it as a branch is a lie.
     const file = write('nobranch.jsonl', [
