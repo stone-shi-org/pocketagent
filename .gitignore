@@ -2,6 +2,7 @@ node_modules/
 .pocketagent/
 dist/
 data/
+data
 *.log
 .env
 .env.local
