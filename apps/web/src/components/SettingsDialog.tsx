@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client.js';
 import { getTerminalFontOverride, setTerminalFontOverride } from '../agent/terminal-font-pref.js';
+import { formatBuildInfo } from '../version.js';
 
 /**
  * Settings. One dangerous, server-wide switch, and one per-device display
@@ -163,6 +164,8 @@ export function SettingsDialog({
                 accept that nothing here will ask before running a command or editing a file.
               </p>
             </div>
+
+            <p className="version-footer">{formatBuildInfo()}</p>
 
             <div className="dialog-actions">
               <button type="button" onClick={onClose}>
