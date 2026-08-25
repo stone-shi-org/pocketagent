@@ -27,13 +27,28 @@ export function useMediaQuery(query: string): boolean {
 }
 
 /**
- * Wide enough for two panes, and driven by something other than a fingertip.
+ * Wide enough for two panes, and either driven by something other than a
+ * fingertip, or roomy enough on both axes to be a tablet rather than a phone.
  *
- * Both halves matter. Width alone would give a landscape tablet a sidebar it
- * has no room to use once a keyboard appears; pointer alone would give a
- * narrow desktop window a layout that does not fit.
+ * The `pointer: fine` branch is the desktop case: it excludes a narrow
+ * desktop window dragged to half width (fails min-width) and a landscape
+ * phone (fails pointer, since a touchscreen is always `coarse` — "request
+ * desktop site" changes the UA string, not the hardware pointer the media
+ * feature reports, so it cannot flip this).
+ *
+ * The second branch exists for iPads, which are touch-only (`pointer:
+ * coarse`) but have room for the sidebar. Width alone can't tell an iPad
+ * from a landscape phone — a large phone's landscape width (e.g. an iPhone
+ * Pro Max at 932px) clears 900px too. What actually separates them is the
+ * *short* side: an iPad's shortest dimension is its portrait width
+ * (744px+), while a landscape phone's shortest dimension is its height
+ * (~430px or less). Requiring both min-width and min-height at 700px passes
+ * every iPad in both orientations and fails every phone in both
+ * orientations. This is still feature detection, not UA sniffing — it reads
+ * real viewport dimensions, not a spoofable platform string.
  */
-export const DESKTOP_QUERY = '(min-width: 900px) and (pointer: fine)';
+export const DESKTOP_QUERY =
+  '(min-width: 900px) and (pointer: fine), (min-width: 700px) and (min-height: 700px) and (pointer: coarse)';
 
 export function useIsDesktop(): boolean {
   return useMediaQuery(DESKTOP_QUERY);
