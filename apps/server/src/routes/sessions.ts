@@ -108,9 +108,28 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     return reply.send({ ok: true, removedSessions, removedConversations });
   });
 
+  /**
+   * Hiding a project is not deletion — but `ProjectService.list` excludes a
+   * hidden directory unconditionally (no live-session exception, unlike a
+   * removed workspace root, which at least leaves a running session visible
+   * under its old cwd until it finishes). A chat with an open desktop tab
+   * would drop out of every future `/api/projects` poll with no way back
+   * short of un-hiding blind — see `DesktopShell`'s tab-title fallback,
+   * which otherwise has nothing left to show but the session's raw id.
+   * Refused the same way `SessionManager.forget` already refuses to remove a
+   * single running chat: stop it first, or wait for it to finish.
+   */
   app.post('/api/projects/hide', async (request, reply) => {
     const cwd = await resolveProjectCwd(request.body, reply);
     if (cwd === null) return reply;
+    if (await hasLiveChatAt(cwd)) {
+      return reply.code(409).send({
+        error: {
+          code: 'session_running',
+          message: 'Stop the session running here before hiding this project.',
+        },
+      });
+    }
     projects.setHidden(cwd, true);
     return reply.send({ ok: true });
   });
@@ -170,6 +189,13 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
   async function isKnownProjectCwd(cwd: string): Promise<boolean> {
     const known = await projects.list(sessions.list(), true);
     return known.some((p) => p.cwd === cwd || p.worktrees.some((w) => w.cwd === cwd));
+  }
+
+  /** Whether `cwd` (or a worktree folded under it) currently has a live chat. */
+  async function hasLiveChatAt(cwd: string): Promise<boolean> {
+    const known = await projects.list(sessions.list(), true);
+    const match = known.find((p) => p.cwd === cwd) ?? known.flatMap((p) => p.worktrees).find((w) => w.cwd === cwd);
+    return match?.chats.some((chat) => chat.live) ?? false;
   }
 
   /** One entry until a front server can register others. */

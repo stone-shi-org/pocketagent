@@ -1119,9 +1119,28 @@ describe('removing and hiding over HTTP', () => {
     expect(ids).not.toContain(finished);
   });
 
+  it('refuses to hide a project with a live session, same as removing one', async () => {
+    const id = await startSession();
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/projects/hide',
+      headers: headers(),
+      payload: { cwd: t.projectDir },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('session_running');
+    // Refused, not silently ignored — the chat is still listed and unhidden.
+    expect((await chatsIn(t.projectDir)).map((c) => c.id)).toContain(id);
+  });
+
   it('hides and unhides a project', async () => {
-    await startSession();
+    const id = await startSession();
     expect(await chatsIn(t.projectDir)).not.toHaveLength(0);
+    // Hiding a project out from under a running session would drop it from
+    // every future `/api/projects` poll with no way back short of un-hiding
+    // blind — stop it first, same as removing a single chat.
+    await t.app.inject({ method: 'DELETE', url: `/api/sessions/${id}`, headers: headers() });
+    await waitFor(async () => !(await chatsIn(t.projectDir)).some((c) => c.live));
 
     await t.app.inject({
       method: 'POST',
