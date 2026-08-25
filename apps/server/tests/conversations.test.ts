@@ -24,6 +24,18 @@ describe('encodeProjectDir', () => {
       encodeProjectDir('/home/me/src/agents/remote/control'),
     );
   });
+
+  it('replaces dots as well as slashes, matching Claude Code project dirs', () => {
+    // Regression: every worktree session's cwd is `<repo>/.worktrees/<branch>`
+    // (see git/worktree.ts). Claude Code's own encoding turns that leading
+    // dot into a dash too; missing it here made the reconstructed path for a
+    // worktree transcript diverge from the real on-disk directory, so
+    // `historyForConversation` ENOENT'd and every worktree chat opened with
+    // no history.
+    expect(encodeProjectDir('/home/me/src/app/.worktrees/feature-x')).toBe(
+      '-home-me-src-app--worktrees-feature-x',
+    );
+  });
 });
 
 describe('readTranscriptMeta', () => {
@@ -586,6 +598,29 @@ describe('ConversationStore.history', () => {
 
   it('returns null for a conversation that does not exist', async () => {
     expect(await store.history('nope')).toBeNull();
+  });
+
+  it('finds the history of a worktree session (cwd contains a dot)', async () => {
+    // Regression: encodeProjectDir used to only replace `/`, so a worktree
+    // cwd like `<repo>/.worktrees/<branch>` was encoded to a directory that
+    // did not match what Claude Code actually created on disk, and the
+    // history lookup silently ENOENT'd to an empty array.
+    const worktreeCwd = path.join(ws.project, '.worktrees', 'feature-x');
+    fs.mkdirSync(worktreeCwd, { recursive: true });
+    write(
+      'c1',
+      [
+        { type: 'user', uuid: 'u1', sessionId: 'c1', cwd: worktreeCwd, message: { content: 'first question' } },
+        {
+          type: 'assistant',
+          sessionId: 'c1',
+          message: { role: 'assistant', id: 'm1', content: [{ type: 'text', text: 'first answer' }] },
+        },
+      ],
+      worktreeCwd,
+    );
+    const events = await store.history('c1');
+    expect(events?.map((e) => e.kind)).toEqual(['user_prompt', 'text']);
   });
 
   it('survives a truncated final line', async () => {

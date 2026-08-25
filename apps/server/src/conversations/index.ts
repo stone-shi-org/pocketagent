@@ -10,7 +10,7 @@ import type { WorkspaceRegistry } from '../workspaces/index.js';
  * Discovery of Claude Code conversations that already exist on disk.
  *
  * Claude Code persists every session as JSONL under
- * `~/.claude/projects/<cwd-with-slashes-replaced-by-dashes>/<session-id>.jsonl`.
+ * `~/.claude/projects/<cwd-with-slashes-and-dots-replaced-by-dashes>/<session-id>.jsonl`.
  * That makes a conversation resumable long after the terminal that started it
  * has gone — which is the point: you can pick up on a phone what you began at
  * a desk, without touching the original process.
@@ -303,14 +303,21 @@ function imageFromContentBlocks(content: unknown[]): PromptImage | null {
 /**
  * `/data/homes/me/src/app` -> `-data-homes-me-src-app`.
  *
- * Claude Code names a project directory by replacing every `/` with `-`. That
- * is **lossy**: `src/agents-remote-control` and `src/agents/remote/control`
- * encode identically, so the mapping cannot be inverted. Encoding forward is
- * exact, which is why containment is decided by a forward-encoded prefix test
- * plus the `cwd` recorded inside the transcript — never by decoding the name.
+ * Claude Code names a project directory by replacing every `/` *and every
+ * `.`* with `-`. That is **lossy**: `src/agents-remote-control` and
+ * `src/agents/remote/control` encode identically, so the mapping cannot be
+ * inverted. Encoding forward is exact, which is why containment is decided by
+ * a forward-encoded prefix test plus the `cwd` recorded inside the transcript
+ * — never by decoding the name.
+ *
+ * The `.` replacement matters in practice for worktree sessions: their cwd is
+ * always `<repo>/.worktrees/<branch>` (see `git/worktree.ts`), so missing it
+ * here made every worktree transcript's reconstructed path diverge from the
+ * real one on disk — `historyForConversation` would ENOENT and silently
+ * return an empty transcript instead of the real history.
  */
 export function encodeProjectDir(cwd: string): string {
-  return cwd.replace(/\//g, '-');
+  return cwd.replace(/[/.]/g, '-');
 }
 
 export interface TranscriptMeta {
