@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Icon } from './Icon.js';
 
 export interface Tab {
@@ -16,6 +16,18 @@ interface Props {
   onClose: (id: string) => void;
   /** Called once, on pointer up, with the full reordered id list. */
   onReorder: (orderedIds: string[]) => void;
+  /** Right-click menu: "Close All". */
+  onCloseAll: () => void;
+  /** Right-click menu: "Close all except this one" — called with the id of
+      the tab that was right-clicked. */
+  onCloseOthers: (keepId: string) => void;
+}
+
+/** Where a tab's right-click menu opens, and which tab it's for. */
+interface ContextMenuState {
+  tabId: string;
+  x: number;
+  y: number;
 }
 
 /**
@@ -33,15 +45,38 @@ interface Props {
  * and self-correcting since the next move always reads freshly rendered
  * positions rather than trusting stale ones.
  */
-export function TabBar({ tabs, activeId, onSelect, onClose, onReorder }: Props): JSX.Element {
+export function TabBar({
+  tabs,
+  activeId,
+  onSelect,
+  onClose,
+  onReorder,
+  onCloseAll,
+  onCloseOthers,
+}: Props): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragId = useRef<string | null>(null);
   const [liveOrder, setLiveOrder] = useState<string[] | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [listOpen, setListOpen] = useState(false);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
   const order = liveOrder ?? tabs.map((t) => t.id);
   const byId = new Map(tabs.map((t) => [t.id, t]));
   const ordered = order.map((id) => byId.get(id)).filter((t): t is Tab => t !== undefined);
+
+  // Same Escape-to-close as `ProjectMenu`/`OverflowMenu`, shared across
+  // whichever of the two popups (tab list, right-click menu) is open.
+  useEffect(() => {
+    if (!listOpen && !contextMenu) return;
+    function onKeyDown(e: KeyboardEvent): void {
+      if (e.key !== 'Escape') return;
+      setListOpen(false);
+      setContextMenu(null);
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [listOpen, contextMenu]);
 
   function startDrag(e: React.PointerEvent<HTMLDivElement>, id: string): void {
     // A click on the close button lands here first (it's inside the tab); let
@@ -86,42 +121,119 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onReorder }: Props):
   }
 
   return (
-    <div className="tab-bar" ref={containerRef} role="tablist">
-      {ordered.map((tab) => (
-        <div
-          key={tab.id}
-          data-tab-id={tab.id}
-          role="tab"
-          aria-selected={tab.id === activeId}
-          className={[
-            'tab',
-            tab.id === activeId ? 'active' : '',
-            tab.id === draggingId ? 'dragging' : '',
-          ]
-            .filter(Boolean)
-            .join(' ')}
-          onPointerDown={(e) => startDrag(e, tab.id)}
-          onPointerMove={drag}
-          onPointerUp={endDrag}
-          onPointerCancel={endDrag}
-          onClick={() => onSelect(tab.id)}
-          title={tab.title}
-        >
-          {tab.live && <span className="live-dot" aria-label="running" />}
-          <span className="tab-title">{tab.title}</span>
+    <>
+      <div className="tab-bar" ref={containerRef} role="tablist">
+        {/* Chrome's own "search tabs" chevron: a fixed-width dropdown ahead of
+            the (shrinking) tab strip, listing every open tab regardless of
+            whether it currently has room to show its own label. */}
+        <div className="tab-list-dropdown">
           <button
             type="button"
-            className="tab-close"
-            onClick={(e) => {
-              e.stopPropagation();
-              onClose(tab.id);
-            }}
-            aria-label={`Close ${tab.title}`}
+            className="tab-list-trigger"
+            onClick={() => setListOpen((v) => !v)}
+            aria-label="List all tabs"
+            aria-haspopup="menu"
+            aria-expanded={listOpen}
           >
-            <Icon name="close" size={13} />
+            <Icon name="chevron-down" size={14} />
           </button>
+          {listOpen && (
+            <>
+              <div className="menu-backdrop" onClick={() => setListOpen(false)} role="presentation" />
+              <div className="menu tab-list-menu" role="menu">
+                {ordered.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    role="menuitem"
+                    className={tab.id === activeId ? 'active' : ''}
+                    onClick={() => {
+                      setListOpen(false);
+                      onSelect(tab.id);
+                    }}
+                  >
+                    {tab.live && <span className="live-dot" aria-label="running" />}
+                    <span className="tab-list-item-title">{tab.title}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
-      ))}
-    </div>
+
+        {ordered.map((tab) => (
+          <div
+            key={tab.id}
+            data-tab-id={tab.id}
+            role="tab"
+            aria-selected={tab.id === activeId}
+            className={[
+              'tab',
+              tab.id === activeId ? 'active' : '',
+              tab.id === draggingId ? 'dragging' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+            onPointerDown={(e) => startDrag(e, tab.id)}
+            onPointerMove={drag}
+            onPointerUp={endDrag}
+            onPointerCancel={endDrag}
+            onClick={() => onSelect(tab.id)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setContextMenu({ tabId: tab.id, x: e.clientX, y: e.clientY });
+            }}
+            title={tab.title}
+          >
+            {tab.live && <span className="live-dot" aria-label="running" />}
+            <span className="tab-title">{tab.title}</span>
+            <button
+              type="button"
+              className="tab-close"
+              onClick={(e) => {
+                e.stopPropagation();
+                onClose(tab.id);
+              }}
+              aria-label={`Close ${tab.title}`}
+            >
+              <Icon name="close" size={13} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {contextMenu && (
+        <>
+          <div className="menu-backdrop" onClick={() => setContextMenu(null)} role="presentation" />
+          <div
+            className="menu tab-context-menu"
+            role="menu"
+            style={{ top: contextMenu.y, left: contextMenu.x }}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setContextMenu(null);
+                onCloseAll();
+              }}
+            >
+              Close All
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              disabled={ordered.length <= 1}
+              onClick={() => {
+                setContextMenu(null);
+                onCloseOthers(contextMenu.tabId);
+              }}
+            >
+              Close all except this one
+            </button>
+          </div>
+        </>
+      )}
+    </>
   );
 }

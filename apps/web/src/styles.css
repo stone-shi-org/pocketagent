@@ -2703,16 +2703,87 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   display: flex;
   align-items: stretch;
   gap: 2px;
-  overflow-x: auto;
+  /* No horizontal scrollbar: once the strip is full, `.tab`'s flex-basis/
+     min-width shrink every tab in step instead, the same "make room, don't
+     scroll" behavior Chrome's own tab strip uses. Whatever still can't show
+     its own label stays reachable through `.tab-list-dropdown` below. */
+  overflow: hidden;
   flex-shrink: 0;
   background: var(--bg-elev);
   padding: 6px 8px 0;
+}
+
+/* Fixed-width, so it never competes with `.tab`'s own shrinking for space. */
+.tab-list-dropdown {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  margin-right: 4px;
+}
+
+.tab-list-trigger {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-dim);
+}
+
+.tab-list-trigger:hover {
+  background: var(--border);
+  color: var(--text);
+}
+
+/* Anchored to the trigger's own wrapper, not the page corner — same
+   `.project-menu`-over-`.menu` override `ProjectList.tsx` uses. */
+.tab-list-menu {
+  top: 100%;
+  left: 0;
+  right: auto;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.tab-list-menu button {
+  display: flex;
+  align-items: center;
+}
+
+.tab-list-menu button.active {
+  color: var(--text);
+  font-weight: 550;
+}
+
+.tab-list-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A right-click menu, not a corner-anchored one — `top`/`left` are set
+   inline from the pointer position at the moment of the click, so the class
+   only needs to clear `.menu`'s own `right` (else both edges being pinned at
+   once would stretch the box instead of sizing to content). */
+.tab-context-menu {
+  position: fixed;
+  right: auto;
 }
 
 .tab {
   display: flex;
   align-items: center;
   gap: 7px;
+  /* Equal-width tabs that shrink together as more open, rather than each
+     sized to its own title — the basis is a comfortable width when there's
+     room; `min-width` is the floor before tabs would start to overlap or
+     lose their close button. */
+  flex: 1 1 176px;
+  min-width: 42px;
   max-width: 220px;
   padding: 8px 8px 8px 12px;
   border-radius: var(--radius) var(--radius) 0 0;
@@ -2722,17 +2793,24 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   touch-action: none;
 }
 
+/* `--border`, not `--bg-elev`: the strip's own background already *is*
+   `--bg-elev` (see `.tab-bar`), so darkening a hovered inactive tab needs the
+   next step down — the same token `.tab-close:hover` below already uses for
+   feedback in this exact context. */
+.tab:not(.active):hover {
+  background: var(--border);
+}
+
 /* Background contrast, not a drawn line, separates the strip from the pane —
    same approach `.sidebar .chat-row.active` already uses. A `border-bottom`
    on `.tab-bar` was tried first: it ran under every tab, active one included,
    leaving a 1px seam of `--border` between the active tab and the content it
    belongs to ("this tab isn't really part of that pane"). Painting over just
    that seam with a pseudo-element looked right in isolation but silently did
-   nothing here: `.tab-bar` sets `overflow-x: auto`, and the CSS Overflow spec
-   computes an unset `overflow-y` to `auto` too whenever its `overflow-x`
-   sibling isn't `visible` — so anything bleeding past the tab's own box
-   (however slightly, to reach the border pixel) was being clipped away by
-   `.tab-bar`'s own scroll container before it could paint over anything. */
+   nothing here: `.tab-bar` clips its own overflow (`overflow: hidden`, so the
+   strip shrinks tabs instead of scrolling — see above), so anything bleeding
+   past the tab's own box (however slightly, to reach the border pixel) was
+   being clipped away before it could paint over anything. */
 .tab.active {
   background: var(--bg);
   color: var(--text);

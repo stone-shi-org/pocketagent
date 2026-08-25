@@ -144,6 +144,31 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
     dispatch({ type: 'reorder', orderedIds });
   }, []);
 
+  /** Closes every open tab. A plain loop over `closeTab` is safe to call
+      repeatedly in the same tick: each call reads and writes `openTabsRef`/
+      `routeRef` synchronously, so it always sees the previous call's result
+      rather than a stale render (see `closeTab`'s own comment). Snapshotting
+      `openTabsRef.current` once, up front, means the loop closes exactly the
+      tabs open when the menu action fired, not whatever `closeTab` leaves
+      behind as it goes. */
+  const closeAllTabs = useCallback(() => {
+    for (const tab of openTabsRef.current) closeTab(tab.id);
+  }, [closeTab]);
+
+  /** Closes every open tab except `keepId`. No special-cased navigation
+      needed: `closeTab`'s own "fall back to a neighbor" behavior cascades
+      the active tab forward through the list as each one closes, and since
+      `keepId` is never among the ids closed here, it's always the tab left
+      standing by the time the loop finishes. */
+  const closeOtherTabs = useCallback(
+    (keepId: string) => {
+      for (const tab of openTabsRef.current) {
+        if (tab.id !== keepId) closeTab(tab.id);
+      }
+    },
+    [closeTab],
+  );
+
   // Title and live status for the tab strip come from the same polled project
   // list the sidebar already renders from — no separate fetch per tab.
   const chatById = useMemo(() => {
@@ -285,6 +310,8 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             }}
             onClose={closeTab}
             onReorder={reorderTabs}
+            onCloseAll={closeAllTabs}
+            onCloseOthers={closeOtherTabs}
           />
         )}
 
