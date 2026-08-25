@@ -1034,12 +1034,12 @@ describe('removing and hiding over HTTP', () => {
 
   const headers = () => ({ cookie: t.cookie });
 
-  const startSession = async (): Promise<string> => {
+  const startSession = async (cwd: string = t.projectDir): Promise<string> => {
     const res = await t.app.inject({
       method: 'POST',
       url: '/api/sessions',
       headers: headers(),
-      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24 },
+      payload: { agent: 'shell', cwd, cols: 80, rows: 24 },
     });
     expect(res.statusCode).toBe(201);
     return res.json().id as string;
@@ -1148,6 +1148,46 @@ describe('removing and hiding over HTTP', () => {
       payload: { cwd: t.projectDir },
     });
     expect(await chatsIn(t.projectDir)).not.toHaveLength(0);
+  });
+
+  it('hides a project whose directory was deleted (e.g. a removed worktree)', async () => {
+    // Reproduces: create a worktree, run a session in it, delete the
+    // worktree. The chat's history keeps its row on the home screen (see
+    // ProjectService.list), but `fs.realpath` on the now-missing directory
+    // used to make hide/unhide 404 before setHidden ever ran.
+    const worktreeDir = path.join(t.projectDir, 'worktree');
+    fs.mkdirSync(worktreeDir);
+    const id = await startSession(worktreeDir);
+    await t.app.inject({ method: 'DELETE', url: `/api/sessions/${id}`, headers: headers() });
+    await waitFor(async () => !(await chatsIn(worktreeDir)).some((c) => c.live));
+    fs.rmSync(worktreeDir, { recursive: true, force: true });
+
+    const hide = await t.app.inject({
+      method: 'POST',
+      url: '/api/projects/hide',
+      headers: headers(),
+      payload: { cwd: worktreeDir },
+    });
+    expect(hide.statusCode).toBe(200);
+    expect(await chatsIn(worktreeDir)).toHaveLength(0);
+
+    const withHidden = await t.app.inject({
+      method: 'GET',
+      url: '/api/projects?includeHidden=1',
+      headers: headers(),
+    });
+    expect(
+      withHidden.json().projects.find((p: { cwd: string }) => p.cwd === worktreeDir)?.hidden,
+    ).toBe(true);
+
+    const unhide = await t.app.inject({
+      method: 'POST',
+      url: '/api/projects/unhide',
+      headers: headers(),
+      payload: { cwd: worktreeDir },
+    });
+    expect(unhide.statusCode).toBe(200);
+    expect(await chatsIn(worktreeDir)).not.toHaveLength(0);
   });
 
   it('will not hide a directory outside the workspace roots', async () => {

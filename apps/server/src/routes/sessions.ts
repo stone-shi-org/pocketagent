@@ -123,8 +123,24 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
   });
 
   /**
-   * Validate a directory from the browser the same way session creation does.
-   * Returns null once it has already written the error response.
+   * Validate a directory from the browser for hide/unhide, which only ever
+   * write a `project_visibility` row keyed by this string — unlike session
+   * creation, nothing here touches the filesystem.
+   *
+   * The normal path is the same containment check session creation uses:
+   * `resolveWorkspacePath` realpaths the directory so a client cannot point
+   * at an arbitrary string. But a project's own directory can vanish out from
+   * under it — deleting a git worktree removes the folder while its
+   * transcripts (and therefore its card on the home screen) live on, and
+   * `ProjectService.list` then shows it as an orphaned, no-longer-folded
+   * top-level project rather than dropping it. `fs.realpath` throws `ENOENT`
+   * for a directory in that state, which used to 404 before `setHidden` ever
+   * ran — the button looked broken because the one directory you'd actually
+   * want to hide is exactly the one that can no longer resolve. A `not_found`
+   * here instead falls back to checking the cwd against the project list the
+   * server itself just computed (containment-checked already, not
+   * user-supplied), so hiding an orphaned row still works while an arbitrary
+   * path a client invents is still rejected.
    */
   async function resolveProjectCwd(body: unknown, reply: FastifyReply): Promise<string | null> {
     const parsed = ProjectRequest.safeParse(body);
@@ -134,7 +150,26 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       });
       return null;
     }
-    return resolveWorkspaceCwdOrReply(workspaces, parsed.data.cwd, reply);
+    const cwd = parsed.data.cwd;
+    try {
+      return await workspaces.resolveWorkspacePath(cwd);
+    } catch (err) {
+      if (err instanceof WorkspaceError && err.code === 'not_found' && (await isKnownProjectCwd(cwd))) {
+        return cwd;
+      }
+      if (err instanceof WorkspaceError) {
+        const status = err.code === 'forbidden' ? 403 : err.code === 'not_found' ? 404 : 400;
+        void reply.code(status).send({ error: { code: err.code, message: err.message } });
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  /** Whether `cwd` is a project or folded worktree the home screen already shows (or would, with hidden ones included). */
+  async function isKnownProjectCwd(cwd: string): Promise<boolean> {
+    const known = await projects.list(sessions.list(), true);
+    return known.some((p) => p.cwd === cwd || p.worktrees.some((w) => w.cwd === cwd));
   }
 
   /** One entry until a front server can register others. */
