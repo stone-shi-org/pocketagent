@@ -67,13 +67,28 @@ class TmuxProcessHandle implements ProcessHandle {
   private finished = false;
   private detached = false;
   private reattachBudget = 3;
+  /**
+   * Size to attach (or reattach) at. Kept up to date by `resize()` so that a
+   * client respawned by `tryReattach()` after an unexpected exit comes back
+   * at the size we actually want, not some other default. Without this, a
+   * respawned client and the shared tmux window it drags along (`window-size
+   * latest`) would silently stick at whatever `spawnAttachClient` happens to
+   * hardcode, permanently out of sync with what the browser is rendering.
+   */
+  private cols: number;
+  private rows: number;
 
   panePid: number | null = null;
 
   constructor(
     private readonly backend: TmuxBackend,
     readonly externalId: string,
-  ) {}
+    cols: number,
+    rows: number,
+  ) {
+    this.cols = cols;
+    this.rows = rows;
+  }
 
   get pid(): number | null {
     return this.panePid;
@@ -106,7 +121,9 @@ class TmuxProcessHandle implements ProcessHandle {
     if (this.finished || this.detached) return;
     if (!(await this.backend.hasSession(this.externalId))) return;
     try {
-      this.attachClient(this.backend.spawnAttachClient(this.externalId));
+      // Spawn at our last known size, not spawnAttachClient's own default —
+      // see `cols`/`rows`'s doc comment above.
+      this.attachClient(this.backend.spawnAttachClient(this.externalId, this.cols, this.rows));
     } catch {
       // The poller will report the exit if the session is really gone.
     }
@@ -117,6 +134,8 @@ class TmuxProcessHandle implements ProcessHandle {
   }
 
   resize(cols: number, rows: number): void {
+    this.cols = cols;
+    this.rows = rows;
     try {
       // Resizing our tmux client resizes the window, because the server runs
       // with `window-size latest`.
@@ -335,12 +354,23 @@ export class TmuxBackend implements ProcessBackend {
     await this.tmuxOk(['kill-session', '-t', `=${name}`]);
   }
 
-  /** Spawn a local tmux client attached to `name`, inside a PTY we control. */
-  spawnAttachClient(name: string): IPty {
+  /**
+   * Spawn a local tmux client attached to `name`, inside a PTY we control.
+   *
+   * `cols`/`rows` must be the size we actually want, not a placeholder: the
+   * server runs with `window-size latest`, so whatever size *this* client
+   * reports at attach time becomes the shared window size every other
+   * viewer (including whichever full-screen TUI is running in the pane)
+   * sees redrawn to. Attaching at a wrong size and correcting it with a
+   * second `resize()` call a moment later used to force a real shrink-then-
+   * grow of the window right as a session started — exactly the kind of
+   * race that corrupts a `top`/`btop` alternate-screen redraw.
+   */
+  spawnAttachClient(name: string, cols: number, rows: number): IPty {
     return pty.spawn(this.bin, [...this.socketArgs(), 'attach-session', '-t', `=${name}`], {
       name: 'xterm-256color',
-      cols: 80,
-      rows: 24,
+      cols,
+      rows,
       cwd: process.cwd(),
       env: { ...this.serverEnv, TERM: 'xterm-256color' },
     });
@@ -374,10 +404,9 @@ export class TmuxBackend implements ProcessBackend {
       ...spec.args,
     ]);
 
-    const handle = new TmuxProcessHandle(this, name);
+    const handle = new TmuxProcessHandle(this, name, spec.cols, spec.rows);
     handle.panePid = await this.readPanePid(name);
-    handle.attachClient(this.spawnAttachClient(name));
-    handle.resize(spec.cols, spec.rows);
+    handle.attachClient(this.spawnAttachClient(name, spec.cols, spec.rows));
 
     this.track(name, handle);
     return handle;
@@ -387,7 +416,7 @@ export class TmuxBackend implements ProcessBackend {
     await this.ensureServer();
     if (!(await this.hasSession(externalId))) return null;
 
-    const handle = new TmuxProcessHandle(this, externalId);
+    const handle = new TmuxProcessHandle(this, externalId, spec.cols, spec.rows);
     handle.panePid = await this.readPanePid(externalId);
 
     // Seed the ring buffer with what the pane already holds, so a reconnecting
@@ -395,8 +424,7 @@ export class TmuxBackend implements ProcessBackend {
     const scrollback = await this.captureScrollback(externalId);
     if (scrollback) handle.emitData(scrollback);
 
-    handle.attachClient(this.spawnAttachClient(externalId));
-    handle.resize(spec.cols, spec.rows);
+    handle.attachClient(this.spawnAttachClient(externalId, spec.cols, spec.rows));
 
     this.track(externalId, handle);
     this.logger?.info({ tmuxSession: externalId, pid: handle.panePid }, 'recovered tmux session');

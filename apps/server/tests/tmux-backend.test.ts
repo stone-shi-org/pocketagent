@@ -200,6 +200,35 @@ describeTmux('TmuxBackend', () => {
     expect(output()).toContain('SIZE=120x40');
   });
 
+  it('reattaches at the last resized size after the local client dies unexpectedly', async () => {
+    const { handle, output } = await startShell('reattach-size', { cols: 80, rows: 24 });
+    await sleep(700);
+    handle.resize(120, 40);
+    await sleep(500);
+
+    // Kill the local `tmux attach-session` client (not the pane's process) to
+    // simulate a crash — `TmuxProcessHandle` should notice via `onExit` and
+    // respawn one via `tryReattach()`. If the respawned client's own size
+    // were not carried over, `window-size latest` would silently shrink the
+    // shared window back down (see `spawnAttachClient`'s doc comment).
+    const { stdout } = await execFileAsync('tmux', [
+      '-L', TEST_SOCKET,
+      'list-clients',
+      '-t', '=pocketagent-reattach-size',
+      '-F', '#{client_pid}',
+    ]);
+    const clientPid = Number.parseInt(stdout.trim().split('\n')[0] ?? '', 10);
+    expect(clientPid).toBeGreaterThan(0);
+    process.kill(clientPid, 'SIGKILL');
+
+    // tryReattach waits 250ms before respawning.
+    await sleep(1000);
+
+    handle.write('echo SIZE=$(tput cols)x$(tput lines)\n');
+    await waitFor(() => output().includes('SIZE='), { timeout: 10_000 });
+    expect(output()).toContain('SIZE=120x40');
+  });
+
   it('does not leak the PocketAgent namespace into the pane', async () => {
     const { handle, output } = await startShell('env');
     await sleep(600);
