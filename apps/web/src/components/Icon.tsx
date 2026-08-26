@@ -31,6 +31,7 @@ export type IconName =
   | 'attach'
   | 'plus'
   | 'minimize'
+  | 'shield'
   | 'agents'
   | 'agent-claude'
   | 'agent-codex'
@@ -201,6 +202,11 @@ const PATHS: Record<IconName, JSX.Element> = {
   // silhouette from `close`'s X so the approval sheet's collapse control
   // can't be mistaken for dismissing the request outright.
   minimize: <path d="M5 18h14" />,
+
+  // A closed shield: the settings row that gates every tool call behind (or
+  // removes) an approval prompt — distinct in silhouette from `check`, which
+  // reads as "done" rather than "guarded".
+  shield: <path d="M12 3.5 5.5 6v5.2c0 4.6 2.9 7.6 6.5 8.8 3.6-1.2 6.5-4.2 6.5-8.8V6Z" />,
 
   // Two overlapping cards with a pair of eyes on the front one: "a fleet",
   // not one agent — distinct from `branch`'s three-node graph, which is

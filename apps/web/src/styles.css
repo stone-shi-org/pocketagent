@@ -244,12 +244,107 @@ button:focus-visible {
   color: var(--danger);
 }
 
+/* Same palette as `.error-box` — a "this is dangerous" callout reads the
+   same way a "something went wrong" one does, deliberately, rather than
+   inventing a third danger treatment. Unlike `.error-box` this is never
+   dismissible and never tied to a caught error, so it gets its own name. */
+.warn-callout {
+  background: #fdeceb;
+  border: 1px solid #f6c9c6;
+  color: #a3221a;
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.warn-callout p {
+  margin: 0 0 8px;
+}
+
+.warn-callout p:last-child {
+  margin-bottom: 0;
+}
+
 .checkbox-row label {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 13px;
   font-weight: 500;
+}
+
+/* A real `<input type="checkbox">` underneath (for native keyboard/AT
+   support), visually replaced by the track — the standard CSS-only switch
+   technique rather than a plain browser checkbox, which was the one control
+   on this whole site still rendered in its unstyled OS chrome. Blue by
+   default; `.danger` recolors the "on" state red for a switch whose whole
+   point is to warn, e.g. Settings' "skip approvals everywhere". */
+.switch {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  width: 44px;
+  height: 26px;
+}
+
+.switch input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.switch input:disabled {
+  cursor: not-allowed;
+}
+
+.switch-track {
+  /* Purely decorative — sits later in the DOM than the real `<input>` it
+     illustrates, so without this it paints on top and silently swallows
+     every click/tap meant for that input, which stays "clickable" in the
+     accessibility tree but is now dead to an actual pointer. */
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: var(--border-strong);
+  transition: background-color 160ms ease;
+}
+
+.switch-track::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: var(--shadow-sm);
+  transition: transform 160ms ease;
+}
+
+.switch input:checked + .switch-track {
+  background: var(--accent);
+}
+
+.switch.danger input:checked + .switch-track {
+  background: var(--danger);
+}
+
+.switch input:checked + .switch-track::before {
+  transform: translateX(18px);
+}
+
+.switch input:disabled + .switch-track {
+  opacity: 0.5;
+}
+
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* Persistent reminder in a live session, not just a one-time dialog checkbox:
@@ -1507,7 +1602,17 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 
 .transport-hint { font-size: 12px; color: var(--text-dim); margin-top: -8px; margin-bottom: 14px; line-height: 1.45; }
 
-.version-footer { font-size: 11.5px; color: var(--text-dim); text-align: center; margin: 4px 0 0; }
+/* Same hairline rhythm as `.settings-row` above it, so it reads as the last
+   row in the list (the build this server is actually running) rather than a
+   caption stuck on underneath. */
+.version-footer {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  text-align: center;
+  margin: 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
 
 /* ---- New-session dialog: modes, pick lists, confirm ---- */
 .mode-tabs { display: flex; gap: 6px; margin-bottom: 16px; }
