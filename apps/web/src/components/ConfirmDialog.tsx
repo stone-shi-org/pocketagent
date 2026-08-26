@@ -15,10 +15,10 @@ interface Props {
 
 /**
  * Replaces `window.confirm` with a dialog that matches the rest of the app —
- * a browser confirm cannot be styled and looks foreign next to `SettingsDialog`
+ * a browser confirm cannot be styled and looks foreign next to `SettingsPage`
  * and `RunningSessions`, which already use this exact `.dialog`/`.confirm-body`
  * shape for the same "are you sure" moment (see the skip-permissions confirm in
- * `SettingsDialog`). `role="alertdialog"` rather than `dialog` is the one
+ * `SettingsPage`). `role="alertdialog"` rather than `dialog` is the one
  * difference from those, since this one is always a yes/no interruption.
  */
 export function ConfirmDialog({

@@ -138,7 +138,6 @@ running keeps running.
 | `POCKETAGENT_COOKIE_SECURE` | auto | `Secure` cookie flag; defaults to on when `NODE_ENV=production`. |
 | `POCKETAGENT_ALLOWED_ORIGINS` | same-origin | Comma-separated Origin allowlist. |
 | `POCKETAGENT_TRUST_PROXY` | `false` | Trust `X-Forwarded-For` (only behind your own proxy). |
-| `DATABASE_PATH` | `./data/pocketagent.db` | Session metadata. No terminal output stored. |
 | `MAX_SESSIONS` | `10` | Concurrent live PTYs. |
 | `OUTPUT_BUFFER_BYTES` | `2097152` | Per-session replay buffer. |
 | `SESSION_IDLE_TIMEOUT` | `0` | Seconds idle **and** unattached before auto-kill. `0` disables. |

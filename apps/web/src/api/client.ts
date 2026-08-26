@@ -12,6 +12,8 @@ import type {
   MeResponse,
   ProjectInfo,
   SessionInfo,
+  SettingsResponse,
+  UpdateSettingsRequest,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
 
@@ -221,13 +223,19 @@ export const api = {
 
   pushTest: () => request<{ sent: number; pruned: number }>('/api/push/test', { method: 'POST' }),
 
-  /** The operator's server-wide "skip all approvals" switch. Off by default. */
-  getSettings: () => request<{ skipPermissionsEnabled: boolean }>('/api/settings'),
+  /**
+   * Every server setting: database-backed, seeded once from `.env` on first
+   * boot, never re-read from it after — see CLAUDE.md and
+   * `apps/server/src/settings/`. `fixed` is read-only (host/port/db path/
+   * env), `restartRequiredKeys` flags which `settings` keys need a restart to
+   * take effect once changed.
+   */
+  getSettings: () => request<SettingsResponse>('/api/settings'),
 
-  updateSettings: (skipPermissionsEnabled: boolean) =>
-    request<{ skipPermissionsEnabled: boolean }>('/api/settings', {
+  updateSettings: (patch: UpdateSettingsRequest) =>
+    request<SettingsResponse>('/api/settings', {
       method: 'PATCH',
-      body: JSON.stringify({ skipPermissionsEnabled }),
+      body: JSON.stringify(patch),
     }),
 
   /** Rate-limit usage for every agent that reports its own, for the status area next to `HostChip`. */

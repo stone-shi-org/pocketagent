@@ -3,7 +3,6 @@ import { NewSessionDialog } from '../components/NewSessionDialog.js';
 import { HiddenProjects } from '../components/HiddenProjects.js';
 import { AddProject } from '../components/AddProject.js';
 import { PushToggle } from '../components/PushToggle.js';
-import { SettingsDialog } from '../components/SettingsDialog.js';
 import { RunningSessions } from '../components/RunningSessions.js';
 import { ShellDialog } from '../components/ShellDialog.js';
 import { Icon } from '../components/Icon.js';
@@ -21,6 +20,7 @@ interface Props {
   onOpenChat: (conversationId: string) => void;
   onCompose: (cwd?: string) => void;
   onOpenAgents: () => void;
+  onOpenSettings: () => void;
   onApiError: (error: unknown) => void;
   onLogout: () => void;
 }
@@ -40,6 +40,7 @@ export function ProjectsPage({
   onOpenChat,
   onCompose,
   onOpenAgents,
+  onOpenSettings,
   onApiError,
   onLogout,
 }: Props): JSX.Element {
@@ -49,7 +50,6 @@ export function ProjectsPage({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
   const [showRunning, setShowRunning] = useState(false);
   const [showShell, setShowShell] = useState(false);
 
@@ -103,7 +103,7 @@ export function ProjectsPage({
             }}
             onSettings={() => {
               setMenuOpen(false);
-              setShowSettings(true);
+              onOpenSettings();
             }}
             onLogout={onLogout}
           />
@@ -164,10 +164,6 @@ export function ProjectsPage({
           onChanged={() => void state.refresh()}
           onApiError={onApiError}
         />
-      )}
-
-      {showSettings && (
-        <SettingsDialog onClose={() => setShowSettings(false)} onApiError={onApiError} />
       )}
 
       {showRunning && (

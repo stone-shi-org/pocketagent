@@ -19,6 +19,7 @@ import {
   type Db,
 } from './db/index.js';
 import { WorkspaceRegistry, createWorkspaceStore } from './workspaces/index.js';
+import { applyRuntimeSettings } from './settings/index.js';
 import { createDefaultRegistry } from './agents/registry.js';
 import { createBackend, DirectPtyBackend } from './backends/index.js';
 import { SessionManager } from './sessions/manager.js';
@@ -68,7 +69,25 @@ export interface BuiltApp {
 }
 
 export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
-  const { config } = options;
+  // `config` starts as whatever `.env` produced. The database has to open
+  // first — `databasePath` itself can never live in it — but everything else
+  // in `SETTINGS_FIELDS` is then seeded-once-and-overlaid *before* anything
+  // else in this function reads a field off `config`, including Fastify's own
+  // `logger.level`/`trustProxy` options below: those are boot-only (Fastify
+  // can't be reconfigured after construction), so they must already reflect
+  // whatever is persisted as of this boot, not the raw env value.
+  let config = options.config;
+
+  // Only close a database we opened. An injected one belongs to the caller,
+  // which is what lets a test restart the app against the same data.
+  const ownsDb = options.db === undefined;
+  const db = options.db ?? openDatabase(config.databasePath);
+  purgeExpiredAuthSessions(db);
+
+  // From here on `.env` is no longer consulted for anything in `SETTINGS_FIELDS`
+  // — first boot seeds these rows from `config`, every later boot (and every
+  // `PATCH /api/settings`) reads/writes only the database.
+  config = applyRuntimeSettings(db, config);
 
   const app = Fastify({
     logger: {
@@ -89,12 +108,6 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     // may not want on disk. Lifecycle events are logged explicitly instead.
     logController: new LogController({ disableRequestLogging: true }),
   });
-
-  // Only close a database we opened. An injected one belongs to the caller,
-  // which is what lets a test restart the app against the same data.
-  const ownsDb = options.db === undefined;
-  const db = options.db ?? openDatabase(config.databasePath);
-  purgeExpiredAuthSessions(db);
 
   const auth = new AuthService(db, config.authToken, config.sessionTtlMs);
   const workspaces = new WorkspaceRegistry(
@@ -166,7 +179,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     conversations,
     db,
     version: VERSION,
-    codeServerBaseUrl: config.codeServerBaseUrl,
+    getCodeServerBaseUrl: () => config.codeServerBaseUrl,
   });
   const worktrees = new WorktreeService({ workspaces });
 

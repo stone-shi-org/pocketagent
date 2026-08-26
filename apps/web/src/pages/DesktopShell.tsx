@@ -4,7 +4,7 @@ import { NewSessionDialog } from '../components/NewSessionDialog.js';
 import { HiddenProjects } from '../components/HiddenProjects.js';
 import { AddProject } from '../components/AddProject.js';
 import { PushToggle } from '../components/PushToggle.js';
-import { SettingsDialog } from '../components/SettingsDialog.js';
+import { SettingsPage } from './SettingsPage.js';
 import { RunningSessions } from '../components/RunningSessions.js';
 import { Icon } from '../components/Icon.js';
 import { HostChip, ProjectList, SearchField, allChats, useProjects } from '../components/ProjectList.js';
@@ -72,7 +72,6 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
   const [showRunning, setShowRunning] = useState(false);
   const [showShell, setShowShell] = useState(false);
 
@@ -265,7 +264,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
               runningCount={runningCount}
               onSettings={() => {
                 setMenuOpen(false);
-                setShowSettings(true);
+                onNavigate({ name: 'settings' });
               }}
               onLogout={onLogout}
             />
@@ -387,6 +386,8 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             onOpen={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
             onApiError={onApiError}
           />
+        ) : route.name === 'settings' ? (
+          <SettingsPage onApiError={onApiError} />
         ) : activeTabId === null ? (
           <WelcomePane onCompose={() => onNavigate({ name: 'compose' })} />
         ) : null}
@@ -406,10 +407,6 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
           onChanged={() => void state.refresh()}
           onApiError={onApiError}
         />
-      )}
-
-      {showSettings && (
-        <SettingsDialog onClose={() => setShowSettings(false)} onApiError={onApiError} />
       )}
 
       {showRunning && (

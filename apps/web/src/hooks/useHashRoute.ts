@@ -9,7 +9,9 @@ export type Route =
   /** `cwd` preselects a workspace, e.g. when composing from a project header. */
   | { name: 'compose'; cwd?: string }
   /** The "Agents" fleet overview — every running agent, at a glance. */
-  | { name: 'agents' };
+  | { name: 'agents' }
+  /** The full settings page — see `SettingsPage`. */
+  | { name: 'settings' };
 
 function parse(hash: string): Route {
   const session = /^#\/s\/([^/?]+)/.exec(hash);
@@ -26,6 +28,8 @@ function parse(hash: string): Route {
 
   if (/^#\/agents$/.exec(hash)) return { name: 'agents' };
 
+  if (/^#\/settings$/.exec(hash)) return { name: 'settings' };
+
   return { name: 'list' };
 }
 
@@ -39,6 +43,8 @@ function toHash(route: Route): string {
       return route.cwd ? `#/new/${encodeURIComponent(route.cwd)}` : '#/new';
     case 'agents':
       return '#/agents';
+    case 'settings':
+      return '#/settings';
     default:
       return '#/';
   }

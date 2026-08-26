@@ -51,8 +51,6 @@ const RawEnv = z.object({
   POCKETAGENT_WORKSPACE_ROOTS: z.string().optional(),
   POCKETAGENT_ALLOWED_ORIGINS: z.string().optional(),
 
-  DATABASE_PATH: z.string().default('./data/pocketagent.db'),
-
   MAX_SESSIONS: intish(10, 1, 200),
   OUTPUT_BUFFER_BYTES: intish(2 * 1024 * 1024, 16 * 1024, 64 * 1024 * 1024),
   /** Seconds of no PTY output AND no attached client before auto-kill. 0 disables. */
@@ -111,6 +109,16 @@ export interface Config {
   workspaceRoots: string[];
   /** null means "accept any Origin" (only permitted outside production). */
   allowedOrigins: string[] | null;
+  /**
+   * Always `<REPO_ROOT>/data/pocketagent.db` — not configurable. Unlike
+   * everything in `settings/fields.ts`, this can never move into the database
+   * it names (chicken-and-egg), and unlike `HOST`/`PORT` there's no boot-order
+   * reason it needs an env var either — the two moving parts (per-checkout
+   * isolation for demos/tests, per-machine persistence for a real deploy) are
+   * both already handled by *which checkout* this process runs from, so a
+   * second knob here only adds a way to point two different processes at the
+   * same file by accident.
+   */
   databasePath: string;
   maxSessions: number;
   outputBufferBytes: number;
@@ -257,9 +265,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   const isProduction = e.NODE_ENV === 'production';
 
-  const databasePath = path.isAbsolute(e.DATABASE_PATH)
-    ? e.DATABASE_PATH
-    : path.join(REPO_ROOT, e.DATABASE_PATH);
+  const databasePath = path.join(REPO_ROOT, 'data', 'pocketagent.db');
 
   const webDistPath = e.POCKETAGENT_WEB_DIST
     ? path.resolve(e.POCKETAGENT_WEB_DIST)

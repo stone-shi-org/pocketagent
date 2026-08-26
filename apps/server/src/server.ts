@@ -13,7 +13,10 @@ async function main(): Promise<void> {
     throw err;
   }
 
-  const { app } = await buildApp({ config });
+  const { app, context } = await buildApp({ config });
+  // `buildApp` may have overlaid `config` with persisted settings-table values
+  // (see `applyRuntimeSettings`) — log the effective ones, not the raw env.
+  const effective = context.config;
 
   await app.listen({ host: config.host, port: config.port });
 
@@ -21,8 +24,8 @@ async function main(): Promise<void> {
     {
       version: VERSION,
       url: `http://${config.host}:${config.port}/`,
-      workspaceRoots: config.workspaceRoots,
-      maxSessions: config.maxSessions,
+      workspaceRoots: effective.workspaceRoots,
+      maxSessions: effective.maxSessions,
     },
     'PocketAgent listening',
   );
@@ -34,7 +37,7 @@ async function main(): Promise<void> {
         'and holds the access token gets terminal access to this machine. Put it behind ' +
         'Tailscale/WireGuard or an HTTPS reverse proxy.',
     );
-    if (!config.cookieSecure) {
+    if (!effective.cookieSecure) {
       app.log.warn(
         'Auth cookie is not marked Secure. Set POCKETAGENT_COOKIE_SECURE=true when serving over HTTPS.',
       );

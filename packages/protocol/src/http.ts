@@ -233,24 +233,88 @@ export const HealthResponse = z.object({
 export type HealthResponse = z.infer<typeof HealthResponse>;
 
 /**
- * Server-wide switch to bypass approvals for every session.
- *
- * A deliberate, dangerous override of the per-session `CreateSessionRequest.skipPermissions`
- * opt-in: PocketAgent's whole reason to exist is routing every approval to the
- * browser, and this switch turns that off fleet-wide instead of session-by-session.
- * It is off by default and must be turned on explicitly by whoever operates this
- * server — see the "global skip-permissions switch" invariant in CLAUDE.md for what
- * it does and does not reach (a running terminal session's flag is fixed at spawn).
+ * Read-only facts fixed at boot, never database-backed: `HOST`/`PORT` are
+ * needed to bind before a settings page is even reachable, `databasePath` is
+ * needed to open the very database that would otherwise store it, and
+ * `nodeEnv` is a deployment mode, not an app setting. Shown on the settings
+ * page so it's obvious *why* these aren't editable there, instead of just
+ * silently missing.
  */
-export const GlobalSettingsResponse = z.object({
-  skipPermissionsEnabled: z.boolean(),
+export const FixedServerInfo = z.object({
+  host: z.string(),
+  port: z.number().int(),
+  databasePath: z.string(),
+  nodeEnv: z.enum(['development', 'production', 'test']),
+  isNetworkExposed: z.boolean(),
 });
-export type GlobalSettingsResponse = z.infer<typeof GlobalSettingsResponse>;
+export type FixedServerInfo = z.infer<typeof FixedServerInfo>;
 
-export const UpdateGlobalSettingsRequest = z.object({
+/**
+ * Every other server setting, all database-backed (see
+ * `apps/server/src/settings/fields.ts`): seeded once from the environment on
+ * first boot, then persisted — `.env` is never consulted again. Some take
+ * effect immediately; others were captured into another module's constructor
+ * closure at boot and need a restart. `GET /api/settings` reports which via
+ * `restartRequiredKeys`, not by omitting a value.
+ *
+ * `skipPermissionsEnabled` is the pre-existing server-wide switch to bypass
+ * approvals for every session — a deliberate, dangerous override of the
+ * per-session `CreateSessionRequest.skipPermissions` opt-in. Off by default;
+ * see the "global skip-permissions switch" invariant in CLAUDE.md for what it
+ * does and does not reach (a running terminal session's flag is fixed at
+ * spawn). It is not one of `SETTINGS_FIELDS` — `SessionManager` owns its
+ * storage and live propagation — but rides on this same resource because it
+ * is, like the rest, a fact about the whole server rather than one session.
+ */
+export const RuntimeSettings = z.object({
   skipPermissionsEnabled: z.boolean(),
+  logLevel: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']),
+  /** Comma-separated origins, or `''` for the same-origin-only default. */
+  allowedOrigins: z.string(),
+  maxSessions: z.number().int().min(1).max(200),
+  outputBufferBytes: z
+    .number()
+    .int()
+    .min(16 * 1024)
+    .max(64 * 1024 * 1024),
+  sessionIdleTimeoutSeconds: z
+    .number()
+    .int()
+    .min(0)
+    .max(30 * 24 * 3600),
+  sessionTtlHours: z.number().int().min(1).max(8760),
+  cookieSecure: z.boolean(),
+  trustProxy: z.boolean(),
+  /** `''` hides the "Open in code-server" action. */
+  codeServerUrl: z.string(),
+  shell: z.string().min(1),
+  claudeBin: z.string().min(1),
+  agyBin: z.string().min(1),
+  opencodeBin: z.string().min(1),
+  codexBin: z.string().min(1),
+  piBin: z.string().min(1),
+  webDistPath: z.string().min(1),
+  backend: z.enum(['direct', 'tmux']),
+  tmuxBin: z.string().min(1),
+  tmuxSocket: z.string().min(1),
+  /** `''` disables tmux pane adoption. */
+  adoptTmuxSocket: z.string(),
+  /** `''` disables the systemd-slice wrapping. */
+  tmuxSessionScopeSlice: z.string(),
+  pushContact: z.string().min(1),
 });
-export type UpdateGlobalSettingsRequest = z.infer<typeof UpdateGlobalSettingsRequest>;
+export type RuntimeSettings = z.infer<typeof RuntimeSettings>;
+
+export const UpdateSettingsRequest = RuntimeSettings.partial();
+export type UpdateSettingsRequest = z.infer<typeof UpdateSettingsRequest>;
+
+export const SettingsResponse = z.object({
+  fixed: FixedServerInfo,
+  settings: RuntimeSettings,
+  /** `RuntimeSettings` keys that need a restart to take effect once changed. */
+  restartRequiredKeys: z.array(z.string()),
+});
+export type SettingsResponse = z.infer<typeof SettingsResponse>;
 
 export const UsageWindowInfo = z.object({
   label: z.string(),

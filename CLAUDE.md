@@ -55,8 +55,10 @@ PA_TOKEN=... pnpm demo:copy-ui           # copy-to-clipboard fallback over plain
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
 *scratch* server (`PA_BASE`) with a throwaway workspace root — they create files, start
-agents, and kill tmux servers. Never point them at the real `.env` database; use a separate
-`DATABASE_PATH`.
+agents, and kill tmux servers. Never point them at the real database: `DATABASE_PATH` is not
+configurable (always `<checkout>/data/pocketagent.db` — see `Config.databasePath`), so the
+only way to get an isolated database for a scratch server is to run it from a second checkout
+rather than pointing an env var at a different file.
 
 **Rebuild then restart** before running a browser demo against a built server: the server
 caches `index.html` at boot, so a fresh bundle on disk is not the one being served, and the

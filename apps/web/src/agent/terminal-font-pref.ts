@@ -1,5 +1,5 @@
 /**
- * An optional override for the terminal's font, typed into `SettingsDialog`.
+ * An optional override for the terminal's font, typed into `SettingsPage`.
  *
  * `create-terminal.ts` bundles "JetBrainsMono Nerd Font Mono" as the default
  * so Powerline/Nerd Font glyphs in a tmux prompt render on any device this

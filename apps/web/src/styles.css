@@ -3546,3 +3546,82 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---- Settings page ----
+ * `SettingsPage`. A stack of `.dialog`-style fields (same `.field`,
+ * `.checkbox-row`, `.transport-hint`, `.warn-note` classes the old
+ * `SettingsDialog` used for its one switch) grouped into named sections,
+ * full-page rather than a modal — see the settings-page plan for why.
+ */
+.settings-page {
+  height: 100%;
+  overflow-y: auto;
+  padding: 24px;
+  box-sizing: border-box;
+  max-width: 640px;
+}
+
+.settings-section {
+  margin-bottom: 28px;
+}
+.settings-section h2 {
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0 0 12px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.settings-row {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.settings-row:last-child {
+  border-bottom: none;
+}
+.settings-row label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.settings-row.checkbox-row label {
+  display: flex;
+  align-items: center;
+}
+
+.settings-unit {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+.settings-badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-dim);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.settings-fixed {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px 20px;
+  margin: 0 0 4px;
+}
+.settings-fixed dt {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  margin: 0 0 2px;
+}
+.settings-fixed dd {
+  font-size: 13.5px;
+  margin: 0;
+}
+.settings-fixed-path {
+  word-break: break-all;
+}

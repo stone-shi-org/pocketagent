@@ -34,8 +34,12 @@ export interface ProjectServiceOptions {
   hostname?: string;
   /** How many transcripts to scan. Bounds the cost on a long-lived install. */
   conversationLimit?: number;
-  /** See `Config.codeServerBaseUrl`. Null when not configured. */
-  codeServerBaseUrl?: string | null;
+  /**
+   * See `Config.codeServerBaseUrl`. A getter, not a snapshotted value, so a
+   * live `PATCH /api/settings` change (it's one of the "live" fields — see
+   * `settings/fields.ts`) is reflected without a restart.
+   */
+  getCodeServerBaseUrl?: () => string | null;
   /** Overridable in tests, so a scenario can force a fresh `git status` between two `list()` calls. */
   gitStatusTtlMs?: number;
 }
@@ -47,7 +51,7 @@ export class ProjectService {
   private readonly version: string;
   private readonly hostname: string;
   private readonly conversationLimit: number;
-  private readonly codeServerBaseUrl: string | null;
+  private readonly getCodeServerBaseUrl: () => string | null;
   private readonly gitStatus: GitStatusTracker;
 
   constructor(options: ProjectServiceOptions) {
@@ -57,7 +61,7 @@ export class ProjectService {
     this.version = options.version;
     this.hostname = options.hostname ?? os.hostname();
     this.conversationLimit = options.conversationLimit ?? 60;
-    this.codeServerBaseUrl = options.codeServerBaseUrl ?? null;
+    this.getCodeServerBaseUrl = options.getCodeServerBaseUrl ?? (() => null);
     this.gitStatus = new GitStatusTracker(options.gitStatusTtlMs);
   }
 
@@ -75,7 +79,7 @@ export class ProjectService {
       name: shortHostname(this.hostname),
       version: this.version,
       online: true,
-      codeServerBaseUrl: this.codeServerBaseUrl,
+      codeServerBaseUrl: this.getCodeServerBaseUrl(),
     };
   }
 

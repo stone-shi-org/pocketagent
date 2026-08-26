@@ -28,7 +28,7 @@ describe('global skip-permissions switch over HTTP', () => {
     t = await createTestApp();
     const res = await t.app.inject({ method: 'GET', url: '/api/settings', headers: headers(t) });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ skipPermissionsEnabled: false });
+    expect(res.json().settings.skipPermissionsEnabled).toBe(false);
   });
 
   it('requires authentication', async () => {
@@ -46,10 +46,10 @@ describe('global skip-permissions switch over HTTP', () => {
       headers: headers(t),
       payload: { skipPermissionsEnabled: true },
     });
-    expect(on.json()).toEqual({ skipPermissionsEnabled: true });
+    expect(on.json().settings.skipPermissionsEnabled).toBe(true);
 
     const get = await t.app.inject({ method: 'GET', url: '/api/settings', headers: headers(t) });
-    expect(get.json()).toEqual({ skipPermissionsEnabled: true });
+    expect(get.json().settings.skipPermissionsEnabled).toBe(true);
 
     const off = await t.app.inject({
       method: 'PATCH',
@@ -57,7 +57,7 @@ describe('global skip-permissions switch over HTTP', () => {
       headers: headers(t),
       payload: { skipPermissionsEnabled: false },
     });
-    expect(off.json()).toEqual({ skipPermissionsEnabled: false });
+    expect(off.json().settings.skipPermissionsEnabled).toBe(false);
   });
 
   it('rejects a malformed body rather than guessing', async () => {
@@ -90,7 +90,7 @@ describe('global skip-permissions switch, persisted across a restart', () => {
     // persisted value must win, the same rule `workspaces` already follows.
     t = await createTestApp({}, db);
     const res = await t.app.inject({ method: 'GET', url: '/api/settings', headers: headers(t) });
-    expect(res.json()).toEqual({ skipPermissionsEnabled: true });
+    expect(res.json().settings.skipPermissionsEnabled).toBe(true);
     await t.cleanup();
     db.close();
   });
@@ -98,7 +98,7 @@ describe('global skip-permissions switch, persisted across a restart', () => {
   it('seeds from POCKETAGENT_GLOBAL_SKIP_PERMISSIONS only on a fresh database', async () => {
     const t = await createTestApp({ POCKETAGENT_GLOBAL_SKIP_PERMISSIONS: 'true' });
     const res = await t.app.inject({ method: 'GET', url: '/api/settings', headers: headers(t) });
-    expect(res.json()).toEqual({ skipPermissionsEnabled: true });
+    expect(res.json().settings.skipPermissionsEnabled).toBe(true);
     await t.cleanup();
   });
 });

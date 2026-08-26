@@ -9,6 +9,7 @@ import { useIsDesktop } from './hooks/useMediaQuery.js';
 import { SessionRoute } from './pages/SessionRoute.js';
 import { ChatPreviewPage } from './pages/ChatPreviewPage.js';
 import { AgentsFleetPage } from './pages/AgentsFleetPage.js';
+import { SettingsPage } from './pages/SettingsPage.js';
 import { api } from './api/client.js';
 
 type AuthState = 'checking' | 'anonymous' | 'authenticated';
@@ -113,12 +114,17 @@ export function App(): JSX.Element {
     );
   }
 
+  if (route.name === 'settings') {
+    return <SettingsPage onBack={() => navigate({ name: 'list' })} onApiError={handleApiError} />;
+  }
+
   return (
     <ProjectsPage
       onOpen={(sessionId) => navigate({ name: 'terminal', sessionId })}
       onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
       onCompose={(cwd) => navigate(cwd ? { name: 'compose', cwd } : { name: 'compose' })}
       onOpenAgents={() => navigate({ name: 'agents' })}
+      onOpenSettings={() => navigate({ name: 'settings' })}
       onApiError={handleApiError}
       onLogout={logout}
     />
