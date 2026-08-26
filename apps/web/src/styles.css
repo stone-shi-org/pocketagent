@@ -2867,6 +2867,14 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   color: var(--danger);
 }
 
+/* VS Code's own affordance for "this is the strip's one reusable tab, not
+   pinned open yet" — a single click on a project-tree row lands here; a
+   double click drops the italic for good. */
+.tab.preview .tab-title,
+.tab-list-menu button.preview .tab-list-item-title {
+  font-style: italic;
+}
+
 /* One panel per open tab, stacked in the same box. `visibility`, not
    `display: none` — `TerminalPage`'s `ResizeObserver` would read a
    `display:none` panel's collapse to 0x0 as a real resize and push it at a

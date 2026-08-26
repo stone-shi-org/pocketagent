@@ -6,6 +6,11 @@ export type TabRoute = Extract<Route, { name: 'terminal' } | { name: 'chat' }>;
 export interface OpenTab {
   id: string;
   route: TabRoute;
+  /** VS Code's name for the one tab a single click in the explorer reuses,
+      rather than piling up a new tab per click — see `tabListReducer`'s
+      `openPreview`/`openPermanent` cases. Absent (not `false`) for a tab
+      opened any other way, same as `dragging` on `TabBar`'s own tab state. */
+  preview?: boolean;
 }
 
 export function isTabRoute(route: Route): route is TabRoute {
@@ -18,6 +23,8 @@ export function tabIdFor(route: TabRoute): string {
 
 export type TabListAction =
   | { type: 'sync'; route: Route }
+  | { type: 'openPreview'; route: TabRoute }
+  | { type: 'openPermanent'; route: TabRoute }
   | { type: 'close'; id: string }
   | { type: 'reorder'; orderedIds: string[] };
 
@@ -48,6 +55,33 @@ export function tabListReducer(tabs: OpenTab[], action: TabListAction): OpenTab[
       const id = tabIdFor(action.route);
       if (tabs.some((t) => t.id === id)) return tabs;
       return [...tabs, { id, route: action.route }];
+    }
+    case 'openPreview': {
+      // A single click on a project-tree row: same chat twice in a row (or
+      // any other already-open tab) just switches to it, untouched. A new
+      // chat replaces whichever tab is *currently* marked preview, in that
+      // tab's own slot, rather than appending — there is only ever one
+      // preview tab, exactly like VS Code's explorer.
+      const id = tabIdFor(action.route);
+      if (tabs.some((t) => t.id === id)) return tabs;
+      const previewIndex = tabs.findIndex((t) => t.preview);
+      if (previewIndex === -1) return [...tabs, { id, route: action.route, preview: true }];
+      const next = tabs.slice();
+      next[previewIndex] = { id, route: action.route, preview: true };
+      return next;
+    }
+    case 'openPermanent': {
+      // A double click: a chat not open yet gets a normal, non-preview tab.
+      // One already open as *this strip's* preview tab is "kept" in place —
+      // same slot, just no longer liable to be replaced by the next single
+      // click elsewhere. Already open and not the preview tab: nothing to do.
+      const id = tabIdFor(action.route);
+      const index = tabs.findIndex((t) => t.id === id);
+      if (index === -1) return [...tabs, { id, route: action.route }];
+      if (!tabs[index]?.preview) return tabs;
+      const next = tabs.slice();
+      next[index] = { id, route: action.route };
+      return next;
     }
     case 'close':
       return tabs.filter((t) => t.id !== action.id);

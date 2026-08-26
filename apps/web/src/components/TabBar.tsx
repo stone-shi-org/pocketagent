@@ -7,6 +7,10 @@ export interface Tab {
   /** Shows the same live-dot the sidebar uses — a tab is its title and,
       if running, a green dot, same as a chat row. */
   live: boolean;
+  /** VS Code's name for the strip's one reusable, unpinned tab — a single
+      click on a project-tree row lands here instead of opening a new tab.
+      Shown in italics, same affordance VS Code uses. */
+  preview: boolean;
 }
 
 interface Props {
@@ -168,7 +172,9 @@ export function TabBar({
                     key={tab.id}
                     type="button"
                     role="menuitem"
-                    className={tab.id === activeId ? 'active' : ''}
+                    className={[tab.id === activeId ? 'active' : '', tab.preview ? 'preview' : '']
+                      .filter(Boolean)
+                      .join(' ')}
                     onClick={() => {
                       setListMenuAt(null);
                       onSelect(tab.id);
@@ -193,6 +199,7 @@ export function TabBar({
               'tab',
               tab.id === activeId ? 'active' : '',
               tab.id === draggingId ? 'dragging' : '',
+              tab.preview ? 'preview' : '',
             ]
               .filter(Boolean)
               .join(' ')}
