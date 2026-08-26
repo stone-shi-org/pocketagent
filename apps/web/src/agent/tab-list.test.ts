@@ -32,6 +32,61 @@ describe('tabListReducer: sync', () => {
   });
 });
 
+describe('tabListReducer: openPreview', () => {
+  it('appends a new tab marked preview when none is open yet', () => {
+    const next = tabListReducer([], { type: 'openPreview', route: tabA.route });
+    expect(next).toEqual([{ ...tabA, preview: true }]);
+  });
+
+  it('reuses the existing preview tab\'s own slot for a different chat', () => {
+    const tabs: OpenTab[] = [tabB, { ...tabA, preview: true }];
+    const next = tabListReducer(tabs, { type: 'openPreview', route: tabC.route });
+    expect(next).toEqual([tabB, { ...tabC, preview: true }]);
+  });
+
+  it('is a no-op for a chat that is already open, preview or not', () => {
+    const tabs: OpenTab[] = [tabA, { ...tabB, preview: true }];
+    expect(tabListReducer(tabs, { type: 'openPreview', route: tabA.route })).toBe(tabs);
+    expect(tabListReducer(tabs, { type: 'openPreview', route: tabB.route })).toBe(tabs);
+  });
+
+  it('appends rather than replacing when nothing is currently a preview tab', () => {
+    const tabs: OpenTab[] = [tabA, tabB];
+    expect(tabListReducer(tabs, { type: 'openPreview', route: tabC.route })).toEqual([
+      tabA,
+      tabB,
+      { ...tabC, preview: true },
+    ]);
+  });
+});
+
+describe('tabListReducer: openPermanent', () => {
+  it('appends a normal (non-preview) tab when the chat is not open yet', () => {
+    expect(tabListReducer([], { type: 'openPermanent', route: tabA.route })).toEqual([tabA]);
+  });
+
+  it('keeps the preview tab open for good, in the same slot', () => {
+    const tabs: OpenTab[] = [tabB, { ...tabA, preview: true }];
+    expect(tabListReducer(tabs, { type: 'openPermanent', route: tabA.route })).toEqual([tabB, tabA]);
+  });
+
+  it('is a no-op for a tab that is already permanent', () => {
+    const tabs: OpenTab[] = [tabA, tabB];
+    expect(tabListReducer(tabs, { type: 'openPermanent', route: tabA.route })).toBe(tabs);
+  });
+
+  it('double-clicking a preview tab and then opening a new chat by single click does not evict the now-permanent tab', () => {
+    // The scenario the whole feature is for: preview B, "keep" it with a
+    // double click, then single-click a third chat — C should open as the
+    // new preview without disturbing B, which is no longer a preview tab.
+    let tabs: OpenTab[] = [tabA];
+    tabs = tabListReducer(tabs, { type: 'openPreview', route: tabB.route });
+    tabs = tabListReducer(tabs, { type: 'openPermanent', route: tabB.route });
+    tabs = tabListReducer(tabs, { type: 'openPreview', route: tabC.route });
+    expect(tabs).toEqual([tabA, tabB, { ...tabC, preview: true }]);
+  });
+});
+
 describe('tabListReducer: close', () => {
   it('removes exactly the closed tab', () => {
     expect(tabListReducer([tabA, tabB, tabC], { type: 'close', id: tabB.id })).toEqual([tabA, tabC]);

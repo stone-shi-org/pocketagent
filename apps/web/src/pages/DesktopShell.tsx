@@ -62,11 +62,6 @@ function routeToStored(route: TabRoute): StoredTabRoute {
  * sniffing the user agent. See `useMediaQuery`.
  */
 export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props): JSX.Element {
-  const state = useProjects(
-    (sessionId) => onNavigate({ name: 'terminal', sessionId }),
-    (conversationId) => onNavigate({ name: 'chat', conversationId }),
-    onApiError,
-  );
   const [search, setSearch] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -169,6 +164,50 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
     [closeTab],
   );
 
+  /** A single click on a project-tree row: shows the chat without
+      permanently adding a tab. Same ref-then-dispatch shape `closeTab` uses,
+      for the same reason — a second click before this one's render commits
+      must still see the tab this one just opened, not a stale empty list. */
+  const openPreviewTab = useCallback(
+    (tabRoute: TabRoute) => {
+      openTabsRef.current = tabListReducer(openTabsRef.current, { type: 'openPreview', route: tabRoute });
+      dispatch({ type: 'openPreview', route: tabRoute });
+      routeRef.current = tabRoute;
+      onNavigate(tabRoute);
+    },
+    [onNavigate],
+  );
+
+  /** A double click: "keeps" the tab open for good, same slot, immune to
+      being replaced by the next single click elsewhere in the tree. */
+  const openPermanentTab = useCallback(
+    (tabRoute: TabRoute) => {
+      openTabsRef.current = tabListReducer(openTabsRef.current, { type: 'openPermanent', route: tabRoute });
+      dispatch({ type: 'openPermanent', route: tabRoute });
+      routeRef.current = tabRoute;
+      onNavigate(tabRoute);
+    },
+    [onNavigate],
+  );
+
+  // Single click from the sidebar previews; double click keeps. Anything
+  // that opens a chat some other way (compose, resuming from a chat preview,
+  // the tab-list dropdown, Agents fleet) calls `onNavigate` directly and
+  // always lands as a normal permanent tab via the plain `sync` merge below.
+  const state = useProjects(
+    (sessionId, opts) => {
+      const tabRoute: TabRoute = { name: 'terminal', sessionId };
+      if (opts?.preview) openPreviewTab(tabRoute);
+      else openPermanentTab(tabRoute);
+    },
+    (conversationId, opts) => {
+      const tabRoute: TabRoute = { name: 'chat', conversationId };
+      if (opts?.preview) openPreviewTab(tabRoute);
+      else openPermanentTab(tabRoute);
+    },
+    onApiError,
+  );
+
   // Title and live status for the tab strip come from the same polled project
   // list the sidebar already renders from — no separate fetch per tab.
   const chatById = useMemo(() => {
@@ -199,14 +238,19 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
 
   const tabsForBar: Tab[] = openTabs.map((tab) => {
     const found = chatById.get(tab.id) ?? knownTitles.current.get(tab.id);
-    if (found) return { id: tab.id, title: found.title, live: found.live };
+    if (found) return { id: tab.id, title: found.title, live: found.live, preview: tab.preview ?? false };
     // Never seen at all — a tab restored from `open-tabs-pref` whose chat had
     // already aged out of the poll window before this tab bar ever mounted.
     // Same fallback `AgentPage`'s own topbar uses (`session?.title ??
     // sessionId`); the tab closes itself via the "this session no longer
     // exists" screen if it really is gone rather than just unpolled.
     const fallback = tab.route.name === 'terminal' ? tab.route.sessionId : tab.route.conversationId;
-    return { id: tab.id, title: fallback, live: tab.route.name === 'terminal' };
+    return {
+      id: tab.id,
+      title: fallback,
+      live: tab.route.name === 'terminal',
+      preview: tab.preview ?? false,
+    };
   });
 
   const activeSessionId = route.name === 'terminal' ? route.sessionId : null;

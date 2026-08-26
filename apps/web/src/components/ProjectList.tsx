@@ -58,12 +58,23 @@ export function allChats(projects: ProjectInfo[]): ChatSummary[] {
   return out;
 }
 
+/**
+ * `preview`: a single click on a project-tree row, VS Code's name for the
+ * one tab it reuses rather than piling up a new tab per click — the desktop
+ * shell opens it in that reusable slot instead of a permanent tab. Omitted
+ * (or a double click) opens a normal, permanent tab. The phone layout has no
+ * tab strip to preview into, so its `onOpen`/`onOpenChat` just ignore this.
+ */
+export interface OpenChatOptions {
+  preview?: boolean;
+}
+
 export interface ProjectsState {
   projects: ProjectInfo[] | null;
   host: HostInfo | null;
   error: string | null;
   refresh: () => Promise<void>;
-  open: (chat: ChatSummary) => void;
+  open: (chat: ChatSummary, opts?: OpenChatOptions) => void;
   removeChat: (chat: ChatSummary) => Promise<void>;
   detachChat: (chat: ChatSummary) => Promise<void>;
   reattachChat: (chat: ChatSummary) => Promise<void>;
@@ -82,8 +93,8 @@ export interface ProjectsState {
  * branch" is one copy too many for a rule with that much behind it.
  */
 export function useProjects(
-  onOpen: (sessionId: string) => void,
-  onOpenChat: (conversationId: string) => void,
+  onOpen: (sessionId: string, opts?: OpenChatOptions) => void,
+  onOpenChat: (conversationId: string, opts?: OpenChatOptions) => void,
   onApiError: (error: unknown) => void,
 ): ProjectsState {
   const [projects, setProjects] = useState<ProjectInfo[] | null>(null);
@@ -147,12 +158,12 @@ export function useProjects(
    * from `SessionInfo.agentSessionId`.
    */
   const open = useCallback(
-    (chat: ChatSummary) => {
+    (chat: ChatSummary, opts?: OpenChatOptions) => {
       if (chat.sessionId && (chat.live || chat.agent !== 'claude' || !chat.conversationId)) {
-        onOpen(chat.sessionId);
+        onOpen(chat.sessionId, opts);
         return;
       }
-      if (chat.conversationId) onOpenChat(chat.conversationId);
+      if (chat.conversationId) onOpenChat(chat.conversationId, opts);
     },
     [onOpen, onOpenChat],
   );
@@ -447,7 +458,7 @@ interface ProjectSectionProps {
   /** A folded worktree renders smaller and indented under its main checkout. */
   nested: boolean;
   state: ProjectsState;
-  open: (chat: ChatSummary) => void;
+  open: (chat: ChatSummary, opts?: OpenChatOptions) => void;
   searching: boolean;
   collapsed: Set<string>;
   toggle: (cwd: string) => void;
@@ -611,7 +622,15 @@ function ProjectSection({
                       .filter(Boolean)
                       .join(' ')}
                     data-chat-id={chat.id}
-                    onClick={() => open(chat)}
+                    // Single click: VS Code's "preview" tab — reuses the
+                    // strip's one unpinned slot instead of piling up a new
+                    // tab per click. Double click keeps it open for good.
+                    // Both always navigate, even if the tab is already open
+                    // (permanent or preview) — DesktopShell's reducer only
+                    // touches the tab list itself when there's actually
+                    // something to change.
+                    onClick={() => open(chat, { preview: true })}
+                    onDoubleClick={() => open(chat, { preview: false })}
                     title={chat.title}
                   >
                     <span className="chat-title">
