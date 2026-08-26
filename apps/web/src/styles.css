@@ -2941,6 +2941,12 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 }
 
 .tab-title {
+  /* Grows to fill whatever room the tab has beyond its own text — without
+     this, a short title left `.tab-close` sitting right next to it with all
+     the tab's slack space trailing uselessly after the button, instead of
+     the button sitting flush against the tab's own right edge. */
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
