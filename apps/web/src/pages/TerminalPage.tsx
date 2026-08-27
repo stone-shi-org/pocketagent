@@ -25,6 +25,22 @@ interface Props {
 
 const RESIZE_DEBOUNCE_MS = 150;
 
+/**
+ * Whether this pane's "fit to this screen anyway" opt-in was already made on
+ * an earlier visit (see `adopted-size-prefs.ts`).
+ *
+ * Module scope, and shared by *every* path that learns a session's identity,
+ * because there is more than one: the WebSocket's `onAttached` and the REST
+ * metadata fetch that deliberately runs ahead of it. Only the former used to
+ * consult the preference, so between mount and attach `session.adopted` was
+ * already true while `takeOverSize` was still its initial `false` — the notice
+ * (and the `fixed-grid` sizing it explains) appeared for a choice the user had
+ * already made, then vanished the moment the socket attached.
+ */
+function hasStoredTakeOver(info: SessionInfo): boolean {
+  return info.adopted && !!info.adoptTargetId && getTakeOverSizePref(info.adoptTargetId);
+}
+
 export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -66,6 +82,17 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
    */
   const knowsAdoptedRef = useRef(false);
   const [takeOverSize, setTakeOverSize] = useState(false);
+  /**
+   * Whether the server has confirmed an attach for the session currently being
+   * shown. The REST metadata fetch below deliberately runs ahead of the socket,
+   * so `session` alone says nothing about whether we are actually attached —
+   * and the adopted-pane notice speaks in the present tense ("Attached to your
+   * own tmux pane at N×M") about a size read from the database row, which
+   * `reconcileAdoptedSize` can have moved on from since. Claiming a stale size
+   * as the current one is the same failure the `resized` frame exists to
+   * prevent, so the notice waits for a real answer.
+   */
+  const [hasAttached, setHasAttached] = useState(false);
   const [confirmingStop, setConfirmingStop] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [reattaching, setReattaching] = useState(false);
@@ -77,6 +104,10 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+
+    // Switching sessions within one mount reuses this state, so a previous
+    // session's confirmed attach must not vouch for the incoming one.
+    setHasAttached(false);
 
     const bundle = createTerminal(host);
     termRef.current = bundle.term;
@@ -150,13 +181,14 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
           setFatal(null);
           adoptedRef.current = info.adopted;
           knowsAdoptedRef.current = true;
+          setHasAttached(true);
           // Already decided "fit to this screen anyway" for this exact pane
           // before — on an earlier visit, or a previous attach that this one
           // superseded (see `adopted-size-prefs.ts`). Apply that now, before
           // deciding below whether to mirror the pane's real grid, so the
           // notice explaining the tradeoff does not reappear for a choice
           // that was already made.
-          if (info.adopted && info.adoptTargetId && getTakeOverSizePref(info.adoptTargetId)) {
+          if (hasStoredTakeOver(info)) {
             takeOverSizeRef.current = true;
             setTakeOverSize(true);
           }
@@ -283,6 +315,14 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
         if (cancelled) return;
         setSession(info);
         setStatus(info.status);
+        // This runs *before* the socket attaches and is enough on its own to
+        // satisfy the adopted-pane notice's `session?.adopted` condition, so
+        // the stored opt-in has to be honoured here too — not only in
+        // `onAttached`. See `hasStoredTakeOver`.
+        if (hasStoredTakeOver(info)) {
+          takeOverSizeRef.current = true;
+          setTakeOverSize(true);
+        }
       })
       .catch((err) => {
         if (cancelled) return;
@@ -414,6 +454,16 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
   const alive = !isTerminalStatus(status);
   const inputDisabled = !alive || connection !== 'connected';
 
+  /**
+   * True while this view is mirroring an adopted pane's grid instead of fitting
+   * the viewport. Drives both the explanatory notice and the `fixed-grid`
+   * sizing, from one expression, so the two cannot disagree about which mode
+   * the terminal is in — and gated on `hasAttached` because until the server
+   * answers, `applyFit` is still fitting the viewport (`adoptedRef` defaults to
+   * false), so claiming a fixed grid then would describe the wrong mode.
+   */
+  const mirroringAdoptedPane = hasAttached && session?.adopted === true && !takeOverSize;
+
   // A prompt typed on the composer, delivered once the CLI can receive it.
   // Unlike a structured session there is no readiness signal here, so this
   // waits for the process to have produced something before typing at it.
@@ -486,7 +536,7 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
         </div>
       )}
 
-      {session?.adopted && !takeOverSize && (
+      {mirroringAdoptedPane && session && (
         <div className="notice" role="status">
           Attached to your own tmux pane at {session.cols}×{session.rows}. Not resizing it —
           that would resize your terminal too.{' '}
@@ -510,7 +560,7 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
         </div>
       )}
 
-      <div className={`terminal-host${session?.adopted && !takeOverSize ? ' fixed-grid' : ''}`} ref={hostRef} />
+      <div className={`terminal-host${mirroringAdoptedPane ? ' fixed-grid' : ''}`} ref={hostRef} />
 
       <MobileKeyBar
         onSend={sendRaw}
