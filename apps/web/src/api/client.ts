@@ -8,6 +8,7 @@ import type {
   DiscoveredFolder,
   AgentInfo,
   ConversationInfo,
+  EffortLevel,
   HostInfo,
   MeResponse,
   ProjectInfo,
@@ -125,6 +126,10 @@ export const api = {
     adoptTargetId?: string;
     /** Explicit opt-in to bypass approvals. Defaults to false server-side. */
     skipPermissions?: boolean;
+    /** Omit to fall back to the per-agent cached default — see `AgentInfo.defaultModel`. */
+    model?: string;
+    /** `null` pins the model's own default; omit to fall back to the cache. */
+    effort?: EffortLevel | null;
   }) =>
     request<SessionInfo>('/api/sessions', {
       method: 'POST',

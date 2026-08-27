@@ -1,12 +1,14 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import type { AgentEvent, SessionInfo, SessionStatus, SessionTransport } from '@pocketagent/protocol';
+import type { AgentEvent, EffortLevel, SessionInfo, SessionStatus, SessionTransport } from '@pocketagent/protocol';
 import type { Db, SessionRow } from '../db/index.js';
 import {
   GLOBAL_SKIP_PERMISSIONS_KEY,
   markStaleSessionsInterrupted,
   pruneOldSessions,
+  readAgentDefaults,
   readSetting,
+  writeAgentDefaults,
   writeSetting,
 } from '../db/index.js';
 import type { AgentRegistry } from '../agents/registry.js';
@@ -83,6 +85,15 @@ export interface CreateSessionInput {
    * `supportsSkipPermissions`; every other adapter ignores it.
    */
   skipPermissions?: boolean;
+  /**
+   * Explicit model/effort for this session. Only honoured on a brand-new
+   * `claude` conversation (see `create()`'s guard below) — a resume already
+   * carries its own conversation's model in the SDK's own state, and forcing
+   * a different agent's cached value onto it would silently switch a
+   * conversation that never asked to change.
+   */
+  model?: string;
+  effort?: EffortLevel | null;
   /** Attach to an already-running tmux pane instead of starting a process. */
   adopt?: {
     command: string;
@@ -338,6 +349,28 @@ export class SessionManager {
       session.on('permission', (pending) => this.onPermissionChange(session.id, pending.length));
       session.on('event', (_seq, event) => {
         if (event.kind === 'turn_complete') this.onTurnComplete(session);
+        // Write-through cache of "what did a live session actually run with",
+        // keyed by agent id — see `agent_defaults` in db/index.ts. This is
+        // the one shared subscription point for every structured backend
+        // (agy/opencode/codex/pi as well as the SDK), so any of them reporting
+        // these event kinds gets cached the same way, with no per-backend
+        // wiring needed. Only the SDK-backed `claude` sessions currently read
+        // this cache back at spawn time (see `create()`), but caching it here
+        // for every backend costs nothing and is ready for that to extend.
+        if (event.kind === 'session_started' && event.model) {
+          writeAgentDefaults(this.opts.db, session.spec.agent, { model: event.model });
+        }
+        if (event.kind === 'model_changed') {
+          writeAgentDefaults(this.opts.db, session.spec.agent, { model: event.model });
+        }
+        if (event.kind === 'effort_changed') {
+          writeAgentDefaults(this.opts.db, session.spec.agent, { effort: event.effort });
+        }
+        if (event.kind === 'models_available') {
+          writeAgentDefaults(this.opts.db, session.spec.agent, {
+            modelsJson: JSON.stringify(event.models),
+          });
+        }
       });
     } else {
       session.on('hint', (hints) => {
@@ -591,6 +624,17 @@ export class SessionManager {
         });
       }
 
+      // Only a brand-new `claude` conversation gets an auto-applied
+      // model/effort default — a resume already carries its own conversation's
+      // model in the SDK's own state (see `StructuredSessionSpec.model`'s doc
+      // comment), and forcing this agent's most-recently-seen value onto it
+      // could silently switch a conversation that never asked to change.
+      const cachedDefaults = input.resumeAgentSessionId
+        ? null
+        : readAgentDefaults(this.opts.db, input.agent);
+      const model = input.model ?? cachedDefaults?.model ?? undefined;
+      const effort = input.effort !== undefined ? input.effort : (cachedDefaults?.effort ?? undefined);
+
       return this.startStructured({
         id,
         title,
@@ -604,6 +648,8 @@ export class SessionManager {
           ? { resumeAgentSessionId: input.resumeAgentSessionId }
           : {}),
         ...(input.forkSession !== undefined ? { forkSession: input.forkSession } : {}),
+        ...(model !== undefined ? { model } : {}),
+        ...(effort !== undefined ? { effort } : {}),
         skipPermissions,
       });
     }
@@ -676,6 +722,8 @@ export class SessionManager {
     env: Record<string, string>;
     resumeAgentSessionId?: string;
     skipPermissions?: boolean;
+    model?: string;
+    effort?: EffortLevel | null;
   }): Promise<StructuredSession> {
     const session = new StructuredSession({
       id: args.id,
@@ -693,6 +741,8 @@ export class SessionManager {
         : {}),
       ...(this.opts.maxBudgetUsd !== undefined ? { maxBudgetUsd: this.opts.maxBudgetUsd } : {}),
       skipPermissions: args.skipPermissions === true,
+      ...(args.model !== undefined ? { model: args.model } : {}),
+      ...(args.effort !== undefined ? { effort: args.effort } : {}),
     });
 
     this.insertRow(session, args.createdAt);

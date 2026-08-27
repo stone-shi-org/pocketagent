@@ -10,7 +10,7 @@ import {
   SessionInfo,
   WorkspaceEntry,
 } from './session.js';
-import { SessionTransport } from './agent-events.js';
+import { EffortLevel, SessionTransport } from './agent-events.js';
 import { LIMITS } from './ws.js';
 
 export const LoginRequest = z.object({
@@ -63,6 +63,22 @@ export const CreateSessionRequest = z.object({
    * `supportsSkipPermissions` in `AgentInfo` honour it.
    */
   skipPermissions: z.boolean().default(false),
+  /**
+   * Model to start this session on (the Claude Agent SDK's model alias or
+   * full id). Optional: omitted means "whatever the agent's own default is",
+   * same as before this field existed. Only the `claude` agent's structured
+   * transport honours it today — see `AgentInfo.defaultModel` for where the
+   * composer sources a value to pre-fill this with, since nothing about model
+   * choice is knowable before a session exists to ask.
+   */
+  model: z.string().min(1).max(200).optional(),
+  /**
+   * Effort level to start this session on. `null` explicitly means "the
+   * model's own default" (distinct from omitting the field, which means "use
+   * whatever was cached from a prior session, if anything" — see
+   * `AgentInfo.defaultEffort`). Same one-agent caveat as `model` above.
+   */
+  effort: EffortLevel.nullable().optional(),
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 

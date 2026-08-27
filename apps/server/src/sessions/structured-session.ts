@@ -81,6 +81,24 @@ export interface StructuredSessionSpec {
    * to the browser and nothing is auto-approved server-side.
    */
   skipPermissions?: boolean;
+  /**
+   * Model to switch to right after spawn, before any prompt is queued —
+   * either an explicit per-session choice or the per-agent cached default
+   * (see `AgentInfo.defaultModel`, `db/index.ts`'s `agent_defaults` table).
+   * Undefined means "the agent's own default", same as before this existed.
+   * Applied via `setModel` in `start()` rather than a spawn-time `Options`
+   * field: the SDK's `Options` has no such field, only the live `Query`
+   * handle's `setModel` does, and calling it before the first prompt is
+   * queued makes "effective on the next prompt" mean "effective immediately"
+   * for a brand-new session.
+   */
+  model?: string;
+  /**
+   * Same idea as `model`, for effort. `null` explicitly resets to the model's
+   * own default; `undefined` leaves whatever the SDK would otherwise start
+   * with untouched.
+   */
+  effort?: EffortLevel | null;
 }
 
 export interface StructuredSessionEvents {
@@ -274,6 +292,11 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
     void this.pump();
     void this.fetchInitialCommands();
     void this.fetchInitialModels();
+    // Applied before any prompt is queued (see `StructuredSessionSpec.model`'s
+    // doc comment), so "effective on the next prompt" lands on the very first
+    // one instead of requiring a switch after the fact.
+    if (this.spec.model) void this.setModel(this.spec.model);
+    if (this.spec.effort !== undefined) void this.setEffort(this.spec.effort);
   }
 
   /**

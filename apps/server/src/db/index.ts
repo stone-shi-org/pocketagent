@@ -155,6 +155,28 @@ const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE sessions ADD COLUMN adopt_target_id TEXT;
   `,
+  // Per-agent "last observed live" model/effort cache.
+  //
+  // Not a user-configured default: a value that updates itself every time a
+  // *live* session reports what it's actually running (see
+  // `SessionManager.wire`'s `model_changed`/`effort_changed`/`models_available`
+  // handling), the same way `derivedTitle` mirrors reality rather than being
+  // set by hand. Nothing about model choice is knowable before a session
+  // exists — the Claude Agent SDK cannot report a model catalog without a
+  // running process — so this is the only way a brand-new session's composer
+  // can show (and pre-select) a model at all. Keyed on agent id, not global:
+  // different agent CLIs have different model catalogs and effort
+  // vocabularies (see `EffortLevel`'s doc comment), so a cached value from one
+  // must never leak into another's picker.
+  `
+  CREATE TABLE IF NOT EXISTS agent_defaults (
+    agent_id    TEXT PRIMARY KEY,
+    model       TEXT,
+    effort      TEXT,
+    models_json TEXT,
+    updated_at  INTEGER NOT NULL
+  );
+  `,
 ];
 
 /**
@@ -312,6 +334,48 @@ export function hideChat(db: Db, conversationId: string): void {
   db.prepare(
     'INSERT OR IGNORE INTO hidden_chats (conversation_id, created_at) VALUES (?, ?)',
   ).run(conversationId, Date.now());
+}
+
+export interface AgentDefaultsRow {
+  agent_id: string;
+  model: string | null;
+  effort: string | null;
+  /** Raw JSON of the agent's last-reported `ModelInfo[]` catalog; parsed by the caller. */
+  models_json: string | null;
+  updated_at: number;
+}
+
+export function readAgentDefaults(db: Db, agentId: string): AgentDefaultsRow | null {
+  const row = db.prepare('SELECT * FROM agent_defaults WHERE agent_id = ?').get(agentId) as
+    | AgentDefaultsRow
+    | undefined;
+  return row ?? null;
+}
+
+/**
+ * Merge a partial observation into the cached row for one agent.
+ *
+ * Model, effort, and the model catalog arrive independently — from separate
+ * `model_changed`/`effort_changed`/`models_available` events, often minutes
+ * apart — so this is a read-modify-write upsert rather than a plain `INSERT
+ * ... ON CONFLICT`: an omitted field must keep whatever was already cached
+ * instead of being clobbered back to null.
+ */
+export function writeAgentDefaults(
+  db: Db,
+  agentId: string,
+  patch: { model?: string | null; effort?: string | null; modelsJson?: string | null },
+): void {
+  const existing = readAgentDefaults(db, agentId);
+  const model = patch.model !== undefined ? patch.model : (existing?.model ?? null);
+  const effort = patch.effort !== undefined ? patch.effort : (existing?.effort ?? null);
+  const modelsJson = patch.modelsJson !== undefined ? patch.modelsJson : (existing?.models_json ?? null);
+  db.prepare(
+    `INSERT INTO agent_defaults (agent_id, model, effort, models_json, updated_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET
+         model = excluded.model, effort = excluded.effort, models_json = excluded.models_json,
+         updated_at = excluded.updated_at`,
+  ).run(agentId, model, effort, modelsJson, Date.now());
 }
 
 /** Keep the session table from growing forever on a long-lived install. */

@@ -6,21 +6,47 @@ import {
   RemoveChatRequest,
   WorkspaceRequest,
   type AgentEvent,
+  type ModelInfo,
 } from '@pocketagent/protocol';
 import os from 'node:os';
 import path from 'node:path';
 import { browseDirectory, discoverFolders } from '../discover/index.js';
 import { SessionError } from '../sessions/manager.js';
 import { WorkspaceError } from '../workspaces/index.js';
-import { hideChat } from '../db/index.js';
+import { hideChat, readAgentDefaults } from '../db/index.js';
 import { VIRTUAL_SHELL_CWD } from '../projects/index.js';
 import { resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
-  const { sessions, workspaces, agents, conversations, agyTranscripts, piTranscripts, adoption, projects } =
+  const { sessions, workspaces, agents, conversations, agyTranscripts, piTranscripts, adoption, projects, db } =
     app.pocket;
 
-  app.get('/api/agents', async () => ({ agents: agents.list() }));
+  // Merges in the per-agent "last observed live" cache (see `agent_defaults`
+  // in db/index.ts) so a brand-new chat's composer can pre-select a model
+  // and effort even though nothing about model choice is knowable before a
+  // session exists to ask. Composed at the route rather than inside
+  // `AgentRegistry.list()`, which has no `db` reference and stays that way —
+  // this is the only consumer of a DB-backed fact about an otherwise static
+  // registry.
+  app.get('/api/agents', async () => ({
+    agents: agents.list().map((agent) => {
+      const cached = readAgentDefaults(db, agent.id);
+      let cachedModels: ModelInfo[] = [];
+      if (cached?.models_json) {
+        try {
+          cachedModels = JSON.parse(cached.models_json) as ModelInfo[];
+        } catch {
+          // A malformed cache row must never break the agent list.
+        }
+      }
+      return {
+        ...agent,
+        defaultModel: cached?.model ?? null,
+        defaultEffort: cached?.effort ?? null,
+        cachedModels,
+      };
+    }),
+  }));
 
   /** The home screen: every directory with activity, and the chats inside it. */
   app.get<{ Querystring: { includeHidden?: string } }>('/api/projects', async (request) => ({
@@ -530,6 +556,8 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
           : {}),
         forkSession: body.forkSession,
         skipPermissions: body.skipPermissions,
+        ...(body.model !== undefined ? { model: body.model } : {}),
+        ...(body.effort !== undefined ? { effort: body.effort } : {}),
         ...(adopt ? { adopt } : {}),
       });
       return reply.code(201).send(sessions.toInfo(session));

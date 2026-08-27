@@ -21,7 +21,14 @@ export class AgentRegistry {
     return this.adapters.get(id);
   }
 
-  list(): AgentInfo[] {
+  /**
+   * `defaultModel`/`defaultEffort`/`cachedModels` are deliberately absent
+   * here: this registry is a static, in-memory adapter list with no `db`
+   * reference, while those three fields are a per-agent DB-backed cache (see
+   * `agent_defaults` in db/index.ts). `GET /api/agents` — the only consumer —
+   * merges them in at the route layer, the one place that already has both.
+   */
+  list(): Omit<AgentInfo, 'defaultModel' | 'defaultEffort' | 'cachedModels'>[] {
     return [...this.adapters.values()].map((a) => ({
       id: a.id,
       displayName: a.displayName,

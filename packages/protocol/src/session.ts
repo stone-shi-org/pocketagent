@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { SessionTransport } from './agent-events.js';
+import { EffortLevel, ModelInfo, SessionTransport } from './agent-events.js';
 
 /**
  * Lifecycle of a server-owned PTY session.
@@ -135,6 +135,24 @@ export const AgentInfo = z.object({
    * mistake for a real off switch.
    */
   forcesSkipPermissions: z.boolean(),
+  /**
+   * The model last observed running for this agent, across any past session —
+   * not a user-configured default, but a self-updating cache written whenever
+   * a live session reports its model (see `SessionManager.wire`). Null until
+   * a session has actually run once. Lets a brand-new chat's composer
+   * pre-select a model even though nothing about model choice is knowable
+   * before a session exists.
+   */
+  defaultModel: z.string().nullable(),
+  /** Same idea as `defaultModel`, for the effort level. See `EffortLevel`. */
+  defaultEffort: EffortLevel.nullable(),
+  /**
+   * The model catalog last reported by a live session of this agent (the SDK's
+   * `supportedModels()`, mirrored the same way `defaultModel` mirrors the
+   * current model). Empty until a session has actually run once — there is no
+   * way to enumerate an agent's models without one.
+   */
+  cachedModels: z.array(ModelInfo),
 });
 export type AgentInfo = z.infer<typeof AgentInfo>;
 

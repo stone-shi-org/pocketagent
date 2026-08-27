@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   AgentInfo,
   ChatSummary,
+  EffortLevel,
   HostInfo,
   ProjectInfo,
   PromptImage,
@@ -13,8 +14,10 @@ import { AddProject } from '../components/AddProject.js';
 import { WorktreeDialog, type WorktreeChoice } from '../components/WorktreeDialog.js';
 import { AttachButton } from '../components/AttachButton.js';
 import { Icon } from '../components/Icon.js';
+import { effortLabel } from '../components/PromptBox.js';
 import { readImageFile } from '../agent/image-attachment.js';
 import { flattenProjects } from '../agent/search.js';
+import { resolveCurrentModel } from '../agent/transcript.js';
 import { setPendingPrompt } from '../agent/pending-prompt.js';
 import { formatRelative } from '../components/StatusBadge.js';
 
@@ -68,6 +71,15 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   const [attachedImage, setAttachedImage] = useState<PromptImage | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [showAddWorkspace, setShowAddWorkspace] = useState(false);
+  /**
+   * Model/effort for a brand-new chat, pre-filled from `AgentInfo.defaultModel`/
+   * `defaultEffort` — the per-agent "last observed live" cache (see
+   * `agent_defaults` in db/index.ts), since nothing about model choice is
+   * knowable before a session exists to ask. `effort: null` means "the
+   * model's own default", same meaning as everywhere else this type is used.
+   */
+  const [model, setModel] = useState('');
+  const [effort, setEffort] = useState<EffortLevel | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -244,6 +256,42 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
       : transport === 'structured';
   const supportsImageAttachment = willBeStructured;
 
+  // Model/effort only matter for a brand-new chat — a picked chat (live or
+  // resumed) always keeps whatever it was already using, same reasoning as
+  // `effectiveAgentId` above.
+  //
+  // Every structured backend already reports `AgentInfo.cachedModels` (all
+  // five normalize `models_available`/`model_changed`/`effort_changed` into
+  // the same events `SessionManager.wire` caches from), but `claude` is the
+  // only one `SessionManager.create` actually threads a cached/explicit
+  // model+effort into at spawn today (see its doc comment). Showing this
+  // picker for another backend would look like a real choice and silently do
+  // nothing on submit, so it stays gated on the one backend that honours it
+  // until the others grow the same spawn-time wiring.
+  const selectedAgent =
+    !picked && agentId === 'claude' ? (agents.find((a) => a.id === agentId) ?? null) : null;
+  // `model` holds a picker `value` (e.g. `'sonnet'`), but `AgentInfo.defaultModel`
+  // is the *resolved* wire id Claude's `session_started` actually reports (e.g.
+  // `'claude-sonnet-5'`) — same mismatch `resolveCurrentModel`'s doc comment
+  // describes for the live composer, so this reuses it rather than a plain
+  // `.find(m => m.value === model)` that would never match the cached default.
+  const selectedModelInfo = selectedAgent ? resolveCurrentModel(selectedAgent.cachedModels, model) : null;
+  const showModelPicker = !picked && willBeStructured && !!selectedAgent?.cachedModels.length;
+  const showEffortPicker = showModelPicker && selectedModelInfo?.supportsEffort === true;
+
+  // Re-seed from this agent's cached defaults whenever the "Agent" row
+  // changes — including on initial load, once `agents` itself has arrived.
+  useEffect(() => {
+    if (!selectedAgent) {
+      setModel('');
+      setEffort(null);
+      return;
+    }
+    const resolved = resolveCurrentModel(selectedAgent.cachedModels, selectedAgent.defaultModel);
+    setModel(resolved?.value ?? '');
+    setEffort(selectedAgent.defaultEffort ?? null);
+  }, [selectedAgent]);
+
   const submit = useCallback(async () => {
     if (!canSend) return;
     setBusy(true);
@@ -291,6 +339,11 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
         // what owns the conversation.
         transport: resumeFrom ? 'structured' : (transport as 'terminal' | 'structured'),
         ...(resumeFrom ? { resumeAgentSessionId: resumeFrom, forkSession: false } : {}),
+        // Only a brand-new chat has a model/effort choice to make (see
+        // `showModelPicker`) — a resumed or already-live chat keeps whatever
+        // it was already running, so nothing is sent for either.
+        ...(!picked && model ? { model } : {}),
+        ...(!picked && showEffortPicker ? { effort } : {}),
       });
       setPendingPrompt(session.id, prompt, attachedImage ?? undefined);
       onCreated(session.id);
@@ -310,6 +363,9 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
     branchName,
     prompt,
     attachedImage,
+    model,
+    effort,
+    showEffortPicker,
     onCreated,
     onApiError,
   ]);
@@ -384,6 +440,50 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
                 value={flavour}
                 options={flavourOptions}
                 onChange={(v) => setFlavour(v as Flavour)}
+              />
+            )}
+            {/* Hidden until this agent has actually run once — there is no
+                way to enumerate its models without a live session (the SDK
+                cannot report a catalog from an idle process), so an agent
+                nobody has used yet just starts on its own default, same as
+                before this row existed. */}
+            {showModelPicker && selectedAgent && (
+              <SelectorRow
+                icon="laptop"
+                label="Model"
+                ariaLabel="Model"
+                value={model}
+                options={selectedAgent.cachedModels.map((m) => ({
+                  value: m.value,
+                  label: m.displayName,
+                }))}
+                onChange={(v) => {
+                  setModel(v);
+                  const info = selectedAgent.cachedModels.find((m) => m.value === v);
+                  // Effort vocab is per-model; carry the current pick forward
+                  // only if the newly chosen model still recognizes it.
+                  setEffort((prev) =>
+                    info?.supportsEffort && prev && info.supportedEffortLevels.includes(prev)
+                      ? prev
+                      : null,
+                  );
+                }}
+              />
+            )}
+            {showEffortPicker && selectedModelInfo && (
+              <SelectorRow
+                icon="laptop"
+                label="Effort"
+                ariaLabel="Effort"
+                value={effort ?? ''}
+                options={[
+                  { value: '', label: "Model's default" },
+                  ...selectedModelInfo.supportedEffortLevels.map((level) => ({
+                    value: level,
+                    label: effortLabel(level),
+                  })),
+                ]}
+                onChange={(v) => setEffort(v === '' ? null : v)}
               />
             )}
             <SelectorRow

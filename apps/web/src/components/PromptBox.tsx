@@ -28,7 +28,8 @@ const KNOWN_EFFORT_LABELS: Partial<Record<EffortLevel, string>> = {
   max: 'Max',
 };
 
-function effortLabel(level: EffortLevel): string {
+/** Exported for `ComposerPage`, which shows the same effort picker pre-session. */
+export function effortLabel(level: EffortLevel): string {
   return KNOWN_EFFORT_LABELS[level] ?? level.charAt(0).toUpperCase() + level.slice(1);
 }
 
