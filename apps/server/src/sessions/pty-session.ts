@@ -46,6 +46,14 @@ export interface PtySessionEvents {
   status: [status: SessionStatus];
   exit: [exitCode: number | null, exitSignal: number | null];
   hint: [hints: TerminalHintKind[]];
+  /**
+   * The grid changed. Emitted for *any* accepted resize, including one the
+   * browser itself asked for — a client that already knows the new size just
+   * ignores the echo, and filtering here would mean the one case that matters
+   * (a server-initiated resize, see `resize`'s doc comment) depended on
+   * correctly guessing who the caller was.
+   */
+  resized: [cols: number, rows: number];
 }
 
 /**
@@ -302,11 +310,25 @@ export class PtySession extends EventEmitter<PtySessionEvents> {
     this.handle.write(data);
   }
 
+  /**
+   * Change the grid, and say so.
+   *
+   * The `resized` event is not decoration: not every resize originates with
+   * the browser. An adopted session's size is refused from the client on
+   * purpose (`mayResize` in `ws/index.ts`) and is instead driven by
+   * `SessionManager.reconcileAdoptedSize`, following tmux's live shared
+   * window. That path resizes the real PTY out from under a client which,
+   * for an adopted pane, is *mirroring* this size rather than fitting its own
+   * viewport — so leaving it unannounced desynchronises the browser's grid
+   * from the byte stream tmux is generating for it, permanently. See
+   * `ResizedMessage`'s doc comment for what that looks like on screen.
+   */
   resize(cols: number, rows: number): boolean {
     if (cols === this._cols && rows === this._rows) return false;
     this._cols = cols;
     this._rows = rows;
     this.handle?.resize(cols, rows);
+    this.emit('resized', cols, rows);
     return true;
   }
 

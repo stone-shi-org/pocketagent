@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as pty from 'node-pty';
@@ -14,6 +15,26 @@ const POLL_INTERVAL_MS = 1000;
 
 /** Lines of tmux scrollback replayed into the buffer when re-adopting. */
 const RECOVER_SCROLLBACK_LINES = 2000;
+
+/**
+ * Server-scoped user option written by `ensureServer` and read back to decide
+ * whether the tmux server on our socket is still one *we* configured.
+ *
+ * A tmux user option (`@`-prefixed) is the only kind tmux will store for us
+ * without interpreting it, and it lives on the server, so it disappears
+ * exactly when the server does — which is the event we need to detect.
+ */
+const CONFIG_MARKER_OPTION = '@pocketagent-config';
+
+/** Reattach attempts allowed before a rapidly-failing client is given up on. */
+const REATTACH_BUDGET = 3;
+
+/**
+ * How long a tmux client must survive for its death to count as an isolated
+ * incident rather than part of a respawn loop. See `TmuxProcessHandle`'s
+ * `reattachBudget`.
+ */
+const REATTACH_BUDGET_RESET_MS = 60_000;
 
 export interface TmuxBackendOptions {
   /** tmux executable. */
@@ -42,6 +63,12 @@ export interface TmuxBackendOptions {
    * running daemon over its socket and needs no such wrapping.
    */
   sessionScopeSlice?: string;
+  /**
+   * Override for `REATTACH_BUDGET_RESET_MS`. Injectable so a test can exercise
+   * the budget reset without waiting a real minute for it; production has no
+   * reason to set this.
+   */
+  reattachBudgetResetMs?: number;
 }
 
 interface PaneState {
@@ -66,7 +93,24 @@ class TmuxProcessHandle implements ProcessHandle {
   private pending: string[] = [];
   private finished = false;
   private detached = false;
-  private reattachBudget = 3;
+  /**
+   * Reattach attempts left before giving up.
+   *
+   * This is a *rate* limit, not a lifetime quota: it exists to stop a tight
+   * respawn loop when a client dies the instant it is spawned, and
+   * `tryReattach` refunds it in full whenever the client that just died had
+   * been up for `REATTACH_BUDGET_RESET_MS`. Without that refund the three
+   * attempts were all a session ever got — three unrelated client deaths
+   * spread across days of uptime and output stopped permanently, with the
+   * pane still alive, the poller still reporting it healthy, and nothing said
+   * to anyone.
+   */
+  private reattachBudget = REATTACH_BUDGET;
+  /**
+   * When the current client was spawned, for the refund rule above. 0 until
+   * the first `attachClient`.
+   */
+  private lastAttachAt = 0;
   /**
    * Size to attach (or reattach) at. Kept up to date by `resize()` so that a
    * client respawned by `tryReattach()` after an unexpected exit comes back
@@ -103,6 +147,7 @@ class TmuxProcessHandle implements ProcessHandle {
 
   attachClient(client: IPty): void {
     this.client = client;
+    this.lastAttachAt = Date.now();
     client.onData((data) => this.emitData(data));
     client.onExit(() => {
       this.client = null;
@@ -115,7 +160,28 @@ class TmuxProcessHandle implements ProcessHandle {
   }
 
   private async tryReattach(): Promise<void> {
-    if (this.reattachBudget <= 0 || this.finished || this.detached) return;
+    if (this.finished || this.detached) return;
+
+    // A client that stayed up is evidence this is not a respawn loop, so the
+    // budget goes back to full — see `reattachBudget`'s doc comment.
+    if (
+      this.lastAttachAt > 0 &&
+      Date.now() - this.lastAttachAt >= this.backend.reattachBudgetResetMs
+    ) {
+      this.reattachBudget = REATTACH_BUDGET;
+    }
+
+    if (this.reattachBudget <= 0) {
+      // Terminal for this session's output, so it must not be silent. The pane
+      // itself is probably fine — the poller is still watching it and will
+      // report a real exit if there is one — but nothing is reading it now.
+      this.backend.warn(
+        { tmuxSession: this.externalId },
+        'giving up reattaching to tmux session after repeated client failures; ' +
+          'its output has stopped, though the pane may still be alive',
+      );
+      return;
+    }
     this.reattachBudget--;
     await new Promise((r) => setTimeout(r, 250));
     if (this.finished || this.detached) return;
@@ -226,10 +292,22 @@ export class TmuxBackend implements ProcessBackend {
   private readonly serverEnv: Record<string, string>;
   private readonly logger: TmuxBackendOptions['logger'];
   private readonly sessionScopeSlice: string | null;
+  /** See `TmuxBackendOptions.reattachBudgetResetMs`. */
+  readonly reattachBudgetResetMs: number;
 
   private readonly handles = new Map<string, TmuxProcessHandle>();
   private poller: NodeJS.Timeout | null = null;
   private serverReady = false;
+  /**
+   * Value written to `CONFIG_MARKER_OPTION` by `ensureServer`, unique to this
+   * backend instance.
+   *
+   * Deliberately not a constant: a server still carrying a *previous*
+   * PocketAgent process's marker gets reconfigured rather than trusted, since
+   * its options were set by a build whose expectations we cannot inspect. That
+   * costs one extra tmux call the first time each process touches the server.
+   */
+  private readonly configMarker = `${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
 
   constructor(options: TmuxBackendOptions = {}) {
     this.bin = options.bin ?? 'tmux';
@@ -237,6 +315,12 @@ export class TmuxBackend implements ProcessBackend {
     this.serverEnv = options.serverEnv ?? {};
     this.logger = options.logger;
     this.sessionScopeSlice = options.sessionScopeSlice ?? null;
+    this.reattachBudgetResetMs = options.reattachBudgetResetMs ?? REATTACH_BUDGET_RESET_MS;
+  }
+
+  /** Surface a handle-level warning through the backend's own logger. */
+  warn(o: object, m: string): void {
+    this.logger?.warn(o, m);
   }
 
   private socketArgs(): string[] {
@@ -304,15 +388,47 @@ export class TmuxBackend implements ProcessBackend {
   }
 
   /**
+   * True when the server on our socket is still the one this instance
+   * configured, decided by reading back `CONFIG_MARKER_OPTION`.
+   *
+   * `show-options` does not start a server when none is running (the same
+   * property `listRecoverable` relies on), so probing with it cannot
+   * accidentally create an *unconfigured* server — and, importantly, cannot
+   * create one outside the `systemd-run` scope that `startServer` exists to
+   * put it in.
+   */
+  private async serverIsOurs(): Promise<boolean> {
+    try {
+      const stdout = await this.tmux(['show-options', '-gqv', CONFIG_MARKER_OPTION]);
+      return stdout.trim() === this.configMarker;
+    } catch {
+      // No server on this socket at all.
+      return false;
+    }
+  }
+
+  /**
    * Start the tmux server (if needed) and apply our options.
    *
    * These are set in a single chained command on a possibly-empty server so
    * there is no window in which a session could be created without them —
    * `prefix None` in particular, because a tmux server with the default prefix
    * would swallow every Ctrl-B the agent should have received.
+   *
+   * `serverReady` alone used to gate this, and it was a one-way latch nothing
+   * ever invalidated. If the tmux server died while this process kept running
+   * — `tmux kill-server`, an OOM kill, the user's systemd session ending —
+   * every later `start()` skipped straight past this and let `new-session`
+   * implicitly bring up a *default* server: `prefix` back to Ctrl-B, stealing
+   * the keystroke this whole block exists to protect, and `remain-on-exit off`,
+   * which drops the pane before the poller can read an exit status so every
+   * agent thereafter reports "vanished" instead of its real exit code. The
+   * marker check makes the latch verify rather than assume, at the cost of one
+   * cheap tmux call per session start.
    */
   private async ensureServer(): Promise<void> {
-    if (this.serverReady) return;
+    if (this.serverReady && (await this.serverIsOurs())) return;
+    this.serverReady = false;
     await this.startServer([
       'start-server',
       ';',
@@ -342,6 +458,11 @@ export class TmuxBackend implements ProcessBackend {
       'set-option', '-wg', 'remain-on-exit', 'on',
       ';',
       'set-option', '-wg', 'history-limit', String(RECOVER_SCROLLBACK_LINES * 2),
+      ';',
+      // Last in the chain, and in the same chain, so the marker cannot outlive
+      // the options it vouches for: a failure partway through leaves it unset
+      // and the next `ensureServer` reconfigures from scratch.
+      'set-option', '-g', CONFIG_MARKER_OPTION, this.configMarker,
     ]);
     this.serverReady = true;
   }
@@ -380,7 +501,11 @@ export class TmuxBackend implements ProcessBackend {
     await this.ensureServer();
     const name = tmuxSessionName(spec.sessionId);
 
-    // A leftover session with this name would be silently reused; refuse.
+    // `new-session -s <existing>` would fail rather than reuse, but either way
+    // the name is derived from a freshly generated session id, so anything
+    // already holding it is a corpse from a previous run whose id we happened
+    // to regenerate. Clear it out rather than failing the user's new session
+    // on it.
     if (await this.hasSession(name)) {
       await this.killSession(name);
     }
@@ -445,9 +570,37 @@ export class TmuxBackend implements ProcessBackend {
     }
   }
 
+  /**
+   * Whether the pane is currently showing the alternate screen — i.e. a
+   * full-screen TUI (top, btop, vim, less) owns the display.
+   */
+  private async inAlternateScreen(name: string): Promise<boolean> {
+    try {
+      const stdout = await this.tmux(['list-panes', '-t', `=${name}`, '-F', '#{alternate_on}']);
+      return stdout.trim().split('\n')[0]?.trim() === '1';
+    } catch {
+      // Unknown: assume not, and let the normal capture path run.
+      return false;
+    }
+  }
+
   private async captureScrollback(name: string): Promise<string> {
     try {
-      // -e keeps colour; -J unwraps; -S starts N lines back.
+      // A pane on the alternate screen has no history worth seeding. What
+      // `capture-pane` hands back is the TUI's *current frame*, and emitting
+      // it as plain `\r\n` lines writes a screenful of it into the browser's
+      // normal-screen buffer as if it were ordinary scrollback. tmux then
+      // redraws the real alternate screen over the top, so it looks right —
+      // until the TUI exits. Exiting restores tmux's normal screen, not the
+      // browser's, and the injected copy is still sitting there: "quit btop,
+      // screen still full of btop". Nothing later clears it, because as far as
+      // xterm.js is concerned that text was legitimately printed.
+      if (await this.inAlternateScreen(name)) return '';
+
+      // -e keeps colour; -S starts N lines back. Deliberately no -J: it joins
+      // wrapped lines, and these bytes are replayed into a grid of unknown
+      // width, where a rejoined long line re-wraps differently than the pane
+      // originally laid it out.
       const stdout = await this.tmux([
         'capture-pane',
         '-p',
@@ -455,7 +608,15 @@ export class TmuxBackend implements ProcessBackend {
         '-S',
         `-${RECOVER_SCROLLBACK_LINES}`,
         '-t',
-        `=${name}`,
+        // Trailing colon is load-bearing. `-t` here is a *pane* target, and
+        // unlike the session targets everywhere else in this file, a bare
+        // `=<session>` is not valid for one: tmux answers "can't find pane"
+        // and this whole function silently returned '' through its own catch,
+        // so scrollback seeding never once ran. `=<session>:` is a pane target
+        // (that session's current window, active pane) and keeps the `=`
+        // exact-match, verified against a real tmux server not to prefix-match
+        // a longer session name.
+        `=${name}:`,
       ]);
       const trimmed = stdout.replace(/\n+$/, '');
       if (!trimmed) return '';

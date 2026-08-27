@@ -212,11 +212,20 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
           send({ type: 'output', sessionId, seq, data });
         const onHint = (hints: TerminalHintKind[]): void =>
           send({ type: 'hint', sessionId, hints });
+        // A resize this client did not ask for — see `ResizedMessage`. Sent
+        // unconditionally rather than only for adopted sessions: the client
+        // already has to decide whether to act on it (a session that fits the
+        // viewport must keep fitting it), and gating here would just be a
+        // second, drift-prone copy of that rule.
+        const onResized = (cols: number, rows: number): void =>
+          send({ type: 'resized', sessionId, cols, rows });
         session.on('output', onOutput);
         session.on('hint', onHint);
+        session.on('resized', onResized);
         unsubscribers.push(() => {
           session.off('output', onOutput);
           session.off('hint', onHint);
+          session.off('resized', onResized);
         });
 
         attached = {

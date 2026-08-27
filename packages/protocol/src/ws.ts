@@ -30,8 +30,11 @@ import { MAX_IMAGE_BASE64_CHARS, MAX_IMAGE_BYTES, PromptImage } from './prompt-i
  * effort-level picker alongside the model picker.
  * v8 added the optional `image` field on `PromptMessage` and `UserPromptEvent`,
  * for attaching a screenshot to a prompt.
+ * v9 added the `resized` server message, so a size change the browser did not
+ * ask for (an adopted pane following tmux's live shared window) reaches the
+ * client instead of silently desynchronising its grid.
  */
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 
 /**
  * WebSocket close codes the server uses for conditions the client must not
@@ -328,6 +331,32 @@ export const HintMessage = z.object({
   hints: z.array(TerminalHintKind),
 });
 
+/**
+ * The session's grid changed without this client having asked for it.
+ *
+ * In practice only an adopted session ever sends one. Its size is deliberately
+ * not the browser's to choose (`mayResize` in `ws/index.ts`), so the client
+ * mirrors the pane's real grid at attach time instead of fitting the viewport
+ * — but tmux's `window-size=latest` lets *another* client change that shared
+ * window at any moment, and `SessionManager`'s adopted-size reconciliation
+ * then follows it by resizing the real PTY. Without this frame that resize is
+ * invisible to the browser, which keeps rendering the grid it mirrored on
+ * attach: tmux's absolute cursor addressing lands on the wrong cells, its
+ * status line settles short of the last row, and the rows below never get
+ * cleared. That is the "same prompt duplicated down the screen" corruption,
+ * and it persists for the life of the attachment because nothing else
+ * re-sends the size.
+ *
+ * `cols`/`rows` are `nonnegative`, matching `SessionInfo` — see the note there
+ * on structured sessions having no character grid.
+ */
+export const ResizedMessage = z.object({
+  type: z.literal('resized'),
+  sessionId: SessionId,
+  cols: z.number().int().nonnegative(),
+  rows: z.number().int().nonnegative(),
+});
+
 export const PongMessage = z.object({
   type: z.literal('pong'),
 });
@@ -340,6 +369,7 @@ export const ServerMessage = z.discriminatedUnion('type', [
   ExitMessage,
   ErrorMessage,
   HintMessage,
+  ResizedMessage,
   PongMessage,
 ]);
 export type ServerMessage = z.infer<typeof ServerMessage>;

@@ -133,6 +133,80 @@ describe('websocket terminal transport', () => {
     expect(client.outputText()).toContain('WS_HELLO');
   });
 
+  describe('server-initiated resize', () => {
+    /**
+     * Not every resize comes from the browser. An adopted session refuses the
+     * client's size on purpose and instead follows tmux's live shared window
+     * via `SessionManager.reconcileAdoptedSize` — and an adopted pane's client
+     * *mirrors* the session's grid rather than fitting its own viewport. A
+     * resize that never reached the client therefore left it rendering the
+     * attach-time grid against a byte stream tmux was generating for the new
+     * one, for the rest of the attachment: misplaced cursor addressing, the
+     * status line short of the last row, and stale rows below it never
+     * cleared.
+     *
+     * Driven through `session.resize` directly rather than a `resize` frame,
+     * because the client-initiated path is the one that was never broken.
+     */
+    it('announces a size change the client did not ask for', async () => {
+      const id = await newShellSession();
+      const client = await connect();
+
+      client.send({ type: 'attach', sessionId: id, afterSeq: 0 });
+      const attached = await client.next('attached');
+      expect(attached.session.cols).toBe(80);
+      expect(attached.session.rows).toBe(24);
+
+      const session = t.context.sessions.get(id);
+      if (!session || session.transport !== 'terminal') throw new Error('expected a terminal session');
+      expect(session.resize(120, 40)).toBe(true);
+
+      const resized = await client.next('resized');
+      expect(resized.sessionId).toBe(id);
+      expect(resized.cols).toBe(120);
+      expect(resized.rows).toBe(40);
+    });
+
+    /**
+     * The adopted-size sweep runs unconditionally every 15s and normally reads
+     * back the size the session already has. That must stay silent, or a
+     * mirrored client would be told to re-grid itself several times a minute
+     * for no reason.
+     */
+    it('stays silent when the size did not actually change', async () => {
+      const id = await newShellSession();
+      const client = await connect();
+
+      client.send({ type: 'attach', sessionId: id, afterSeq: 0 });
+      await client.next('attached');
+
+      const session = t.context.sessions.get(id);
+      if (!session || session.transport !== 'terminal') throw new Error('expected a terminal session');
+      expect(session.resize(80, 24)).toBe(false);
+
+      await sleep(200);
+      expect(client.messages.filter((m) => m.type === 'resized')).toHaveLength(0);
+    });
+
+    /** A detached client must not keep receiving frames for the session. */
+    it('stops announcing after the client detaches', async () => {
+      const id = await newShellSession();
+      const client = await connect();
+
+      client.send({ type: 'attach', sessionId: id, afterSeq: 0 });
+      await client.next('attached');
+      client.send({ type: 'detach', sessionId: id });
+      await waitFor(() => t.context.sessions.attachedCount(id) === 0);
+
+      const session = t.context.sessions.get(id);
+      if (!session || session.transport !== 'terminal') throw new Error('expected a terminal session');
+      expect(session.resize(120, 40)).toBe(true);
+
+      await sleep(200);
+      expect(client.messages.filter((m) => m.type === 'resized')).toHaveLength(0);
+    });
+  });
+
   it('assigns strictly increasing sequence numbers', async () => {
     const id = await newShellSession();
     const client = await connect();

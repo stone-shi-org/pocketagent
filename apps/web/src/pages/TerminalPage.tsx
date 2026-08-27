@@ -102,6 +102,24 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
     // the page was opened. Only *live* queries get answered; see the
     // `onData` handler below.
     let replaying = false;
+
+    /**
+     * Point the local grid at an adopted pane's real size.
+     *
+     * Shared by the attach path and the server-pushed `resized` path so the
+     * two cannot drift: an adopted pane is mirrored, never fitted, and both
+     * routes have to apply the same rule and the same `lastSizeRef` bookkeeping
+     * (which is what keeps `applyFit`'s change-detection honest).
+     *
+     * The `term.resize` below re-enters xterm.js's own `onResize`, but that
+     * handler declines to send anything back for a mirrored pane, so this does
+     * not echo a size at the server.
+     */
+    const mirrorAdoptedGrid = (cols: number, rows: number): void => {
+      bundle.term.resize(cols, rows);
+      lastSizeRef.current = { cols, rows };
+    };
+
     const connection = new TerminalConnection({
       handlers: {
         onConnectionState: setConnection,
@@ -150,8 +168,7 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
             // it produces exactly the corrupted redraws — cursor moves and
             // background fills landing on the wrong cells — that "fit to this
             // screen anyway" exists to opt out of.
-            bundle.term.resize(info.cols, info.rows);
-            lastSizeRef.current = { cols: info.cols, rows: info.rows };
+            mirrorAdoptedGrid(info.cols, info.rows);
           } else {
             // Adopt whatever size the browser actually has, right now.
             queueMicrotask(() => applyFit(true));
@@ -164,6 +181,24 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
             latestTitle = info.title;
             setSession(info);
           }
+        },
+
+        /**
+         * The pane's grid changed underneath us — tmux's shared window
+         * followed some other client and the server's adopted-size
+         * reconciliation resized the real PTY to match (see `ResizedMessage`).
+         *
+         * Only a mirrored pane acts on this. A session that fits its own
+         * viewport owns its size, and so does an adopted one the user took
+         * over with "fit to this screen anyway"; re-mirroring either would
+         * fight `applyFit` and hand the size back to whoever else is attached.
+         */
+        onResized: (cols, rows) => {
+          if (!adoptedRef.current || takeOverSizeRef.current) return;
+          mirrorAdoptedGrid(cols, rows);
+          // Keep the "attached at N×M" notice truthful; it is read straight
+          // off `session`, which otherwise still holds the attach-time size.
+          setSession((prev) => (prev ? { ...prev, cols, rows } : prev));
         },
 
         onExit: (exitCode, exitSignal) => {

@@ -30,6 +30,13 @@ export interface TerminalConnectionHandlers {
   onExit?: (exitCode: number | null, exitSignal: number | null) => void;
   onConnectionState?: (state: ConnectionState) => void;
   onHint?: (hints: TerminalHintKind[]) => void;
+  /**
+   * The session's grid changed without this client asking. Only meaningful for
+   * an adopted pane, whose size the browser mirrors rather than chooses — see
+   * `ResizedMessage` in the protocol package, and `TerminalPage`'s handler for
+   * why a session that fits its own viewport must ignore this.
+   */
+  onResized?: (cols: number, rows: number) => void;
   onError?: (code: string, message: string) => void;
   /**
    * The server closed the socket for a reason retrying cannot fix (a
@@ -283,6 +290,9 @@ export class TerminalConnection {
         break;
       case 'hint':
         this.handlers.onHint?.(message.hints);
+        break;
+      case 'resized':
+        this.handlers.onResized?.(message.cols, message.rows);
         break;
       case 'error':
         this.handlers.onError?.(message.code, message.message);
