@@ -95,9 +95,6 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
    */
   private readonly pendingSubagents = new Set<string>();
 
-  /** See `maybeWarnCwdMismatch`'s doc comment. */
-  private cwdMismatchWarned = false;
-
   /**
    * How many times a turn is silently re-run before its error is finally
    * shown to the user, when that error looks transient (see
@@ -301,6 +298,47 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   }
 
   /**
+   * The flags every `-p` invocation needs, including `--add-dir <cwd>`.
+   *
+   * **`--add-dir` is load-bearing, not a hint.** Spawning agy with
+   * `{ cwd }` is not enough to make it work in that directory: agy resolves
+   * its *workspace* from its own project registry
+   * (`~/.gemini/antigravity-cli/cache/projects.json`), entirely
+   * independently of the OS-level cwd of the process. Its own changelog
+   * calls this out at 1.0.12 — "updated the project resolution logic to
+   * default regardless of the active workspace" — so with no `--add-dir`
+   * and no `--project`, every session silently lands in the default
+   * project, whose workspace is agy's own scratch directory
+   * (`~/.gemini/antigravity-cli/scratch`).
+   *
+   * Reproduced outside PocketAgent against v1.1.22: spawned with cwd
+   * `/tmp/agyprobe/testA` and asked to write a file "in your current
+   * working directory", agy wrote it to
+   * `~/.gemini/antigravity-cli/scratch/` instead. Adding `--add-dir <cwd>`
+   * put the same write in the intended directory, on a fresh conversation
+   * *and* on a resumed one (`--conversation <id>`), and did not add an
+   * entry to `projects.json` — so this is a per-invocation workspace
+   * override with no persistent side effect. It must be passed on **every**
+   * turn, since each turn is a fresh process (see the class doc comment).
+   *
+   * Note what is *not* checkable here: agy's `init` line reports only
+   * `cwd`, `tools` and `permission_mode` — never the workspace it actually
+   * resolved — and its `cwd` field faithfully echoes the OS cwd we spawned
+   * with even when the workspace is wrong. There is therefore no signal in
+   * the event stream to verify this against; passing the flag is the whole
+   * of the guarantee.
+   */
+  private baseArgs(): string[] {
+    return [
+      '--output-format',
+      'stream-json',
+      '--dangerously-skip-permissions',
+      '--add-dir',
+      this.spec.cwd,
+    ];
+  }
+
+  /**
    * Learn agy's built-in command list for the picker, via its own `/help` —
    * confirmed live (v1.1.12) to resolve locally with zero tokens, zero
    * duration, and no model turn, so this costs nothing and has no
@@ -312,7 +350,11 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
    */
   private fetchInitialCommands(): void {
     const bin = this.spec.executablePath ?? 'agy';
-    const args = ['--output-format', 'stream-json', '--dangerously-skip-permissions', '-p', '/help'];
+    // `--add-dir` matters even for this probe: workspace-local slash commands
+    // and skills live under the workspace, so asking the default (scratch)
+    // project for `/help` would list a different set than the session's own
+    // directory actually has.
+    const args = [...this.baseArgs(), '-p', '/help'];
 
     let child: ChildProcessWithoutNullStreams;
     try {
@@ -379,41 +421,6 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this.emit('event', entry.seq, entry.event);
   }
 
-  /**
-   * agy's own `init` line self-reports the cwd it actually resolved for
-   * this turn (`normalizeAgyInit`). Confirmed live that this can diverge
-   * from `spec.cwd` — the exact `cwd` this process was just spawned with —
-   * specifically when resuming an existing `--conversation <id>`: agy
-   * maintains its own persistent project/workspace registry under
-   * `~/.gemini/antigravity-cli/cache/` (`projects.json`,
-   * `conversation_metadata.json`) and appears to bind a conversation to
-   * whatever project it was first created against there, rather than
-   * trusting the OS-level `cwd` of whichever process happens to continue
-   * it. When a conversation has no real project registered, agy falls back
-   * to its own state/install root — which is how a user asking it `pwd`
-   * can get back `~/.gemini/antigravity-cli` instead of any real
-   * PocketAgent workspace folder.
-   *
-   * Surfacing this the moment a turn starts beats the user only
-   * discovering it by asking the agent for its own cwd. Warned once per
-   * session rather than once per turn (`init` fires on every turn, since
-   * agy is respawned per turn): the conversation either is or isn't bound
-   * to the wrong directory, and repeating the same notice on every reply
-   * would just be noise.
-   */
-  private maybeWarnCwdMismatch(reportedCwd: string): void {
-    if (this.cwdMismatchWarned || !reportedCwd || reportedCwd === this.spec.cwd) return;
-    this.cwdMismatchWarned = true;
-    this.emitEvent({
-      kind: 'notice',
-      level: 'warn',
-      text:
-        `agy reports its working directory as "${reportedCwd}", not this session's ` +
-        `"${this.spec.cwd}" — it may have bound this conversation to a different ` +
-        `project internally. Tool calls and file edits may run against the wrong directory.`,
-    });
-  }
-
   // ---- Conversation ----------------------------------------------------------
 
   /** Queue a user turn. Safe to call while a previous turn is still running. */
@@ -478,7 +485,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
       // sees the id it started with, and a post-reset fresh attempt correctly
       // sees `null`.
       const resumedConversationId = this._agentSessionId;
-      const args = ['--output-format', 'stream-json', '--dangerously-skip-permissions', '-p', text];
+      const args = [...this.baseArgs(), '-p', text];
       if (resumedConversationId) args.push('--conversation', resumedConversationId);
       if (this._desiredModel) args.push('--model', this._desiredModel);
 
@@ -604,9 +611,8 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
         // error the retry may well erase a moment later.
         if (!pendingRetryText) {
           for (const event of normalizeAgyMessageSafe(parsed)) {
-            if (event.kind === 'session_started') {
-              if (event.agentSessionId) this._agentSessionId = event.agentSessionId;
-              this.maybeWarnCwdMismatch(event.cwd);
+            if (event.kind === 'session_started' && event.agentSessionId) {
+              this._agentSessionId = event.agentSessionId;
             }
             if (event.kind === 'tool_use' && event.name === 'invoke_subagent') {
               this.pendingSubagents.add(event.id);

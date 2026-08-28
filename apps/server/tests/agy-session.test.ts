@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentEvent } from '@pocketagent/protocol';
 import { AgySession, type AgySessionSpec } from '../src/sessions/agy-session.js';
 import { waitFor } from './helpers.js';
@@ -304,49 +304,115 @@ describe('AgySession', () => {
   });
 
   /**
-   * Reproduces a live bug: `agy`'s own `init` line self-reported a `cwd`
-   * (its state directory, `~/.gemini/antigravity-cli`) that diverged from
-   * the `cwd` PocketAgent actually spawned it with — apparently because the
-   * conversation was bound, in agy's own registry, to a different project.
-   * `AgySession.maybeWarnCwdMismatch` is meant to catch exactly this the
-   * moment a turn starts, rather than the user only finding out by asking
-   * the agent for `pwd`.
+   * The regression test for the bug that made agy effectively unusable:
+   * spawning it with `{ cwd }` does not make it *work* in that directory.
+   * agy resolves its workspace from its own project registry, independently
+   * of the process cwd, and with no `--add-dir` it silently operates in the
+   * default project's scratch directory
+   * (`~/.gemini/antigravity-cli/scratch`) — reproduced against v1.1.22
+   * outside PocketAgent entirely. See `AgySession.baseArgs`.
+   *
+   * Asserted on argv rather than behaviour because there is nothing in
+   * agy's event stream that reports the workspace it chose: its `init` line
+   * carries only `cwd`/`tools`/`permission_mode`, and its `cwd` echoes the
+   * OS cwd faithfully even when the workspace is wrong.
    */
-  it('warns once when agy self-reports a cwd that diverges from this session\'s spec.cwd', async () => {
-    // `spec.cwd` must be a real, spawnable directory — the fixture's fake
-    // `init.cwd` (agy's own state dir, `~/.gemini/antigravity-cli`) is what
-    // supplies the mismatch, not this. `makeSpec()`'s default (`process.cwd()`,
-    // the repo checkout) already differs from that hardcoded fake path.
-    session = new AgySession(makeSpec());
-    await session.start();
-    const events = collect(session);
+  describe('--add-dir (binds agy to the session directory, not its own scratch project)', () => {
+    /** Reads back every invocation's argv recorded by the fixture. */
+    function argvLog(file: string): string[][] {
+      if (!fs.existsSync(file)) return [];
+      return fs
+        .readFileSync(file, 'utf8')
+        .split('\n')
+        .filter((l) => l.trim())
+        .map((l) => JSON.parse(l) as string[]);
+    }
 
-    session.prompt('WRONG_CWD');
-    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+    function specWithArgvLog(file: string, overrides: Partial<AgySessionSpec> = {}) {
+      return makeSpec({
+        env: { ...(process.env as Record<string, string>), AGY_FIXTURE_ARGV_FILE: file },
+        ...overrides,
+      });
+    }
 
-    const warnings = events.filter((e) => e.kind === 'notice' && e.level === 'warn');
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toMatchObject({
-      text: expect.stringContaining('/home/agy/.gemini/antigravity-cli'),
+    let argvFile: string;
+    beforeEach(() => {
+      argvFile = path.join(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'agy-argv-')),
+        'argv.jsonl',
+      );
     });
-    expect((warnings[0] as { text: string }).text).toContain(session.spec.cwd);
 
-    // A second mismatched turn must not repeat the notice — the divergence
-    // either exists or it doesn't; a fresh one every turn would just be noise.
-    session.prompt('WRONG_CWD');
-    await waitFor(() => session?.busy === false);
-    expect(events.filter((e) => e.kind === 'notice' && e.level === 'warn')).toHaveLength(1);
-  });
+    /** Every `--add-dir` value present in one invocation's argv. */
+    function addDirs(argv: string[]): string[] {
+      return argv.filter((_a, i) => argv[i - 1] === '--add-dir');
+    }
 
-  it('never warns when agy\'s self-reported cwd matches spec.cwd', async () => {
-    session = new AgySession(makeSpec());
-    await session.start();
-    const events = collect(session);
+    it('passes --add-dir <spec.cwd> on a normal turn', async () => {
+      session = new AgySession(specWithArgvLog(argvFile));
+      await session.start();
+      const events = collect(session);
 
-    session.prompt('hello');
-    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+      session.prompt('hello');
+      await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
 
-    expect(events.some((e) => e.kind === 'notice' && e.level === 'warn')).toBe(false);
+      const turn = argvLog(argvFile).find((argv) => argv.includes('hello'));
+      expect(turn).toBeDefined();
+      expect(addDirs(turn as string[])).toEqual([session.spec.cwd]);
+    });
+
+    /**
+     * A per-turn respawn means the flag has to be re-passed every time —
+     * getting it onto only the first turn would leave every later turn in
+     * the scratch project, which is the original bug for all but one reply.
+     */
+    it('re-passes --add-dir on a resumed turn, alongside --conversation', async () => {
+      session = new AgySession(specWithArgvLog(argvFile));
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('first');
+      await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+      session.prompt('second');
+      await waitFor(() => events.filter((e) => e.kind === 'turn_complete').length === 2);
+
+      const second = argvLog(argvFile).find((argv) => argv.includes('second'));
+      expect(second).toBeDefined();
+      expect(addDirs(second as string[])).toEqual([session.spec.cwd]);
+      // The whole point of a resumed turn: both flags travel together.
+      expect(second).toContain('--conversation');
+    });
+
+    /**
+     * Workspace-local slash commands and skills live under the workspace, so
+     * the startup `/help` probe has to ask about the session's own directory
+     * — otherwise the picker lists the scratch project's commands.
+     */
+    it('passes --add-dir on the startup /help probe too', async () => {
+      session = new AgySession(specWithArgvLog(argvFile));
+      const events = collect(session);
+      await session.start();
+
+      await waitFor(() => events.some((e) => e.kind === 'commands_available'));
+
+      const help = argvLog(argvFile).find((argv) => argv.includes('/help'));
+      expect(help).toBeDefined();
+      expect(addDirs(help as string[])).toEqual([session.spec.cwd]);
+    });
+
+    it('points --add-dir at the session\'s configured cwd, not the server\'s process cwd', async () => {
+      const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-project-'));
+      session = new AgySession(specWithArgvLog(argvFile, { cwd: projectDir }));
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('hello');
+      await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+      const turn = argvLog(argvFile).find((argv) => argv.includes('hello'));
+      expect(addDirs(turn as string[])).toEqual([projectDir]);
+      expect(projectDir).not.toBe(process.cwd());
+    });
   });
 
   it('silently retries a transient error (e.g. a backend timeout) and succeeds without surfacing it as a failure', async () => {

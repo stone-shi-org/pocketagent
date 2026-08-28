@@ -16,6 +16,15 @@ const providedConversationId = argVal('--conversation');
 const conversationId = providedConversationId ?? crypto.randomUUID();
 const model = argVal('--model');
 
+// Records the argv of *every* invocation (one JSON array per line), so a test
+// can assert on flags real agy would only ever reveal through behaviour we
+// cannot reproduce here — specifically `--add-dir`, which is what actually
+// binds agy to the session's directory rather than its own scratch project.
+// Off unless the test asks for it, since most tests don't care.
+if (process.env.AGY_FIXTURE_ARGV_FILE) {
+  fs.appendFileSync(process.env.AGY_FIXTURE_ARGV_FILE, JSON.stringify(args) + '\n');
+}
+
 function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
@@ -139,36 +148,6 @@ if (prompt === 'CONTEXT_CANCELED_ONCE') {
     });
     process.exit(1);
   }
-}
-
-// Mirrors the real bug this fixture exists to catch: a live `agy` run once
-// self-reported an `init.cwd` that diverged from the OS-level `cwd` it was
-// actually spawned with — traced to a conversation bound, in agy's own
-// `~/.gemini/antigravity-cli/cache/conversation_metadata.json` registry, to a
-// different project than the one PocketAgent passed as this process's `cwd`.
-// `AgySession.maybeWarnCwdMismatch` is the code this exercises.
-if (prompt === 'WRONG_CWD') {
-  emit({
-    event: 'init',
-    conversation_id: conversationId,
-    init: {
-      cwd: '/home/agy/.gemini/antigravity-cli',
-      tools: ['run_command'],
-      permission_mode: 'always-proceed',
-    },
-  });
-  emit({
-    event: 'result',
-    result: {
-      conversation_id: conversationId,
-      status: 'SUCCESS',
-      response: 'echo: WRONG_CWD',
-      duration_seconds: 0.01,
-      num_turns: 1,
-      usage: { input_tokens: 10, output_tokens: 5 },
-    },
-  });
-  process.exit(0);
 }
 
 // Mirrors a permanently wedged conversation, captured live: replaying a turn
