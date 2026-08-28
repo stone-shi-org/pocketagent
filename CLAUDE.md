@@ -253,3 +253,38 @@ setting; the README covers deployment, the security model, and known limitations
 
 Default bind is `127.0.0.1`. This grants terminal access as your user, so exposing it is a
 deliberate act — prefer Tailscale over `0.0.0.0`.
+
+## Confluence documentation
+
+This project is documented in Confluence at
+[`https://confluence.local.shifamily.com/spaces/PA/`](https://confluence.local.shifamily.com/spaces/PA/)
+(space key `PA`), accessed via the `mcp-atlassian` MCP server. The space root page is
+"Pocket Agent", with seven child pages:
+
+- **Architecture Overview** — what PocketAgent is, the two independent dimensions
+  (transport/backend), the wire protocol, and the repo layout.
+- **Transports & Process Backends** — `terminal` vs `structured` transports, `direct` vs
+  `tmux` backends, session lifecycle, and how to add a new agent adapter.
+- **Key Workflows** — resuming a conversation vs. attaching to a tmux pane, the home screen
+  merge rules, the composer's fourth row, hiding/removing chats, and layouts.
+- **Invariants & Security Model** — the load-bearing invariants list and the enforced
+  security boundaries table.
+- **Development Guide** — commands, running a single test, live demo scripts, and
+  troubleshooting.
+- **Conventions & Environment** — coding/frontend conventions, the full environment variable
+  table, deployment notes summary, and known limitations.
+- **Installation & Deployment** — requirements, install, first-run configuration (token,
+  project folders), running (dev/production/systemd), deploying to another machine, and
+  accessing it remotely (Tailscale, LAN, reverse proxy).
+
+**Keep this documentation in sync with the code.** When a change in this repo touches
+anything one of those pages describes — a new transport, backend, agent adapter, invariant,
+env var, workflow, or convention — update the corresponding Confluence page(s) in the same
+piece of work, not as a follow-up. Read the existing page with
+`mcp__mcp-atlassian__confluence_get_page` before editing so the update lands as a diff against
+current content rather than a rewrite, and use `mcp__mcp-atlassian__confluence_update_page` to
+save it. When creating new pages, remember Confluence storage format requires HTML entities
+to be escaped (`&` → `&amp;`, literal `<`/`>` in prose → `&lt;`/`&gt;`); passing
+`content_format: "markdown"` to the create/update tools and writing plain Markdown handles this
+conversion automatically — verified by round-tripping a page and confirming `&` came back as
+`&amp;` in the stored XHTML.
