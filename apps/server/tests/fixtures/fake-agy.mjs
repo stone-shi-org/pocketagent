@@ -141,6 +141,36 @@ if (prompt === 'CONTEXT_CANCELED_ONCE') {
   }
 }
 
+// Mirrors the real bug this fixture exists to catch: a live `agy` run once
+// self-reported an `init.cwd` that diverged from the OS-level `cwd` it was
+// actually spawned with — traced to a conversation bound, in agy's own
+// `~/.gemini/antigravity-cli/cache/conversation_metadata.json` registry, to a
+// different project than the one PocketAgent passed as this process's `cwd`.
+// `AgySession.maybeWarnCwdMismatch` is the code this exercises.
+if (prompt === 'WRONG_CWD') {
+  emit({
+    event: 'init',
+    conversation_id: conversationId,
+    init: {
+      cwd: '/home/agy/.gemini/antigravity-cli',
+      tools: ['run_command'],
+      permission_mode: 'always-proceed',
+    },
+  });
+  emit({
+    event: 'result',
+    result: {
+      conversation_id: conversationId,
+      status: 'SUCCESS',
+      response: 'echo: WRONG_CWD',
+      duration_seconds: 0.01,
+      num_turns: 1,
+      usage: { input_tokens: 10, output_tokens: 5 },
+    },
+  });
+  process.exit(0);
+}
+
 // Mirrors a permanently wedged conversation, captured live: replaying a turn
 // against a specific `--conversation <id>` twice outside PocketAgent, both
 // times, finished in a few seconds with the model's answer already in

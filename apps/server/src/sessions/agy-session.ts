@@ -95,6 +95,9 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
    */
   private readonly pendingSubagents = new Set<string>();
 
+  /** See `maybeWarnCwdMismatch`'s doc comment. */
+  private cwdMismatchWarned = false;
+
   /**
    * How many times a turn is silently re-run before its error is finally
    * shown to the user, when that error looks transient (see
@@ -376,6 +379,41 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this.emit('event', entry.seq, entry.event);
   }
 
+  /**
+   * agy's own `init` line self-reports the cwd it actually resolved for
+   * this turn (`normalizeAgyInit`). Confirmed live that this can diverge
+   * from `spec.cwd` — the exact `cwd` this process was just spawned with —
+   * specifically when resuming an existing `--conversation <id>`: agy
+   * maintains its own persistent project/workspace registry under
+   * `~/.gemini/antigravity-cli/cache/` (`projects.json`,
+   * `conversation_metadata.json`) and appears to bind a conversation to
+   * whatever project it was first created against there, rather than
+   * trusting the OS-level `cwd` of whichever process happens to continue
+   * it. When a conversation has no real project registered, agy falls back
+   * to its own state/install root — which is how a user asking it `pwd`
+   * can get back `~/.gemini/antigravity-cli` instead of any real
+   * PocketAgent workspace folder.
+   *
+   * Surfacing this the moment a turn starts beats the user only
+   * discovering it by asking the agent for its own cwd. Warned once per
+   * session rather than once per turn (`init` fires on every turn, since
+   * agy is respawned per turn): the conversation either is or isn't bound
+   * to the wrong directory, and repeating the same notice on every reply
+   * would just be noise.
+   */
+  private maybeWarnCwdMismatch(reportedCwd: string): void {
+    if (this.cwdMismatchWarned || !reportedCwd || reportedCwd === this.spec.cwd) return;
+    this.cwdMismatchWarned = true;
+    this.emitEvent({
+      kind: 'notice',
+      level: 'warn',
+      text:
+        `agy reports its working directory as "${reportedCwd}", not this session's ` +
+        `"${this.spec.cwd}" — it may have bound this conversation to a different ` +
+        `project internally. Tool calls and file edits may run against the wrong directory.`,
+    });
+  }
+
   // ---- Conversation ----------------------------------------------------------
 
   /** Queue a user turn. Safe to call while a previous turn is still running. */
@@ -566,8 +604,9 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
         // error the retry may well erase a moment later.
         if (!pendingRetryText) {
           for (const event of normalizeAgyMessageSafe(parsed)) {
-            if (event.kind === 'session_started' && event.agentSessionId) {
-              this._agentSessionId = event.agentSessionId;
+            if (event.kind === 'session_started') {
+              if (event.agentSessionId) this._agentSessionId = event.agentSessionId;
+              this.maybeWarnCwdMismatch(event.cwd);
             }
             if (event.kind === 'tool_use' && event.name === 'invoke_subagent') {
               this.pendingSubagents.add(event.id);

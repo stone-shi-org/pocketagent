@@ -303,6 +303,52 @@ describe('AgySession', () => {
     await waitFor(() => session?.busy === false);
   });
 
+  /**
+   * Reproduces a live bug: `agy`'s own `init` line self-reported a `cwd`
+   * (its state directory, `~/.gemini/antigravity-cli`) that diverged from
+   * the `cwd` PocketAgent actually spawned it with — apparently because the
+   * conversation was bound, in agy's own registry, to a different project.
+   * `AgySession.maybeWarnCwdMismatch` is meant to catch exactly this the
+   * moment a turn starts, rather than the user only finding out by asking
+   * the agent for `pwd`.
+   */
+  it('warns once when agy self-reports a cwd that diverges from this session\'s spec.cwd', async () => {
+    // `spec.cwd` must be a real, spawnable directory — the fixture's fake
+    // `init.cwd` (agy's own state dir, `~/.gemini/antigravity-cli`) is what
+    // supplies the mismatch, not this. `makeSpec()`'s default (`process.cwd()`,
+    // the repo checkout) already differs from that hardcoded fake path.
+    session = new AgySession(makeSpec());
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('WRONG_CWD');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    const warnings = events.filter((e) => e.kind === 'notice' && e.level === 'warn');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({
+      text: expect.stringContaining('/home/agy/.gemini/antigravity-cli'),
+    });
+    expect((warnings[0] as { text: string }).text).toContain(session.spec.cwd);
+
+    // A second mismatched turn must not repeat the notice — the divergence
+    // either exists or it doesn't; a fresh one every turn would just be noise.
+    session.prompt('WRONG_CWD');
+    await waitFor(() => session?.busy === false);
+    expect(events.filter((e) => e.kind === 'notice' && e.level === 'warn')).toHaveLength(1);
+  });
+
+  it('never warns when agy\'s self-reported cwd matches spec.cwd', async () => {
+    session = new AgySession(makeSpec());
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('hello');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    expect(events.some((e) => e.kind === 'notice' && e.level === 'warn')).toBe(false);
+  });
+
   it('silently retries a transient error (e.g. a backend timeout) and succeeds without surfacing it as a failure', async () => {
     const stateFile = path.join(os.tmpdir(), `agy-timeout-once-${crypto.randomUUID()}.state`);
     session = new AgySession(
