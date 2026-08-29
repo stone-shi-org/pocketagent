@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { EffortLevel, ModelInfo, SessionTransport } from './agent-events.js';
+import { CronJobSummary } from './cron.js';
 
 /**
  * Lifecycle of a server-owned PTY session.
@@ -270,6 +271,16 @@ export const ChatSummary = z.object({
    * /api/sessions` needs to resolve the same pane again.
    */
   adoptTargetId: z.string().nullable(),
+  /**
+   * Set when this chat was started by a scheduled job, so the row can carry a
+   * clock badge instead of reading as something a human began.
+   *
+   * Keyed from the *conversation* id server-side rather than the session id:
+   * `ProjectService.representativeSessions` collapses several session rows
+   * that share one `agentSessionId` into a single chat, and a session-keyed
+   * lookup loses the badge whenever the collapse picks a different row.
+   */
+  cronJobId: z.string().nullable(),
 });
 export type ChatSummary = z.infer<typeof ChatSummary>;
 
@@ -312,6 +323,16 @@ export interface ProjectInfo {
    */
   isWorkspace: boolean;
   chats: ChatSummary[];
+  /**
+   * Scheduled jobs whose directory is this one.
+   *
+   * Listed separately from `chats` rather than folded in as a synthetic chat: a
+   * job is a *spec*, not a conversation — it exists before it has ever run and
+   * survives every run it starts — so it has no transcript and nothing to open
+   * as one. Always empty for a worktree entry; a job's directory is the project
+   * it was configured against, even when its runs happen in worktrees below it.
+   */
+  cronJobs: CronJobSummary[];
   worktrees: ProjectInfo[];
 }
 // `z.lazy` plus the explicit interface above is zod's documented pattern for a
@@ -327,6 +348,7 @@ export const ProjectInfo: z.ZodType<ProjectInfo> = z.lazy(() =>
     hidden: z.boolean(),
     isWorkspace: z.boolean(),
     chats: z.array(ChatSummary),
+    cronJobs: z.array(CronJobSummary),
     worktrees: z.array(ProjectInfo),
   }),
 );

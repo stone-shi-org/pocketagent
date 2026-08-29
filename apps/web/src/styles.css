@@ -3943,3 +3943,452 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   margin-top: 32px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+
+/* ---------------------------------------------------------------------------
+   Scheduled jobs
+   
+   Everything here reads from the token block at the top of this file; the run
+   statuses map onto the existing --ok/--danger/--warn/--idle semantics rather
+   than introducing a parallel palette.
+   --------------------------------------------------------------------------- */
+
+.cron-page {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.cron-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.cron-head h2 {
+  font-size: 20px;
+  margin: 0;
+}
+
+.cron-sub,
+.cron-note {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 4px 0 0;
+  line-height: 1.45;
+}
+
+.cron-new,
+.cron-save,
+.cron-secondary,
+.cron-danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: var(--radius);
+  padding: 9px 14px;
+  font-size: 14px;
+  font-weight: 550;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev-2);
+  color: var(--text);
+  flex: none;
+}
+
+.cron-new,
+.cron-save {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.cron-secondary.danger {
+  color: var(--danger);
+  border-color: var(--border-strong);
+}
+
+.cron-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--on-accent);
+}
+
+.cron-save:disabled,
+.cron-secondary:disabled,
+.cron-danger:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.cron-empty {
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1.5;
+  padding: 24px 4px;
+}
+
+/* ---- The list ---- */
+
+.cron-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.cron-row.disabled .cron-row-title,
+.cron-row.disabled .cron-row-meta {
+  opacity: 0.55;
+}
+
+.cron-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-start;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 12px 2px;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.cron-row-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 15px;
+  font-weight: 550;
+}
+
+.cron-row-icon {
+  color: var(--text-dim);
+  flex: none;
+}
+
+.cron-row-meta {
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.cron-row-error {
+  font-size: 12.5px;
+  color: var(--danger);
+  max-width: 60ch;
+}
+
+.cron-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+/* A job running with approvals bypassed says so wherever it is seen — the same
+   persistent treatment `SessionInfo.skipPermissionsEnabled` gets.
+
+   `display: inline-block` is load-bearing, not decoration: `.icon` is
+   `display: block`, so inside `.chat-title` (a nowrap block) this shield would
+   otherwise take a line of its own and sit under the job name instead of after
+   it. `.live-dot` declares the same override for the same reason. */
+.cron-shield {
+  color: var(--warn);
+  display: inline-block;
+  vertical-align: -2px;
+  flex: none;
+}
+
+.cron-status {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: lowercase;
+}
+
+.cron-status--succeeded { color: var(--ok); }
+.cron-status--failed { color: var(--danger); }
+.cron-status--skipped { color: var(--text-dim); }
+.cron-status--running,
+.cron-status--starting { color: var(--accent); }
+
+/* ---- The editor ---- */
+
+.cron-editor {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 720px;
+}
+
+.cron-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cron-field > span {
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.cron-field > small {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.cron-field.inline {
+  flex: 1;
+  min-width: 90px;
+}
+
+.cron-row-2 {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.cron-row-2 > * {
+  flex: 1;
+  min-width: 160px;
+}
+
+.settings-input.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.cron-prompt {
+  resize: vertical;
+  min-height: 96px;
+  line-height: 1.5;
+  font-family: inherit;
+}
+
+.cron-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cron-section h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.cron-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.cron-tabs {
+  display: inline-flex;
+  background: var(--bg-elev);
+  border-radius: 999px;
+  padding: 2px;
+}
+
+.cron-tabs button {
+  border: 0;
+  background: none;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-dim);
+}
+
+.cron-tabs button.active {
+  background: var(--bg-elev-2);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+.cron-preset {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cron-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev-2);
+  border-radius: 999px;
+  padding: 6px 13px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.chip.active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--on-ink);
+}
+
+.cron-time {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cron-preview {
+  background: var(--bg-elev);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.cron-preview strong {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 5px;
+  font-weight: 600;
+}
+
+.cron-preview ul {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.cron-preview li {
+  margin: 2px 0;
+}
+
+.cron-preview li span {
+  color: var(--text-dim);
+}
+
+.cron-preview-empty {
+  color: var(--danger);
+}
+
+.cron-save-bar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.cron-runs {
+  display: flex;
+  flex-direction: column;
+}
+
+.cron-run {
+  border-top: 1px solid var(--border);
+}
+
+.cron-run:first-child {
+  border-top: 0;
+}
+
+.cron-run-main {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  flex-wrap: wrap;
+  background: none;
+  border: 0;
+  padding: 9px 2px;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.cron-run-main:disabled {
+  cursor: default;
+  opacity: 0.75;
+}
+
+.cron-run-when {
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.cron-run-error {
+  font-size: 12.5px;
+  color: var(--danger);
+  flex-basis: 100%;
+}
+
+/* ---- Rows in the project tree ---- */
+
+.cron-line .cron-job-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cron-job-row.paused .chat-title,
+.cron-job-row.paused .cron-line-when {
+  opacity: 0.55;
+}
+
+.cron-line-when {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  flex: none;
+}
+
+/* Wraps the clock so a last-run dot can pin to its corner — the same shape as
+   `.project-icon` holding `.git-status-dot`. */
+.cron-icon-wrap {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  margin-right: 7px;
+  vertical-align: -2px;
+}
+
+.cron-badge-icon {
+  color: var(--text-dim);
+}
+
+.cron-dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid var(--bg);
+}
+
+.cron-dot--succeeded { background: var(--ok); }
+.cron-dot--failed { background: var(--danger); }
+.cron-dot--skipped { background: var(--text-dim); }
+.cron-dot--running,
+.cron-dot--starting { background: var(--accent); }
+
+/* Inline in the title, beside `.live-dot`: a chat row has no icon of its own
+   to pin a corner badge to. */
+.chat-cron-badge {
+  color: var(--text-dim);
+  display: inline-block;
+  margin-right: 5px;
+  vertical-align: -2px;
+  flex: none;
+}

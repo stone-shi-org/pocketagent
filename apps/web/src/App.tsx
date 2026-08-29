@@ -10,6 +10,8 @@ import { SessionRoute } from './pages/SessionRoute.js';
 import { ChatPreviewPage } from './pages/ChatPreviewPage.js';
 import { AgentsFleetPage } from './pages/AgentsFleetPage.js';
 import { SettingsPage } from './pages/SettingsPage.js';
+import { CronJobsPage } from './pages/CronJobsPage.js';
+import { CronJobEditorPage } from './pages/CronJobEditorPage.js';
 import { api } from './api/client.js';
 
 type AuthState = 'checking' | 'anonymous' | 'authenticated';
@@ -118,6 +120,30 @@ export function App(): JSX.Element {
     return <SettingsPage onBack={() => navigate({ name: 'list' })} onApiError={handleApiError} />;
   }
 
+  if (route.name === 'cron') {
+    return (
+      <CronJobsPage
+        onBack={() => navigate({ name: 'list' })}
+        onOpenJob={(jobId) => navigate({ name: 'cron-job', jobId })}
+        onApiError={handleApiError}
+      />
+    );
+  }
+
+  if (route.name === 'cron-job') {
+    return (
+      <CronJobEditorPage
+        key={route.jobId}
+        jobId={route.jobId}
+        onBack={() => navigate({ name: 'cron' })}
+        onDone={() => navigate({ name: 'cron' })}
+        onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
+        onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
+        onApiError={handleApiError}
+      />
+    );
+  }
+
   return (
     <ProjectsPage
       onOpen={(sessionId) => navigate({ name: 'terminal', sessionId })}
@@ -125,6 +151,8 @@ export function App(): JSX.Element {
       onCompose={(cwd) => navigate(cwd ? { name: 'compose', cwd } : { name: 'compose' })}
       onOpenAgents={() => navigate({ name: 'agents' })}
       onOpenSettings={() => navigate({ name: 'settings' })}
+      onOpenCron={() => navigate({ name: 'cron' })}
+      onOpenCronJob={(jobId) => navigate({ name: 'cron-job', jobId })}
       onApiError={handleApiError}
       onLogout={logout}
     />

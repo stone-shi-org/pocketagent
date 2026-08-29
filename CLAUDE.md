@@ -38,7 +38,7 @@ and `adopt.test.ts` skip themselves when `tmux` is not installed.
 ### Live demos
 
 The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
-decision. Ten demo scripts do, against a *running* server:
+decision. Eleven demo scripts do, against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -51,6 +51,7 @@ PA_TOKEN=... pnpm demo:home-ui           # projects screen and composer, phone v
 PA_TOKEN=... pnpm demo:resume-history    # resuming a real transcript, with its history
 PA_TOKEN=... pnpm demo:desktop-ui        # two-pane shell, and the width/pointer switch
 PA_TOKEN=... pnpm demo:copy-ui           # copy-to-clipboard fallback over plain HTTP
+PA_TOKEN=... pnpm demo:cron-ui           # scheduled jobs: picker, preview, tree badge
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -119,6 +120,48 @@ there is the *conversation*, not the process.
   sha256-derived id; the server builds the argv. Adopted sessions always use the direct
   backend, because what we spawn is a tmux *client* and killing it must only ever detach.
 
+### Scheduled jobs
+
+`cron/index.ts` (`CronService`) is the only thing in the server that starts agent work with
+no human present. A job is a saved spec — directory, agent, worktree policy, model, effort,
+prompt, schedule — and a *run* is one firing of it: one prompt, one turn.
+
+The ticker is modelled on `SessionManager`'s sweep timer, deliberately not on a chain of
+`setTimeout(nextRunAt - now)`: one long timer is what a laptop suspend or an NTP step breaks
+silently. A fixed 30s poll against the clock recovers from both for free, and makes a forward
+clock jump indistinguishable from the server having been down — which is why there is one
+catch-up policy rather than two. `next_run_at` is materialized on write, so a tick is one
+indexed query no matter how many jobs exist, and the UI gets "next run" for free.
+
+**The schedule solver lives in `packages/protocol/src/cron-expr.ts`**, not in the server,
+because both sides need the same answer: the server decides when a job fires, and the editor
+shows a live "next runs" preview while you type. Duplicating it in `apps/web` guarantees the
+preview eventually lies. It is hand-rolled (no npm dep) and only ever converts
+instant → wall-clock via `Intl.DateTimeFormat`, never the reverse — the ambiguous direction is
+the only genuinely hard part of time zones, and avoiding needing it is what makes a dep-free
+implementation correct rather than approximately correct. Consequences worth knowing:
+a local time that does not exist (spring forward) simply does not fire that day, and a
+repeated hour (fall back) fires once, on the earlier instant. Both are covered in
+`cron-schedule.test.ts`, which is where the real risk in this feature lives.
+
+`cron_expr` is the single source of truth and the only thing the scheduler reads.
+`preset_json` is a write-only-by-the-UI descriptor of *which picker built it*, kept so the
+editor re-opens the picker rather than dumping you into raw cron; every write recompiles the
+expression from it, so the two cannot drift, and switching a job to a hand-typed expression
+drops the preset because it genuinely is no longer "weekly at 09:00".
+
+A run reaches its transcript through three tiers, in order: `#/s/<sessionId>` while live;
+still `#/s/<sessionId>` once finished (`GET /api/sessions/:id/history` resolves via
+`SessionManager.resumedConversationId`'s row fallback, **for every agent**); and
+`#/c/<agentSessionId>` only once the session row itself has been pruned — which resolves for
+`claude` alone, since `ConversationStore` is the one reader that can find a conversation with
+no session. So the client rule is "prefer `sessionId`, fall back to `agentSessionId`, else no
+link", and no new transcript viewer was needed.
+
+Known limitation: per-run worktrees are **not** garbage-collected. A nightly job leaves a
+tree per run under `<project>/.worktrees/`. Deleting them after a run would destroy the very
+output the job was scheduled to produce, so the editor says so instead.
+
 ### The home screen
 
 `projects/index.ts` composes `GET /api/projects`: live sessions and on-disk conversations
@@ -126,6 +169,15 @@ merged into one chat list per directory. Two rules live here — a session that 
 transcript hides that transcript's row (they are one chat, and the session is the live view
 of it), and a chat's timestamp falls back through `lastActivityAt → startedAt → createdAt`
 so a brand new one does not sort last.
+
+Scheduled jobs also surface here, as `ProjectInfo.cronJobs` rather than folded into `chats`:
+a job is a *spec*, not a conversation — it exists before it has ever run and survives every
+run it starts — so it has no transcript to open and tapping it opens its editor instead. A
+directory that only has a job in it still gets a project row, or a job configured in a
+subdirectory with no chats yet would be invisible until its first run, which defeats the
+point of listing it. Runs, in contrast, *are* chats: `ChatSummary.cronJobId` badges them,
+keyed on the **conversation** id because `representativeSessions` collapses several session
+rows sharing one `agentSessionId` and a session-keyed badge would vanish with the collapse.
 
 `HostInfo` is first-class with exactly one entry: this server. The header chip, the
 composer's host row and `GET /api/hosts` are all shaped for several machines so that a front
@@ -171,7 +223,10 @@ These are load-bearing. Several were bugs first.
   off-by-default opt-in (`structured-session.ts` sets the SDK's `bypassPermissions` mode;
   `claude.ts` adds `--dangerously-skip-permissions` for the terminal transport). It must stay
   opt-in — never the default — and a session running with it must say so persistently in the
-  UI (`SessionInfo.skipPermissionsEnabled`), not just at the moment it was created.
+  UI (`SessionInfo.skipPermissionsEnabled`), not just at the moment it was created. There are
+  exactly **two** documented overrides of the "never the default" half of that rule, both
+  below (the global switch, and scheduled jobs); adding a third needs the same treatment
+  rather than a quiet default flip.
 - **The global skip-permissions switch is the one deliberate, operator-level override of the
   invariant above.** `POCKETAGENT_GLOBAL_SKIP_PERMISSIONS` seeds it at boot; the database
   (`settings.global_skip_permissions`, via `SessionManager.setGlobalSkipPermissions`) wins after
@@ -186,6 +241,44 @@ These are load-bearing. Several were bugs first.
   ORs in `StructuredSession.globalBypassActive` so the badge reflects live reality; `spec` itself
   is never mutated, so history and persistence still record what a session was actually created
   with.
+- **A scheduled job is the second override, and the only place a skip-permissions *default* is
+  on.** `CreateCronJobRequest.skipPermissions` defaults to `true` (`cron_jobs.skip_permissions`
+  likewise) because a cron job is unattended by definition: there is nobody at 3am to answer an
+  approval, so a job created the usual way would park on its first tool call and never finish.
+  What is *not* relaxed is the half that matters — with the toggle off, a run that hits an
+  approval waits **forever** (no timeout is added anywhere) and pushes a notification; an
+  unanswered approval still never decays into an allow. Because the default is inverted, two
+  things are mandatory and asserted in `apps/server/tests/cron.test.ts`: the editor shows a
+  visible warning whenever it is on, and `CronJob.skipPermissionsEnabled` is surfaced
+  persistently on the job row, the list, and every run — never only at creation. A job must
+  never touch the global switch or leak its bypass into interactive sessions; it only ever sets
+  `CreateSessionInput.skipPermissions` for its own run.
+- **A scheduled job is always a structured session.** Enforced at the route
+  (`routes/cron.ts` rejects an agent whose `transports` lacks `structured`), not merely
+  defaulted, and `CreateCronJobRequest` has no `transport` field at all. Delivering a prompt to
+  a terminal session means writing keystrokes into a TUI with no readiness signal and no way to
+  tell a finished turn from a hung one — exactly the judgement `terminal/classifier.ts` is
+  forbidden from making.
+- **The scheduler never catches up on a backlog.** A firing more than `CATCH_UP_GRACE_MS`
+  (1 hour) late records **one** coalesced `skipped` run and rolls forward from now
+  (`cron/index.ts`). A week offline for an hourly job would otherwise fire 168 agents at boot —
+  which is what the obvious `while (next <= now)` loop does — and recording all 168 as rows just
+  moves the storm from processes into the run list. Inside the grace window it fires once, so a
+  `systemctl restart` at 08:59:58 does not lose the 09:00 run.
+- **A wedged run is detected by asking whether its session is alive, never by a timeout.** The
+  overlap check counts only runs whose session is still `starting`/`running`. A "stale run"
+  timeout would kill a legitimately long turn, and a run parked on an unanswered approval is
+  *genuinely still running* — force-failing it is the same disrespect for an undecided decision
+  the no-timeout rule exists to prevent.
+- **A repeating job must never store a literal git branch name.** `branchMode: 'new'` with a
+  fixed name succeeds exactly once and then throws `branch_exists` forever, so
+  `cron/index.ts` mints `<slug>-<YYYYMMDD-HHmm>-<hex>` per run, stamped in the job's own zone.
+- **Deleting a scheduled job keeps its run history.** `cron_runs.job_id` is `ON DELETE SET
+  NULL`, and `job_name`/`agent` are copied onto every run row so an orphan still describes
+  itself — the same discipline that stops "Remove" from deleting a transcript. `session_id` is
+  deliberately *not* a foreign key: `pruneOldSessions` and `SessionManager.forget` delete
+  session rows out from under it, so a CASCADE would quietly destroy history and a RESTRICT
+  would make pruning fail.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.

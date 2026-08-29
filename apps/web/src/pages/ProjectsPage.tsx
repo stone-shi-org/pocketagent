@@ -21,6 +21,9 @@ interface Props {
   onCompose: (cwd?: string) => void;
   onOpenAgents: () => void;
   onOpenSettings: () => void;
+  onOpenCron: () => void;
+  /** Opens one job's editor, from its row in the project tree. */
+  onOpenCronJob: (jobId: string) => void;
   onApiError: (error: unknown) => void;
   onLogout: () => void;
 }
@@ -41,6 +44,8 @@ export function ProjectsPage({
   onCompose,
   onOpenAgents,
   onOpenSettings,
+  onOpenCron,
+  onOpenCronJob,
   onApiError,
   onLogout,
 }: Props): JSX.Element {
@@ -105,6 +110,10 @@ export function ProjectsPage({
               setMenuOpen(false);
               onOpenSettings();
             }}
+            onCron={() => {
+              setMenuOpen(false);
+              onOpenCron();
+            }}
             onLogout={onLogout}
           />
         )}
@@ -121,6 +130,7 @@ export function ProjectsPage({
           search={search}
           onCompose={onCompose}
           onAddProject={() => setShowAdd(true)}
+          onOpenCronJob={onOpenCronJob}
           emptyHint="Nothing here yet. Tap the compose button to start a chat."
         />
       </div>
@@ -210,6 +220,7 @@ export function OverflowMenu({
   runningCount = 0,
   onAgents,
   onSettings,
+  onCron,
   onLogout,
 }: {
   onClose: () => void;
@@ -227,6 +238,7 @@ export function OverflowMenu({
    */
   onAgents?: () => void;
   onSettings: () => void;
+  onCron: () => void;
   onLogout: () => void;
 }): JSX.Element {
   const ref = useRef<HTMLDivElement>(null);
@@ -269,6 +281,9 @@ export function OverflowMenu({
             Agents…
           </button>
         )}
+        <button type="button" role="menuitem" onClick={onCron}>
+          Cron jobs…
+        </button>
         <button type="button" role="menuitem" onClick={onAdvanced}>
           More session options…
         </button>

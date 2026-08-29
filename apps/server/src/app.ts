@@ -37,7 +37,9 @@ import {
   createCodexUsageSource,
   createAgyUsageSource,
 } from './usage/index.js';
+import { CronService } from './cron/index.js';
 import { authRoutes } from './routes/auth.js';
+import { cronRoutes } from './routes/cron.js';
 import { pushRoutes } from './routes/push.js';
 import { sessionRoutes } from './routes/sessions.js';
 import { settingsRoutes } from './routes/settings.js';
@@ -224,10 +226,20 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     }),
   ]);
 
+  const cron = new CronService({
+    db,
+    sessions,
+    workspaces,
+    worktrees,
+    agents,
+    logger: app.log,
+  });
+
   const context: PocketContext = {
     config,
     auth,
     sessions,
+    cron,
     workspaces,
     agents,
     db,
@@ -248,6 +260,10 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   if (interrupted > 0) {
     app.log.info({ interrupted }, 'marked sessions interrupted after restart');
   }
+
+  // After `sessions.init()`: this reconciles cron run rows against an
+  // already-reconciled session table, and its first tick can create a session.
+  await cron.init();
 
   await app.register(cookie);
   await app.register(rateLimit, {
@@ -321,6 +337,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(authRoutes);
   await app.register(sessionRoutes);
   await app.register(worktreeRoutes);
+  await app.register(cronRoutes);
   await app.register(settingsRoutes);
   await app.register(pushRoutes);
   await app.register(usageRoutes);
@@ -365,6 +382,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   app.addHook('onClose', async () => {
     usage.stop();
+    // Before `sessions.shutdown()`: no new run may be started into a manager
+    // that is already tearing down.
+    cron.stop();
     await sessions.shutdown();
     if (ownsDb) db.close();
   });

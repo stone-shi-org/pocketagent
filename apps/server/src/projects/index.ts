@@ -2,12 +2,21 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { ChatSummary, HostInfo, ProjectInfo, SessionInfo } from '@pocketagent/protocol';
+import type {
+  ChatSummary,
+  CronJobSummary,
+  CronRunStatus,
+  HostInfo,
+  ProjectInfo,
+  SessionInfo,
+} from '@pocketagent/protocol';
 import type { ConversationStore } from '../conversations/index.js';
 import { GitStatusTracker } from '../git/status.js';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
 import {
   AUTO_HIDDEN_DIRS,
+  readCronJobs,
+  readCronRunConversationIds,
   readHiddenChats,
   readProjectVisibility,
   setProjectVisibility,
@@ -121,6 +130,28 @@ export class ProjectService {
     // resumedFrom check, so this is a map lookup, not extra I/O.
     const conversationById = new Map(conversations.map((c) => [c.id, c]));
 
+    // Which conversations a scheduled job produced, and which jobs live in
+    // which directory. Keyed on the *conversation* id rather than the session
+    // id because `representativeSessions` below collapses several session rows
+    // sharing one `agentSessionId` into a single chat — a session-keyed badge
+    // would vanish whenever the collapse happened to pick a different row.
+    const cronByConversation = readCronRunConversationIds(this.db);
+    const cronByCwd = new Map<string, CronJobSummary[]>();
+    for (const row of readCronJobs(this.db)) {
+      const list = cronByCwd.get(row.cwd) ?? [];
+      list.push({
+        id: row.id,
+        name: row.name,
+        enabled: row.enabled === 1,
+        cronExpr: row.cron_expr,
+        timeZone: row.time_zone,
+        nextRunAt: row.next_run_at,
+        lastRunStatus: (row.last_run_status as CronRunStatus | null) ?? null,
+        skipPermissionsEnabled: row.skip_permissions === 1,
+      });
+      cronByCwd.set(row.cwd, list);
+    }
+
     // A non-forked resume keeps writing to the same transcript, but
     // `SessionManager.create` still mints a brand-new session row every time
     // (finished rows are kept, not reused) — so resuming the same chat
@@ -132,12 +163,30 @@ export class ProjectService {
         ? conversationById.get(session.agentSessionId)
         : undefined;
       const targetCwd = session.adopted ? VIRTUAL_SHELL_CWD : session.cwd;
-      push(byCwd, targetCwd, chatFromSession(session, liveConversation?.title));
+      push(
+        byCwd,
+        targetCwd,
+        chatFromSession(
+          session,
+          liveConversation?.title,
+          session.agentSessionId ? (cronByConversation.get(session.agentSessionId) ?? null) : null,
+        ),
+      );
     }
 
     // Every configured directory gets a place, even an empty one.
     for (const entry of await this.workspaces.list()) {
       if (!byCwd.has(entry.path)) byCwd.set(entry.path, []);
+    }
+
+    // So does every directory a scheduled job points at. A job is visible from
+    // the moment it is saved — the whole point of showing it here is to see
+    // what is *going* to happen — and a job configured in a subdirectory that
+    // has no chats yet would otherwise have no row to hang from and silently
+    // disappear until its first run. Containment is still enforced below, so
+    // this cannot conjure a project outside every added folder.
+    for (const cwd of cronByCwd.keys()) {
+      if (!byCwd.has(cwd)) byCwd.set(cwd, []);
     }
 
     for (const conversation of conversations) {
@@ -162,6 +211,7 @@ export class ProjectService {
         busySince: null,
         // A disk-only transcript is a Claude conversation, never an adopted pane.
         adoptTargetId: null,
+        cronJobId: cronByConversation.get(conversation.id) ?? null,
       });
     }
 
@@ -185,6 +235,9 @@ export class ProjectService {
           hidden: false,
           isWorkspace: true,
           chats: shellChats,
+          // The virtual Shell project is not a real directory, so no job can
+          // ever be configured against it.
+          cronJobs: [],
           worktrees: [],
           mainRepoCwd: null,
         });
@@ -216,6 +269,7 @@ export class ProjectService {
         hidden,
         isWorkspace: added.has(cwd),
         chats,
+        cronJobs: cronByCwd.get(cwd) ?? [],
         worktrees: [],
         mainRepoCwd: await findMainRepoCwd(cwd),
       });
@@ -273,11 +327,16 @@ function push(map: Map<string, ChatSummary[]>, cwd: string, chat: ChatSummary): 
   else map.set(cwd, [chat]);
 }
 
-function chatFromSession(session: SessionInfo, transcriptTitle?: string): ChatSummary {
+function chatFromSession(
+  session: SessionInfo,
+  transcriptTitle?: string,
+  cronJobId: string | null = null,
+): ChatSummary {
   return {
     id: session.id,
     sessionId: session.id,
     conversationId: session.agentSessionId,
+    cronJobId,
     title: transcriptTitle ?? session.title,
     agent: session.agent,
     agentDisplayName: session.agentDisplayName,

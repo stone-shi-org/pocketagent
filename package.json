@@ -28,7 +28,8 @@
     "demo:home-ui": "pnpm -F @pocketagent/server exec node scripts/home-ui-demo.mjs",
     "demo:resume-history": "pnpm -F @pocketagent/server exec node scripts/resume-history-demo.mjs",
     "demo:desktop-ui": "pnpm -F @pocketagent/server exec node scripts/desktop-ui-demo.mjs",
-    "demo:copy-ui": "pnpm -F @pocketagent/server exec node scripts/copy-ui-demo.mjs"
+    "demo:copy-ui": "pnpm -F @pocketagent/server exec node scripts/copy-ui-demo.mjs",
+    "demo:cron-ui": "pnpm -F @pocketagent/server exec node scripts/cron-ui-demo.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

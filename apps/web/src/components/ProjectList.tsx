@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ChatSummary, HostInfo, ProjectInfo } from '@pocketagent/protocol';
+import { describeCron } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { filterProjects } from '../agent/search.js';
+import { formatCountdown } from '../agent/cron-format.js';
 
 const REFRESH_MS = 5000;
 
@@ -374,6 +376,8 @@ interface ListProps {
   /** Wording differs: one is tapped, the other clicked. */
   emptyHint: string;
   onAddProject: () => void;
+  /** Opens a scheduled job's editor. Omitted where cron rows are not wanted. */
+  onOpenCronJob?: (jobId: string) => void;
 }
 
 /** The folders and their chats. Presentation only; state comes from above. */
@@ -385,6 +389,7 @@ export function ProjectList({
   activeConversationId,
   emptyHint,
   onAddProject,
+  onOpenCronJob,
 }: ListProps): JSX.Element {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [expandedChats, setExpandedChats] = useState<Set<string>>(() => new Set());
@@ -423,6 +428,7 @@ export function ProjectList({
     onCompose,
     activeSessionId,
     activeConversationId,
+    onOpenCronJob,
   };
 
   return (
@@ -469,6 +475,7 @@ interface ProjectSectionProps {
   onCompose: (cwd: string) => void;
   activeSessionId?: string | null;
   activeConversationId?: string | null;
+  onOpenCronJob?: (jobId: string) => void;
 }
 
 /**
@@ -493,6 +500,7 @@ function ProjectSection({
   onCompose,
   activeSessionId,
   activeConversationId,
+  onOpenCronJob,
 }: ProjectSectionProps): JSX.Element {
   // A search that hid a folder's other chats should not also hide the ones it
   // matched, so collapsing is ignored while searching.
@@ -593,9 +601,57 @@ function ProjectSection({
         )}
       </div>
 
-      {!isCollapsed && project.chats.length === 0 && (
+      {!isCollapsed && project.chats.length === 0 && project.cronJobs.length === 0 && (
         <div className="project-empty">No chats yet</div>
       )}
+
+      {/* Scheduled jobs sit above the chats: a job is what is *going* to
+          happen, and it is a spec rather than a conversation — there is no
+          transcript to open, so tapping one opens its editor. Rendered even
+          when it has never run, which is the whole reason it is here. */}
+      {!isCollapsed &&
+        onOpenCronJob &&
+        project.cronJobs.map((job) => (
+          <div key={job.id} className="chat-line cron-line">
+            <button
+              type="button"
+              className={`chat-row cron-job-row${job.enabled ? '' : ' paused'}`}
+              onClick={() => onOpenCronJob(job.id)}
+              title={`${job.name} — ${describeCron(job.cronExpr)}${
+                job.enabled ? '' : ' (paused)'
+              }`}
+            >
+              <span className="chat-title">
+                <span className="cron-icon-wrap">
+                  <Icon name="clock" size={15} className="cron-badge-icon" />
+                  {job.lastRunStatus !== null && (
+                    <span
+                      className={`cron-dot cron-dot--${job.lastRunStatus}`}
+                      role="img"
+                      aria-label={`Last run ${job.lastRunStatus}`}
+                    />
+                  )}
+                </span>
+                {job.name}
+                {job.skipPermissionsEnabled && (
+                  <Icon
+                    name="shield"
+                    size={13}
+                    className="cron-shield"
+                    aria-label="Approvals bypassed"
+                  />
+                )}
+              </span>
+              <span className="cron-line-when">
+                {job.enabled
+                  ? job.nextRunAt !== null
+                    ? formatCountdown(job.nextRunAt)
+                    : 'no next run'
+                  : 'paused'}
+              </span>
+            </button>
+          </div>
+        ))}
 
       {(() => {
         // A search that hid a folder's other chats already narrowed this to
@@ -635,6 +691,16 @@ function ProjectSection({
                   >
                     <span className="chat-title">
                       {chat.live && <span className="live-dot" aria-label="running" />}
+                      {/* Inline, beside `live-dot`, rather than a corner
+                          overlay: a chat row has no icon to pin a badge to. */}
+                      {chat.cronJobId !== null && (
+                        <Icon
+                          name="clock"
+                          size={13}
+                          className="chat-cron-badge"
+                          aria-label="Started by a scheduled job"
+                        />
+                      )}
                       {chat.title}
                     </span>
                   </button>
@@ -708,6 +774,7 @@ function ProjectSection({
             onCompose={onCompose}
             activeSessionId={activeSessionId}
             activeConversationId={activeConversationId}
+            {...(onOpenCronJob ? { onOpenCronJob } : {})}
           />
         ))}
     </section>

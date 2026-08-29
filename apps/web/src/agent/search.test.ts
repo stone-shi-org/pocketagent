@@ -18,6 +18,7 @@ function chat(title: string): ChatSummary {
     directoryBusy: false,
     busySince: null,
     adoptTargetId: null,
+    cronJobId: null,
   };
 }
 
@@ -32,6 +33,7 @@ function project(name: string, titles: string[], worktrees: ProjectInfo[] = []):
     hidden: false,
     isWorkspace: true,
     chats: titles.map(chat),
+    cronJobs: [],
     worktrees,
   };
 }

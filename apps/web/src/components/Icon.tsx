@@ -32,6 +32,9 @@ export type IconName =
   | 'plus'
   | 'minimize'
   | 'shield'
+  | 'clock'
+  | 'play'
+  | 'trash'
   | 'agents'
   | 'agent-claude'
   | 'agent-codex'
@@ -207,6 +210,27 @@ const PATHS: Record<IconName, JSX.Element> = {
   // removes) an approval prompt — distinct in silhouette from `check`, which
   // reads as "done" rather than "guarded".
   shield: <path d="M12 3.5 5.5 6v5.2c0 4.6 2.9 7.6 6.5 8.8 3.6-1.2 6.5-4.2 6.5-8.8V6Z" />,
+  // A clock face with hands at 10:2 rather than the usual 12:3, so the two
+  // strokes stay distinguishable at the 8px overlay size the project tree
+  // renders it at — at 12:3 the vertical hand merges into the circle's edge.
+  clock: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </>
+  ),
+  // A solid triangle, not an outlined one: this is "run now", and at 16px an
+  // outlined play reads as a hollow arrow pointing nowhere.
+  play: <path d="M9 6.5 17.5 12 9 17.5Z" fill="currentColor" stroke="none" />,
+  // A lidded bin. Distinct from `close` (an X, "take this off the list") by
+  // carrying a lid and a body — this one destroys something.
+  trash: (
+    <>
+      <path d="M4.5 7.5h15" />
+      <path d="M9.5 7.5V5.5h5v2" />
+      <path d="M6.5 7.5 7.4 19a1 1 0 0 0 1 .9h7.2a1 1 0 0 0 1-.9l.9-11.5" />
+    </>
+  ),
 
   // Two overlapping cards with a pair of eyes on the front one: "a fleet",
   // not one agent — distinct from `branch`'s three-node graph, which is

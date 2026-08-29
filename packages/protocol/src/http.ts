@@ -11,7 +11,7 @@ import {
   WorkspaceEntry,
 } from './session.js';
 import { EffortLevel, SessionTransport } from './agent-events.js';
-import { LIMITS } from './ws.js';
+import { LIMITS } from './limits.js';
 
 export const LoginRequest = z.object({
   token: z.string().min(1).max(512),

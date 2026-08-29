@@ -13,11 +13,13 @@ import type { AdoptionService } from './adopt/index.js';
 import type { ProjectService } from './projects/index.js';
 import type { UsageService } from './usage/index.js';
 import type { WorktreeService } from './git/worktree.js';
+import type { CronService } from './cron/index.js';
 
 export interface PocketContext {
   config: Config;
   auth: AuthService;
   sessions: SessionManager;
+  cron: CronService;
   workspaces: WorkspaceRegistry;
   agents: AgentRegistry;
   db: Db;

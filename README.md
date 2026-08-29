@@ -32,6 +32,7 @@ or use private remote-control APIs. It launches `claude` exactly the way you wou
 - [Deploying to another machine](#deploying-to-another-machine)
 - [Two interfaces: native and terminal](#two-interfaces-native-and-terminal)
 - [Picking up work you started elsewhere](#picking-up-work-you-started-elsewhere)
+- [Scheduled jobs](#scheduled-jobs)
 - [Process backends](#process-backends)
 - [Accessing from another device](#accessing-from-another-device)
 - [Using it](#using-it)
@@ -542,6 +543,15 @@ Agent SDK's `bypassPermissions` mode (structured transport): every tool call run
 immediately, unattended. A session running this way says so persistently in its header, not
 just at the moment you created it. Use it only for a session you trust completely.
 
+**A scheduled job is the one exception, and it defaults to bypassed.** There is nobody
+awake at 3am to answer an approval, so a job created with approvals routed to the browser
+would park on its first tool call and never finish — the default would make the feature
+useless rather than safe. The per-job switch is still there and can be turned off, and
+turning it off does *not* introduce a timeout: the run waits indefinitely for you and sends
+a notification, because an unanswered approval must never become an allow. A job running
+bypassed says so on its row, in the list, and on every run it produces. See
+[Scheduled jobs](#scheduled-jobs).
+
 ### What native mode does not give you
 
 - **Durability.** The Agent SDK owns the child process, so structured sessions do not use
@@ -637,6 +647,74 @@ of the above: create one from your phone, then pick it up later with
 > terminal. Reparenting it needs `ptrace`-level tricks (`reptyr`), which are blocked by
 > default on most distributions and which PocketAgent does not attempt. Resume the
 > conversation instead.
+
+## Scheduled jobs
+
+Everything above starts when you tap something. A **scheduled job** runs a prompt on a
+repeating schedule instead: a nightly review of yesterday's commits, a Monday-morning
+dependency check, an hourly sweep of a log directory.
+
+A job is a saved spec — project directory, agent, working-copy policy, model, effort, prompt
+and schedule — and it lives at **"…" → Cron jobs…**, or `#/cron`. Each firing is a **run**:
+one prompt, one turn, with its own transcript you can read afterwards.
+
+### Defining when it runs
+
+Two ways, and you can switch between them per job:
+
+- **Simple** — hourly, daily, weekly (pick the weekdays) or monthly, at an hour and minute.
+- **Advanced** — a raw five-field cron expression (`*/15 9-17 * * 1-5`), validated as you
+  type, for anything the picker cannot say.
+
+Either way the editor shows **the next three runs** as absolute times with countdowns, so a
+schedule you got wrong is visible before you save rather than at 3am. Each job carries its
+own **IANA time zone** (not a UTC offset — an offset does not survive DST), so "run at 9am"
+means *your* 9am even on a server running in UTC.
+
+Two DST behaviours worth knowing, because they are choices rather than accidents: a local
+time that does not exist on a spring-forward day simply does not fire that day, and an hour
+repeated by a fall-back transition fires **once**, on the first pass.
+
+### Where it runs
+
+A job either runs in the project directory as-is, or creates **a fresh git worktree per
+run** on its own branch (`nightly-review-20260828-0300-a3f9c1`). The second is what you want
+for anything that edits files: last night's uncommitted changes cannot trip up tonight's run.
+Those worktrees are *not* cleaned up automatically — the run's output is what is in them.
+
+### Approvals
+
+**A scheduled job runs with tool approvals bypassed by default**, and this is the only place
+in PocketAgent where that is the default. It is unattended by definition; a job that routed
+approvals to a browser nobody is looking at would stop on its first tool call and never
+finish.
+
+You can turn it off per job. If you do, a run that needs an approval **waits for you** —
+indefinitely, with a notification — rather than timing out into a yes or a no. Either way,
+a job running bypassed says so persistently: on its row, in the list, and on every run.
+
+### Watching it
+
+- The **PROJECTS tree** shows each job under its directory with a clock icon, from the moment
+  you save it — before it has ever run — plus a dot for how the last run went. Runs show up
+  as ordinary chats carrying the same clock badge.
+- **Run history** sits at the bottom of the job's editor. Tapping a run opens its transcript,
+  exactly like any other chat.
+- **Run now** fires a job by hand without waiting for its schedule, and takes you to the
+  live session.
+- Deleting a job **keeps its run history**, the same way removing a chat never deletes its
+  transcript.
+
+### What it will not do
+
+- **It will not replay a backlog.** Runs missed while the server was off are collapsed into a
+  single `skipped` entry once they are more than an hour stale — a week offline for an hourly
+  job would otherwise start 168 agents at boot. Inside that hour it still fires once, so an
+  ordinary restart does not lose a run.
+- **It will not run two at once**, unless you ask it to. By default a firing is skipped while
+  the previous run is still going, which for a job that edits files is the safe answer.
+- **It needs an agent with a native mode.** Terminal-only agents (`shell`) cannot be
+  scheduled: typing at a TUI gives no reliable signal that it is ready, or that it is done.
 
 ## Process backends
 
@@ -925,6 +1003,21 @@ should have told you. Raise `OUTPUT_BUFFER_BYTES`, or press `^L` to redraw.
 14. **Conversation discovery is Claude-specific.** It reads Claude Code's on-disk transcript
     format. Other agents would each need their own reader; the rest of the session
     machinery is agent-agnostic.
+15. **Per-run worktrees are never cleaned up.** A scheduled job set to branch per run leaves
+    one tree per run under `<project>/.worktrees/`, so a nightly job accumulates roughly one
+    a day. Deleting them afterwards is not an option — the run's work is what is in there —
+    so pruning old branches stays a manual job.
+16. **A scheduled job does not catch up after downtime.** Occurrences missed while the
+    server was off are collapsed into a single `skipped` run once they are more than an hour
+    stale, rather than firing a backlog at boot. Inside that hour the job still fires once,
+    so an ordinary restart does not lose a run.
+17. **Scheduled jobs cannot use the terminal transport.** They require an agent with a
+    structured mode, because delivering a prompt to a TUI has no readiness signal and no
+    reliable way to tell a finished turn from a hung one.
+18. **A scheduled job runs with approvals bypassed by default.** It is unattended, so there
+    is nobody to ask; the per-job switch can be turned off, in which case a run that needs
+    an approval waits indefinitely for you instead of proceeding. See
+    [Security model](#security-model).
 
 ---
 

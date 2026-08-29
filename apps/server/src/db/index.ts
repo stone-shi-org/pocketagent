@@ -177,6 +177,97 @@ const MIGRATIONS: readonly string[] = [
     updated_at  INTEGER NOT NULL
   );
   `,
+  // Scheduled jobs, and the history of what they did.
+  //
+  // `cron_expr` is the only part of the schedule the scheduler ever reads.
+  // `preset_json` is a descriptor of which picker built it (hourly/daily/
+  // weekly/monthly at a time), kept solely so the editor can re-open the
+  // picker the job was created with instead of dumping the user into the raw
+  // expression field. It is never the source of truth: every write recompiles
+  // `cron_expr` from it, so the two cannot drift, and a later change to the
+  // compiler cannot silently retime a job that already exists.
+  //
+  // `time_zone` is an IANA name, not a UTC offset, because an offset does not
+  // survive DST — and it is per job rather than server-wide, because a server
+  // running in UTC still has to honour somebody's local 9am.
+  //
+  // `effort_set` exists because SQL has one NULL and `CreateSessionRequest`
+  // has two absences: an omitted `effort` means "whatever was cached for this
+  // agent", an explicit `null` means "the model's own default". Collapsing the
+  // two would silently change what a job runs with.
+  //
+  // `skip_permissions` defaults to 1 here and to 0 everywhere else in this
+  // schema. That inversion is deliberate and is documented in CLAUDE.md as an
+  // override rather than left to be discovered: a scheduled job is unattended
+  // by definition, so approvals routed to a browser nobody is looking at just
+  // park the run forever. The invariant that matters still holds — with this
+  // 0, an unanswered approval never decays into an allow; the run simply waits.
+  //
+  // `cron_runs.job_id` is ON DELETE SET NULL, not CASCADE: deleting a job must
+  // not erase the record of what it already did, the same discipline that
+  // stops "Remove" from deleting a transcript. That is also why `job_name` and
+  // `agent` are copied onto every run row — an orphaned run still has to
+  // describe itself, and renaming a job must not rewrite what its old runs say
+  // they were.
+  //
+  // `session_id` is deliberately NOT a foreign key. `pruneOldSessions` and
+  // `SessionManager.forget` both delete session rows out from under us; a
+  // CASCADE there would quietly destroy run history, and a RESTRICT would make
+  // pruning fail. A run whose session row is gone renders as "no longer
+  // available" instead of vanishing, and `agent_session_id` is kept alongside
+  // as the last-resort link to the transcript still on disk.
+  `
+  CREATE TABLE IF NOT EXISTS cron_jobs (
+    id               TEXT PRIMARY KEY,
+    name             TEXT NOT NULL,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+
+    cron_expr        TEXT NOT NULL,
+    time_zone        TEXT NOT NULL,
+    schedule_kind    TEXT NOT NULL,
+    preset_json      TEXT,
+
+    cwd              TEXT NOT NULL,
+    agent            TEXT NOT NULL,
+    worktree_mode    TEXT NOT NULL DEFAULT 'none',
+    model            TEXT,
+    effort           TEXT,
+    effort_set       INTEGER NOT NULL DEFAULT 0,
+    skip_permissions INTEGER NOT NULL DEFAULT 1,
+    prompt           TEXT NOT NULL,
+    overlap_policy   TEXT NOT NULL DEFAULT 'skip',
+
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL,
+    next_run_at      INTEGER,
+    last_run_at      INTEGER,
+    last_run_status  TEXT,
+    last_error       TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_cron_jobs_due ON cron_jobs (enabled, next_run_at);
+  CREATE INDEX IF NOT EXISTS idx_cron_jobs_cwd ON cron_jobs (cwd);
+
+  CREATE TABLE IF NOT EXISTS cron_runs (
+    id               TEXT PRIMARY KEY,
+    job_id           TEXT REFERENCES cron_jobs (id) ON DELETE SET NULL,
+    job_name         TEXT NOT NULL,
+    agent            TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    trigger          TEXT NOT NULL,
+    scheduled_for    INTEGER NOT NULL,
+    started_at       INTEGER NOT NULL,
+    finished_at      INTEGER,
+    session_id       TEXT,
+    agent_session_id TEXT,
+    cwd              TEXT,
+    error            TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_cron_runs_job ON cron_runs (job_id, started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_cron_runs_started ON cron_runs (started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_cron_runs_conversation ON cron_runs (agent_session_id);
+  `,
 ];
 
 /**
@@ -376,6 +467,236 @@ export function writeAgentDefaults(
          model = excluded.model, effort = excluded.effort, models_json = excluded.models_json,
          updated_at = excluded.updated_at`,
   ).run(agentId, model, effort, modelsJson, Date.now());
+}
+
+export interface CronJobRow {
+  id: string;
+  name: string;
+  enabled: number;
+  cron_expr: string;
+  /** IANA zone name. */
+  time_zone: string;
+  /** `'preset' | 'expression'`. */
+  schedule_kind: string;
+  /** Raw JSON of a `CronSchedulePreset`; parsed by the caller. Non-null iff `schedule_kind` is `'preset'`. */
+  preset_json: string | null;
+  cwd: string;
+  agent: string;
+  /** `'none' | 'new-branch' | 'current-branch'`. */
+  worktree_mode: string;
+  model: string | null;
+  effort: string | null;
+  /** 1 when `effort` was set explicitly — including explicitly to null. See the migration comment. */
+  effort_set: number;
+  skip_permissions: number;
+  prompt: string;
+  /** `'skip' | 'allow'`. */
+  overlap_policy: string;
+  created_at: number;
+  updated_at: number;
+  next_run_at: number | null;
+  last_run_at: number | null;
+  last_run_status: string | null;
+  last_error: string | null;
+}
+
+export interface CronRunRow {
+  id: string;
+  /** Null once its job has been deleted; `job_name`/`agent` carry on without it. */
+  job_id: string | null;
+  job_name: string;
+  agent: string;
+  status: string;
+  trigger: string;
+  scheduled_for: number;
+  started_at: number;
+  finished_at: number | null;
+  /** Not a foreign key — see the migration comment. */
+  session_id: string | null;
+  agent_session_id: string | null;
+  cwd: string | null;
+  error: string | null;
+}
+
+export function readCronJobs(db: Db): CronJobRow[] {
+  return db.prepare('SELECT * FROM cron_jobs ORDER BY name').all() as CronJobRow[];
+}
+
+export function readCronJob(db: Db, id: string): CronJobRow | null {
+  return (db.prepare('SELECT * FROM cron_jobs WHERE id = ?').get(id) as CronJobRow | undefined) ?? null;
+}
+
+export function insertCronJob(db: Db, row: CronJobRow): void {
+  db.prepare(
+    `INSERT INTO cron_jobs (
+       id, name, enabled, cron_expr, time_zone, schedule_kind, preset_json,
+       cwd, agent, worktree_mode, model, effort, effort_set, skip_permissions,
+       prompt, overlap_policy, created_at, updated_at, next_run_at, last_run_at,
+       last_run_status, last_error
+     ) VALUES (
+       @id, @name, @enabled, @cron_expr, @time_zone, @schedule_kind, @preset_json,
+       @cwd, @agent, @worktree_mode, @model, @effort, @effort_set, @skip_permissions,
+       @prompt, @overlap_policy, @created_at, @updated_at, @next_run_at, @last_run_at,
+       @last_run_status, @last_error
+     )`,
+  ).run(row);
+}
+
+/** Columns `updateCronJob` is allowed to write. `id`/`created_at` are immutable. */
+type CronJobPatch = Partial<Omit<CronJobRow, 'id' | 'created_at'>>;
+
+/**
+ * Merge a partial patch into one job row.
+ *
+ * Read-modify-write for the same reason `writeAgentDefaults` is: `PATCH
+ * /api/cron/jobs/:id` is partial, so an omitted field must keep its value
+ * rather than be clobbered to NULL. Absence is tested with `in`, never with a
+ * null check, because `null` is a real value here — clearing `model`, or an
+ * explicitly-default `effort`.
+ */
+export function updateCronJob(db: Db, id: string, patch: CronJobPatch): CronJobRow | null {
+  const existing = readCronJob(db, id);
+  if (existing === null) return null;
+
+  const keys = Object.keys(patch).filter((k) => k in patch) as (keyof CronJobPatch)[];
+  if (keys.length === 0) return existing;
+
+  const assignments = keys.map((k) => `${k} = @${k}`).join(', ');
+  db.prepare(`UPDATE cron_jobs SET ${assignments} WHERE id = @id`).run({
+    ...Object.fromEntries(keys.map((k) => [k, patch[k] ?? null])),
+    id,
+  });
+  return readCronJob(db, id);
+}
+
+export function deleteCronJob(db: Db, id: string): boolean {
+  return db.prepare('DELETE FROM cron_jobs WHERE id = ?').run(id).changes > 0;
+}
+
+/**
+ * Jobs this tick should consider — one indexed range scan.
+ *
+ * `next_run_at` is materialized on write rather than computed per tick, so a
+ * hundred jobs cost one query instead of a hundred schedule solves.
+ */
+export function readDueCronJobs(db: Db, now: number): CronJobRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM cron_jobs
+        WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
+        ORDER BY next_run_at`,
+    )
+    .all(now) as CronJobRow[];
+}
+
+export function insertCronRun(db: Db, row: CronRunRow): void {
+  db.prepare(
+    `INSERT INTO cron_runs (
+       id, job_id, job_name, agent, status, trigger, scheduled_for, started_at,
+       finished_at, session_id, agent_session_id, cwd, error
+     ) VALUES (
+       @id, @job_id, @job_name, @agent, @status, @trigger, @scheduled_for, @started_at,
+       @finished_at, @session_id, @agent_session_id, @cwd, @error
+     )`,
+  ).run(row);
+}
+
+export function updateCronRun(
+  db: Db,
+  id: string,
+  patch: Partial<Omit<CronRunRow, 'id' | 'job_id'>>,
+): void {
+  const keys = Object.keys(patch) as (keyof typeof patch)[];
+  if (keys.length === 0) return;
+  const assignments = keys.map((k) => `${k} = @${k}`).join(', ');
+  db.prepare(`UPDATE cron_runs SET ${assignments} WHERE id = @id`).run({
+    ...Object.fromEntries(keys.map((k) => [k, patch[k] ?? null])),
+    id,
+  });
+}
+
+export function readCronRun(db: Db, id: string): CronRunRow | null {
+  return (db.prepare('SELECT * FROM cron_runs WHERE id = ?').get(id) as CronRunRow | undefined) ?? null;
+}
+
+/** Newest first. `jobId` omitted lists every job's runs, orphans included. */
+export function readCronRuns(db: Db, opts: { jobId?: string; limit: number }): CronRunRow[] {
+  if (opts.jobId !== undefined) {
+    return db
+      .prepare('SELECT * FROM cron_runs WHERE job_id = ? ORDER BY started_at DESC LIMIT ?')
+      .all(opts.jobId, opts.limit) as CronRunRow[];
+  }
+  return db
+    .prepare('SELECT * FROM cron_runs ORDER BY started_at DESC LIMIT ?')
+    .all(opts.limit) as CronRunRow[];
+}
+
+/** Runs that have not reached a terminal status yet. */
+export function readActiveCronRuns(db: Db, jobId?: string): CronRunRow[] {
+  const open = `status IN ('starting', 'running')`;
+  if (jobId !== undefined) {
+    return db
+      .prepare(`SELECT * FROM cron_runs WHERE job_id = ? AND ${open}`)
+      .all(jobId) as CronRunRow[];
+  }
+  return db.prepare(`SELECT * FROM cron_runs WHERE ${open}`).all() as CronRunRow[];
+}
+
+/**
+ * Anything still `starting`/`running` at boot belongs to a dead server.
+ *
+ * No `keepAlive` exception, unlike `markStaleSessionsInterrupted`: a cron run
+ * is always a structured session, and those never survive a restart — the SDK
+ * owns the process, so there is nothing to re-adopt.
+ */
+export function markStaleCronRunsFailed(db: Db, now = Date.now()): number {
+  return db
+    .prepare(
+      `UPDATE cron_runs
+         SET status = 'failed',
+             finished_at = COALESCE(finished_at, ?),
+             error = COALESCE(error, 'The server restarted while this run was in progress.')
+       WHERE status IN ('starting', 'running')`,
+    )
+    .run(now).changes;
+}
+
+/**
+ * Keep run history bounded, per job rather than globally.
+ *
+ * Global pruning would let one every-15-minutes job evict a monthly job's
+ * entire history within a day, which is exactly backwards: the rare job's runs
+ * are the ones worth keeping.
+ */
+export function pruneOldCronRuns(db: Db, keepPerJob: number): number {
+  return db
+    .prepare(
+      `DELETE FROM cron_runs
+        WHERE status NOT IN ('starting', 'running')
+          AND job_id IS NOT NULL
+          AND id NOT IN (
+            SELECT id FROM cron_runs AS r
+             WHERE r.job_id = cron_runs.job_id
+             ORDER BY started_at DESC
+             LIMIT ?
+          )`,
+    )
+    .run(keepPerJob).changes;
+}
+
+export function deleteCronRunsForJob(db: Db, jobId: string): number {
+  return db.prepare('DELETE FROM cron_runs WHERE job_id = ?').run(jobId).changes;
+}
+
+/** Which conversations were produced by a scheduled run, for the home screen's badge. */
+export function readCronRunConversationIds(db: Db): Map<string, string> {
+  const rows = db
+    .prepare(
+      `SELECT agent_session_id, job_id FROM cron_runs
+        WHERE agent_session_id IS NOT NULL AND job_id IS NOT NULL`,
+    )
+    .all() as { agent_session_id: string; job_id: string }[];
+  return new Map(rows.map((r) => [r.agent_session_id, r.job_id]));
 }
 
 /** Keep the session table from growing forever on a long-lived install. */

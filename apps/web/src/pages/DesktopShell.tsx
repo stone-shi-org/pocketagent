@@ -14,6 +14,8 @@ import { formatBuildInfo } from '../version.js';
 import { OverflowMenu } from './ProjectsPage.js';
 import { ComposerPage } from './ComposerPage.js';
 import { AgentsFleetPage } from './AgentsFleetPage.js';
+import { CronJobsPage } from './CronJobsPage.js';
+import { CronJobEditorPage } from './CronJobEditorPage.js';
 import { SessionRoute } from './SessionRoute.js';
 import { ChatPreviewPage } from './ChatPreviewPage.js';
 import { loadOpenTabRoutes, saveOpenTabRoutes, type StoredTabRoute } from '../agent/open-tabs-pref.js';
@@ -310,6 +312,10 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                 setMenuOpen(false);
                 onNavigate({ name: 'settings' });
               }}
+              onCron={() => {
+                setMenuOpen(false);
+                onNavigate({ name: 'cron' });
+              }}
               onLogout={onLogout}
             />
           )}
@@ -360,6 +366,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
           onAddProject={() => setShowAdd(true)}
             activeSessionId={activeSessionId}
             activeConversationId={activeConversationId}
+            onOpenCronJob={(jobId) => onNavigate({ name: 'cron-job', jobId })}
             emptyHint="Nothing here yet. Start a chat to see it listed."
           />
         </div>
@@ -432,6 +439,23 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
           />
         ) : route.name === 'settings' ? (
           <SettingsPage onApiError={onApiError} />
+        ) : route.name === 'cron' ? (
+          <CronJobsPage
+            onOpenJob={(jobId) => onNavigate({ name: 'cron-job', jobId })}
+            onApiError={onApiError}
+          />
+        ) : route.name === 'cron-job' ? (
+          <CronJobEditorPage
+            key={route.jobId}
+            jobId={route.jobId}
+            onDone={() => {
+              void state.refresh();
+              onNavigate({ name: 'cron' });
+            }}
+            onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+            onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
+            onApiError={onApiError}
+          />
         ) : activeTabId === null ? (
           <WelcomePane onCompose={() => onNavigate({ name: 'compose' })} />
         ) : null}

@@ -7,7 +7,8 @@ import {
   EffortLevel,
   PermissionDecision,
 } from './agent-events.js';
-import { MAX_IMAGE_BASE64_CHARS, MAX_IMAGE_BYTES, PromptImage } from './prompt-image.js';
+import { PromptImage } from './prompt-image.js';
+import { LIMITS } from './limits.js';
 
 /**
  * Wire protocol version. The client sends it as a query parameter on the
@@ -49,25 +50,6 @@ export const WsCloseCode = {
   UNAUTHORIZED: 4003,
   FLOOD: 4008,
   BACKPRESSURE: 4009,
-} as const;
-
-/** Hard caps, enforced on the server before any frame is acted on. */
-export const LIMITS = {
-  // A base64'd 5 MB image runs ~6.7 MB of text, plus JSON overhead — this
-  // used to be 256 KiB (plenty for a terminal keystroke or a paragraph of
-  // prompt text) but has to cover the largest single frame the protocol now
-  // carries, which is an image-bearing prompt.
-  maxMessageBytes: 8 * 1024 * 1024,
-  /** Max characters of a single `input` payload. */
-  maxInputChars: 128 * 1024,
-  /** Raw file size cap for a prompt's attached image, before base64 encoding. */
-  maxImageBytes: MAX_IMAGE_BYTES,
-  /** Base64 inflates by 4/3; this is the cap actually applied to `image.data`. */
-  maxImageBase64Chars: MAX_IMAGE_BASE64_CHARS,
-  minCols: 2,
-  maxCols: 1000,
-  minRows: 2,
-  maxRows: 500,
 } as const;
 
 const SessionId = z.string().min(1).max(64);

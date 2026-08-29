@@ -8,8 +8,12 @@ import type {
   DiscoveredFolder,
   AgentInfo,
   ConversationInfo,
+  CreateCronJobRequest,
+  CronJob,
+  CronJobRun,
   EffortLevel,
   HostInfo,
+  UpdateCronJobRequest,
   MeResponse,
   ProjectInfo,
   SessionInfo,
@@ -245,4 +249,39 @@ export const api = {
 
   /** Rate-limit usage for every agent that reports its own, for the status area next to `HostChip`. */
   getUsage: () => request<{ usage: AgentUsageInfo[] }>('/api/usage'),
+
+  // ---- Scheduled jobs -------------------------------------------------------
+
+  listCronJobs: () => request<{ jobs: CronJob[] }>('/api/cron/jobs'),
+
+  getCronJob: (id: string) => request<CronJob>(`/api/cron/jobs/${encodeURIComponent(id)}`),
+
+  createCronJob: (body: CreateCronJobRequest) =>
+    request<CronJob>('/api/cron/jobs', { method: 'POST', body: JSON.stringify(body) }),
+
+  updateCronJob: (id: string, patch: UpdateCronJobRequest) =>
+    request<CronJob>(`/api/cron/jobs/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  deleteCronJob: (id: string) =>
+    request<{ ok: true; runsKept: number }>(`/api/cron/jobs/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
+  /**
+   * Fire a job by hand. Resolves once the session exists — so the returned run
+   * already carries `sessionId` to navigate to — but not once the turn is done.
+   */
+  runCronJobNow: (id: string) =>
+    request<CronJobRun>(`/api/cron/jobs/${encodeURIComponent(id)}/run`, { method: 'POST' }),
+
+  listCronRuns: (id: string) =>
+    request<{ runs: CronJobRun[] }>(`/api/cron/jobs/${encodeURIComponent(id)}/runs`),
+
+  clearCronRuns: (id: string) =>
+    request<{ ok: true; removed: number }>(`/api/cron/jobs/${encodeURIComponent(id)}/runs`, {
+      method: 'DELETE',
+    }),
 };

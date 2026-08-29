@@ -11,7 +11,11 @@ export type Route =
   /** The "Agents" fleet overview — every running agent, at a glance. */
   | { name: 'agents' }
   /** The full settings page — see `SettingsPage`. */
-  | { name: 'settings' };
+  | { name: 'settings' }
+  /** The list of scheduled jobs — see `CronJobsPage`. */
+  | { name: 'cron' }
+  /** One job's editor and run history. `jobId` is `'new'` for an unsaved one. */
+  | { name: 'cron-job'; jobId: string };
 
 function parse(hash: string): Route {
   const session = /^#\/s\/([^/?]+)/.exec(hash);
@@ -25,6 +29,12 @@ function parse(hash: string): Route {
     const cwd = compose[1] ? decodeURIComponent(compose[1]) : undefined;
     return cwd ? { name: 'compose', cwd } : { name: 'compose' };
   }
+
+  // Before the bare `#/cron` check, or the list route would swallow `#/cron/x`.
+  const cronJob = /^#\/cron\/([^/?]+)/.exec(hash);
+  if (cronJob?.[1]) return { name: 'cron-job', jobId: decodeURIComponent(cronJob[1]) };
+
+  if (/^#\/cron$/.exec(hash)) return { name: 'cron' };
 
   if (/^#\/agents$/.exec(hash)) return { name: 'agents' };
 
@@ -45,6 +55,10 @@ function toHash(route: Route): string {
       return '#/agents';
     case 'settings':
       return '#/settings';
+    case 'cron':
+      return '#/cron';
+    case 'cron-job':
+      return `#/cron/${encodeURIComponent(route.jobId)}`;
     default:
       return '#/';
   }
