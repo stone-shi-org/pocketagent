@@ -4116,119 +4116,34 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 .cron-status--running,
 .cron-status--starting { color: var(--accent); }
 
-/* ---- The editor ---- */
-
-.cron-editor {
-  padding: 16px;
-  overflow-y: auto;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  max-width: 720px;
-}
-
-.cron-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.cron-field > span {
-  font-size: 13px;
-  font-weight: 550;
-}
-
-.cron-field > small {
-  font-size: 11.5px;
-  color: var(--text-dim);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-.cron-field.inline {
-  flex: 1;
-  min-width: 90px;
-}
-
-.cron-row-2 {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.cron-row-2 > * {
-  flex: 1;
-  min-width: 160px;
-}
+/* ---- The editor ----
+   Built entirely from `SettingsPage`'s own card/row vocabulary
+   (`.settings-page`, `.settings-header`, `.settings-section`, `.settings-row`,
+   `.settings-input`, `.transport-hint`, ...), imported and reused rather than
+   duplicated — see `SectionCard`/`TextRow`/`NumberRow` exported from
+   `SettingsPage.tsx`. What follows is only the handful of controls that
+   vocabulary has no shape for: a multi-line input, a native `<select>` row
+   that saves on submit instead of on change, the weekday multi-select, the
+   schedule preview, and a run-history row. */
 
 .settings-input.mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-.cron-prompt {
+.settings-textarea {
   resize: vertical;
   min-height: 96px;
   line-height: 1.5;
   font-family: inherit;
 }
 
-.cron-section {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.cron-section h3 {
-  margin: 0;
-  font-size: 15px;
-}
-
-.cron-section-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.cron-tabs {
-  display: inline-flex;
-  background: var(--bg-elev);
-  border-radius: 999px;
-  padding: 2px;
-}
-
-.cron-tabs button {
-  border: 0;
-  background: none;
-  padding: 5px 12px;
-  border-radius: 999px;
-  font-size: 13px;
-  cursor: pointer;
-  color: var(--text-dim);
-}
-
-.cron-tabs button.active {
-  background: var(--bg-elev-2);
-  color: var(--text);
-  box-shadow: var(--shadow-sm);
-}
-
-.cron-preset {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.cron-chips {
+.cron-weekday-group {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
 
-.chip {
+.cron-weekday {
   border: 1px solid var(--border-strong);
   background: var(--bg-elev-2);
   border-radius: 999px;
@@ -4238,48 +4153,24 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   color: var(--text);
 }
 
-.chip.active {
+.cron-weekday.active {
   background: var(--ink);
   border-color: var(--ink);
   color: var(--on-ink);
 }
 
-.cron-time {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.cron-preview {
-  background: var(--bg-elev);
-  border-radius: var(--radius);
-  padding: 10px 12px;
+.cron-next-runs {
+  margin: 6px 0 0;
+  padding-left: 18px;
   font-size: 13px;
 }
 
-.cron-preview strong {
-  display: block;
-  font-size: 12px;
-  color: var(--text-dim);
-  margin-bottom: 5px;
-  font-weight: 600;
-}
-
-.cron-preview ul {
-  margin: 0;
-  padding-left: 16px;
-}
-
-.cron-preview li {
+.cron-next-runs li {
   margin: 2px 0;
 }
 
-.cron-preview li span {
+.cron-next-runs li span {
   color: var(--text-dim);
-}
-
-.cron-preview-empty {
-  color: var(--danger);
 }
 
 .cron-save-bar {
@@ -4287,39 +4178,46 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   gap: 8px;
   flex-wrap: wrap;
   align-items: center;
+  margin-bottom: 24px;
 }
 
-.cron-runs {
+/* One run, styled to the exact rhythm of `.settings-row` (same padding and
+   hairline) so the run list reads as one more settings section rather than a
+   different kind of list glued on underneath. */
+.cron-run-row {
   display: flex;
   flex-direction: column;
-}
-
-.cron-run {
-  border-top: 1px solid var(--border);
-}
-
-.cron-run:first-child {
-  border-top: 0;
-}
-
-.cron-run-main {
+  gap: 4px;
   width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 16px 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.cron-run-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.cron-run-row:first-of-type {
+  padding-top: 0;
+}
+
+.cron-run-row:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.cron-run-row-main {
   display: flex;
   align-items: baseline;
   gap: 9px;
   flex-wrap: wrap;
-  background: none;
-  border: 0;
-  padding: 9px 2px;
-  text-align: left;
-  cursor: pointer;
-  color: inherit;
-  font: inherit;
-}
-
-.cron-run-main:disabled {
-  cursor: default;
-  opacity: 0.75;
 }
 
 .cron-run-when {
@@ -4330,7 +4228,6 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 .cron-run-error {
   font-size: 12.5px;
   color: var(--danger);
-  flex-basis: 100%;
 }
 
 /* ---- Rows in the project tree ---- */

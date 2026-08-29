@@ -11,11 +11,10 @@ import type {
 import { compileCronPreset, cronErrorFor, nextRuns, serverTimeZone } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
-import { SelectorRow, type SelectorOption } from '../components/SelectorRow.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import { formatAbsolute, formatCountdown, WEEKDAY_LABELS } from '../agent/cron-format.js';
 import { flattenProjects } from '../agent/search.js';
-import { agentIconName } from '../agent/agent-icon.js';
+import { NumberRow, SectionCard, TextRow } from './SettingsPage.js';
 
 interface Props {
   /** `'new'` for an unsaved job. */
@@ -33,6 +32,13 @@ type Every = CronSchedulePreset['every'];
 
 /**
  * The job editor, plus that job's run history.
+ *
+ * Built from `SettingsPage`'s own card-and-row vocabulary (`SectionCard`,
+ * `TextRow`, `NumberRow`, imported straight from there — same reuse `OverflowMenu`
+ * gets from `ProjectsPage`) rather than a parallel set of look-alike classes:
+ * a job's form is exactly the same kind of "grouped settings with help text"
+ * `SettingsPage` already renders, and drifting the two apart is how a page
+ * ends up looking like it wandered in from a different app.
  *
  * Explicit Save, deliberately unlike `SettingsPage`'s auto-save: a half-typed
  * cron expression must never become a live schedule, and a job is a single
@@ -186,18 +192,18 @@ export function CronJobEditorPage({
   const selectedAgent = agents.find((a) => a.id === agent) ?? null;
 
   const flatProjects = useMemo(() => flattenProjects(projects), [projects]);
-  const dirOptions: SelectorOption[] = useMemo(() => {
+  const dirOptions = useMemo(() => {
     const seen = new Set<string>();
-    const out: SelectorOption[] = [];
+    const out: { value: string; label: string }[] = [];
     for (const w of workspaces) {
       if (seen.has(w.path)) continue;
       seen.add(w.path);
-      out.push({ value: w.path, label: w.path.split('/').pop() ?? w.path, detail: w.path });
+      out.push({ value: w.path, label: w.path });
     }
     for (const p of flatProjects) {
       if (seen.has(p.cwd) || p.cwd === 'virtual:shell') continue;
       seen.add(p.cwd);
-      out.push({ value: p.cwd, label: p.name, detail: p.workspaceLabel });
+      out.push({ value: p.cwd, label: p.workspaceLabel || p.name });
     }
     return out;
   }, [workspaces, flatProjects]);
@@ -220,8 +226,7 @@ export function CronJobEditorPage({
     setError(null);
 
     // Exactly one of `preset`/`cronExpr` — the server refuses both.
-    const schedule =
-      scheduleKind === 'preset' ? { preset } : { cronExpr };
+    const schedule = scheduleKind === 'preset' ? { preset } : { cronExpr };
 
     try {
       if (isNew) {
@@ -305,206 +310,173 @@ export function CronJobEditorPage({
   };
 
   const body = loading ? (
-    <div className="spinner">Loading…</div>
+    <div className="settings-page">
+      <div className="spinner">Loading…</div>
+    </div>
   ) : (
-    <div className="cron-editor">
-      <label className="cron-field">
-        <span>Name</span>
-        <input
-          className="settings-input"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Nightly review"
-          maxLength={128}
-        />
-      </label>
+    <div className="settings-page">
+      {error !== null && (
+        <div className="error-box" role="alert">
+          {error}
+        </div>
+      )}
 
-      <div className="selector-stack">
-        <SelectorRow
-          icon="folder"
+      <div className="settings-header">
+        <div className="settings-header-icon">
+          <Icon name="clock" size={26} />
+        </div>
+        <div className="settings-header-title">
+          <h1>{isNew ? 'New scheduled job' : name || 'Scheduled job'}</h1>
+          <p className="settings-header-sub">
+            Runs a prompt in a project on a repeating schedule, unattended.
+          </p>
+        </div>
+      </div>
+
+      <SectionCard title="Job" icon="folder">
+        <TextRow
+          label="Name"
+          value={name}
+          busy={busy}
+          placeholder="Nightly review"
+          onChange={setName}
+        />
+        <SelectRowNative
+          busy={busy}
           label="Project"
           value={cwd}
           options={dirOptions}
           onChange={setCwd}
-          ariaLabel="Project directory"
         />
-        <SelectorRow
-          icon={agentIconName(agent)}
+        <SelectRowNative
+          busy={busy}
           label="Agent"
           value={agent}
           options={structuredAgents.map((a) => ({
             value: a.id,
-            label: a.displayName,
-            detail: a.available ? undefined : 'not installed',
+            label: a.available ? a.displayName : `${a.displayName} (not installed)`,
           }))}
           onChange={setAgent}
-          ariaLabel="Agent"
         />
-        <SelectorRow
-          icon="branch"
+        <SelectRowNative
+          busy={busy}
           label="Working copy"
           value={worktreeMode}
           options={[
-            { value: 'none', label: 'The project directory', detail: 'Runs in place' },
-            {
-              value: 'new-branch',
-              label: 'A fresh worktree per run',
-              detail: 'New branch each time',
-            },
+            { value: 'none', label: 'The project directory — runs in place' },
+            { value: 'new-branch', label: 'A fresh worktree per run — new branch each time' },
             {
               value: 'current-branch',
-              label: 'A worktree off the current branch',
-              detail: 'New branch from its tip',
+              label: 'A worktree off the current branch — new branch from its tip',
             },
           ]}
+          help={
+            worktreeMode !== 'none'
+              ? 'Each run gets its own worktree under .worktrees/ in the project. These accumulate and are not cleaned up automatically — that is where the run’s work is.'
+              : undefined
+          }
           onChange={(v) => setWorktreeMode(v as CronWorktreeMode)}
-          ariaLabel="Working copy"
         />
-      </div>
+      </SectionCard>
 
-      {worktreeMode !== 'none' && (
-        <p className="cron-note">
-          Each run gets its own worktree under <code>.worktrees/</code>, and they are not
-          cleaned up automatically — that is where the run's work is.
-        </p>
-      )}
+      <SectionCard title="Prompt" icon="compose" desc="Sent to the agent the moment the run starts.">
+        <TextRow
+          label="Prompt"
+          value={prompt}
+          busy={busy}
+          multiline
+          rows={5}
+          placeholder="Review the commits from yesterday and open issues for anything risky."
+          onChange={setPrompt}
+        />
+      </SectionCard>
 
-      {/* ---- Schedule ---- */}
-      <div className="cron-section">
-        <div className="cron-section-head">
-          <h3>Schedule</h3>
-          <div className="cron-tabs" role="tablist">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={scheduleKind === 'preset'}
-              className={scheduleKind === 'preset' ? 'active' : ''}
-              onClick={() => setScheduleKind('preset')}
-            >
-              Simple
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={scheduleKind === 'expression'}
-              className={scheduleKind === 'expression' ? 'active' : ''}
-              onClick={() => {
-                // Seed the raw field from the picker, so switching to Advanced
-                // starts from what was already chosen rather than blank.
-                setCronExpr(compileCronPreset(preset));
-                setScheduleKind('expression');
-              }}
-            >
-              Advanced
-            </button>
-          </div>
-        </div>
+      <SectionCard title="Schedule" icon="clock">
+        <SelectRowNative
+          busy={busy}
+          label="Schedule type"
+          value={scheduleKind}
+          options={[
+            { value: 'preset', label: 'Simple' },
+            { value: 'expression', label: 'Advanced — raw cron expression' },
+          ]}
+          onChange={(v) => {
+            if (v === 'expression') {
+              // Seed the raw field from the picker, so switching to Advanced
+              // starts from what was already chosen rather than blank.
+              setCronExpr(compileCronPreset(preset));
+            }
+            setScheduleKind(v as 'preset' | 'expression');
+          }}
+        />
 
         {scheduleKind === 'preset' ? (
-          <div className="cron-preset">
-            <div className="cron-chips" role="radiogroup" aria-label="How often">
-              {(['hour', 'day', 'week', 'month'] as Every[]).map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  role="radio"
-                  aria-checked={every === option}
-                  className={every === option ? 'chip active' : 'chip'}
-                  onClick={() => setEvery(option)}
-                >
-                  {option === 'hour'
-                    ? 'Hourly'
-                    : option === 'day'
-                      ? 'Daily'
-                      : option === 'week'
-                        ? 'Weekly'
-                        : 'Monthly'}
-                </button>
-              ))}
-            </div>
-
-            <div className="cron-time">
-              {every !== 'hour' && (
-                <label className="cron-field inline">
-                  <span>Hour</span>
-                  <input
-                    className="settings-input"
-                    type="number"
-                    min={0}
-                    max={23}
-                    value={hour}
-                    onChange={(e) => setHour(clamp(Number(e.target.value), 0, 23))}
-                  />
-                </label>
-              )}
-              <label className="cron-field inline">
-                <span>Minute</span>
-                <input
-                  className="settings-input"
-                  type="number"
-                  min={0}
-                  max={59}
-                  value={minute}
-                  onChange={(e) => setMinute(clamp(Number(e.target.value), 0, 59))}
-                />
-              </label>
-              {every === 'month' && (
-                <label className="cron-field inline">
-                  <span>Day of month</span>
-                  <input
-                    className="settings-input"
-                    type="number"
-                    min={1}
-                    max={28}
-                    value={dayOfMonth}
-                    onChange={(e) => setDayOfMonth(clamp(Number(e.target.value), 1, 28))}
-                  />
-                </label>
-              )}
-            </div>
-
-            {every === 'month' && (
-              <p className="cron-note">
-                Capped at the 28th: a job set for the 29th–31st would silently skip February.
-                Use Advanced if you really mean the last days of a month.
-              </p>
+          <>
+            <SelectRowNative
+              busy={busy}
+              label="Runs"
+              value={every}
+              options={[
+                { value: 'hour', label: 'Every hour' },
+                { value: 'day', label: 'Every day' },
+                { value: 'week', label: 'Every week' },
+                { value: 'month', label: 'Every month' },
+              ]}
+              onChange={(v) => setEvery(v as Every)}
+            />
+            {every !== 'hour' && (
+              <NumberRow label="Hour" value={hour} min={0} max={23} busy={busy} onChange={setHour} />
             )}
-
+            <NumberRow label="Minute" value={minute} min={0} max={59} busy={busy} onChange={setMinute} />
+            {every === 'month' && (
+              <NumberRow
+                label="Day of month"
+                value={dayOfMonth}
+                min={1}
+                max={28}
+                busy={busy}
+                help="Capped at the 28th: a job set for the 29th–31st would silently skip February. Use Advanced if you really mean the last days of a month."
+                onChange={setDayOfMonth}
+              />
+            )}
             {every === 'week' && (
-              <div className="cron-chips" role="group" aria-label="Days of the week">
-                {WEEKDAY_LABELS.map((label, index) => (
-                  <button
-                    key={label}
-                    type="button"
-                    aria-pressed={weekdays.includes(index)}
-                    className={weekdays.includes(index) ? 'chip active' : 'chip'}
-                    onClick={() =>
-                      setWeekdays((prev) =>
-                        prev.includes(index)
-                          ? prev.filter((d) => d !== index)
-                          : [...prev, index].sort((a, b) => a - b),
-                      )
-                    }
-                  >
-                    {label}
-                  </button>
-                ))}
+              <div className="settings-row settings-row-stacked">
+                <div className="settings-row-info">
+                  <label className="settings-row-label">Days of the week</label>
+                </div>
+                <div className="cron-weekday-group" role="group" aria-label="Days of the week">
+                  {WEEKDAY_LABELS.map((label, index) => (
+                    <button
+                      key={label}
+                      type="button"
+                      className={`cron-weekday${weekdays.includes(index) ? ' active' : ''}`}
+                      aria-pressed={weekdays.includes(index)}
+                      disabled={busy}
+                      onClick={() =>
+                        setWeekdays((prev) =>
+                          prev.includes(index)
+                            ? prev.filter((d) => d !== index)
+                            : [...prev, index].sort((a, b) => a - b),
+                        )
+                      }
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
-          </div>
+          </>
         ) : (
-          <label className="cron-field">
-            <span>Cron expression</span>
-            <input
-              className="settings-input mono"
-              value={cronExpr}
-              onChange={(e) => setCronExpr(e.target.value)}
-              placeholder="*/15 9-17 * * 1-5"
-              spellCheck={false}
-              autoCapitalize="off"
-            />
-            <small>minute hour day-of-month month day-of-week</small>
-          </label>
+          <TextRow
+            label="Cron expression"
+            value={cronExpr}
+            busy={busy}
+            mono
+            placeholder="*/15 9-17 * * 1-5"
+            help="minute hour day-of-month month day-of-week"
+            onChange={setCronExpr}
+          />
         )}
 
         {exprError !== null && (
@@ -513,57 +485,43 @@ export function CronJobEditorPage({
           </div>
         )}
 
-        <label className="cron-field">
-          <span>Time zone</span>
-          <input
-            className="settings-input"
-            value={timeZone}
-            onChange={(e) => setTimeZone(e.target.value)}
-            spellCheck={false}
-          />
-        </label>
-
-        <div className="cron-preview">
-          <strong>Next runs</strong>
-          {preview.length === 0 ? (
-            <span className="cron-preview-empty">
-              This schedule has no upcoming run.
-            </span>
-          ) : (
-            <ul>
-              {preview.map((ts) => (
-                <li key={ts}>
-                  {formatAbsolute(ts, timeZone)} <span>({formatCountdown(ts)})</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </div>
-
-      {/* ---- Prompt ---- */}
-      <label className="cron-field">
-        <span>Prompt</span>
-        <textarea
-          className="settings-input cron-prompt"
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          rows={5}
-          placeholder="Review the commits from yesterday and open issues for anything risky."
+        <TextRow
+          label="Time zone"
+          value={timeZone}
+          busy={busy}
+          help="An IANA name, e.g. America/New_York. Defaults to this server's own zone."
+          onChange={setTimeZone}
         />
-      </label>
 
-      {/* ---- Model / effort: free text, because each CLI has its own vocabulary ---- */}
-      <div className="cron-row-2">
-        <label className="cron-field">
-          <span>Model</span>
-          <input
-            className="settings-input"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder={selectedAgent?.defaultModel ?? 'the agent’s default'}
-            list="cron-model-options"
-          />
+        <div className="settings-row">
+          <div className="settings-row-info" style={{ width: '100%' }}>
+            <label className="settings-row-label">Next runs</label>
+            {preview.length === 0 ? (
+              <p className="transport-hint" style={{ color: 'var(--danger)' }}>
+                This schedule has no upcoming run.
+              </p>
+            ) : (
+              <ul className="cron-next-runs">
+                {preview.map((ts) => (
+                  <li key={ts}>
+                    {formatAbsolute(ts, timeZone)} <span>({formatCountdown(ts)})</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </SectionCard>
+
+      <SectionCard title="Model & effort" icon="code" desc="Free text — each agent has its own vocabulary.">
+        <TextRow
+          label="Model"
+          value={model}
+          busy={busy}
+          placeholder={selectedAgent?.defaultModel ?? "the agent's default"}
+          listId="cron-model-options"
+          onChange={setModel}
+        >
           <datalist id="cron-model-options">
             {(selectedAgent?.cachedModels ?? []).map((m) => (
               <option key={m.value} value={m.value}>
@@ -571,94 +529,85 @@ export function CronJobEditorPage({
               </option>
             ))}
           </datalist>
-        </label>
-        <label className="cron-field">
-          <span>Effort</span>
-          <input
-            className="settings-input"
-            value={effort}
-            onChange={(e) => setEffort(e.target.value)}
-            placeholder={selectedAgent?.defaultEffort ?? 'the model’s default'}
-          />
-        </label>
-      </div>
+        </TextRow>
+        <TextRow
+          label="Effort"
+          value={effort}
+          busy={busy}
+          placeholder={selectedAgent?.defaultEffort ?? "the model's default"}
+          onChange={setEffort}
+        />
+      </SectionCard>
 
-      {/* ---- Approvals ---- */}
-      <div className="cron-section">
-        <h3>Approvals</h3>
-        <label className="settings-row">
-          <span className="settings-row-label">Skip tool approvals</span>
-          <span className="settings-row-control">
-            <span className="switch">
-              <input
-                type="checkbox"
-                checked={skipPermissions}
-                onChange={(e) => setSkipPermissions(e.target.checked)}
-                aria-label="Skip tool approvals"
-              />
-              <span className="switch-track" />
-            </span>
-          </span>
-        </label>
-        {skipPermissions ? (
-          <div className="warn-callout">
-            This job will run with every tool approval bypassed. Nobody is watching at the
-            scheduled time, so it will edit files and run commands without asking.
+      <SectionCard title="Approvals" icon="shield">
+        <div className="settings-row">
+          <div className="settings-row-main">
+            <div className="settings-row-info">
+              <label className="settings-row-label">Skip tool approvals</label>
+              <p className="transport-hint">
+                {skipPermissions
+                  ? 'Nobody is watching at the scheduled time, so every tool call runs immediately, unattended.'
+                  : 'Approvals go to the browser. Since nothing answers them at the scheduled time, a run that needs one waits — indefinitely — until you answer it, and you will get a notification.'}
+              </p>
+            </div>
+            <div className="settings-row-control">
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={skipPermissions}
+                  disabled={busy}
+                  onChange={(e) => setSkipPermissions(e.target.checked)}
+                  aria-label="Skip tool approvals"
+                />
+                <span className="switch-track" />
+              </label>
+            </div>
           </div>
-        ) : (
-          <p className="cron-note">
-            Approvals go to the browser. Since nothing answers them at the scheduled time, a run
-            that needs one will wait — indefinitely — until you answer it. You will get a
-            notification.
-          </p>
-        )}
-        <label className="settings-row">
-          <span className="settings-row-label">If the previous run is still going</span>
-          <span className="settings-row-control">
-            <select
-              className="settings-select"
-              value={overlapPolicy}
-              onChange={(e) => setOverlapPolicy(e.target.value as 'skip' | 'allow')}
-            >
-              <option value="skip">Skip this run</option>
-              <option value="allow">Start anyway</option>
-            </select>
-          </span>
-        </label>
-        {overlapPolicy === 'allow' && worktreeMode === 'none' && (
-          <p className="cron-note">
-            Two runs will share one directory. That is fine for a read-only job, and a hazard
-            for one that edits files.
-          </p>
-        )}
-      </div>
-
-      {error !== null && (
-        <div className="error-box" role="alert">
-          {error}
         </div>
-      )}
+        {skipPermissions && (
+          <div className="warn-callout" role="alert">
+            This job will run with every tool approval bypassed. It will edit files and run
+            commands without asking.
+          </div>
+        )}
+        <SelectRowNative
+          busy={busy}
+          label="If the previous run is still going"
+          value={overlapPolicy}
+          options={[
+            { value: 'skip', label: 'Skip this run' },
+            { value: 'allow', label: 'Start anyway' },
+          ]}
+          help={
+            overlapPolicy === 'allow' && worktreeMode === 'none'
+              ? 'Two runs will share one directory. That is fine for a read-only job, and a hazard for one that edits files.'
+              : undefined
+          }
+          onChange={(v) => setOverlapPolicy(v as 'skip' | 'allow')}
+        />
+      </SectionCard>
 
       <div className="cron-save-bar">
-        <button type="button" className="cron-save" disabled={busy} onClick={() => void save()}>
+        <button type="button" className="primary" disabled={busy} onClick={() => void save()}>
           {isNew ? 'Create job' : 'Save changes'}
         </button>
         {!isNew && (
           <>
-            <button type="button" className="cron-secondary" disabled={busy} onClick={() => void runNow()}>
+            <button type="button" disabled={busy} onClick={() => void runNow()}>
               <Icon name="play" size={16} />
               Run now
             </button>
             {confirmingDelete ? (
-              <button type="button" className="cron-danger" disabled={busy} onClick={() => void remove()}>
+              <button
+                type="button"
+                className="danger primary-danger"
+                disabled={busy}
+                onClick={() => void remove()}
+              >
                 Really delete? Runs are kept.
               </button>
             ) : (
-              <button
-                type="button"
-                className="cron-secondary danger"
-                onClick={() => setConfirmingDelete(true)}
-              >
+              <button type="button" className="danger" onClick={() => setConfirmingDelete(true)}>
                 <Icon name="trash" size={16} />
                 Delete
               </button>
@@ -667,38 +616,35 @@ export function CronJobEditorPage({
         )}
       </div>
 
-      {/* ---- Run history ---- */}
       {!isNew && (
-        <div className="cron-section">
-          <h3>Run history</h3>
+        <SectionCard title="Run history" icon="terminal">
           {runs.length === 0 ? (
-            <p className="cron-note">No runs yet.</p>
+            <p className="transport-hint">No runs yet.</p>
           ) : (
-            <div className="cron-runs">
-              {runs.map((run) => {
-                const openable = run.sessionId !== null || run.agentSessionId !== null;
-                return (
-                  <div key={run.id} className="cron-run">
-                    <button
-                      type="button"
-                      className="cron-run-main"
-                      disabled={!openable}
-                      onClick={() => openRun(run)}
-                      title={openable ? 'Open this run’s transcript' : 'No transcript available'}
-                    >
-                      <span className={`cron-status cron-status--${run.status}`}>{run.status}</span>
-                      <span className="cron-run-when">
-                        {formatRelative(run.startedAt)}
-                        {run.trigger === 'manual' && ' · by hand'}
-                      </span>
-                      {run.error !== null && <span className="cron-run-error">{run.error}</span>}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
+            runs.map((run) => {
+              const openable = run.sessionId !== null || run.agentSessionId !== null;
+              return (
+                <button
+                  key={run.id}
+                  type="button"
+                  className="cron-run-row"
+                  disabled={!openable}
+                  onClick={() => openRun(run)}
+                  title={openable ? 'Open this run’s transcript' : 'No transcript available'}
+                >
+                  <span className="cron-run-row-main">
+                    <span className={`cron-status cron-status--${run.status}`}>{run.status}</span>
+                    <span className="cron-run-when">
+                      {formatRelative(run.startedAt)}
+                      {run.trigger === 'manual' && ' · by hand'}
+                    </span>
+                  </span>
+                  {run.error !== null && <span className="cron-run-error">{run.error}</span>}
+                </button>
+              );
+            })
           )}
-        </div>
+        </SectionCard>
       )}
     </div>
   );
@@ -717,7 +663,49 @@ export function CronJobEditorPage({
   );
 }
 
-function clamp(value: number, lo: number, hi: number): number {
-  if (!Number.isFinite(value)) return lo;
-  return Math.min(hi, Math.max(lo, Math.floor(value)));
+/**
+ * A `SelectRow` alike, local to this page: `SettingsPage`'s own `SelectRow`
+ * always fires immediately (auto-save, one field at a time), while a value
+ * picked here is only sent once the whole form is submitted. Same row shell
+ * and CSS classes, just a plain `value`/`onChange` rather than a save call.
+ */
+function SelectRowNative({
+  label,
+  help,
+  value,
+  options,
+  busy,
+  onChange,
+}: {
+  label: string;
+  help?: string;
+  value: string;
+  options: { value: string; label: string }[];
+  busy?: boolean;
+  onChange: (value: string) => void;
+}): JSX.Element {
+  return (
+    <div className="settings-row">
+      <div className="settings-row-main">
+        <div className="settings-row-info">
+          <label className="settings-row-label">{label}</label>
+          {help && <p className="transport-hint">{help}</p>}
+        </div>
+        <div className="settings-row-control settings-select-control">
+          <select
+            className="settings-select"
+            value={value}
+            disabled={busy}
+            onChange={(e) => onChange(e.target.value)}
+          >
+            {options.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+    </div>
+  );
 }

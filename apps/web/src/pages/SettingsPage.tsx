@@ -448,7 +448,14 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
   );
 }
 
-function SectionCard({
+/**
+ * The card shell every settings section (and, by extension, the cron job
+ * editor — see `CronJobEditorPage`) is built from. Exported the same way
+ * `ProjectsPage` exports `OverflowMenu` for `DesktopShell`: a presentational
+ * piece one other page needs verbatim, not a general-purpose component
+ * library.
+ */
+export function SectionCard({
   title,
   icon,
   desc,
@@ -490,18 +497,26 @@ function PageShell({ onBack, children }: { onBack?: () => void; children: ReactN
   );
 }
 
-function RestartBadge({ show }: { show?: boolean }): JSX.Element | null {
+export function RestartBadge({ show }: { show?: boolean }): JSX.Element | null {
   if (!show) return null;
   return <span className="settings-badge">Applies after restart</span>;
 }
 
-function TextRow({
+export function TextRow({
   label,
   help,
   placeholder,
   value,
   busy,
   restart,
+  /** Fixed-width font — for a value that is itself syntax, e.g. a cron expression. */
+  mono,
+  /** Renders a `<textarea>` instead of a single-line `<input>`, for a value with no useful line length. */
+  multiline,
+  rows,
+  /** Wires up an HTML `list` attribute; pair with a `<datalist>` passed as `children`. */
+  listId,
+  children,
   onChange,
 }: {
   label: string;
@@ -510,8 +525,14 @@ function TextRow({
   value: string;
   busy: boolean;
   restart?: boolean;
+  mono?: boolean;
+  multiline?: boolean;
+  rows?: number;
+  listId?: string;
+  children?: ReactNode;
   onChange: (value: string) => void;
 }): JSX.Element {
+  const inputClassName = `settings-input${mono ? ' mono' : ''}`;
   return (
     <div className="settings-row settings-row-stacked">
       <div className="settings-row-info">
@@ -521,21 +542,35 @@ function TextRow({
         </label>
       </div>
       <div className="settings-row-control">
-        <input
-          type="text"
-          className="settings-input"
-          value={value}
-          placeholder={placeholder}
-          disabled={busy}
-          onChange={(e) => onChange(e.target.value)}
-        />
+        {multiline ? (
+          <textarea
+            className={`${inputClassName} settings-textarea`}
+            value={value}
+            placeholder={placeholder}
+            rows={rows ?? 4}
+            disabled={busy}
+            onChange={(e) => onChange(e.target.value)}
+          />
+        ) : (
+          <input
+            type="text"
+            className={inputClassName}
+            value={value}
+            placeholder={placeholder}
+            disabled={busy}
+            list={listId}
+            spellCheck={mono ? false : undefined}
+            onChange={(e) => onChange(e.target.value)}
+          />
+        )}
+        {children}
       </div>
       {help && <p className="transport-hint">{help}</p>}
     </div>
   );
 }
 
-function NumberRow({
+export function NumberRow({
   label,
   help,
   unit,
@@ -589,7 +624,7 @@ function NumberRow({
   );
 }
 
-function BoolRow({
+export function BoolRow({
   label,
   help,
   checked,
@@ -630,7 +665,7 @@ function BoolRow({
   );
 }
 
-function SelectRow({
+export function SelectRow({
   label,
   help,
   value,
