@@ -3453,13 +3453,21 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   border: 1px solid var(--border);
   border-radius: 16px;
   box-shadow: var(--shadow-sm);
-  transition: box-shadow 150ms ease, border-color 150ms ease, transform 150ms ease;
+  transition: box-shadow 150ms ease, border-color 150ms ease;
 }
 .agent-card:hover {
   box-shadow: var(--shadow-md);
   border-color: var(--border-strong);
-  transform: translateY(-1px);
 }
+/* No `transform` here (deliberately, was removed): a `transform` on this
+   ancestor makes it the containing block for the confirm dialog's
+   `position: fixed` backdrop (ConfirmDialog is rendered as a DOM child of
+   this card, not a portal). That clamped the backdrop to the card's small
+   box instead of the viewport, and since `:hover` follows DOM ancestry
+   rather than screen geometry, the backdrop shrinking/growing as the
+   pointer crossed its own edge fed back into `:hover` itself — an infinite
+   flicker loop reachable just by moving the mouse toward the page center
+   after clicking stop. */
 
 /* The card's actual "open" hit area. A plain `<button>` inside the styled
    `.agent-card` div rather than the div itself being the button — the stop
