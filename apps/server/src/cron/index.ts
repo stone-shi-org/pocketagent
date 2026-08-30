@@ -24,13 +24,12 @@ import {
   updateCronJob,
   updateCronRun,
 } from '../db/index.js';
-import type { SessionManager, StructuredLikeSession } from '../sessions/manager.js';
-import { SessionError } from '../sessions/manager.js';
+import type { SessionManager } from '../sessions/manager.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
-import { WorkspaceError } from '../workspaces/index.js';
 import type { WorktreeService } from '../git/worktree.js';
-import { WorktreeError } from '../git/worktree.js';
 import type { AgentRegistry } from '../agents/registry.js';
+import type { RunSink, RunSpec } from '../runs/executor.js';
+import { RunExecutor, mintBranchName } from '../runs/executor.js';
 
 /**
  * How often to look for due jobs.
@@ -119,11 +118,26 @@ export class CronService {
   private readonly db: Db;
   /** Guards against a slow tick overlapping the next one. */
   private ticking = false;
-  /** Run ids whose completion listeners are still attached, so `stop()` can close them out. */
-  private readonly inFlight = new Set<string>();
+  /**
+   * The shared worktree → session → prompt composite.
+   *
+   * Constructed here rather than injected, because the only state it holds is
+   * its own set of in-flight watchers and `abandonAll()` must not settle
+   * another service's runs. One executor per service is the correct
+   * granularity, not one per process.
+   */
+  private readonly executor: RunExecutor;
 
   constructor(private readonly opts: CronServiceOptions) {
     this.db = opts.db;
+    this.executor = new RunExecutor({
+      sessions: opts.sessions,
+      workspaces: opts.workspaces,
+      worktrees: opts.worktrees,
+      label: 'cron run',
+      ...(opts.logger !== undefined ? { logger: opts.logger } : {}),
+      ...(opts.now !== undefined ? { now: opts.now } : {}),
+    });
   }
 
   private now(): number {
@@ -172,14 +186,7 @@ export class CronService {
       clearInterval(this.timer);
       this.timer = null;
     }
-    for (const runId of this.inFlight) {
-      updateCronRun(this.db, runId, {
-        status: 'failed',
-        error: 'The server shut down while this run was in progress.',
-        finished_at: this.now(),
-      });
-    }
-    this.inFlight.clear();
+    this.executor.abandonAll('The server shut down while this run was in progress.');
   }
 
   // -------------------------------------------------------------------------
@@ -317,10 +324,7 @@ export class CronService {
   private reconcileActiveRuns(): void {
     for (const run of readActiveCronRuns(this.db)) {
       if (run.session_id === null) continue;
-      const info = this.opts.sessions.find(run.session_id);
-      const alive = info !== null && (info.status === 'starting' || info.status === 'running');
-      if (alive) continue;
-      this.inFlight.delete(run.id);
+      if (this.executor.isAlive(run.session_id)) continue;
       updateCronRun(this.db, run.id, {
         status: 'failed',
         error: run.error ?? 'The session ended before the run completed.',
@@ -333,11 +337,12 @@ export class CronService {
   }
 
   private hasActiveRun(jobId: string): boolean {
-    return readActiveCronRuns(this.db, jobId).some((run) => {
-      if (run.session_id === null) return true; // still mid-composite
-      const info = this.opts.sessions.find(run.session_id);
-      return info !== null && (info.status === 'starting' || info.status === 'running');
-    });
+    return readActiveCronRuns(this.db, jobId).some(
+      // A null session id means still mid-composite, which counts as active:
+      // nothing may escape `startRun` with the row open, so this is a run that
+      // has not finished resolving a directory or creating a session yet.
+      (run) => run.session_id === null || this.executor.isAlive(run.session_id),
+    );
   }
 
   private async fire(job: CronJobRow, scheduledFor: number): Promise<void> {
@@ -355,12 +360,14 @@ export class CronService {
   // -------------------------------------------------------------------------
 
   /**
-   * The worktree → session → prompt composite.
+   * Record a run, then hand it to the shared executor.
    *
-   * The run row is inserted *first*, so nothing can happen unrecorded. Every
-   * failure below closes that row out rather than throwing, because a
-   * background job has nobody to show an exception to — the run list is the
-   * only place a failure can surface.
+   * The run row is inserted *first*, so nothing can happen unrecorded, and the
+   * sink below is the only thing that writes to it afterwards. Every failure
+   * closes that row out rather than throwing, because a background job has
+   * nobody to show an exception to — the run list is the only place a failure
+   * can surface. `RunExecutor.start` guarantees exactly one `onSettled`, so
+   * this method never has to reason about whether a row is still open.
    */
   private async startRun(
     job: CronJobRow,
@@ -386,181 +393,67 @@ export class CronService {
       error: null,
     });
 
-    const fail = (message: string): CronRunRow => {
-      this.inFlight.delete(runId);
-      updateCronRun(this.db, runId, {
-        status: 'failed',
-        error: message,
-        finished_at: this.now(),
-      });
-      updateCronJob(this.db, job.id, {
-        last_run_at: startedAt,
-        last_run_status: 'failed',
-        last_error: message,
-      });
-      return readCronRun(this.db, runId) as CronRunRow;
+    const sink: RunSink = {
+      onCwd: (cwd) => {
+        updateCronRun(this.db, runId, { cwd });
+      },
+      onSessionStarted: (sessionId) => {
+        updateCronRun(this.db, runId, { status: 'running', session_id: sessionId });
+        updateCronJob(this.db, job.id, {
+          last_run_at: startedAt,
+          last_run_status: 'running',
+          last_error: null,
+        });
+      },
+      onAgentSessionId: (agentSessionId) => {
+        updateCronRun(this.db, runId, { agent_session_id: agentSessionId });
+      },
+      onSettled: (status, error) => {
+        updateCronRun(this.db, runId, { status, error, finished_at: this.now() });
+        // `last_run_at` is set here as well as in `onSessionStarted` because a
+        // failure before the session existed never reached that callback, and a
+        // job that failed at 09:00 still ran at 09:00. After a successful start
+        // this rewrites the same value.
+        updateCronJob(this.db, job.id, {
+          last_run_at: startedAt,
+          last_run_status: status,
+          last_error: error,
+        });
+      },
     };
 
-    try {
-      return await this.runComposite(job, runId, scheduledFor, startedAt, fail);
-    } catch (err) {
-      // Nothing may escape with the row still open. The specific failure modes
-      // are handled inside with their own messages; this catches the ones we
-      // did not think of, because the alternative is a row stuck in `starting`
-      // with no session — which `reconcileActiveRuns` cannot close out (it has
-      // no session to ask about) and which would block a `skip`-policy job
-      // forever, with no timeout anywhere to rescue it.
-      this.opts.logger?.warn({ jobId: job.id, runId, err }, 'cron run failed unexpectedly');
-      return fail(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  /** The body of a run. Every early return goes through `fail`. */
-  private async runComposite(
-    job: CronJobRow,
-    runId: string,
-    scheduledFor: number,
-    startedAt: number,
-    fail: (message: string) => CronRunRow,
-  ): Promise<CronRunRow> {
-    // 1. Re-validate the directory. A folder can be removed from the workspace
-    //    list, unmounted, or deleted long after the job was saved, and a
-    //    background job is the last place to weaken containment.
-    let projectCwd: string;
-    try {
-      projectCwd = await this.opts.workspaces.resolveWorkspacePath(job.cwd);
-    } catch (err) {
-      if (err instanceof WorkspaceError) {
-        const reason =
-          err.code === 'not_found'
-            ? 'The project folder no longer exists.'
-            : err.code === 'forbidden'
-              ? 'The project folder is no longer inside an added project folder.'
-              : err.code === 'not_a_directory'
-                ? 'The project path is no longer a directory.'
-                : err.message;
-        return fail(reason);
-      }
-      throw err;
-    }
-
-    // 2. A per-run worktree, when asked for.
-    let cwd = projectCwd;
-    if (job.worktree_mode !== 'none') {
-      try {
-        const created = await this.opts.worktrees.create({
-          projectCwd,
-          // A repeating job must never pass a *fixed* branch name: `new`
-          // succeeds exactly once and then throws `branch_exists` forever.
-          // The stamp is derived from the scheduled instant in the job's own
-          // zone so the branch reads correctly in `git branch`, and the hex
-          // suffix removes the "run now twice in one minute" collision.
-          branchMode: job.worktree_mode === 'new-branch' ? 'new' : 'current',
-          ...(job.worktree_mode === 'new-branch'
-            ? { branchName: branchNameFor(job, scheduledFor) }
-            : {}),
-        });
-        cwd = created.cwd;
-      } catch (err) {
-        if (err instanceof WorktreeError) return fail(`Could not create a worktree: ${err.message}`);
-        throw err;
-      }
-    }
-    updateCronRun(this.db, runId, { cwd });
-
-    // 3. Start the session. `create()` surfaces a missing agent binary as
-    //    `agent_unavailable` for us, so there is no separate preflight.
-    let session: StructuredLikeSession;
-    try {
-      const created = await this.opts.sessions.create({
-        agent: job.agent,
-        cwd,
-        // Legal because `cols`/`rows` are `nonnegative()`, and honest: a
-        // structured session has no character grid and reports 0 anyway.
-        cols: 0,
-        rows: 0,
-        transport: 'structured',
-        title: job.name,
-        skipPermissions: job.skip_permissions === 1,
-        ...(job.model !== null ? { model: job.model } : {}),
-        // `effort_set` distinguishes "omitted" from "explicitly null"; only
-        // pass the key at all when it was set.
-        ...(job.effort_set === 1 ? { effort: job.effort } : {}),
-      });
-      if (created.transport !== 'structured') {
-        return fail('A scheduled job needs a structured session, but a terminal one was created.');
-      }
-      session = created as StructuredLikeSession;
-    } catch (err) {
-      if (err instanceof SessionError) return fail(err.message);
-      throw err;
-    }
-
-    updateCronRun(this.db, runId, { status: 'running', session_id: session.id });
-    updateCronJob(this.db, job.id, {
-      last_run_at: startedAt,
-      last_run_status: 'running',
-      last_error: null,
-    });
-
-    // 4. Watch for completion *before* prompting, so a turn that finishes
-    //    instantly cannot land before anyone is listening.
-    this.watch(runId, job.id, session);
-
-    // 5. Send the prompt. No wait, no poll, no timeout: every structured
-    //    backend sets `running` synchronously inside its own awaited
-    //    `start()`, so by the time `create()` resolves there is nothing left
-    //    to wait for. `prompt()` returning false therefore means the session
-    //    is already dead — an asynchronous start failure surfacing between
-    //    those two lines — not that it is not ready yet.
-    if (!session.prompt(job.prompt)) {
-      return fail('The session ended before its prompt could be sent.');
-    }
-
+    await this.executor.start(runId, this.specFor(job, scheduledFor), sink);
     return readCronRun(this.db, runId) as CronRunRow;
   }
 
-  /**
-   * Attach completion listeners for one run.
-   *
-   * The `settled` latch is load-bearing: `turn_complete` fires, and then
-   * `exit` fires later when the session is disposed. Without it a run would
-   * flip from `succeeded` to `failed` minutes after the fact.
-   *
-   * The first `turn_complete` ends the run. A cron run is one prompt and one
-   * turn — if someone then keeps chatting in the session it created, the
-   * session lives on but the *run* is finished. The run records what the
-   * schedule did, not everything that ever happened downstream of it.
-   */
-  private watch(runId: string, jobId: string, session: StructuredLikeSession): void {
-    this.inFlight.add(runId);
-    let settled = false;
+  /** A job row as the executor wants it. */
+  private specFor(job: CronJobRow, scheduledFor: number): RunSpec {
+    const worktree: RunSpec['worktree'] =
+      job.worktree_mode === 'new-branch'
+        ? {
+            mode: 'new-branch',
+            // Minted per run, never stored: `new` with a fixed name succeeds
+            // exactly once and then throws `branch_exists` forever.
+            branchName: mintBranchName(job.name, job.time_zone, scheduledFor, 'cron'),
+          }
+        : job.worktree_mode === 'current-branch'
+          ? { mode: 'current-branch' }
+          : { mode: 'none' };
 
-    const settle = (status: CronRunStatus, error: string | null): void => {
-      if (settled) return;
-      settled = true;
-      this.inFlight.delete(runId);
-      updateCronRun(this.db, runId, { status, error, finished_at: this.now() });
-      updateCronJob(this.db, jobId, { last_run_status: status, last_error: error });
+    return {
+      cwd: job.cwd,
+      agent: job.agent,
+      title: job.name,
+      prompt: job.prompt,
+      skipPermissions: job.skip_permissions === 1,
+      model: job.model,
+      // `effort_set` distinguishes "omitted" from "explicitly null"; only pass
+      // the key at all when it was set.
+      ...(job.effort_set === 1 ? { effort: job.effort } : {}),
+      worktree,
+      notStructuredMessage:
+        'A scheduled job needs a structured session, but a terminal one was created.',
     };
-
-    session.on('event', (_seq, event) => {
-      if (event.kind === 'session_started' && event.agentSessionId) {
-        // Not awaited anywhere: this arrives asynchronously in the first
-        // event, and it is what links the run to a transcript on disk.
-        updateCronRun(this.db, runId, { agent_session_id: event.agentSessionId });
-      }
-      if (event.kind === 'turn_complete') {
-        settle(
-          event.isError ? 'failed' : 'succeeded',
-          event.isError ? 'The agent reported an error.' : null,
-        );
-      }
-    });
-
-    session.on('exit', () => {
-      settle('failed', 'The session ended before its turn completed.');
-    });
   }
 
   private recordSkippedRun(job: CronJobRow, scheduledFor: number, reason: string): void {
@@ -785,37 +678,6 @@ function parsePreset(json: string | null): CronSchedulePreset | null {
     return JSON.parse(json) as CronSchedulePreset;
   } catch {
     return null;
-  }
-}
-
-/** `nightly-review-20260828-0900-a3f9c1` — readable in `git branch`, and unique per run. */
-function branchNameFor(job: CronJobRow, scheduledFor: number): string {
-  const slug =
-    job.name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 32) || 'cron';
-  const stamp = stampIn(scheduledFor, job.time_zone);
-  return `${slug}-${stamp}-${crypto.randomBytes(3).toString('hex')}`;
-}
-
-/** `YYYYMMDD-HHmm` in the job's own zone, so the branch name reads correctly. */
-function stampIn(ms: number, timeZone: string): string {
-  try {
-    const parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone,
-      hour12: false,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).formatToParts(new Date(ms));
-    const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '00';
-    return `${get('year')}${get('month')}${get('day')}-${get('hour')}${get('minute')}`;
-  } catch {
-    return String(ms);
   }
 }
 
