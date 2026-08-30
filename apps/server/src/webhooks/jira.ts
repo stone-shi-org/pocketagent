@@ -173,6 +173,39 @@ export function evaluateJiraFilter(
   return { matched: true };
 }
 
+export type ProjectRouteVerdict = { matched: true; cwd: string } | { matched: false; reason: string };
+
+/**
+ * Decide which directory a delivery runs in.
+ *
+ * An empty map means "no routing configured": every delivery keeps running in
+ * `defaultCwd`, which is what every webhook did before this feature existed.
+ * A non-empty map changes what an unrouted project means — it is no longer
+ * "fall back to the default", it is "nobody configured this project yet", and
+ * silently running it in the wrong checkout is worse than declining and
+ * saying so. That is the same reasoning `evaluateJiraFilter` uses for every
+ * other field: an unmatched thing is filtered, not guessed at.
+ *
+ * Case-insensitive, like `filter.projectKeys` — Jira project keys are
+ * conventionally upper-case but nothing enforces that on the way in here.
+ */
+export function resolveProjectRoute(
+  map: { projectKey: string; cwd: string }[],
+  defaultCwd: string,
+  projectKey: string | null,
+): ProjectRouteVerdict {
+  if (map.length === 0) return { matched: true, cwd: defaultCwd };
+  const hit = projectKey === null ? undefined : map.find((e) => eq(e.projectKey, projectKey));
+  if (hit === undefined) {
+    const mapped = list(map.map((e) => e.projectKey.toUpperCase()));
+    return {
+      matched: false,
+      reason: `Project ${projectKey ?? '(none)'} has no directory mapping (mapped: ${mapped}).`,
+    };
+  }
+  return { matched: true, cwd: hit.cwd };
+}
+
 /** A one-line description of what a filter accepts, for the home-screen row. */
 export function describeJiraFilter(filter: JiraWebhookFilter): string {
   const parts: string[] = [];

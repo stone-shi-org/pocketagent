@@ -130,14 +130,45 @@ export const JiraWebhookFilter = z.object({
 export type JiraWebhookFilter = z.infer<typeof JiraWebhookFilter>;
 
 /**
+ * One row of "issues in this Jira project go to this directory".
+ *
+ * Deliberately just a directory: agent, worktree mode, model and effort stay
+ * the webhook's single configured values no matter which row matched — a
+ * per-project override of *those* would make one webhook behave like several
+ * independent ones with no independent history, secret or cap. `cwd` is
+ * validated through workspace containment at the route, exactly like the
+ * webhook's own top-level `cwd`.
+ */
+export const JiraProjectMapEntry = z.object({
+  projectKey: z.string().min(1).max(32),
+  cwd: z.string().min(1).max(4096),
+});
+export type JiraProjectMapEntry = z.infer<typeof JiraProjectMapEntry>;
+
+/**
  * Discriminated on `type` so a second provider is purely additive.
  *
  * A discriminated union cannot be `.partial()`-ed, so a PATCH replaces `config`
  * wholesale rather than merging into it. That is the better semantic anyway: a
  * half-updated filter is more surprising than one the client re-sends complete.
+ *
+ * `projectMap` defaults to `[]`, meaning "no routing configured" — every
+ * delivery runs in the webhook's own `cwd`, exactly as before this field
+ * existed. Once it is non-empty, a delivery for a project key that is not in
+ * it is filtered rather than falling back to `cwd`: routing by project and
+ * "one of these projects wasn't set up yet" are different situations, and
+ * silently running the wrong project in the wrong checkout is worse than
+ * declining and saying which project had no mapping. Uniqueness of
+ * `projectKey` across rows is checked in the route, not here — this schema
+ * intentionally carries no `.refine()`, for the same two reasons
+ * `WebhookFields` below gives.
  */
 export const WebhookConfig = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('jira'), filter: JiraWebhookFilter }),
+  z.object({
+    type: z.literal('jira'),
+    filter: JiraWebhookFilter,
+    projectMap: z.array(JiraProjectMapEntry).max(50).default([]),
+  }),
 ]);
 export type WebhookConfig = z.infer<typeof WebhookConfig>;
 

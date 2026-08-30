@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type {
+  JiraProjectMapEntry,
   JiraWebhookFilter,
   Webhook,
   WebhookAuthMode,
@@ -48,7 +49,12 @@ import { safeTokenEqual } from '../auth/index.js';
 import type { RunSink, RunSpec } from '../runs/executor.js';
 import { RunExecutor, mintBranchName } from '../runs/executor.js';
 import type { JiraEventFacts } from './jira.js';
-import { describeJiraFilter, evaluateJiraFilter, parseJiraEvent } from './jira.js';
+import {
+  describeJiraFilter,
+  evaluateJiraFilter,
+  parseJiraEvent,
+  resolveProjectRoute,
+} from './jira.js';
 
 /** How often to reconcile deliveries against session liveness and prune. */
 const SWEEP_INTERVAL_MS = 30_000;
@@ -127,6 +133,7 @@ export interface WebhookSpec {
   enabled: boolean;
   type: 'jira';
   filter: JiraWebhookFilter;
+  projectMap: JiraProjectMapEntry[];
   authMode: WebhookAuthMode;
   cwd: string;
   agent: string;
@@ -380,6 +387,14 @@ export class WebhookService {
       return accepted('filtered', deliveryId, verdict.reason);
     }
 
+    // 6b. Route by project. An empty map always resolves to `hook.cwd`; a
+    // non-empty one filters a project nobody mapped rather than guessing.
+    const route = resolveProjectRoute(this.projectMapFor(hook), hook.cwd, facts.projectKey);
+    if (!route.matched) {
+      this.closeDelivery(hook, deliveryId, 'filtered', route.reason);
+      return accepted('filtered', deliveryId, route.reason);
+    }
+
     // 7. Caps. Counted by asking whether sessions are alive, never by a timeout.
     const cap = this.capReason(hook, deliveryId);
     if (cap !== null) {
@@ -405,7 +420,7 @@ export class WebhookService {
       payload_truncated: prompt.truncated ? 1 : 0,
     });
 
-    const started = await this.startRun(hook, deliveryId, facts, prompt.text);
+    const started = await this.startRun(hook, deliveryId, facts, prompt.text, route.cwd);
     return {
       status: started.sessionId !== null ? 'running' : 'failed',
       httpStatus: 202,
@@ -429,10 +444,11 @@ export class WebhookService {
     deliveryId: string,
     facts: JiraEventFacts,
     prompt: string,
+    cwd: string,
   ): Promise<{ sessionId: string | null; error: string | null }> {
     const startedAt = this.now();
     updateWebhookDelivery(this.db, deliveryId, { started_at: startedAt });
-    const sink = this.sinkFor(hook, deliveryId, facts.issueKey, startedAt);
+    const sink = this.sinkFor(hook, deliveryId, facts.issueKey, startedAt, cwd);
 
     if (hook.conversation_mode === 'per-issue') {
       const mapped = readWebhookIssueSession(this.db, hook.id, facts.issueKey);
@@ -457,7 +473,7 @@ export class WebhookService {
         const outcome = await this.executor.start(
           deliveryId,
           {
-            ...this.specFor(hook, facts.issueKey),
+            ...this.specFor(hook, facts.issueKey, cwd),
             reuseCwd: mapped.cwd,
             resume: { agentSessionId: mapped.agent_session_id },
             prompt,
@@ -472,7 +488,7 @@ export class WebhookService {
 
     const outcome = await this.executor.start(
       deliveryId,
-      { ...this.specFor(hook, facts.issueKey), prompt },
+      { ...this.specFor(hook, facts.issueKey, cwd), prompt },
       sink,
     );
     return outcome.ok
@@ -485,11 +501,14 @@ export class WebhookService {
     deliveryId: string,
     issueKey: string,
     startedAt: number,
+    resolvedCwd: string,
   ): RunSink {
     const remember = (patch: { sessionId?: string; agentSessionId?: string; cwd?: string }): void => {
       if (hook.conversation_mode !== 'per-issue') return;
       const existing = readWebhookIssueSession(this.db, hook.id, issueKey);
-      const cwd = patch.cwd ?? existing?.cwd ?? hook.cwd;
+      // `resolvedCwd`, not `hook.cwd`: the routed directory for *this*
+      // delivery's project is the right fallback before `onCwd` has fired.
+      const cwd = patch.cwd ?? existing?.cwd ?? resolvedCwd;
       upsertWebhookIssueSession(this.db, {
         webhook_id: hook.id,
         issue_key: issueKey,
@@ -570,7 +589,7 @@ export class WebhookService {
     });
   }
 
-  private specFor(hook: WebhookRow, issueKey: string): Omit<RunSpec, 'prompt'> {
+  private specFor(hook: WebhookRow, issueKey: string, cwd: string): Omit<RunSpec, 'prompt'> {
     const worktree: RunSpec['worktree'] =
       hook.worktree_mode === 'new-branch'
         ? {
@@ -585,7 +604,7 @@ export class WebhookService {
           : { mode: 'none' };
 
     return {
-      cwd: hook.cwd,
+      cwd,
       agent: hook.agent,
       title: `${hook.name} · ${issueKey}`,
       skipPermissions: hook.skip_permissions === 1,
@@ -820,6 +839,20 @@ export class WebhookService {
     }
   }
 
+  private projectMapFor(hook: WebhookRow): JiraProjectMapEntry[] {
+    try {
+      const parsed = JSON.parse(hook.project_map_json) as unknown;
+      return Array.isArray(parsed) ? (parsed as JiraProjectMapEntry[]) : [];
+    } catch {
+      // Same reasoning as `filterFor`: an unreadable map must not silently
+      // become "no routing", which would run every project in `hook.cwd` —
+      // but there is no way to express "block everything" here either, so log
+      // loudly and treat it as unrouted, which is what the row literally says.
+      this.opts.logger?.warn({ webhook: hook.id }, 'webhook project map JSON is unreadable');
+      return [];
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Public API used by the routes
   // -------------------------------------------------------------------------
@@ -855,6 +888,7 @@ export class WebhookService {
       auth_token_hash: token !== undefined ? sha256(Buffer.from(token, 'utf8')) : null,
       secret_set_at: now,
       filter_json: JSON.stringify(spec.filter),
+      project_map_json: JSON.stringify(spec.projectMap),
       cwd: spec.cwd,
       agent: spec.agent,
       worktree_mode: spec.worktreeMode,
@@ -896,6 +930,9 @@ export class WebhookService {
       ...(patch.slug !== undefined ? { slug: patch.slug.toLowerCase() } : {}),
       ...(patch.enabled !== undefined ? { enabled: patch.enabled ? 1 : 0 } : {}),
       ...(patch.filter !== undefined ? { filter_json: JSON.stringify(patch.filter) } : {}),
+      ...(patch.projectMap !== undefined
+        ? { project_map_json: JSON.stringify(patch.projectMap) }
+        : {}),
       ...(patch.authMode !== undefined ? { auth_mode: patch.authMode } : {}),
       ...(patch.cwd !== undefined ? { cwd: patch.cwd } : {}),
       ...(patch.agent !== undefined ? { agent: patch.agent } : {}),
@@ -1032,7 +1069,9 @@ export class WebhookService {
       ? parsed.reason
       : (() => {
           const v = evaluateJiraFilter(this.filterFor(hook), parsed.facts);
-          return v.matched ? null : v.reason;
+          if (!v.matched) return v.reason;
+          const r = resolveProjectRoute(this.projectMapFor(hook), hook.cwd, parsed.facts.projectKey);
+          return r.matched ? null : r.reason;
         })();
     return {
       prompt: rendered.text,
@@ -1063,7 +1102,7 @@ export class WebhookService {
       authMode: row.auth_mode as WebhookAuthMode,
       hasToken: row.auth_token_hash !== null,
       secretSetAt: row.secret_set_at,
-      config: { type: 'jira', filter },
+      config: { type: 'jira', filter, projectMap: this.projectMapFor(row) },
       cwd: row.cwd,
       workspaceLabel: this.opts.workspaces.labelFor(row.cwd),
       agent: row.agent,
@@ -1140,12 +1179,19 @@ export class WebhookService {
     };
   }
 
-  /** For the home screen's project tree, keyed by cwd like `CronService`'s. */
+  /**
+   * For the home screen's project tree, keyed by cwd like `CronService`'s.
+   *
+   * A webhook can route to more than one directory now, so it is listed under
+   * every one of them — `row.cwd` plus every mapped `cwd`, deduplicated — not
+   * just its own. A directory that is only ever reached through the project
+   * map is exactly the "configured but maybe never fired" case CLAUDE.md
+   * already argues a webhook row must not hide.
+   */
   summariesByCwd(): Map<string, WebhookSummary[]> {
     const out = new Map<string, WebhookSummary[]>();
     for (const row of readWebhooks(this.db)) {
-      const list = out.get(row.cwd) ?? [];
-      list.push({
+      const summary: WebhookSummary = {
         id: row.id,
         name: row.name,
         enabled: row.enabled === 1,
@@ -1154,8 +1200,13 @@ export class WebhookService {
         lastDeliveryAt: row.last_delivery_at,
         lastDeliveryStatus: (row.last_delivery_status as WebhookDeliveryStatus | null) ?? null,
         skipPermissionsEnabled: row.skip_permissions === 1,
-      });
-      out.set(row.cwd, list);
+      };
+      const cwds = new Set([row.cwd, ...this.projectMapFor(row).map((e) => e.cwd)]);
+      for (const cwd of cwds) {
+        const list = out.get(cwd) ?? [];
+        list.push(summary);
+        out.set(cwd, list);
+      }
     }
     return out;
   }

@@ -425,6 +425,14 @@ const MIGRATIONS: readonly string[] = [
   CREATE INDEX IF NOT EXISTS idx_webhook_issue_sessions_updated
     ON webhook_issue_sessions (updated_at);
   `,
+  // Per-project routing for inbound webhooks: `projectKey -> cwd`, one JSON
+  // blob for the same reason `filter_json` is — type-specific, validated as a
+  // whole by Zod, never queried inside. `'[]'` (no routing configured) means
+  // every delivery keeps running in the webhook's own `cwd`, so this migration
+  // changes no existing webhook's behaviour.
+  `
+  ALTER TABLE webhooks ADD COLUMN project_map_json TEXT NOT NULL DEFAULT '[]';
+  `,
 ];
 
 /**
@@ -877,6 +885,8 @@ export interface WebhookRow {
   secret_set_at: number;
   /** Raw JSON of a type-specific filter; parsed and validated by the caller. */
   filter_json: string;
+  /** Raw JSON of `JiraProjectMapEntry[]`; `'[]'` means no per-project routing. */
+  project_map_json: string;
   cwd: string;
   agent: string;
   /** `'none' | 'new-branch' | 'current-branch'`. */
@@ -1003,13 +1013,13 @@ export function insertWebhook(db: Db, row: WebhookRow): void {
   db.prepare(
     `INSERT INTO webhooks (
        id, name, slug, enabled, type, auth_mode, secret, auth_token_hash,
-       secret_set_at, filter_json, cwd, agent, worktree_mode, model, effort,
+       secret_set_at, filter_json, project_map_json, cwd, agent, worktree_mode, model, effort,
        effort_set, skip_permissions, prompt_template, conversation_mode,
        overlap_policy, max_concurrent, debounce_seconds, store_payloads,
        created_at, updated_at, last_delivery_at, last_delivery_status, last_error
      ) VALUES (
        @id, @name, @slug, @enabled, @type, @auth_mode, @secret, @auth_token_hash,
-       @secret_set_at, @filter_json, @cwd, @agent, @worktree_mode, @model, @effort,
+       @secret_set_at, @filter_json, @project_map_json, @cwd, @agent, @worktree_mode, @model, @effort,
        @effort_set, @skip_permissions, @prompt_template, @conversation_mode,
        @overlap_policy, @max_concurrent, @debounce_seconds, @store_payloads,
        @created_at, @updated_at, @last_delivery_at, @last_delivery_status, @last_error

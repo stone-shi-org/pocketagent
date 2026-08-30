@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { JIRA_SAMPLE_PAYLOAD } from '@pocketagent/protocol';
 import { REDACT_PATHS } from '../src/app.js';
@@ -162,6 +163,54 @@ describe('webhook management', () => {
   it('refuses a directory outside every workspace folder', async () => {
     const res = await post('/api/webhooks', validWebhook({ cwd: '/etc' }));
     expect([403, 404]).toContain(res.statusCode);
+  });
+
+  it('refuses a project-map entry whose directory is outside every workspace folder', async () => {
+    const res = await post(
+      '/api/webhooks',
+      validWebhook({
+        config: {
+          type: 'jira',
+          filter: {},
+          projectMap: [{ projectKey: 'ENG', cwd: '/etc' }],
+        },
+      }),
+    );
+    expect([403, 404]).toContain(res.statusCode);
+  });
+
+  it('refuses a project map with a duplicate key, case-insensitively', async () => {
+    const res = await post(
+      '/api/webhooks',
+      validWebhook({
+        config: {
+          type: 'jira',
+          filter: {},
+          projectMap: [
+            { projectKey: 'eng', cwd: ctx.projectDir },
+            { projectKey: 'ENG', cwd: ctx.projectDir },
+          ],
+        },
+      }),
+    );
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('accepts and echoes a project map, upper-casing each key', async () => {
+    const other = `${ctx.workspaceRoot}/other-repo`;
+    fs.mkdirSync(other);
+    const res = await post(
+      '/api/webhooks',
+      validWebhook({
+        config: {
+          type: 'jira',
+          filter: {},
+          projectMap: [{ projectKey: 'eng', cwd: other }],
+        },
+      }),
+    );
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.json().webhook.config.projectMap).toEqual([{ projectKey: 'ENG', cwd: other }]);
   });
 
   it('reveals and rotates the secret, and rotation invalidates the old one', async () => {
@@ -585,6 +634,59 @@ describe('webhook delivery: filtering', () => {
   });
 });
 
+describe('webhook delivery: project routing', () => {
+  /** Same payload shape `payloadFor` uses, with just the project key changed. */
+  const payloadForProjectAndIssue = (projectKey: string, issueKey: string): string =>
+    JSON.stringify({
+      ...(JIRA_SAMPLE_PAYLOAD as object),
+      timestamp: Date.now(),
+      issue: { key: issueKey, fields: { project: { key: projectKey }, labels: [] } },
+    });
+
+  it('runs an empty map in the base directory — unchanged from before this feature', async () => {
+    const hook = await createWebhook({ config: { type: 'jira', filter: {}, projectMap: [] } });
+    const res = await deliver(SLUG, payloadForProjectAndIssue('PA', 'PA-1'), {
+      secret: hook.secret,
+    });
+    expect(res.json().status).toBe('running');
+  });
+
+  it('routes a mapped project to its own directory', async () => {
+    const other = `${ctx.workspaceRoot}/other-repo`;
+    fs.mkdirSync(other);
+    const hook = await createWebhook({
+      config: { type: 'jira', filter: {}, projectMap: [{ projectKey: 'ENG', cwd: other }] },
+    });
+    const res = await deliver(SLUG, payloadForProjectAndIssue('ENG', 'ENG-1'), {
+      secret: hook.secret,
+    });
+    expect(res.json().status).toBe('running');
+
+    const rows = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 });
+    expect(rows[0]?.cwd).toBe(other);
+  });
+
+  it('filters a project not in a non-empty map, instead of falling back to the base directory', async () => {
+    const other = `${ctx.workspaceRoot}/other-repo`;
+    fs.mkdirSync(other);
+    const hook = await createWebhook({
+      config: { type: 'jira', filter: {}, projectMap: [{ projectKey: 'ENG', cwd: other }] },
+    });
+    const res = await deliver(SLUG, payloadForProjectAndIssue('PLAT', 'PLAT-1'), {
+      secret: hook.secret,
+    });
+    expect(res.statusCode).toBe(202);
+    expect(res.json().status).toBe('filtered');
+    expect(res.json().sessionId).toBeNull();
+
+    const rows = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 });
+    expect(rows[0]?.status).toBe('filtered');
+    expect(rows[0]?.reason).toMatch(/PLAT/);
+    expect(rows[0]?.reason).toMatch(/ENG/);
+    expect(rows[0]?.cwd).toBeNull();
+  });
+});
+
 describe('webhook delivery: unusable payloads', () => {
   it('rejects a body that is not JSON, after the signature passed', async () => {
     const hook = await createWebhook();
@@ -740,5 +842,16 @@ describe('webhook payload storage', () => {
     await deliver(SLUG, payloadFor(), { secret: hook.secret });
     const rows = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 });
     expect(rows[0]?.payload_json).toBeNull();
+  });
+});
+
+describe('webhook migration', () => {
+  it('adds project_map_json to an existing database', () => {
+    const file = `${fs.mkdtempSync('/tmp/pa-webhook-')}/db.sqlite`;
+    const db = openDatabase(file);
+    const columns = db.prepare(`PRAGMA table_info(webhooks)`).all() as { name: string }[];
+    expect(columns.map((c) => c.name)).toContain('project_map_json');
+    db.close();
+    fs.rmSync(file, { force: true });
   });
 });
