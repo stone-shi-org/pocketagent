@@ -121,6 +121,12 @@ export function WebhookEditorPage({
   const [labels, setLabels] = useState('');
   const [labelMode, setLabelMode] = useState<'any' | 'all'>('any');
 
+  // ---- Per-project routing ----------------------------------------------------
+  // `id` is a client-only key for React's benefit; it never reaches the server.
+  const [projectMap, setProjectMap] = useState<{ id: string; projectKey: string; cwd: string }[]>(
+    [],
+  );
+
   const loadDeliveries = useCallback(async () => {
     if (isNew) return;
     try {
@@ -195,6 +201,13 @@ export function WebhookEditorPage({
       setChangedFields((f.changedFields ?? []).join(', '));
       setLabels((f.labels ?? []).join(', '));
       setLabelMode(f.labelMode ?? 'any');
+      setProjectMap(
+        hook.config.projectMap.map((e) => ({
+          id: crypto.randomUUID(),
+          projectKey: e.projectKey,
+          cwd: e.cwd,
+        })),
+      );
     }
   }, [id, isNew, onApiError]);
 
@@ -264,6 +277,38 @@ export function WebhookEditorPage({
   /** Empty means "match everything", which is the footgun of the whole form. */
   const filterIsEmpty = Object.keys(filter).length === 0;
 
+  const addProjectRoute = (): void => {
+    setProjectMap((prev) => [...prev, { id: crypto.randomUUID(), projectKey: '', cwd }]);
+  };
+  const removeProjectRoute = (id: string): void => {
+    setProjectMap((prev) => prev.filter((r) => r.id !== id));
+  };
+  const updateProjectRoute = (
+    id: string,
+    patch: Partial<{ projectKey: string; cwd: string }>,
+  ): void => {
+    setProjectMap((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  };
+
+  /** Blank rows are dropped rather than rejected — a half-filled-in row while typing is not an error. */
+  const cleanedProjectMap = useMemo(
+    () =>
+      projectMap
+        .map((r) => ({ projectKey: r.projectKey.trim().toUpperCase(), cwd: r.cwd }))
+        .filter((r) => r.projectKey !== '' && r.cwd !== ''),
+    [projectMap],
+  );
+
+  /** The one thing Save must refuse — mirrors the route's own duplicate check. */
+  const projectMapDuplicate = useMemo(() => {
+    const seen = new Set<string>();
+    for (const r of cleanedProjectMap) {
+      if (seen.has(r.projectKey)) return r.projectKey;
+      seen.add(r.projectKey);
+    }
+    return null;
+  }, [cleanedProjectMap]);
+
   const slugProblem =
     slug.trim() === '' ? null : WEBHOOK_SLUG_RE.test(slug.trim()) ? null : 'Lowercase letters, digits and dashes only.';
 
@@ -281,13 +326,17 @@ export function WebhookEditorPage({
       setError(slugProblem);
       return;
     }
+    if (projectMapDuplicate !== null) {
+      setError(`Project "${projectMapDuplicate}" is mapped more than once.`);
+      return;
+    }
     setBusy(true);
     setError(null);
 
     const common = {
       name: name.trim(),
       enabled,
-      config: { type: 'jira' as const, filter },
+      config: { type: 'jira' as const, filter, projectMap: cleanedProjectMap },
       authMode,
       cwd,
       agent,
@@ -755,6 +804,68 @@ export function WebhookEditorPage({
           <div className="warn-callout" role="alert">
             With no worktree and approvals bypassed, an agent driven by someone else’s Jira text
             will edit this folder directly, unsupervised.
+          </div>
+        )}
+      </SectionCard>
+
+      <SectionCard
+        title="Route by Jira project"
+        icon="folder"
+        desc="Leave empty to always use the project above. Once you add a row, a delivery for a project that isn’t listed here is filtered instead of falling back to it."
+      >
+        {projectMap.length === 0 && (
+          <p className="transport-hint">
+            No per-project routing. Every delivery runs in the project selected above.
+          </p>
+        )}
+        {projectMap.map((row) => (
+          <div key={row.id} className="settings-row settings-row-stacked">
+            <div className="project-map-row">
+              <input
+                type="text"
+                className="settings-input mono project-map-key"
+                value={row.projectKey}
+                placeholder="ENG"
+                disabled={busy}
+                spellCheck={false}
+                aria-label="Jira project key"
+                onChange={(e) => updateProjectRoute(row.id, { projectKey: e.target.value })}
+              />
+              <select
+                className="settings-select project-map-dir"
+                value={row.cwd}
+                disabled={busy}
+                aria-label="Directory"
+                onChange={(e) => updateProjectRoute(row.id, { cwd: e.target.value })}
+              >
+                <option value="" disabled>
+                  Choose a directory
+                </option>
+                {dirOptions.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="round-btn project-map-remove"
+                disabled={busy}
+                aria-label={`Remove the ${row.projectKey || 'blank'} mapping`}
+                onClick={() => removeProjectRoute(row.id)}
+              >
+                <Icon name="close" size={16} />
+              </button>
+            </div>
+          </div>
+        ))}
+        <button type="button" disabled={busy} onClick={addProjectRoute}>
+          <Icon name="plus" size={16} />
+          Add project
+        </button>
+        {projectMapDuplicate !== null && (
+          <div className="warn-callout" role="alert">
+            Project &quot;{projectMapDuplicate}&quot; is mapped more than once.
           </div>
         )}
       </SectionCard>

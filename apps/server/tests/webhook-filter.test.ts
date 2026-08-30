@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { JiraEventFacts } from '../src/webhooks/jira.js';
-import { describeJiraFilter, evaluateJiraFilter, parseJiraEvent } from '../src/webhooks/jira.js';
+import {
+  describeJiraFilter,
+  evaluateJiraFilter,
+  parseJiraEvent,
+  resolveProjectRoute,
+} from '../src/webhooks/jira.js';
 
 /**
  * The filter decides whether an outside event starts an agent on this machine,
@@ -168,6 +173,44 @@ describe('evaluateJiraFilter', () => {
       expect(v.matched).toBe(false);
       expect(v.matched === false && v.reason.length, JSON.stringify(f)).toBeGreaterThan(10);
     }
+  });
+});
+
+describe('resolveProjectRoute', () => {
+  it('always matches the default cwd when the map is empty — full backward compatibility', () => {
+    expect(resolveProjectRoute([], '/repo/default', 'PA')).toEqual({
+      matched: true,
+      cwd: '/repo/default',
+    });
+    expect(resolveProjectRoute([], '/repo/default', null)).toEqual({
+      matched: true,
+      cwd: '/repo/default',
+    });
+  });
+
+  it('matches a mapped project case-insensitively', () => {
+    const map = [{ projectKey: 'ENG', cwd: '/repo/eng' }];
+    expect(resolveProjectRoute(map, '/repo/default', 'eng')).toEqual({
+      matched: true,
+      cwd: '/repo/eng',
+    });
+    expect(resolveProjectRoute(map, '/repo/default', 'ENG')).toEqual({
+      matched: true,
+      cwd: '/repo/eng',
+    });
+  });
+
+  it('filters a project not in a non-empty map, rather than falling back to the default', () => {
+    const map = [{ projectKey: 'ENG', cwd: '/repo/eng' }];
+    const v = resolveProjectRoute(map, '/repo/default', 'PLAT');
+    expect(v.matched).toBe(false);
+    expect(v.matched === false && v.reason).toMatch(/PLAT/);
+    expect(v.matched === false && v.reason).toMatch(/ENG/);
+  });
+
+  it('filters a null project key against a non-empty map', () => {
+    const v = resolveProjectRoute([{ projectKey: 'ENG', cwd: '/repo/eng' }], '/repo/default', null);
+    expect(v.matched).toBe(false);
   });
 });
 

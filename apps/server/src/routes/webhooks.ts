@@ -7,6 +7,8 @@ import {
   WEBHOOK_SLUG_RE,
   WebhookTestRequest,
 } from '@pocketagent/protocol';
+import type { JiraProjectMapEntry } from '@pocketagent/protocol';
+import type { WorkspaceRegistry } from '../workspaces/index.js';
 import type { WebhookSpec } from '../webhooks/index.js';
 import { WebhookServiceError } from '../webhooks/index.js';
 import { resolveWorkspaceCwdOrReply, structuredAgentProblem } from './shared.js';
@@ -67,9 +69,12 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     const agentProblem = structuredAgentProblem(agents, body.agent, 'triggered by a webhook');
     if (agentProblem !== null) return badRequest(reply, agentProblem);
 
+    const projectMap = await resolveProjectMap(workspaces, body.config.projectMap, reply);
+    if (projectMap === null) return reply;
+
     try {
       const created = webhooks.create({
-        ...specFrom(body),
+        ...specFrom(body, projectMap),
         slug,
         cwd,
       });
@@ -107,12 +112,21 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
       if (agentProblem !== null) return badRequest(reply, agentProblem);
     }
 
+    // `config` replaces wholesale, so the project map is re-resolved in full
+    // whenever it is sent — same as the filter object just above it.
+    let projectMap: JiraProjectMapEntry[] | undefined;
+    if (body.config !== undefined) {
+      const resolved = await resolveProjectMap(workspaces, body.config.projectMap, reply);
+      if (resolved === null) return reply;
+      projectMap = resolved;
+    }
+
     try {
       const patch: Partial<WebhookSpec> = {
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.slug !== undefined ? { slug: body.slug } : {}),
         ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
-        ...(body.config !== undefined ? { filter: body.config.filter } : {}),
+        ...(body.config !== undefined ? { filter: body.config.filter, projectMap } : {}),
         ...(body.authMode !== undefined ? { authMode: body.authMode } : {}),
         ...(cwd !== undefined ? { cwd } : {}),
         ...(body.agent !== undefined ? { agent: body.agent } : {}),
@@ -316,17 +330,66 @@ function checkSlug(slug: string): string | null {
   return null;
 }
 
+/**
+ * Reject a blank or (case-insensitively) duplicate project key.
+ *
+ * Uniqueness lives here rather than in the Zod schema for the same reason
+ * slug uniqueness does: a discriminated-union member can't carry a
+ * `.refine()` without losing its literal discriminant, so cross-row checks on
+ * `config` belong at the route, same as everywhere else this file says so.
+ */
+function checkProjectMapDuplicates(entries: { projectKey: string }[]): string | null {
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const key = entry.projectKey.trim().toUpperCase();
+    if (key === '') return 'A project mapping needs a project key.';
+    if (seen.has(key)) return `Project "${key}" is mapped more than once.`;
+    seen.add(key);
+  }
+  return null;
+}
+
+/**
+ * Validate and resolve every row of a project map, the same way the
+ * webhook's own `cwd` is resolved — each directory must be inside a
+ * workspace folder. Returns `null` once the reply has already been sent;
+ * callers should `return reply` in that case, exactly like
+ * `resolveWorkspaceCwdOrReply`.
+ */
+async function resolveProjectMap(
+  workspaces: WorkspaceRegistry,
+  entries: { projectKey: string; cwd: string }[],
+  reply: FastifyReply,
+): Promise<JiraProjectMapEntry[] | null> {
+  const dupProblem = checkProjectMapDuplicates(entries);
+  if (dupProblem !== null) {
+    badRequest(reply, dupProblem);
+    return null;
+  }
+  const resolved: JiraProjectMapEntry[] = [];
+  for (const entry of entries) {
+    const cwd = await resolveWorkspaceCwdOrReply(workspaces, entry.cwd, reply);
+    if (cwd === null) return null;
+    resolved.push({ projectKey: entry.projectKey.trim().toUpperCase(), cwd });
+  }
+  return resolved;
+}
+
 /** The reveal/rotate responses must never sit in an intermediary's cache. */
 function noStore(reply: FastifyReply): FastifyReply {
   return reply.header('cache-control', 'no-store');
 }
 
-function specFrom(body: CreateWebhookRequest): Omit<WebhookSpec, 'slug' | 'cwd'> {
+function specFrom(
+  body: CreateWebhookRequest,
+  projectMap: JiraProjectMapEntry[],
+): Omit<WebhookSpec, 'slug' | 'cwd'> {
   return {
     name: body.name,
     enabled: body.enabled,
     type: 'jira',
     filter: body.config.filter,
+    projectMap,
     authMode: body.authMode,
     agent: body.agent,
     worktreeMode: body.worktreeMode,

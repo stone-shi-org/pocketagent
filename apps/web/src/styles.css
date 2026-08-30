@@ -3902,6 +3902,31 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   min-width: 180px;
 }
 
+/* One row of the Jira project → directory map: a short key, a directory
+   picker that takes the remaining space, and a remove button that never
+   participates in the wrap. */
+.project-map-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.project-map-key {
+  width: 110px;
+  flex: none;
+}
+
+.project-map-dir {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.project-map-remove {
+  width: 32px;
+  height: 32px;
+}
+
 .settings-unit {
   color: var(--text-dim);
   font-weight: 400;
