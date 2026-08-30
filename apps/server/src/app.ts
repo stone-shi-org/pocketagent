@@ -45,14 +45,63 @@ import { sessionRoutes } from './routes/sessions.js';
 import { settingsRoutes } from './routes/settings.js';
 import { usageRoutes } from './routes/usage.js';
 import { worktreeRoutes } from './routes/worktrees.js';
+import { webhookRoutes } from './routes/webhooks.js';
 import { websocketRoutes } from './ws/index.js';
+import { WebhookService } from './webhooks/index.js';
 import type { PocketContext } from './types.js';
 
 export const VERSION = '0.1.0';
 
 
+/**
+ * Fields scrubbed from every log line.
+ *
+ * Exported so a test can assert the exact spelling. Bracket-with-quotes syntax
+ * is mandatory for any path containing a dash — pino's dotted form silently
+ * matches nothing, which is the worst possible failure mode for a redaction
+ * rule. `req.body` is redacted wholesale rather than per-field because a webhook
+ * payload is untrusted text of unbounded size and is never worth writing to a
+ * log at any level.
+ */
+export const REDACT_PATHS: readonly string[] = [
+  'req.headers.cookie',
+  'req.headers.authorization',
+  'req.body.token',
+  'req.headers["x-hub-signature"]',
+  'req.headers["x-hub-signature-256"]',
+  'req.body',
+];
+
 /** Routes reachable without a session cookie. Everything else is closed. */
 const PUBLIC_API_PATHS = new Set(['/health', '/api/auth/login', '/api/auth/me']);
+
+/**
+ * The one *dynamic* unauthenticated surface: inbound webhook deliveries.
+ *
+ * `PUBLIC_API_PATHS` stays an exact-string Set — that is its safety property,
+ * and turning it into a prefix set is how `/api/auth/logout` accidentally
+ * becomes public. A slug cannot be enumerated in advance, so it gets this
+ * narrowly-scoped predicate instead.
+ *
+ * Deliberately its own flat namespace rather than a prefix under
+ * `/api/webhooks/`: the management routes live there, and an exemption that has
+ * to tell a slug apart from an `:id` (and from `:id/deliveries`) is one bad
+ * `startsWith` away from opening `DELETE /api/webhooks/:id` to the internet.
+ * Nothing but the delivery route may ever be mounted under `/api/hooks/`, and
+ * `grep '/api/hooks/'` must therefore enumerate the whole unauthenticated
+ * surface.
+ */
+const WEBHOOK_DELIVERY_PREFIX = '/api/hooks/';
+
+function isWebhookDelivery(url: string, method: string): boolean {
+  // Method-gated, so `GET /api/hooks/foo` still meets the cookie gate and 401s
+  // rather than reaching a handler unauthenticated.
+  if (method !== 'POST') return false;
+  if (!url.startsWith(WEBHOOK_DELIVERY_PREFIX)) return false;
+  const slug = url.slice(WEBHOOK_DELIVERY_PREFIX.length);
+  // Exactly one non-empty segment: no sub-paths, nothing to smuggle.
+  return slug.length > 0 && !slug.includes('/');
+}
 
 export interface BuildAppOptions {
   config: Config;
@@ -96,7 +145,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
       level: config.logLevel,
       // Terminal traffic is never logged. Only lifecycle events are.
       redact: {
-        paths: ['req.headers.cookie', 'req.headers.authorization', 'req.body.token'],
+        paths: [...REDACT_PATHS],
         censor: '[redacted]',
       },
       transport: config.isProduction
@@ -235,11 +284,24 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     logger: app.log,
   });
 
+  const webhooks = new WebhookService({
+    db,
+    sessions,
+    workspaces,
+    worktrees,
+    agents,
+    // Shared with interactive sessions: the service carves a reservation out of
+    // this so a Jira delivery storm can never take the user's last slots.
+    maxSessions: config.maxSessions,
+    logger: app.log,
+  });
+
   const context: PocketContext = {
     config,
     auth,
     sessions,
     cron,
+    webhooks,
     workspaces,
     agents,
     db,
@@ -264,6 +326,10 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // After `sessions.init()`: this reconciles cron run rows against an
   // already-reconciled session table, and its first tick can create a session.
   await cron.init();
+
+  // Same ordering reason as cron's: this reconciles delivery rows against an
+  // already-reconciled session table.
+  webhooks.init();
 
   await app.register(cookie);
   await app.register(rateLimit, {
@@ -308,6 +374,17 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
     if (PUBLIC_API_PATHS.has(url)) return;
 
+    // Inbound webhook deliveries authenticate themselves, by HMAC over the raw
+    // body, inside the handler.
+    //
+    // This must sit *above* the Origin check as well as the cookie check, and
+    // that is not an oversight to be tidied up later: a Jira Data Center webhook
+    // sends neither an Origin nor a cookie. The Origin gate exists to stop a
+    // *browser* being used as a confused deputy, which is irrelevant to a
+    // server-to-server POST whose authenticity comes from a signature over the
+    // payload instead. Re-adding either check here rejects every real delivery.
+    if (isWebhookDelivery(url, request.method)) return;
+
     // CSRF: SameSite=Strict already blocks cross-site cookie sends, but browsers
     // vary. An explicit Origin check on state-changing verbs closes the gap.
     if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -338,6 +415,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(sessionRoutes);
   await app.register(worktreeRoutes);
   await app.register(cronRoutes);
+  await app.register(webhookRoutes);
   await app.register(settingsRoutes);
   await app.register(pushRoutes);
   await app.register(usageRoutes);
@@ -385,6 +463,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     // Before `sessions.shutdown()`: no new run may be started into a manager
     // that is already tearing down.
     cron.stop();
+    webhooks.stop();
     await sessions.shutdown();
     if (ownsDb) db.close();
   });

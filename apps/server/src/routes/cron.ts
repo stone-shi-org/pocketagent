@@ -6,7 +6,7 @@ import {
 } from '@pocketagent/protocol';
 import type { CronJobSpec } from '../cron/index.js';
 import { CronServiceError } from '../cron/index.js';
-import { resolveWorkspaceCwdOrReply } from './shared.js';
+import { resolveWorkspaceCwdOrReply, structuredAgentProblem } from './shared.js';
 
 /** Default page size for a run list. Enough to fill a phone screen several times. */
 const DEFAULT_RUN_LIMIT = 50;
@@ -229,21 +229,9 @@ export const cronRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
-  /**
-   * A cron job is always a structured session.
-   *
-   * Refused rather than silently downgraded: delivering a prompt to a terminal
-   * session means writing keystrokes into a TUI with no readiness signal and no
-   * way to tell a finished turn from a hung one, which is exactly the judgement
-   * `terminal/classifier.ts` must never make.
-   */
+  /** A cron job is always a structured session. See `structuredAgentProblem`. */
   function checkAgent(id: string): string | null {
-    const adapter = agents.get(id);
-    if (adapter === undefined) return `No such agent "${id}".`;
-    if (!adapter.transports.includes('structured')) {
-      return `${adapter.displayName} cannot be scheduled: it has no structured mode, and a scheduled run has nobody to type at a terminal.`;
-    }
-    return null;
+    return structuredAgentProblem(agents, id, 'scheduled');
   }
 };
 

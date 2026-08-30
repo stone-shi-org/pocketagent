@@ -55,6 +55,7 @@ export default tseslint.config(
       'apps/server/scripts/desktop-ui-demo.mjs',
       'apps/server/scripts/copy-ui-demo.mjs',
       'apps/server/scripts/cron-ui-demo.mjs',
+      'apps/server/scripts/webhook-ui-demo.mjs',
     ],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },
   },

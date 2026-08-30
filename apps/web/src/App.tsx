@@ -12,6 +12,8 @@ import { AgentsFleetPage } from './pages/AgentsFleetPage.js';
 import { SettingsPage } from './pages/SettingsPage.js';
 import { CronJobsPage } from './pages/CronJobsPage.js';
 import { CronJobEditorPage } from './pages/CronJobEditorPage.js';
+import { WebhooksPage } from './pages/WebhooksPage.js';
+import { WebhookEditorPage } from './pages/WebhookEditorPage.js';
 import { api } from './api/client.js';
 
 type AuthState = 'checking' | 'anonymous' | 'authenticated';
@@ -144,6 +146,30 @@ export function App(): JSX.Element {
     );
   }
 
+  if (route.name === 'webhooks') {
+    return (
+      <WebhooksPage
+        onBack={() => navigate({ name: 'list' })}
+        onOpenWebhook={(webhookId) => navigate({ name: 'webhook', webhookId })}
+        onApiError={handleApiError}
+      />
+    );
+  }
+
+  if (route.name === 'webhook') {
+    return (
+      <WebhookEditorPage
+        key={route.webhookId}
+        webhookId={route.webhookId}
+        onBack={() => navigate({ name: 'webhooks' })}
+        onDone={() => navigate({ name: 'webhooks' })}
+        onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
+        onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
+        onApiError={handleApiError}
+      />
+    );
+  }
+
   return (
     <ProjectsPage
       onOpen={(sessionId) => navigate({ name: 'terminal', sessionId })}
@@ -153,6 +179,8 @@ export function App(): JSX.Element {
       onOpenSettings={() => navigate({ name: 'settings' })}
       onOpenCron={() => navigate({ name: 'cron' })}
       onOpenCronJob={(jobId) => navigate({ name: 'cron-job', jobId })}
+      onOpenWebhooks={() => navigate({ name: 'webhooks' })}
+      onOpenWebhook={(webhookId) => navigate({ name: 'webhook', webhookId })}
       onApiError={handleApiError}
       onLogout={logout}
     />

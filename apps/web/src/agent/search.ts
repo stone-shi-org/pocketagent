@@ -26,8 +26,17 @@ function filterSections(projects: ProjectInfo[], needle: string): ProjectInfo[] 
       continue;
     }
     const chats = project.chats.filter((c) => c.title.toLowerCase().includes(needle));
+    // Specs are searchable too, and they have to be: a project whose only
+    // contents are a scheduled job or a webhook would otherwise vanish from a
+    // search that matched its name, which is precisely when you are looking for
+    // it. Non-matching specs are filtered out of the kept project rather than
+    // carried along, so a hit shows only what matched.
+    const cronJobs = project.cronJobs.filter((j) => j.name.toLowerCase().includes(needle));
+    const webhooks = project.webhooks.filter((w) => w.name.toLowerCase().includes(needle));
     const worktrees = filterSections(project.worktrees, needle);
-    if (chats.length > 0 || worktrees.length > 0) out.push({ ...project, chats, worktrees });
+    if (chats.length > 0 || cronJobs.length > 0 || webhooks.length > 0 || worktrees.length > 0) {
+      out.push({ ...project, chats, cronJobs, webhooks, worktrees });
+    }
   }
   return out;
 }

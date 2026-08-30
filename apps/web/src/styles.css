@@ -4115,6 +4115,15 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 .cron-status--skipped { color: var(--text-dim); }
 .cron-status--running,
 .cron-status--starting { color: var(--accent); }
+/* Inbound-delivery statuses. Two are deliberately not dimmed: a failing
+   signature is a botched rotation or someone probing the endpoint, and a
+   throttle means work was dropped — neither should read as routine noise the
+   way a filtered delivery does. */
+.cron-status--filtered,
+.cron-status--duplicate { color: var(--text-dim); }
+.cron-status--throttled { color: var(--warn); }
+.cron-status--rejected,
+.cron-status--invalid { color: var(--danger); }
 
 /* ---- The editor ----
    Built entirely from `SettingsPage`'s own card/row vocabulary
@@ -4137,12 +4146,25 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   font-family: inherit;
 }
 
+/* The weekday picker generalized: the webhook editor's event and
+   template-variable pickers are the identical interaction, down to
+   `aria-pressed`. The `.cron-weekday*` names are kept as aliases rather than
+   renamed at every call site.
+   
+   Deliberately NOT called `.chip`. A bare `.chip` already exists at the top of
+   this file for AgentPage's tool-call and cost chips (12px / 5px 10px), and a
+   second definition here would silently win on cascade order and restyle them —
+   which is exactly the bug commit 2e96e0f had to fix when the cron editor did
+   this the first time. A pressable toggle and a read-only label are different
+   things and get different names. */
+.toggle-chip-group,
 .cron-weekday-group {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
 
+.toggle-chip,
 .cron-weekday {
   border: 1px solid var(--border-strong);
   background: var(--bg-elev-2);
@@ -4153,10 +4175,23 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   color: var(--text);
 }
 
+.toggle-chip.active,
 .cron-weekday.active {
   background: var(--ink);
   border-color: var(--ink);
   color: var(--on-ink);
+}
+
+/* A denser variant for the long list of template variables. */
+.toggle-chip.compact {
+  padding: 3px 9px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.toggle-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .cron-next-runs {
@@ -4228,6 +4263,125 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 .cron-run-error {
   font-size: 12.5px;
   color: var(--danger);
+}
+
+/* ---- Inbound webhooks ----
+   Everything else the webhook pages need comes from the cron and settings
+   vocabulary above. What follows is only what neither has a shape for: the
+   endpoint URL, the secret panel, and the rendered-prompt block. */
+
+/* A delivery that never became a run. Dimmed and non-interactive, with its
+   reason on a second line — the reason string is the answer to "why isn't my
+   webhook doing anything", which is the only question this feature generates. */
+.cron-run-row.inert {
+  cursor: default;
+  opacity: 0.75;
+}
+
+.delivery-reason {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.hook-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.endpoint-url {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 11px;
+}
+
+.endpoint-url code {
+  /* A URL is pasted, so it must be fully visible rather than ellipsised —
+     the same reason `.secret-value` wraps. */
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  word-break: break-all;
+  flex: 1;
+}
+
+.endpoint-origin-note {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+/* A link-looking button. Not an <a>: there is no href, and a real anchor here
+   would offer "open in new tab" on something that only toggles state. */
+.linkish {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* Same geometry as `.warn-callout`, in the warn palette rather than danger:
+   this is "handle carefully", not "you broke something". */
+.secret-callout {
+  margin-top: 14px;
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  padding: 12px 13px;
+  background: var(--bg-elev-2);
+}
+
+.secret-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 8px;
+  color: var(--warn);
+}
+
+.secret-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 11px;
+  /* Selectable and fully wrapped: a secret you cannot see is one you cannot
+     transcribe, and on the plain-HTTP origin this app is usually reached over,
+     the clipboard fallback can genuinely fail. */
+  user-select: text;
+  word-break: break-all;
+}
+
+.secret-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 9px;
+}
+
+/* The rendered prompt. On `--console`, so it MUST set `--console-text` too:
+   inheriting the body colour renders dark-on-dark, which is exactly how the
+   code blocks broke once. */
+.hook-preview {
+  margin: 10px 0 0;
+  background: var(--console);
+  color: var(--console-text);
+  border-radius: 10px;
+  padding: 12px 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 420px;
+  overflow: auto;
 }
 
 /* ---- Rows in the project tree ---- */

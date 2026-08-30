@@ -5,6 +5,7 @@ import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { filterProjects } from '../agent/search.js';
 import { formatCountdown } from '../agent/cron-format.js';
+import { formatRelative } from './StatusBadge.js';
 
 const REFRESH_MS = 5000;
 
@@ -378,6 +379,8 @@ interface ListProps {
   onAddProject: () => void;
   /** Opens a scheduled job's editor. Omitted where cron rows are not wanted. */
   onOpenCronJob?: (jobId: string) => void;
+  /** Opens a webhook's editor. Omitted where webhook rows are not wanted. */
+  onOpenWebhook?: (webhookId: string) => void;
 }
 
 /** The folders and their chats. Presentation only; state comes from above. */
@@ -390,6 +393,7 @@ export function ProjectList({
   emptyHint,
   onAddProject,
   onOpenCronJob,
+  onOpenWebhook,
 }: ListProps): JSX.Element {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [expandedChats, setExpandedChats] = useState<Set<string>>(() => new Set());
@@ -429,6 +433,7 @@ export function ProjectList({
     activeSessionId,
     activeConversationId,
     onOpenCronJob,
+    onOpenWebhook,
   };
 
   return (
@@ -476,6 +481,7 @@ interface ProjectSectionProps {
   activeSessionId?: string | null;
   activeConversationId?: string | null;
   onOpenCronJob?: (jobId: string) => void;
+  onOpenWebhook?: (webhookId: string) => void;
 }
 
 /**
@@ -501,6 +507,7 @@ function ProjectSection({
   activeSessionId,
   activeConversationId,
   onOpenCronJob,
+  onOpenWebhook,
 }: ProjectSectionProps): JSX.Element {
   // A search that hid a folder's other chats should not also hide the ones it
   // matched, so collapsing is ignored while searching.
@@ -601,9 +608,12 @@ function ProjectSection({
         )}
       </div>
 
-      {!isCollapsed && project.chats.length === 0 && project.cronJobs.length === 0 && (
-        <div className="project-empty">No chats yet</div>
-      )}
+      {/* Without the webhook clause a webhook-only project renders "No chats
+          yet" directly above a visible webhook row. */}
+      {!isCollapsed &&
+        project.chats.length === 0 &&
+        project.cronJobs.length === 0 &&
+        project.webhooks.length === 0 && <div className="project-empty">No chats yet</div>}
 
       {/* Scheduled jobs sit above the chats: a job is what is *going* to
           happen, and it is a spec rather than a conversation — there is no
@@ -648,6 +658,53 @@ function ProjectSection({
                     ? formatCountdown(job.nextRunAt)
                     : 'no next run'
                   : 'paused'}
+              </span>
+            </button>
+          </div>
+        ))}
+
+      {/* Webhooks sit with the scheduled jobs, above the chats, and for a
+          sharper version of the same reason: a webhook may never fire at all —
+          a wrong URL, a mistyped secret, a proxy that is not forwarding — so a
+          row that only appeared after the first delivery would hide exactly the
+          case worth looking at. `never fired` is the signal. */}
+      {!isCollapsed &&
+        onOpenWebhook &&
+        project.webhooks.map((hook) => (
+          <div key={hook.id} className="chat-line cron-line">
+            <button
+              type="button"
+              className={`chat-row cron-job-row${hook.enabled ? '' : ' paused'}`}
+              onClick={() => onOpenWebhook(hook.id)}
+              title={`${hook.name} — ${hook.triggerLabel}${hook.enabled ? '' : ' (disabled)'}`}
+            >
+              <span className="chat-title">
+                <span className="cron-icon-wrap">
+                  <Icon name="webhook" size={15} className="cron-badge-icon" />
+                  {hook.lastDeliveryStatus !== null && (
+                    <span
+                      className={`cron-dot cron-dot--${hook.lastDeliveryStatus}`}
+                      role="img"
+                      aria-label={`Last delivery ${hook.lastDeliveryStatus}`}
+                    />
+                  )}
+                </span>
+                {hook.name}
+                {hook.skipPermissionsEnabled && (
+                  <Icon
+                    name="shield"
+                    size={13}
+                    className="cron-shield"
+                    aria-label="Approvals bypassed"
+                  />
+                )}
+              </span>
+              <span className="cron-line-when">
+                {hook.enabled
+                  ? hook.lastDeliveryAt !== null
+                    ? formatRelative(hook.lastDeliveryAt)
+                    : 'never fired'
+                  : 'disabled'}
               </span>
             </button>
           </div>
@@ -699,6 +756,14 @@ function ProjectSection({
                           size={13}
                           className="chat-cron-badge"
                           aria-label="Started by a scheduled job"
+                        />
+                      )}
+                      {chat.webhookId !== null && (
+                        <Icon
+                          name="webhook"
+                          size={13}
+                          className="chat-cron-badge"
+                          aria-label="Started by a webhook"
                         />
                       )}
                       {chat.title}

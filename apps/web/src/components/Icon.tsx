@@ -33,6 +33,10 @@ export type IconName =
   | 'minimize'
   | 'shield'
   | 'clock'
+  | 'webhook'
+  | 'link'
+  | 'rotate'
+  | 'key'
   | 'play'
   | 'trash'
   | 'agents'
@@ -217,6 +221,45 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <circle cx="12" cy="12" r="8.5" />
       <path d="M12 7.5V12l3 2" />
+    </>
+  ),
+  // Three nodes joined by two arcs: one event fanning out along a path.
+  // Deliberately not a plug (reads as "connect a device") and not a lightning
+  // bolt (reads as "fast"). The nodes sit at different heights so it cannot be
+  // confused with `branch`, whose circles are vertically stacked.
+  webhook: (
+    <>
+      <circle cx="6.5" cy="8" r="2.2" />
+      <circle cx="17.5" cy="8" r="2.2" />
+      <circle cx="12" cy="18" r="2.2" />
+      <path d="M8.1 9.6 10.6 15.9" />
+      <path d="M15.9 9.6 13.4 15.9" />
+      <path d="M8.7 8h6.6" />
+    </>
+  ),
+  // Two interlocking links, for the endpoint card's header.
+  link: (
+    <>
+      <path d="M10.2 13.8a3.4 3.4 0 0 1 0-4.8l2.3-2.3a3.4 3.4 0 0 1 4.8 4.8l-1 1" />
+      <path d="M13.8 10.2a3.4 3.4 0 0 1 0 4.8l-2.3 2.3a3.4 3.4 0 0 1-4.8-4.8l1-1" />
+    </>
+  ),
+  // A key, for revealing a secret. Bow and shaft rather than a padlock, which
+  // would read as "locked" — this button unlocks something.
+  key: (
+    <>
+      <circle cx="8" cy="12" r="3.5" />
+      <path d="M11.5 12h8.5" />
+      <path d="M17 12v3" />
+      <path d="M20 12v2.2" />
+    </>
+  ),
+  // A circular arrow, for rotating a secret. Distinct from `play` (a solid
+  // triangle) so "replace this" never reads as "run this".
+  rotate: (
+    <>
+      <path d="M20 12a8 8 0 1 1-2.6-5.9" />
+      <path d="M20 4v4.5h-4.5" />
     </>
   ),
   // A solid triangle, not an outlined one: this is "run now", and at 16px an

@@ -19,6 +19,7 @@ function chat(title: string): ChatSummary {
     busySince: null,
     adoptTargetId: null,
     cronJobId: null,
+    webhookId: null,
   };
 }
 
@@ -34,6 +35,7 @@ function project(name: string, titles: string[], worktrees: ProjectInfo[] = []):
     isWorkspace: true,
     chats: titles.map(chat),
     cronJobs: [],
+    webhooks: [],
     worktrees,
   };
 }

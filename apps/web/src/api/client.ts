@@ -19,6 +19,15 @@ import type {
   SessionInfo,
   SettingsResponse,
   UpdateSettingsRequest,
+  CreateWebhookRequest,
+  UpdateWebhookRequest,
+  Webhook,
+  WebhookCreatedResponse,
+  WebhookDelivery,
+  WebhookDeliveryCounts,
+  WebhookDeliveryDetail,
+  WebhookPreviewResponse,
+  WebhookSecretResponse,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
 
@@ -283,5 +292,75 @@ export const api = {
   clearCronRuns: (id: string) =>
     request<{ ok: true; removed: number }>(`/api/cron/jobs/${encodeURIComponent(id)}/runs`, {
       method: 'DELETE',
+    }),
+
+  // ---- Inbound webhooks -----------------------------------------------------
+
+  listWebhooks: () => request<{ webhooks: Webhook[] }>('/api/webhooks'),
+
+  getWebhook: (id: string) => request<Webhook>(`/api/webhooks/${encodeURIComponent(id)}`),
+
+  /** The only response that ever carries the secret, besides an explicit reveal. */
+  createWebhook: (body: CreateWebhookRequest) =>
+    request<WebhookCreatedResponse>('/api/webhooks', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  updateWebhook: (id: string, patch: UpdateWebhookRequest) =>
+    request<Webhook>(`/api/webhooks/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  deleteWebhook: (id: string) =>
+    request<{ ok: true; deliveriesKept: number }>(`/api/webhooks/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
+  listWebhookDeliveries: (id: string, opts: { includeNoise?: boolean } = {}) =>
+    request<{ deliveries: WebhookDelivery[]; counts: WebhookDeliveryCounts }>(
+      `/api/webhooks/${encodeURIComponent(id)}/deliveries${
+        opts.includeNoise === false ? '?noise=false' : ''
+      }`,
+    ),
+
+  getWebhookDelivery: (id: string, deliveryId: string) =>
+    request<WebhookDeliveryDetail>(
+      `/api/webhooks/${encodeURIComponent(id)}/deliveries/${encodeURIComponent(deliveryId)}`,
+    ),
+
+  clearWebhookDeliveries: (id: string) =>
+    request<{ ok: true; removed: number }>(
+      `/api/webhooks/${encodeURIComponent(id)}/deliveries`,
+      { method: 'DELETE' },
+    ),
+
+  /**
+   * POST, not GET, on purpose: the Origin check in `app.ts` only runs on
+   * non-GET/HEAD methods, so a GET here would be CSRF-reachable and cacheable.
+   */
+  revealWebhookSecret: (id: string) =>
+    request<WebhookSecretResponse>(`/api/webhooks/${encodeURIComponent(id)}/secret/reveal`, {
+      method: 'POST',
+    }),
+
+  rotateWebhookSecret: (id: string) =>
+    request<WebhookSecretResponse>(`/api/webhooks/${encodeURIComponent(id)}/secret/rotate`, {
+      method: 'POST',
+    }),
+
+  /** Runs a payload through the real pipeline with auth skipped. */
+  sendTestDelivery: (id: string, payload?: string) =>
+    request<{ deliveryId: string | null; status: string; sessionId: string | null; reason: string | null }>(
+      `/api/webhooks/${encodeURIComponent(id)}/test`,
+      { method: 'POST', body: JSON.stringify(payload !== undefined ? { payload } : {}) },
+    ),
+
+  /** Renders server-side so the editor never re-implements the renderer. */
+  previewWebhookPrompt: (id: string, body: { payload?: string; promptTemplate?: string }) =>
+    request<WebhookPreviewResponse>(`/api/webhooks/${encodeURIComponent(id)}/preview`, {
+      method: 'POST',
+      body: JSON.stringify(body),
     }),
 };
