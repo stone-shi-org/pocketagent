@@ -315,10 +315,14 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
       const commands = await handle.supportedCommands();
       if (!this.isAlive()) return;
       this.emitEvent({ kind: 'commands_available', commands: normalizeSlashCommands(commands) });
-    } catch {
+    } catch (err) {
       // Older CLI builds or an already-torn-down query may not support this;
       // silently do without the picker rather than emit a notice for
-      // something the user never asked for.
+      // something the user never asked for. Still logged to stderr (picked
+      // up by journald under the production unit) so a *newer* CLI build
+      // failing for some other reason — e.g. a cwd-specific problem — leaves
+      // a trace instead of looking identical to the expected old-build case.
+      console.error(`[structured-session ${this.id}] fetchInitialCommands failed:`, err);
     }
   }
 
@@ -338,9 +342,20 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
       const models = await handle.supportedModels();
       if (!this.isAlive()) return;
       this.emitEvent({ kind: 'models_available', models: normalizeModels(models) });
-    } catch {
+    } catch (err) {
       // Older CLI builds or an already-torn-down query may not support this;
-      // the composer just has no model picker.
+      // the composer just has no model picker — not worth a user-facing
+      // notice for a control nobody explicitly asked for. But swallowing it
+      // *completely* left a real failure (a session whose cwd was a linked
+      // git worktree never got a model picker, and nothing anywhere recorded
+      // why — 2026-08-30) indistinguishable from the benign old-CLI case, so
+      // this is logged to stderr (journald, under the production unit) for
+      // exactly that situation: the picker is still silently absent, but the
+      // absence is now diagnosable.
+      console.error(
+        `[structured-session ${this.id}] fetchInitialModels failed for cwd=${this.spec.cwd}:`,
+        err,
+      );
     }
   }
 
