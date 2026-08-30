@@ -38,7 +38,7 @@ and `adopt.test.ts` skip themselves when `tmux` is not installed.
 ### Live demos
 
 The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
-decision. Eleven demo scripts do, against a *running* server:
+decision. Twelve demo scripts do, against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -52,6 +52,7 @@ PA_TOKEN=... pnpm demo:resume-history    # resuming a real transcript, with its 
 PA_TOKEN=... pnpm demo:desktop-ui        # two-pane shell, and the width/pointer switch
 PA_TOKEN=... pnpm demo:copy-ui           # copy-to-clipboard fallback over plain HTTP
 PA_TOKEN=... pnpm demo:cron-ui           # scheduled jobs: picker, preview, tree badge
+PA_TOKEN=... pnpm demo:webhook-ui        # webhooks: secret panel, signed delivery, filtered row
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -122,8 +123,9 @@ there is the *conversation*, not the process.
 
 ### Scheduled jobs
 
-`cron/index.ts` (`CronService`) is the only thing in the server that starts agent work with
-no human present. A job is a saved spec — directory, agent, worktree policy, model, effort,
+`cron/index.ts` (`CronService`) is one of two things in the server that start agent work with
+no human present — see "Inbound webhooks" below for the other, which shares its run pipeline.
+A job is a saved spec — directory, agent, worktree policy, model, effort,
 prompt, schedule — and a *run* is one firing of it: one prompt, one turn.
 
 The ticker is modelled on `SessionManager`'s sweep timer, deliberately not on a chain of
@@ -162,6 +164,63 @@ Known limitation: per-run worktrees are **not** garbage-collected. A nightly job
 tree per run under `<project>/.worktrees/`. Deleting them after a run would destroy the very
 output the job was scheduled to produce, so the editor says so instead.
 
+### Inbound webhooks
+
+`webhooks/index.ts` (`WebhookService`) is the second thing that starts agent work with no
+human present, and the only one whose trigger comes from **outside this machine**. A webhook
+is a saved spec — path, type, filter, directory, agent, prompt template, conversation mode —
+and a *delivery* is one firing of it.
+
+Downstream of the trigger, a webhook and a cron job are the same thing, so they share
+`runs/executor.ts`: **the worktree → session → prompt composite lives there**, extracted from
+`CronService` when the second caller appeared. It reports progress through a `RunSink`, so one
+implementation writes `cron_runs` and another writes `webhook_deliveries` without the executor
+knowing either table exists. The subtle parts of that composite — watch before prompting, one
+`onSettled` per run, liveness asked of the session rather than a timer — are why a second copy
+was not acceptable.
+
+**`POST /api/hooks/:slug` is the only unauthenticated route in the server**, and everything
+unusual about it follows from that. It lives under `/api/` because the not-found handler
+answers anything *outside* `/api/` with the SPA shell and a 200, which would make an unknown
+slug distinguishable from a known one — a slug enumeration oracle. It has its own flat
+namespace rather than sitting under `/api/webhooks/`, because that path also holds management
+CRUD and an exemption that has to tell a slug from an `:id` is one bad `startsWith` from
+opening `DELETE /api/webhooks/:id` to the internet. `grep '/api/hooks/'` must therefore
+enumerate the entire unauthenticated surface, forever.
+
+`routes/webhook-delivery.ts` is its own Fastify plugin scope for one reason: HMAC has to be
+computed over the exact bytes the sender signed, and Fastify's JSON parser hands back an object
+whose re-serialization is **not** byte-identical (key order survives `JSON.stringify`, but
+whitespace, unicode escaping and number formatting do not). Content-type parsers are
+encapsulated per plugin scope, so `removeAllContentTypeParsers()` plus a buffer passthrough
+there leaves every sibling plugin — including the webhook management routes that register it —
+parsing JSON as before. A test POSTs JSON to a management route from inside the same app to
+prove the encapsulation held, and another signs `{"a":1}` and sends `{ "a" : 1 }` expecting a
+401: that one fails the moment anyone reintroduces the parser.
+
+The handler order is the security design: look up the slug → verify over the raw buffer →
+parse → check the payload's own `timestamp` for freshness → **claim idempotency by inserting
+the row** → evaluate the filter → check the caps → run. Nothing answers 5xx once the body has
+been read, because Jira Data Center does not retry and a 5xx loses the event permanently.
+
+`webhooks/jira.ts` holds payload extraction and filter evaluation, both pure. The filter's
+semantics are OR within a category and AND across categories, with empty meaning *no
+constraint* — so an empty filter matches everything, which is the footgun of the feature and is
+why the editor warns rather than the code choosing a different default. Every non-match records
+a human-readable reason; "why isn't my webhook firing" is the only support question this
+feature generates, and that string is the answer.
+
+**The prompt renderer lives in `packages/protocol/src/webhook-template.ts`**, not in the
+server, for the same reason `cron-expr.ts` does: the server renders the prompt that runs and the
+editor previews it, and duplicating the renderer in `apps/web` guarantees the preview eventually
+lies about what the agent will be told. One exported array drives both the substitution and the
+editor's variable chips, so a variable existing in one but not the other is impossible.
+
+Known limitations, both inherited and made worse: per-delivery worktrees are not
+garbage-collected either, and a busy Jira project creates them far faster than a nightly job
+does — the editor says so. And `webhook_issue_sessions` is a cache, so a pruned row means the
+next event on that issue starts a fresh conversation rather than continuing one.
+
 ### The home screen
 
 `projects/index.ts` composes `GET /api/projects`: live sessions and on-disk conversations
@@ -169,6 +228,16 @@ merged into one chat list per directory. Two rules live here — a session that 
 transcript hides that transcript's row (they are one chat, and the session is the live view
 of it), and a chat's timestamp falls back through `lastActivityAt → startedAt → createdAt`
 so a brand new one does not sort last.
+
+Inbound webhooks surface the same way, as `ProjectInfo.webhooks`, and the argument for it is a
+sharper version of the one below: a cron job will fire tonight whether or not anyone looks,
+whereas "configured but never fired" is a webhook's *most likely* steady state — a wrong URL, a
+mistyped secret, a proxy that is not forwarding. A row that only appeared after the first
+delivery would hide precisely the case that needs attention, so `never fired` is shown as
+information rather than as an empty state. `ChatSummary.webhookId` badges the chats a delivery
+started, keyed on the conversation id for the same `representativeSessions` reason — and it
+matters more here, because `per-issue` mode deliberately maps many deliveries onto one
+conversation, making the badge a boolean about the conversation rather than a count.
 
 Scheduled jobs also surface here, as `ProjectInfo.cronJobs` rather than folded into `chats`:
 a job is a *spec*, not a conversation — it exists before it has ever run and survives every
@@ -279,6 +348,71 @@ These are load-bearing. Several were bugs first.
   deliberately *not* a foreign key: `pruneOldSessions` and `SessionManager.forget` delete
   session rows out from under it, so a CASCADE would quietly destroy history and a RESTRICT
   would make pruning fail.
+- **An inbound webhook is the third override of the skip-permissions rule, and it is the one
+  that goes the other way.** `CreateWebhookRequest.skipPermissions` defaults to **`false`**,
+  unlike a scheduled job's `true`. Cron's rationale has two halves — nobody is awake at 3am,
+  which transfers, and *the operator wrote the prompt*, which does not: a webhook's prompt is
+  built partly from text a stranger typed into a Jira ticket, and in a Service Desk project
+  that stranger can be an anonymous customer. Inheriting the inversion would be exactly the
+  quiet default flip the first invariant forbids, on the one path where the prompt is not
+  ours. What *is* inherited is the disclosure discipline: the editor warns more strongly than
+  cron's does, `Webhook.skipPermissionsEnabled` is surfaced on the list row, the project-tree
+  row and **every delivery**, and the value is copied onto the delivery row at delivery time so
+  turning the toggle off later does not retroactively make last week's bypassed deliveries look
+  supervised. Asserted in `apps/server/tests/webhooks.test.ts`.
+- **A webhook delivery is authenticated over the raw request bytes, in constant time.**
+  HMAC-SHA256 of the body exactly as received — never of a re-serialized parse, which validates
+  cleanly in a unit test with canonical JSON and then fails on every real Jira payload, because
+  `JSON.stringify` preserves key order but not whitespace, unicode escaping or number
+  formatting. `routes/webhook-delivery.ts` therefore replaces its own content-type parsers
+  inside its own plugin scope, and comparison goes through `safeTokenEqual`, which sha256s both
+  sides first so a truncated or non-hex signature is a mismatch rather than a throw out of
+  `timingSafeEqual`. The bearer fallback exists for senders that cannot sign, is off unless
+  chosen per webhook, and authenticates nothing about the body.
+- **Unknown slug, disabled webhook and bad signature are one response.** Same status, same
+  body, and an HMAC against a dummy key on the unknown-slug path so timing does not answer what
+  the status refuses to. `filtered` and `duplicate`, by contrast, answer 2xx: they succeeded,
+  and a 4xx only makes Jira retry harder. Nothing here answers 5xx once the body has been read,
+  because Jira Data Center does not retry and a 5xx loses the event permanently.
+- **Replay is stopped by the body, never by the header.** `X-Atlassian-Webhook-Identifier` sits
+  *outside* the signature, so keying idempotency on it means a captured delivery replays forever
+  with a fresh identifier: the HMAC still verifies, the uniqueness index never fires, and an
+  agent starts every time. The key is `sha256(rawBody)`, unique per webhook, and the insert *is*
+  the claim — no read-then-write race, and durable across a restart as an in-memory set is not.
+  The payload's own `timestamp` *is* inside the signature, so it is trustworthy where present;
+  it is checked against a window with the observed skew logged on rejection, because
+  "webhooks stopped working" with no diagnostic is the failure mode of a clock check.
+- **Jira text is data, and it is fenced as data.** Only an enumerated allowlist of fields
+  reaches the renderer — never a generic path walker, or any Jira admin, custom field or
+  marketplace plugin could push content into the prompt through a path nobody reviewed. Free
+  text is stripped of control, zero-width and bidi characters, truncated, and wrapped in a
+  per-delivery nonce fence whose opener is removed from the content *first*, which is what makes
+  the fence unclosable from inside. **The fence lowers the hit rate; it is not a boundary** —
+  the boundary is the approval toggle and the worktree. Untrusted text reaches the prompt body
+  and nothing else: not the branch name (minted server-side from the *validated* issue key, for
+  the reason the repeating-job invariant already gives), not a path, not a session title, not a
+  command.
+- **Jira can never consume the last of `maxSessions`.** A webhook has no natural rate ceiling
+  the way a cron ticker does: one bulk edit is hundreds of signed, filtered, entirely legitimate
+  deliveries. Per-webhook and global caps hold the total strictly below `maxSessions` with slots
+  reserved for a human, and a delivery over a cap is recorded and answered 2xx rather than 429 —
+  a 429 provokes Jira's retry storm and eventually gets the webhook disabled at Jira's end.
+  Both caps exclude the asking delivery's own row, because unlike a cron firing that row is
+  inserted *before* the caps are checked (the insert is the idempotency claim), and counting it
+  made every delivery throttle itself.
+- **Deleting a webhook keeps its delivery history.** `webhook_deliveries.webhook_id` is
+  `ON DELETE SET NULL`, with `webhook_name`/`agent`/`skip_permissions_enabled` copied onto every
+  row so an orphan still describes itself, and `session_id` deliberately not a foreign key — the
+  same reasoning `cron_runs` records. `webhook_issue_sessions` is the one webhook table that
+  CASCADEs, because it is a cache rather than history.
+- **The webhook secret exists in the database in plaintext and must not exist anywhere else.**
+  HMAC is a keyed MAC, so verification needs the key material and "shown once" is a UX choice
+  rather than a cryptographic one: it is returned at creation and from an explicit,
+  rate-limited, logged `POST …/secret/reveal`, and never from a list or a get. Reveal and rotate
+  are POSTs specifically so the Origin check covers them. The render context handed to the
+  template engine has no field for it, and `x-hub-signature` plus the whole request body are on
+  the logger's redact list — with bracket-quoted paths, because pino silently ignores a dotted
+  path containing a dash.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.
@@ -346,6 +480,16 @@ setting; the README covers deployment, the security model, and known limitations
 
 Default bind is `127.0.0.1`. This grants terminal access as your user, so exposing it is a
 deliberate act — prefer Tailscale over `0.0.0.0`.
+
+An inbound webhook inverts the direction of that posture: it requires that a machine you do not
+control can open a connection to this process. **The server has no reliable notion of its own
+external origin** — the bind is loopback and `Host`/`X-Forwarded-*` are attacker-supplied
+claims — so it returns only `Webhook.deliveryPath` and the browser composes the URL, labelling
+which origin it used. Nothing claims the URL is reachable from Jira; the first received delivery
+is the only evidence, and the UI shows its absence as `never fired` rather than hiding it. The
+recommended posture is Jira on the same tailnet; a reverse proxy forwarding only `/api/hooks/*`
+is the acceptable second, and **not enforceable by the app** — the server cannot tell a proxied
+request from a direct one.
 
 ## Confluence documentation
 

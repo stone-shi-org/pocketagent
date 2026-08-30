@@ -468,7 +468,7 @@ What it does enforce:
 | Boundary | Implementation |
 | --- | --- |
 | Default reachability | Binds `127.0.0.1`; anything else is explicit and logs a warning. |
-| Authentication | Every route except `/health` requires a valid session cookie — including the WebSocket upgrade. |
+| Authentication | Every route except `/health`, the login endpoints, and `POST /api/hooks/:slug` requires a valid session cookie — including the WebSocket upgrade. The one exception authenticates itself by HMAC over the raw request body; see [Inbound webhooks](#inbound-webhooks-and-what-they-change). |
 | Token handling | The master token is exchanged once at login for a random 32-byte session id in an `HttpOnly; SameSite=Strict` cookie. The token never reaches JavaScript, localStorage, or the URL. Comparison is constant-time. |
 | Brute force | Login is rate-limited to 8 attempts/minute; other routes to 300/minute. |
 | CSRF | `SameSite=Strict` plus an explicit `Origin` check on every state-changing request and on the WebSocket handshake. |
@@ -488,6 +488,70 @@ The optional terminal classifier emits advisory hints (`working`, `waiting_for_i
 `possible_approval_prompt`, `idle`) that drive a best-effort push notification when a
 terminal session goes quiet (see below). These hints **never** cause input to be sent and
 can never approve anything.
+
+### Inbound webhooks, and what they change
+
+A webhook is the one feature that inverts the posture above: it requires that some machine you
+do not control can open a connection to this process and hand it bytes that cause an agent to
+run. If you are not using webhooks, none of this applies — no webhook exists until you create
+one, and the endpoint rejects everything without a valid signature.
+
+**Exposure, ranked.** These are not equivalent; pick the highest one you can.
+
+1. **Jira on the same tailnet (recommended).** Jira Data Center is on-prem for most people who
+   can use a signing secret at all. Put its host on the tailnet, keep the `127.0.0.1` bind, and
+   the threat model barely moves — nothing is publicly exposed.
+2. **A reverse proxy that forwards only `/api/hooks/*` (acceptable).** TLS at the proxy, forward
+   to `127.0.0.1:8787`, and — the part that matters — return 404 for everything else, so the
+   API, the WebSocket and the UI stay on the tailnet:
+
+   ```nginx
+   location /api/hooks/ {
+     proxy_pass http://127.0.0.1:8787;
+     proxy_set_header Host $host;
+     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+     proxy_set_header X-Forwarded-Proto $scheme;
+   }
+   location / { return 404; }
+   ```
+
+   Set `POCKETAGENT_TRUST_PROXY=true` so rate limiting keys on the real client IP.
+3. **`HOST=0.0.0.0` (don't).** The login page, the API and the terminal WebSocket are then on the
+   same interface as the webhook.
+
+**A proxy-only posture is not enforceable by the app.** The server cannot distinguish a request
+that arrived via a proxy from one that arrived directly: `X-Forwarded-For` is a header and
+`trustProxy` is a claim about your own topology. Anything the app could "enforce" here would be
+advisory, so it does not pretend to.
+
+**Prompt injection is the real risk, not the endpoint.** A Jira issue's summary, description and
+comments are written by whoever can file or comment on a ticket — in most organisations every
+employee, and in a Service Desk project possibly an anonymous portal submitter. That text is
+interpolated into a prompt for an agent with shell access, as your user. What PocketAgent does
+about it:
+
+- Only an enumerated allowlist of Jira fields reaches the prompt, never a generic path walker.
+- Free text is stripped of control, zero-width and bidi characters, truncated, and wrapped in a
+  per-delivery nonce fence that cannot be closed from inside, behind a preamble telling the
+  agent it is data.
+- Untrusted text reaches the prompt body and nothing else — never a branch name, path, title or
+  command.
+- `skipPermissions` defaults to **off** for webhooks, unlike scheduled jobs. A delivery that hits
+  an approval waits for you, indefinitely, and pushes a notification.
+- The editor recommends a per-delivery worktree, and a required-label filter — which is worth
+  more than everything above, because it narrows the trigger from "anyone who can comment on a
+  ticket" to "anyone who can label this project".
+
+**Be clear about what a worktree does and does not contain.** It contains *file* damage: a
+successful injection dirties a throwaway branch and leaves a diff to read, instead of editing the
+tree you are working in. It does **not** contain `git push`, `gh`, `curl`, an SSH key, an MCP
+server holding a Jira or GitHub token, or `~/.aws/credentials`. A successful injection in a
+webhook session can exfiltrate anything your machine can reach. Real isolation is a container,
+and that is a different piece of work.
+
+**Do not point a webhook at this checkout.** `data/pocketagent.db` holds webhook signing secrets
+in plaintext — HMAC needs the key material, so there is no alternative — and an agent running
+with approvals bypassed inside this repository could read them.
 
 ---
 
@@ -977,47 +1041,62 @@ should have told you. Raise `OUTPUT_BUFFER_BYTES`, or press `^L` to redraw.
 6. **Terminal replay is byte-oriented, not screen-oriented.** Reattaching to a full-screen TUI
    mid-stream can briefly look odd until the app redraws (`^L` fixes it). A server-side
    headless terminal would solve this properly.
-7. **Linux-first.** macOS is untested; Windows is not supported.
-8. **Push notifications need HTTPS**, and on iOS the site must be installed to the home
+7. **A webhook cannot tell you whether Jira can reach it.** Nothing in the server can prove the
+   inbound path works — the URL is composed in your browser, and `Host` headers are claims. The
+   first received delivery is the only evidence, so the UI shows `never fired` until one arrives.
+8. **Linux-first.** macOS is untested; Windows is not supported.
+9. **Push notifications need HTTPS**, and on iOS the site must be installed to the home
    screen before the browser will allow them at all. PocketAgent pushes for two events —
    a pending approval, and a structured agent finishing its turn (or, best-effort, a
    terminal session going quiet) — always to a fully detached client only; both also fire
    in-page whenever the tab is merely backgrounded, which needs no push service.
-9. **Terminal output is never persisted.** Buffers are in-memory only, so a restart loses
-   scrollback along with the session.
-10. **Conversation liveness is directory-level.** Claude does not keep its transcript file
+10. **Terminal output is never persisted.** Buffers are in-memory only, so a restart loses
+    scrollback along with the session.
+11. **Conversation liveness is directory-level.** Claude does not keep its transcript file
     open and its command line does not name the session, so PocketAgent can tell you an
     agent is running in that directory but not that it is running *that conversation*. It
     labels it accordingly rather than guessing.
-11. **Attaching to your own tmux is a shared session, not a takeover.** Your prefix key is
+12. **Attaching to your own tmux is a shared session, not a takeover.** Your prefix key is
     live from the browser, and the window follows whichever client attached most recently.
     A pane in a plain terminal (no tmux) cannot be attached to at all.
-12. **One host.** The header, the composer's host row and `GET /api/hosts` are shaped for
+13. **One host.** The header, the composer's host row and `GET /api/hosts` are shaped for
     several machines, but a server only ever reports itself. Driving more than one needs a
     front server that registers backs and proxies to them; that does not exist yet, and it
     would concentrate credentials for every registered machine in one place, so it wants
     designing rather than bolting on.
-13. **The home screen lists only directories with chats in them.** A configured workspace
+14. **The home screen lists only directories with chats in them.** A configured workspace
     you have never used does not appear until you start something there; the composer's
     workspace row can still reach it.
-14. **Conversation discovery is Claude-specific.** It reads Claude Code's on-disk transcript
+15. **Conversation discovery is Claude-specific.** It reads Claude Code's on-disk transcript
     format. Other agents would each need their own reader; the rest of the session
     machinery is agent-agnostic.
-15. **Per-run worktrees are never cleaned up.** A scheduled job set to branch per run leaves
-    one tree per run under `<project>/.worktrees/`, so a nightly job accumulates roughly one
-    a day. Deleting them afterwards is not an option — the run's work is what is in there —
-    so pruning old branches stays a manual job.
-16. **A scheduled job does not catch up after downtime.** Occurrences missed while the
+16. **Per-run and per-delivery worktrees are never cleaned up.** A scheduled job set to
+    branch per run leaves one tree per run under `<project>/.worktrees/`, so a nightly job
+    accumulates roughly one a day. A webhook accumulates one per *delivery*, which a busy
+    Jira project produces far faster. Deleting them afterwards is not an option — the run's
+    work is what is in there — so pruning old branches stays a manual job.
+17. **A scheduled job does not catch up after downtime.** Occurrences missed while the
     server was off are collapsed into a single `skipped` run once they are more than an hour
     stale, rather than firing a backlog at boot. Inside that hour the job still fires once,
     so an ordinary restart does not lose a run.
-17. **Scheduled jobs cannot use the terminal transport.** They require an agent with a
+18. **Scheduled jobs cannot use the terminal transport.** They require an agent with a
     structured mode, because delivering a prompt to a TUI has no readiness signal and no
     reliable way to tell a finished turn from a hung one.
-18. **A scheduled job runs with approvals bypassed by default.** It is unattended, so there
+19. **A scheduled job runs with approvals bypassed by default.** It is unattended, so there
     is nobody to ask; the per-job switch can be turned off, in which case a run that needs
     an approval waits indefinitely for you instead of proceeding. See
     [Security model](#security-model).
+20. **A webhook cannot tell you whether Jira can reach it.** Nothing in the server can prove
+    the inbound path works — the URL is composed in your browser, and `Host` headers are
+    claims — so the UI shows `never fired` until a delivery actually arrives, and that first
+    delivery is the only evidence you get.
+21. **A webhook runs with approvals *enabled* by default**, unlike a scheduled job, because
+    its prompt is built partly from text a Jira user wrote. Turning the switch on is a
+    deliberate act, and the editor says what it means. See
+    [Inbound webhooks](#inbound-webhooks-and-what-they-change).
+22. **Webhook signing secrets are stored in plaintext.** HMAC verification needs the key
+    material, so there is no way around it. They live in `data/pocketagent.db`, which is
+    another reason not to point a webhook at this checkout.
 
 ---
 
