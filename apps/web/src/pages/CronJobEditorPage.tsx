@@ -14,6 +14,7 @@ import { Icon } from '../components/Icon.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import { formatAbsolute, formatCountdown, WEEKDAY_LABELS } from '../agent/cron-format.js';
 import { flattenProjects } from '../agent/search.js';
+import { SelectRowNative } from '../components/SelectRowNative.js';
 import { NumberRow, SectionCard, TextRow } from './SettingsPage.js';
 
 interface Props {
@@ -659,53 +660,6 @@ export function CronJobEditorPage({
         <strong>{isNew ? 'New scheduled job' : name || 'Scheduled job'}</strong>
       </header>
       {body}
-    </div>
-  );
-}
-
-/**
- * A `SelectRow` alike, local to this page: `SettingsPage`'s own `SelectRow`
- * always fires immediately (auto-save, one field at a time), while a value
- * picked here is only sent once the whole form is submitted. Same row shell
- * and CSS classes, just a plain `value`/`onChange` rather than a save call.
- */
-function SelectRowNative({
-  label,
-  help,
-  value,
-  options,
-  busy,
-  onChange,
-}: {
-  label: string;
-  help?: string;
-  value: string;
-  options: { value: string; label: string }[];
-  busy?: boolean;
-  onChange: (value: string) => void;
-}): JSX.Element {
-  return (
-    <div className="settings-row">
-      <div className="settings-row-main">
-        <div className="settings-row-info">
-          <label className="settings-row-label">{label}</label>
-          {help && <p className="transport-hint">{help}</p>}
-        </div>
-        <div className="settings-row-control settings-select-control">
-          <select
-            className="settings-select"
-            value={value}
-            disabled={busy}
-            onChange={(e) => onChange(e.target.value)}
-          >
-            {options.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
     </div>
   );
 }

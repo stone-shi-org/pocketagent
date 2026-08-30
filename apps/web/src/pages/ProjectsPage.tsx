@@ -24,6 +24,9 @@ interface Props {
   onOpenCron: () => void;
   /** Opens one job's editor, from its row in the project tree. */
   onOpenCronJob: (jobId: string) => void;
+  onOpenWebhooks: () => void;
+  /** Opens one webhook's editor, from its row in the project tree. */
+  onOpenWebhook: (webhookId: string) => void;
   onApiError: (error: unknown) => void;
   onLogout: () => void;
 }
@@ -46,6 +49,8 @@ export function ProjectsPage({
   onOpenSettings,
   onOpenCron,
   onOpenCronJob,
+  onOpenWebhooks,
+  onOpenWebhook,
   onApiError,
   onLogout,
 }: Props): JSX.Element {
@@ -114,6 +119,10 @@ export function ProjectsPage({
               setMenuOpen(false);
               onOpenCron();
             }}
+            onWebhooks={() => {
+              setMenuOpen(false);
+              onOpenWebhooks();
+            }}
             onLogout={onLogout}
           />
         )}
@@ -131,6 +140,7 @@ export function ProjectsPage({
           onCompose={onCompose}
           onAddProject={() => setShowAdd(true)}
           onOpenCronJob={onOpenCronJob}
+          onOpenWebhook={onOpenWebhook}
           emptyHint="Nothing here yet. Tap the compose button to start a chat."
         />
       </div>
@@ -221,6 +231,7 @@ export function OverflowMenu({
   onAgents,
   onSettings,
   onCron,
+  onWebhooks,
   onLogout,
 }: {
   onClose: () => void;
@@ -239,6 +250,7 @@ export function OverflowMenu({
   onAgents?: () => void;
   onSettings: () => void;
   onCron: () => void;
+  onWebhooks: () => void;
   onLogout: () => void;
 }): JSX.Element {
   const ref = useRef<HTMLDivElement>(null);
@@ -283,6 +295,9 @@ export function OverflowMenu({
         )}
         <button type="button" role="menuitem" onClick={onCron}>
           Cron jobs…
+        </button>
+        <button type="button" role="menuitem" onClick={onWebhooks}>
+          Webhooks…
         </button>
         <button type="button" role="menuitem" onClick={onAdvanced}>
           More session options…

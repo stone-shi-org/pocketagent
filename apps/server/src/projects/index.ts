@@ -9,14 +9,20 @@ import type {
   HostInfo,
   ProjectInfo,
   SessionInfo,
+  WebhookDeliveryStatus,
+  WebhookSummary,
 } from '@pocketagent/protocol';
+import { JiraWebhookFilter } from '@pocketagent/protocol';
 import type { ConversationStore } from '../conversations/index.js';
+import { describeJiraFilter } from '../webhooks/jira.js';
 import { GitStatusTracker } from '../git/status.js';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
 import {
   AUTO_HIDDEN_DIRS,
   readCronJobs,
   readCronRunConversationIds,
+  readWebhookDeliveryConversationIds,
+  readWebhooks,
   readHiddenChats,
   readProjectVisibility,
   setProjectVisibility,
@@ -152,6 +158,27 @@ export class ProjectService {
       cronByCwd.set(row.cwd, list);
     }
 
+    // The same two maps for inbound webhooks. Keyed on the conversation id for
+    // the same `representativeSessions` reason, which bites harder here: a
+    // `per-issue` webhook deliberately maps many deliveries onto one
+    // conversation, so the badge is a fact about the conversation.
+    const webhookByConversation = readWebhookDeliveryConversationIds(this.db);
+    const webhookByCwd = new Map<string, WebhookSummary[]>();
+    for (const row of readWebhooks(this.db)) {
+      const list = webhookByCwd.get(row.cwd) ?? [];
+      list.push({
+        id: row.id,
+        name: row.name,
+        enabled: row.enabled === 1,
+        type: 'jira',
+        triggerLabel: describeWebhookTrigger(row.filter_json),
+        lastDeliveryAt: row.last_delivery_at,
+        lastDeliveryStatus: (row.last_delivery_status as WebhookDeliveryStatus | null) ?? null,
+        skipPermissionsEnabled: row.skip_permissions === 1,
+      });
+      webhookByCwd.set(row.cwd, list);
+    }
+
     // A non-forked resume keeps writing to the same transcript, but
     // `SessionManager.create` still mints a brand-new session row every time
     // (finished rows are kept, not reused) — so resuming the same chat
@@ -170,6 +197,9 @@ export class ProjectService {
           session,
           liveConversation?.title,
           session.agentSessionId ? (cronByConversation.get(session.agentSessionId) ?? null) : null,
+          session.agentSessionId
+            ? (webhookByConversation.get(session.agentSessionId) ?? null)
+            : null,
         ),
       );
     }
@@ -186,6 +216,13 @@ export class ProjectService {
     // disappear until its first run. Containment is still enforced below, so
     // this cannot conjure a project outside every added folder.
     for (const cwd of cronByCwd.keys()) {
+      if (!byCwd.has(cwd)) byCwd.set(cwd, []);
+    }
+
+    // And every directory a webhook points at, for the same reason and more so:
+    // a webhook may never fire at all, so waiting for a first delivery to give
+    // it a row would hide the one case worth looking at.
+    for (const cwd of webhookByCwd.keys()) {
       if (!byCwd.has(cwd)) byCwd.set(cwd, []);
     }
 
@@ -212,6 +249,7 @@ export class ProjectService {
         // A disk-only transcript is a Claude conversation, never an adopted pane.
         adoptTargetId: null,
         cronJobId: cronByConversation.get(conversation.id) ?? null,
+        webhookId: webhookByConversation.get(conversation.id) ?? null,
       });
     }
 
@@ -235,9 +273,10 @@ export class ProjectService {
           hidden: false,
           isWorkspace: true,
           chats: shellChats,
-          // The virtual Shell project is not a real directory, so no job can
-          // ever be configured against it.
+          // The virtual Shell project is not a real directory, so no job and no
+          // webhook can ever be configured against it.
           cronJobs: [],
+          webhooks: [],
           worktrees: [],
           mainRepoCwd: null,
         });
@@ -270,6 +309,7 @@ export class ProjectService {
         isWorkspace: added.has(cwd),
         chats,
         cronJobs: cronByCwd.get(cwd) ?? [],
+        webhooks: webhookByCwd.get(cwd) ?? [],
         worktrees: [],
         mainRepoCwd: await findMainRepoCwd(cwd),
       });
@@ -327,16 +367,35 @@ function push(map: Map<string, ChatSummary[]>, cwd: string, chat: ChatSummary): 
   else map.set(cwd, [chat]);
 }
 
+/**
+ * The one-line trigger description on a project-tree row.
+ *
+ * Parses `filter_json` here rather than taking a `WebhookService` dependency:
+ * `ProjectService` is constructed before it, and a summary label is not worth
+ * inverting that order for. A filter we cannot read simply describes itself as
+ * unfiltered, which is what the row literally says.
+ */
+function describeWebhookTrigger(filterJson: string): string {
+  try {
+    const parsed = JiraWebhookFilter.safeParse(JSON.parse(filterJson));
+    return describeJiraFilter(parsed.success ? parsed.data : {});
+  } catch {
+    return describeJiraFilter({});
+  }
+}
+
 function chatFromSession(
   session: SessionInfo,
   transcriptTitle?: string,
   cronJobId: string | null = null,
+  webhookId: string | null = null,
 ): ChatSummary {
   return {
     id: session.id,
     sessionId: session.id,
     conversationId: session.agentSessionId,
     cronJobId,
+    webhookId,
     title: transcriptTitle ?? session.title,
     agent: session.agent,
     agentDisplayName: session.agentDisplayName,

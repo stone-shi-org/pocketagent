@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { EffortLevel, ModelInfo, SessionTransport } from './agent-events.js';
 import { CronJobSummary } from './cron.js';
+import { WebhookSummary } from './webhooks.js';
 
 /**
  * Lifecycle of a server-owned PTY session.
@@ -281,6 +282,16 @@ export const ChatSummary = z.object({
    * lookup loses the badge whenever the collapse picks a different row.
    */
   cronJobId: z.string().nullable(),
+  /**
+   * Set when this chat was started by an inbound webhook delivery, so the row
+   * carries a webhook glyph rather than reading as something a human began.
+   *
+   * Keyed from the conversation id for the same `representativeSessions` reason
+   * `cronJobId` is — and it matters more here: a webhook in `per-issue` mode
+   * genuinely maps many deliveries onto one conversation, so this is a boolean
+   * fact about the conversation, never a count.
+   */
+  webhookId: z.string().nullable(),
 });
 export type ChatSummary = z.infer<typeof ChatSummary>;
 
@@ -333,6 +344,16 @@ export interface ProjectInfo {
    * it was configured against, even when its runs happen in worktrees below it.
    */
   cronJobs: CronJobSummary[];
+  /**
+   * Inbound webhooks whose directory is this one.
+   *
+   * Listed beside `cronJobs` for the same reason, and a sharper version of it: a
+   * webhook is a spec with no transcript, and "configured but never fired" is a
+   * webhook's most likely steady state — a URL can be wrong, a secret mistyped,
+   * a proxy misrouted. A surface that only appeared after the first delivery
+   * would hide precisely the case that needs attention.
+   */
+  webhooks: WebhookSummary[];
   worktrees: ProjectInfo[];
 }
 // `z.lazy` plus the explicit interface above is zod's documented pattern for a
@@ -349,6 +370,7 @@ export const ProjectInfo: z.ZodType<ProjectInfo> = z.lazy(() =>
     isWorkspace: z.boolean(),
     chats: z.array(ChatSummary),
     cronJobs: z.array(CronJobSummary),
+    webhooks: z.array(WebhookSummary),
     worktrees: z.array(ProjectInfo),
   }),
 );

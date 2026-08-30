@@ -15,7 +15,11 @@ export type Route =
   /** The list of scheduled jobs — see `CronJobsPage`. */
   | { name: 'cron' }
   /** One job's editor and run history. `jobId` is `'new'` for an unsaved one. */
-  | { name: 'cron-job'; jobId: string };
+  | { name: 'cron-job'; jobId: string }
+  /** The list of inbound webhooks — see `WebhooksPage`. */
+  | { name: 'webhooks' }
+  /** One webhook's editor and delivery history. `'new'` for an unsaved one. */
+  | { name: 'webhook'; webhookId: string };
 
 function parse(hash: string): Route {
   const session = /^#\/s\/([^/?]+)/.exec(hash);
@@ -35,6 +39,13 @@ function parse(hash: string): Route {
   if (cronJob?.[1]) return { name: 'cron-job', jobId: decodeURIComponent(cronJob[1]) };
 
   if (/^#\/cron$/.exec(hash)) return { name: 'cron' };
+
+  // Same ordering hazard as the cron pair above, kept adjacent to it so the
+  // pattern is visible rather than looking like two unrelated accidents.
+  const webhook = /^#\/hooks\/([^/?]+)/.exec(hash);
+  if (webhook?.[1]) return { name: 'webhook', webhookId: decodeURIComponent(webhook[1]) };
+
+  if (/^#\/hooks$/.exec(hash)) return { name: 'webhooks' };
 
   if (/^#\/agents$/.exec(hash)) return { name: 'agents' };
 
@@ -59,6 +70,10 @@ function toHash(route: Route): string {
       return '#/cron';
     case 'cron-job':
       return `#/cron/${encodeURIComponent(route.jobId)}`;
+    case 'webhooks':
+      return '#/hooks';
+    case 'webhook':
+      return `#/hooks/${encodeURIComponent(route.webhookId)}`;
     default:
       return '#/';
   }

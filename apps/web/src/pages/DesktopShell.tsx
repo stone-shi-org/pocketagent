@@ -16,6 +16,8 @@ import { ComposerPage } from './ComposerPage.js';
 import { AgentsFleetPage } from './AgentsFleetPage.js';
 import { CronJobsPage } from './CronJobsPage.js';
 import { CronJobEditorPage } from './CronJobEditorPage.js';
+import { WebhooksPage } from './WebhooksPage.js';
+import { WebhookEditorPage } from './WebhookEditorPage.js';
 import { SessionRoute } from './SessionRoute.js';
 import { ChatPreviewPage } from './ChatPreviewPage.js';
 import { loadOpenTabRoutes, saveOpenTabRoutes, type StoredTabRoute } from '../agent/open-tabs-pref.js';
@@ -316,6 +318,10 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                 setMenuOpen(false);
                 onNavigate({ name: 'cron' });
               }}
+              onWebhooks={() => {
+                setMenuOpen(false);
+                onNavigate({ name: 'webhooks' });
+              }}
               onLogout={onLogout}
             />
           )}
@@ -367,6 +373,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             activeSessionId={activeSessionId}
             activeConversationId={activeConversationId}
             onOpenCronJob={(jobId) => onNavigate({ name: 'cron-job', jobId })}
+            onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
             emptyHint="Nothing here yet. Start a chat to see it listed."
           />
         </div>
@@ -451,6 +458,23 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             onDone={() => {
               void state.refresh();
               onNavigate({ name: 'cron' });
+            }}
+            onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+            onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
+            onApiError={onApiError}
+          />
+        ) : route.name === 'webhooks' ? (
+          <WebhooksPage
+            onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
+            onApiError={onApiError}
+          />
+        ) : route.name === 'webhook' ? (
+          <WebhookEditorPage
+            key={route.webhookId}
+            webhookId={route.webhookId}
+            onDone={() => {
+              void state.refresh();
+              onNavigate({ name: 'webhooks' });
             }}
             onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
             onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
