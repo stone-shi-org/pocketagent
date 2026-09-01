@@ -613,6 +613,35 @@ describe('webhook delivery: filtering', () => {
     );
   });
 
+  it('gates on assignee, case-insensitively', async () => {
+    const hook = await withFilter({ assignees: ['grace hopper'] });
+    expect((await deliver(SLUG, payloadFor(), { secret: hook.secret })).json().status).toBe(
+      'running',
+    );
+
+    const reassigned = payloadFor({
+      issue: {
+        key: 'PA-9',
+        fields: { assignee: { displayName: 'Ada Lovelace' }, project: { key: 'PA' } },
+      },
+    });
+    const res = await deliver(SLUG, reassigned, { secret: hook.secret });
+    expect(res.json().status).toBe('filtered');
+
+    const rows = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 });
+    expect(rows[0]?.reason).toMatch(/Assignee Ada Lovelace is not one of "grace hopper"/);
+  });
+
+  it('filters an unassigned issue against a non-empty assignee list', async () => {
+    const hook = await withFilter({ assignees: ['Grace Hopper'] });
+    const unassigned = payloadFor({
+      issue: { key: 'PA-10', fields: { assignee: null, project: { key: 'PA' } } },
+    });
+    expect((await deliver(SLUG, unassigned, { secret: hook.secret })).json().status).toBe(
+      'filtered',
+    );
+  });
+
   it('does not count filtered deliveries as errors on the webhook row', async () => {
     const hook = await withFilter({ projectKeys: ['ENG'] });
     await deliver(SLUG, payloadFor(), { secret: hook.secret });

@@ -22,6 +22,7 @@ const facts = (over: Partial<JiraEventFacts> = {}): JiraEventFacts => ({
   issueKey: 'PA-1',
   projectKey: 'PA',
   issueType: 'Bug',
+  assignee: 'Grace Hopper',
   labels: ['agent-ready'],
   changedFields: ['status'],
   actor: 'Ada',
@@ -41,6 +42,7 @@ describe('parseJiraEvent', () => {
         fields: {
           project: { key: 'pa' },
           issuetype: { name: 'Bug' },
+          assignee: { displayName: 'Grace Hopper' },
           labels: ['x', 'y'],
         },
       },
@@ -50,8 +52,20 @@ describe('parseJiraEvent', () => {
     if (!r.ok) return;
     expect(r.facts.issueKey).toBe('PA-42');
     expect(r.facts.projectKey).toBe('PA'); // upper-cased
+    expect(r.facts.assignee).toBe('Grace Hopper');
     expect(r.facts.changedFields).toEqual(['status', 'assignee']);
     expect(r.facts.timestamp).toBe(123);
+  });
+
+  it('reports an unassigned issue as null, not empty string', () => {
+    // `fields.assignee` is `null` for an unassigned issue — Jira does not omit
+    // the key. Treating that as a wildcard-matching '' would let an assignee
+    // filter accidentally match "nobody".
+    const r = parseJiraEvent({
+      webhookEvent: 'jira:issue_created',
+      issue: { key: 'PA-1', fields: { assignee: null } },
+    });
+    expect(r.ok && r.facts.assignee).toBe(null);
   });
 
   it('refuses a payload with no event', () => {
@@ -114,6 +128,17 @@ describe('evaluateJiraFilter', () => {
     expect(evaluateJiraFilter({ issueTypes: ['Task'] }, facts()).matched).toBe(false);
   });
 
+  it('gates on assignee, case-insensitively', () => {
+    expect(evaluateJiraFilter({ assignees: ['grace hopper'] }, facts()).matched).toBe(true);
+    expect(evaluateJiraFilter({ assignees: ['Ada Lovelace'] }, facts()).matched).toBe(false);
+  });
+
+  it('never matches an unassigned issue against a non-empty assignee list', () => {
+    const no = evaluateJiraFilter({ assignees: ['Grace Hopper'] }, facts({ assignee: null }));
+    expect(no.matched).toBe(false);
+    expect(no.matched === false && no.reason).toMatch(/\(unassigned\)/);
+  });
+
   it('gates on a changed field', () => {
     expect(evaluateJiraFilter({ changedFields: ['status'] }, facts()).matched).toBe(true);
     const no = evaluateJiraFilter({ changedFields: ['assignee'] }, facts());
@@ -165,6 +190,7 @@ describe('evaluateJiraFilter', () => {
       { events: ['x'] },
       { projectKeys: ['X'] },
       { issueTypes: ['X'] },
+      { assignees: ['Nobody'] },
       { changedFields: ['x'] },
       { labels: ['x'] },
     ];
@@ -223,10 +249,12 @@ describe('describeJiraFilter', () => {
     const label = describeJiraFilter({
       events: ['jira:issue_created'],
       projectKeys: ['pa'],
+      assignees: ['Grace Hopper'],
       labels: ['agent-ready'],
     });
     expect(label).toContain('issue_created');
     expect(label).toContain('PA');
+    expect(label).toContain('Grace Hopper');
     expect(label).toContain('agent-ready');
   });
 });
