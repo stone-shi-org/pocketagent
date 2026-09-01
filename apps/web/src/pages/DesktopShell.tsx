@@ -18,6 +18,7 @@ import { CronJobsPage } from './CronJobsPage.js';
 import { CronJobEditorPage } from './CronJobEditorPage.js';
 import { WebhooksPage } from './WebhooksPage.js';
 import { WebhookEditorPage } from './WebhookEditorPage.js';
+import { WebhookHistoryPage } from './WebhookHistoryPage.js';
 import { SessionRoute } from './SessionRoute.js';
 import { ChatPreviewPage } from './ChatPreviewPage.js';
 import { loadOpenTabRoutes, saveOpenTabRoutes, type StoredTabRoute } from '../agent/open-tabs-pref.js';
@@ -322,6 +323,10 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                 setMenuOpen(false);
                 onNavigate({ name: 'webhooks' });
               }}
+              onWebhookHistory={() => {
+                setMenuOpen(false);
+                onNavigate({ name: 'webhook-history' });
+              }}
               onLogout={onLogout}
             />
           )}
@@ -466,6 +471,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
         ) : route.name === 'webhooks' ? (
           <WebhooksPage
             onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
+            onOpenHistory={() => onNavigate({ name: 'webhook-history' })}
             onApiError={onApiError}
           />
         ) : route.name === 'webhook' ? (
@@ -478,6 +484,13 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             }}
             onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
             onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
+            onApiError={onApiError}
+          />
+        ) : route.name === 'webhook-history' ? (
+          <WebhookHistoryPage
+            onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+            onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
+            onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
             onApiError={onApiError}
           />
         ) : activeTabId === null ? (

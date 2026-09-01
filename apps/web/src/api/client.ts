@@ -26,6 +26,7 @@ import type {
   WebhookDelivery,
   WebhookDeliveryCounts,
   WebhookDeliveryDetail,
+  WebhookHistoryResponse,
   WebhookPreviewResponse,
   WebhookSecretResponse,
   WorkspaceEntry,
@@ -297,6 +298,12 @@ export const api = {
   // ---- Inbound webhooks -----------------------------------------------------
 
   listWebhooks: () => request<{ webhooks: Webhook[] }>('/api/webhooks'),
+
+  /** Every webhook's call history in one feed, including unmatched hits. */
+  listWebhookHistory: (opts: { includeNoise?: boolean } = {}) =>
+    request<WebhookHistoryResponse>(
+      `/api/webhooks/history${opts.includeNoise === false ? '?noise=false' : ''}`,
+    ),
 
   getWebhook: (id: string) => request<Webhook>(`/api/webhooks/${encodeURIComponent(id)}`),
 

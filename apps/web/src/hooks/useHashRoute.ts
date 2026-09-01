@@ -19,7 +19,9 @@ export type Route =
   /** The list of inbound webhooks — see `WebhooksPage`. */
   | { name: 'webhooks' }
   /** One webhook's editor and delivery history. `'new'` for an unsaved one. */
-  | { name: 'webhook'; webhookId: string };
+  | { name: 'webhook'; webhookId: string }
+  /** Every webhook's call history in one feed, including unmatched hits. */
+  | { name: 'webhook-history' };
 
 function parse(hash: string): Route {
   const session = /^#\/s\/([^/?]+)/.exec(hash);
@@ -41,7 +43,10 @@ function parse(hash: string): Route {
   if (/^#\/cron$/.exec(hash)) return { name: 'cron' };
 
   // Same ordering hazard as the cron pair above, kept adjacent to it so the
-  // pattern is visible rather than looking like two unrelated accidents.
+  // pattern is visible rather than looking like two unrelated accidents:
+  // `history` would otherwise parse as a webhook id, since a real one is a
+  // UUID and this regex has no way to tell the two apart.
+  if (/^#\/hooks\/history$/.exec(hash)) return { name: 'webhook-history' };
   const webhook = /^#\/hooks\/([^/?]+)/.exec(hash);
   if (webhook?.[1]) return { name: 'webhook', webhookId: decodeURIComponent(webhook[1]) };
 
@@ -74,6 +79,8 @@ function toHash(route: Route): string {
       return '#/hooks';
     case 'webhook':
       return `#/hooks/${encodeURIComponent(route.webhookId)}`;
+    case 'webhook-history':
+      return '#/hooks/history';
     default:
       return '#/';
   }

@@ -4030,6 +4030,15 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   margin: 0;
 }
 
+/* `.cron-head`'s own flex only ever had to place one button on the right;
+   `WebhooksPage` now places two, so they need a row of their own. */
+.cron-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
 .cron-sub,
 .cron-note {
   color: var(--text-dim);
@@ -4183,6 +4192,12 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 .cron-status--throttled { color: var(--warn); }
 .cron-status--rejected,
 .cron-status--invalid { color: var(--danger); }
+/* Call-history-only statuses: a call that matched no webhook at all reads as
+   routine noise (dim), like a bad slug being probed; a call that reached a
+   real, currently-disabled webhook is worth a second look, so it reads like
+   `throttled` rather than like `filtered`. */
+.cron-status--unmatched { color: var(--text-dim); }
+.cron-status--disabled { color: var(--warn); }
 
 /* ---- The editor ----
    Built entirely from `SettingsPage`'s own card/row vocabulary

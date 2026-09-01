@@ -433,6 +433,40 @@ const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE webhooks ADD COLUMN project_map_json TEXT NOT NULL DEFAULT '[]';
   `,
+  // Calls to POST /api/hooks/:slug that matched no runnable webhook: either the
+  // slug does not exist, or it does but the webhook is disabled. The two cases
+  // share one table and one code path deliberately, because the load-bearing
+  // invariant is that they must stay indistinguishable *from outside* —
+  // recording them identically here (one INSERT either way, before the
+  // identical 404 is returned) keeps the work profile symmetric rather than
+  // opening a new server-side timing difference between "wrong slug" and
+  // "right slug, off".
+  //
+  // Never a payload, a signature, or any other request data: this row exists
+  // purely so an operator can see "something hit this endpoint and nothing was
+  // listening", not to audit the request. `webhook_id`/`webhook_name` are only
+  // ever populated for the disabled case and are copied at hit time so the row
+  // still describes itself if the webhook is later deleted — the same
+  // discipline `webhook_deliveries.webhook_name` already follows.
+  //
+  // A separate table rather than folding into `webhook_deliveries`: that
+  // table's `webhook_name`/`agent`/`signature_state` columns are NOT NULL,
+  // which an unknown-slug hit cannot supply, and SQLite cannot relax a NOT
+  // NULL constraint without rebuilding the table. Kept deliberately thin —
+  // every row here is noise by definition, pruned as one global partition
+  // rather than the per-webhook run/noise split `webhook_deliveries` needs.
+  `
+  CREATE TABLE IF NOT EXISTS webhook_hit_log (
+    id           TEXT PRIMARY KEY,
+    slug         TEXT NOT NULL,
+    webhook_id   TEXT REFERENCES webhooks (id) ON DELETE SET NULL,
+    webhook_name TEXT,
+    reason       TEXT NOT NULL,
+    received_at  INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_webhook_hit_log_received ON webhook_hit_log (received_at DESC);
+  `,
 ];
 
 /**
@@ -959,6 +993,21 @@ export interface WebhookIssueSessionRow {
   updated_at: number;
 }
 
+/**
+ * A call to `/api/hooks/:slug` that matched no runnable webhook. See the
+ * migration comment: `webhook_id`/`webhook_name` are only ever set for the
+ * `'disabled'` case, and no request data beyond the slug is ever stored here.
+ */
+export interface WebhookHitLogRow {
+  id: string;
+  slug: string;
+  webhook_id: string | null;
+  webhook_name: string | null;
+  /** `'unknown_slug' | 'disabled'`. */
+  reason: string;
+  received_at: number;
+}
+
 /** Statuses a delivery can still leave, mirroring `readActiveCronRuns`'s pair. */
 const OPEN_DELIVERY = `status IN ('starting', 'running')`;
 
@@ -1252,6 +1301,29 @@ export function upsertWebhookIssueSession(db: Db, row: WebhookIssueSessionRow): 
 export function pruneOldWebhookIssueSessions(db: Db, olderThan: number): number {
   return db.prepare('DELETE FROM webhook_issue_sessions WHERE updated_at < ?').run(olderThan)
     .changes;
+}
+
+export function insertWebhookHit(db: Db, row: WebhookHitLogRow): void {
+  db.prepare(
+    `INSERT INTO webhook_hit_log (id, slug, webhook_id, webhook_name, reason, received_at)
+     VALUES (@id, @slug, @webhook_id, @webhook_name, @reason, @received_at)`,
+  ).run(row);
+}
+
+export function readWebhookHits(db: Db, opts: { limit: number }): WebhookHitLogRow[] {
+  return db
+    .prepare('SELECT * FROM webhook_hit_log ORDER BY received_at DESC LIMIT ?')
+    .all(opts.limit) as WebhookHitLogRow[];
+}
+
+/** Every row here is noise by definition, so one global "keep newest N" prune. */
+export function pruneOldWebhookHits(db: Db, keep: number): number {
+  return db
+    .prepare(
+      `DELETE FROM webhook_hit_log
+        WHERE id NOT IN (SELECT id FROM webhook_hit_log ORDER BY received_at DESC LIMIT ?)`,
+    )
+    .run(keep).changes;
 }
 
 /** Keep the session table from growing forever on a long-lived install. */
