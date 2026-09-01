@@ -9,6 +9,8 @@ const REFRESH_MS = 5000;
 interface Props {
   /** Opens one webhook's editor and delivery history. */
   onOpenWebhook: (webhookId: string) => void;
+  /** Every webhook's call history in one feed, including unmatched hits. */
+  onOpenHistory: () => void;
   onApiError: (error: unknown) => void;
   /**
    * Present only on the phone route. `DesktopShell` renders this in its right
@@ -26,7 +28,12 @@ interface Props {
  * this machine decides it should, and that is exactly what someone watching
  * this page is waiting for.
  */
-export function WebhooksPage({ onOpenWebhook, onApiError, onBack }: Props): JSX.Element {
+export function WebhooksPage({
+  onOpenWebhook,
+  onOpenHistory,
+  onApiError,
+  onBack,
+}: Props): JSX.Element {
   const [hooks, setHooks] = useState<Webhook[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** Webhook ids with an action in flight, so a row cannot be double-fired. */
@@ -90,10 +97,16 @@ export function WebhooksPage({ onOpenWebhook, onApiError, onBack }: Props): JSX.
             Each webhook gives an outside system a URL. A matching event starts an agent here.
           </p>
         </div>
-        <button type="button" className="cron-new" onClick={() => onOpenWebhook('new')}>
-          <Icon name="plus" size={18} />
-          New webhook
-        </button>
+        <div className="cron-head-actions">
+          <button type="button" className="cron-secondary" onClick={onOpenHistory}>
+            <Icon name="clock" size={16} />
+            Call history
+          </button>
+          <button type="button" className="cron-new" onClick={() => onOpenWebhook('new')}>
+            <Icon name="plus" size={18} />
+            New webhook
+          </button>
+        </div>
       </div>
 
       {error && (

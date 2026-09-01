@@ -27,6 +27,8 @@ interface Props {
   onOpenWebhooks: () => void;
   /** Opens one webhook's editor, from its row in the project tree. */
   onOpenWebhook: (webhookId: string) => void;
+  /** Every webhook's call history in one feed, including unmatched hits. */
+  onOpenWebhookHistory: () => void;
   onApiError: (error: unknown) => void;
   onLogout: () => void;
 }
@@ -51,6 +53,7 @@ export function ProjectsPage({
   onOpenCronJob,
   onOpenWebhooks,
   onOpenWebhook,
+  onOpenWebhookHistory,
   onApiError,
   onLogout,
 }: Props): JSX.Element {
@@ -122,6 +125,10 @@ export function ProjectsPage({
             onWebhooks={() => {
               setMenuOpen(false);
               onOpenWebhooks();
+            }}
+            onWebhookHistory={() => {
+              setMenuOpen(false);
+              onOpenWebhookHistory();
             }}
             onLogout={onLogout}
           />
@@ -232,6 +239,7 @@ export function OverflowMenu({
   onSettings,
   onCron,
   onWebhooks,
+  onWebhookHistory,
   onLogout,
 }: {
   onClose: () => void;
@@ -251,6 +259,7 @@ export function OverflowMenu({
   onSettings: () => void;
   onCron: () => void;
   onWebhooks: () => void;
+  onWebhookHistory: () => void;
   onLogout: () => void;
 }): JSX.Element {
   const ref = useRef<HTMLDivElement>(null);
@@ -298,6 +307,9 @@ export function OverflowMenu({
         </button>
         <button type="button" role="menuitem" onClick={onWebhooks}>
           Webhooks…
+        </button>
+        <button type="button" role="menuitem" onClick={onWebhookHistory}>
+          Call history…
         </button>
         <button type="button" role="menuitem" onClick={onAdvanced}>
           More session options…

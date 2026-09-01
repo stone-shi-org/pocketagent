@@ -417,6 +417,47 @@ export const WebhookDeliveryListResponse = z.object({
 });
 export type WebhookDeliveryListResponse = z.infer<typeof WebhookDeliveryListResponse>;
 
+/**
+ * A call to `/api/hooks/:slug` that matched no runnable webhook.
+ *
+ * `unknown_slug`: no webhook has this path at all. `disabled`: the webhook
+ * exists but is turned off. The two are one indistinguishable HTTP response
+ * by design — see the "unknown slug, disabled webhook and bad signature are
+ * one response" invariant — this type exists purely for an operator to look
+ * at server-side; it never reaches or is influenced by the caller.
+ */
+export const WebhookHitReason = z.enum(['unknown_slug', 'disabled']);
+export type WebhookHitReason = z.infer<typeof WebhookHitReason>;
+
+export const WebhookHit = z.object({
+  id: z.string(),
+  slug: z.string(),
+  /** Set only for `reason: 'disabled'` — there is no webhook for the other case. */
+  webhookId: z.string().nullable(),
+  webhookName: z.string().nullable(),
+  reason: WebhookHitReason,
+  receivedAt: z.number().int(),
+});
+export type WebhookHit = z.infer<typeof WebhookHit>;
+
+/**
+ * One chronological feed across every webhook: real deliveries and the hits
+ * that never became one, discriminated so the UI can render either without
+ * a runtime type check. `webhookId`/`webhookName` are visible on both members
+ * (`WebhookDelivery` already carries them), which is what lets a single list
+ * answer "which webhook did this call match, or did it match none at all".
+ */
+export const WebhookHistoryEntry = z.discriminatedUnion('kind', [
+  WebhookDelivery.extend({ kind: z.literal('delivery') }),
+  WebhookHit.extend({ kind: z.literal('hit') }),
+]);
+export type WebhookHistoryEntry = z.infer<typeof WebhookHistoryEntry>;
+
+export const WebhookHistoryResponse = z.object({
+  entries: z.array(WebhookHistoryEntry),
+});
+export type WebhookHistoryResponse = z.infer<typeof WebhookHistoryResponse>;
+
 /** Body for `POST /api/webhooks/:id/test` and `.../preview`. */
 export const WebhookTestRequest = z.object({
   /** Raw JSON to run through the pipeline. Omitted uses the built-in sample. */

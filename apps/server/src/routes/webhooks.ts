@@ -36,6 +36,24 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     webhooks: webhooks.list().map((row) => webhooks.toWebhook(row)),
   }));
 
+  /**
+   * One chronological feed across every webhook, including calls that matched
+   * none at all. A static path, so it is never shadowed by `:id` below —
+   * Fastify's router prioritizes an exact segment over a parametric one
+   * regardless of registration order, unlike the browser's own regex-based
+   * hash router, which needs the same care spelled out explicitly.
+   */
+  app.get<{ Querystring: { limit?: string; noise?: string } }>(
+    '/api/webhooks/history',
+    async (request, reply) =>
+      reply.send(
+        webhooks.history({
+          limit: parseLimit(request.query.limit),
+          includeNoise: request.query.noise !== 'false',
+        }),
+      ),
+  );
+
   app.get<{ Params: { id: string } }>('/api/webhooks/:id', async (request, reply) => {
     try {
       return reply.send(webhooks.toWebhook(webhooks.get(request.params.id)));

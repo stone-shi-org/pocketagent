@@ -10,6 +10,8 @@ import type {
   WebhookDeliveryDetail,
   WebhookDeliveryStatus,
   WebhookDeliveryTrigger,
+  WebhookHistoryEntry,
+  WebhookHit,
   WebhookSignatureState,
   WebhookSummary,
 } from '@pocketagent/protocol';
@@ -20,21 +22,24 @@ import {
   jiraTemplateVariables,
   renderJiraTemplate,
 } from '@pocketagent/protocol';
-import type { Db, WebhookDeliveryRow, WebhookRow } from '../db/index.js';
+import type { Db, WebhookDeliveryRow, WebhookHitLogRow, WebhookRow } from '../db/index.js';
 import {
   countActiveWebhookDeliveries,
   deleteWebhook,
   deleteWebhookDeliveriesFor,
   insertWebhook,
   insertWebhookDelivery,
+  insertWebhookHit,
   markStaleWebhookDeliveriesFailed,
   pruneOldWebhookDeliveries,
+  pruneOldWebhookHits,
   pruneOldWebhookIssueSessions,
   readActiveWebhookDeliveries,
   readWebhook,
   readWebhookBySlug,
   readWebhookDeliveries,
   readWebhookDelivery,
+  readWebhookHits,
   readWebhookIssueSession,
   readWebhooks,
   updateWebhook,
@@ -62,6 +67,16 @@ const SWEEP_INTERVAL_MS = 30_000;
 /** Delivery rows kept per webhook, split by class — see `pruneOldWebhookDeliveries`. */
 const KEEP_RUNS_PER_WEBHOOK = 50;
 const KEEP_NOISE_PER_WEBHOOK = 20;
+
+/**
+ * Rows kept in `webhook_hit_log`, globally rather than per anything — a
+ * bad slug flooded by one caller and a hundred different disabled webhooks
+ * are the same kind of noise, so one shared budget is enough.
+ */
+const KEEP_WEBHOOK_HITS = 300;
+
+/** Longest slug attempt recorded, so a huge attacker-supplied path segment cannot bloat storage. */
+const MAX_STORED_SLUG_LENGTH = 128;
 
 /** The per-issue conversation cache is a cache; a dropped row costs a fresh chat. */
 const ISSUE_SESSION_TTL_MS = 30 * 24 * 60 * 60_000;
@@ -243,6 +258,7 @@ export class WebhookService {
         keepNoisePerWebhook: KEEP_NOISE_PER_WEBHOOK,
       });
       pruneOldWebhookIssueSessions(this.db, this.now() - ISSUE_SESSION_TTL_MS);
+      pruneOldWebhookHits(this.db, KEEP_WEBHOOK_HITS);
     } catch (err) {
       this.opts.logger?.warn({ err }, 'webhook sweep failed');
     }
@@ -274,6 +290,11 @@ export class WebhookService {
     const hook = readWebhookBySlug(this.db, input.slug);
     if (hook === null || hook.enabled !== 1) {
       verifyAgainstDummyKey(input.rawBody);
+      // Recorded the same way regardless of which sub-case this is: doing
+      // anything asymmetric between "no such slug" and "that slug, but off"
+      // would reopen exactly the timing question the identical response
+      // above already closes.
+      this.recordHit(input.slug, hook);
       return notFound();
     }
 
@@ -753,6 +774,32 @@ export class WebhookService {
     };
   }
 
+  /**
+   * Record a call that matched no runnable webhook — an unknown slug, or a
+   * real one that is disabled. Never allowed to throw: this runs on the one
+   * unauthenticated route in the server, right before an identical 404 either
+   * way, and a logging failure here must not turn that into a 500 — nothing
+   * may answer 5xx once the body has been read.
+   *
+   * No payload, signature or header is stored, only the slug (truncated —
+   * there is no length cap upstream, and the caller controls this string
+   * entirely) and, when `hook` is a real-but-disabled webhook, which one.
+   */
+  private recordHit(rawSlug: string, hook: WebhookRow | null): void {
+    try {
+      insertWebhookHit(this.db, {
+        id: crypto.randomUUID(),
+        slug: sanitizeSlugForLog(rawSlug),
+        webhook_id: hook?.id ?? null,
+        webhook_name: hook?.name ?? null,
+        reason: hook === null ? 'unknown_slug' : 'disabled',
+        received_at: this.now(),
+      });
+    } catch (err) {
+      this.opts.logger?.warn({ err }, 'failed to record an unmatched webhook hit');
+    }
+  }
+
   /** Insert an already-terminal delivery (rejected / invalid). */
   private recordTerminal(
     hook: WebhookRow,
@@ -1162,6 +1209,47 @@ export class WebhookService {
     };
   }
 
+  toHit(row: WebhookHitLogRow): WebhookHit {
+    return {
+      id: row.id,
+      slug: row.slug,
+      webhookId: row.webhook_id,
+      webhookName: row.webhook_name,
+      reason: row.reason as WebhookHit['reason'],
+      receivedAt: row.received_at,
+    };
+  }
+
+  /**
+   * One chronological feed across every webhook: real deliveries plus the
+   * hits that never became one. `includeNoise: false` drops the hits
+   * entirely, since every one of them is noise by the same definition
+   * `NOISE_STATUSES` already uses for a delivery.
+   *
+   * Each side is fetched up to `limit` and then merged, rather than paged
+   * together in one query — the two live in different tables with different
+   * retention, and this is a UI list, not an API meant to paginate deeply.
+   */
+  history(opts: { limit: number; includeNoise: boolean }): { entries: WebhookHistoryEntry[] } {
+    const deliveries: WebhookHistoryEntry[] = readWebhookDeliveries(this.db, {
+      limit: opts.limit,
+      includeNoise: opts.includeNoise,
+    }).map((row) => ({ kind: 'delivery' as const, ...this.toDelivery(row) }));
+
+    const hits: WebhookHistoryEntry[] = opts.includeNoise
+      ? readWebhookHits(this.db, { limit: opts.limit }).map((row) => ({
+          kind: 'hit' as const,
+          ...this.toHit(row),
+        }))
+      : [];
+
+    return {
+      entries: [...deliveries, ...hits]
+        .sort((a, b) => b.receivedAt - a.receivedAt)
+        .slice(0, opts.limit),
+    };
+  }
+
   countsFor(webhookId: string): WebhookDeliveryCounts {
     const rows = this.db
       .prepare(
@@ -1238,6 +1326,25 @@ function notFound(): DeliveryOutcome {
 
 function sha256(buf: Buffer): string {
   return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
+/**
+ * Bound and clean an attacker-controlled slug before it is persisted. There is
+ * no length cap on the `:slug` URL segment upstream, and control characters
+ * would render confusingly (or worse, oddly) in a list built to be read by a
+ * human — not a security boundary, just the same "don't store more than the
+ * point of the row needs" discipline `storablePayload` already applies.
+ */
+function sanitizeSlugForLog(slug: string): string {
+  // Built without a regex escape range, deliberately: a literal control-
+  // character range is easy to mistype into something else entirely, and
+  // this reads unambiguously as "printable ASCII only, DEL excluded".
+  let out = '';
+  for (const ch of slug) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code >= 0x20 && code !== 0x7f) out += ch;
+  }
+  return out.slice(0, MAX_STORED_SLUG_LENGTH);
 }
 
 /** 32 bytes of base64url — long enough that a slug leak is not a secret leak. */

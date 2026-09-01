@@ -3,7 +3,13 @@ import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { JIRA_SAMPLE_PAYLOAD } from '@pocketagent/protocol';
 import { REDACT_PATHS } from '../src/app.js';
-import { openDatabase, readWebhookDeliveries, type Db } from '../src/db/index.js';
+import {
+  openDatabase,
+  pruneOldWebhookHits,
+  readWebhookDeliveries,
+  readWebhookHits,
+  type Db,
+} from '../src/db/index.js';
 import { authHeaders, createTestApp, type TestApp } from './helpers.js';
 
 /**
@@ -432,6 +438,20 @@ describe('webhook delivery: the unauthenticated surface', () => {
     const disabled = await deliver(SLUG, body, { secret: hook.secret });
     expect(disabled.statusCode).toBe(404);
     expect(disabled.body).toBe(unknown.body);
+
+    // Recorded server-side even though the response never told the caller
+    // which case it was — logging them differently would reopen the timing
+    // question the identical response above already closes.
+    const hits = readWebhookHits(ctx.db, { limit: 10 });
+    expect(hits).toHaveLength(2);
+    const unknownHit = hits.find((h) => h.slug === 'no-such-hook');
+    expect(unknownHit?.reason).toBe('unknown_slug');
+    expect(unknownHit?.webhook_id).toBeNull();
+    expect(unknownHit?.webhook_name).toBeNull();
+    const disabledHit = hits.find((h) => h.slug === SLUG);
+    expect(disabledHit?.reason).toBe('disabled');
+    expect(disabledHit?.webhook_id).toBe(hook.id);
+    expect(disabledHit?.webhook_name).toBe('Triage new bugs');
   });
 
   it('needs no Origin header, unlike every other state-changing route', async () => {
@@ -882,5 +902,76 @@ describe('webhook migration', () => {
     expect(columns.map((c) => c.name)).toContain('project_map_json');
     db.close();
     fs.rmSync(file, { force: true });
+  });
+
+  it('adds the webhook_hit_log table to an existing database', () => {
+    const file = `${fs.mkdtempSync('/tmp/pa-webhook-')}/db.sqlite`;
+    const db = openDatabase(file);
+    const tables = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+      .all() as { name: string }[];
+    expect(tables.map((t) => t.name)).toContain('webhook_hit_log');
+    db.close();
+    fs.rmSync(file, { force: true });
+  });
+});
+
+describe('pruneOldWebhookHits', () => {
+  it('keeps only the newest N rows, globally', () => {
+    for (let i = 0; i < 5; i++) {
+      ctx.db
+        .prepare(
+          `INSERT INTO webhook_hit_log (id, slug, webhook_id, webhook_name, reason, received_at)
+           VALUES (?, ?, NULL, NULL, 'unknown_slug', ?)`,
+        )
+        .run(`hit-${i}`, `slug-${i}`, i);
+    }
+    const removed = pruneOldWebhookHits(ctx.db, 2);
+    expect(removed).toBe(3);
+    const remaining = readWebhookHits(ctx.db, { limit: 10 });
+    expect(remaining.map((h) => h.id)).toEqual(['hit-4', 'hit-3']);
+  });
+});
+
+describe('webhook call history', () => {
+  it('merges deliveries and unmatched hits into one time-sorted feed', async () => {
+    const hook = await createWebhook();
+    // A real, ran delivery.
+    await deliver(SLUG, payloadFor({ timestamp: 1 + Date.now() }), { secret: hook.secret });
+    // An unmatched hit.
+    await deliver('bogus-slug', payloadFor({ timestamp: 2 + Date.now() }), {
+      secret: hook.secret,
+    });
+
+    const res = await get('/api/webhooks/history');
+    expect(res.statusCode).toBe(200);
+    const { entries } = res.json();
+    expect(entries.length).toBeGreaterThanOrEqual(2);
+
+    const delivery = entries.find((e: { kind: string }) => e.kind === 'delivery');
+    expect(delivery).toBeTruthy();
+    expect(delivery.webhookName).toBe('Triage new bugs');
+
+    const hit = entries.find((e: { kind: string }) => e.kind === 'hit');
+    expect(hit).toBeTruthy();
+    expect(hit.slug).toBe('bogus-slug');
+    expect(hit.reason).toBe('unknown_slug');
+    expect(hit.webhookId).toBeNull();
+
+    // Newest first.
+    for (let i = 1; i < entries.length; i++) {
+      expect(entries[i - 1].receivedAt).toBeGreaterThanOrEqual(entries[i].receivedAt);
+    }
+  });
+
+  it('drops hits from the feed when noise is excluded, keeping real deliveries', async () => {
+    const hook = await createWebhook();
+    await deliver(SLUG, payloadFor(), { secret: hook.secret });
+    await deliver('bogus-slug', payloadFor(), { secret: hook.secret });
+
+    const res = await get('/api/webhooks/history?noise=false');
+    const { entries } = res.json();
+    expect(entries.some((e: { kind: string }) => e.kind === 'hit')).toBe(false);
+    expect(entries.some((e: { kind: string }) => e.kind === 'delivery')).toBe(true);
   });
 });
