@@ -117,6 +117,7 @@ export function WebhookEditorPage({
   const [events, setEvents] = useState<string[]>(['jira:issue_created']);
   const [projectKeys, setProjectKeys] = useState('');
   const [issueTypes, setIssueTypes] = useState('');
+  const [assignees, setAssignees] = useState('');
   const [changedFields, setChangedFields] = useState('');
   const [labels, setLabels] = useState('');
   const [labelMode, setLabelMode] = useState<'any' | 'all'>('any');
@@ -198,6 +199,7 @@ export function WebhookEditorPage({
       setEvents(f.events ?? []);
       setProjectKeys((f.projectKeys ?? []).join(', '));
       setIssueTypes((f.issueTypes ?? []).join(', '));
+      setAssignees((f.assignees ?? []).join(', '));
       setChangedFields((f.changedFields ?? []).join(', '));
       setLabels((f.labels ?? []).join(', '));
       setLabelMode(f.labelMode ?? 'any');
@@ -264,6 +266,8 @@ export function WebhookEditorPage({
     if (pk.length > 0) f.projectKeys = pk;
     const it = csvToList(issueTypes);
     if (it.length > 0) f.issueTypes = it;
+    const asn = csvToList(assignees);
+    if (asn.length > 0) f.assignees = asn;
     const cf = csvToList(changedFields);
     if (cf.length > 0) f.changedFields = cf;
     const lb = csvToList(labels);
@@ -272,7 +276,7 @@ export function WebhookEditorPage({
       f.labelMode = labelMode;
     }
     return f;
-  }, [events, projectKeys, issueTypes, changedFields, labels, labelMode]);
+  }, [events, projectKeys, issueTypes, assignees, changedFields, labels, labelMode]);
 
   /** Empty means "match everything", which is the footgun of the whole form. */
   const filterIsEmpty = Object.keys(filter).length === 0;
@@ -590,27 +594,51 @@ export function WebhookEditorPage({
         <div className="settings-row settings-row-stacked">
           <div className="settings-row-info">
             <label className="settings-row-label">Events</label>
+            <p className="transport-hint">
+              Pick from the dropdown to add one; empty matches every event Jira can send.
+            </p>
           </div>
-          <div className="toggle-chip-group" role="group" aria-label="Jira events">
-            {EVENT_CHOICES.map((choice) => (
-              <button
-                key={choice.value}
-                type="button"
-                className={`toggle-chip${events.includes(choice.value) ? ' active' : ''}`}
-                aria-pressed={events.includes(choice.value)}
-                disabled={busy}
-                onClick={() =>
-                  setEvents((prev) =>
-                    prev.includes(choice.value)
-                      ? prev.filter((e) => e !== choice.value)
-                      : [...prev, choice.value],
-                  )
-                }
-              >
+          <select
+            className="settings-select"
+            value=""
+            disabled={busy || events.length >= EVENT_CHOICES.length}
+            aria-label="Add a Jira event"
+            onChange={(e) => {
+              const value = e.target.value;
+              if (value === '') return;
+              setEvents((prev) => (prev.includes(value) ? prev : [...prev, value]));
+            }}
+          >
+            <option value="">
+              {events.length >= EVENT_CHOICES.length ? 'All events added' : 'Add an event…'}
+            </option>
+            {EVENT_CHOICES.filter((choice) => !events.includes(choice.value)).map((choice) => (
+              <option key={choice.value} value={choice.value}>
                 {choice.label}
-              </button>
+              </option>
             ))}
-          </div>
+          </select>
+          {events.length > 0 && (
+            <div className="chip-list" role="list" aria-label="Selected events">
+              {events.map((value) => {
+                const choice = EVENT_CHOICES.find((c) => c.value === value);
+                return (
+                  <span key={value} className="chip chip-removable" role="listitem">
+                    {choice?.label ?? value}
+                    <button
+                      type="button"
+                      className="chip-remove-btn"
+                      disabled={busy}
+                      aria-label={`Remove ${choice?.label ?? value}`}
+                      onClick={() => setEvents((prev) => prev.filter((e) => e !== value))}
+                    >
+                      <Icon name="close" size={12} />
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+          )}
         </div>
         <TextRow
           label="Project keys"
@@ -628,6 +656,14 @@ export function WebhookEditorPage({
           placeholder="Bug, Incident"
           help="Comma-separated. Empty matches every type."
           onChange={setIssueTypes}
+        />
+        <TextRow
+          label="Assignee"
+          value={assignees}
+          busy={busy}
+          placeholder="Grace Hopper"
+          help="Comma-separated display names. Empty matches any assignee, including unassigned."
+          onChange={setAssignees}
         />
         <TextRow
           label="Required labels"

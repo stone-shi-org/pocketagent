@@ -119,6 +119,16 @@ export const JiraWebhookFilter = z.object({
   issueTypes: z.array(Name).max(30).optional(),
   changedFields: z.array(Name).max(30).optional(),
   /**
+   * Compared against the issue's assignee display name, case-insensitively.
+   * Matched the same way `labels`/`issueTypes` are — free text, not an
+   * account id — because the filter has no Jira credentials of its own to
+   * resolve a name to one. An unassigned issue never matches a non-empty
+   * list; there is deliberately no separate "(unassigned)" sentinel value to
+   * type, since an assignee list is opt-in and empty already means "anyone,
+   * including nobody".
+   */
+  assignees: z.array(Name).max(30).optional(),
+  /**
    * The cheapest real control this feature has. "Only run when the issue is
    * labelled `agent-ready`" narrows the trigger population from "anyone who can
    * comment on a ticket" to "anyone who can set a label on this project" — in

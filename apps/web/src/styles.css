@@ -1101,6 +1101,40 @@ input[type='number']::-webkit-outer-spin-button {
 .chip.muted { color: var(--text-dim); }
 .chip.danger-chip { color: var(--danger); border-color: var(--danger); }
 
+/* A dropdown-picks-into-a-list pattern: choosing a value from a `<select>`
+   appends it here as a removable chip, rather than a toggle you have to
+   already know is clickable. Used for the webhook editor's Jira event list. */
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip-removable {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 4px;
+}
+
+.chip-remove-btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-dim);
+}
+
+.chip-remove-btn:hover:not(:disabled) {
+  background: var(--bg-elev);
+  color: var(--danger);
+}
+
 .file-list {
   margin: 0;
   padding: 8px calc(12px + var(--safe-right)) 8px calc(28px + var(--safe-left));

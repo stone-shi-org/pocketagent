@@ -19,6 +19,8 @@ export interface JiraEventFacts {
   issueKey: string;
   projectKey: string | null;
   issueType: string | null;
+  /** Display name of the issue's assignee, or `null` when unassigned. */
+  assignee: string | null;
   labels: string[];
   /** Field names in this event's changelog. Empty for a creation. */
   changedFields: string[];
@@ -73,6 +75,10 @@ export function parseJiraEvent(payload: unknown): JiraParseResult {
       issueKey,
       projectKey: str(asRecord(fields['project'])['key']).toUpperCase() || null,
       issueType: str(asRecord(fields['issuetype'])['name']) || null,
+      // `fields.assignee` is `null` (not merely absent) for an unassigned
+      // issue; `asRecord` turns that into `{}`, so `str(...)` naturally comes
+      // back `''` and this resolves to `null` either way.
+      assignee: str(asRecord(fields['assignee'])['displayName']) || null,
       labels: (Array.isArray(fields['labels']) ? fields['labels'] : [])
         .map((l) => str(l))
         .filter((l) => l !== ''),
@@ -135,6 +141,15 @@ export function evaluateJiraFilter(
       return {
         matched: false,
         reason: `Issue type ${facts.issueType ?? '(none)'} is not one of ${list(filter.issueTypes)}.`,
+      };
+    }
+  }
+
+  if (nonEmpty(filter.assignees)) {
+    if (facts.assignee === null || !filter.assignees.some((a) => eq(a, facts.assignee))) {
+      return {
+        matched: false,
+        reason: `Assignee ${facts.assignee ?? '(unassigned)'} is not one of ${list(filter.assignees)}.`,
       };
     }
   }
@@ -214,6 +229,7 @@ export function describeJiraFilter(filter: JiraWebhookFilter): string {
   }
   if (nonEmpty(filter.projectKeys)) parts.push(filter.projectKeys.map((k) => k.toUpperCase()).join(', '));
   if (nonEmpty(filter.issueTypes)) parts.push(filter.issueTypes.join(', '));
+  if (nonEmpty(filter.assignees)) parts.push(`assigned to ${filter.assignees.join(', ')}`);
   if (nonEmpty(filter.labels)) {
     parts.push(`${filter.labelMode === 'all' ? 'all labels' : 'label'} ${filter.labels.join(', ')}`);
   }
