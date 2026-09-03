@@ -16,12 +16,10 @@ export type Route =
   | { name: 'cron' }
   /** One job's editor and run history. `jobId` is `'new'` for an unsaved one. */
   | { name: 'cron-job'; jobId: string }
-  /** The list of inbound webhooks — see `WebhooksPage`. */
+  /** The list of inbound webhooks, and every webhook's call history — see `WebhooksPage`. */
   | { name: 'webhooks' }
   /** One webhook's editor and delivery history. `'new'` for an unsaved one. */
-  | { name: 'webhook'; webhookId: string }
-  /** Every webhook's call history in one feed, including unmatched hits. */
-  | { name: 'webhook-history' };
+  | { name: 'webhook'; webhookId: string };
 
 function parse(hash: string): Route {
   const session = /^#\/s\/([^/?]+)/.exec(hash);
@@ -42,11 +40,13 @@ function parse(hash: string): Route {
 
   if (/^#\/cron$/.exec(hash)) return { name: 'cron' };
 
-  // Same ordering hazard as the cron pair above, kept adjacent to it so the
-  // pattern is visible rather than looking like two unrelated accidents:
-  // `history` would otherwise parse as a webhook id, since a real one is a
-  // UUID and this regex has no way to tell the two apart.
-  if (/^#\/hooks\/history$/.exec(hash)) return { name: 'webhook-history' };
+  // `#/hooks/history` used to be its own route (a separate call-history page);
+  // history is now a second section of the webhooks list itself, but this
+  // redirect keeps an old bookmark/link landing somewhere sensible rather than
+  // parsing `history` as a webhook id, which the generic pattern below would
+  // otherwise do — a real id is a UUID, and this regex has no way to tell the
+  // two apart.
+  if (/^#\/hooks\/history$/.exec(hash)) return { name: 'webhooks' };
   const webhook = /^#\/hooks\/([^/?]+)/.exec(hash);
   if (webhook?.[1]) return { name: 'webhook', webhookId: decodeURIComponent(webhook[1]) };
 
@@ -79,8 +79,6 @@ function toHash(route: Route): string {
       return '#/hooks';
     case 'webhook':
       return `#/hooks/${encodeURIComponent(route.webhookId)}`;
-    case 'webhook-history':
-      return '#/hooks/history';
     default:
       return '#/';
   }

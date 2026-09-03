@@ -2718,9 +2718,11 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   opacity: 0.9;
 }
 
-/* Secondary to `.new-chat-btn` — opens the Agents fleet view rather than
-   starting anything, so it reads as a lighter, outlined action next to it. */
-.agents-nav-btn {
+/* Secondary to `.new-chat-btn` — opens the Agents fleet view (or the
+   Webhooks list) rather than starting anything, so each reads as a lighter,
+   outlined action next to it. Same rule, extended rather than duplicated. */
+.agents-nav-btn,
+.webhooks-nav-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2734,8 +2736,8 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   font-weight: 600;
   font-size: 13px;
 }
-.agents-nav-btn:hover { background: var(--bg-elev); }
-.agents-nav-btn.active { border-color: var(--accent); color: var(--accent); }
+.agents-nav-btn:hover, .webhooks-nav-btn:hover { background: var(--bg-elev); }
+.agents-nav-btn.active, .webhooks-nav-btn.active { border-color: var(--accent); color: var(--accent); }
 
 .shell-nav-btn {
   display: flex;
@@ -4311,6 +4313,32 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 .cron-run-row:last-child {
   border-bottom: none;
   padding-bottom: 0;
+}
+
+/* A call-history row plus its Detail button. `.cron-run-row` stays a bare
+   full-width button where it's used alone (`WebhookEditorPage`'s own
+   per-webhook delivery list) — this wrapper only exists in
+   `WebhookHistoryPanel`, where a second action sits beside it, so the
+   row/border ownership moves up a level rather than changing the base rule. */
+.call-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  padding: 16px 0;
+}
+
+.call-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.call-row .cron-run-row {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  border-bottom: none;
+  padding: 0;
 }
 
 .cron-run-row:first-of-type {

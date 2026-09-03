@@ -18,7 +18,6 @@ import { CronJobsPage } from './CronJobsPage.js';
 import { CronJobEditorPage } from './CronJobEditorPage.js';
 import { WebhooksPage } from './WebhooksPage.js';
 import { WebhookEditorPage } from './WebhookEditorPage.js';
-import { WebhookHistoryPage } from './WebhookHistoryPage.js';
 import { SessionRoute } from './SessionRoute.js';
 import { ChatPreviewPage } from './ChatPreviewPage.js';
 import { loadOpenTabRoutes, saveOpenTabRoutes, type StoredTabRoute } from '../agent/open-tabs-pref.js';
@@ -323,10 +322,6 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                 setMenuOpen(false);
                 onNavigate({ name: 'webhooks' });
               }}
-              onWebhookHistory={() => {
-                setMenuOpen(false);
-                onNavigate({ name: 'webhook-history' });
-              }}
               onLogout={onLogout}
             />
           )}
@@ -357,6 +352,29 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
           >
             <Icon name="agents" size={16} />
             Agents
+          </button>
+          {/*
+            Webhooks and the webhook editor have no tab, and unlike every other
+            pane reached only from the "…" menu, there was no way back out once
+            you navigated in — `onBack` is deliberately omitted on desktop for
+            these shared-content pages (see `WebhooksPage`'s own doc comment),
+            on the assumption that the sidebar is already the way back. That
+            assumption only holds where a persistent button like this one
+            exists; Cron has the identical gap today, left alone here since it
+            wasn't part of what was reported.
+          */}
+          <button
+            type="button"
+            className={
+              route.name === 'webhooks' || route.name === 'webhook'
+                ? 'webhooks-nav-btn active'
+                : 'webhooks-nav-btn'
+            }
+            onClick={() => onNavigate({ name: 'webhooks' })}
+            aria-pressed={route.name === 'webhooks' || route.name === 'webhook'}
+          >
+            <Icon name="webhook" size={16} />
+            Webhooks
           </button>
         </div>
 
@@ -471,7 +489,8 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
         ) : route.name === 'webhooks' ? (
           <WebhooksPage
             onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
-            onOpenHistory={() => onNavigate({ name: 'webhook-history' })}
+            onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+            onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
             onApiError={onApiError}
           />
         ) : route.name === 'webhook' ? (
@@ -484,13 +503,6 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             }}
             onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
             onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
-            onApiError={onApiError}
-          />
-        ) : route.name === 'webhook-history' ? (
-          <WebhookHistoryPage
-            onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
-            onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
-            onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
             onApiError={onApiError}
           />
         ) : activeTabId === null ? (
