@@ -39,6 +39,7 @@ import {
  */
 
 export const VIRTUAL_SHELL_CWD = 'virtual:shell';
+export const VIRTUAL_WEBHOOKS_CWD = 'virtual:webhooks';
 
 export interface ProjectServiceOptions {
   workspaces: WorkspaceRegistry;
@@ -165,7 +166,15 @@ export class ProjectService {
     const webhookByConversation = readWebhookDeliveryConversationIds(this.db);
     const webhookByCwd = new Map<string, WebhookSummary[]>();
     for (const row of readWebhooks(this.db)) {
-      const list = webhookByCwd.get(row.cwd) ?? [];
+      let isAutoMap = false;
+      try {
+        const pm = JSON.parse(row.project_map_json) as unknown;
+        isAutoMap = Array.isArray(pm) && pm.length > 0;
+      } catch {
+        isAutoMap = false;
+      }
+      const targetCwd = isAutoMap ? VIRTUAL_WEBHOOKS_CWD : row.cwd;
+      const list = webhookByCwd.get(targetCwd) ?? [];
       list.push({
         id: row.id,
         name: row.name,
@@ -176,7 +185,7 @@ export class ProjectService {
         lastDeliveryStatus: (row.last_delivery_status as WebhookDeliveryStatus | null) ?? null,
         skipPermissionsEnabled: row.skip_permissions === 1,
       });
-      webhookByCwd.set(row.cwd, list);
+      webhookByCwd.set(targetCwd, list);
     }
 
     // A non-forked resume keeps writing to the same transcript, but
@@ -223,6 +232,7 @@ export class ProjectService {
     // a webhook may never fire at all, so waiting for a first delivery to give
     // it a row would hide the one case worth looking at.
     for (const cwd of webhookByCwd.keys()) {
+      if (cwd === VIRTUAL_WEBHOOKS_CWD) continue;
       if (!byCwd.has(cwd)) byCwd.set(cwd, []);
     }
 
@@ -283,8 +293,29 @@ export class ProjectService {
       }
     }
 
+    if (webhookByCwd.has(VIRTUAL_WEBHOOKS_CWD)) {
+      const virtualWebhooks = webhookByCwd.get(VIRTUAL_WEBHOOKS_CWD) ?? [];
+      if (virtualWebhooks.length > 0) {
+        drafts.push({
+          cwd: VIRTUAL_WEBHOOKS_CWD,
+          name: 'Webhooks',
+          workspaceLabel: 'Webhooks',
+          isGitRepo: false,
+          gitBranch: null,
+          gitStatus: null,
+          hidden: false,
+          isWorkspace: true,
+          chats: [],
+          cronJobs: [],
+          webhooks: virtualWebhooks,
+          worktrees: [],
+          mainRepoCwd: null,
+        });
+      }
+    }
+
     for (const [cwd, chats] of byCwd) {
-      if (cwd === VIRTUAL_SHELL_CWD) continue;
+      if (cwd === VIRTUAL_SHELL_CWD || cwd === VIRTUAL_WEBHOOKS_CWD) continue;
       // A project is a folder you added, or a directory inside one. Chats in a
       // directory that is no longer either are not shown: "remove this folder"
       // has to actually remove it, and a folder with history in it is exactly

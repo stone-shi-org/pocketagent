@@ -513,11 +513,15 @@ function ProjectSection({
   // matched, so collapsing is ignored while searching.
   const isCollapsed = !searching && collapsed.has(project.cwd);
 
-  // The virtual Shell "project" has no real folder on disk, so there is
+  const isVirtualWebhooks = project.cwd === 'virtual:webhooks';
+  const isVirtualShell = project.cwd === 'virtual:shell';
+  const isVirtual = isVirtualShell || isVirtualWebhooks;
+
+  // Virtual projects have no real folder on disk, so there is
   // nothing for code-server to open.
   const codeServerBase = state.host?.codeServerBaseUrl;
   const codeServerHref =
-    codeServerBase && project.cwd !== 'virtual:shell'
+    codeServerBase && !isVirtual
       ? codeServerLink(codeServerBase, project.cwd)
       : null;
 
@@ -534,7 +538,18 @@ function ProjectSection({
           aria-expanded={!isCollapsed}
         >
           <span className="project-icon">
-            <Icon name={project.cwd === 'virtual:shell' ? 'agent-shell' : nested ? 'branch' : 'folder'} className="folder" />
+            <Icon
+              name={
+                isVirtualWebhooks
+                  ? 'webhook'
+                  : isVirtualShell
+                    ? 'agent-shell'
+                    : nested
+                      ? 'branch'
+                      : 'folder'
+              }
+              className="folder"
+            />
             {project.gitStatus && project.gitStatus !== 'clean' && (
               <span
                 className={`git-status-dot git-status-dot--${project.gitStatus}`}
@@ -548,17 +563,23 @@ function ProjectSection({
             {nested ? project.gitBranch ?? project.name : project.name}
           </span>
           <Icon name="chevron-down" className={`project-caret${isCollapsed ? ' closed' : ''}`} />
-          {isCollapsed && <span className="project-count">{project.chats.length}</span>}
+          {isCollapsed && (
+            <span className="project-count">
+              {isVirtualWebhooks ? project.webhooks.length : project.chats.length}
+            </span>
+          )}
         </button>
-        <button
-          type="button"
-          className="round-btn plain"
-          onClick={() => onCompose(project.cwd)}
-          aria-label={`New chat in ${project.name}`}
-          title={`New chat in ${project.name}`}
-        >
-          <Icon name="compose" size={19} />
-        </button>
+        {!isVirtualWebhooks && (
+          <button
+            type="button"
+            className="round-btn plain"
+            onClick={() => onCompose(project.cwd)}
+            aria-label={`New chat in ${project.name}`}
+            title={`New chat in ${project.name}`}
+          >
+            <Icon name="compose" size={19} />
+          </button>
+        )}
         {codeServerHref && (
           <a
             className="round-btn plain"
@@ -571,16 +592,18 @@ function ProjectSection({
             <Icon name="code" size={19} />
           </a>
         )}
-        <button
-          type="button"
-          className="round-btn plain"
-          onClick={() => setMenuFor(menuFor === project.cwd ? null : project.cwd)}
-          aria-label={`Options for ${project.name}`}
-          aria-expanded={menuFor === project.cwd}
-        >
-          <Icon name="ellipsis" size={18} />
-        </button>
-        {menuFor === project.cwd && (
+        {!isVirtualWebhooks && (
+          <button
+            type="button"
+            className="round-btn plain"
+            onClick={() => setMenuFor(menuFor === project.cwd ? null : project.cwd)}
+            aria-label={`Options for ${project.name}`}
+            aria-expanded={menuFor === project.cwd}
+          >
+            <Icon name="ellipsis" size={18} />
+          </button>
+        )}
+        {menuFor === project.cwd && !isVirtualWebhooks && (
           <ProjectMenu
             project={project}
             onClose={() => setMenuFor(null)}
@@ -597,7 +620,7 @@ function ProjectSection({
               void state.removeProject(project.cwd);
             }}
             onNewTmuxSession={
-              project.cwd === 'virtual:shell'
+              isVirtualShell
                 ? undefined
                 : () => {
                     setMenuFor(null);
