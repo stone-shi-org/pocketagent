@@ -14,7 +14,6 @@ import { CronJobsPage } from './pages/CronJobsPage.js';
 import { CronJobEditorPage } from './pages/CronJobEditorPage.js';
 import { WebhooksPage } from './pages/WebhooksPage.js';
 import { WebhookEditorPage } from './pages/WebhookEditorPage.js';
-import { WebhookHistoryPage } from './pages/WebhookHistoryPage.js';
 import { api } from './api/client.js';
 
 type AuthState = 'checking' | 'anonymous' | 'authenticated';
@@ -152,7 +151,8 @@ export function App(): JSX.Element {
       <WebhooksPage
         onBack={() => navigate({ name: 'list' })}
         onOpenWebhook={(webhookId) => navigate({ name: 'webhook', webhookId })}
-        onOpenHistory={() => navigate({ name: 'webhook-history' })}
+        onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
+        onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
         onApiError={handleApiError}
       />
     );
@@ -172,18 +172,6 @@ export function App(): JSX.Element {
     );
   }
 
-  if (route.name === 'webhook-history') {
-    return (
-      <WebhookHistoryPage
-        onBack={() => navigate({ name: 'webhooks' })}
-        onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
-        onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
-        onOpenWebhook={(webhookId) => navigate({ name: 'webhook', webhookId })}
-        onApiError={handleApiError}
-      />
-    );
-  }
-
   return (
     <ProjectsPage
       onOpen={(sessionId) => navigate({ name: 'terminal', sessionId })}
@@ -195,7 +183,6 @@ export function App(): JSX.Element {
       onOpenCronJob={(jobId) => navigate({ name: 'cron-job', jobId })}
       onOpenWebhooks={() => navigate({ name: 'webhooks' })}
       onOpenWebhook={(webhookId) => navigate({ name: 'webhook', webhookId })}
-      onOpenWebhookHistory={() => navigate({ name: 'webhook-history' })}
       onApiError={handleApiError}
       onLogout={logout}
     />

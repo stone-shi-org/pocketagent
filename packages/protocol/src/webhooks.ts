@@ -102,7 +102,8 @@ const Name = z.string().min(1).max(64);
  * in every project the Jira user can see. The editor says so out loud.
  *
  * Semantics: OR within a category, AND across categories. Names compare
- * case-insensitively; project keys are upper-cased on both sides.
+ * case-insensitively; project keys are upper-cased on both sides. `excludeActors`
+ * is the one category that runs the other way — see its own doc comment.
  *
  * `changedFields` deliberately does **not** match `jira:issue_created`, which
  * carries no changelog. "Notify me when status changes" firing on creation is
@@ -136,6 +137,21 @@ export const JiraWebhookFilter = z.object({
    */
   labels: z.array(Name).max(30).optional(),
   labelMode: z.enum(['any', 'all']).optional(),
+  /**
+   * The one field in this schema that inverts the whole file's semantics: every
+   * other field is an allow-list ("must be one of these"), and this is a
+   * block-list ("must not be any of these"). It exists for one concrete
+   * problem — an agent that comments on the issue it was triggered by re-fires
+   * `comment_created` for its own comment, and without something deterministic
+   * here the only thing stopping a loop is the agent itself *noticing* and
+   * choosing not to act again, which is a judgment call, not a guarantee.
+   * Listing the agent's own Jira account display name here makes the refusal
+   * structural instead. Matched against `actor` case-insensitively, like every
+   * other name field; a `null` actor (a payload shape that omits `user`) is
+   * never excluded, since there is nothing to compare against — the same
+   * "cannot prove a negative" posture `eq()` already has everywhere else.
+   */
+  excludeActors: z.array(Name).max(30).optional(),
 });
 export type JiraWebhookFilter = z.infer<typeof JiraWebhookFilter>;
 

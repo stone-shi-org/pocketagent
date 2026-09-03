@@ -121,12 +121,24 @@ export function WebhookEditorPage({
   const [changedFields, setChangedFields] = useState('');
   const [labels, setLabels] = useState('');
   const [labelMode, setLabelMode] = useState<'any' | 'all'>('any');
+  const [excludeActors, setExcludeActors] = useState('');
 
   // ---- Per-project routing ----------------------------------------------------
   // `id` is a client-only key for React's benefit; it never reaches the server.
   const [projectMap, setProjectMap] = useState<{ id: string; projectKey: string; cwd: string }[]>(
     [],
   );
+  /**
+   * A UI-only concept — the server only ever sees `cwd` and `config.projectMap`,
+   * exactly as before. `workspace` and `auto-map` used to be able to coexist
+   * (a base `cwd` *and* a project map, both always visible), which is exactly
+   * what let a half-finished mapping row look plausible: it silently fell back
+   * to being redundant with the base directory instead of visibly broken. This
+   * makes the two mutually exclusive in the editor, and `save()` clears
+   * `projectMap` outright in `workspace` mode so the two can never both reach
+   * the server non-empty at once.
+   */
+  const [directoryMode, setDirectoryMode] = useState<'workspace' | 'auto-map'>('workspace');
 
   const loadDeliveries = useCallback(async () => {
     if (isNew) return;
@@ -203,6 +215,7 @@ export function WebhookEditorPage({
       setChangedFields((f.changedFields ?? []).join(', '));
       setLabels((f.labels ?? []).join(', '));
       setLabelMode(f.labelMode ?? 'any');
+      setExcludeActors((f.excludeActors ?? []).join(', '));
       setProjectMap(
         hook.config.projectMap.map((e) => ({
           id: crypto.randomUUID(),
@@ -210,6 +223,7 @@ export function WebhookEditorPage({
           cwd: e.cwd,
         })),
       );
+      setDirectoryMode(hook.config.projectMap.length > 0 ? 'auto-map' : 'workspace');
     }
   }, [id, isNew, onApiError]);
 
@@ -246,13 +260,17 @@ export function WebhookEditorPage({
    * saved. Checked from whichever source knows about this path.
    */
   const selectedIsRepo = useMemo(() => {
+    // In `auto-map` mode `cwd` is hidden and may be stale — there is no single
+    // directory to check (each mapped project has its own, validated
+    // server-side at save time), so this must not nag based on it.
+    if (directoryMode === 'auto-map') return true;
     const ws = workspaces.find((w) => w.path === cwd);
     if (ws !== undefined) return ws.isGitRepo;
     const proj = flatProjects.find((p) => p.cwd === cwd);
     // Unknown means "do not nag": a directory neither list knows about is not
     // evidence that it is not a repo.
     return proj?.isGitRepo ?? true;
-  }, [cwd, workspaces, flatProjects]);
+  }, [directoryMode, cwd, workspaces, flatProjects]);
 
   useEffect(() => {
     // Fall back rather than letting the user save something that cannot work.
@@ -275,14 +293,28 @@ export function WebhookEditorPage({
       f.labels = lb;
       f.labelMode = labelMode;
     }
+    const ex = csvToList(excludeActors);
+    if (ex.length > 0) f.excludeActors = ex;
     return f;
-  }, [events, projectKeys, issueTypes, assignees, changedFields, labels, labelMode]);
+  }, [events, projectKeys, issueTypes, assignees, changedFields, labels, labelMode, excludeActors]);
 
-  /** Empty means "match everything", which is the footgun of the whole form. */
-  const filterIsEmpty = Object.keys(filter).length === 0;
+  /**
+   * Empty means "match everything", which is the footgun of the whole form.
+   * `excludeActors` is deliberately not counted here: it narrows out one
+   * account, not the trigger population the warning is about — a webhook with
+   * only an actor exclusion set still starts an agent for every issue event in
+   * every project the Jira user can see, minus that one account's own actions.
+   */
+  const filterIsEmpty =
+    Object.keys(filter).filter((k) => k !== 'excludeActors').length === 0;
 
   const addProjectRoute = (): void => {
-    setProjectMap((prev) => [...prev, { id: crypto.randomUUID(), projectKey: '', cwd }]);
+    // Blank, not the base `cwd`: a pre-filled row looks already-configured,
+    // which is exactly how a mapping silently ends up routing to the same
+    // directory as everything else — the row *looked* done and nobody noticed
+    // it needed changing. Blank forces a deliberate choice via the select's
+    // own placeholder option.
+    setProjectMap((prev) => [...prev, { id: crypto.randomUUID(), projectKey: '', cwd: '' }]);
   };
   const removeProjectRoute = (id: string): void => {
     setProjectMap((prev) => prev.filter((r) => r.id !== id));
@@ -313,6 +345,15 @@ export function WebhookEditorPage({
     return null;
   }, [cleanedProjectMap]);
 
+  /**
+   * What actually reaches the server. `workspace` mode sends an empty map
+   * regardless of whatever rows are sitting in state — switching modes must
+   * not leave a stale mapping behind that reactivates the next time someone
+   * flips back to `auto-map`, and it's what makes the two modes genuinely
+   * mutually exclusive rather than just visually so.
+   */
+  const effectiveProjectMap = directoryMode === 'auto-map' ? cleanedProjectMap : [];
+
   const slugProblem =
     slug.trim() === '' ? null : WEBHOOK_SLUG_RE.test(slug.trim()) ? null : 'Lowercase letters, digits and dashes only.';
 
@@ -330,9 +371,15 @@ export function WebhookEditorPage({
       setError(slugProblem);
       return;
     }
-    if (projectMapDuplicate !== null) {
-      setError(`Project "${projectMapDuplicate}" is mapped more than once.`);
-      return;
+    if (directoryMode === 'auto-map') {
+      if (projectMapDuplicate !== null) {
+        setError(`Project "${projectMapDuplicate}" is mapped more than once.`);
+        return;
+      }
+      if (cleanedProjectMap.length === 0) {
+        setError('Add at least one project mapping, or switch to Workspace mode.');
+        return;
+      }
     }
     setBusy(true);
     setError(null);
@@ -340,7 +387,7 @@ export function WebhookEditorPage({
     const common = {
       name: name.trim(),
       enabled,
-      config: { type: 'jira' as const, filter, projectMap: cleanedProjectMap },
+      config: { type: 'jira' as const, filter, projectMap: effectiveProjectMap },
       authMode,
       cwd,
       agent,
@@ -695,6 +742,14 @@ export function WebhookEditorPage({
             onChange={setChangedFields}
           />
         )}
+        <TextRow
+          label="Ignore actor"
+          value={excludeActors}
+          busy={busy}
+          placeholder="Agent Bot"
+          help="Comma-separated display names. The one field above that excludes rather than requires — list the account this agent comments as, so its own comment on a ticket doesn’t re-trigger this webhook."
+          onChange={setExcludeActors}
+        />
         {filterIsEmpty && (
           <div className="warn-callout" role="alert">
             Nothing is filtered. This will start an agent for every issue event in every project
@@ -797,11 +852,28 @@ export function WebhookEditorPage({
       <SectionCard title="Project & agent" icon="folder">
         <SelectRowNative
           busy={busy}
-          label="Project"
-          value={cwd}
-          options={dirOptions}
-          onChange={setCwd}
+          label="Directory"
+          value={directoryMode}
+          options={[
+            { value: 'workspace', label: 'Workspace' },
+            { value: 'auto-map', label: 'Auto map by Jira project' },
+          ]}
+          help={
+            directoryMode === 'workspace'
+              ? 'Every delivery runs in one directory, picked below.'
+              : 'Each Jira project key routes to its own directory, configured below — there is no single directory picker in this mode.'
+          }
+          onChange={(v) => setDirectoryMode(v as 'workspace' | 'auto-map')}
         />
+        {directoryMode === 'workspace' && (
+          <SelectRowNative
+            busy={busy}
+            label="Project"
+            value={cwd}
+            options={dirOptions}
+            onChange={setCwd}
+          />
+        )}
         <SelectRowNative
           busy={busy}
           label="Agent"
@@ -844,14 +916,15 @@ export function WebhookEditorPage({
         )}
       </SectionCard>
 
+      {directoryMode === 'auto-map' && (
       <SectionCard
         title="Route by Jira project"
         icon="folder"
-        desc="Leave empty to always use the project above. Once you add a row, a delivery for a project that isn’t listed here is filtered instead of falling back to it."
+        desc="Each Jira project key routes to its own directory. A delivery for a project not listed here is filtered rather than guessed at — add at least one row."
       >
         {projectMap.length === 0 && (
           <p className="transport-hint">
-            No per-project routing. Every delivery runs in the project selected above.
+            No projects mapped yet. Every delivery will be filtered until you add one.
           </p>
         )}
         {projectMap.map((row) => (
@@ -905,6 +978,7 @@ export function WebhookEditorPage({
           </div>
         )}
       </SectionCard>
+      )}
 
       <SectionCard
         title="Model & effort"

@@ -3,14 +3,16 @@ import type { Webhook } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { formatRelative } from '../components/StatusBadge.js';
+import { WebhookHistoryPanel } from '../components/WebhookHistoryPanel.js';
 
 const REFRESH_MS = 5000;
 
 interface Props {
   /** Opens one webhook's editor and delivery history. */
   onOpenWebhook: (webhookId: string) => void;
-  /** Every webhook's call history in one feed, including unmatched hits. */
-  onOpenHistory: () => void;
+  /** Opens a call-history row's live or finished transcript. */
+  onOpenSession: (sessionId: string) => void;
+  onOpenChat: (conversationId: string) => void;
   onApiError: (error: unknown) => void;
   /**
    * Present only on the phone route. `DesktopShell` renders this in its right
@@ -21,16 +23,24 @@ interface Props {
 }
 
 /**
- * The list of inbound webhooks.
+ * The list of inbound webhooks, and — below it, on the same page — every
+ * webhook's call history in one feed.
  *
- * Polls like `CronJobsPage`, for a slightly different reason: a webhook has no
- * countdown to tick, but `lastDeliveryStatus` changes when something outside
- * this machine decides it should, and that is exactly what someone watching
- * this page is waiting for.
+ * These used to be two destinations (`#/hooks` and `#/hooks/history`), which
+ * meant navigating into history needed its own way back. Folding history into
+ * a second section here removes that question entirely: there is nowhere to
+ * navigate back *from*, because you never left. `WebhookHistoryPanel` owns its
+ * own fetch/loading/error state independently of the list above it.
+ *
+ * The list itself polls like `CronJobsPage`, for a slightly different reason:
+ * a webhook has no countdown to tick, but `lastDeliveryStatus` changes when
+ * something outside this machine decides it should, and that is exactly what
+ * someone watching this page is waiting for.
  */
 export function WebhooksPage({
   onOpenWebhook,
-  onOpenHistory,
+  onOpenSession,
+  onOpenChat,
   onApiError,
   onBack,
 }: Props): JSX.Element {
@@ -98,10 +108,6 @@ export function WebhooksPage({
           </p>
         </div>
         <div className="cron-head-actions">
-          <button type="button" className="cron-secondary" onClick={onOpenHistory}>
-            <Icon name="clock" size={16} />
-            Call history
-          </button>
           <button type="button" className="cron-new" onClick={() => onOpenWebhook('new')}>
             <Icon name="plus" size={18} />
             New webhook
@@ -207,6 +213,22 @@ export function WebhooksPage({
           </div>
         </div>
       ))}
+
+      <div className="cron-head" style={{ marginTop: 28 }}>
+        <div>
+          <h2>Call history</h2>
+          <p className="cron-sub">
+            Every call to a webhook URL, across every webhook — including one that matched
+            nothing at all.
+          </p>
+        </div>
+      </div>
+      <WebhookHistoryPanel
+        onOpenSession={onOpenSession}
+        onOpenChat={onOpenChat}
+        onOpenWebhook={onOpenWebhook}
+        onApiError={onApiError}
+      />
     </div>
   );
 

@@ -139,6 +139,26 @@ describe('evaluateJiraFilter', () => {
     expect(no.matched === false && no.reason).toMatch(/\(unassigned\)/);
   });
 
+  it('excludes a listed actor, case-insensitively — the one block-list field', () => {
+    const bot = facts({ actor: 'Agent Bot' });
+    const no = evaluateJiraFilter({ excludeActors: ['agent bot'] }, bot);
+    expect(no.matched).toBe(false);
+    expect(no.matched === false && no.reason).toMatch(/Agent Bot is excluded/);
+    expect(evaluateJiraFilter({ excludeActors: ['agent bot'] }, facts()).matched).toBe(true);
+  });
+
+  it('never excludes a null actor — nothing to compare against', () => {
+    expect(evaluateJiraFilter({ excludeActors: ['Agent Bot'] }, facts({ actor: null })).matched).toBe(
+      true,
+    );
+  });
+
+  it('excludeActors combines with an allow-list: matches the allow-list but still excluded', () => {
+    const bot = facts({ actor: 'Agent Bot', issueType: 'Bug' });
+    const v = evaluateJiraFilter({ issueTypes: ['Bug'], excludeActors: ['Agent Bot'] }, bot);
+    expect(v.matched).toBe(false);
+  });
+
   it('gates on a changed field', () => {
     expect(evaluateJiraFilter({ changedFields: ['status'] }, facts()).matched).toBe(true);
     const no = evaluateJiraFilter({ changedFields: ['assignee'] }, facts());
@@ -193,6 +213,7 @@ describe('evaluateJiraFilter', () => {
       { assignees: ['Nobody'] },
       { changedFields: ['x'] },
       { labels: ['x'] },
+      { excludeActors: ['Ada'] },
     ];
     for (const f of cases) {
       const v = evaluateJiraFilter(f, facts());
@@ -251,10 +272,12 @@ describe('describeJiraFilter', () => {
       projectKeys: ['pa'],
       assignees: ['Grace Hopper'],
       labels: ['agent-ready'],
+      excludeActors: ['Agent Bot'],
     });
     expect(label).toContain('issue_created');
     expect(label).toContain('PA');
     expect(label).toContain('Grace Hopper');
     expect(label).toContain('agent-ready');
+    expect(label).toContain('Agent Bot');
   });
 });

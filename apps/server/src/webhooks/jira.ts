@@ -185,6 +185,18 @@ export function evaluateJiraFilter(
     }
   }
 
+  // The one block-list. Checked last on purpose: it is a veto rather than a
+  // requirement, and reads that way — every check above asks "does this
+  // qualify", this one asks "is this specifically excluded regardless".
+  if (nonEmpty(filter.excludeActors) && facts.actor !== null) {
+    if (filter.excludeActors.some((a) => eq(a, facts.actor))) {
+      return {
+        matched: false,
+        reason: `Actor ${facts.actor} is excluded.`,
+      };
+    }
+  }
+
   return { matched: true };
 }
 
@@ -234,6 +246,7 @@ export function describeJiraFilter(filter: JiraWebhookFilter): string {
     parts.push(`${filter.labelMode === 'all' ? 'all labels' : 'label'} ${filter.labels.join(', ')}`);
   }
   if (nonEmpty(filter.changedFields)) parts.push(`${filter.changedFields.join('/')} changed`);
+  if (nonEmpty(filter.excludeActors)) parts.push(`not ${filter.excludeActors.join(', ')}`);
   return parts.length > 0 ? `Jira · ${parts.join(' · ')}` : 'Jira issue events · everything';
 }
 

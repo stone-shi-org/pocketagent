@@ -662,6 +662,22 @@ describe('webhook delivery: filtering', () => {
     );
   });
 
+  it('excludes a listed actor — the deterministic way to stop an agent-comment loop', async () => {
+    // The scenario this exists for: the agent comments on the issue it was
+    // triggered by, and that comment_created event must not re-trigger the
+    // same webhook. `payloadFor()`'s default actor is 'Ada Lovelace'.
+    const hook = await withFilter({ excludeActors: ['ada lovelace'] });
+    const res = await deliver(SLUG, payloadFor(), { secret: hook.secret });
+    expect(res.json().status).toBe('filtered');
+
+    const rows = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 });
+    expect(rows[0]?.reason).toMatch(/Actor Ada Lovelace is excluded/);
+
+    // A different actor is unaffected.
+    const other = payloadFor({ user: { displayName: 'Grace Hopper' } });
+    expect((await deliver(SLUG, other, { secret: hook.secret })).json().status).toBe('running');
+  });
+
   it('does not count filtered deliveries as errors on the webhook row', async () => {
     const hook = await withFilter({ projectKeys: ['ENG'] });
     await deliver(SLUG, payloadFor(), { secret: hook.secret });

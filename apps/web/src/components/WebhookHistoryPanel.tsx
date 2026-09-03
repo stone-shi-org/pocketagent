@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { WebhookHistoryEntry } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
-import { Icon } from '../components/Icon.js';
-import { formatRelative } from '../components/StatusBadge.js';
+import { Icon } from './Icon.js';
+import { formatRelative } from './StatusBadge.js';
+import { WebhookCallDetailDialog } from './WebhookCallDetailDialog.js';
 
 interface Props {
   /** Opens a `kind: 'delivery'` row's live or finished transcript. */
@@ -11,11 +12,6 @@ interface Props {
   /** Opens a `kind: 'hit', reason: 'disabled'` row's owning webhook. */
   onOpenWebhook: (webhookId: string) => void;
   onApiError: (error: unknown) => void;
-  /**
-   * Present only on the phone route, exactly like `WebhooksPage` — see that
-   * component's own note on why `DesktopShell` passes nothing.
-   */
-  onBack?: () => void;
 }
 
 /** Delivery statuses that mean "this call never became a run". A hit is always this. */
@@ -52,27 +48,26 @@ const titleFor = (e: WebhookHistoryEntry): string => {
 };
 
 /**
- * Every webhook's call history, in one feed — including calls that matched no
- * runnable webhook at all.
+ * The call-history feed: every webhook's deliveries, merged with calls that
+ * matched no runnable webhook at all — see `GET /api/webhooks/history`.
  *
- * `WebhookEditorPage`'s own delivery list only ever shows one webhook's rows,
- * because it's scoped to that webhook's id. This page reads
- * `GET /api/webhooks/history`, which merges every webhook's deliveries with
- * `webhook_hit_log` (unknown slugs and disabled-webhook hits — see that
- * table's migration comment for why those are recorded at all). Loads once
- * on mount rather than polling, matching the per-webhook list it's modeled
- * on.
+ * Content only, no page chrome: this used to be its own routed page
+ * (`WebhookHistoryPage`, `#/hooks/history`), folded into `WebhooksPage` as a
+ * second section on the same page instead of a second destination, so there
+ * is nowhere for "how do I get back to the list" to even come up. Loads once
+ * on mount rather than polling, matching the per-webhook delivery list it was
+ * modeled on.
  */
-export function WebhookHistoryPage({
+export function WebhookHistoryPanel({
   onOpenSession,
   onOpenChat,
   onOpenWebhook,
   onApiError,
-  onBack,
 }: Props): JSX.Element {
   const [entries, setEntries] = useState<WebhookHistoryEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showNoise, setShowNoise] = useState(false);
+  const [detailEntry, setDetailEntry] = useState<WebhookHistoryEntry | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -101,18 +96,8 @@ export function WebhookHistoryPage({
     else if (e.agentSessionId) onOpenChat(e.agentSessionId);
   };
 
-  const content = (
-    <div className="cron-page">
-      <div className="cron-head">
-        <div>
-          <h2>Call history</h2>
-          <p className="cron-sub">
-            Every call to a webhook URL, across every webhook — including one that matched
-            nothing at all.
-          </p>
-        </div>
-      </div>
-
+  return (
+    <>
       {error !== null && (
         <div className="error-box" role="alert">
           {error}
@@ -136,41 +121,46 @@ export function WebhookHistoryPage({
       {visible.map((e) => {
         const openable = isOpenable(e);
         return (
-          <button
-            key={e.id}
-            type="button"
-            className={`cron-run-row${isNoise(e) ? ' inert' : ''}`}
-            disabled={!openable}
-            onClick={() => openEntry(e)}
-            title={titleFor(e)}
-          >
-            <span className="cron-run-row-main">
-              <span className={`cron-status cron-status--${statusFor(e)}`}>{statusFor(e)}</span>
-              <span className="cron-run-when">
-                {whoFor(e)}
-                {' · '}
-                {formatRelative(e.receivedAt)}
+          <div key={e.id} className={`call-row${isNoise(e) ? ' inert' : ''}`}>
+            <button
+              type="button"
+              className="cron-run-row"
+              disabled={!openable}
+              onClick={() => openEntry(e)}
+              title={titleFor(e)}
+            >
+              <span className="cron-run-row-main">
+                <span className={`cron-status cron-status--${statusFor(e)}`}>{statusFor(e)}</span>
+                <span className="cron-run-when">
+                  {whoFor(e)}
+                  {' · '}
+                  {formatRelative(e.receivedAt)}
+                </span>
               </span>
-            </span>
-            {e.kind === 'delivery' && e.reason !== null && (
-              <span className="delivery-reason">{e.reason}</span>
-            )}
-          </button>
+              {e.kind === 'delivery' && e.reason !== null && (
+                <span className="delivery-reason">{e.reason}</span>
+              )}
+            </button>
+            <button
+              type="button"
+              className="round-btn plain"
+              onClick={() => setDetailEntry(e)}
+              aria-label="Show call detail"
+              title="Show call detail"
+            >
+              <Icon name="code" size={16} />
+            </button>
+          </div>
         );
       })}
-    </div>
-  );
 
-  if (!onBack) return content;
-  return (
-    <div className="app">
-      <header className="home-bar">
-        <button type="button" className="round-btn" onClick={onBack} aria-label="Back">
-          <Icon name="chevron-left" size={20} />
-        </button>
-        <strong>Call history</strong>
-      </header>
-      {content}
-    </div>
+      {detailEntry !== null && (
+        <WebhookCallDetailDialog
+          entry={detailEntry}
+          onClose={() => setDetailEntry(null)}
+          onApiError={onApiError}
+        />
+      )}
+    </>
   );
 }
