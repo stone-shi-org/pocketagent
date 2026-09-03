@@ -1145,6 +1145,9 @@ export class WebhookService {
 
   toWebhook(row: WebhookRow): Webhook {
     const filter = this.filterFor(row);
+    const projectMap = this.projectMapFor(row);
+    const workspaceLabel =
+      projectMap.length > 0 ? 'Auto-mapped' : this.opts.workspaces.labelFor(row.cwd);
     return {
       id: row.id,
       name: row.name,
@@ -1155,9 +1158,9 @@ export class WebhookService {
       authMode: row.auth_mode as WebhookAuthMode,
       hasToken: row.auth_token_hash !== null,
       secretSetAt: row.secret_set_at,
-      config: { type: 'jira', filter, projectMap: this.projectMapFor(row) },
+      config: { type: 'jira', filter, projectMap },
       cwd: row.cwd,
-      workspaceLabel: this.opts.workspaces.labelFor(row.cwd),
+      workspaceLabel,
       agent: row.agent,
       agentDisplayName: this.opts.agents.get(row.agent)?.displayName ?? row.agent,
       worktreeMode: row.worktree_mode as 'none' | 'new-branch' | 'current-branch',
