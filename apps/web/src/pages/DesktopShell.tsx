@@ -353,29 +353,6 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             <Icon name="agents" size={16} />
             Agents
           </button>
-          {/*
-            Webhooks and the webhook editor have no tab, and unlike every other
-            pane reached only from the "…" menu, there was no way back out once
-            you navigated in — `onBack` is deliberately omitted on desktop for
-            these shared-content pages (see `WebhooksPage`'s own doc comment),
-            on the assumption that the sidebar is already the way back. That
-            assumption only holds where a persistent button like this one
-            exists; Cron has the identical gap today, left alone here since it
-            wasn't part of what was reported.
-          */}
-          <button
-            type="button"
-            className={
-              route.name === 'webhooks' || route.name === 'webhook'
-                ? 'webhooks-nav-btn active'
-                : 'webhooks-nav-btn'
-            }
-            onClick={() => onNavigate({ name: 'webhooks' })}
-            aria-pressed={route.name === 'webhooks' || route.name === 'webhook'}
-          >
-            <Icon name="webhook" size={16} />
-            Webhooks
-          </button>
         </div>
 
         <div className="sidebar-search">
@@ -468,9 +445,10 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             onApiError={onApiError}
           />
         ) : route.name === 'settings' ? (
-          <SettingsPage onApiError={onApiError} />
+          <SettingsPage onBack={() => onNavigate({ name: 'list' })} onApiError={onApiError} />
         ) : route.name === 'cron' ? (
           <CronJobsPage
+            onBack={() => onNavigate({ name: 'list' })}
             onOpenJob={(jobId) => onNavigate({ name: 'cron-job', jobId })}
             onApiError={onApiError}
           />
@@ -478,6 +456,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
           <CronJobEditorPage
             key={route.jobId}
             jobId={route.jobId}
+            onBack={() => onNavigate({ name: 'cron' })}
             onDone={() => {
               void state.refresh();
               onNavigate({ name: 'cron' });
@@ -488,6 +467,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
           />
         ) : route.name === 'webhooks' ? (
           <WebhooksPage
+            onBack={() => onNavigate({ name: 'list' })}
             onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
             onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
             onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
@@ -497,6 +477,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
           <WebhookEditorPage
             key={route.webhookId}
             webhookId={route.webhookId}
+            onBack={() => onNavigate({ name: 'webhooks' })}
             onDone={() => {
               void state.refresh();
               onNavigate({ name: 'webhooks' });

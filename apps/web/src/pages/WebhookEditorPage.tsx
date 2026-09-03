@@ -12,6 +12,7 @@ import type {
 } from '@pocketagent/protocol';
 import {
   DEFAULT_JIRA_PROMPT_TEMPLATE,
+  JIRA_PROMPT_TEMPLATES,
   JIRA_TEMPLATE_VARS,
   WEBHOOK_SLUG_RE,
 } from '@pocketagent/protocol';
@@ -19,7 +20,7 @@ import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { SecretReveal } from '../components/SecretReveal.js';
 import { SelectRowNative } from '../components/SelectRowNative.js';
-import { formatRelative } from '../components/StatusBadge.js';
+import { formatRelative, WebhookStatusIcon } from '../components/StatusBadge.js';
 import { flattenProjects } from '../agent/search.js';
 import { NumberRow, SectionCard, TextRow } from './SettingsPage.js';
 
@@ -759,6 +760,30 @@ export function WebhookEditorPage({
       </SectionCard>
 
       <SectionCard title="Prompt" icon="compose">
+        <SelectRowNative
+          busy={busy}
+          label="Template preset"
+          value={
+            JIRA_PROMPT_TEMPLATES.find((p) => p.template === promptTemplate)?.id ?? 'custom'
+          }
+          options={[
+            ...JIRA_PROMPT_TEMPLATES.map((p) => ({
+              value: p.id,
+              label: p.name,
+            })),
+            { value: 'custom', label: 'Custom prompt template' },
+          ]}
+          help={
+            JIRA_PROMPT_TEMPLATES.find((p) => p.template === promptTemplate)?.description ??
+            'Custom prompt instructions for the agent.'
+          }
+          onChange={(val) => {
+            const found = JIRA_PROMPT_TEMPLATES.find((p) => p.id === val);
+            if (found) {
+              setPromptTemplate(found.template);
+            }
+          }}
+        />
         <TextRow
           label="Prompt template"
           value={promptTemplate}
@@ -1128,36 +1153,63 @@ export function WebhookEditorPage({
                 : 'No deliveries have started a run.'}
             </p>
           ) : (
-            visibleDeliveries.map((d) => {
-              const openable = d.sessionId !== null || d.agentSessionId !== null;
-              return (
-                <button
-                  key={d.id}
-                  type="button"
-                  className={`cron-run-row${DID_NOT_RUN.has(d.status) ? ' inert' : ''}`}
-                  disabled={!openable}
-                  onClick={() => openDelivery(d)}
-                  title={
-                    openable
-                      ? 'Open this delivery’s transcript'
-                      : (d.reason ?? 'No transcript available')
-                  }
-                >
-                  <span className="cron-run-row-main">
-                    <span className={`cron-status cron-status--${d.status}`}>{d.status}</span>
-                    <span className="cron-run-when">
-                      {d.issueKey ?? d.event ?? 'delivery'}
-                      {' · '}
-                      {formatRelative(d.receivedAt)}
-                      {d.trigger === 'test' && ' · test'}
-                      {d.skipPermissionsEnabled && ' · bypassed'}
-                    </span>
-                  </span>
-                  {d.reason !== null && <span className="delivery-reason">{d.reason}</span>}
-                  {d.error !== null && <span className="cron-run-error">{d.error}</span>}
-                </button>
-              );
-            })
+            <div className="webhook-history-panel" style={{ border: 'none', background: 'transparent' }}>
+              {visibleDeliveries.map((d) => {
+                const openable = d.sessionId !== null || d.agentSessionId !== null;
+                return (
+                  <div key={d.id} className={`history-row${DID_NOT_RUN.has(d.status) ? ' inert' : ''}`}>
+                    <button
+                      type="button"
+                      className="history-row-main"
+                      disabled={!openable}
+                      onClick={() => openDelivery(d)}
+                      title={
+                        openable
+                          ? 'Open this delivery’s transcript'
+                          : (d.reason ?? 'No transcript available')
+                      }
+                    >
+                      <div className="history-row-primary">
+                        <WebhookStatusIcon status={d.status} />
+
+                        {d.issueKey && (
+                          <span className="jira-issue-badge">{d.issueKey}</span>
+                        )}
+
+                        {d.event && (
+                          <span className="jira-event-badge">
+                            {d.event.replace(/^jira:/, '').replace(/^issue_/, '')}
+                          </span>
+                        )}
+
+                        {d.actor && (
+                          <span className="history-row-actor">by {d.actor}</span>
+                        )}
+
+                        {d.trigger === 'test' && (
+                          <span className="history-test-tag">test</span>
+                        )}
+
+                        {d.skipPermissionsEnabled && (
+                          <Icon
+                            name="shield"
+                            size={13}
+                            className="cron-shield"
+                            aria-label="Approvals bypassed"
+                          />
+                        )}
+                      </div>
+
+                      <div className="history-row-secondary">
+                        <span className="history-row-time">{formatRelative(d.receivedAt)}</span>
+                        {d.reason !== null && <span className="delivery-reason">{d.reason}</span>}
+                        {d.error !== null && <span className="history-row-error">{d.error}</span>}
+                      </div>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </SectionCard>
       )}
@@ -1171,7 +1223,9 @@ export function WebhookEditorPage({
         <button type="button" className="round-btn" onClick={onBack} aria-label="Back">
           <Icon name="chevron-left" size={20} />
         </button>
-        <strong>{isNew ? 'New webhook' : name || 'Webhook'}</strong>
+        <div className="home-title">
+          <strong>{isNew ? 'New webhook' : name || 'Webhook'}</strong>
+        </div>
       </header>
       {body}
     </div>

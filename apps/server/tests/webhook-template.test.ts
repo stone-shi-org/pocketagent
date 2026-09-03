@@ -197,4 +197,14 @@ describe('renderJiraTemplate: sanitization', () => {
     const v = vars(issue({ labels: many }));
     expect(v['issue.labels'].split(', ')).toHaveLength(20);
   });
+
+  it('renders all predefined template presets without missing variables', async () => {
+    const { JIRA_PROMPT_TEMPLATES } = await import('@pocketagent/protocol');
+    expect(JIRA_PROMPT_TEMPLATES.length).toBeGreaterThanOrEqual(3);
+    for (const preset of JIRA_PROMPT_TEMPLATES) {
+      const r = render(preset.template, JIRA_SAMPLE_PAYLOAD);
+      expect(r.text).toContain('PA-123');
+      expect(r.missing).toHaveLength(0);
+    }
+  });
 });

@@ -48,6 +48,7 @@ import {
 } from '../db/index.js';
 import type { SessionManager, StructuredLikeSession } from '../sessions/manager.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
+import { isContained } from '../workspaces/index.js';
 import type { WorktreeService } from '../git/worktree.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import { safeTokenEqual } from '../auth/index.js';
@@ -473,9 +474,13 @@ export class WebhookService {
 
     if (hook.conversation_mode === 'per-issue') {
       const mapped = readWebhookIssueSession(this.db, hook.id, facts.issueKey);
-      // Case 1: the conversation is still live. Nothing to create, nothing to
-      // resume — just another turn in the session already handling this issue.
-      if (mapped !== null && mapped.session_id !== null && this.executor.isAlive(mapped.session_id)) {
+      const sameProject = mapped !== null && (mapped.cwd === cwd || isContained(cwd, mapped.cwd));
+
+      // Case 1: the conversation is still live in the same project directory.
+      // Nothing to create, nothing to resume — just another turn in the session
+      // already handling this issue. If the project mapping changed, do NOT
+      // follow up in the old project's session.
+      if (sameProject && mapped.session_id !== null && this.executor.isAlive(mapped.session_id)) {
         const live = this.opts.sessions.get(mapped.session_id);
         if (live !== undefined && live.transport === 'structured') {
           const ok = this.executor.followUp(
@@ -487,10 +492,11 @@ export class WebhookService {
           return { sessionId: ok ? mapped.session_id : null, error: null };
         }
       }
-      // Case 2: the conversation exists but its session has ended. Resume it in
-      // the worktree the first delivery made, rather than minting a second one.
-
-      if (mapped !== null && mapped.agent_session_id !== null) {
+      // Case 2: the conversation exists in the same project directory but its
+      // session has ended. Resume it in the worktree the first delivery made,
+      // rather than minting a second one. If the project mapping changed to a
+      // different directory, start fresh in the new cwd.
+      if (sameProject && mapped.agent_session_id !== null) {
         const outcome = await this.executor.start(
           deliveryId,
           {

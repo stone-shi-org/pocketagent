@@ -122,6 +122,88 @@ Investigate {{issue.key}} in this repository: find the relevant code, work out
 what is going on, and write up what you find. Do not push a branch, comment on
 the issue, or change anything outside this working tree unless told to above.`;
 
+export const JIRA_PROMPT_TEMPLATE_FIX_ISSUE = `A Jira issue update event arrived: {{event}}.
+
+Issue:    {{issue.key}}
+Project:  {{issue.project}} ({{issue.projectKey}})
+Type:     {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
+Labels:   {{issue.labels}}
+Changed:  {{changelog.fields}}
+
+Summary:
+{{issue.summary}}
+
+Description:
+{{issue.description}}
+
+Comment:
+{{comment.body}}
+
+Workflow Instructions:
+1. Triage the issue and understand what needs to be fixed.
+2. If the user commented "go ahead" / "fix it" OR if the issue has the tag/label "agent ready":
+   - Implement the fix in the codebase and run verification tests.
+   - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Fix: ...").
+   - Transition/mark the Jira ticket status as "In Review" (or "in-review").
+3. If not yet approved or ready, analyze the root cause and propose the solution plan without modifying code.`;
+
+export const JIRA_PROMPT_TEMPLATE_NEW_FEATURE = `A Jira feature request event arrived: {{event}}.
+
+Issue:    {{issue.key}}
+Project:  {{issue.project}} ({{issue.projectKey}})
+Type:     {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
+Labels:   {{issue.labels}}
+Changed:  {{changelog.fields}}
+
+Summary:
+{{issue.summary}}
+
+Description:
+{{issue.description}}
+
+Comment:
+{{comment.body}}
+
+Workflow Instructions:
+1. Initial Phase (Plan & Propose):
+   - When a feature request arrives, investigate the repository and generate a comprehensive implementation plan.
+   - Format the plan as a Markdown (.md) document, attach/post it to the Jira ticket, and transition/mark the ticket status to "In Progress" (or "in-progress").
+   - Wait for review and approval.
+2. Execution Phase (Once Approved):
+   - Once a user comments "go ahead" or "approve", or adds the tag/label "agent ready" or "approved":
+     - Execute the implementation plan carefully across the codebase.
+     - Verify with relevant test suites.
+     - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Feature: ...").
+     - Transition/mark the Jira ticket status as "In Review" (or "in-review").`;
+
+export interface JiraPromptTemplatePreset {
+  id: string;
+  name: string;
+  description: string;
+  template: string;
+}
+
+export const JIRA_PROMPT_TEMPLATES: readonly JiraPromptTemplatePreset[] = [
+  {
+    id: 'triage-only',
+    name: 'Investigation & Triage (Default)',
+    description: 'Investigate the issue, find relevant code, and write up findings without modifying code.',
+    template: DEFAULT_JIRA_PROMPT_TEMPLATE,
+  },
+  {
+    id: 'fix-issue',
+    name: 'Fix Issue (Triage + Auto-Fix & Commit on Approval)',
+    description: 'Triage bug; when approved ("go ahead", "fix it", "agent ready"), implement fix, commit with ticket key, and mark in-review.',
+    template: JIRA_PROMPT_TEMPLATE_FIX_ISSUE,
+  },
+  {
+    id: 'new-feature',
+    name: 'New Feature (Plan & Attach -> Execute on Approval)',
+    description: 'Generate plan md, mark in-progress, wait; when approved ("go ahead", "approved", "agent ready"), implement, commit with ticket key, and mark in-review.',
+    template: JIRA_PROMPT_TEMPLATE_NEW_FEATURE,
+  },
+];
+
 /** A realistic payload, so the editor can preview before any delivery exists. */
 export const JIRA_SAMPLE_PAYLOAD: unknown = {
   timestamp: 1_756_000_000_000,
