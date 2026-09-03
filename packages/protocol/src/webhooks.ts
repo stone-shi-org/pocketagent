@@ -172,6 +172,18 @@ export const JiraProjectMapEntry = z.object({
 export type JiraProjectMapEntry = z.infer<typeof JiraProjectMapEntry>;
 
 /**
+ * One row pairing an issue type with a specific prompt template.
+ *
+ * `issueType` can be "All type" / "*" (fallback rule) or a specific Jira issue
+ * type name like "Bug", "Story", "Task", "Incident", etc.
+ */
+export const JiraPromptTemplateMapEntry = z.object({
+  issueType: z.string().min(1).max(64),
+  promptTemplate: z.string().min(1).max(LIMITS.maxInputChars),
+});
+export type JiraPromptTemplateMapEntry = z.infer<typeof JiraPromptTemplateMapEntry>;
+
+/**
  * Discriminated on `type` so a second provider is purely additive.
  *
  * A discriminated union cannot be `.partial()`-ed, so a PATCH replaces `config`
@@ -188,12 +200,16 @@ export type JiraProjectMapEntry = z.infer<typeof JiraProjectMapEntry>;
  * `projectKey` across rows is checked in the route, not here — this schema
  * intentionally carries no `.refine()`, for the same two reasons
  * `WebhookFields` below gives.
+ *
+ * `promptTemplateMap` defaults to `[]`. When populated, incoming issues match
+ * against mapped issue types before falling back to "All type" / top-level template.
  */
 export const WebhookConfig = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('jira'),
     filter: JiraWebhookFilter,
     projectMap: z.array(JiraProjectMapEntry).max(50).default([]),
+    promptTemplateMap: z.array(JiraPromptTemplateMapEntry).max(50).default([]),
   }),
 ]);
 export type WebhookConfig = z.infer<typeof WebhookConfig>;

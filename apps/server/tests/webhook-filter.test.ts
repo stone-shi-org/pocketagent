@@ -5,6 +5,7 @@ import {
   evaluateJiraFilter,
   parseJiraEvent,
   resolveProjectRoute,
+  resolvePromptTemplate,
 } from '../src/webhooks/jira.js';
 
 /**
@@ -279,5 +280,37 @@ describe('describeJiraFilter', () => {
     expect(label).toContain('Grace Hopper');
     expect(label).toContain('agent-ready');
     expect(label).toContain('Agent Bot');
+  });
+});
+
+describe('resolvePromptTemplate', () => {
+  it('falls back to default prompt template when map is empty', () => {
+    expect(resolvePromptTemplate([], 'Default Template', 'Bug')).toBe('Default Template');
+    expect(resolvePromptTemplate([], 'Default Template', null)).toBe('Default Template');
+  });
+
+  it('matches specific issue type case-insensitively', () => {
+    const map = [
+      { issueType: 'Bug', promptTemplate: 'Bug Template' },
+      { issueType: 'Story', promptTemplate: 'Story Template' },
+      { issueType: 'All type', promptTemplate: 'All Type Fallback' },
+    ];
+    expect(resolvePromptTemplate(map, 'Default Template', 'bug')).toBe('Bug Template');
+    expect(resolvePromptTemplate(map, 'Default Template', 'BUG')).toBe('Bug Template');
+    expect(resolvePromptTemplate(map, 'Default Template', 'Story')).toBe('Story Template');
+  });
+
+  it('falls back to "All type" / "*" rule when specific issue type does not match', () => {
+    const map = [
+      { issueType: 'Bug', promptTemplate: 'Bug Template' },
+      { issueType: 'All type', promptTemplate: 'All Type Fallback' },
+    ];
+    expect(resolvePromptTemplate(map, 'Default Template', 'Task')).toBe('All Type Fallback');
+    expect(resolvePromptTemplate(map, 'Default Template', null)).toBe('All Type Fallback');
+  });
+
+  it('falls back to default template when neither specific type nor "All type" is mapped', () => {
+    const map = [{ issueType: 'Bug', promptTemplate: 'Bug Template' }];
+    expect(resolvePromptTemplate(map, 'Default Template', 'Task')).toBe('Default Template');
   });
 });

@@ -3962,6 +3962,51 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   height: 32px;
 }
 
+/* One row of the Jira issue type → prompt template map */
+.prompt-map-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.prompt-map-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.prompt-map-type-select {
+  width: 140px;
+  flex: none;
+}
+
+.prompt-map-type-custom {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+.prompt-map-preset-select {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.prompt-map-remove {
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+}
+
+.prompt-map-textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
+
 .settings-unit {
   color: var(--text-dim);
   font-weight: 400;

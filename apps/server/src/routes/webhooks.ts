@@ -7,7 +7,7 @@ import {
   WEBHOOK_SLUG_RE,
   WebhookTestRequest,
 } from '@pocketagent/protocol';
-import type { JiraProjectMapEntry } from '@pocketagent/protocol';
+import type { JiraProjectMapEntry, JiraPromptTemplateMapEntry } from '@pocketagent/protocol';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 import type { WebhookSpec } from '../webhooks/index.js';
 import { WebhookServiceError } from '../webhooks/index.js';
@@ -90,9 +90,12 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     const projectMap = await resolveProjectMap(workspaces, body.config.projectMap, reply);
     if (projectMap === null) return reply;
 
+    const templateMapDup = checkPromptTemplateMapDuplicates(body.config.promptTemplateMap);
+    if (templateMapDup !== null) return badRequest(reply, templateMapDup);
+
     try {
       const created = webhooks.create({
-        ...specFrom(body, projectMap),
+        ...specFrom(body, projectMap, body.config.promptTemplateMap),
         slug,
         cwd,
       });
@@ -133,10 +136,15 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     // `config` replaces wholesale, so the project map is re-resolved in full
     // whenever it is sent — same as the filter object just above it.
     let projectMap: JiraProjectMapEntry[] | undefined;
+    let promptTemplateMap: JiraPromptTemplateMapEntry[] | undefined;
     if (body.config !== undefined) {
       const resolved = await resolveProjectMap(workspaces, body.config.projectMap, reply);
       if (resolved === null) return reply;
       projectMap = resolved;
+
+      const templateMapDup = checkPromptTemplateMapDuplicates(body.config.promptTemplateMap);
+      if (templateMapDup !== null) return badRequest(reply, templateMapDup);
+      promptTemplateMap = body.config.promptTemplateMap;
     }
 
     try {
@@ -144,7 +152,9 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.slug !== undefined ? { slug: body.slug } : {}),
         ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
-        ...(body.config !== undefined ? { filter: body.config.filter, projectMap } : {}),
+        ...(body.config !== undefined
+          ? { filter: body.config.filter, projectMap, promptTemplateMap }
+          : {}),
         ...(body.authMode !== undefined ? { authMode: body.authMode } : {}),
         ...(cwd !== undefined ? { cwd } : {}),
         ...(body.agent !== undefined ? { agent: body.agent } : {}),
@@ -368,6 +378,20 @@ function checkProjectMapDuplicates(entries: { projectKey: string }[]): string | 
 }
 
 /**
+ * Reject a blank or duplicate issue type in prompt template map.
+ */
+function checkPromptTemplateMapDuplicates(entries: JiraPromptTemplateMapEntry[]): string | null {
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const key = entry.issueType.trim().toLowerCase();
+    if (key === '') return 'A prompt template mapping needs an issue type.';
+    if (seen.has(key)) return `Issue type "${entry.issueType.trim()}" is mapped more than once.`;
+    seen.add(key);
+  }
+  return null;
+}
+
+/**
  * Validate and resolve every row of a project map, the same way the
  * webhook's own `cwd` is resolved — each directory must be inside a
  * workspace folder. Returns `null` once the reply has already been sent;
@@ -401,6 +425,7 @@ function noStore(reply: FastifyReply): FastifyReply {
 function specFrom(
   body: CreateWebhookRequest,
   projectMap: JiraProjectMapEntry[],
+  promptTemplateMap: JiraPromptTemplateMapEntry[],
 ): Omit<WebhookSpec, 'slug' | 'cwd'> {
   return {
     name: body.name,
@@ -408,6 +433,7 @@ function specFrom(
     type: 'jira',
     filter: body.config.filter,
     projectMap,
+    promptTemplateMap,
     authMode: body.authMode,
     agent: body.agent,
     worktreeMode: body.worktreeMode,

@@ -790,6 +790,74 @@ describe('webhook delivery: project routing', () => {
   });
 });
 
+describe('webhook delivery: prompt template routing', () => {
+  const payloadForIssueType = (issueType: string, issueKey = 'PA-100'): string =>
+    JSON.stringify({
+      ...(JIRA_SAMPLE_PAYLOAD as object),
+      timestamp: Date.now(),
+      issue: {
+        key: issueKey,
+        fields: {
+          project: { key: 'PA', name: 'Pocket Agent' },
+          issuetype: { name: issueType },
+          summary: `Test ${issueType}`,
+          labels: [],
+        },
+      },
+    });
+
+  it('routes prompt template by issue type and falls back to All type', async () => {
+    const bugTemplate = 'Custom Bug Template: {{issue.key}}';
+    const fallbackTemplate = 'Custom Fallback Template: {{issue.key}}';
+
+    const hook = await createWebhook({
+      promptTemplate: 'Top Level Default Template: {{issue.key}}',
+      config: {
+        type: 'jira',
+        filter: {},
+        promptTemplateMap: [
+          { issueType: 'Bug', promptTemplate: bugTemplate },
+          { issueType: 'All type', promptTemplate: fallbackTemplate },
+        ],
+      },
+    });
+
+    // Preview Bug -> should match Bug Template
+    const previewBug = (
+      await post(`/api/webhooks/${hook.id}/preview`, {
+        payload: payloadForIssueType('Bug'),
+      })
+    ).json();
+    expect(previewBug.prompt).toContain('Custom Bug Template: PA-100');
+
+    // Preview Story -> should fall back to All type template
+    const previewStory = (
+      await post(`/api/webhooks/${hook.id}/preview`, {
+        payload: payloadForIssueType('Story'),
+      })
+    ).json();
+    expect(previewStory.prompt).toContain('Custom Fallback Template: PA-100');
+  });
+
+  it('rejects duplicate issue types in promptTemplateMap', async () => {
+    const res = await post(
+      '/api/webhooks',
+      validWebhook({
+        config: {
+          type: 'jira',
+          filter: {},
+          promptTemplateMap: [
+            { issueType: 'Bug', promptTemplate: 'Template 1' },
+            { issueType: 'bug', promptTemplate: 'Template 2' },
+          ],
+        },
+      }),
+    );
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toMatch(/mapped more than once/i);
+  });
+});
+
 describe('webhook delivery: unusable payloads', () => {
   it('rejects a body that is not JSON, after the signature passed', async () => {
     const hook = await createWebhook();

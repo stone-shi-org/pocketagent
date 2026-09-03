@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import type {
   JiraProjectMapEntry,
+  JiraPromptTemplateMapEntry,
   JiraWebhookFilter,
   Webhook,
   WebhookAuthMode,
@@ -60,6 +61,7 @@ import {
   evaluateJiraFilter,
   parseJiraEvent,
   resolveProjectRoute,
+  resolvePromptTemplate,
 } from './jira.js';
 
 /** How often to reconcile deliveries against session liveness and prune. */
@@ -150,6 +152,7 @@ export interface WebhookSpec {
   type: 'jira';
   filter: JiraWebhookFilter;
   projectMap: JiraProjectMapEntry[];
+  promptTemplateMap?: JiraPromptTemplateMapEntry[];
   authMode: WebhookAuthMode;
   cwd: string;
   agent: string;
@@ -436,7 +439,7 @@ export class WebhookService {
     }
 
     // 8. Render, then run.
-    const prompt = this.renderPrompt(hook, deliveryId, payload);
+    const prompt = this.renderPrompt(hook, deliveryId, payload, facts.issueType);
     updateWebhookDelivery(this.db, deliveryId, {
       rendered_prompt: prompt.text,
       payload_truncated: prompt.truncated ? 1 : 0,
@@ -647,14 +650,20 @@ export class WebhookService {
     hook: WebhookRow,
     deliveryId: string,
     payload: unknown,
+    issueType?: string | null,
   ): { text: string; truncated: boolean } {
     const vars = jiraTemplateVariables(payload, {
       webhookName: hook.name,
       deliveryId,
     });
+    const template = resolvePromptTemplate(
+      this.promptTemplateMapFor(hook),
+      hook.prompt_template,
+      issueType ?? null,
+    );
     // A fresh nonce per delivery: a fixed one would eventually appear in a Jira
     // description, and the fence would then be closable from inside.
-    const result = renderJiraTemplate(hook.prompt_template, vars, {
+    const result = renderJiraTemplate(template, vars, {
       nonce: crypto.randomBytes(8).toString('hex'),
     });
     return { text: result.text, truncated: result.truncated };
@@ -906,6 +915,16 @@ export class WebhookService {
     }
   }
 
+  private promptTemplateMapFor(hook: WebhookRow): JiraPromptTemplateMapEntry[] {
+    try {
+      const parsed = JSON.parse(hook.prompt_template_map_json) as unknown;
+      return Array.isArray(parsed) ? (parsed as JiraPromptTemplateMapEntry[]) : [];
+    } catch {
+      this.opts.logger?.warn({ webhook: hook.id }, 'webhook prompt template map JSON is unreadable');
+      return [];
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Public API used by the routes
   // -------------------------------------------------------------------------
@@ -942,6 +961,7 @@ export class WebhookService {
       secret_set_at: now,
       filter_json: JSON.stringify(spec.filter),
       project_map_json: JSON.stringify(spec.projectMap),
+      prompt_template_map_json: JSON.stringify(spec.promptTemplateMap ?? []),
       cwd: spec.cwd,
       agent: spec.agent,
       worktree_mode: spec.worktreeMode,
@@ -985,6 +1005,9 @@ export class WebhookService {
       ...(patch.filter !== undefined ? { filter_json: JSON.stringify(patch.filter) } : {}),
       ...(patch.projectMap !== undefined
         ? { project_map_json: JSON.stringify(patch.projectMap) }
+        : {}),
+      ...(patch.promptTemplateMap !== undefined
+        ? { prompt_template_map_json: JSON.stringify(patch.promptTemplateMap) }
         : {}),
       ...(patch.authMode !== undefined ? { auth_mode: patch.authMode } : {}),
       ...(patch.cwd !== undefined ? { cwd: patch.cwd } : {}),
@@ -1113,8 +1136,13 @@ export class WebhookService {
       throw new WebhookServiceError('That is not valid JSON.', 'invalid_filter');
     }
     const parsed = parseJiraEvent(payload);
+    const template = opts.promptTemplate ?? resolvePromptTemplate(
+      this.promptTemplateMapFor(hook),
+      hook.prompt_template,
+      parsed.ok ? parsed.facts.issueType : null,
+    );
     const rendered = renderJiraTemplate(
-      opts.promptTemplate ?? hook.prompt_template,
+      template,
       jiraTemplateVariables(payload, { webhookName: hook.name, deliveryId: 'preview' }),
       { nonce: crypto.randomBytes(8).toString('hex') },
     );
@@ -1146,6 +1174,7 @@ export class WebhookService {
   toWebhook(row: WebhookRow): Webhook {
     const filter = this.filterFor(row);
     const projectMap = this.projectMapFor(row);
+    const promptTemplateMap = this.promptTemplateMapFor(row);
     const workspaceLabel =
       projectMap.length > 0 ? 'Auto-mapped' : this.opts.workspaces.labelFor(row.cwd);
     return {
@@ -1158,7 +1187,7 @@ export class WebhookService {
       authMode: row.auth_mode as WebhookAuthMode,
       hasToken: row.auth_token_hash !== null,
       secretSetAt: row.secret_set_at,
-      config: { type: 'jira', filter, projectMap },
+      config: { type: 'jira', filter, projectMap, promptTemplateMap },
       cwd: row.cwd,
       workspaceLabel,
       agent: row.agent,

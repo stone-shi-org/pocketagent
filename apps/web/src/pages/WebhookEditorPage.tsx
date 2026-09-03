@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   AgentInfo,
   CronWorktreeMode,
+  JiraPromptTemplateMapEntry,
   JiraWebhookFilter,
   ProjectInfo,
   Webhook,
@@ -141,6 +142,12 @@ export function WebhookEditorPage({
    */
   const [directoryMode, setDirectoryMode] = useState<'workspace' | 'auto-map'>('workspace');
 
+  // ---- Per-issue-type prompt template routing ---------------------------------
+  const [promptTemplateMap, setPromptTemplateMap] = useState<
+    { id: string; issueType: string; promptTemplate: string }[]
+  >([]);
+  const [promptTemplateMode, setPromptTemplateMode] = useState<'single' | 'by-issue-type'>('single');
+
   const loadDeliveries = useCallback(async () => {
     if (isNew) return;
     try {
@@ -225,6 +232,16 @@ export function WebhookEditorPage({
         })),
       );
       setDirectoryMode(hook.config.projectMap.length > 0 ? 'auto-map' : 'workspace');
+      setPromptTemplateMap(
+        (hook.config.promptTemplateMap ?? []).map((e) => ({
+          id: crypto.randomUUID(),
+          issueType: e.issueType,
+          promptTemplate: e.promptTemplate,
+        })),
+      );
+      setPromptTemplateMode(
+        (hook.config.promptTemplateMap ?? []).length > 0 ? 'by-issue-type' : 'single',
+      );
     }
   }, [id, isNew, onApiError]);
 
@@ -355,6 +372,48 @@ export function WebhookEditorPage({
    */
   const effectiveProjectMap = directoryMode === 'auto-map' ? cleanedProjectMap : [];
 
+  const addPromptTemplateRoute = (): void => {
+    setPromptTemplateMap((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), issueType: 'All type', promptTemplate: DEFAULT_JIRA_PROMPT_TEMPLATE },
+    ]);
+  };
+  const removePromptTemplateRoute = (id: string): void => {
+    setPromptTemplateMap((prev) => prev.filter((r) => r.id !== id));
+  };
+  const updatePromptTemplateRoute = (
+    id: string,
+    patch: Partial<{ issueType: string; promptTemplate: string }>,
+  ): void => {
+    setPromptTemplateMap((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  };
+
+  /** Blank rows are dropped rather than rejected — a half-filled-in row while typing is not an error. */
+  const cleanedPromptTemplateMap = useMemo(
+    () =>
+      promptTemplateMap
+        .map((r) => ({
+          issueType: r.issueType.trim(),
+          promptTemplate: r.promptTemplate.trim(),
+        }))
+        .filter((r) => r.issueType !== '' && r.promptTemplate !== ''),
+    [promptTemplateMap],
+  );
+
+  /** Reject duplicate issue type mapping */
+  const promptTemplateMapDuplicate = useMemo(() => {
+    const seen = new Set<string>();
+    for (const r of cleanedPromptTemplateMap) {
+      const key = r.issueType.toLowerCase();
+      if (seen.has(key)) return r.issueType;
+      seen.add(key);
+    }
+    return null;
+  }, [cleanedPromptTemplateMap]);
+
+  const effectivePromptTemplateMap =
+    promptTemplateMode === 'by-issue-type' ? cleanedPromptTemplateMap : [];
+
   const slugProblem =
     slug.trim() === '' ? null : WEBHOOK_SLUG_RE.test(slug.trim()) ? null : 'Lowercase letters, digits and dashes only.';
 
@@ -382,13 +441,28 @@ export function WebhookEditorPage({
         return;
       }
     }
+    if (promptTemplateMode === 'by-issue-type') {
+      if (promptTemplateMapDuplicate !== null) {
+        setError(`Issue type "${promptTemplateMapDuplicate}" is mapped more than once.`);
+        return;
+      }
+      if (cleanedPromptTemplateMap.length === 0) {
+        setError('Add at least one prompt template mapping, or switch to Single template mode.');
+        return;
+      }
+    }
     setBusy(true);
     setError(null);
 
     const common = {
       name: name.trim(),
       enabled,
-      config: { type: 'jira' as const, filter, projectMap: effectiveProjectMap },
+      config: {
+        type: 'jira' as const,
+        filter,
+        projectMap: effectiveProjectMap,
+        promptTemplateMap: effectivePromptTemplateMap,
+      },
       authMode,
       cwd,
       agent,
@@ -762,36 +836,171 @@ export function WebhookEditorPage({
       <SectionCard title="Prompt" icon="compose">
         <SelectRowNative
           busy={busy}
-          label="Template preset"
-          value={
-            JIRA_PROMPT_TEMPLATES.find((p) => p.template === promptTemplate)?.id ?? 'custom'
-          }
+          label="Template routing"
+          value={promptTemplateMode}
           options={[
-            ...JIRA_PROMPT_TEMPLATES.map((p) => ({
-              value: p.id,
-              label: p.name,
-            })),
-            { value: 'custom', label: 'Custom prompt template' },
+            { value: 'single', label: 'Single prompt template' },
+            { value: 'by-issue-type', label: 'Auto pick by Jira issue type' },
           ]}
           help={
-            JIRA_PROMPT_TEMPLATES.find((p) => p.template === promptTemplate)?.description ??
-            'Custom prompt instructions for the agent.'
+            promptTemplateMode === 'single'
+              ? 'Every delivery uses the single template configured below.'
+              : 'Routes prompt templates by Jira issue type (or "All type" fallback).'
           }
-          onChange={(val) => {
-            const found = JIRA_PROMPT_TEMPLATES.find((p) => p.id === val);
-            if (found) {
-              setPromptTemplate(found.template);
-            }
-          }}
+          onChange={(v) => setPromptTemplateMode(v as 'single' | 'by-issue-type')}
         />
-        <TextRow
-          label="Prompt template"
-          value={promptTemplate}
-          busy={busy}
-          multiline
-          rows={10}
-          onChange={setPromptTemplate}
-        />
+
+        {promptTemplateMode === 'single' ? (
+          <>
+            <SelectRowNative
+              busy={busy}
+              label="Template preset"
+              value={
+                JIRA_PROMPT_TEMPLATES.find((p) => p.template === promptTemplate)?.id ?? 'custom'
+              }
+              options={[
+                ...JIRA_PROMPT_TEMPLATES.map((p) => ({
+                  value: p.id,
+                  label: p.name,
+                })),
+                { value: 'custom', label: 'Custom prompt template' },
+              ]}
+              help={
+                JIRA_PROMPT_TEMPLATES.find((p) => p.template === promptTemplate)?.description ??
+                'Custom prompt instructions for the agent.'
+              }
+              onChange={(val) => {
+                const found = JIRA_PROMPT_TEMPLATES.find((p) => p.id === val);
+                if (found) {
+                  setPromptTemplate(found.template);
+                }
+              }}
+            />
+            <TextRow
+              label="Prompt template"
+              value={promptTemplate}
+              busy={busy}
+              multiline
+              rows={10}
+              onChange={setPromptTemplate}
+            />
+          </>
+        ) : (
+          <div className="settings-row settings-row-stacked">
+            <div className="settings-row-info">
+              <label className="settings-row-label">Issue type template rules</label>
+              <p className="transport-hint">
+                Incoming deliveries will match issue type rules from top to bottom. Use &ldquo;All type&rdquo; as the fallback template.
+              </p>
+            </div>
+            {promptTemplateMap.length === 0 && (
+              <p className="transport-hint">
+                No issue type prompt templates configured yet. Add at least one rule.
+              </p>
+            )}
+            {promptTemplateMap.map((row) => {
+              const knownIssueTypes = ['All type', 'Bug', 'Story', 'Task', 'Incident', 'Feature', 'Epic', 'Sub-task'];
+              const isKnownType = knownIssueTypes.some((t) => t.toLowerCase() === row.issueType.trim().toLowerCase());
+              const typeSelectValue = isKnownType
+                ? knownIssueTypes.find((t) => t.toLowerCase() === row.issueType.trim().toLowerCase()) ?? 'custom'
+                : 'custom';
+              const matchedPreset = JIRA_PROMPT_TEMPLATES.find((p) => p.template === row.promptTemplate);
+
+              return (
+                <div key={row.id} className="prompt-map-card">
+                  <div className="prompt-map-header">
+                    <select
+                      className="settings-select prompt-map-type-select"
+                      value={typeSelectValue}
+                      disabled={busy}
+                      aria-label="Issue type selector"
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val !== 'custom') {
+                          updatePromptTemplateRoute(row.id, { issueType: val });
+                        } else if (isKnownType) {
+                          updatePromptTemplateRoute(row.id, { issueType: '' });
+                        }
+                      }}
+                    >
+                      <option value="All type">All type (Fallback)</option>
+                      <option value="Bug">Bug</option>
+                      <option value="Story">Story</option>
+                      <option value="Task">Task</option>
+                      <option value="Incident">Incident</option>
+                      <option value="Feature">Feature</option>
+                      <option value="Epic">Epic</option>
+                      <option value="Sub-task">Sub-task</option>
+                      <option value="custom">Custom issue type…</option>
+                    </select>
+
+                    {typeSelectValue === 'custom' && (
+                      <input
+                        type="text"
+                        className="settings-input prompt-map-type-custom"
+                        value={row.issueType}
+                        placeholder="Enter Jira issue type"
+                        disabled={busy}
+                        aria-label="Custom Jira issue type"
+                        onChange={(e) => updatePromptTemplateRoute(row.id, { issueType: e.target.value })}
+                      />
+                    )}
+
+                    <select
+                      className="settings-select prompt-map-preset-select"
+                      value={matchedPreset?.id ?? 'custom'}
+                      disabled={busy}
+                      aria-label="Prompt template preset"
+                      onChange={(e) => {
+                        const preset = JIRA_PROMPT_TEMPLATES.find((p) => p.id === e.target.value);
+                        if (preset) {
+                          updatePromptTemplateRoute(row.id, { promptTemplate: preset.template });
+                        }
+                      }}
+                    >
+                      {JIRA_PROMPT_TEMPLATES.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                      <option value="custom">Custom template</option>
+                    </select>
+
+                    <button
+                      type="button"
+                      className="round-btn prompt-map-remove"
+                      disabled={busy}
+                      aria-label={`Remove mapping for ${row.issueType || 'blank'}`}
+                      onClick={() => removePromptTemplateRoute(row.id)}
+                    >
+                      <Icon name="close" size={16} />
+                    </button>
+                  </div>
+
+                  <textarea
+                    className="settings-input settings-textarea prompt-map-textarea"
+                    rows={6}
+                    value={row.promptTemplate}
+                    disabled={busy}
+                    placeholder="Enter prompt template for this issue type..."
+                    aria-label={`Prompt template for ${row.issueType || 'issue type'}`}
+                    onChange={(e) => updatePromptTemplateRoute(row.id, { promptTemplate: e.target.value })}
+                  />
+                </div>
+              );
+            })}
+            <button type="button" disabled={busy} onClick={addPromptTemplateRoute}>
+              <Icon name="plus" size={16} />
+              Add issue type template
+            </button>
+            {promptTemplateMapDuplicate !== null && (
+              <div className="warn-callout" role="alert">
+                Issue type &quot;{promptTemplateMapDuplicate}&quot; is mapped more than once.
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="settings-row settings-row-stacked">
           <div className="settings-row-info">
             <label className="settings-row-label">Insert a value</label>
