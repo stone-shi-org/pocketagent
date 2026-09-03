@@ -196,7 +196,9 @@ export function CronJobsPage({ onOpenJob, onApiError, onBack }: Props): JSX.Elem
         <button type="button" className="round-btn" onClick={onBack} aria-label="Back">
           <Icon name="chevron-left" size={20} />
         </button>
-        <strong>Scheduled jobs</strong>
+        <div className="home-title">
+          <strong>Scheduled jobs</strong>
+        </div>
       </header>
       {content}
     </div>

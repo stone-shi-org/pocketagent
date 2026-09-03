@@ -128,93 +128,102 @@ export function WebhooksPage({
         </div>
       )}
 
-      {hooks?.map((hook) => (
-        <div key={hook.id} className={`cron-row${hook.enabled ? '' : ' disabled'}`}>
-          <button type="button" className="cron-main" onClick={() => onOpenWebhook(hook.id)}>
-            <span className="cron-row-title">
-              <Icon name="webhook" size={17} className="cron-row-icon" />
-              {hook.name}
-              {hook.skipPermissionsEnabled && (
-                // Persistent, not just at creation. More load-bearing here than
-                // for a cron job: this one runs on a prompt partly written by
-                // whoever can file a ticket.
-                <Icon
-                  name="shield"
-                  size={14}
-                  className="cron-shield"
-                  aria-label="Approvals bypassed"
-                />
-              )}
-            </span>
-            <span className="cron-row-meta">
-              <code className="hook-path">{hook.deliveryPath}</code>
-              {' · '}
-              {hook.workspaceLabel}
-            </span>
-            <span className="cron-row-meta">
-              {hook.enabled ? (
-                hook.lastDeliveryAt === null ? (
-                  // Not an empty state to hide: a webhook that has never fired
-                  // is the most likely broken one, and this is the only signal
-                  // that anything is wrong.
-                  <>Never fired</>
-                ) : (
-                  <>
-                    <span
-                      className={`cron-status cron-status--${hook.lastDeliveryStatus ?? 'unknown'}`}
-                    >
-                      {hook.lastDeliveryStatus ?? 'delivered'}
-                    </span>{' '}
-                    {formatRelative(hook.lastDeliveryAt)}
-                  </>
-                )
-              ) : (
-                <>Disabled — the URL answers as if it did not exist</>
-              )}
-              {hook.deliveryCounts.total > 0 && (
-                <>
-                  {' · '}
-                  {hook.deliveryCounts.ran} ran
-                  {hook.deliveryCounts.filtered > 0 && `, ${hook.deliveryCounts.filtered} filtered`}
-                  {hook.deliveryCounts.rejected > 0 && `, ${hook.deliveryCounts.rejected} rejected`}
-                </>
-              )}
-            </span>
-            {hook.lastError !== null && <span className="cron-row-error">{hook.lastError}</span>}
-          </button>
+      {hooks && hooks.length > 0 && (
+        <div className="webhook-grid">
+          {hooks.map((hook) => (
+            <div key={hook.id} className={`webhook-card${hook.enabled ? '' : ' disabled'}`}>
+              <div className="webhook-card-head">
+                <div className="webhook-card-title-wrap">
+                  <Icon name="webhook" size={18} className="webhook-card-icon" />
+                  <strong className="webhook-card-name">{hook.name}</strong>
+                  {hook.skipPermissionsEnabled && (
+                    <Icon
+                      name="shield"
+                      size={14}
+                      className="cron-shield"
+                      aria-label="Approvals bypassed"
+                    />
+                  )}
+                </div>
+                <div className="webhook-card-actions">
+                  <button
+                    type="button"
+                    className="round-btn plain"
+                    disabled={busy.has(hook.id)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void withBusy(hook.id, () => api.sendTestDelivery(hook.id));
+                    }}
+                    aria-label={`Send a test delivery to ${hook.name}`}
+                    title="Send test delivery"
+                  >
+                    <Icon name="play" size={15} />
+                  </button>
+                  <label
+                    className="switch"
+                    title={hook.enabled ? 'Disable this webhook' : 'Enable this webhook'}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={hook.enabled}
+                      onChange={(e) => setEnabled(hook.id, e.target.checked)}
+                      aria-label={`${hook.name} enabled`}
+                    />
+                    <span className="switch-track" />
+                  </label>
+                </div>
+              </div>
 
-          <div className="cron-actions">
-            {/* "Send test delivery" rather than cron's "Run now": for a webhook
-                nobody can reach yet, "run now" answers the wrong question. A test
-                delivery exercises the filter, the template and the runner at
-                once, which is what is actually in doubt. */}
-            <button
-              type="button"
-              className="round-btn plain"
-              disabled={busy.has(hook.id)}
-              onClick={() => void withBusy(hook.id, () => api.sendTestDelivery(hook.id))}
-              aria-label={`Send a test delivery to ${hook.name}`}
-              title="Send test delivery"
-            >
-              <Icon name="play" size={16} />
-            </button>
-            <label
-              className="switch"
-              title={hook.enabled ? 'Disable this webhook' : 'Enable this webhook'}
-            >
-              <input
-                type="checkbox"
-                checked={hook.enabled}
-                onChange={(e) => setEnabled(hook.id, e.target.checked)}
-                aria-label={`${hook.name} enabled`}
-              />
-              <span className="switch-track" />
-            </label>
-          </div>
+              <button
+                type="button"
+                className="webhook-card-body"
+                onClick={() => onOpenWebhook(hook.id)}
+              >
+                <div className="webhook-card-path-row">
+                  <code className="hook-path">{hook.deliveryPath}</code>
+                  <span className="webhook-card-ws">{hook.workspaceLabel}</span>
+                </div>
+
+                <div className="webhook-card-meta-row">
+                  <span className="webhook-card-status">
+                    {hook.enabled ? (
+                      hook.lastDeliveryAt === null ? (
+                        <span className="webhook-meta-never">Never fired</span>
+                      ) : (
+                        <>
+                          <span
+                            className={`cron-status cron-status--${hook.lastDeliveryStatus ?? 'unknown'}`}
+                          >
+                            {hook.lastDeliveryStatus ?? 'delivered'}
+                          </span>
+                          <span className="webhook-meta-time">
+                            {formatRelative(hook.lastDeliveryAt)}
+                          </span>
+                        </>
+                      )
+                    ) : (
+                      <span className="webhook-meta-disabled">Disabled</span>
+                    )}
+                  </span>
+                  {hook.deliveryCounts.total > 0 && (
+                    <span className="webhook-card-counts">
+                      {hook.deliveryCounts.ran} ran
+                      {hook.deliveryCounts.filtered > 0 && ` · ${hook.deliveryCounts.filtered} filtered`}
+                      {hook.deliveryCounts.rejected > 0 && ` · ${hook.deliveryCounts.rejected} rejected`}
+                    </span>
+                  )}
+                </div>
+                {hook.lastError !== null && (
+                  <div className="webhook-card-error">{hook.lastError}</div>
+                )}
+              </button>
+            </div>
+          ))}
         </div>
-      ))}
+      )}
 
-      <div className="cron-head" style={{ marginTop: 28 }}>
+      <div className="cron-head" style={{ marginTop: 32 }}>
         <div>
           <h2>Call history</h2>
           <p className="cron-sub">
@@ -239,7 +248,9 @@ export function WebhooksPage({
         <button type="button" className="round-btn" onClick={onBack} aria-label="Back">
           <Icon name="chevron-left" size={20} />
         </button>
-        <strong>Webhooks</strong>
+        <div className="home-title">
+          <strong>Webhooks</strong>
+        </div>
       </header>
       {content}
     </div>

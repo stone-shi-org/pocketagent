@@ -657,7 +657,9 @@ export function CronJobEditorPage({
         <button type="button" className="round-btn" onClick={onBack} aria-label="Back">
           <Icon name="chevron-left" size={20} />
         </button>
-        <strong>{isNew ? 'New scheduled job' : name || 'Scheduled job'}</strong>
+        <div className="home-title">
+          <strong>{isNew ? 'New scheduled job' : name || 'Scheduled job'}</strong>
+        </div>
       </header>
       {body}
     </div>

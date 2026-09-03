@@ -750,6 +750,44 @@ describe('webhook delivery: project routing', () => {
     expect(rows[0]?.reason).toMatch(/ENG/);
     expect(rows[0]?.cwd).toBeNull();
   });
+
+  it('honors a changed project directory mapping in per-issue conversation mode', async () => {
+    const repoA = `${ctx.workspaceRoot}/repo-a`;
+    const repoB = `${ctx.workspaceRoot}/repo-b`;
+    fs.mkdirSync(repoA);
+    fs.mkdirSync(repoB);
+
+    // Initially route ENG to repoA in per-issue mode
+    const hook = await createWebhook({
+      conversation_mode: 'per-issue',
+      overlapPolicy: 'allow',
+      config: { type: 'jira', filter: {}, projectMap: [{ projectKey: 'ENG', cwd: repoA }] },
+    });
+
+    const res1 = await deliver(SLUG, payloadForProjectAndIssue('ENG', 'ENG-100'), {
+      secret: hook.secret,
+    });
+    expect(res1.json().status).toBe('running');
+    const rows1 = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 });
+    expect(rows1[0]?.cwd).toBe(repoA);
+
+    // Now update the webhook configuration to route ENG to repoB (auto-map update)
+    await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/webhooks/${hook.id}`,
+      headers: authHeaders(ctx.cookie),
+      payload: {
+        config: { type: 'jira', filter: {}, projectMap: [{ projectKey: 'ENG', cwd: repoB }] },
+      },
+    });
+
+    const res2 = await deliver(SLUG, payloadForProjectAndIssue('ENG', 'ENG-100'), {
+      secret: hook.secret,
+    });
+    expect(res2.json().status).toBe('running');
+    const rows2 = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 });
+    expect(rows2[0]?.cwd).toBe(repoB);
+  });
 });
 
 describe('webhook delivery: unusable payloads', () => {

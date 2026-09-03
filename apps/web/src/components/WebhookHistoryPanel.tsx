@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { WebhookHistoryEntry } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { Icon } from './Icon.js';
-import { formatRelative } from './StatusBadge.js';
+import { formatRelative, WebhookStatusIcon } from './StatusBadge.js';
 import { WebhookCallDetailDialog } from './WebhookCallDetailDialog.js';
 
 interface Props {
@@ -24,13 +24,6 @@ const isNoise = (e: WebhookHistoryEntry): boolean =>
 const statusFor = (e: WebhookHistoryEntry): string =>
   e.kind === 'delivery' ? e.status : e.reason === 'disabled' ? 'disabled' : 'unmatched';
 
-const whoFor = (e: WebhookHistoryEntry): string =>
-  e.kind === 'delivery'
-    ? e.webhookName
-    : e.reason === 'disabled'
-      ? (e.webhookName ?? 'Unknown webhook')
-      : `/api/hooks/${e.slug}`;
-
 const isOpenable = (e: WebhookHistoryEntry): boolean =>
   e.kind === 'delivery'
     ? e.sessionId !== null || e.agentSessionId !== null
@@ -50,13 +43,6 @@ const titleFor = (e: WebhookHistoryEntry): string => {
 /**
  * The call-history feed: every webhook's deliveries, merged with calls that
  * matched no runnable webhook at all — see `GET /api/webhooks/history`.
- *
- * Content only, no page chrome: this used to be its own routed page
- * (`WebhookHistoryPage`, `#/hooks/history`), folded into `WebhooksPage` as a
- * second section on the same page instead of a second destination, so there
- * is nowhere for "how do I get back to the list" to even come up. Loads once
- * on mount rather than polling, matching the per-webhook delivery list it was
- * modeled on.
  */
 export function WebhookHistoryPanel({
   onOpenSession,
@@ -97,7 +83,7 @@ export function WebhookHistoryPanel({
   };
 
   return (
-    <>
+    <div className="webhook-history-container">
       {error !== null && (
         <div className="error-box" role="alert">
           {error}
@@ -111,48 +97,84 @@ export function WebhookHistoryPanel({
         </div>
       )}
       {entries !== null && entries.length > 0 && (
-        <p className="transport-hint">
-          {entries.length} recorded{' '}
+        <div className="webhook-history-bar">
+          <span className="webhook-history-count">{entries.length} recorded</span>
           <button type="button" className="linkish" onClick={() => setShowNoise((v) => !v)}>
-            {showNoise ? 'Hide' : 'Show'} the ones that did not run
+            {showNoise ? 'Hide' : 'Show'} filtered & skipped ({entries.filter(isNoise).length})
           </button>
-        </p>
+        </div>
       )}
-      {visible.map((e) => {
-        const openable = isOpenable(e);
-        return (
-          <div key={e.id} className={`call-row${isNoise(e) ? ' inert' : ''}`}>
-            <button
-              type="button"
-              className="cron-run-row"
-              disabled={!openable}
-              onClick={() => openEntry(e)}
-              title={titleFor(e)}
-            >
-              <span className="cron-run-row-main">
-                <span className={`cron-status cron-status--${statusFor(e)}`}>{statusFor(e)}</span>
-                <span className="cron-run-when">
-                  {whoFor(e)}
-                  {' · '}
-                  {formatRelative(e.receivedAt)}
-                </span>
-              </span>
-              {e.kind === 'delivery' && e.reason !== null && (
-                <span className="delivery-reason">{e.reason}</span>
-              )}
-            </button>
-            <button
-              type="button"
-              className="round-btn plain"
-              onClick={() => setDetailEntry(e)}
-              aria-label="Show call detail"
-              title="Show call detail"
-            >
-              <Icon name="code" size={16} />
-            </button>
-          </div>
-        );
-      })}
+
+      {visible.length > 0 && (
+        <div className="webhook-history-panel">
+          {visible.map((e) => {
+            const openable = isOpenable(e);
+            return (
+              <div key={e.id} className={`history-row${isNoise(e) ? ' inert' : ''}`}>
+                <button
+                  type="button"
+                  className="history-row-main"
+                  disabled={!openable}
+                  onClick={() => openEntry(e)}
+                  title={titleFor(e)}
+                >
+                  <div className="history-row-primary">
+                    <WebhookStatusIcon status={statusFor(e)} />
+
+                    {e.kind === 'delivery' && e.issueKey && (
+                      <span className="jira-issue-badge">{e.issueKey}</span>
+                    )}
+
+                    {e.kind === 'delivery' && e.eventType && (
+                      <span className="jira-event-badge">
+                        {e.eventType.replace(/^jira:/, '').replace(/^issue_/, '')}
+                      </span>
+                    )}
+
+                    <span className="history-row-target">
+                      {e.kind === 'delivery'
+                        ? e.webhookName
+                        : e.reason === 'disabled'
+                          ? (e.webhookName ?? 'Disabled webhook')
+                          : `/api/hooks/${e.slug}`}
+                    </span>
+
+                    {e.kind === 'delivery' && e.actor && (
+                      <span className="history-row-actor">by {e.actor}</span>
+                    )}
+
+                    {e.kind === 'delivery' && e.trigger === 'test' && (
+                      <span className="history-test-tag">test</span>
+                    )}
+                  </div>
+
+                  <div className="history-row-secondary">
+                    <span className="history-row-time">{formatRelative(e.receivedAt)}</span>
+                    {e.kind === 'delivery' && e.reason !== null && (
+                      <span className="delivery-reason">{e.reason}</span>
+                    )}
+                    {e.kind === 'delivery' && e.error !== null && (
+                      <span className="history-row-error">{e.error}</span>
+                    )}
+                  </div>
+                </button>
+
+                <div className="history-row-actions">
+                  <button
+                    type="button"
+                    className="round-btn plain history-detail-btn"
+                    onClick={() => setDetailEntry(e)}
+                    aria-label="Show call detail"
+                    title="Show call detail"
+                  >
+                    <Icon name="code" size={15} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {detailEntry !== null && (
         <WebhookCallDetailDialog
@@ -161,6 +183,6 @@ export function WebhookHistoryPanel({
           onApiError={onApiError}
         />
       )}
-    </>
+    </div>
   );
 }
