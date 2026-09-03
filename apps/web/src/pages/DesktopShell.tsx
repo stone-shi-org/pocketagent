@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { Route } from '../hooks/useHashRoute.js';
 import { NewSessionDialog } from '../components/NewSessionDialog.js';
 import { HiddenProjects } from '../components/HiddenProjects.js';
 import { AddProject } from '../components/AddProject.js';
 import { PushToggle } from '../components/PushToggle.js';
-import { SettingsPage } from './SettingsPage.js';
 import { RunningSessions } from '../components/RunningSessions.js';
 import { Icon } from '../components/Icon.js';
 import { HostChip, ProjectList, SearchField, allChats, useProjects } from '../components/ProjectList.js';
@@ -13,11 +12,14 @@ import { UsageBar } from '../components/UsageBar.js';
 import { formatBuildInfo } from '../version.js';
 import { OverflowMenu } from './ProjectsPage.js';
 import { ComposerPage } from './ComposerPage.js';
-import { AgentsFleetPage } from './AgentsFleetPage.js';
-import { CronJobsPage } from './CronJobsPage.js';
-import { CronJobEditorPage } from './CronJobEditorPage.js';
-import { WebhooksPage } from './WebhooksPage.js';
-import { WebhookEditorPage } from './WebhookEditorPage.js';
+import {
+  AgentsFleetPage,
+  CronJobEditorPage,
+  CronJobsPage,
+  SettingsPage,
+  WebhookEditorPage,
+  WebhooksPage,
+} from '../lazy-pages.js';
 import { SessionRoute } from './SessionRoute.js';
 import { ChatPreviewPage } from './ChatPreviewPage.js';
 import { loadOpenTabRoutes, saveOpenTabRoutes, type StoredTabRoute } from '../agent/open-tabs-pref.js';
@@ -30,6 +32,12 @@ interface Props {
   onNavigate: (route: Route) => void;
   onApiError: (error: unknown) => void;
   onLogout: () => void;
+}
+
+/** Fallback for the lazily-loaded admin pages (`../lazy-pages.js`) while
+    their chunk is still fetching — same spinner used everywhere else. */
+function PageFallback(): JSX.Element {
+  return <div className="spinner">Loading…</div>;
 }
 
 function storedToRoute(stored: StoredTabRoute): TabRoute {
@@ -440,52 +448,64 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             onApiError={onApiError}
           />
         ) : route.name === 'agents' ? (
-          <AgentsFleetPage
-            onOpen={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
-            onApiError={onApiError}
-          />
+          <Suspense fallback={<PageFallback />}>
+            <AgentsFleetPage
+              onOpen={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+              onApiError={onApiError}
+            />
+          </Suspense>
         ) : route.name === 'settings' ? (
-          <SettingsPage onBack={() => onNavigate({ name: 'list' })} onApiError={onApiError} />
+          <Suspense fallback={<PageFallback />}>
+            <SettingsPage onBack={() => onNavigate({ name: 'list' })} onApiError={onApiError} />
+          </Suspense>
         ) : route.name === 'cron' ? (
-          <CronJobsPage
-            onBack={() => onNavigate({ name: 'list' })}
-            onOpenJob={(jobId) => onNavigate({ name: 'cron-job', jobId })}
-            onApiError={onApiError}
-          />
+          <Suspense fallback={<PageFallback />}>
+            <CronJobsPage
+              onBack={() => onNavigate({ name: 'list' })}
+              onOpenJob={(jobId) => onNavigate({ name: 'cron-job', jobId })}
+              onApiError={onApiError}
+            />
+          </Suspense>
         ) : route.name === 'cron-job' ? (
-          <CronJobEditorPage
-            key={route.jobId}
-            jobId={route.jobId}
-            onBack={() => onNavigate({ name: 'cron' })}
-            onDone={() => {
-              void state.refresh();
-              onNavigate({ name: 'cron' });
-            }}
-            onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
-            onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
-            onApiError={onApiError}
-          />
+          <Suspense fallback={<PageFallback />}>
+            <CronJobEditorPage
+              key={route.jobId}
+              jobId={route.jobId}
+              onBack={() => onNavigate({ name: 'cron' })}
+              onDone={() => {
+                void state.refresh();
+                onNavigate({ name: 'cron' });
+              }}
+              onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+              onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
+              onApiError={onApiError}
+            />
+          </Suspense>
         ) : route.name === 'webhooks' ? (
-          <WebhooksPage
-            onBack={() => onNavigate({ name: 'list' })}
-            onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
-            onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
-            onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
-            onApiError={onApiError}
-          />
+          <Suspense fallback={<PageFallback />}>
+            <WebhooksPage
+              onBack={() => onNavigate({ name: 'list' })}
+              onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
+              onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+              onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
+              onApiError={onApiError}
+            />
+          </Suspense>
         ) : route.name === 'webhook' ? (
-          <WebhookEditorPage
-            key={route.webhookId}
-            webhookId={route.webhookId}
-            onBack={() => onNavigate({ name: 'webhooks' })}
-            onDone={() => {
-              void state.refresh();
-              onNavigate({ name: 'webhooks' });
-            }}
-            onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
-            onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
-            onApiError={onApiError}
-          />
+          <Suspense fallback={<PageFallback />}>
+            <WebhookEditorPage
+              key={route.webhookId}
+              webhookId={route.webhookId}
+              onBack={() => onNavigate({ name: 'webhooks' })}
+              onDone={() => {
+                void state.refresh();
+                onNavigate({ name: 'webhooks' });
+              }}
+              onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+              onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
+              onApiError={onApiError}
+            />
+          </Suspense>
         ) : activeTabId === null ? (
           <WelcomePane onCompose={() => onNavigate({ name: 'compose' })} />
         ) : null}

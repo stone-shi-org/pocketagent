@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useState } from 'react';
 import { ApiError } from './api/client.js';
 import { useHashRoute } from './hooks/useHashRoute.js';
 import { LoginPage } from './pages/LoginPage.js';
@@ -8,13 +8,22 @@ import { DesktopShell } from './pages/DesktopShell.js';
 import { useIsDesktop } from './hooks/useMediaQuery.js';
 import { SessionRoute } from './pages/SessionRoute.js';
 import { ChatPreviewPage } from './pages/ChatPreviewPage.js';
-import { AgentsFleetPage } from './pages/AgentsFleetPage.js';
-import { SettingsPage } from './pages/SettingsPage.js';
-import { CronJobsPage } from './pages/CronJobsPage.js';
-import { CronJobEditorPage } from './pages/CronJobEditorPage.js';
-import { WebhooksPage } from './pages/WebhooksPage.js';
-import { WebhookEditorPage } from './pages/WebhookEditorPage.js';
+import {
+  AgentsFleetPage,
+  CronJobEditorPage,
+  CronJobsPage,
+  SettingsPage,
+  WebhookEditorPage,
+  WebhooksPage,
+} from './lazy-pages.js';
 import { api } from './api/client.js';
+
+/** Shared fallback while a lazily-loaded page's chunk is still fetching —
+    same spinner the auth check above uses, so there's no visual seam
+    between "checking who you are" and "loading the page you asked for". */
+function PageFallback(): JSX.Element {
+  return <div className="spinner">Loading…</div>;
+}
 
 type AuthState = 'checking' | 'anonymous' | 'authenticated';
 
@@ -110,65 +119,79 @@ export function App(): JSX.Element {
 
   if (route.name === 'agents') {
     return (
-      <AgentsFleetPage
-        onBack={() => navigate({ name: 'list' })}
-        onOpen={(sessionId) => navigate({ name: 'terminal', sessionId })}
-        onApiError={handleApiError}
-      />
+      <Suspense fallback={<PageFallback />}>
+        <AgentsFleetPage
+          onBack={() => navigate({ name: 'list' })}
+          onOpen={(sessionId) => navigate({ name: 'terminal', sessionId })}
+          onApiError={handleApiError}
+        />
+      </Suspense>
     );
   }
 
   if (route.name === 'settings') {
-    return <SettingsPage onBack={() => navigate({ name: 'list' })} onApiError={handleApiError} />;
+    return (
+      <Suspense fallback={<PageFallback />}>
+        <SettingsPage onBack={() => navigate({ name: 'list' })} onApiError={handleApiError} />
+      </Suspense>
+    );
   }
 
   if (route.name === 'cron') {
     return (
-      <CronJobsPage
-        onBack={() => navigate({ name: 'list' })}
-        onOpenJob={(jobId) => navigate({ name: 'cron-job', jobId })}
-        onApiError={handleApiError}
-      />
+      <Suspense fallback={<PageFallback />}>
+        <CronJobsPage
+          onBack={() => navigate({ name: 'list' })}
+          onOpenJob={(jobId) => navigate({ name: 'cron-job', jobId })}
+          onApiError={handleApiError}
+        />
+      </Suspense>
     );
   }
 
   if (route.name === 'cron-job') {
     return (
-      <CronJobEditorPage
-        key={route.jobId}
-        jobId={route.jobId}
-        onBack={() => navigate({ name: 'cron' })}
-        onDone={() => navigate({ name: 'cron' })}
-        onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
-        onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
-        onApiError={handleApiError}
-      />
+      <Suspense fallback={<PageFallback />}>
+        <CronJobEditorPage
+          key={route.jobId}
+          jobId={route.jobId}
+          onBack={() => navigate({ name: 'cron' })}
+          onDone={() => navigate({ name: 'cron' })}
+          onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
+          onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
+          onApiError={handleApiError}
+        />
+      </Suspense>
     );
   }
 
   if (route.name === 'webhooks') {
     return (
-      <WebhooksPage
-        onBack={() => navigate({ name: 'list' })}
-        onOpenWebhook={(webhookId) => navigate({ name: 'webhook', webhookId })}
-        onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
-        onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
-        onApiError={handleApiError}
-      />
+      <Suspense fallback={<PageFallback />}>
+        <WebhooksPage
+          onBack={() => navigate({ name: 'list' })}
+          onOpenWebhook={(webhookId) => navigate({ name: 'webhook', webhookId })}
+          onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
+          onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
+          onApiError={handleApiError}
+        />
+      </Suspense>
     );
   }
 
   if (route.name === 'webhook') {
     return (
-      <WebhookEditorPage
-        key={route.webhookId}
-        webhookId={route.webhookId}
-        onBack={() => navigate({ name: 'webhooks' })}
-        onDone={() => navigate({ name: 'webhooks' })}
-        onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
-        onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
-        onApiError={handleApiError}
-      />
+      <Suspense fallback={<PageFallback />}>
+        <WebhookEditorPage
+          key={route.webhookId}
+          webhookId={route.webhookId}
+          onBack={() => navigate({ name: 'webhooks' })}
+          onDone={() => navigate({ name: 'webhooks' })}
+          onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
+          onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
+          onApiError={handleApiError}
+        />
+      </Suspense>
     );
   }
 
