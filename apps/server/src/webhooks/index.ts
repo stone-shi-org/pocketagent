@@ -503,7 +503,7 @@ export class WebhookService {
         const outcome = await this.executor.start(
           deliveryId,
           {
-            ...this.specFor(hook, facts.issueKey, cwd),
+            ...this.specFor(hook, facts, cwd),
             reuseCwd: mapped.cwd,
             resume: { agentSessionId: mapped.agent_session_id },
             prompt,
@@ -518,7 +518,7 @@ export class WebhookService {
 
     const outcome = await this.executor.start(
       deliveryId,
-      { ...this.specFor(hook, facts.issueKey, cwd), prompt },
+      { ...this.specFor(hook, facts, cwd), prompt },
       sink,
     );
     return outcome.ok
@@ -619,7 +619,7 @@ export class WebhookService {
     });
   }
 
-  private specFor(hook: WebhookRow, issueKey: string, cwd: string): Omit<RunSpec, 'prompt'> {
+  private specFor(hook: WebhookRow, facts: JiraEventFacts, cwd: string): Omit<RunSpec, 'prompt'> {
     const worktree: RunSpec['worktree'] =
       hook.worktree_mode === 'new-branch'
         ? {
@@ -627,16 +627,20 @@ export class WebhookService {
             // Minted from the *issue key*, not from untrusted text: a branch
             // name reaches git and the filesystem, and the key is the one
             // untrusted value validated against a pattern rather than escaped.
-            branchName: mintBranchName(`${hook.name}-${issueKey}`, 'UTC', this.now(), 'webhook'),
+            branchName: mintBranchName(`${hook.name}-${facts.issueKey}`, 'UTC', this.now(), 'webhook'),
           }
         : hook.worktree_mode === 'current-branch'
           ? { mode: 'current-branch' }
           : { mode: 'none' };
 
+    const title = facts.summary
+      ? `[${facts.issueKey}] ${facts.summary}`
+      : `${hook.name} · ${facts.issueKey}`;
+
     return {
       cwd,
       agent: hook.agent,
-      title: `${hook.name} · ${issueKey}`,
+      title,
       skipPermissions: hook.skip_permissions === 1,
       model: hook.model,
       ...(hook.effort_set === 1 ? { effort: hook.effort } : {}),

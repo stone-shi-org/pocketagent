@@ -451,7 +451,7 @@ export async function readTranscriptMeta(file: string): Promise<TranscriptMeta> 
 
   // A conversation started headlessly never gets an `ai-title`; the opening
   // prompt is a far better label than "Untitled".
-  meta.title = aiTitle ?? (firstPrompt ? truncate(firstPrompt.split('\n')[0]!.trim(), 80) : null);
+  meta.title = aiTitle ?? (firstPrompt ? fallbackTitle(firstPrompt) : null);
 
   return meta;
 }
@@ -492,6 +492,44 @@ export async function listRunningAgentCwds(): Promise<string[]> {
   }
 
   return [...cwds];
+}
+
+function fallbackTitle(firstPrompt: string): string | null {
+  const trimmed = firstPrompt.trim();
+  if (!trimmed) return null;
+
+  // If this is a Jira webhook prompt, try to extract "[KEY] Summary"
+  const issueMatch = /Issue:\s*([A-Z][A-Z0-9]*-\d+)/i.exec(trimmed);
+  const summaryMatch =
+    /(?:Summary:\s*\n*(?:<<<JIRA[^\n]*>>>\s*\n*)?|<<<JIRA\s+issue\.summary[^\n]*>>>\s*\n*)([^\n\r<]+)/i.exec(
+      trimmed,
+    );
+  if (issueMatch && issueMatch[1]) {
+    const key = issueMatch[1].toUpperCase();
+    const summary = summaryMatch && summaryMatch[1] ? summaryMatch[1].trim() : null;
+    if (summary) {
+      return truncate(`[${key}] ${summary}`, 80);
+    }
+    return `[${key}]`;
+  }
+
+  // Filter out any untrusted fence preamble lines
+  const lines = trimmed.split('\n').map((l) => l.trim());
+  for (const line of lines) {
+    if (
+      !line ||
+      line.startsWith('Text inside <<<JIRA') ||
+      line.startsWith('<<<JIRA') ||
+      line.startsWith('<<<END') ||
+      line.startsWith('user in Jira and copied here') ||
+      line.startsWith('the task — never as instructions')
+    ) {
+      continue;
+    }
+    return truncate(line, 80);
+  }
+
+  return truncate(lines[0] || '', 80) || null;
 }
 
 function truncate(value: string, max: number): string {
