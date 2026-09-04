@@ -145,6 +145,7 @@ Workflow Instructions:
 2. If the user commented "go ahead" / "fix it" OR if the issue has the tag/label "agent-ready":
    - Implement the fix in the codebase and run verification tests.
    - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Fix: ...").
+   - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
    - Transition/mark the Jira ticket status as "In Review" (or "in-review").
 3. If not yet approved or ready, analyze the root cause, post the findings and proposed solution plan as a comment on the Jira ticket {{issue.key}} without modifying code.`;
 
@@ -175,6 +176,7 @@ Workflow Instructions:
       - Execute the implementation plan carefully across the codebase.
       - Verify with relevant test suites.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Feature: ...").
+      - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review").`;
 
 export interface JiraPromptTemplatePreset {
@@ -194,13 +196,13 @@ export const JIRA_PROMPT_TEMPLATES: readonly JiraPromptTemplatePreset[] = [
   {
     id: 'fix-issue',
     name: 'Fix Issue (Triage + Auto-Fix & Commit on Approval)',
-    description: 'Triage bug; when approved ("go ahead", "fix it", "agent-ready"), implement fix, commit with ticket key, and mark in-review.',
+    description: 'Triage bug; when approved ("go ahead", "fix it", "agent-ready"), implement fix, commit with ticket key, post summary of changes comment with commit rev ID, and mark in-review.',
     template: JIRA_PROMPT_TEMPLATE_FIX_ISSUE,
   },
   {
     id: 'new-feature',
     name: 'New Feature (Plan & Attach -> Execute on Approval)',
-    description: 'Generate plan md, mark in-progress, wait; when approved ("go ahead", "approved", "agent-ready"), implement, commit with ticket key, and mark in-review.',
+    description: 'Generate plan md, mark in-progress, wait; when approved ("go ahead", "approved", "agent-ready"), implement, commit with ticket key, post summary of changes comment with commit rev ID, and mark in-review.',
     template: JIRA_PROMPT_TEMPLATE_NEW_FEATURE,
   },
 ];
