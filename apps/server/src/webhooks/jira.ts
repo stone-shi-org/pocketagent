@@ -19,6 +19,7 @@ export interface JiraEventFacts {
   issueKey: string;
   projectKey: string | null;
   issueType: string | null;
+  summary: string | null;
   /** Display name of the issue's assignee, or `null` when unassigned. */
   assignee: string | null;
   labels: string[];
@@ -75,6 +76,7 @@ export function parseJiraEvent(payload: unknown): JiraParseResult {
       issueKey,
       projectKey: str(asRecord(fields['project'])['key']).toUpperCase() || null,
       issueType: str(asRecord(fields['issuetype'])['name']) || null,
+      summary: str(fields['summary']) || null,
       // `fields.assignee` is `null` (not merely absent) for an unassigned
       // issue; `asRecord` turns that into `{}`, so `str(...)` naturally comes
       // back `''` and this resolves to `null` either way.

@@ -43,6 +43,7 @@ describe('parseJiraEvent', () => {
         fields: {
           project: { key: 'pa' },
           issuetype: { name: 'Bug' },
+          summary: 'Login fails on Safari',
           assignee: { displayName: 'Grace Hopper' },
           labels: ['x', 'y'],
         },
@@ -53,6 +54,7 @@ describe('parseJiraEvent', () => {
     if (!r.ok) return;
     expect(r.facts.issueKey).toBe('PA-42');
     expect(r.facts.projectKey).toBe('PA'); // upper-cased
+    expect(r.facts.summary).toBe('Login fails on Safari');
     expect(r.facts.assignee).toBe('Grace Hopper');
     expect(r.facts.changedFields).toEqual(['status', 'assignee']);
     expect(r.facts.timestamp).toBe(123);
