@@ -179,6 +179,36 @@ Workflow Instructions:
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review").`;
 
+export const JIRA_PROMPT_TEMPLATE_TASK = `A Jira task event arrived: {{event}}.
+
+Issue:    {{issue.key}}
+Project:  {{issue.project}} ({{issue.projectKey}})
+Type:     {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
+Labels:   {{issue.labels}}
+Changed:  {{changelog.fields}}
+
+Summary:
+{{issue.summary}}
+
+Description:
+{{issue.description}}
+
+Comment:
+{{comment.body}}
+
+Workflow Instructions:
+1. Task Review & Assessment:
+   - Understand the task requirements from the summary, description, and comments.
+   - If the task is complex, you may optionally post your findings or proposed plan as a comment on Jira ticket {{issue.key}} before starting.
+2. Execution Phase (Once Approved / Ready):
+   - If the user commented "go ahead" or "approve", or if the issue has the tag/label "agent-ready" or "approved":
+      - Implement the requested task directly across the codebase.
+      - Verify with relevant test suites.
+      - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Task: ...").
+      - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
+      - Transition/mark the Jira ticket status as "In Review" (or "in-review").
+   - If not yet approved and not tagged "agent-ready", post a brief assessment or plan on {{issue.key}} without modifying code.`;
+
 export interface JiraPromptTemplatePreset {
   id: string;
   name: string;
@@ -192,6 +222,12 @@ export const JIRA_PROMPT_TEMPLATES: readonly JiraPromptTemplatePreset[] = [
     name: 'Investigation & Triage (Default)',
     description: 'Investigate the issue, find relevant code, and post findings as a comment on the Jira ticket without modifying code.',
     template: DEFAULT_JIRA_PROMPT_TEMPLATE,
+  },
+  {
+    id: 'task',
+    name: 'Task (Direct Execution on Approval)',
+    description: 'Execute task; when approved ("go ahead", "approved", "agent-ready"), implement, verify, commit, post summary of changes comment with commit rev ID, and mark in-review.',
+    template: JIRA_PROMPT_TEMPLATE_TASK,
   },
   {
     id: 'fix-issue',
