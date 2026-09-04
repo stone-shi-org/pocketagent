@@ -127,6 +127,18 @@ describe('evaluateJiraFilter', () => {
   it('gates on issue type, case-insensitively', () => {
     expect(evaluateJiraFilter({ issueTypes: ['bug'] }, facts()).matched).toBe(true);
     expect(evaluateJiraFilter({ issueTypes: ['Task'] }, facts()).matched).toBe(false);
+    expect(
+      evaluateJiraFilter({ issueTypes: ['New Feature'] }, facts({ issueType: 'New Feature' }))
+        .matched,
+    ).toBe(true);
+    expect(
+      evaluateJiraFilter({ issueTypes: ['new feature'] }, facts({ issueType: 'New Feature' }))
+        .matched,
+    ).toBe(true);
+    expect(
+      evaluateJiraFilter({ issueTypes: ['Bug', 'New Feature'] }, facts({ issueType: 'new feature' }))
+        .matched,
+    ).toBe(true);
   });
 
   it('gates on assignee, case-insensitively', () => {

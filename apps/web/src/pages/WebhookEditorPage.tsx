@@ -977,7 +977,7 @@ export function WebhookEditorPage({
                 </p>
               )}
               {promptTemplateMap.map((row) => {
-                const knownIssueTypes = ['All type', 'Bug', 'Story', 'Task', 'Incident', 'Feature', 'Epic', 'Sub-task'];
+                const knownIssueTypes = ['All type', 'Bug', 'Story', 'Task', 'Incident', 'New Feature', 'Feature', 'Epic', 'Sub-task'];
                 const isKnownType = knownIssueTypes.some((t) => t.toLowerCase() === row.issueType.trim().toLowerCase());
                 const typeSelectValue = isKnownType
                   ? knownIssueTypes.find((t) => t.toLowerCase() === row.issueType.trim().toLowerCase()) ?? 'custom'
@@ -1006,6 +1006,7 @@ export function WebhookEditorPage({
                         <option value="Story">Story</option>
                         <option value="Task">Task</option>
                         <option value="Incident">Incident</option>
+                        <option value="New Feature">New Feature</option>
                         <option value="Feature">Feature</option>
                         <option value="Epic">Epic</option>
                         <option value="Sub-task">Sub-task</option>
