@@ -119,8 +119,9 @@ Description:
 {{issue.description}}
 
 Investigate {{issue.key}} in this repository: find the relevant code, work out
-what is going on, and write up what you find. Do not push a branch, comment on
-the issue, or change anything outside this working tree unless told to above.`;
+what is going on, and post your findings and analysis as a comment on the Jira
+issue {{issue.key}}. Do not push a branch or change anything outside this working
+tree unless told to above.`;
 
 export const JIRA_PROMPT_TEMPLATE_FIX_ISSUE = `A Jira issue update event arrived: {{event}}.
 
@@ -145,7 +146,7 @@ Workflow Instructions:
    - Implement the fix in the codebase and run verification tests.
    - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Fix: ...").
    - Transition/mark the Jira ticket status as "In Review" (or "in-review").
-3. If not yet approved or ready, analyze the root cause and propose the solution plan without modifying code.`;
+3. If not yet approved or ready, analyze the root cause, post the findings and proposed solution plan as a comment on the Jira ticket {{issue.key}} without modifying code.`;
 
 export const JIRA_PROMPT_TEMPLATE_NEW_FEATURE = `A Jira feature request event arrived: {{event}}.
 
@@ -171,10 +172,10 @@ Workflow Instructions:
    - Wait for review and approval.
 2. Execution Phase (Once Approved):
    - Once a user comments "go ahead" or "approve", or adds the tag/label "agent ready" or "approved":
-     - Execute the implementation plan carefully across the codebase.
-     - Verify with relevant test suites.
-     - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Feature: ...").
-     - Transition/mark the Jira ticket status as "In Review" (or "in-review").`;
+      - Execute the implementation plan carefully across the codebase.
+      - Verify with relevant test suites.
+      - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Feature: ...").
+      - Transition/mark the Jira ticket status as "In Review" (or "in-review").`;
 
 export interface JiraPromptTemplatePreset {
   id: string;
@@ -187,7 +188,7 @@ export const JIRA_PROMPT_TEMPLATES: readonly JiraPromptTemplatePreset[] = [
   {
     id: 'triage-only',
     name: 'Investigation & Triage (Default)',
-    description: 'Investigate the issue, find relevant code, and write up findings without modifying code.',
+    description: 'Investigate the issue, find relevant code, and post findings as a comment on the Jira ticket without modifying code.',
     template: DEFAULT_JIRA_PROMPT_TEMPLATE,
   },
   {
