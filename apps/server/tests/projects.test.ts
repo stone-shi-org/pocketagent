@@ -135,6 +135,17 @@ describe('findMainRepoCwd', () => {
       fs.rmSync(superproject, { recursive: true, force: true });
     }
   });
+
+  it('resolves a deleted worktree path under .worktrees back to its main checkout', async () => {
+    const main = fs.mkdtempSync('/tmp/pa-git-main-');
+    fs.mkdirSync(path.join(main, '.git'));
+    const deletedWtPath = path.join(main, '.worktrees', 'deleted-branch');
+    try {
+      expect(await findMainRepoCwd(deletedWtPath)).toBe(main);
+    } finally {
+      fs.rmSync(main, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('ProjectService', () => {
@@ -712,6 +723,47 @@ describe('ProjectService', () => {
       // present (empty) `ws.root` entry sorts in too.
       const indexOf = (cwd: string) => projects.findIndex((p) => p.cwd === cwd);
       expect(indexOf(ws.project)).toBeLessThan(indexOf(other));
+    });
+
+    it('folds a deleted worktree into its main checkout and marks it isDeleted', async () => {
+      const deletedWorktreePath = path.join(ws.project, '.worktrees', 'deleted-feat');
+      // The worktree directory does NOT exist on disk (was removed by git worktree remove)
+      expect(fs.existsSync(deletedWorktreePath)).toBe(false);
+
+      const projects = await service.list([
+        makeSession({ id: 'main-sess', cwd: ws.project }),
+        makeSession({ id: 'deleted-wt-sess', cwd: deletedWorktreePath, title: 'Old chat in deleted wt' }),
+      ]);
+
+      expect(projects.some((p) => p.cwd === deletedWorktreePath)).toBe(false);
+      const main = projects.find((p) => p.cwd === ws.project);
+      expect(main?.worktrees).toHaveLength(1);
+      expect(main?.worktrees[0]).toMatchObject({
+        cwd: deletedWorktreePath,
+        name: 'deleted-feat',
+        isDeleted: true,
+        isGitRepo: false,
+      });
+      expect(main?.worktrees[0]?.chats.map((c) => c.title)).toEqual(['Old chat in deleted wt']);
+    });
+
+    it('sorts active worktrees before deleted worktrees', async () => {
+      const activeWorktreePath = path.join(ws.project, '.worktrees', 'z-active');
+      const deletedWorktreePath = path.join(ws.project, '.worktrees', 'a-deleted');
+      addWorktree(activeWorktreePath, 'z-active');
+
+      const projects = await service.list([
+        makeSession({ id: 'main-sess', cwd: ws.project }),
+        makeSession({ id: 'act-sess', cwd: activeWorktreePath }),
+        makeSession({ id: 'del-sess', cwd: deletedWorktreePath }),
+      ]);
+
+      const main = projects.find((p) => p.cwd === ws.project);
+      expect(main?.worktrees).toHaveLength(2);
+      expect(main?.worktrees[0]?.name).toBe('z-active');
+      expect(main?.worktrees[0]?.isDeleted).toBeUndefined();
+      expect(main?.worktrees[1]?.name).toBe('a-deleted');
+      expect(main?.worktrees[1]?.isDeleted).toBe(true);
     });
   });
 

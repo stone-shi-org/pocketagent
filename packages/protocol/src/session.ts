@@ -355,6 +355,8 @@ export interface ProjectInfo {
    */
   webhooks: WebhookSummary[];
   worktrees: ProjectInfo[];
+  /** True when this worktree or directory no longer exists on disk. */
+  isDeleted?: boolean;
 }
 // `z.lazy` plus the explicit interface above is zod's documented pattern for a
 // self-referencing schema — inference alone cannot see through the recursion.
@@ -372,6 +374,7 @@ export const ProjectInfo: z.ZodType<ProjectInfo> = z.lazy(() =>
     cronJobs: z.array(CronJobSummary),
     webhooks: z.array(WebhookSummary),
     worktrees: z.array(ProjectInfo),
+    isDeleted: z.boolean().optional(),
   }),
 );
 

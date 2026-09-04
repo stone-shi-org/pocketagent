@@ -314,6 +314,16 @@ export class ProjectService {
       }
     }
 
+    // Ensure that if any worktree (live or deleted) has chats, its main checkout
+    // directory is also considered for drafts so the worktree can fold into it.
+    for (const cwd of Array.from(byCwd.keys())) {
+      if (cwd === VIRTUAL_SHELL_CWD || cwd === VIRTUAL_WEBHOOKS_CWD) continue;
+      const mainCwd = await findMainRepoCwd(cwd);
+      if (mainCwd && !byCwd.has(mainCwd)) {
+        byCwd.set(mainCwd, []);
+      }
+    }
+
     for (const [cwd, chats] of byCwd) {
       if (cwd === VIRTUAL_SHELL_CWD || cwd === VIRTUAL_WEBHOOKS_CWD) continue;
       // A project is a folder you added, or a directory inside one. Chats in a
@@ -327,6 +337,8 @@ export class ProjectService {
       if (hidden && !includeHidden) continue;
       chats.sort((a, b) => compareByRecency(chatSortKey(a), chatSortKey(b)));
       const isRepo = await isGitRepo(cwd);
+      const exists = isRepo || (await pathExists(cwd));
+      const mainRepoCwd = await findMainRepoCwd(cwd);
       drafts.push({
         cwd,
         name: path.basename(cwd) || cwd,
@@ -342,7 +354,8 @@ export class ProjectService {
         cronJobs: cronByCwd.get(cwd) ?? [],
         webhooks: webhookByCwd.get(cwd) ?? [],
         worktrees: [],
-        mainRepoCwd: await findMainRepoCwd(cwd),
+        mainRepoCwd,
+        ...(!exists ? { isDeleted: true } : {}),
       });
     }
 
@@ -361,7 +374,12 @@ export class ProjectService {
       else projects.push(info);
     }
     for (const project of projects) {
-      project.worktrees.sort((a, b) => a.name.localeCompare(b.name));
+      project.worktrees.sort((a, b) => {
+        const aDel = Boolean(a.isDeleted);
+        const bDel = Boolean(b.isDeleted);
+        if (aDel !== bDel) return aDel ? 1 : -1;
+        return a.name.localeCompare(b.name);
+      });
     }
 
     // Anything with work in it first, most recent at the top; then the rest
@@ -613,7 +631,26 @@ export async function readGitBranch(dir: string): Promise<string | null> {
  */
 export async function findMainRepoCwd(dir: string): Promise<string | null> {
   const info = await resolveGitDir(dir);
-  return info?.mainRepoCwd ?? null;
+  if (info?.mainRepoCwd) return info.mainRepoCwd;
+  // Fallback for worktrees that no longer exist on disk (e.g. deleted worktree
+  // whose chats are still retained). Standard worktrees are nested at `<main>/.worktrees/<slug>`.
+  const idx = dir.lastIndexOf(`${path.sep}.worktrees${path.sep}`);
+  if (idx !== -1) {
+    const candidateMain = dir.slice(0, idx);
+    if (await isGitRepo(candidateMain)) {
+      return candidateMain;
+    }
+  }
+  return null;
+}
+
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await fs.stat(target);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function isGitRepo(dir: string): Promise<boolean> {

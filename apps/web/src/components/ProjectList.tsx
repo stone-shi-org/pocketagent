@@ -434,6 +434,7 @@ export function ProjectList({
   onApiError,
 }: ListProps): JSX.Element {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [expandedDeleted, setExpandedDeleted] = useState<Set<string>>(() => new Set());
   const [expandedChats, setExpandedChats] = useState<Set<string>>(() => new Set());
   const [menuFor, setMenuFor] = useState<string | null>(null);
   // A delete flow can outlive its three-dot menu closing (it opens its own
@@ -447,6 +448,14 @@ export function ProjectList({
 
   const toggle = (cwd: string): void =>
     setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(cwd)) next.delete(cwd);
+      else next.add(cwd);
+      return next;
+    });
+
+  const toggleDeleted = (cwd: string): void =>
+    setExpandedDeleted((prev) => {
       const next = new Set(prev);
       if (next.has(cwd)) next.delete(cwd);
       else next.add(cwd);
@@ -467,6 +476,8 @@ export function ProjectList({
     searching,
     collapsed,
     toggle,
+    expandedDeleted,
+    toggleDeleted,
     expandedChats,
     showMoreChats,
     menuFor,
@@ -518,6 +529,8 @@ interface ProjectSectionProps {
   searching: boolean;
   collapsed: Set<string>;
   toggle: (cwd: string) => void;
+  expandedDeleted: Set<string>;
+  toggleDeleted: (cwd: string) => void;
   expandedChats: Set<string>;
   showMoreChats: (cwd: string) => void;
   menuFor: string | null;
@@ -547,6 +560,8 @@ function ProjectSection({
   searching,
   collapsed,
   toggle,
+  expandedDeleted,
+  toggleDeleted,
   expandedChats,
   showMoreChats,
   menuFor,
@@ -568,17 +583,17 @@ function ProjectSection({
   const isVirtualShell = project.cwd === 'virtual:shell';
   const isVirtual = isVirtualShell || isVirtualWebhooks;
 
-  // Virtual projects have no real folder on disk, so there is
+  // Virtual projects and deleted worktrees have no real folder on disk, so there is
   // nothing for code-server to open.
   const codeServerBase = state.host?.codeServerBaseUrl;
   const codeServerHref =
-    codeServerBase && !isVirtual
+    codeServerBase && !isVirtual && !project.isDeleted
       ? codeServerLink(codeServerBase, project.cwd)
       : null;
 
   return (
     <section
-      className={`project${nested ? ' project--worktree' : ''}`}
+      className={`project${nested ? ' project--worktree' : ''}${project.isDeleted ? ' project--deleted' : ''}`}
       data-project={project.cwd}
     >
       <div className="project-head">
@@ -624,7 +639,7 @@ function ProjectSection({
             </span>
           )}
         </button>
-        {!isVirtualWebhooks && (
+        {!isVirtualWebhooks && !project.isDeleted && (
           <button
             type="button"
             className="round-btn plain"
@@ -676,7 +691,7 @@ function ProjectSection({
               void state.removeProject(project.cwd);
             }}
             onNewTmuxSession={
-              isVirtualShell
+              isVirtualShell || project.isDeleted
                 ? undefined
                 : () => {
                     setMenuFor(null);
@@ -684,7 +699,7 @@ function ProjectSection({
                   }
             }
             onDeleteWorktree={
-              nested
+              nested && !project.isDeleted
                 ? () => {
                     setMenuFor(null);
                     setDeleteFlowFor(project.cwd);
@@ -917,29 +932,93 @@ function ProjectSection({
       {/* Collapsing a project hides its worktrees along with its own chats —
           the two are one card, not siblings. */}
       {!isCollapsed &&
-        project.worktrees.map((worktree) => (
-          <ProjectSection
-            key={worktree.cwd}
-            project={worktree}
-            nested
-            state={state}
-            open={open}
-            searching={searching}
-            collapsed={collapsed}
-            toggle={toggle}
-            expandedChats={expandedChats}
-            showMoreChats={showMoreChats}
-            menuFor={menuFor}
-            setMenuFor={setMenuFor}
-            deleteFlowFor={deleteFlowFor}
-            setDeleteFlowFor={setDeleteFlowFor}
-            onCompose={onCompose}
-            activeSessionId={activeSessionId}
-            activeConversationId={activeConversationId}
-            onApiError={onApiError}
-            {...(onOpenCronJob ? { onOpenCronJob } : {})}
-          />
-        ))}
+        (() => {
+          const activeWorktrees = project.worktrees.filter((w) => !w.isDeleted);
+          const deletedWorktrees = project.worktrees.filter((w) => w.isDeleted);
+          const isDeletedExpanded = searching || expandedDeleted.has(project.cwd);
+
+          return (
+            <>
+              {activeWorktrees.map((worktree) => (
+                <ProjectSection
+                  key={worktree.cwd}
+                  project={worktree}
+                  nested
+                  state={state}
+                  open={open}
+                  searching={searching}
+                  collapsed={collapsed}
+                  toggle={toggle}
+                  expandedDeleted={expandedDeleted}
+                  toggleDeleted={toggleDeleted}
+                  expandedChats={expandedChats}
+                  showMoreChats={showMoreChats}
+                  menuFor={menuFor}
+                  setMenuFor={setMenuFor}
+                  deleteFlowFor={deleteFlowFor}
+                  setDeleteFlowFor={setDeleteFlowFor}
+                  onCompose={onCompose}
+                  activeSessionId={activeSessionId}
+                  activeConversationId={activeConversationId}
+                  onApiError={onApiError}
+                  {...(onOpenCronJob ? { onOpenCronJob } : {})}
+                  {...(onOpenWebhook ? { onOpenWebhook } : {})}
+                />
+              ))}
+
+              {deletedWorktrees.length > 0 && (
+                <div className="deleted-worktrees-group">
+                  <button
+                    type="button"
+                    className="project-name deleted-worktrees-toggle"
+                    onClick={() => toggleDeleted(project.cwd)}
+                    aria-expanded={isDeletedExpanded}
+                    title="Deleted worktrees"
+                  >
+                    <span className="project-icon">
+                      <Icon name="folder" className="folder" />
+                    </span>
+                    <span className="project-label">Deleted worktrees</span>
+                    <Icon
+                      name="chevron-down"
+                      className={`project-caret${isDeletedExpanded ? '' : ' closed'}`}
+                    />
+                    {!isDeletedExpanded && (
+                      <span className="project-count">{deletedWorktrees.length}</span>
+                    )}
+                  </button>
+                  {isDeletedExpanded &&
+                    deletedWorktrees.map((worktree) => (
+                      <ProjectSection
+                        key={worktree.cwd}
+                        project={worktree}
+                        nested
+                        state={state}
+                        open={open}
+                        searching={searching}
+                        collapsed={collapsed}
+                        toggle={toggle}
+                        expandedDeleted={expandedDeleted}
+                        toggleDeleted={toggleDeleted}
+                        expandedChats={expandedChats}
+                        showMoreChats={showMoreChats}
+                        menuFor={menuFor}
+                        setMenuFor={setMenuFor}
+                        deleteFlowFor={deleteFlowFor}
+                        setDeleteFlowFor={setDeleteFlowFor}
+                        onCompose={onCompose}
+                        activeSessionId={activeSessionId}
+                        activeConversationId={activeConversationId}
+                        onApiError={onApiError}
+                        {...(onOpenCronJob ? { onOpenCronJob } : {})}
+                        {...(onOpenWebhook ? { onOpenWebhook } : {})}
+                      />
+                    ))}
+                </div>
+              )}
+            </>
+          );
+        })()}
     </section>
   );
 }
