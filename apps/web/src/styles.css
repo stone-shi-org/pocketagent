@@ -4007,6 +4007,119 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   box-sizing: border-box;
 }
 
+/* ---- Webhook Detail Layout (Full width + Right-side Index Navigation) ---- */
+.webhook-editor-page {
+  max-width: 100%;
+  padding: 32px 32px 64px;
+  box-sizing: border-box;
+}
+
+.webhook-editor-layout {
+  display: flex;
+  gap: 32px;
+  align-items: flex-start;
+  width: 100%;
+}
+
+.webhook-editor-main {
+  flex: 1 1 0%;
+  min-width: 0;
+  width: 100%;
+}
+
+.webhook-editor-nav {
+  position: sticky;
+  top: 0;
+  width: 200px;
+  flex: 0 0 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+  box-sizing: border-box;
+}
+
+.webhook-editor-nav-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  padding: 0 8px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.webhook-editor-nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.webhook-editor-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: color 0.15s ease, background 0.15s ease;
+  line-height: 1.4;
+}
+
+.webhook-editor-nav-item:hover {
+  color: var(--text);
+  background: var(--bg-elev-2);
+}
+
+.webhook-editor-nav-item.active {
+  color: var(--accent);
+  background: var(--bg-elev-2);
+  font-weight: 600;
+}
+
+.webhook-editor-nav-icon {
+  flex: none;
+  opacity: 0.7;
+}
+
+.webhook-editor-nav-item.active .webhook-editor-nav-icon {
+  opacity: 1;
+}
+
+@media (max-width: 900px) {
+  .webhook-editor-page {
+    padding: 20px 16px 48px;
+  }
+
+  .webhook-editor-layout {
+    flex-direction: column-reverse;
+    gap: 20px;
+  }
+
+  .webhook-editor-nav {
+    position: static;
+    width: 100%;
+    flex: none;
+  }
+
+  .webhook-editor-nav-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 4px;
+  }
+}
+
 .settings-unit {
   color: var(--text-dim);
   font-weight: 400;

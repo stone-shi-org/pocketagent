@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AgentInfo,
   CronWorktreeMode,
@@ -18,7 +18,7 @@ import {
   WEBHOOK_SLUG_RE,
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
-import { Icon } from '../components/Icon.js';
+import { Icon, type IconName } from '../components/Icon.js';
 import { SecretReveal } from '../components/SecretReveal.js';
 import { SelectRowNative } from '../components/SelectRowNative.js';
 import { formatRelative, WebhookStatusIcon } from '../components/StatusBadge.js';
@@ -587,12 +587,80 @@ export function WebhookEditorPage({
     ? deliveries
     : deliveries.filter((d) => !DID_NOT_RUN.has(d.status));
 
+  // ---- Navigation Index for sections ---------------------------------------
+  const [activeSection, setActiveSection] = useState('section-webhook');
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+
+  const navSections = useMemo<{ id: string; title: string; icon: IconName }[]>(() => {
+    const list: { id: string; title: string; icon: IconName }[] = [
+      { id: 'section-webhook', title: 'Webhook', icon: 'webhook' },
+    ];
+    if (!isNew && deliveryPath !== null) {
+      list.push({ id: 'section-endpoint', title: 'Endpoint', icon: 'link' });
+    }
+    list.push(
+      { id: 'section-filter', title: 'Filter', icon: 'folder' },
+      { id: 'section-prompt', title: 'Prompt', icon: 'compose' },
+      { id: 'section-conversation', title: 'Conversation', icon: 'terminal' },
+      { id: 'section-project', title: 'Project & agent', icon: 'folder' },
+    );
+    if (directoryMode === 'auto-map') {
+      list.push({ id: 'section-automap', title: 'Project routing', icon: 'folder' });
+    }
+    list.push(
+      { id: 'section-model', title: 'Model & effort', icon: 'code' },
+      { id: 'section-approvals', title: 'Approvals', icon: 'shield' },
+    );
+    if (!isNew) {
+      list.push({ id: 'section-deliveries', title: 'Deliveries', icon: 'terminal' });
+    }
+    return list;
+  }, [isNew, deliveryPath, directoryMode]);
+
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = (): void => {
+      const sectionElements = navSections
+        .map((s) => ({ id: s.id, el: document.getElementById(s.id) }))
+        .filter((s): s is { id: string; el: HTMLElement } => s.el !== null);
+
+      if (sectionElements.length === 0 || !sectionElements[0]) return;
+
+      const containerTop = container.getBoundingClientRect().top;
+      let current = sectionElements[0].id;
+
+      for (const section of sectionElements) {
+        const rect = section.el.getBoundingClientRect();
+        // Highlight if the section top is near the top of viewport / container
+        if (rect.top - containerTop <= 160) {
+          current = section.id;
+        }
+      }
+
+      setActiveSection(current);
+    };
+
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    handleScroll();
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, [navSections]);
+
+  const scrollToSection = (sectionId: string): void => {
+    setActiveSection(sectionId);
+    const el = document.getElementById(sectionId);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+
   const body = loading ? (
-    <div className="settings-page">
+    <div className="settings-page webhook-editor-page">
       <div className="spinner">Loading…</div>
     </div>
   ) : (
-    <div className="settings-page">
+    <div className="settings-page webhook-editor-page" ref={scrollContainerRef}>
       {error !== null && (
         <div className="error-box" role="alert">
           {error}
@@ -611,709 +679,730 @@ export function WebhookEditorPage({
         </div>
       </div>
 
-      <SectionCard title="Webhook" icon="webhook">
-        <TextRow label="Name" value={name} busy={busy} placeholder="Triage new bugs" onChange={setName} />
-        <TextRow
-          label="Path"
-          value={slug}
-          busy={busy}
-          mono
-          placeholder={isNew ? 'left blank: generated from the name' : ''}
-          help={
-            slugProblem ??
-            'The last part of the URL Jira posts to. Lowercase letters, digits and dashes.'
-          }
-          onChange={setSlug}
-        />
-        {/* Kept even with one option: the section's shape does not change when a
-            second type lands, and the row documents that this is a dimension. */}
-        <SelectRowNative
-          busy={busy}
-          label="Trigger"
-          value="jira"
-          options={[{ value: 'jira', label: 'Jira issue events' }]}
-          onChange={() => undefined}
-        />
-        <SelectRowNative
-          busy={busy}
-          label="Authentication"
-          value={authMode}
-          options={[
-            { value: 'hmac', label: 'Signature (recommended)' },
-            { value: 'bearer', label: 'Bearer token' },
-          ]}
-          help={
-            authMode === 'hmac'
-              ? 'Jira signs each request with the secret. Only a sender holding the secret can produce a valid body.'
-              : 'A token in a header. It proves who sent the request but nothing about the payload, and it lands in every proxy log along the way.'
-          }
-          onChange={(v) => setAuthMode(v as 'hmac' | 'bearer')}
-        />
-        {authMode === 'bearer' && (
-          <div className="warn-callout" role="alert">
-            A bearer token authenticates nothing about the body: anyone holding it can send any
-            payload at all. Prefer a signature unless the sender cannot produce one.
-          </div>
-        )}
-        <div className="settings-row">
-          <div className="settings-row-main">
-            <div className="settings-row-info">
-              <label className="settings-row-label">Enabled</label>
-              <p className="transport-hint">
-                When off, the URL answers exactly as if it did not exist, so nothing can tell
-                whether the webhook is paused or gone.
-              </p>
-            </div>
-            <div className="settings-row-control">
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={enabled}
-                  disabled={busy}
-                  onChange={(e) => setEnabled(e.target.checked)}
-                  aria-label="Enabled"
-                />
-                <span className="switch-track" />
-              </label>
-            </div>
-          </div>
-        </div>
-      </SectionCard>
+      <div className="webhook-editor-layout">
+        <div className="webhook-editor-main">
 
-      {!isNew && deliveryPath !== null && (
-        <SectionCard title="Endpoint" icon="link">
-          <SecretReveal
-            deliveryPath={deliveryPath}
-            secret={secret}
-            token={token}
-            authMode={authMode}
-            firstDeliveryAt={firstDeliveryAt}
-            onReveal={async () => {
-              const res = await api.revealWebhookSecret(id);
-              setSecret(res.secret);
-              setToken(res.token ?? null);
-            }}
-            onRotate={async () => {
-              const res = await api.rotateWebhookSecret(id);
-              setSecret(res.secret);
-              setToken(res.token ?? null);
-            }}
+      <div id="section-webhook">
+        <SectionCard title="Webhook" icon="webhook">
+          <TextRow label="Name" value={name} busy={busy} placeholder="Triage new bugs" onChange={setName} />
+          <TextRow
+            label="Path"
+            value={slug}
+            busy={busy}
+            mono
+            placeholder={isNew ? 'left blank: generated from the name' : ''}
+            help={
+              slugProblem ??
+              'The last part of the URL Jira posts to. Lowercase letters, digits and dashes.'
+            }
+            onChange={setSlug}
           />
-          {/* The accurate description of what was just built, on the screen
-              where it was built — not in the README. */}
-          <p className="transport-hint">
-            Anyone who can reach this URL and knows the secret can start an agent on this machine
-            {skipPermissions ? ', with every tool approval bypassed.' : '.'}
-          </p>
-        </SectionCard>
-      )}
-
-      <SectionCard
-        title="Which deliveries run"
-        icon="folder"
-        desc="Every field left empty means “match anything”."
-      >
-        <div className="settings-row settings-row-stacked">
-          <div className="settings-row-info">
-            <label className="settings-row-label">Events</label>
-            <p className="transport-hint">
-              Pick from the dropdown to add one; empty matches every event Jira can send.
-            </p>
-          </div>
-          <select
-            className="settings-select"
-            value=""
-            disabled={busy || events.length >= EVENT_CHOICES.length}
-            aria-label="Add a Jira event"
-            onChange={(e) => {
-              const value = e.target.value;
-              if (value === '') return;
-              setEvents((prev) => (prev.includes(value) ? prev : [...prev, value]));
-            }}
-          >
-            <option value="">
-              {events.length >= EVENT_CHOICES.length ? 'All events added' : 'Add an event…'}
-            </option>
-            {EVENT_CHOICES.filter((choice) => !events.includes(choice.value)).map((choice) => (
-              <option key={choice.value} value={choice.value}>
-                {choice.label}
-              </option>
-            ))}
-          </select>
-          {events.length > 0 && (
-            <div className="chip-list" role="list" aria-label="Selected events">
-              {events.map((value) => {
-                const choice = EVENT_CHOICES.find((c) => c.value === value);
-                return (
-                  <span key={value} className="chip chip-removable" role="listitem">
-                    {choice?.label ?? value}
-                    <button
-                      type="button"
-                      className="chip-remove-btn"
-                      disabled={busy}
-                      aria-label={`Remove ${choice?.label ?? value}`}
-                      onClick={() => setEvents((prev) => prev.filter((e) => e !== value))}
-                    >
-                      <Icon name="close" size={12} />
-                    </button>
-                  </span>
-                );
-              })}
-            </div>
-          )}
-        </div>
-        <TextRow
-          label="Project keys"
-          value={projectKeys}
-          busy={busy}
-          mono
-          placeholder="ENG, PLAT"
-          help="Comma-separated. Empty matches every project."
-          onChange={setProjectKeys}
-        />
-        <TextRow
-          label="Issue types"
-          value={issueTypes}
-          busy={busy}
-          placeholder="Bug, Incident"
-          help="Comma-separated. Empty matches every type."
-          onChange={setIssueTypes}
-        />
-        <TextRow
-          label="Assignee"
-          value={assignees}
-          busy={busy}
-          placeholder="Grace Hopper"
-          help="Comma-separated display names. Empty matches any assignee, including unassigned."
-          onChange={setAssignees}
-        />
-        <TextRow
-          label="Required labels"
-          value={labels}
-          busy={busy}
-          placeholder="agent-ready"
-          help="Worth more than every other control here: it narrows the trigger from “anyone who can comment on a ticket” to “anyone who can label this project”."
-          onChange={setLabels}
-        />
-        {csvToList(labels).length > 1 && (
+          {/* Kept even with one option: the section's shape does not change when a
+              second type lands, and the row documents that this is a dimension. */}
           <SelectRowNative
             busy={busy}
-            label="Label match"
-            value={labelMode}
-            options={[
-              { value: 'any', label: 'Any one of them' },
-              { value: 'all', label: 'All of them' },
-            ]}
-            onChange={(v) => setLabelMode(v as 'any' | 'all')}
+            label="Trigger"
+            value="jira"
+            options={[{ value: 'jira', label: 'Jira issue events' }]}
+            onChange={() => undefined}
           />
-        )}
-        {events.includes('jira:issue_updated') && (
-          <TextRow
-            label="Changed field"
-            value={changedFields}
+          <SelectRowNative
             busy={busy}
-            placeholder="status, assignee"
-            help="Read from the event’s changelog, so this can never match an issue being created — a creation has no changelog."
-            onChange={setChangedFields}
+            label="Authentication"
+            value={authMode}
+            options={[
+              { value: 'hmac', label: 'Signature (recommended)' },
+              { value: 'bearer', label: 'Bearer token' },
+            ]}
+            help={
+              authMode === 'hmac'
+                ? 'Jira signs each request with the secret. Only a sender holding the secret can produce a valid body.'
+                : 'A token in a header. It proves who sent the request but nothing about the payload, and it lands in every proxy log along the way.'
+            }
+            onChange={(v) => setAuthMode(v as 'hmac' | 'bearer')}
           />
-        )}
-        <TextRow
-          label="Ignore actor"
-          value={excludeActors}
-          busy={busy}
-          placeholder="Agent Bot"
-          help="Comma-separated display names. The one field above that excludes rather than requires — list the account this agent comments as, so its own comment on a ticket doesn’t re-trigger this webhook."
-          onChange={setExcludeActors}
-        />
-        {filterIsEmpty && (
-          <div className="warn-callout" role="alert">
-            Nothing is filtered. This will start an agent for every issue event in every project
-            the Jira user can see.
+          {authMode === 'bearer' && (
+            <div className="warn-callout" role="alert">
+              A bearer token authenticates nothing about the body: anyone holding it can send any
+              payload at all. Prefer a signature unless the sender cannot produce one.
+            </div>
+          )}
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-info">
+                <label className="settings-row-label">Enabled</label>
+                <p className="transport-hint">
+                  When off, the URL answers exactly as if it did not exist, so nothing can tell
+                  whether the webhook is paused or gone.
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={enabled}
+                    disabled={busy}
+                    onChange={(e) => setEnabled(e.target.checked)}
+                    aria-label="Enabled"
+                  />
+                  <span className="switch-track" />
+                </label>
+              </div>
+            </div>
           </div>
-        )}
-      </SectionCard>
+        </SectionCard>
+      </div>
 
-      <SectionCard title="Prompt" icon="compose">
-        <SelectRowNative
-          busy={busy}
-          label="Template routing"
-          value={promptTemplateMode}
-          options={[
-            { value: 'single', label: 'Single prompt template' },
-            { value: 'by-issue-type', label: 'Auto pick by Jira issue type' },
-          ]}
-          help={
-            promptTemplateMode === 'single'
-              ? 'Every delivery uses the single template configured below.'
-              : 'Routes prompt templates by Jira issue type (or "All type" fallback).'
-          }
-          onChange={(v) => setPromptTemplateMode(v as 'single' | 'by-issue-type')}
-        />
-
-        {promptTemplateMode === 'single' ? (
-          <>
-            <SelectRowNative
-              busy={busy}
-              label="Template preset"
-              value={
-                JIRA_PROMPT_TEMPLATES.find((p) => p.template === promptTemplate)?.id ?? 'custom'
-              }
-              options={[
-                ...JIRA_PROMPT_TEMPLATES.map((p) => ({
-                  value: p.id,
-                  label: p.name,
-                })),
-                { value: 'custom', label: 'Custom prompt template' },
-              ]}
-              help={
-                JIRA_PROMPT_TEMPLATES.find((p) => p.template === promptTemplate)?.description ??
-                'Custom prompt instructions for the agent.'
-              }
-              onChange={(val) => {
-                const found = JIRA_PROMPT_TEMPLATES.find((p) => p.id === val);
-                if (found) {
-                  setPromptTemplate(found.template);
-                }
+      {!isNew && deliveryPath !== null && (
+        <div id="section-endpoint">
+          <SectionCard title="Endpoint" icon="link">
+            <SecretReveal
+              deliveryPath={deliveryPath}
+              secret={secret}
+              token={token}
+              authMode={authMode}
+              firstDeliveryAt={firstDeliveryAt}
+              onReveal={async () => {
+                const res = await api.revealWebhookSecret(id);
+                setSecret(res.secret);
+                setToken(res.token ?? null);
+              }}
+              onRotate={async () => {
+                const res = await api.rotateWebhookSecret(id);
+                setSecret(res.secret);
+                setToken(res.token ?? null);
               }}
             />
-            <TextRow
-              label="Prompt template"
-              value={promptTemplate}
-              busy={busy}
-              multiline
-              rows={10}
-              onChange={setPromptTemplate}
-            />
-          </>
-        ) : (
+            {/* The accurate description of what was just built, on the screen
+                where it was built — not in the README. */}
+            <p className="transport-hint">
+              Anyone who can reach this URL and knows the secret can start an agent on this machine
+              {skipPermissions ? ', with every tool approval bypassed.' : '.'}
+            </p>
+          </SectionCard>
+        </div>
+      )}
+
+      <div id="section-filter">
+        <SectionCard
+          title="Which deliveries run"
+          icon="folder"
+          desc="Every field left empty means “match anything”."
+        >
           <div className="settings-row settings-row-stacked">
             <div className="settings-row-info">
-              <label className="settings-row-label">Issue type template rules</label>
+              <label className="settings-row-label">Events</label>
               <p className="transport-hint">
-                Incoming deliveries will match issue type rules from top to bottom. Use &ldquo;All type&rdquo; as the fallback template.
+                Pick from the dropdown to add one; empty matches every event Jira can send.
               </p>
             </div>
-            {promptTemplateMap.length === 0 && (
-              <p className="transport-hint">
-                No issue type prompt templates configured yet. Add at least one rule.
-              </p>
-            )}
-            {promptTemplateMap.map((row) => {
-              const knownIssueTypes = ['All type', 'Bug', 'Story', 'Task', 'Incident', 'Feature', 'Epic', 'Sub-task'];
-              const isKnownType = knownIssueTypes.some((t) => t.toLowerCase() === row.issueType.trim().toLowerCase());
-              const typeSelectValue = isKnownType
-                ? knownIssueTypes.find((t) => t.toLowerCase() === row.issueType.trim().toLowerCase()) ?? 'custom'
-                : 'custom';
-              const matchedPreset = JIRA_PROMPT_TEMPLATES.find((p) => p.template === row.promptTemplate);
-
-              return (
-                <div key={row.id} className="prompt-map-card">
-                  <div className="prompt-map-header">
-                    <select
-                      className="settings-select prompt-map-type-select"
-                      value={typeSelectValue}
-                      disabled={busy}
-                      aria-label="Issue type selector"
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        if (val !== 'custom') {
-                          updatePromptTemplateRoute(row.id, { issueType: val });
-                        } else if (isKnownType) {
-                          updatePromptTemplateRoute(row.id, { issueType: '' });
-                        }
-                      }}
-                    >
-                      <option value="All type">All type (Fallback)</option>
-                      <option value="Bug">Bug</option>
-                      <option value="Story">Story</option>
-                      <option value="Task">Task</option>
-                      <option value="Incident">Incident</option>
-                      <option value="Feature">Feature</option>
-                      <option value="Epic">Epic</option>
-                      <option value="Sub-task">Sub-task</option>
-                      <option value="custom">Custom issue type…</option>
-                    </select>
-
-                    {typeSelectValue === 'custom' && (
-                      <input
-                        type="text"
-                        className="settings-input prompt-map-type-custom"
-                        value={row.issueType}
-                        placeholder="Enter Jira issue type"
+            <select
+              className="settings-select"
+              value=""
+              disabled={busy || events.length >= EVENT_CHOICES.length}
+              aria-label="Add a Jira event"
+              onChange={(e) => {
+                const value = e.target.value;
+                if (value === '') return;
+                setEvents((prev) => (prev.includes(value) ? prev : [...prev, value]));
+              }}
+            >
+              <option value="">
+                {events.length >= EVENT_CHOICES.length ? 'All events added' : 'Add an event…'}
+              </option>
+              {EVENT_CHOICES.filter((choice) => !events.includes(choice.value)).map((choice) => (
+                <option key={choice.value} value={choice.value}>
+                  {choice.label}
+                </option>
+              ))}
+            </select>
+            {events.length > 0 && (
+              <div className="chip-list" role="list" aria-label="Selected events">
+                {events.map((value) => {
+                  const choice = EVENT_CHOICES.find((c) => c.value === value);
+                  return (
+                    <span key={value} className="chip chip-removable" role="listitem">
+                      {choice?.label ?? value}
+                      <button
+                        type="button"
+                        className="chip-remove-btn"
                         disabled={busy}
-                        aria-label="Custom Jira issue type"
-                        onChange={(e) => updatePromptTemplateRoute(row.id, { issueType: e.target.value })}
-                      />
-                    )}
-
-                    <select
-                      className="settings-select prompt-map-preset-select"
-                      value={matchedPreset?.id ?? 'custom'}
-                      disabled={busy}
-                      aria-label="Prompt template preset"
-                      onChange={(e) => {
-                        const preset = JIRA_PROMPT_TEMPLATES.find((p) => p.id === e.target.value);
-                        if (preset) {
-                          updatePromptTemplateRoute(row.id, { promptTemplate: preset.template });
-                        }
-                      }}
-                    >
-                      {JIRA_PROMPT_TEMPLATES.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
-                      <option value="custom">Custom template</option>
-                    </select>
-
-                    <button
-                      type="button"
-                      className="round-btn prompt-map-remove"
-                      disabled={busy}
-                      aria-label={`Remove mapping for ${row.issueType || 'blank'}`}
-                      onClick={() => removePromptTemplateRoute(row.id)}
-                    >
-                      <Icon name="close" size={16} />
-                    </button>
-                  </div>
-
-                  <textarea
-                    className="settings-input settings-textarea prompt-map-textarea"
-                    rows={6}
-                    value={row.promptTemplate}
-                    disabled={busy}
-                    placeholder="Enter prompt template for this issue type..."
-                    aria-label={`Prompt template for ${row.issueType || 'issue type'}`}
-                    onChange={(e) => updatePromptTemplateRoute(row.id, { promptTemplate: e.target.value })}
-                  />
-                </div>
-              );
-            })}
-            <button type="button" disabled={busy} onClick={addPromptTemplateRoute}>
-              <Icon name="plus" size={16} />
-              Add issue type template
-            </button>
-            {promptTemplateMapDuplicate !== null && (
-              <div className="warn-callout" role="alert">
-                Issue type &quot;{promptTemplateMapDuplicate}&quot; is mapped more than once.
+                        aria-label={`Remove ${choice?.label ?? value}`}
+                        onClick={() => setEvents((prev) => prev.filter((e) => e !== value))}
+                      >
+                        <Icon name="close" size={12} />
+                      </button>
+                    </span>
+                  );
+                })}
               </div>
             )}
           </div>
-        )}
-
-        <div className="settings-row settings-row-stacked">
-          <div className="settings-row-info">
-            <label className="settings-row-label">Insert a value</label>
-            <p className="transport-hint">
-              Text written by a Jira user is wrapped in markers and labelled as data, not
-              instructions. Keep that shape.
-            </p>
-          </div>
-          {/* Rendered from the same array the server renderer iterates, so a
-              variable that exists in one but not the other is impossible. */}
-          <div className="toggle-chip-group">
-            {JIRA_TEMPLATE_VARS.map((v) => (
-              <button
-                key={v.name}
-                type="button"
-                className="toggle-chip compact"
-                disabled={busy}
-                title={`${v.description} e.g. ${v.example}`}
-                onClick={() => insertVar(v.name)}
-              >
-                {v.name}
-              </button>
-            ))}
-          </div>
-        </div>
-        {!isNew && (
-          <>
-            <div className="secret-actions">
-              <button type="button" disabled={busy} onClick={() => void runPreview()}>
-                Preview
-              </button>
-              {preview !== null && (
-                <button type="button" onClick={() => setPreview(null)}>
-                  Hide
-                </button>
-              )}
-            </div>
-            {preview !== null && <pre className="hook-preview">{preview}</pre>}
-          </>
-        )}
-      </SectionCard>
-
-      <SectionCard title="Conversation" icon="terminal">
-        <SelectRowNative
-          busy={busy}
-          label="Each delivery"
-          value={conversationMode}
-          options={[
-            { value: 'per-delivery', label: 'Starts a fresh chat' },
-            { value: 'per-issue', label: 'Continues one chat per issue' },
-          ]}
-          help={
-            conversationMode === 'per-delivery'
-              ? 'Every event is a cold start: the agent re-reads the issue each time and knows nothing about earlier events.'
-              : 'The agent keeps the issue’s history, at the cost of a transcript that grows for as long as people keep editing that ticket.'
-          }
-          onChange={(v) => setConversationMode(v as WebhookConversationMode)}
-        />
-        {conversationMode === 'per-issue' && (
-          <NumberRow
-            label="Wait before starting"
-            unit="seconds"
-            value={debounceSeconds}
-            min={0}
-            max={3600}
+          <TextRow
+            label="Project keys"
+            value={projectKeys}
             busy={busy}
-            help="Collapses a burst of edits on one issue into a single run. A bulk edit otherwise appends one turn per changed field."
-            onChange={setDebounceSeconds}
+            mono
+            placeholder="ENG, PLAT"
+            help="Comma-separated. Empty matches every project."
+            onChange={setProjectKeys}
           />
-        )}
-        <SelectRowNative
-          busy={busy}
-          label="If a run is already going"
-          value={overlapPolicy}
-          options={[
-            { value: 'skip', label: 'Skip the new delivery' },
-            { value: 'allow', label: 'Start it anyway' },
-          ]}
-          onChange={(v) => setOverlapPolicy(v as 'skip' | 'allow')}
-        />
-      </SectionCard>
+          <TextRow
+            label="Issue types"
+            value={issueTypes}
+            busy={busy}
+            placeholder="Bug, Incident"
+            help="Comma-separated. Empty matches every type."
+            onChange={setIssueTypes}
+          />
+          <TextRow
+            label="Assignee"
+            value={assignees}
+            busy={busy}
+            placeholder="Grace Hopper"
+            help="Comma-separated display names. Empty matches any assignee, including unassigned."
+            onChange={setAssignees}
+          />
+          <TextRow
+            label="Required labels"
+            value={labels}
+            busy={busy}
+            placeholder="agent-ready"
+            help="Worth more than every other control here: it narrows the trigger from “anyone who can comment on a ticket” to “anyone who can label this project”."
+            onChange={setLabels}
+          />
+          {csvToList(labels).length > 1 && (
+            <SelectRowNative
+              busy={busy}
+              label="Label match"
+              value={labelMode}
+              options={[
+                { value: 'any', label: 'Any one of them' },
+                { value: 'all', label: 'All of them' },
+              ]}
+              onChange={(v) => setLabelMode(v as 'any' | 'all')}
+            />
+          )}
+          {events.includes('jira:issue_updated') && (
+            <TextRow
+              label="Changed field"
+              value={changedFields}
+              busy={busy}
+              placeholder="status, assignee"
+              help="Read from the event’s changelog, so this can never match an issue being created — a creation has no changelog."
+              onChange={setChangedFields}
+            />
+          )}
+          <TextRow
+            label="Ignore actor"
+            value={excludeActors}
+            busy={busy}
+            placeholder="Agent Bot"
+            help="Comma-separated display names. The one field above that excludes rather than requires — list the account this agent comments as, so its own comment on a ticket doesn’t re-trigger this webhook."
+            onChange={setExcludeActors}
+          />
+          {filterIsEmpty && (
+            <div className="warn-callout" role="alert">
+              Nothing is filtered. This will start an agent for every issue event in every project
+              the Jira user can see.
+            </div>
+          )}
+        </SectionCard>
+      </div>
 
-      <SectionCard title="Project & agent" icon="folder">
-        <SelectRowNative
-          busy={busy}
-          label="Directory"
-          value={directoryMode}
-          options={[
-            { value: 'workspace', label: 'Workspace' },
-            { value: 'auto-map', label: 'Auto map by Jira project' },
-          ]}
-          help={
-            directoryMode === 'workspace'
-              ? 'Every delivery runs in one directory, picked below.'
-              : 'Each Jira project key routes to its own directory, configured below — there is no single directory picker in this mode.'
-          }
-          onChange={(v) => setDirectoryMode(v as 'workspace' | 'auto-map')}
-        />
-        {directoryMode === 'workspace' && (
+      <div id="section-prompt">
+        <SectionCard title="Prompt" icon="compose">
           <SelectRowNative
             busy={busy}
-            label="Project"
-            value={cwd}
-            options={dirOptions}
-            onChange={setCwd}
+            label="Template routing"
+            value={promptTemplateMode}
+            options={[
+              { value: 'single', label: 'Single prompt template' },
+              { value: 'by-issue-type', label: 'Auto pick by Jira issue type' },
+            ]}
+            help={
+              promptTemplateMode === 'single'
+                ? 'Every delivery uses the single template configured below.'
+                : 'Routes prompt templates by Jira issue type (or "All type" fallback).'
+            }
+            onChange={(v) => setPromptTemplateMode(v as 'single' | 'by-issue-type')}
           />
-        )}
-        <SelectRowNative
-          busy={busy}
-          label="Agent"
-          value={agent}
-          options={structuredAgents.map((a) => ({
-            value: a.id,
-            label: a.available ? a.displayName : `${a.displayName} (not installed)`,
-          }))}
-          onChange={setAgent}
-        />
-        <SelectRowNative
-          busy={busy || !selectedIsRepo}
-          label="Working copy"
-          value={worktreeMode}
-          options={
-            selectedIsRepo
-              ? [
-                  { value: 'new-branch', label: 'A new worktree per delivery' },
-                  { value: 'current-branch', label: 'A worktree on the current branch' },
-                  { value: 'none', label: 'The project directory itself' },
-                ]
-              : [{ value: 'none', label: 'The project directory itself' }]
-          }
-          help={
-            !selectedIsRepo
-              ? 'This directory is not a git repository, so there is no worktree to make. Without one, the agent works directly in the folder itself.'
-              : worktreeMode === 'none'
-                ? 'The agent works directly in your checkout. A prompt built partly from someone else’s Jira text will be editing the tree you are working in.'
-                : 'Per-delivery worktrees are never cleaned up automatically — deleting one would destroy the output it produced. A busy Jira project can create hundreds.'
-          }
-          onChange={(v) => setWorktreeMode(v as CronWorktreeMode)}
-        />
-        {!selectedIsRepo && skipPermissions && (
-          // The one containment boundary is unavailable here, and the approval
-          // toggle is off, so say so rather than letting the two combine quietly.
-          <div className="warn-callout" role="alert">
-            With no worktree and approvals bypassed, an agent driven by someone else’s Jira text
-            will edit this folder directly, unsupervised.
+
+          {promptTemplateMode === 'single' ? (
+            <>
+              <SelectRowNative
+                busy={busy}
+                label="Template preset"
+                value={
+                  JIRA_PROMPT_TEMPLATES.find((p) => p.template === promptTemplate)?.id ?? 'custom'
+                }
+                options={[
+                  ...JIRA_PROMPT_TEMPLATES.map((p) => ({
+                    value: p.id,
+                    label: p.name,
+                  })),
+                  { value: 'custom', label: 'Custom prompt template' },
+                ]}
+                help={
+                  JIRA_PROMPT_TEMPLATES.find((p) => p.template === promptTemplate)?.description ??
+                  'Custom prompt instructions for the agent.'
+                }
+                onChange={(val) => {
+                  const found = JIRA_PROMPT_TEMPLATES.find((p) => p.id === val);
+                  if (found) {
+                    setPromptTemplate(found.template);
+                  }
+                }}
+              />
+              <TextRow
+                label="Prompt template"
+                value={promptTemplate}
+                busy={busy}
+                multiline
+                rows={10}
+                onChange={setPromptTemplate}
+              />
+            </>
+          ) : (
+            <div className="settings-row settings-row-stacked">
+              <div className="settings-row-info">
+                <label className="settings-row-label">Issue type template rules</label>
+                <p className="transport-hint">
+                  Incoming deliveries will match issue type rules from top to bottom. Use &ldquo;All type&rdquo; as the fallback template.
+                </p>
+              </div>
+              {promptTemplateMap.length === 0 && (
+                <p className="transport-hint">
+                  No issue type prompt templates configured yet. Add at least one rule.
+                </p>
+              )}
+              {promptTemplateMap.map((row) => {
+                const knownIssueTypes = ['All type', 'Bug', 'Story', 'Task', 'Incident', 'Feature', 'Epic', 'Sub-task'];
+                const isKnownType = knownIssueTypes.some((t) => t.toLowerCase() === row.issueType.trim().toLowerCase());
+                const typeSelectValue = isKnownType
+                  ? knownIssueTypes.find((t) => t.toLowerCase() === row.issueType.trim().toLowerCase()) ?? 'custom'
+                  : 'custom';
+                const matchedPreset = JIRA_PROMPT_TEMPLATES.find((p) => p.template === row.promptTemplate);
+
+                return (
+                  <div key={row.id} className="prompt-map-card">
+                    <div className="prompt-map-header">
+                      <select
+                        className="settings-select prompt-map-type-select"
+                        value={typeSelectValue}
+                        disabled={busy}
+                        aria-label="Issue type selector"
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (val !== 'custom') {
+                            updatePromptTemplateRoute(row.id, { issueType: val });
+                          } else if (isKnownType) {
+                            updatePromptTemplateRoute(row.id, { issueType: '' });
+                          }
+                        }}
+                      >
+                        <option value="All type">All type (Fallback)</option>
+                        <option value="Bug">Bug</option>
+                        <option value="Story">Story</option>
+                        <option value="Task">Task</option>
+                        <option value="Incident">Incident</option>
+                        <option value="Feature">Feature</option>
+                        <option value="Epic">Epic</option>
+                        <option value="Sub-task">Sub-task</option>
+                        <option value="custom">Custom issue type…</option>
+                      </select>
+
+                      {typeSelectValue === 'custom' && (
+                        <input
+                          type="text"
+                          className="settings-input prompt-map-type-custom"
+                          value={row.issueType}
+                          placeholder="Enter Jira issue type"
+                          disabled={busy}
+                          aria-label="Custom Jira issue type"
+                          onChange={(e) => updatePromptTemplateRoute(row.id, { issueType: e.target.value })}
+                        />
+                      )}
+
+                      <select
+                        className="settings-select prompt-map-preset-select"
+                        value={matchedPreset?.id ?? 'custom'}
+                        disabled={busy}
+                        aria-label="Prompt template preset"
+                        onChange={(e) => {
+                          const preset = JIRA_PROMPT_TEMPLATES.find((p) => p.id === e.target.value);
+                          if (preset) {
+                            updatePromptTemplateRoute(row.id, { promptTemplate: preset.template });
+                          }
+                        }}
+                      >
+                        {JIRA_PROMPT_TEMPLATES.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name}
+                          </option>
+                        ))}
+                        <option value="custom">Custom template</option>
+                      </select>
+
+                      <button
+                        type="button"
+                        className="round-btn prompt-map-remove"
+                        disabled={busy}
+                        aria-label={`Remove mapping for ${row.issueType || 'blank'}`}
+                        onClick={() => removePromptTemplateRoute(row.id)}
+                      >
+                        <Icon name="close" size={16} />
+                      </button>
+                    </div>
+
+                    <textarea
+                      className="settings-input settings-textarea prompt-map-textarea"
+                      rows={6}
+                      value={row.promptTemplate}
+                      disabled={busy}
+                      placeholder="Enter prompt template for this issue type..."
+                      aria-label={`Prompt template for ${row.issueType || 'issue type'}`}
+                      onChange={(e) => updatePromptTemplateRoute(row.id, { promptTemplate: e.target.value })}
+                    />
+                  </div>
+                );
+              })}
+              <button type="button" disabled={busy} onClick={addPromptTemplateRoute}>
+                <Icon name="plus" size={16} />
+                Add issue type template
+              </button>
+              {promptTemplateMapDuplicate !== null && (
+                <div className="warn-callout" role="alert">
+                  Issue type &quot;{promptTemplateMapDuplicate}&quot; is mapped more than once.
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="settings-row settings-row-stacked">
+            <div className="settings-row-info">
+              <label className="settings-row-label">Insert a value</label>
+              <p className="transport-hint">
+                Text written by a Jira user is wrapped in markers and labelled as data, not
+                instructions. Keep that shape.
+              </p>
+            </div>
+            {/* Rendered from the same array the server renderer iterates, so a
+                variable that exists in one but not the other is impossible. */}
+            <div className="toggle-chip-group">
+              {JIRA_TEMPLATE_VARS.map((v) => (
+                <button
+                  key={v.name}
+                  type="button"
+                  className="toggle-chip compact"
+                  disabled={busy}
+                  title={`${v.description} e.g. ${v.example}`}
+                  onClick={() => insertVar(v.name)}
+                >
+                  {v.name}
+                </button>
+              ))}
+            </div>
           </div>
-        )}
-      </SectionCard>
+          {!isNew && (
+            <>
+              <div className="secret-actions">
+                <button type="button" disabled={busy} onClick={() => void runPreview()}>
+                  Preview
+                </button>
+                {preview !== null && (
+                  <button type="button" onClick={() => setPreview(null)}>
+                    Hide
+                  </button>
+                )}
+              </div>
+              {preview !== null && <pre className="hook-preview">{preview}</pre>}
+            </>
+          )}
+        </SectionCard>
+      </div>
+
+      <div id="section-conversation">
+        <SectionCard title="Conversation" icon="terminal">
+          <SelectRowNative
+            busy={busy}
+            label="Each delivery"
+            value={conversationMode}
+            options={[
+              { value: 'per-delivery', label: 'Starts a fresh chat' },
+              { value: 'per-issue', label: 'Continues one chat per issue' },
+            ]}
+            help={
+              conversationMode === 'per-delivery'
+                ? 'Every event is a cold start: the agent re-reads the issue each time and knows nothing about earlier events.'
+                : 'The agent keeps the issue’s history, at the cost of a transcript that grows for as long as people keep editing that ticket.'
+            }
+            onChange={(v) => setConversationMode(v as WebhookConversationMode)}
+          />
+          {conversationMode === 'per-issue' && (
+            <NumberRow
+              label="Wait before starting"
+              unit="seconds"
+              value={debounceSeconds}
+              min={0}
+              max={3600}
+              busy={busy}
+              help="Collapses a burst of edits on one issue into a single run. A bulk edit otherwise appends one turn per changed field."
+              onChange={setDebounceSeconds}
+            />
+          )}
+          <SelectRowNative
+            busy={busy}
+            label="If a run is already going"
+            value={overlapPolicy}
+            options={[
+              { value: 'skip', label: 'Skip the new delivery' },
+              { value: 'allow', label: 'Start it anyway' },
+            ]}
+            onChange={(v) => setOverlapPolicy(v as 'skip' | 'allow')}
+          />
+        </SectionCard>
+      </div>
+
+      <div id="section-project">
+        <SectionCard title="Project & agent" icon="folder">
+          <SelectRowNative
+            busy={busy}
+            label="Directory"
+            value={directoryMode}
+            options={[
+              { value: 'workspace', label: 'Workspace' },
+              { value: 'auto-map', label: 'Auto map by Jira project' },
+            ]}
+            help={
+              directoryMode === 'workspace'
+                ? 'Every delivery runs in one directory, picked below.'
+                : 'Each Jira project key routes to its own directory, configured below — there is no single directory picker in this mode.'
+            }
+            onChange={(v) => setDirectoryMode(v as 'workspace' | 'auto-map')}
+          />
+          {directoryMode === 'workspace' && (
+            <SelectRowNative
+              busy={busy}
+              label="Project"
+              value={cwd}
+              options={dirOptions}
+              onChange={setCwd}
+            />
+          )}
+          <SelectRowNative
+            busy={busy}
+            label="Agent"
+            value={agent}
+            options={structuredAgents.map((a) => ({
+              value: a.id,
+              label: a.available ? a.displayName : `${a.displayName} (not installed)`,
+            }))}
+            onChange={setAgent}
+          />
+          <SelectRowNative
+            busy={busy || !selectedIsRepo}
+            label="Working copy"
+            value={worktreeMode}
+            options={
+              selectedIsRepo
+                ? [
+                    { value: 'new-branch', label: 'A new worktree per delivery' },
+                    { value: 'current-branch', label: 'A worktree on the current branch' },
+                    { value: 'none', label: 'The project directory itself' },
+                  ]
+                : [{ value: 'none', label: 'The project directory itself' }]
+            }
+            help={
+              !selectedIsRepo
+                ? 'This directory is not a git repository, so there is no worktree to make. Without one, the agent works directly in the folder itself.'
+                : worktreeMode === 'none'
+                  ? 'The agent works directly in your checkout. A prompt built partly from someone else’s Jira text will be editing the tree you are working in.'
+                  : 'Per-delivery worktrees are never cleaned up automatically — deleting one would destroy the output it produced. A busy Jira project can create hundreds.'
+            }
+            onChange={(v) => setWorktreeMode(v as CronWorktreeMode)}
+          />
+          {!selectedIsRepo && skipPermissions && (
+            // The one containment boundary is unavailable here, and the approval
+            // toggle is off, so say so rather than letting the two combine quietly.
+            <div className="warn-callout" role="alert">
+              With no worktree and approvals bypassed, an agent driven by someone else’s Jira text
+              will edit this folder directly, unsupervised.
+            </div>
+          )}
+        </SectionCard>
+      </div>
 
       {directoryMode === 'auto-map' && (
-      <SectionCard
-        title="Route by Jira project"
-        icon="folder"
-        desc="Each Jira project key routes to its own directory. A delivery for a project not listed here is filtered rather than guessed at — add at least one row."
-      >
-        {projectMap.length === 0 && (
-          <p className="transport-hint">
-            No projects mapped yet. Every delivery will be filtered until you add one.
-          </p>
-        )}
-        {projectMap.map((row) => (
-          <div key={row.id} className="settings-row settings-row-stacked">
-            <div className="project-map-row">
-              <input
-                type="text"
-                className="settings-input mono project-map-key"
-                value={row.projectKey}
-                placeholder="ENG"
-                disabled={busy}
-                spellCheck={false}
-                aria-label="Jira project key"
-                onChange={(e) => updateProjectRoute(row.id, { projectKey: e.target.value })}
-              />
-              <select
-                className="settings-select project-map-dir"
-                value={row.cwd}
-                disabled={busy}
-                aria-label="Directory"
-                onChange={(e) => updateProjectRoute(row.id, { cwd: e.target.value })}
-              >
-                <option value="" disabled>
-                  Choose a directory
-                </option>
-                {dirOptions.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                className="round-btn project-map-remove"
-                disabled={busy}
-                aria-label={`Remove the ${row.projectKey || 'blank'} mapping`}
-                onClick={() => removeProjectRoute(row.id)}
-              >
-                <Icon name="close" size={16} />
-              </button>
-            </div>
-          </div>
-        ))}
-        <button type="button" disabled={busy} onClick={addProjectRoute}>
-          <Icon name="plus" size={16} />
-          Add project
-        </button>
-        {projectMapDuplicate !== null && (
-          <div className="warn-callout" role="alert">
-            Project &quot;{projectMapDuplicate}&quot; is mapped more than once.
-          </div>
-        )}
-      </SectionCard>
+        <div id="section-automap">
+          <SectionCard
+            title="Route by Jira project"
+            icon="folder"
+            desc="Each Jira project key routes to its own directory. A delivery for a project not listed here is filtered rather than guessed at — add at least one row."
+          >
+            {projectMap.length === 0 && (
+              <p className="transport-hint">
+                No projects mapped yet. Every delivery will be filtered until you add one.
+              </p>
+            )}
+            {projectMap.map((row) => (
+              <div key={row.id} className="settings-row settings-row-stacked">
+                <div className="project-map-row">
+                  <input
+                    type="text"
+                    className="settings-input mono project-map-key"
+                    value={row.projectKey}
+                    placeholder="ENG"
+                    disabled={busy}
+                    spellCheck={false}
+                    aria-label="Jira project key"
+                    onChange={(e) => updateProjectRoute(row.id, { projectKey: e.target.value })}
+                  />
+                  <select
+                    className="settings-select project-map-dir"
+                    value={row.cwd}
+                    disabled={busy}
+                    aria-label="Directory"
+                    onChange={(e) => updateProjectRoute(row.id, { cwd: e.target.value })}
+                  >
+                    <option value="" disabled>
+                      Choose a directory
+                    </option>
+                    {dirOptions.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="round-btn project-map-remove"
+                    disabled={busy}
+                    aria-label={`Remove the ${row.projectKey || 'blank'} mapping`}
+                    onClick={() => removeProjectRoute(row.id)}
+                  >
+                    <Icon name="close" size={16} />
+                  </button>
+                </div>
+              </div>
+            ))}
+            <button type="button" disabled={busy} onClick={addProjectRoute}>
+              <Icon name="plus" size={16} />
+              Add project
+            </button>
+            {projectMapDuplicate !== null && (
+              <div className="warn-callout" role="alert">
+                Project &quot;{projectMapDuplicate}&quot; is mapped more than once.
+              </div>
+            )}
+          </SectionCard>
+        </div>
       )}
 
-      <SectionCard
-        title="Model & effort"
-        icon="code"
-        desc="Free text — each agent has its own vocabulary."
-      >
-        <TextRow
-          label="Model"
-          value={model}
-          busy={busy}
-          placeholder={selectedAgent?.defaultModel ?? "the agent's default"}
-          listId="webhook-model-options"
-          onChange={setModel}
+      <div id="section-model">
+        <SectionCard
+          title="Model & effort"
+          icon="code"
+          desc="Free text — each agent has its own vocabulary."
         >
-          {/* `id` is document-global and `cron-model-options` may be mounted in
-              the same document on desktop. */}
-          <datalist id="webhook-model-options">
-            {(selectedAgent?.cachedModels ?? []).map((m) => (
-              <option key={m.value} value={m.value}>
-                {m.displayName}
-              </option>
-            ))}
-          </datalist>
-        </TextRow>
-        <TextRow
-          label="Effort"
-          value={effort}
-          busy={busy}
-          placeholder={selectedAgent?.defaultEffort ?? "the model's default"}
-          onChange={setEffort}
-        />
-      </SectionCard>
+          <TextRow
+            label="Model"
+            value={model}
+            busy={busy}
+            placeholder={selectedAgent?.defaultModel ?? "the agent's default"}
+            listId="webhook-model-options"
+            onChange={setModel}
+          >
+            {/* `id` is document-global and `cron-model-options` may be mounted in
+                the same document on desktop. */}
+            <datalist id="webhook-model-options">
+              {(selectedAgent?.cachedModels ?? []).map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.displayName}
+                </option>
+              ))}
+            </datalist>
+          </TextRow>
+          <TextRow
+            label="Effort"
+            value={effort}
+            busy={busy}
+            placeholder={selectedAgent?.defaultEffort ?? "the model's default"}
+            onChange={setEffort}
+          />
+        </SectionCard>
+      </div>
 
-      <SectionCard title="Approvals" icon="shield">
-        <div className="settings-row">
-          <div className="settings-row-main">
-            <div className="settings-row-info">
-              <label className="settings-row-label">Skip tool approvals</label>
-              <p className="transport-hint">
-                {skipPermissions
-                  ? 'Every tool call runs immediately, unattended.'
-                  : 'Approvals go to the browser. A delivery that needs one waits — indefinitely — until you answer it, and you get a notification.'}
-              </p>
-            </div>
-            <div className="settings-row-control">
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={skipPermissions}
-                  disabled={busy}
-                  onChange={(e) => setSkipPermissions(e.target.checked)}
-                  aria-label="Skip tool approvals"
-                />
-                <span className="switch-track" />
-              </label>
-            </div>
-          </div>
-        </div>
-        {skipPermissions && (
-          // Stronger than the cron editor's warning, and the difference is
-          // material: a cron job's prompt is written by the operator, this one
-          // is built partly from text an outsider typed into a ticket.
-          <div className="warn-callout" role="alert">
-            This webhook will run with every tool approval bypassed, on a prompt built partly from
-            text someone else wrote in Jira. It will edit files and run commands without asking.
-            Consider a per-delivery worktree and a required label.
-          </div>
-        )}
-        <NumberRow
-          label="Deliveries running at once"
-          value={maxConcurrent}
-          min={1}
-          max={10}
-          busy={busy}
-          help="Over this, a delivery is recorded and dropped rather than queued. Webhook runs are also capped globally so two session slots always stay free for you."
-          onChange={setMaxConcurrent}
-        />
-        <div className="settings-row">
-          <div className="settings-row-main">
-            <div className="settings-row-info">
-              <label className="settings-row-label">Keep payloads</label>
-              <p className="transport-hint">
-                Stores each delivery&rsquo;s JSON so a filter or template can be debugged. Bounded,
-                and secret-shaped fields are removed before saving.
-              </p>
-            </div>
-            <div className="settings-row-control">
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={storePayloads}
-                  disabled={busy}
-                  onChange={(e) => setStorePayloads(e.target.checked)}
-                  aria-label="Keep payloads"
-                />
-                <span className="switch-track" />
-              </label>
+      <div id="section-approvals">
+        <SectionCard title="Approvals" icon="shield">
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-info">
+                <label className="settings-row-label">Skip tool approvals</label>
+                <p className="transport-hint">
+                  {skipPermissions
+                    ? 'Every tool call runs immediately, unattended.'
+                    : 'Approvals go to the browser. A delivery that needs one waits — indefinitely — until you answer it, and you get a notification.'}
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={skipPermissions}
+                    disabled={busy}
+                    onChange={(e) => setSkipPermissions(e.target.checked)}
+                    aria-label="Skip tool approvals"
+                  />
+                  <span className="switch-track" />
+                </label>
+              </div>
             </div>
           </div>
-        </div>
-      </SectionCard>
+          {skipPermissions && (
+            // Stronger than the cron editor's warning, and the difference is
+            // material: a cron job's prompt is written by the operator, this one
+            // is built partly from text an outsider typed into a ticket.
+            <div className="warn-callout" role="alert">
+              This webhook will run with every tool approval bypassed, on a prompt built partly from
+              text someone else wrote in Jira. It will edit files and run commands without asking.
+              Consider a per-delivery worktree and a required label.
+            </div>
+          )}
+          <NumberRow
+            label="Deliveries running at once"
+            value={maxConcurrent}
+            min={1}
+            max={10}
+            busy={busy}
+            help="Over this, a delivery is recorded and dropped rather than queued. Webhook runs are also capped globally so two session slots always stay free for you."
+            onChange={setMaxConcurrent}
+          />
+          <div className="settings-row">
+            <div className="settings-row-main">
+              <div className="settings-row-info">
+                <label className="settings-row-label">Keep payloads</label>
+                <p className="transport-hint">
+                  Stores each delivery&rsquo;s JSON so a filter or template can be debugged. Bounded,
+                  and secret-shaped fields are removed before saving.
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={storePayloads}
+                    disabled={busy}
+                    onChange={(e) => setStorePayloads(e.target.checked)}
+                    aria-label="Keep payloads"
+                  />
+                  <span className="switch-track" />
+                </label>
+              </div>
+            </div>
+          </div>
+        </SectionCard>
+      </div>
 
       <div className="cron-save-bar">
         <button type="button" className="primary" disabled={busy} onClick={() => void save()}>
@@ -1345,83 +1434,104 @@ export function WebhookEditorPage({
       </div>
 
       {!isNew && (
-        <SectionCard title="Deliveries" icon="terminal">
-          {counts !== null && counts.total > 0 && (
-            <p className="transport-hint">
-              {counts.total} received · {counts.ran} ran · {counts.filtered} filtered ·{' '}
-              {counts.rejected} rejected{' '}
-              <button type="button" className="linkish" onClick={() => setShowNoise((v) => !v)}>
-                {showNoise ? 'Hide' : 'Show'} the ones that did not run
-              </button>
-            </p>
-          )}
-          {visibleDeliveries.length === 0 ? (
-            <p className="transport-hint">
-              {deliveries.length === 0
-                ? 'No deliveries yet. Until one arrives, nothing confirms Jira can reach this server.'
-                : 'No deliveries have started a run.'}
-            </p>
-          ) : (
-            <div className="webhook-history-panel" style={{ border: 'none', background: 'transparent' }}>
-              {visibleDeliveries.map((d) => {
-                const openable = d.sessionId !== null || d.agentSessionId !== null;
-                return (
-                  <div key={d.id} className={`history-row${DID_NOT_RUN.has(d.status) ? ' inert' : ''}`}>
-                    <button
-                      type="button"
-                      className="history-row-main"
-                      disabled={!openable}
-                      onClick={() => openDelivery(d)}
-                      title={
-                        openable
-                          ? 'Open this delivery’s transcript'
-                          : (d.reason ?? 'No transcript available')
-                      }
-                    >
-                      <div className="history-row-primary">
-                        <WebhookStatusIcon status={d.status} />
+        <div id="section-deliveries">
+          <SectionCard title="Deliveries" icon="terminal">
+            {counts !== null && counts.total > 0 && (
+              <p className="transport-hint">
+                {counts.total} received · {counts.ran} ran · {counts.filtered} filtered ·{' '}
+                {counts.rejected} rejected{' '}
+                <button type="button" className="linkish" onClick={() => setShowNoise((v) => !v)}>
+                  {showNoise ? 'Hide' : 'Show'} the ones that did not run
+                </button>
+              </p>
+            )}
+            {visibleDeliveries.length === 0 ? (
+              <p className="transport-hint">
+                {deliveries.length === 0
+                  ? 'No deliveries yet. Until one arrives, nothing confirms Jira can reach this server.'
+                  : 'No deliveries have started a run.'}
+              </p>
+            ) : (
+              <div className="webhook-history-panel" style={{ border: 'none', background: 'transparent' }}>
+                {visibleDeliveries.map((d) => {
+                  const openable = d.sessionId !== null || d.agentSessionId !== null;
+                  return (
+                    <div key={d.id} className={`history-row${DID_NOT_RUN.has(d.status) ? ' inert' : ''}`}>
+                      <button
+                        type="button"
+                        className="history-row-main"
+                        disabled={!openable}
+                        onClick={() => openDelivery(d)}
+                        title={
+                          openable
+                            ? 'Open this delivery’s transcript'
+                            : (d.reason ?? 'No transcript available')
+                        }
+                      >
+                        <div className="history-row-primary">
+                          <WebhookStatusIcon status={d.status} />
 
-                        {d.issueKey && (
-                          <span className="jira-issue-badge">{d.issueKey}</span>
-                        )}
+                          {d.issueKey && (
+                            <span className="jira-issue-badge">{d.issueKey}</span>
+                          )}
 
-                        {d.event && (
-                          <span className="jira-event-badge">
-                            {d.event.replace(/^jira:/, '').replace(/^issue_/, '')}
-                          </span>
-                        )}
+                          {d.event && (
+                            <span className="jira-event-badge">
+                              {d.event.replace(/^jira:/, '').replace(/^issue_/, '')}
+                            </span>
+                          )}
 
-                        {d.actor && (
-                          <span className="history-row-actor">by {d.actor}</span>
-                        )}
+                          {d.actor && (
+                            <span className="history-row-actor">by {d.actor}</span>
+                          )}
 
-                        {d.trigger === 'test' && (
-                          <span className="history-test-tag">test</span>
-                        )}
+                          {d.trigger === 'test' && (
+                            <span className="history-test-tag">test</span>
+                          )}
 
-                        {d.skipPermissionsEnabled && (
-                          <Icon
-                            name="shield"
-                            size={13}
-                            className="cron-shield"
-                            aria-label="Approvals bypassed"
-                          />
-                        )}
-                      </div>
+                          {d.skipPermissionsEnabled && (
+                            <Icon
+                              name="shield"
+                              size={13}
+                              className="cron-shield"
+                              aria-label="Approvals bypassed"
+                            />
+                          )}
+                        </div>
 
-                      <div className="history-row-secondary">
-                        <span className="history-row-time">{formatRelative(d.receivedAt)}</span>
-                        {d.reason !== null && <span className="delivery-reason">{d.reason}</span>}
-                        {d.error !== null && <span className="history-row-error">{d.error}</span>}
-                      </div>
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </SectionCard>
+                        <div className="history-row-secondary">
+                          <span className="history-row-time">{formatRelative(d.receivedAt)}</span>
+                          {d.reason !== null && <span className="delivery-reason">{d.reason}</span>}
+                          {d.error !== null && <span className="history-row-error">{d.error}</span>}
+                        </div>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </SectionCard>
+        </div>
       )}
+        </div>
+
+        <nav className="webhook-editor-nav" aria-label="Sections">
+          <div className="webhook-editor-nav-title">On this page</div>
+          <div className="webhook-editor-nav-list">
+            {navSections.map((sec) => (
+              <button
+                key={sec.id}
+                type="button"
+                className={`webhook-editor-nav-item${activeSection === sec.id ? ' active' : ''}`}
+                onClick={() => scrollToSection(sec.id)}
+              >
+                <Icon name={sec.icon} size={14} className="webhook-editor-nav-icon" />
+                <span>{sec.title}</span>
+              </button>
+            ))}
+          </div>
+        </nav>
+      </div>
     </div>
   );
 
