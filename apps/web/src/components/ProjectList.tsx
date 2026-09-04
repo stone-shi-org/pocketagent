@@ -536,6 +536,7 @@ function ProjectSection({
           className="project-name"
           onClick={() => toggle(project.cwd)}
           aria-expanded={!isCollapsed}
+          title={nested ? project.gitBranch ?? project.name : project.name}
         >
           <span className="project-icon">
             <Icon
@@ -559,7 +560,10 @@ function ProjectSection({
               />
             )}
           </span>
-          <span className="project-label">
+          <span
+            className="project-label"
+            title={nested ? project.gitBranch ?? project.name : project.name}
+          >
             {nested ? project.gitBranch ?? project.name : project.name}
           </span>
           <Icon name="chevron-down" className={`project-caret${isCollapsed ? ' closed' : ''}`} />

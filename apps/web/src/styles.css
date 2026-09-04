@@ -2648,11 +2648,39 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 }
 
 .sidebar {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--bg-elev);
   border-right: 1px solid var(--border);
+}
+
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  user-select: none;
+  z-index: 20;
+}
+
+.sidebar-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 3px;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.sidebar-resizer:hover::after,
+.sidebar-resizer.resizing::after {
+  background: var(--accent);
 }
 
 .sidebar-head {

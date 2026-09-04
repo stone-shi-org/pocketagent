@@ -24,6 +24,12 @@ import { SessionRoute } from './SessionRoute.js';
 import { ChatPreviewPage } from './ChatPreviewPage.js';
 import { loadOpenTabRoutes, saveOpenTabRoutes, type StoredTabRoute } from '../agent/open-tabs-pref.js';
 import { fallbackAfterClose, isTabRoute, tabIdFor, tabListReducer, type TabRoute } from '../agent/tab-list.js';
+import {
+  clampSidebarWidth,
+  DEFAULT_SIDEBAR_WIDTH,
+  getSidebarWidthPref,
+  setSidebarWidthPref,
+} from '../agent/sidebar-width-pref.js';
 
 import { ShellDialog } from '../components/ShellDialog.js';
 
@@ -270,9 +276,60 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
   const runningCount =
     state.projects?.reduce((n, p) => n + p.chats.filter((c) => c.live).length, 0) ?? 0;
 
+  const [sidebarWidth, setSidebarWidth] = useState<number>(getSidebarWidthPref);
+  const [isResizing, setIsResizing] = useState(false);
+  const isResizingRef = useRef(false);
+
+  const handleResizerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizingRef.current = true;
+    setIsResizing(true);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      if (!isResizingRef.current) return;
+      const newWidth = clampSidebarWidth(moveEvent.clientX);
+      setSidebarWidth(newWidth);
+    };
+
+    const onMouseUp = (upEvent: MouseEvent) => {
+      if (!isResizingRef.current) return;
+      isResizingRef.current = false;
+      setIsResizing(false);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      const finalWidth = clampSidebarWidth(upEvent.clientX);
+      setSidebarWidth(finalWidth);
+      setSidebarWidthPref(finalWidth);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, []);
+
+  const handleResizerDoubleClick = useCallback(() => {
+    setSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+    setSidebarWidthPref(DEFAULT_SIDEBAR_WIDTH);
+  }, []);
+
   return (
-    <div className="desktop-shell">
+    <div
+      className="desktop-shell"
+      style={{ gridTemplateColumns: `${sidebarWidth}px minmax(0, 1fr)` }}
+    >
       <aside className="sidebar">
+        <div
+          className={`sidebar-resizer${isResizing ? ' resizing' : ''}`}
+          onMouseDown={handleResizerMouseDown}
+          onDoubleClick={handleResizerDoubleClick}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          title="Drag to resize sidebar, double-click to reset"
+        />
         <header className="sidebar-head">
           <div className="sidebar-brand">
             <strong>Remote</strong>

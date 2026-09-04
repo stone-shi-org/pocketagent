@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AgentInfo,
   CronWorktreeMode,
-  JiraPromptTemplateMapEntry,
   JiraWebhookFilter,
   ProjectInfo,
   Webhook,
