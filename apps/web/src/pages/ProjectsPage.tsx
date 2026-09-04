@@ -141,6 +141,7 @@ export function ProjectsPage({
           onAddProject={() => setShowAdd(true)}
           onOpenCronJob={onOpenCronJob}
           onOpenWebhook={onOpenWebhook}
+          onApiError={onApiError}
           emptyHint="Nothing here yet. Tap the compose button to start a chat."
         />
       </div>

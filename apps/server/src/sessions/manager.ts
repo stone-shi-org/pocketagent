@@ -1240,6 +1240,19 @@ export class SessionManager {
     }
   }
 
+  /**
+   * True if any session, of any transport or backend, is currently alive
+   * with this exact `cwd`. Used to refuse deleting a worktree out from under
+   * a running process — the same "never disturb a running session" posture
+   * as `forget()` above, extended to a directory-level action.
+   */
+  hasAliveSessionIn(cwd: string): boolean {
+    for (const session of this.live.values()) {
+      if (session.spec.cwd === cwd && session.isAlive()) return true;
+    }
+    return false;
+  }
+
   /** Forget every finished session in a directory. Running ones are left. */
   forgetFinishedIn(cwd: string): number {
     for (const [id, session] of this.live) {

@@ -439,6 +439,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             activeConversationId={activeConversationId}
             onOpenCronJob={(jobId) => onNavigate({ name: 'cron-job', jobId })}
             onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
+            onApiError={onApiError}
             emptyHint="Nothing here yet. Start a chat to see it listed."
           />
         </div>

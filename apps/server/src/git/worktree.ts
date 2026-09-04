@@ -4,7 +4,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
-import { readGitBranch } from '../projects/index.js';
+import { findMainRepoCwd, readGitBranch } from '../projects/index.js';
+import { parsePorcelainV2 } from './status.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -12,7 +13,15 @@ export class WorktreeError extends Error {
   override readonly name = 'WorktreeError';
   constructor(
     message: string,
-    readonly code: 'not_a_repo' | 'invalid_branch' | 'branch_exists' | 'already_exists' | 'git_failed',
+    readonly code:
+      | 'not_a_repo'
+      | 'invalid_branch'
+      | 'branch_exists'
+      | 'already_exists'
+      | 'git_failed'
+      | 'not_a_worktree'
+      | 'dirty'
+      | 'unmerged',
   ) {
     super(message);
   }
@@ -33,6 +42,27 @@ export interface CreateWorktreeOutput {
 
 export interface WorktreeServiceOptions {
   workspaces: WorkspaceRegistry;
+}
+
+export interface RemoveWorktreeInput {
+  /** Already resolved and workspace-validated, same as `create()`'s `projectCwd`. */
+  worktreeCwd: string;
+}
+
+export interface RemoveWorktreeOutput {
+  /** The local branch that was deleted along with the worktree. */
+  branch: string;
+  /** The main checkout this worktree belonged to. */
+  mainCwd: string;
+  /** Present only when the deleted branch had a remote-tracking branch. */
+  remote: { remoteName: string; remoteBranch: string } | null;
+}
+
+export interface DeleteRemoteBranchInput {
+  /** The main checkout — the worktree this branch came from is already gone by this point. */
+  mainCwd: string;
+  remoteName: string;
+  remoteBranch: string;
 }
 
 /**
@@ -108,6 +138,98 @@ export class WorktreeService {
     const resolved = await this.workspaces.resolveWorkspacePath(worktreePath);
     return { cwd: resolved, branch };
   }
+
+  /**
+   * Removes a linked worktree and its local branch — never a main checkout,
+   * never anything with unsaved or unmerged work.
+   *
+   * Both gates below (uncommitted changes, then mergeability) run *before*
+   * anything on disk changes, and in that order deliberately: this used to
+   * remove the worktree first and delete the branch second, which was fine
+   * with `git branch -D` (never fails) but turned every ordinary call into a
+   * half-finished state once branch deletion became `-d` (safe) — `-d`
+   * refuses anything not merged into its target, and most worktree branches
+   * are, by definition, still unmerged at delete-time (that is usually the
+   * whole reason a worktree for one still exists). Checking mergeability
+   * first keeps the action atomic: either everything below happens, or
+   * nothing does.
+   */
+  async remove(input: RemoveWorktreeInput): Promise<RemoveWorktreeOutput> {
+    const { worktreeCwd } = input;
+
+    const mainCwd = await findMainRepoCwd(worktreeCwd);
+    if (!mainCwd) {
+      throw new WorktreeError(`${worktreeCwd} is not a linked git worktree.`, 'not_a_worktree');
+    }
+
+    const branch = await readGitBranch(worktreeCwd);
+    if (!branch) {
+      // A detached-HEAD worktree — never produced by `create()`, which always
+      // checks out a named branch, but a worktree could have been made by
+      // hand outside this app. There is no branch to delete alongside it, so
+      // this is refused rather than guessing at "just remove the worktree".
+      throw new WorktreeError(
+        `${worktreeCwd} has no branch checked out (detached HEAD); not removable from here.`,
+        'not_a_worktree',
+      );
+    }
+
+    // Fresh, uncached — this feeds a destructive decision, unlike
+    // `GitStatusTracker`'s 15s-stale reads for the home-screen poll.
+    if ((await freshGitStatus(worktreeCwd)) === 'dirty') {
+      throw new WorktreeError('Worktree has uncommitted changes. Commit or discard them first.', 'dirty');
+    }
+
+    const remote = await readUpstream(mainCwd, branch);
+
+    // Merge target: the branch's own upstream if it has one, else the main
+    // checkout's current branch — the base a worktree is normally forked
+    // from (see `create()`'s `baseRef`). Falls back to the main checkout's
+    // raw `HEAD` if that, too, is detached.
+    const mergeTarget = remote
+      ? `${remote.remoteName}/${remote.remoteBranch}`
+      : ((await readGitBranch(mainCwd)) ?? 'HEAD');
+
+    if (!(await isMergedInto(mainCwd, branch, mergeTarget))) {
+      throw new WorktreeError(
+        `Branch "${branch}" has commits not merged into ${mergeTarget}. Merge it, or delete the branch manually, before deleting this worktree.`,
+        'unmerged',
+      );
+    }
+
+    try {
+      await execFileAsync('git', ['worktree', 'remove', worktreeCwd], { cwd: mainCwd });
+    } catch (err) {
+      throw new WorktreeError(gitErrorMessage(err), 'git_failed');
+    }
+
+    try {
+      await execFileAsync('git', ['branch', '-d', branch], { cwd: mainCwd });
+    } catch (err) {
+      // The worktree is already gone at this point — the mergeability check
+      // above should make this unreachable outside a same-instant race (a
+      // commit landing on `branch` between that check and this delete).
+      throw new WorktreeError(gitErrorMessage(err), 'git_failed');
+    }
+
+    return { branch, mainCwd, remote };
+  }
+
+  /**
+   * Deletes a branch on a remote. Only ever called with the exact
+   * `{ remoteName, remoteBranch }` pair `remove()` itself returned moments
+   * earlier — never a name the browser invents — after the user opts in to
+   * a follow-up prompt.
+   */
+  async deleteRemoteBranch(input: DeleteRemoteBranchInput): Promise<void> {
+    try {
+      await execFileAsync('git', ['push', input.remoteName, '--delete', input.remoteBranch], {
+        cwd: input.mainCwd,
+      });
+    } catch (err) {
+      throw new WorktreeError(gitErrorMessage(err), 'git_failed');
+    }
+  }
 }
 
 async function isGitRepo(dir: string): Promise<boolean> {
@@ -170,6 +292,57 @@ async function excludeWorktreesDir(projectCwd: string): Promise<void> {
     await fs.writeFile(excludePath, `${withNewline}.worktrees/\n`);
   } catch {
     // Not fatal — see comment above.
+  }
+}
+
+/**
+ * A fresh, uncached `git status`, for the one caller (`remove()`) that must
+ * never act on a stale "clean" reading. Deliberately bypasses
+ * `GitStatusTracker` — see that class's own doc comment for why its 15s
+ * cache is fine for a 5s home-screen poll but wrong for a destructive
+ * decision.
+ */
+async function freshGitStatus(cwd: string) {
+  const { stdout } = await execFileAsync(
+    'git',
+    ['status', '--porcelain=2', '--branch', '--untracked-files=normal'],
+    { cwd },
+  );
+  return parsePorcelainV2(stdout);
+}
+
+/**
+ * A branch's remote-tracking branch, or `null` if it has none. Queried via
+ * `for-each-ref` rather than `rev-parse @{u}` so a missing upstream is a
+ * blank field rather than a thrown error to catch.
+ */
+async function readUpstream(
+  repoCwd: string,
+  branch: string,
+): Promise<{ remoteName: string; remoteBranch: string } | null> {
+  const { stdout } = await execFileAsync(
+    'git',
+    ['for-each-ref', '--format=%(upstream:remotename)\t%(upstream:remoteref)', `refs/heads/${branch}`],
+    { cwd: repoCwd },
+  );
+  const [remoteName = '', remoteRef = ''] = stdout.trim().split('\t');
+  if (!remoteName || !remoteRef) return null;
+  return { remoteName, remoteBranch: remoteRef.replace(/^refs\/heads\//, '') };
+}
+
+/** Whether every commit on `branch` is reachable from `target` — i.e. `git branch -d branch` would succeed. */
+async function isMergedInto(repoCwd: string, branch: string, target: string): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['merge-base', '--is-ancestor', branch, target], { cwd: repoCwd });
+    return true;
+  } catch (err) {
+    // Exit code 1 is `git merge-base --is-ancestor`'s documented "no" answer,
+    // not a failure — anything else (e.g. `target` doesn't resolve) must not
+    // be silently read as "merged".
+    if (err && typeof err === 'object' && 'code' in err && (err as { code?: unknown }).code === 1) {
+      return false;
+    }
+    throw new WorktreeError(gitErrorMessage(err), 'git_failed');
   }
 }
 

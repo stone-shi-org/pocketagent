@@ -118,6 +118,46 @@ export const CreateWorktreeResponse = z.object({
 });
 export type CreateWorktreeResponse = z.infer<typeof CreateWorktreeResponse>;
 
+/**
+ * Removes a linked git worktree and its local branch (three-dot menu, worktree
+ * rows only). The server derives the branch name from the worktree's own
+ * `HEAD` rather than trusting one from the client — see `WorktreeService.remove`.
+ */
+export const DeleteWorktreeRequest = z.object({
+  /** The worktree's own directory (a `ProjectInfo.cwd` for a worktree row). */
+  cwd: z.string().min(1).max(4096),
+});
+export type DeleteWorktreeRequest = z.infer<typeof DeleteWorktreeRequest>;
+
+export const DeleteWorktreeResponse = z.object({
+  ok: z.literal(true),
+  /** The local branch that was deleted along with the worktree. */
+  branch: z.string(),
+  /** The main checkout this worktree belonged to — feeds a follow-up delete-remote-branch call. */
+  mainCwd: z.string(),
+  /** Present only when the deleted branch had a remote-tracking branch. */
+  remote: z
+    .object({
+      remoteName: z.string(),
+      /** Short branch name on the remote (e.g. "feature/x", not "origin/feature/x"). */
+      remoteBranch: z.string(),
+    })
+    .nullable(),
+});
+export type DeleteWorktreeResponse = z.infer<typeof DeleteWorktreeResponse>;
+
+/**
+ * Follow-up call, only made if the user opts in after `DeleteWorktreeResponse.remote`
+ * is non-null — the worktree and local branch are already gone by this point.
+ */
+export const DeleteRemoteBranchRequest = z.object({
+  /** The main checkout (`DeleteWorktreeResponse.mainCwd`). */
+  cwd: z.string().min(1).max(4096),
+  remoteName: z.string().min(1).max(200),
+  remoteBranch: z.string().min(1).max(200),
+});
+export type DeleteRemoteBranchRequest = z.infer<typeof DeleteRemoteBranchRequest>;
+
 export const SessionListResponse = z.object({
   sessions: z.array(SessionInfo),
 });
