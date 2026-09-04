@@ -5,6 +5,8 @@ import type {
   BrowseEntry,
   CreateWorktreeRequest,
   CreateWorktreeResponse,
+  DeleteRemoteBranchRequest,
+  DeleteWorktreeResponse,
   DiscoveredFolder,
   AgentInfo,
   ConversationInfo,
@@ -189,6 +191,25 @@ export const api = {
   /** Creates a new git worktree for a project; the returned `cwd` feeds `createSession`. */
   createWorktree: (body: CreateWorktreeRequest) =>
     request<CreateWorktreeResponse>('/api/projects/worktree', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /**
+   * Deletes a linked git worktree and its local branch. Throws `ApiError` on
+   * rejection (`dirty`, `unmerged`, `worktree_busy`, ...) rather than
+   * swallowing it — the three-dot menu's delete flow branches on the error
+   * code to show the right dialog.
+   */
+  deleteWorktree: (cwd: string) =>
+    request<DeleteWorktreeResponse>('/api/projects/worktree/delete', {
+      method: 'POST',
+      body: JSON.stringify({ cwd }),
+    }),
+
+  /** Follow-up to `deleteWorktree`, only called if the user opts in after its `remote` is non-null. */
+  deleteRemoteBranch: (body: DeleteRemoteBranchRequest) =>
+    request<{ ok: true }>('/api/projects/worktree/delete-remote', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { ChatSummary, HostInfo, ProjectInfo } from '@pocketagent/protocol';
+import type {
+  ChatSummary,
+  DeleteRemoteBranchRequest,
+  DeleteWorktreeResponse,
+  HostInfo,
+  ProjectInfo,
+} from '@pocketagent/protocol';
 import { describeCron } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { filterProjects } from '../agent/search.js';
 import { formatCountdown } from '../agent/cron-format.js';
 import { formatRelative } from './StatusBadge.js';
+import { DeleteWorktreeFlow } from './DeleteWorktreeFlow.js';
 
 const REFRESH_MS = 5000;
 
@@ -85,6 +92,16 @@ export interface ProjectsState {
   clearFinished: (project: ProjectInfo) => Promise<void>;
   hideProject: (cwd: string) => Promise<void>;
   removeProject: (cwd: string) => Promise<void>;
+  /**
+   * Deletes a linked git worktree and its local branch. Unlike every member
+   * above, this does *not* swallow its own error into `onApiError`/`setError`
+   * — `DeleteWorktreeFlow` needs to branch on `ApiError.code` (`dirty`,
+   * `unmerged`, `worktree_busy`, ...) to show the right dialog, so it does its
+   * own error handling and its own `refresh()` once it reaches a resting state.
+   */
+  deleteWorktree: (cwd: string) => Promise<DeleteWorktreeResponse>;
+  /** Follow-up to `deleteWorktree`; also propagates rather than swallowing. */
+  deleteRemoteBranch: (body: DeleteRemoteBranchRequest) => Promise<void>;
 }
 
 /**
@@ -239,6 +256,22 @@ export function useProjects(
     [onApiError, refresh],
   );
 
+  /**
+   * Deletes a linked git worktree and its local branch. Deliberately does
+   * *not* catch its own error the way every action above does — `ApiError`
+   * propagates so `DeleteWorktreeFlow` can branch on `.code` (`dirty`,
+   * `unmerged`, `worktree_busy`, ...) and show the matching dialog rather
+   * than a generic banner. The flow component calls `refresh()` itself once
+   * it reaches a resting state, whichever path that turns out to be.
+   */
+  const deleteWorktree = useCallback((cwd: string) => api.deleteWorktree(cwd), []);
+
+  /** Follow-up to `deleteWorktree`; same propagate-don't-swallow reasoning. */
+  const deleteRemoteBranch = useCallback(
+    (body: DeleteRemoteBranchRequest) => api.deleteRemoteBranch(body).then(() => undefined),
+    [],
+  );
+
   const detachChat = useCallback(
     async (chat: ChatSummary) => {
       if (chat.sessionId) {
@@ -363,6 +396,8 @@ export function useProjects(
     clearFinished,
     hideProject,
     removeProject,
+    deleteWorktree,
+    deleteRemoteBranch,
   };
 }
 
@@ -381,6 +416,8 @@ interface ListProps {
   onOpenCronJob?: (jobId: string) => void;
   /** Opens a webhook's editor. Omitted where webhook rows are not wanted. */
   onOpenWebhook?: (webhookId: string) => void;
+  /** Only reached by `DeleteWorktreeFlow`, for a failure outside its own handled rejections. */
+  onApiError: (error: unknown) => void;
 }
 
 /** The folders and their chats. Presentation only; state comes from above. */
@@ -394,10 +431,15 @@ export function ProjectList({
   onAddProject,
   onOpenCronJob,
   onOpenWebhook,
+  onApiError,
 }: ListProps): JSX.Element {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [expandedChats, setExpandedChats] = useState<Set<string>>(() => new Set());
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  // A delete flow can outlive its three-dot menu closing (it opens its own
+  // dialogs), so it is not reusing `menuFor`'s state — but like `menuFor`,
+  // only one can be open at a time, keyed by the worktree's own `cwd`.
+  const [deleteFlowFor, setDeleteFlowFor] = useState<string | null>(null);
   const { projects, open } = state;
 
   const visible = useMemo(() => filterProjects(projects ?? [], search), [projects, search]);
@@ -429,11 +471,14 @@ export function ProjectList({
     showMoreChats,
     menuFor,
     setMenuFor,
+    deleteFlowFor,
+    setDeleteFlowFor,
     onCompose,
     activeSessionId,
     activeConversationId,
     onOpenCronJob,
     onOpenWebhook,
+    onApiError,
   };
 
   return (
@@ -477,11 +522,14 @@ interface ProjectSectionProps {
   showMoreChats: (cwd: string) => void;
   menuFor: string | null;
   setMenuFor: (cwd: string | null) => void;
+  deleteFlowFor: string | null;
+  setDeleteFlowFor: (cwd: string | null) => void;
   onCompose: (cwd: string) => void;
   activeSessionId?: string | null;
   activeConversationId?: string | null;
   onOpenCronJob?: (jobId: string) => void;
   onOpenWebhook?: (webhookId: string) => void;
+  onApiError: (error: unknown) => void;
 }
 
 /**
@@ -503,11 +551,14 @@ function ProjectSection({
   showMoreChats,
   menuFor,
   setMenuFor,
+  deleteFlowFor,
+  setDeleteFlowFor,
   onCompose,
   activeSessionId,
   activeConversationId,
   onOpenCronJob,
   onOpenWebhook,
+  onApiError,
 }: ProjectSectionProps): JSX.Element {
   // A search that hid a folder's other chats should not also hide the ones it
   // matched, so collapsing is ignored while searching.
@@ -610,6 +661,7 @@ function ProjectSection({
         {menuFor === project.cwd && !isVirtualWebhooks && (
           <ProjectMenu
             project={project}
+            nested={nested}
             onClose={() => setMenuFor(null)}
             onClear={() => {
               setMenuFor(null);
@@ -631,6 +683,22 @@ function ProjectSection({
                     void state.newTmuxSession(project);
                   }
             }
+            onDeleteWorktree={
+              nested
+                ? () => {
+                    setMenuFor(null);
+                    setDeleteFlowFor(project.cwd);
+                  }
+                : undefined
+            }
+          />
+        )}
+        {deleteFlowFor === project.cwd && (
+          <DeleteWorktreeFlow
+            project={project}
+            state={state}
+            onApiError={onApiError}
+            onClose={() => setDeleteFlowFor(null)}
           />
         )}
       </div>
@@ -863,9 +931,12 @@ function ProjectSection({
             showMoreChats={showMoreChats}
             menuFor={menuFor}
             setMenuFor={setMenuFor}
+            deleteFlowFor={deleteFlowFor}
+            setDeleteFlowFor={setDeleteFlowFor}
             onCompose={onCompose}
             activeSessionId={activeSessionId}
             activeConversationId={activeConversationId}
+            onApiError={onApiError}
             {...(onOpenCronJob ? { onOpenCronJob } : {})}
           />
         ))}
@@ -917,22 +988,32 @@ export function SearchField({
   );
 }
 
-/** Per-folder actions. All reversible-ish; none touches a transcript. */
+/**
+ * Per-folder actions. Everything except "Delete worktree…" is reversible-ish
+ * and touches no transcript; that one is destructive on purpose, gated on
+ * `nested` so it can never show up on a main checkout's own menu.
+ */
 function ProjectMenu({
   project,
+  nested,
   onClose,
   onClear,
   onHide,
   onRemove,
   onNewTmuxSession,
+  onDeleteWorktree,
 }: {
   project: ProjectInfo;
+  /** A folded worktree row — see `ProjectSection`'s own `nested` doc comment. */
+  nested: boolean;
   onClose: () => void;
   onClear: () => void;
   onHide: () => void;
   onRemove: () => void;
   /** Undefined for the virtual Shell "project", which has no real folder to root a tmux session in. */
   onNewTmuxSession: (() => void) | undefined;
+  /** Undefined unless `nested` — a main checkout has no worktree/branch of its own to delete this way. */
+  onDeleteWorktree: (() => void) | undefined;
 }): JSX.Element {
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -969,6 +1050,11 @@ function ProjectMenu({
         ) : (
           <button type="button" role="menuitem" onClick={onHide}>
             Hide this project
+          </button>
+        )}
+        {nested && onDeleteWorktree && (
+          <button type="button" role="menuitem" className="danger" onClick={onDeleteWorktree}>
+            Delete worktree…
           </button>
         )}
       </div>

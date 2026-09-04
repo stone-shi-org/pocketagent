@@ -9,6 +9,14 @@ interface Props {
   danger?: boolean;
   /** Disables both buttons and Escape/backdrop-dismiss while the action is in flight. */
   busy?: boolean;
+  /**
+   * Renders only the confirm button, for a purely informational
+   * acknowledgement (e.g. "this worktree has uncommitted changes") rather
+   * than an actual yes/no choice. Escape still calls `onCancel` so a keyboard
+   * user can dismiss it the same way; `onConfirm` and `onCancel` are expected
+   * to be the same close-the-dialog callback in that case.
+   */
+  hideCancel?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -28,6 +36,7 @@ export function ConfirmDialog({
   cancelLabel = 'Cancel',
   danger = true,
   busy = false,
+  hideCancel = false,
   onConfirm,
   onCancel,
 }: Props): JSX.Element {
@@ -51,9 +60,11 @@ export function ConfirmDialog({
         <h2>{title}</h2>
         <p className="confirm-body">{body}</p>
         <div className="dialog-actions">
-          <button type="button" onClick={onCancel} disabled={busy}>
-            {cancelLabel}
-          </button>
+          {!hideCancel && (
+            <button type="button" onClick={onCancel} disabled={busy}>
+              {cancelLabel}
+            </button>
+          )}
           <button
             type="button"
             className={danger ? 'danger primary-danger' : 'primary'}
