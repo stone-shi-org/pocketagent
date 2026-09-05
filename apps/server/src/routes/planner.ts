@@ -1,15 +1,23 @@
 import crypto from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import {
+  CreatePlannerChatRequest,
   CreatePlannerModelRequest,
   CreatePlannerWorkspaceRequest,
+  PlannerSendMessageRequest,
+  UpdatePlannerChatRequest,
   UpdatePlannerSettingsRequest,
   type PlannerApiKeyRevealResponse,
+  type PlannerChatHistoryResponse,
+  type PlannerChatListResponse,
   type PlannerModelListResponse,
+  type PlannerSendMessageResponse,
   type PlannerSettingsDto,
   type PlannerWorkspaceListResponse,
 } from '@pocketagent/protocol';
 import { PlannerWorkspaceError } from '../planner/workspaces.js';
+import { PlannerChatError } from '../planner/chats.js';
+import { PlannerLlmError } from '../planner/llm-client.js';
 import {
   deletePlannerModel,
   insertPlannerModel,
@@ -42,10 +50,25 @@ function mapWorkspaceError(reply: FastifyReply, err: unknown): FastifyReply | ne
   throw err;
 }
 
+function mapChatError(reply: FastifyReply, err: unknown): FastifyReply | never {
+  if (err instanceof PlannerChatError) {
+    const status = err.code === 'not_found' ? 404 : err.code === 'not_configured' ? 409 : 400;
+    return reply.code(status).send({ error: { code: err.code, message: err.message } });
+  }
+  if (err instanceof PlannerLlmError) {
+    // 502: the request into this server was fine, the configured upstream
+    // failed or is unreachable — not this server's own fault, and not the
+    // caller's either.
+    return reply.code(502).send({ error: { code: 'llm_error', message: err.message } });
+  }
+  throw err;
+}
+
 /**
- * PA-6, phase 1 (foundation): planner workspaces, the model catalog for the
- * single configured LLM provider, and that provider's settings. No chat, no
- * tools, no approval gate yet — those are later phases, tracked on PA-6.
+ * PA-6: the planner. Phase 1 (foundation) added workspaces, the model
+ * catalog, and provider settings. Phase 2 (chat core) adds chat CRUD and the
+ * turn loop below — still no tools and no approval gate, see PA-6 for the
+ * phases that add them.
  */
 export const plannerRoutes: FastifyPluginAsync = async (app) => {
   app.get('/api/planner/workspaces', async () => {
@@ -150,4 +173,88 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       return noStore(reply).send(response);
     },
   );
+
+  app.get('/api/planner/chats', async (request) => {
+    const { workspaceId } = request.query as { workspaceId?: string };
+    const response: PlannerChatListResponse = {
+      chats: app.pocket.plannerChats.list(workspaceId),
+    };
+    return response;
+  });
+
+  app.post('/api/planner/chats', async (request, reply) => {
+    const parsed = CreatePlannerChatRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    try {
+      const chat = app.pocket.plannerChats.create(parsed.data);
+      return reply.code(201).send(chat);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  app.patch('/api/planner/chats/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = UpdatePlannerChatRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    try {
+      const { plannerChats } = app.pocket;
+      let chat = plannerChats.get(id);
+      if (!chat) return notFound(reply, 'Chat not found.');
+      if (parsed.data.title !== undefined) chat = plannerChats.rename(id, parsed.data.title);
+      if (parsed.data.modelId !== undefined) chat = plannerChats.setModel(id, parsed.data.modelId);
+      return reply.send(chat);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  app.delete('/api/planner/chats/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const removed = app.pocket.plannerChats.remove(id);
+    if (!removed) return notFound(reply, 'Chat not found.');
+    return reply.code(204).send();
+  });
+
+  app.get('/api/planner/chats/:id/history', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      const response: PlannerChatHistoryResponse = {
+        entries: await app.pocket.plannerChats.history(id),
+      };
+      return response;
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  /**
+   * Synchronous today: the response only arrives once the whole assistant
+   * reply is in — see `llm-client.ts`'s doc comment for why phase 2 is
+   * request/response rather than streamed. The frontend disables its
+   * composer for the duration, the same "one turn in flight at a time"
+   * discipline `PromptBox` already applies to a structured session.
+   */
+  app.post('/api/planner/chats/:id/messages', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = PlannerSendMessageRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    try {
+      const { userEntry, assistantEntry } = await app.pocket.plannerChats.sendMessage(
+        id,
+        parsed.data.content,
+        parsed.data.modelId ? { modelId: parsed.data.modelId } : {},
+      );
+      const response: PlannerSendMessageResponse = { userEntry, assistantEntry };
+      return response;
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
 };

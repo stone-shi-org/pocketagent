@@ -32,6 +32,21 @@ import type {
   WebhookPreviewResponse,
   WebhookSecretResponse,
   WorkspaceEntry,
+  PlannerWorkspace,
+  PlannerWorkspaceListResponse,
+  PlannerModel,
+  PlannerModelListResponse,
+  CreatePlannerModelRequest,
+  PlannerSettingsDto,
+  UpdatePlannerSettingsRequest,
+  PlannerApiKeyRevealResponse,
+  PlannerChat,
+  PlannerChatListResponse,
+  CreatePlannerChatRequest,
+  UpdatePlannerChatRequest,
+  PlannerChatHistoryResponse,
+  PlannerSendMessageRequest,
+  PlannerSendMessageResponse,
 } from '@pocketagent/protocol';
 
 export class ApiError extends Error {
@@ -388,6 +403,69 @@ export const api = {
   /** Renders server-side so the editor never re-implements the renderer. */
   previewWebhookPrompt: (id: string, body: { payload?: string; promptTemplate?: string }) =>
     request<WebhookPreviewResponse>(`/api/webhooks/${encodeURIComponent(id)}/preview`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  // ---- Planner (PA-6) ---------------------------------------------------------
+
+  listPlannerWorkspaces: () =>
+    request<PlannerWorkspaceListResponse>('/api/planner/workspaces'),
+
+  createPlannerWorkspace: (name: string) =>
+    request<PlannerWorkspace>('/api/planner/workspaces', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
+  deletePlannerWorkspace: (id: string) =>
+    request<void>(`/api/planner/workspaces/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  listPlannerModels: () => request<PlannerModelListResponse>('/api/planner/models'),
+
+  createPlannerModel: (body: CreatePlannerModelRequest) =>
+    request<PlannerModel>('/api/planner/models', { method: 'POST', body: JSON.stringify(body) }),
+
+  deletePlannerModel: (id: string) =>
+    request<void>(`/api/planner/models/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  getPlannerSettings: () => request<PlannerSettingsDto>('/api/planner/settings'),
+
+  updatePlannerSettings: (patch: UpdatePlannerSettingsRequest) =>
+    request<PlannerSettingsDto>('/api/planner/settings', {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  /** POST, not GET — same CSRF/caching reasoning as `revealWebhookSecret`. */
+  revealPlannerApiKey: () =>
+    request<PlannerApiKeyRevealResponse>('/api/planner/settings/api-key/reveal', {
+      method: 'POST',
+    }),
+
+  listPlannerChats: (workspaceId?: string) =>
+    request<PlannerChatListResponse>(
+      `/api/planner/chats${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ''}`,
+    ),
+
+  createPlannerChat: (body: CreatePlannerChatRequest) =>
+    request<PlannerChat>('/api/planner/chats', { method: 'POST', body: JSON.stringify(body) }),
+
+  updatePlannerChat: (id: string, patch: UpdatePlannerChatRequest) =>
+    request<PlannerChat>(`/api/planner/chats/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  deletePlannerChat: (id: string) =>
+    request<void>(`/api/planner/chats/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  plannerChatHistory: (id: string) =>
+    request<PlannerChatHistoryResponse>(`/api/planner/chats/${encodeURIComponent(id)}/history`),
+
+  /** Resolves once the whole assistant reply is in — see the route's doc comment. */
+  sendPlannerMessage: (id: string, body: PlannerSendMessageRequest) =>
+    request<PlannerSendMessageResponse>(`/api/planner/chats/${encodeURIComponent(id)}/messages`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),

@@ -19,7 +19,11 @@ export type Route =
   /** The list of inbound webhooks, and every webhook's call history — see `WebhooksPage`. */
   | { name: 'webhooks' }
   /** One webhook's editor and delivery history. `'new'` for an unsaved one. */
-  | { name: 'webhook'; webhookId: string };
+  | { name: 'webhook'; webhookId: string }
+  /** The list of planner chats and its inline LLM/model setup — see `PlannerPage`. */
+  | { name: 'planner' }
+  /** One planner chat — see `PlannerChatPage`. */
+  | { name: 'planner-chat'; chatId: string };
 
 function parse(hash: string): Route {
   const session = /^#\/s\/([^/?]+)/.exec(hash);
@@ -52,6 +56,12 @@ function parse(hash: string): Route {
 
   if (/^#\/hooks$/.exec(hash)) return { name: 'webhooks' };
 
+  // Before the bare `#/planner` check, same reason as `cronJob` above.
+  const plannerChat = /^#\/planner\/([^/?]+)/.exec(hash);
+  if (plannerChat?.[1]) return { name: 'planner-chat', chatId: decodeURIComponent(plannerChat[1]) };
+
+  if (/^#\/planner$/.exec(hash)) return { name: 'planner' };
+
   if (/^#\/agents$/.exec(hash)) return { name: 'agents' };
 
   if (/^#\/settings$/.exec(hash)) return { name: 'settings' };
@@ -79,6 +89,10 @@ function toHash(route: Route): string {
       return '#/hooks';
     case 'webhook':
       return `#/hooks/${encodeURIComponent(route.webhookId)}`;
+    case 'planner':
+      return '#/planner';
+    case 'planner-chat':
+      return `#/planner/${encodeURIComponent(route.chatId)}`;
     default:
       return '#/';
   }

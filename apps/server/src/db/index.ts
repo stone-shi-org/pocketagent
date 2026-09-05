@@ -524,6 +524,41 @@ const MIGRATIONS: readonly string[] = [
 
   CREATE INDEX IF NOT EXISTS idx_planner_models_sort ON planner_models (sort_order);
   `,
+  // PA-6, phase 2 (chat core): one row per planner chat.
+  //
+  // `workspace_id` is ON DELETE SET NULL with `workspace_name` copied at
+  // creation — the same discipline `cron_runs.job_id`/`webhook_deliveries.webhook_id`
+  // already apply: deleting a planner workspace must not erase the chats that
+  // lived in it, only detach them. `PlannerChatService.workspacePathFor` falls
+  // back to the default workspace's directory for an orphaned chat's
+  // transcript, the same way an orphaned cron run still renders using its
+  // copied `job_name`.
+  //
+  // `last_model_id` is null until the first turn picks one (or the chat is
+  // created with an explicit model) — see `planner_last_model_id` in
+  // `settings`, which this seeds new chats from and which this in turn
+  // updates after every turn, so "remember the last selection" works both
+  // globally (for a brand new chat) and per-chat (once one has a history of
+  // its own to keep consistent).
+  //
+  // No `planner_messages` table: a chat's transcript is JSONL on disk under
+  // its workspace (`<workspace path>/.transcripts/<chatId>.jsonl`), the same
+  // "transcript lives on disk, the database only indexes it" split
+  // `conversations/index.ts` already uses for Claude Code's own transcripts.
+  `
+  CREATE TABLE IF NOT EXISTS planner_chats (
+    id               TEXT PRIMARY KEY,
+    workspace_id     TEXT REFERENCES planner_workspaces (id) ON DELETE SET NULL,
+    workspace_name   TEXT NOT NULL,
+    title            TEXT,
+    last_model_id    TEXT,
+    created_at       INTEGER NOT NULL,
+    last_activity_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_planner_chats_activity ON planner_chats (last_activity_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_planner_chats_workspace ON planner_chats (workspace_id, last_activity_at DESC);
+  `,
 ];
 
 /**

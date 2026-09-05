@@ -37,3 +37,11 @@ export const WebhooksPage = lazy(() =>
 export const WebhookEditorPage = lazy(() =>
   import('./pages/WebhookEditorPage.js').then((m) => ({ default: m.WebhookEditorPage })),
 );
+
+export const PlannerPage = lazy(() =>
+  import('./pages/PlannerPage.js').then((m) => ({ default: m.PlannerPage })),
+);
+
+export const PlannerChatPage = lazy(() =>
+  import('./pages/PlannerChatPage.js').then((m) => ({ default: m.PlannerChatPage })),
+);

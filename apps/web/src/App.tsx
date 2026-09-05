@@ -12,6 +12,8 @@ import {
   AgentsFleetPage,
   CronJobEditorPage,
   CronJobsPage,
+  PlannerChatPage,
+  PlannerPage,
   SettingsPage,
   WebhookEditorPage,
   WebhooksPage,
@@ -195,6 +197,31 @@ export function App(): JSX.Element {
     );
   }
 
+  if (route.name === 'planner') {
+    return (
+      <Suspense fallback={<PageFallback />}>
+        <PlannerPage
+          onBack={() => navigate({ name: 'list' })}
+          onOpenChat={(chatId) => navigate({ name: 'planner-chat', chatId })}
+          onApiError={handleApiError}
+        />
+      </Suspense>
+    );
+  }
+
+  if (route.name === 'planner-chat') {
+    return (
+      <Suspense fallback={<PageFallback />}>
+        <PlannerChatPage
+          key={route.chatId}
+          chatId={route.chatId}
+          onBack={() => navigate({ name: 'planner' })}
+          onApiError={handleApiError}
+        />
+      </Suspense>
+    );
+  }
+
   return (
     <ProjectsPage
       onOpen={(sessionId) => navigate({ name: 'terminal', sessionId })}
@@ -206,6 +233,7 @@ export function App(): JSX.Element {
       onOpenCronJob={(jobId) => navigate({ name: 'cron-job', jobId })}
       onOpenWebhooks={() => navigate({ name: 'webhooks' })}
       onOpenWebhook={(webhookId) => navigate({ name: 'webhook', webhookId })}
+      onOpenPlanner={() => navigate({ name: 'planner' })}
       onApiError={handleApiError}
       onLogout={logout}
     />

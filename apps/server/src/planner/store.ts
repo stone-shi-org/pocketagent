@@ -1,3 +1,4 @@
+import type { PlannerChat } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import { readSetting, writeSetting } from '../db/index.js';
 import type { PlannerWorkspaceRow, PlannerWorkspaceStore } from './workspaces.js';
@@ -172,4 +173,82 @@ export function writePlannerLastModelId(db: Db, modelId: string | null): void {
 export function revealPlannerApiKey(db: Db): string | null {
   const value = readSetting(db, PLANNER_LLM_API_KEY_KEY);
   return value && value.length > 0 ? value : null;
+}
+
+// ---- planner_chats -----------------------------------------------------------
+
+interface PlannerChatDbRow {
+  id: string;
+  workspace_id: string | null;
+  workspace_name: string;
+  title: string | null;
+  last_model_id: string | null;
+  created_at: number;
+  last_activity_at: number;
+}
+
+function chatFromDbRow(row: PlannerChatDbRow): PlannerChat {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    workspaceName: row.workspace_name,
+    title: row.title,
+    lastModelId: row.last_model_id,
+    createdAt: row.created_at,
+    lastActivityAt: row.last_activity_at,
+  };
+}
+
+export function readPlannerChats(db: Db, workspaceId?: string): PlannerChat[] {
+  const rows = (
+    workspaceId
+      ? db
+          .prepare('SELECT * FROM planner_chats WHERE workspace_id = ? ORDER BY last_activity_at DESC')
+          .all(workspaceId)
+      : db.prepare('SELECT * FROM planner_chats ORDER BY last_activity_at DESC').all()
+  ) as PlannerChatDbRow[];
+  return rows.map(chatFromDbRow);
+}
+
+export function readPlannerChat(db: Db, id: string): PlannerChat | null {
+  const row = db.prepare('SELECT * FROM planner_chats WHERE id = ?').get(id) as
+    | PlannerChatDbRow
+    | undefined;
+  return row ? chatFromDbRow(row) : null;
+}
+
+export function insertPlannerChat(db: Db, chat: PlannerChat): void {
+  db.prepare(
+    `INSERT INTO planner_chats
+       (id, workspace_id, workspace_name, title, last_model_id, created_at, last_activity_at)
+     VALUES (@id, @workspaceId, @workspaceName, @title, @lastModelId, @createdAt, @lastActivityAt)`,
+  ).run(chat);
+}
+
+/** Partial update: only the keys present in `patch` are touched. */
+export function updatePlannerChat(
+  db: Db,
+  id: string,
+  patch: Partial<Pick<PlannerChat, 'title' | 'lastModelId' | 'lastActivityAt'>>,
+): void {
+  const assignments: string[] = [];
+  const params: Record<string, unknown> = { id };
+  if ('title' in patch) {
+    assignments.push('title = @title');
+    params.title = patch.title;
+  }
+  if ('lastModelId' in patch) {
+    assignments.push('last_model_id = @lastModelId');
+    params.lastModelId = patch.lastModelId;
+  }
+  if ('lastActivityAt' in patch) {
+    assignments.push('last_activity_at = @lastActivityAt');
+    params.lastActivityAt = patch.lastActivityAt;
+  }
+  if (assignments.length === 0) return;
+  db.prepare(`UPDATE planner_chats SET ${assignments.join(', ')} WHERE id = @id`).run(params);
+}
+
+export function deletePlannerChat(db: Db, id: string): boolean {
+  return db.prepare('DELETE FROM planner_chats WHERE id = ?').run(id).changes > 0;
 }

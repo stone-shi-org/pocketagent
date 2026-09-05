@@ -27,6 +27,8 @@ interface Props {
   onOpenWebhooks: () => void;
   /** Opens one webhook's editor, from its row in the project tree. */
   onOpenWebhook: (webhookId: string) => void;
+  /** PA-6: the planner's own chat list, in parallel to project chats. */
+  onOpenPlanner: () => void;
   onApiError: (error: unknown) => void;
   onLogout: () => void;
 }
@@ -51,6 +53,7 @@ export function ProjectsPage({
   onOpenCronJob,
   onOpenWebhooks,
   onOpenWebhook,
+  onOpenPlanner,
   onApiError,
   onLogout,
 }: Props): JSX.Element {
@@ -122,6 +125,10 @@ export function ProjectsPage({
             onWebhooks={() => {
               setMenuOpen(false);
               onOpenWebhooks();
+            }}
+            onPlanner={() => {
+              setMenuOpen(false);
+              onOpenPlanner();
             }}
             onLogout={onLogout}
           />
@@ -233,6 +240,7 @@ export function OverflowMenu({
   onSettings,
   onCron,
   onWebhooks,
+  onPlanner,
   onLogout,
 }: {
   onClose: () => void;
@@ -252,6 +260,7 @@ export function OverflowMenu({
   onSettings: () => void;
   onCron: () => void;
   onWebhooks: () => void;
+  onPlanner: () => void;
   onLogout: () => void;
 }): JSX.Element {
   const ref = useRef<HTMLDivElement>(null);
@@ -299,6 +308,9 @@ export function OverflowMenu({
         </button>
         <button type="button" role="menuitem" onClick={onWebhooks}>
           Webhooks…
+        </button>
+        <button type="button" role="menuitem" onClick={onPlanner}>
+          Planner…
         </button>
         <button type="button" role="menuitem" onClick={onAdvanced}>
           More session options…

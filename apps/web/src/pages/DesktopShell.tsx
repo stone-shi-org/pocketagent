@@ -16,6 +16,8 @@ import {
   AgentsFleetPage,
   CronJobEditorPage,
   CronJobsPage,
+  PlannerChatPage,
+  PlannerPage,
   SettingsPage,
   WebhookEditorPage,
   WebhooksPage,
@@ -387,6 +389,10 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                 setMenuOpen(false);
                 onNavigate({ name: 'webhooks' });
               }}
+              onPlanner={() => {
+                setMenuOpen(false);
+                onNavigate({ name: 'planner' });
+              }}
               onLogout={onLogout}
             />
           )}
@@ -561,6 +567,23 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
               }}
               onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
               onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
+              onApiError={onApiError}
+            />
+          </Suspense>
+        ) : route.name === 'planner' ? (
+          <Suspense fallback={<PageFallback />}>
+            <PlannerPage
+              onBack={() => onNavigate({ name: 'list' })}
+              onOpenChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
+              onApiError={onApiError}
+            />
+          </Suspense>
+        ) : route.name === 'planner-chat' ? (
+          <Suspense fallback={<PageFallback />}>
+            <PlannerChatPage
+              key={route.chatId}
+              chatId={route.chatId}
+              onBack={() => onNavigate({ name: 'planner' })}
               onApiError={onApiError}
             />
           </Suspense>

@@ -51,6 +51,7 @@ import { websocketRoutes } from './ws/index.js';
 import { WebhookService } from './webhooks/index.js';
 import { PlannerWorkspaceRegistry } from './planner/workspaces.js';
 import { createPlannerWorkspaceStore } from './planner/store.js';
+import { PlannerChatService } from './planner/chats.js';
 import type { PocketContext } from './types.js';
 
 export const VERSION = '0.1.0';
@@ -122,6 +123,8 @@ export interface BuildAppOptions {
    * the host next to the real database.
    */
   plannerWorkspacesRoot?: string;
+  /** Injected in tests so a planner chat turn never makes a real network call. */
+  plannerLlmFetch?: typeof fetch;
   serveStatic?: boolean;
 }
 
@@ -199,6 +202,12 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     options.plannerWorkspacesRoot ?? path.join(path.dirname(config.databasePath), 'planner-workspaces');
   const plannerWorkspaces = new PlannerWorkspaceRegistry(createPlannerWorkspaceStore(db));
   await plannerWorkspaces.ensureDefaultWorkspace(plannerWorkspacesRoot);
+  const plannerChats = new PlannerChatService({
+    db,
+    plannerWorkspaces,
+    logger: app.log,
+    ...(options.plannerLlmFetch ? { llmFetch: options.plannerLlmFetch } : {}),
+  });
 
   const agents = createDefaultRegistry({
     shell: config.shell,
@@ -328,6 +337,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     workspaces,
     plannerWorkspaces,
     plannerWorkspacesRoot,
+    plannerChats,
     agents,
     db,
     backend,

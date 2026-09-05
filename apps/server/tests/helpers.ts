@@ -52,6 +52,8 @@ export async function createTestApp(
   agyTranscripts?: AgyTranscriptStore,
   /** Injected so a test can point pi history reads at a fixture directory instead of a real `~/.pi`. */
   piTranscripts?: PiTranscriptStore,
+  /** Injected so a planner chat turn never makes a real network call. */
+  plannerLlmFetch?: typeof fetch,
 ): Promise<TestApp> {
   const ws = makeWorkspace();
   const config = makeConfig({
@@ -70,6 +72,7 @@ export async function createTestApp(
     agyTranscripts,
     piTranscripts,
     plannerWorkspacesRoot,
+    ...(plannerLlmFetch ? { plannerLlmFetch } : {}),
     serveStatic: false,
   });
   await app.ready();

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { LIMITS } from './limits.js';
 
 /**
  * PA-6, phase 1 (foundation): the planner — an LLM chat (any OpenAI-compatible
@@ -113,3 +114,75 @@ export const PlannerApiKeyRevealResponse = z.object({
   apiKey: z.string(),
 });
 export type PlannerApiKeyRevealResponse = z.infer<typeof PlannerApiKeyRevealResponse>;
+
+/**
+ * PA-6, phase 2 (chat core): a planner chat and its transcript.
+ *
+ * Deliberately not the `AgentEvent` union `agent-events.ts` defines for a
+ * structured session. That union exists to carry *live, incremental* SDK
+ * output (partial-message deltas, tool-call lifecycles) over a WebSocket to a
+ * renderer built for exactly that shape. Phase 2's chat loop is
+ * request/response, one full assistant message per turn — see
+ * `planner/llm-client.ts`'s doc comment for why streaming is deferred — so
+ * reusing `AgentEvent` here would mean emitting a union designed for partial
+ * delivery to describe something that was never partial. A dedicated,
+ * minimal transcript entry now, and a switch to `AgentEvent` if and when a
+ * later phase adds real token-level streaming and tool-call events, keeps
+ * each shape honest about what it actually carries.
+ */
+export const PlannerTranscriptEntry = z.object({
+  role: z.enum(['user', 'assistant']),
+  content: z.string(),
+  createdAt: z.number().int(),
+});
+export type PlannerTranscriptEntry = z.infer<typeof PlannerTranscriptEntry>;
+
+export const PlannerChat = z.object({
+  id: z.string(),
+  /** Null when the owning workspace was later deleted — see `workspace_id`'s `ON DELETE SET NULL`. */
+  workspaceId: z.string().nullable(),
+  /** Copied at creation so an orphaned chat still describes itself, like `WebhookDelivery.webhookName`. */
+  workspaceName: z.string(),
+  title: z.string().nullable(),
+  /** The model this chat last used; seeds the composer's model picker. */
+  lastModelId: z.string().nullable(),
+  createdAt: z.number().int(),
+  lastActivityAt: z.number().int(),
+});
+export type PlannerChat = z.infer<typeof PlannerChat>;
+
+export const PlannerChatListResponse = z.object({ chats: z.array(PlannerChat) });
+export type PlannerChatListResponse = z.infer<typeof PlannerChatListResponse>;
+
+/** Omitted `workspaceId` defaults to the default planner workspace. */
+export const CreatePlannerChatRequest = z.object({
+  workspaceId: z.string().optional(),
+  title: z.string().max(200).optional(),
+  modelId: z.string().max(200).optional(),
+});
+export type CreatePlannerChatRequest = z.infer<typeof CreatePlannerChatRequest>;
+
+export const UpdatePlannerChatRequest = z.object({
+  title: z.string().max(200).nullable().optional(),
+  modelId: z.string().max(200).optional(),
+});
+export type UpdatePlannerChatRequest = z.infer<typeof UpdatePlannerChatRequest>;
+
+export const PlannerChatHistoryResponse = z.object({
+  entries: z.array(PlannerTranscriptEntry),
+});
+export type PlannerChatHistoryResponse = z.infer<typeof PlannerChatHistoryResponse>;
+
+export const PlannerSendMessageRequest = z.object({
+  content: z.string().min(1).max(LIMITS.maxInputChars),
+  /** Overrides the chat's remembered model for this turn onward. */
+  modelId: z.string().max(200).optional(),
+});
+export type PlannerSendMessageRequest = z.infer<typeof PlannerSendMessageRequest>;
+
+/** Both entries the turn produced, so the composer can append without re-fetching history. */
+export const PlannerSendMessageResponse = z.object({
+  userEntry: PlannerTranscriptEntry,
+  assistantEntry: PlannerTranscriptEntry,
+});
+export type PlannerSendMessageResponse = z.infer<typeof PlannerSendMessageResponse>;
