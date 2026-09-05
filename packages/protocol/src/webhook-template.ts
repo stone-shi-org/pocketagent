@@ -280,6 +280,37 @@ Workflow Instructions:
       - Transition/mark the Jira ticket status as "In Review" (or "in-review") and reassign the ticket back to the reporter ({{issue.reporter}}).
    - If not yet approved and not tagged "agent-ready", post a brief assessment or plan on {{issue.key}} without modifying code.`;
 
+export const JIRA_PROMPT_TEMPLATE_IMPROVEMENT = `A Jira improvement event arrived: {{event}}.
+
+Issue:    {{issue.key}}
+Project:  {{issue.project}} ({{issue.projectKey}})
+Type:     {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
+Reporter: {{issue.reporter}}
+Labels:   {{issue.labels}}
+Changed:  {{changelog.fields}}
+
+Summary:
+{{issue.summary}}
+
+Description:
+{{issue.description}}
+
+Comment:
+{{comment.body}}
+
+Workflow Instructions:
+1. Improvement Review & Assessment:
+   - Understand the improvement requirements from the summary, description, and comments.
+   - If the improvement is complex, you may optionally post your findings or proposed plan as a comment on Jira ticket {{issue.key}} before starting.
+2. Execution Phase (Once Approved / Ready):
+   - If the user commented "go ahead" or "approve", or if the issue has the tag/label "agent-ready" or "approved":
+      - Implement the requested improvement directly across the codebase.
+      - Verify with relevant test suites.
+      - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Improvement: ...").
+      - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
+      - Transition/mark the Jira ticket status as "In Review" (or "in-review") and reassign the ticket back to the reporter ({{issue.reporter}}).
+   - If not yet approved and not tagged "agent-ready", post a brief assessment or plan on {{issue.key}} without modifying code.`;
+
 export interface JiraPromptTemplatePreset {
   id: string;
   name: string;
@@ -299,6 +330,12 @@ export const JIRA_PROMPT_TEMPLATES: readonly JiraPromptTemplatePreset[] = [
     name: 'Task (Direct Execution on Approval)',
     description: 'Execute task; when approved ("go ahead", "approved", "agent-ready"), implement, verify, commit, post summary of changes comment with commit rev ID, and mark in-review.',
     template: JIRA_PROMPT_TEMPLATE_TASK,
+  },
+  {
+    id: 'improvement',
+    name: 'Improvement (Direct Execution on Approval)',
+    description: 'Execute improvement; when approved ("go ahead", "approved", "agent-ready"), implement, verify, commit, post summary of changes comment with commit rev ID, and mark in-review.',
+    template: JIRA_PROMPT_TEMPLATE_IMPROVEMENT,
   },
   {
     id: 'fix-issue',
