@@ -4,6 +4,7 @@ import {
   CreatePlannerChatRequest,
   CreatePlannerModelRequest,
   CreatePlannerWorkspaceRequest,
+  SetPlannerAgentToolRequest,
   UpdatePlannerWorkspaceRequest,
   PlannerSendMessageRequest,
   ResolvePlannerApprovalRequest,
@@ -12,6 +13,7 @@ import {
   UpdatePlannerSettingsRequest,
   type AgentEvent,
   type DiscoverPlannerModelsResponse,
+  type PlannerAgentToolsResponse,
   type PlannerApiKeyRevealResponse,
   type PlannerChatHistoryResponse,
   type PlannerChatListResponse,
@@ -32,10 +34,12 @@ import {
   deletePlannerToolApproval,
   insertPlannerModel,
   nextPlannerModelSortOrder,
+  readDisabledToolNames,
   readPlannerModels,
   readPlannerSettings,
   readPlannerToolApprovals,
   revealPlannerApiKey,
+  setToolEnabledForWorkspace,
   writePlannerApiKey,
   writePlannerBaseUrl,
   writePlannerToolApproval,
@@ -180,7 +184,17 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
     try {
-      const row = app.pocket.plannerWorkspaces.rename(id, parsed.data.name);
+      let row = app.pocket.plannerWorkspaces.get(id);
+      if (!row) return notFound(reply, 'Workspace not found.');
+      if (parsed.data.name !== undefined) {
+        row = app.pocket.plannerWorkspaces.rename(id, parsed.data.name);
+      }
+      // Distinguishes "clear it" (`defaultModelId: null`, sent) from "leave
+      // it alone" (the field omitted) — the same "only touch what's sent"
+      // convention `UpdatePlannerSettingsRequest`'s own PATCH already uses.
+      if (parsed.data.defaultModelId !== undefined) {
+        row = app.pocket.plannerWorkspaces.setDefaultModelId(id, parsed.data.defaultModelId);
+      }
       return reply.send(row);
     } catch (err) {
       return mapWorkspaceError(reply, err);
@@ -298,6 +312,45 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
   app.get('/api/planner/tools', async () => {
     const response: PlannerToolListResponse = {
       tools: PLANNER_TOOLS.map((t) => ({ name: t.name, description: t.description, readOnly: t.readOnly })),
+    };
+    return response;
+  });
+
+  /** One agent's own tool subset — see `PlannerAgentToolInfo`'s doc comment. */
+  app.get('/api/planner/workspaces/:id/tools', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!app.pocket.plannerWorkspaces.get(id)) return notFound(reply, 'Workspace not found.');
+    const disabled = readDisabledToolNames(app.pocket.db, id);
+    const response: PlannerAgentToolsResponse = {
+      tools: PLANNER_TOOLS.map((t) => ({
+        name: t.name,
+        description: t.description,
+        readOnly: t.readOnly,
+        enabled: !disabled.has(t.name),
+      })),
+    };
+    return noStore(reply).send(response);
+  });
+
+  app.post('/api/planner/workspaces/:id/tools', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!app.pocket.plannerWorkspaces.get(id)) return notFound(reply, 'Workspace not found.');
+    const parsed = SetPlannerAgentToolRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    if (!PLANNER_TOOLS.some((t) => t.name === parsed.data.toolName)) {
+      return notFound(reply, `Unknown tool: ${parsed.data.toolName}`);
+    }
+    setToolEnabledForWorkspace(app.pocket.db, id, parsed.data.toolName, parsed.data.enabled);
+    const disabled = readDisabledToolNames(app.pocket.db, id);
+    const response: PlannerAgentToolsResponse = {
+      tools: PLANNER_TOOLS.map((t) => ({
+        name: t.name,
+        description: t.description,
+        readOnly: t.readOnly,
+        enabled: !disabled.has(t.name),
+      })),
     };
     return response;
   });

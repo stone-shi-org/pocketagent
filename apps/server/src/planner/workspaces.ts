@@ -19,6 +19,11 @@ export interface PlannerWorkspaceRow {
   path: string;
   isDefault: boolean;
   createdAt: number;
+  /** This agent's own default model, or `null` to fall back to the global
+      last-used model (`readPlannerSettings().lastModelId`) — see
+      `PlannerChatService.create`. No FK: a model removed from the catalog
+      just means the fallback kicks in, never a broken reference. */
+  defaultModelId: string | null;
 }
 
 /** Persistence seam, so the registry stays testable without a database. */
@@ -30,6 +35,7 @@ export interface PlannerWorkspaceStore {
       original (slugified) name, so nothing that already resolved this
       workspace's path needs to change with it. */
   rename(id: string, name: string): void;
+  setDefaultModelId(id: string, modelId: string | null): void;
   /** Whether `ensureDefaultWorkspace` has already run, ever — see its doc comment. */
   isSeeded(): boolean;
   markSeeded(): void;
@@ -94,6 +100,7 @@ export class PlannerWorkspaceRegistry {
       path: real,
       isDefault: true,
       createdAt: Date.now(),
+      defaultModelId: null,
     };
     this.store.insert(row);
     this.rows = [...this.rows, row];
@@ -172,6 +179,7 @@ export class PlannerWorkspaceRegistry {
       path: real,
       isDefault: false,
       createdAt: Date.now(),
+      defaultModelId: null,
     };
     this.store.insert(row);
     this.rows = [...this.rows, row];
@@ -211,6 +219,23 @@ export class PlannerWorkspaceRegistry {
     if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
     this.store.rename(id, trimmed);
     const updated = { ...row, name: trimmed };
+    this.rows = this.rows.map((r) => (r.id === id ? updated : r));
+    return updated;
+  }
+
+  /**
+   * Set (or clear, with `null`) this agent's own default model — the
+   * "each agent should be able to configure their own model" half of PA-6
+   * round 4's bigger ask. Deliberately not validated against the model
+   * catalog: a model row can be deleted later without this having to be
+   * cleaned up in lockstep, the same "dangling id just means the fallback
+   * kicks in" reasoning `planner_chats.last_model_id` already relies on.
+   */
+  setDefaultModelId(id: string, modelId: string | null): PlannerWorkspaceRow {
+    const row = this.get(id);
+    if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
+    this.store.setDefaultModelId(id, modelId);
+    const updated = { ...row, defaultModelId: modelId };
     this.rows = this.rows.map((r) => (r.id === id ? updated : r));
     return updated;
   }

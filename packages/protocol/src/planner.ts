@@ -28,6 +28,11 @@ export const PlannerWorkspace = z.object({
   /** The one seeded at first boot. Refuses removal — there must always be one. */
   isDefault: z.boolean(),
   createdAt: z.number().int(),
+  /** This agent's own default model, or `null` to fall back to the global
+      last-used model — PA-6 round 4's "each agent should configure their
+      own model". Seeds a new chat created in this workspace; each chat then
+      keeps its own choice exactly like today. */
+  defaultModelId: z.string().nullable(),
 });
 export type PlannerWorkspace = z.infer<typeof PlannerWorkspace>;
 
@@ -55,10 +60,16 @@ export const CreatePlannerWorkspaceRequest = z.object({
 });
 export type CreatePlannerWorkspaceRequest = z.infer<typeof CreatePlannerWorkspaceRequest>;
 
-/** Renames an agent. Only `name` — see `PlannerWorkspaceRegistry.rename`'s doc
-    comment for why the on-disk directory is never touched by this. */
+/**
+ * Updates an agent. `name` renames it — see `PlannerWorkspaceRegistry.rename`'s
+ * doc comment for why the on-disk directory is never touched by this.
+ * `defaultModelId` sets (or, with `null`, clears) this agent's own default
+ * model; omitted leaves it unchanged, same "only touch what's sent"
+ * convention every other settings PATCH in this codebase uses.
+ */
 export const UpdatePlannerWorkspaceRequest = z.object({
-  name: z.string().min(1).max(128),
+  name: z.string().min(1).max(128).optional(),
+  defaultModelId: z.string().max(200).nullable().optional(),
 });
 export type UpdatePlannerWorkspaceRequest = z.infer<typeof UpdatePlannerWorkspaceRequest>;
 
@@ -290,3 +301,35 @@ export const SetPlannerToolApprovalRequest = z.object({
   decision: z.enum(['allow', 'deny']),
 });
 export type SetPlannerToolApprovalRequest = z.infer<typeof SetPlannerToolApprovalRequest>;
+
+/**
+ * PA-6 round 4: "tools can be global, but each agent can select their own
+ * available tools." The catalog (`name`/`description`/`readOnly`) stays the
+ * global one from `PlannerToolInfo` — `enabled` is this *agent's* own
+ * current setting, defaulting to `true` for every tool an agent has never
+ * explicitly disabled (see the migration's own doc comment for why the
+ * store is a disabled-list, not an allow-list). Distinct from
+ * `PlannerToolApprovalRow`: that gates *when a mutating call still has to
+ * ask*; this gates whether the tool is offered to the model at all — a
+ * disabled tool never appears in the `tools` array sent upstream, and a
+ * call to one anyway (a stale conversation, a model that hallucinates a
+ * name) is refused the same way an unknown tool name already is.
+ */
+export const PlannerAgentToolInfo = z.object({
+  name: z.string(),
+  description: z.string(),
+  readOnly: z.boolean(),
+  enabled: z.boolean(),
+});
+export type PlannerAgentToolInfo = z.infer<typeof PlannerAgentToolInfo>;
+
+export const PlannerAgentToolsResponse = z.object({
+  tools: z.array(PlannerAgentToolInfo),
+});
+export type PlannerAgentToolsResponse = z.infer<typeof PlannerAgentToolsResponse>;
+
+export const SetPlannerAgentToolRequest = z.object({
+  toolName: z.string().min(1),
+  enabled: z.boolean(),
+});
+export type SetPlannerAgentToolRequest = z.infer<typeof SetPlannerAgentToolRequest>;

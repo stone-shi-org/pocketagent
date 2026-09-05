@@ -34,6 +34,10 @@ function makeStore(): PlannerWorkspaceStore {
       const row = rows.find((r) => r.id === id);
       if (row) row.name = name;
     },
+    setDefaultModelId: (id, modelId) => {
+      const row = rows.find((r) => r.id === id);
+      if (row) row.defaultModelId = modelId;
+    },
     isSeeded: () => seeded,
     markSeeded: () => {
       seeded = true;
@@ -137,6 +141,24 @@ describe('PlannerWorkspaceRegistry', () => {
     const registry = new PlannerWorkspaceRegistry(makeStore());
     await registry.create(root, 'First', { path: ws.project });
     await expect(registry.create(root, 'Second', { path: ws.project })).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  it('sets and clears a workspace default model', async () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    const row = await registry.create(root, 'Coder');
+    expect(row.defaultModelId).toBeNull();
+
+    const updated = registry.setDefaultModelId(row.id, 'gpt-4o');
+    expect(updated.defaultModelId).toBe('gpt-4o');
+    expect(registry.get(row.id)?.defaultModelId).toBe('gpt-4o');
+
+    const cleared = registry.setDefaultModelId(row.id, null);
+    expect(cleared.defaultModelId).toBeNull();
+  });
+
+  it('throws setting a default model on an unknown workspace', () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    expect(() => registry.setDefaultModelId('does-not-exist', 'gpt-4o')).toThrow(PlannerWorkspaceError);
   });
 
   it('refuses to remove the default workspace', async () => {
@@ -318,6 +340,73 @@ describe('planner routes over HTTP', () => {
   it('rejects an empty workspace name', async () => {
     const res = await post('/api/planner/workspaces', { name: '' });
     expect(res.statusCode).toBe(400);
+  });
+
+  // ---- PA-6 round 4: real multi-agent — per-agent default model ------------
+
+  it('sets and clears an agent\'s own default model, independent of the global one', async () => {
+    const created = await post('/api/planner/workspaces', { name: 'Coder' });
+    const row = created.json();
+    expect(row.defaultModelId).toBeNull();
+
+    const withModel = await patch(`/api/planner/workspaces/${row.id}`, { defaultModelId: 'gpt-4o' });
+    expect(withModel.statusCode).toBe(200);
+    expect(withModel.json().defaultModelId).toBe('gpt-4o');
+
+    // A plain rename (defaultModelId omitted) must not clobber it.
+    const renamed = await patch(`/api/planner/workspaces/${row.id}`, { name: 'Coder 2' });
+    expect(renamed.json().defaultModelId).toBe('gpt-4o');
+
+    // Explicit null clears it.
+    const cleared = await patch(`/api/planner/workspaces/${row.id}`, { defaultModelId: null });
+    expect(cleared.json().defaultModelId).toBeNull();
+  });
+
+  // ---- PA-6 round 4: real multi-agent — per-agent tool subset ---------------
+
+  it("lists every global tool as enabled for a brand new agent", async () => {
+    const created = await post('/api/planner/workspaces', { name: 'Restricted' });
+    const res = await get(`/api/planner/workspaces/${created.json().id}/tools`);
+    expect(res.statusCode).toBe(200);
+    const { tools } = res.json();
+    expect(tools.length).toBeGreaterThan(0);
+    expect(tools.every((t: { enabled: boolean }) => t.enabled)).toBe(true);
+    expect(tools.some((t: { name: string }) => t.name === 'write_file')).toBe(true);
+  });
+
+  it('disables and re-enables one tool for one agent, without affecting another agent', async () => {
+    const a = (await post('/api/planner/workspaces', { name: 'A' })).json();
+    const b = (await post('/api/planner/workspaces', { name: 'B' })).json();
+
+    const disabled = await post(`/api/planner/workspaces/${a.id}/tools`, {
+      toolName: 'write_file',
+      enabled: false,
+    });
+    expect(disabled.statusCode).toBe(200);
+    const aTools = disabled.json().tools;
+    expect(aTools.find((t: { name: string }) => t.name === 'write_file').enabled).toBe(false);
+
+    const bTools = (await get(`/api/planner/workspaces/${b.id}/tools`)).json().tools;
+    expect(bTools.find((t: { name: string }) => t.name === 'write_file').enabled).toBe(true);
+
+    const reenabled = await post(`/api/planner/workspaces/${a.id}/tools`, {
+      toolName: 'write_file',
+      enabled: true,
+    });
+    const aToolsAgain = reenabled.json().tools;
+    expect(aToolsAgain.find((t: { name: string }) => t.name === 'write_file').enabled).toBe(true);
+  });
+
+  it('404s the per-agent tools routes for an unknown workspace or tool name', async () => {
+    const res1 = await get('/api/planner/workspaces/does-not-exist/tools');
+    expect(res1.statusCode).toBe(404);
+
+    const created = (await post('/api/planner/workspaces', { name: 'X' })).json();
+    const res2 = await post(`/api/planner/workspaces/${created.id}/tools`, {
+      toolName: 'does_not_exist',
+      enabled: false,
+    });
+    expect(res2.statusCode).toBe(404);
   });
 
   it('lists no models by default, then CRUDs them in sort order', async () => {

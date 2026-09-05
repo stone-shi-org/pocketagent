@@ -9,6 +9,7 @@ import type { PlannerWorkspaceRegistry } from './workspaces.js';
 import {
   deletePlannerChat,
   insertPlannerChat,
+  readDisabledToolNames,
   readPlannerChat,
   readPlannerChats,
   readPlannerSettings,
@@ -174,7 +175,9 @@ export class PlannerChatService {
       workspaceId: workspace.id,
       workspaceName: workspace.name,
       title: input.title ?? null,
-      lastModelId: input.modelId ?? readPlannerSettings(this.opts.db).lastModelId,
+      // An explicit request wins, then this agent's own configured default
+      // (PA-6 round 4), then the last model used anywhere.
+      lastModelId: input.modelId ?? workspace.defaultModelId ?? readPlannerSettings(this.opts.db).lastModelId,
       createdAt: now,
       lastActivityAt: now,
     };
@@ -230,6 +233,36 @@ export class PlannerChatService {
       what to do with the ids. */
   async discoverModels(): Promise<string[]> {
     return this.llmClient().listModels();
+  }
+
+  /**
+   * Tools available to a given agent right now: the injected/global catalog
+   * minus whatever that agent has explicitly disabled — see
+   * `PlannerAgentToolInfo`'s doc comment for why this is a deny-list, not an
+   * allow-list. `workspaceId: null` (an orphaned chat whose workspace was
+   * since deleted) gets the full, unrestricted set — there is no agent
+   * identity left to restrict by, the same reasoning `workspacePathFor`
+   * already falls back on for an orphaned chat's transcript directory.
+   */
+  private toolsFor(workspaceId: string | null): readonly PlannerToolDefinition[] {
+    if (!workspaceId) return this.tools;
+    const disabled = readDisabledToolNames(this.opts.db, workspaceId);
+    if (disabled.size === 0) return this.tools;
+    return this.tools.filter((t) => !disabled.has(t.name));
+  }
+
+  /**
+   * Looks a tool up by name *and* confirms it's actually enabled for this
+   * agent right now — refused the same way an unknown tool name already is,
+   * whether the model still names a tool that was disabled after the
+   * conversation started, or a paused approval's tool was disabled while it
+   * sat waiting for a human. Defense in depth: `driveLoop` already excludes
+   * a disabled tool from what's offered to the model at all, so this should
+   * rarely trigger, but the model choosing to call something is not this
+   * server's decision to trust unchecked.
+   */
+  private resolveEnabledTool(workspaceId: string | null, name: string): PlannerToolDefinition | undefined {
+    return this.toolsFor(workspaceId).find((t) => t.name === name);
   }
 
   /**
@@ -310,7 +343,7 @@ export class PlannerChatService {
     const chat = this.requireChat(chatId);
     const workspacePath = this.workspacePathFor(chat);
     const call = pending.toolCalls[pending.index]!;
-    const tool = findPlannerTool(call.function.name);
+    const tool = this.resolveEnabledTool(pending.workspaceId, call.function.name);
 
     if (choice !== 'allow_once') {
       rememberDecisionIfAsked(this.opts.db, choice, call.function.name, pending.workspaceId);
@@ -327,7 +360,7 @@ export class PlannerChatService {
         kind: 'tool_result',
         id: crypto.randomUUID(),
         toolUseId: call.id,
-        content: choice === 'deny' ? 'Denied by the user.' : `Unknown tool: ${call.function.name}`,
+        content: choice === 'deny' ? 'Denied by the user.' : toolUnavailableMessage(call.function.name),
         truncated: false,
         isError: true,
       });
@@ -450,7 +483,7 @@ export class PlannerChatService {
     // `PlannerTurnStats`'s doc comment for why.
     const llmStartedAt = Date.now();
     try {
-      for await (const chunk of client.streamComplete(modelId, messages, toOpenAiToolSpecs(this.tools), signal)) {
+      for await (const chunk of client.streamComplete(modelId, messages, toOpenAiToolSpecs(this.toolsFor(chat.workspaceId)), signal)) {
         if (chunk.type === 'text_delta') {
           yield { kind: 'text_delta', id: textBlockId, text: chunk.text };
         } else {
@@ -522,14 +555,14 @@ export class PlannerChatService {
   ): AsyncGenerator<AgentEvent> {
     for (let index = startIndex; index < toolCalls.length; index++) {
       const call = toolCalls[index]!;
-      const tool = findPlannerTool(call.function.name);
+      const tool = this.resolveEnabledTool(chat.workspaceId, call.function.name);
 
       if (!tool) {
         yield* this.emit(workspacePath, chat.id, {
           kind: 'tool_result',
           id: crypto.randomUUID(),
           toolUseId: call.id,
-          content: `Unknown tool: ${call.function.name}`,
+          content: toolUnavailableMessage(call.function.name),
           truncated: false,
           isError: true,
         });
@@ -647,6 +680,15 @@ export class PlannerChatService {
     }
     return fallback.path;
   }
+}
+
+/** Distinguishes "the model named a tool that doesn't exist at all" from
+    "the model named a real tool this agent has had disabled" — the same
+    global catalog lookup (`findPlannerTool`) either result is checked
+    against, so a genuinely unknown name and a merely-restricted one never
+    read as the same failure to whoever's watching the transcript. */
+function toolUnavailableMessage(name: string): string {
+  return findPlannerTool(name) ? `Tool "${name}" is disabled for this agent.` : `Unknown tool: ${name}`;
 }
 
 function scopeMessage(choice: PlannerToolApprovalChoice): string | null {

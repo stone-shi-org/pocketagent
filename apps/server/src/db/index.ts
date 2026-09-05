@@ -597,6 +597,40 @@ const MIGRATIONS: readonly string[] = [
   CREATE UNIQUE INDEX IF NOT EXISTS idx_planner_tool_approvals_unique
     ON planner_tool_approvals (scope, COALESCE(workspace_id, ''), tool_name);
   `,
+  // PA-6 round 4 (reporter: "current multiple agents design is just name,
+  // actual I need real multiple agents"): each agent gets its own default
+  // model and its own tool subset, not just a name and a directory.
+  //
+  // `default_model_id` has no FK to `planner_models` — same reasoning
+  // `planner_chats.last_model_id` already has none: a model can be removed
+  // from the catalog independently, and a dangling id here just means
+  // `PlannerChatService.create` falls back to the global last-used model
+  // instead, never a broken reference.
+  //
+  // `planner_agent_disabled_tools` stores only what's *turned off* — the
+  // catalog (`planner/tools.ts`) stays global and every tool defaults to
+  // enabled for every agent, so adding a brand new tool to the catalog
+  // automatically reaches every existing agent with no backfill, and an
+  // agent created before this migration is unaffected until someone
+  // explicitly restricts it. This is deliberately the opposite structure
+  // from `planner_tool_approvals` (which records a *decision made*, worth
+  // keeping even for a deleted workspace) — a disabled-tool row is pure
+  // current configuration of an agent that, once gone, makes the row
+  // meaningless, so `ON DELETE CASCADE` here is correct where
+  // `planner_tool_approvals.workspace_id` deliberately has no FK at all.
+  `
+  ALTER TABLE planner_workspaces ADD COLUMN default_model_id TEXT;
+
+  CREATE TABLE IF NOT EXISTS planner_agent_disabled_tools (
+    id           TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES planner_workspaces (id) ON DELETE CASCADE,
+    tool_name    TEXT NOT NULL,
+    created_at   INTEGER NOT NULL
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_planner_agent_disabled_tools_unique
+    ON planner_agent_disabled_tools (workspace_id, tool_name);
+  `,
 ];
 
 /**

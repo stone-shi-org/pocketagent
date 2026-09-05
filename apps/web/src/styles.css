@@ -5277,6 +5277,29 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   color: var(--danger);
 }
 
+/* One agent's block in the Agents list: name/actions, then its model picker
+   and Tools toggle, then (expanded) its tool checklist — several stacked
+   rows, so the divider moves here from `.planner-model-row` (which still
+   provides the flex/space-between layout for each individual row inside). */
+.planner-agent-row {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 0;
+}
+
+.planner-agent-row:last-child {
+  border-bottom: none;
+}
+
+.planner-agent-tools-panel {
+  margin: 4px 0 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  max-height: 280px;
+  overflow-y: auto;
+}
+
 .planner-empty {
   color: var(--text-dim);
   font-size: 14px;

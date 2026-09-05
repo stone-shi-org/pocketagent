@@ -259,6 +259,28 @@ directory a human chose — logged the same way `POST /api/workspaces/add` logs 
 being added. Two agents may never point at the exact same directory (checked at creation) to
 avoid two "agents" silently sharing one identity for `PlannerWorkspaceRegistry.contains`.
 
+**Each agent has its own default model and its own tool subset — "real multiple agents," not
+just distinct names** (PA-6 round 4, reporter: "current multiple agents design is just name,
+actual I need real multiple agents"). `planner_workspaces.default_model_id` seeds a new chat
+created in that agent (`PlannerChatService.create` prefers it over the global last-used model);
+each chat then keeps its own choice exactly as before, so this only changes what a *fresh* chat
+starts with. `planner_agent_disabled_tools` stores only what one agent has *turned off* — the
+catalog (`planner/tools.ts`) stays global and every tool defaults to enabled for every agent,
+so a tool added to the catalog later reaches every existing agent with no backfill, and an
+agent created before this feature existed is unaffected until someone explicitly restricts it.
+This is the opposite structure from `planner_tool_approvals` (a record of a *decision made*,
+worth keeping even for a deleted workspace) — a disabled-tool row is pure current configuration
+of an agent that, once gone, makes the row meaningless, so it `ON DELETE CASCADE`s where
+`planner_tool_approvals.workspace_id` deliberately has no FK at all. Enforced in two places, not
+one: `driveLoop` excludes a disabled tool from the `tools` array sent to the model at all, and
+`processToolCalls`/`resolveApproval` separately refuse to *execute* one even if a call for it
+still arrives (a stale conversation from before it was disabled, a model that names it anyway)
+— the same "the model choosing to call something is not this server's decision to trust
+unchecked" posture `exec_command`'s own input validation already takes. A disabled tool's
+refusal (`Tool "x" is disabled for this agent.`) is deliberately worded differently from an
+unknown tool's (`Unknown tool: x`), so the transcript never conflates "doesn't exist" with
+"exists but restricted."
+
 **A chat's transcript is the same `AgentEvent` union a structured session's own event stream
 uses** (`packages/protocol/src/agent-events.ts`), not a parallel shape — reused directly so a
 reopened Pocket Agent chat replays through the exact same `applyEvents` reducer the frontend

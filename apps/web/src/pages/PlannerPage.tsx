@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type {
+  PlannerAgentToolInfo,
   PlannerModel,
   PlannerSettingsDto,
   PlannerToolApprovalRow,
@@ -53,6 +54,9 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
   const [testResults, setTestResults] = useState<Record<string, TestPlannerModelResponse | 'testing'>>({});
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
   const [newAgentPath, setNewAgentPath] = useState<{ path: string; create: boolean } | null>(null);
+  const [expandedAgentTools, setExpandedAgentTools] = useState<string | null>(null);
+  const [agentTools, setAgentTools] = useState<PlannerAgentToolInfo[] | null>(null);
+  const [agentToolsBusy, setAgentToolsBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -226,6 +230,48 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
 
   const removeAgent = (id: string): void => {
     void withBusy(() => api.deletePlannerWorkspace(id));
+  };
+
+  /** `''` means "use the global last-used model" — `defaultModelId: null`. */
+  const setAgentDefaultModel = (id: string, modelId: string): void => {
+    void withBusy(() => api.updatePlannerWorkspace(id, { defaultModelId: modelId || null }));
+  };
+
+  /** Expands/collapses one agent's tool checklist at a time — fetches fresh
+      on expand rather than caching, since another browser tab could have
+      changed it. */
+  const toggleAgentToolsPanel = (ws: PlannerWorkspace): void => {
+    if (expandedAgentTools === ws.id) {
+      setExpandedAgentTools(null);
+      setAgentTools(null);
+      return;
+    }
+    setExpandedAgentTools(ws.id);
+    setAgentTools(null);
+    void (async () => {
+      try {
+        const { tools } = await api.listPlannerAgentTools(ws.id);
+        setAgentTools(tools);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : "Could not load this agent's tools.");
+      }
+    })();
+  };
+
+  const toggleAgentTool = (workspaceId: string, toolName: string, enabled: boolean): void => {
+    setAgentToolsBusy(true);
+    void (async () => {
+      try {
+        const { tools } = await api.setPlannerAgentTool(workspaceId, { toolName, enabled });
+        setAgentTools(tools);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : "Could not update this agent's tools.");
+      } finally {
+        setAgentToolsBusy(false);
+      }
+    })();
   };
 
   const setYolo = (yoloEnabled: boolean): void => {
@@ -504,51 +550,100 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
         </p>
         {workspaces === null && <div className="spinner">Loading…</div>}
         {workspaces?.map((ws) => (
-          <div key={ws.id} className="planner-model-row">
-            {renamingAgent === ws.id ? (
-              <input
-                autoFocus
-                type="text"
-                value={renameValue}
-                onChange={(e) => setRenameValue(e.target.value)}
-                onBlur={saveRenameAgent}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') saveRenameAgent();
-                  if (e.key === 'Escape') setRenamingAgent(null);
-                }}
-              />
-            ) : (
-              <span>
-                {ws.name}
-                {ws.isDefault && <span className="planner-row-meta"> (default)</span>}
-                <br />
-                <span className="planner-row-meta" title={ws.path}>
-                  {ws.path}
+          <div key={ws.id} className="planner-agent-row">
+            <div className="planner-model-row" style={{ borderBottom: 'none', paddingBottom: 0 }}>
+              {renamingAgent === ws.id ? (
+                <input
+                  autoFocus
+                  type="text"
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onBlur={saveRenameAgent}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') saveRenameAgent();
+                    if (e.key === 'Escape') setRenamingAgent(null);
+                  }}
+                />
+              ) : (
+                <span>
+                  {ws.name}
+                  {ws.isDefault && <span className="planner-row-meta"> (default)</span>}
+                  <br />
+                  <span className="planner-row-meta" title={ws.path}>
+                    {ws.path}
+                  </span>
                 </span>
-              </span>
-            )}
-            <div className="planner-inline">
-              <button
-                type="button"
-                className="planner-btn"
-                disabled={busy}
-                onClick={() => startRenameAgent(ws)}
-                aria-label={`Rename ${ws.name}`}
-              >
-                Rename
-              </button>
-              {!ws.isDefault && (
+              )}
+              <div className="planner-inline">
                 <button
                   type="button"
-                  className="planner-btn danger"
+                  className="planner-btn"
                   disabled={busy}
-                  onClick={() => removeAgent(ws.id)}
-                  aria-label={`Remove ${ws.name}`}
+                  onClick={() => startRenameAgent(ws)}
+                  aria-label={`Rename ${ws.name}`}
                 >
-                  <Icon name="trash" size={14} />
+                  Rename
                 </button>
-              )}
+                {!ws.isDefault && (
+                  <button
+                    type="button"
+                    className="planner-btn danger"
+                    disabled={busy}
+                    onClick={() => removeAgent(ws.id)}
+                    aria-label={`Remove ${ws.name}`}
+                  >
+                    <Icon name="trash" size={14} />
+                  </button>
+                )}
+              </div>
             </div>
+
+            <div className="planner-model-row" style={{ paddingTop: 6 }}>
+              <label className="planner-row-meta">
+                Model:{' '}
+                <select
+                  value={ws.defaultModelId ?? ''}
+                  disabled={busy}
+                  onChange={(e) => setAgentDefaultModel(ws.id, e.target.value)}
+                  aria-label={`Default model for ${ws.name}`}
+                >
+                  <option value="">Use global last-used model</option>
+                  {models?.map((m) => (
+                    <option key={m.id} value={m.modelId}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button type="button" className="planner-btn" onClick={() => toggleAgentToolsPanel(ws)}>
+                Tools {expandedAgentTools === ws.id ? '▲' : '▼'}
+              </button>
+            </div>
+
+            {expandedAgentTools === ws.id && (
+              <div className="planner-agent-tools-panel">
+                {agentTools === null ? (
+                  <div className="spinner">Loading…</div>
+                ) : (
+                  agentTools.map((t) => (
+                    <label key={t.name} className="planner-checkbox-row" style={{ marginBottom: 4 }}>
+                      <input
+                        type="checkbox"
+                        checked={t.enabled}
+                        disabled={agentToolsBusy}
+                        onChange={(e) => toggleAgentTool(ws.id, t.name, e.target.checked)}
+                      />
+                      <span>
+                        <code>{t.name}</code>
+                        {t.readOnly && <span className="planner-row-meta"> (read-only)</span>}
+                        <br />
+                        <span className="planner-row-meta">{t.description}</span>
+                      </span>
+                    </label>
+                  ))
+                )}
+              </div>
+            )}
           </div>
         ))}
         <div className="planner-inline" style={{ marginTop: 10 }}>

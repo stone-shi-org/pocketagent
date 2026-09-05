@@ -20,6 +20,7 @@ interface PlannerWorkspaceDbRow {
   path: string;
   is_default: number;
   created_at: number;
+  default_model_id: string | null;
 }
 
 function fromDbRow(row: PlannerWorkspaceDbRow): PlannerWorkspaceRow {
@@ -29,6 +30,7 @@ function fromDbRow(row: PlannerWorkspaceDbRow): PlannerWorkspaceRow {
     path: row.path,
     isDefault: row.is_default === 1,
     createdAt: row.created_at,
+    defaultModelId: row.default_model_id,
   };
 }
 
@@ -40,23 +42,64 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
       ).map(fromDbRow),
     insert: (row) => {
       db.prepare(
-        `INSERT INTO planner_workspaces (id, name, path, is_default, created_at)
-         VALUES (@id, @name, @path, @isDefault, @createdAt)`,
+        `INSERT INTO planner_workspaces (id, name, path, is_default, created_at, default_model_id)
+         VALUES (@id, @name, @path, @isDefault, @createdAt, @defaultModelId)`,
       ).run({
         id: row.id,
         name: row.name,
         path: row.path,
         isDefault: row.isDefault ? 1 : 0,
         createdAt: row.createdAt,
+        defaultModelId: row.defaultModelId,
       });
     },
     delete: (id) => db.prepare('DELETE FROM planner_workspaces WHERE id = ?').run(id).changes > 0,
     rename: (id, name) => {
       db.prepare('UPDATE planner_workspaces SET name = ? WHERE id = ?').run(name, id);
     },
+    setDefaultModelId: (id, modelId) => {
+      db.prepare('UPDATE planner_workspaces SET default_model_id = ? WHERE id = ?').run(modelId, id);
+    },
     isSeeded: () => readSetting(db, PLANNER_DEFAULT_WORKSPACE_SEEDED_KEY) !== null,
     markSeeded: () => writeSetting(db, PLANNER_DEFAULT_WORKSPACE_SEEDED_KEY, new Date().toISOString()),
   };
+}
+
+// ---- planner_agent_disabled_tools --------------------------------------------
+
+/**
+ * "Tools can be global, but each agent can select their own available
+ * tools" (PA-6 round 4). Stores only what's *disabled* — see the migration's
+ * own doc comment in `db/index.ts` for why that (rather than an allow-list)
+ * is the correct default: every tool starts enabled for every agent,
+ * including ones added to the catalog after an agent already existed.
+ */
+export function readDisabledToolNames(db: Db, workspaceId: string): Set<string> {
+  const rows = db
+    .prepare('SELECT tool_name FROM planner_agent_disabled_tools WHERE workspace_id = ?')
+    .all(workspaceId) as { tool_name: string }[];
+  return new Set(rows.map((r) => r.tool_name));
+}
+
+/** Idempotent either way — disabling an already-disabled tool, or enabling
+    an already-enabled one, is a no-op rather than an error. */
+export function setToolEnabledForWorkspace(
+  db: Db,
+  workspaceId: string,
+  toolName: string,
+  enabled: boolean,
+): void {
+  if (enabled) {
+    db.prepare(
+      'DELETE FROM planner_agent_disabled_tools WHERE workspace_id = ? AND tool_name = ?',
+    ).run(workspaceId, toolName);
+  } else {
+    db.prepare(
+      `INSERT INTO planner_agent_disabled_tools (id, workspace_id, tool_name, created_at)
+       VALUES (@id, @workspaceId, @toolName, @createdAt)
+       ON CONFLICT (workspace_id, tool_name) DO NOTHING`,
+    ).run({ id: crypto.randomUUID(), workspaceId, toolName, createdAt: Date.now() });
+  }
 }
 
 // ---- planner_models ---------------------------------------------------------

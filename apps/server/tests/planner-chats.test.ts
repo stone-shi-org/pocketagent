@@ -266,6 +266,27 @@ describe('planner chat routes over HTTP', () => {
     expect(res.statusCode).toBe(404);
   });
 
+  it("a new chat's model defaults to its agent's own configured model over the global last-used one", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+
+    // Complete one turn with an explicit model to seed the *global*
+    // last-used setting (only a completed turn writes it — creating a chat
+    // alone does not).
+    const plainChat = (await post(t, '/api/planner/chats', { modelId: 'global-default' })).json();
+    await sendMessage(t, plainChat.id, 'hi');
+    expect((await get(t, '/api/planner/settings')).json().lastModelId).toBe('global-default');
+
+    const ws = (await post(t, '/api/planner/workspaces', { name: 'Coder' })).json();
+    await patch(t, `/api/planner/workspaces/${ws.id}`, { defaultModelId: 'agent-specific-model' });
+
+    // No explicit modelId on the request — should pick up the agent's own
+    // default, not the global last-used model.
+    const chat = (await post(t, '/api/planner/chats', { workspaceId: ws.id })).json();
+    expect(chat.lastModelId).toBe('agent-specific-model');
+  });
+
   it('renames a chat and changes its model', async () => {
     t = await createTestApp();
     const chat = (await post(t, '/api/planner/chats', {})).json();
@@ -398,6 +419,54 @@ describe('planner chat routes over HTTP', () => {
     const turnComplete = findEvent(events, 'turn_complete')!;
     expect(turnComplete.inputTokens).toBe(35); // 10 + 25
     expect(turnComplete.outputTokens).toBe(7); // 2 + 5
+  });
+
+  // ---- PA-6 round 4: per-agent tool subset -----------------------------------
+
+  it('excludes a disabled tool from what is offered to the model', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    await post(t, `/api/planner/workspaces/${chat.workspaceId}/tools`, {
+      toolName: 'write_file',
+      enabled: false,
+    });
+
+    await sendMessage(t, chat.id, 'hi');
+    const body = JSON.parse(fetchImpl.mock.calls[0]![1].body as string);
+    const toolNames = body.tools.map((spec: { function: { name: string } }) => spec.function.name);
+    expect(toolNames).not.toContain('write_file');
+    expect(toolNames).toContain('list_workspaces');
+  });
+
+  it('refuses to execute a disabled tool even if the model calls it anyway, without pausing for approval', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(fakeToolCallResponse('write_file', { path: 'x', content: 'y' }))
+      .mockResolvedValueOnce(fakeCompletionResponse('ok, understood'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+    await post(t, `/api/planner/workspaces/${chat.workspaceId}/tools`, {
+      toolName: 'write_file',
+      enabled: false,
+    });
+
+    const { events } = await sendMessage(t, chat.id, 'write a file anyway');
+    expect(events.map((e) => e.kind)).toEqual([
+      'user_prompt',
+      'tool_use',
+      'tool_result',
+      'text_delta',
+      'text',
+      'turn_complete',
+    ]);
+    const result = findEvent(events, 'tool_result')!;
+    expect(result.isError).toBe(true);
+    expect(result.content).toMatch(/disabled for this agent/);
+    expect(findEvent(events, 'permission_request')).toBeUndefined();
   });
 
   it('executes a read-only tool call immediately (no approval), streaming tool_use/tool_result, and persists them', async () => {

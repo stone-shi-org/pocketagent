@@ -53,6 +53,9 @@ import type {
   PlannerToolApprovalListResponse,
   PlannerToolApprovalRow,
   SetPlannerToolApprovalRequest,
+  PlannerAgentToolsResponse,
+  SetPlannerAgentToolRequest,
+  UpdatePlannerWorkspaceRequest,
 } from '@pocketagent/protocol';
 
 export class ApiError extends Error {
@@ -499,8 +502,23 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
 
+  updatePlannerWorkspace: (id: string, patch: UpdatePlannerWorkspaceRequest) =>
+    request<PlannerWorkspace>(`/api/planner/workspaces/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
   deletePlannerWorkspace: (id: string) =>
     request<void>(`/api/planner/workspaces/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  listPlannerAgentTools: (workspaceId: string) =>
+    request<PlannerAgentToolsResponse>(`/api/planner/workspaces/${encodeURIComponent(workspaceId)}/tools`),
+
+  setPlannerAgentTool: (workspaceId: string, body: SetPlannerAgentToolRequest) =>
+    request<PlannerAgentToolsResponse>(`/api/planner/workspaces/${encodeURIComponent(workspaceId)}/tools`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 
   listPlannerModels: () => request<PlannerModelListResponse>('/api/planner/models'),
 
