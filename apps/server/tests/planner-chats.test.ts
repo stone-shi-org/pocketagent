@@ -149,7 +149,7 @@ describe('planner chat routes over HTTP', () => {
     const created = await post(t, '/api/planner/chats', {});
     expect(created.statusCode).toBe(201);
     const chat = created.json();
-    expect(chat.workspaceName).toBe('default');
+    expect(chat.workspaceName).toBe('Pocket Agent');
     expect(chat.title).toBeNull();
     expect(chat.lastModelId).toBeNull();
 

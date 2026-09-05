@@ -30,6 +30,10 @@ function makeStore(): PlannerWorkspaceStore {
       if (idx >= 0) rows.splice(idx, 1);
       return rows.length < before;
     },
+    rename: (id, name) => {
+      const row = rows.find((r) => r.id === id);
+      if (row) row.name = name;
+    },
     isSeeded: () => seeded,
     markSeeded: () => {
       seeded = true;
@@ -56,7 +60,7 @@ describe('PlannerWorkspaceRegistry', () => {
     const list = registry.list();
     expect(list).toHaveLength(1);
     expect(list[0]?.isDefault).toBe(true);
-    expect(list[0]?.name).toBe('default');
+    expect(list[0]?.name).toBe('Pocket Agent');
     expect(fs.statSync(list[0]!.path).isDirectory()).toBe(true);
   });
 
@@ -119,6 +123,37 @@ describe('PlannerWorkspaceRegistry', () => {
     expect(registry.get(row.id)).toBeUndefined();
   });
 
+  it('renames a workspace without touching its on-disk directory', async () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    const row = await registry.create(root, 'Old Name');
+    const renamed = registry.rename(row.id, 'New Name');
+    expect(renamed.name).toBe('New Name');
+    expect(renamed.path).toBe(row.path);
+    expect(registry.get(row.id)?.name).toBe('New Name');
+    expect(fs.statSync(row.path).isDirectory()).toBe(true);
+  });
+
+  it('renaming the default workspace is allowed (unlike removing it)', async () => {
+    const store = makeStore();
+    const registry = new PlannerWorkspaceRegistry(store);
+    await registry.ensureDefaultWorkspace(root);
+    const [defaultRow] = registry.list();
+    const renamed = registry.rename(defaultRow!.id, 'My Assistant');
+    expect(renamed.isDefault).toBe(true);
+    expect(renamed.name).toBe('My Assistant');
+  });
+
+  it('rejects renaming to an empty name', async () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    const row = await registry.create(root, 'Scratch');
+    expect(() => registry.rename(row.id, '   ')).toThrow(PlannerWorkspaceError);
+  });
+
+  it('rejects renaming an unknown workspace', () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    expect(() => registry.rename('does-not-exist', 'X')).toThrow(PlannerWorkspaceError);
+  });
+
   it('reuses the containment primitive: contains() only matches inside a root', async () => {
     const registry = new PlannerWorkspaceRegistry(makeStore());
     const row = await registry.create(root, 'Sandbox');
@@ -159,7 +194,7 @@ describe('planner routes over HTTP', () => {
     const { workspaces } = res.json();
     expect(workspaces).toHaveLength(1);
     expect(workspaces[0].isDefault).toBe(true);
-    expect(workspaces[0].name).toBe('default');
+    expect(workspaces[0].name).toBe('Pocket Agent');
   });
 
   it('requires authentication', async () => {
@@ -191,6 +226,33 @@ describe('planner routes over HTTP', () => {
   it('404s removing an unknown workspace', async () => {
     const res = await del('/api/planner/workspaces/does-not-exist');
     expect(res.statusCode).toBe(404);
+  });
+
+  it('renames a workspace over HTTP, including the default one', async () => {
+    const created = await post('/api/planner/workspaces', { name: 'Old' });
+    const row = created.json();
+    const renamed = await patch(`/api/planner/workspaces/${row.id}`, { name: 'New' });
+    expect(renamed.statusCode).toBe(200);
+    expect(renamed.json().name).toBe('New');
+
+    const list = (await get('/api/planner/workspaces')).json().workspaces;
+    const defaultWorkspace = list.find((w: { isDefault: boolean }) => w.isDefault);
+    const renamedDefault = await patch(`/api/planner/workspaces/${defaultWorkspace.id}`, {
+      name: 'My Assistant',
+    });
+    expect(renamedDefault.statusCode).toBe(200);
+    expect(renamedDefault.json().name).toBe('My Assistant');
+  });
+
+  it('404s renaming an unknown workspace', async () => {
+    const res = await patch('/api/planner/workspaces/does-not-exist', { name: 'X' });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('rejects renaming to an empty name over HTTP', async () => {
+    const created = await post('/api/planner/workspaces', { name: 'Old' });
+    const res = await patch(`/api/planner/workspaces/${created.json().id}`, { name: '' });
+    expect(res.statusCode).toBe(400);
   });
 
   it('rejects an empty workspace name', async () => {

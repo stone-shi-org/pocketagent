@@ -51,6 +51,9 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
       });
     },
     delete: (id) => db.prepare('DELETE FROM planner_workspaces WHERE id = ?').run(id).changes > 0,
+    rename: (id, name) => {
+      db.prepare('UPDATE planner_workspaces SET name = ? WHERE id = ?').run(name, id);
+    },
     isSeeded: () => readSetting(db, PLANNER_DEFAULT_WORKSPACE_SEEDED_KEY) !== null,
     markSeeded: () => writeSetting(db, PLANNER_DEFAULT_WORKSPACE_SEEDED_KEY, new Date().toISOString()),
   };

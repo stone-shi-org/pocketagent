@@ -162,7 +162,7 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
         setError(
           err instanceof ApiError
             ? err.message
-            : 'Could not reach the planner. Your message was not sent.',
+            : 'Could not reach Pocket Agent. Your message was not sent.',
         );
         setSending(false);
       }
@@ -215,7 +215,7 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
       {pending && (
         <div className="planner-approval-card" role="alertdialog" aria-label="Tool approval">
           <p className="planner-approval-title">
-            The planner wants to run <code>{pending.toolName}</code>
+            This agent wants to run <code>{pending.toolName}</code>
           </p>
           <pre className="planner-approval-args">{pending.argsSummary}</pre>
           <div className="planner-approval-actions">

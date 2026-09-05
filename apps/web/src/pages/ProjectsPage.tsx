@@ -13,6 +13,7 @@ import {
   useProjects,
 } from '../components/ProjectList.js';
 import { UsageBar } from '../components/UsageBar.js';
+import { PocketAgentsSection } from '../components/PocketAgentsSection.js';
 
 interface Props {
   onOpen: (sessionId: string) => void;
@@ -27,8 +28,10 @@ interface Props {
   onOpenWebhooks: () => void;
   /** Opens one webhook's editor, from its row in the project tree. */
   onOpenWebhook: (webhookId: string) => void;
-  /** PA-6: the planner's own chat list, in parallel to project chats. */
+  /** PA-6: opens the Pocket Agent settings page (LLM endpoint, agents, tools). */
   onOpenPlanner: () => void;
+  /** PA-6: opens one Pocket Agent chat, from the home screen's own "Pocket Agents" section. */
+  onOpenPlannerChat: (chatId: string) => void;
   onApiError: (error: unknown) => void;
   onLogout: () => void;
 }
@@ -54,6 +57,7 @@ export function ProjectsPage({
   onOpenWebhooks,
   onOpenWebhook,
   onOpenPlanner,
+  onOpenPlannerChat,
   onApiError,
   onLogout,
 }: Props): JSX.Element {
@@ -151,6 +155,7 @@ export function ProjectsPage({
           onApiError={onApiError}
           emptyHint="Nothing here yet. Tap the compose button to start a chat."
         />
+        <PocketAgentsSection onOpenChat={onOpenPlannerChat} onApiError={onApiError} />
       </div>
 
       <UsageBar />
@@ -310,7 +315,7 @@ export function OverflowMenu({
           Webhooks…
         </button>
         <button type="button" role="menuitem" onClick={onPlanner}>
-          Planner…
+          Pocket Agent settings…
         </button>
         <button type="button" role="menuitem" onClick={onAdvanced}>
           More session options…

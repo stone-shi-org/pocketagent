@@ -200,11 +200,7 @@ export function App(): JSX.Element {
   if (route.name === 'planner') {
     return (
       <Suspense fallback={<PageFallback />}>
-        <PlannerPage
-          onBack={() => navigate({ name: 'list' })}
-          onOpenChat={(chatId) => navigate({ name: 'planner-chat', chatId })}
-          onApiError={handleApiError}
-        />
+        <PlannerPage onBack={() => navigate({ name: 'list' })} onApiError={handleApiError} />
       </Suspense>
     );
   }
@@ -234,6 +230,7 @@ export function App(): JSX.Element {
       onOpenWebhooks={() => navigate({ name: 'webhooks' })}
       onOpenWebhook={(webhookId) => navigate({ name: 'webhook', webhookId })}
       onOpenPlanner={() => navigate({ name: 'planner' })}
+      onOpenPlannerChat={(chatId) => navigate({ name: 'planner-chat', chatId })}
       onApiError={handleApiError}
       onLogout={logout}
     />

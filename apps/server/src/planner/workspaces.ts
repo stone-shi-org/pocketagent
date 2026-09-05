@@ -26,6 +26,10 @@ export interface PlannerWorkspaceStore {
   list(): PlannerWorkspaceRow[];
   insert(row: PlannerWorkspaceRow): void;
   delete(id: string): boolean;
+  /** Only the display name changes — the on-disk directory keeps its
+      original (slugified) name, so nothing that already resolved this
+      workspace's path needs to change with it. */
+  rename(id: string, name: string): void;
   /** Whether `ensureDefaultWorkspace` has already run, ever — see its doc comment. */
   isSeeded(): boolean;
   markSeeded(): void;
@@ -72,6 +76,12 @@ export class PlannerWorkspaceRegistry {
    * is empty", so a user who deliberately removes the default workspace
    * later does not get it silently recreated on the next boot — the same
    * discipline `workspaces_seeded` already applies to project folders.
+   *
+   * The seeded *display* name is "Pocket Agent" — the on-disk directory
+   * stays `default` regardless (nothing needs the two to match; `name` is
+   * purely presentational and renamable, see `rename` below), but the name a
+   * user actually sees for their first agent should read as one, not as an
+   * implementation detail.
    */
   async ensureDefaultWorkspace(root: string): Promise<void> {
     if (this.store.isSeeded()) return;
@@ -80,7 +90,7 @@ export class PlannerWorkspaceRegistry {
     const real = await fs.realpath(defaultPath);
     const row: PlannerWorkspaceRow = {
       id: crypto.randomUUID(),
-      name: 'default',
+      name: 'Pocket Agent',
       path: real,
       isDefault: true,
       createdAt: Date.now(),
@@ -148,6 +158,25 @@ export class PlannerWorkspaceRegistry {
     this.store.delete(id);
     this.rows = this.rows.filter((r) => r.id !== id);
     return true;
+  }
+
+  /**
+   * Rename an agent. Only the display name (`name`) changes — the on-disk
+   * directory is never renamed, so every chat's stored `workspacePath` (and
+   * every tool call that resolved a path against it) keeps working
+   * unaffected by a purely cosmetic rename.
+   */
+  rename(id: string, name: string): PlannerWorkspaceRow {
+    const trimmed = name.trim();
+    if (trimmed.length === 0 || trimmed.length > 128) {
+      throw new PlannerWorkspaceError('Name must be 1-128 characters.', 'invalid');
+    }
+    const row = this.get(id);
+    if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
+    this.store.rename(id, trimmed);
+    const updated = { ...row, name: trimmed };
+    this.rows = this.rows.map((r) => (r.id === id ? updated : r));
+    return updated;
   }
 
   /**

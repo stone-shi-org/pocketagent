@@ -5050,6 +5050,15 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   flex: none;
 }
 
+/* "Pocket Agents" (PA-6) — parallel to the project list above it on the home
+   screen; a top border is enough separation since `.section-heading` already
+   carries its own vertical rhythm. */
+.agents-section {
+  border-top: 1px solid var(--border);
+  padding-top: 4px;
+  margin-top: 8px;
+}
+
 /* ---- Planner (PA-6) ----------------------------------------------------
    Phase 2's frontend is deliberately minimal — a functional list/chat pair,
    not yet the full `Transcript`/`ToolCard`/`ApprovalSheet` reuse the plan

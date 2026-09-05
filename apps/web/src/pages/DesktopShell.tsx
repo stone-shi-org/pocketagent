@@ -7,6 +7,7 @@ import { PushToggle } from '../components/PushToggle.js';
 import { RunningSessions } from '../components/RunningSessions.js';
 import { Icon } from '../components/Icon.js';
 import { HostChip, ProjectList, SearchField, allChats, useProjects } from '../components/ProjectList.js';
+import { PocketAgentsSection } from '../components/PocketAgentsSection.js';
 import { TabBar, type Tab } from '../components/TabBar.js';
 import { UsageBar } from '../components/UsageBar.js';
 import { formatBuildInfo } from '../version.js';
@@ -448,6 +449,11 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             onApiError={onApiError}
             emptyHint="Nothing here yet. Start a chat to see it listed."
           />
+          <PocketAgentsSection
+            onOpenChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
+            onApiError={onApiError}
+            activeChatId={route.name === 'planner-chat' ? route.chatId : null}
+          />
         </div>
 
         <UsageBar />
@@ -572,11 +578,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
           </Suspense>
         ) : route.name === 'planner' ? (
           <Suspense fallback={<PageFallback />}>
-            <PlannerPage
-              onBack={() => onNavigate({ name: 'list' })}
-              onOpenChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
-              onApiError={onApiError}
-            />
+            <PlannerPage onBack={() => onNavigate({ name: 'list' })} onApiError={onApiError} />
           </Suspense>
         ) : route.name === 'planner-chat' ? (
           <Suspense fallback={<PageFallback />}>

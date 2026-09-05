@@ -4,6 +4,7 @@ import {
   CreatePlannerChatRequest,
   CreatePlannerModelRequest,
   CreatePlannerWorkspaceRequest,
+  UpdatePlannerWorkspaceRequest,
   PlannerSendMessageRequest,
   ResolvePlannerApprovalRequest,
   SetPlannerToolApprovalRequest,
@@ -96,6 +97,20 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     try {
       const row = await plannerWorkspaces.create(plannerWorkspacesRoot, parsed.data.name);
       return reply.code(201).send(row);
+    } catch (err) {
+      return mapWorkspaceError(reply, err);
+    }
+  });
+
+  app.patch('/api/planner/workspaces/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = UpdatePlannerWorkspaceRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    try {
+      const row = app.pocket.plannerWorkspaces.rename(id, parsed.data.name);
+      return reply.send(row);
     } catch (err) {
       return mapWorkspaceError(reply, err);
     }

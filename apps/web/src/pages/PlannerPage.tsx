@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
 import type {
-  PlannerChat,
   PlannerModel,
   PlannerSettingsDto,
   PlannerToolApprovalRow,
@@ -9,26 +8,25 @@ import type {
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
-import { formatRelative } from '../components/StatusBadge.js';
 
 interface Props {
-  onOpenChat: (chatId: string) => void;
   onApiError: (error: unknown) => void;
   /** Present only on the phone route — see `CronJobsPage`'s identical prop for why. */
   onBack?: () => void;
 }
 
 /**
- * PA-6: the planner's chat list, plus an inline LLM endpoint / model setup
- * and tool-safety controls (phase 5) so the feature is actually usable end
- * to end without a `curl`. A proper Settings-page section, and a chat page
- * reusing `Transcript`/`ApprovalSheet` once live streaming exists, are later
- * refinements — see PA-6.
+ * PA-6: settings for Pocket Agent — the LLM endpoint/API key, the model
+ * catalog, agent management (rename, add, remove — see
+ * `PocketAgentsSection` for where the chats themselves now live), and tool
+ * safety controls. Chats moved to the home screen's own "Pocket Agents"
+ * section per the reporter's feedback that they belonged there, not behind
+ * a menu item — this page is purely configuration now, the same split
+ * "Projects" already draws between browsing chats and managing folders.
  */
-export function PlannerPage({ onOpenChat, onApiError, onBack }: Props): JSX.Element {
+export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
   const [workspaces, setWorkspaces] = useState<PlannerWorkspace[] | null>(null);
   const [models, setModels] = useState<PlannerModel[] | null>(null);
-  const [chats, setChats] = useState<PlannerChat[] | null>(null);
   const [settings, setSettings] = useState<PlannerSettingsDto | null>(null);
   const [tools, setTools] = useState<PlannerToolInfo[]>([]);
   const [approvals, setApprovals] = useState<PlannerToolApprovalRow[]>([]);
@@ -44,20 +42,21 @@ export function PlannerPage({ onOpenChat, onApiError, onBack }: Props): JSX.Elem
   const [newApprovalWorkspaceId, setNewApprovalWorkspaceId] = useState('');
   const [newApprovalTool, setNewApprovalTool] = useState('');
   const [newApprovalDecision, setNewApprovalDecision] = useState<'allow' | 'deny'>('deny');
+  const [renamingAgent, setRenamingAgent] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [newAgentName, setNewAgentName] = useState('');
 
   const load = useCallback(async () => {
     try {
-      const [ws, mo, ch, se, to, ap] = await Promise.all([
+      const [ws, mo, se, to, ap] = await Promise.all([
         api.listPlannerWorkspaces(),
         api.listPlannerModels(),
-        api.listPlannerChats(),
         api.getPlannerSettings(),
         api.listPlannerTools(),
         api.listPlannerToolApprovals(),
       ]);
       setWorkspaces(ws.workspaces);
       setModels(mo.models);
-      setChats(ch.chats);
       setSettings(se);
       setBaseUrlInput(se.baseUrl ?? '');
       setTools(to.tools);
@@ -65,7 +64,7 @@ export function PlannerPage({ onOpenChat, onApiError, onBack }: Props): JSX.Elem
       setError(null);
     } catch (err) {
       onApiError(err);
-      setError(err instanceof ApiError ? err.message : 'Could not load the planner.');
+      setError(err instanceof ApiError ? err.message : 'Could not load Pocket Agent settings.');
     }
   }, [onApiError]);
 
@@ -121,15 +120,30 @@ export function PlannerPage({ onOpenChat, onApiError, onBack }: Props): JSX.Elem
     void withBusy(() => api.deletePlannerModel(id));
   };
 
-  const newChat = (): void => {
+  const startRenameAgent = (ws: PlannerWorkspace): void => {
+    setRenamingAgent(ws.id);
+    setRenameValue(ws.name);
+  };
+
+  const saveRenameAgent = (): void => {
+    const id = renamingAgent;
+    const name = renameValue.trim();
+    setRenamingAgent(null);
+    if (!id || !name) return;
+    void withBusy(() => api.renamePlannerWorkspace(id, name));
+  };
+
+  const addAgent = (): void => {
+    const name = newAgentName.trim();
+    if (!name) return;
     void withBusy(async () => {
-      const chat = await api.createPlannerChat({});
-      onOpenChat(chat.id);
+      await api.createPlannerWorkspace(name);
+      setNewAgentName('');
     });
   };
 
-  const removeChat = (id: string): void => {
-    void withBusy(() => api.deletePlannerChat(id));
+  const removeAgent = (id: string): void => {
+    void withBusy(() => api.deletePlannerWorkspace(id));
   };
 
   const setYolo = (yoloEnabled: boolean): void => {
@@ -161,10 +175,10 @@ export function PlannerPage({ onOpenChat, onApiError, onBack }: Props): JSX.Elem
     <div className="planner-page">
       <div className="planner-head">
         <div>
-          <h2>Planner</h2>
+          <h2>Pocket Agent settings</h2>
           <p className="planner-sub">
-            A chat backed by your own LLM endpoint, with tools to drive your other sessions
-            (coming in a later phase).
+            LLM endpoint, models, agents, and tool safety. Chats themselves live in the "Pocket
+            Agents" section on the home screen.
           </p>
         </div>
         {onBack && (
@@ -358,40 +372,72 @@ export function PlannerPage({ onOpenChat, onApiError, onBack }: Props): JSX.Elem
         </div>
       </div>
 
-      <div className="planner-head" style={{ marginTop: 6 }}>
-        <h3 style={{ margin: 0, fontSize: 16 }}>Chats</h3>
-        <button type="button" className="planner-new" disabled={busy} onClick={newChat}>
-          <Icon name="compose" size={16} />
-          New chat
-        </button>
+      <div className="planner-section">
+        <h3>Agents</h3>
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          Each agent has its own name, its own scratch directory, and its own chats — see "Pocket
+          Agents" on the home screen. All agents share the LLM endpoint and models configured above.
+        </p>
+        {workspaces === null && <div className="spinner">Loading…</div>}
+        {workspaces?.map((ws) => (
+          <div key={ws.id} className="planner-model-row">
+            {renamingAgent === ws.id ? (
+              <input
+                autoFocus
+                type="text"
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onBlur={saveRenameAgent}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') saveRenameAgent();
+                  if (e.key === 'Escape') setRenamingAgent(null);
+                }}
+              />
+            ) : (
+              <span>
+                {ws.name}
+                {ws.isDefault && <span className="planner-row-meta"> (default)</span>}
+              </span>
+            )}
+            <div className="planner-inline">
+              <button
+                type="button"
+                className="planner-btn"
+                disabled={busy}
+                onClick={() => startRenameAgent(ws)}
+                aria-label={`Rename ${ws.name}`}
+              >
+                Rename
+              </button>
+              {!ws.isDefault && (
+                <button
+                  type="button"
+                  className="planner-btn danger"
+                  disabled={busy}
+                  onClick={() => removeAgent(ws.id)}
+                  aria-label={`Remove ${ws.name}`}
+                >
+                  <Icon name="trash" size={14} />
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+        <div className="planner-inline" style={{ marginTop: 10 }}>
+          <input
+            type="text"
+            placeholder="New agent name"
+            value={newAgentName}
+            onChange={(e) => setNewAgentName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') addAgent();
+            }}
+          />
+          <button type="button" className="planner-btn" disabled={busy} onClick={addAgent}>
+            <Icon name="plus" size={14} /> Add agent
+          </button>
+        </div>
       </div>
-
-      {chats === null && <div className="spinner">Loading…</div>}
-      {chats?.length === 0 && (
-        <div className="planner-empty">
-          No planner chats yet. Start one with the button above — it will run in your{' '}
-          {workspaces?.find((w) => w.isDefault)?.name ?? 'default'} workspace unless you pick another.
-        </div>
-      )}
-      {chats?.map((chat) => (
-        <div key={chat.id} className="planner-row">
-          <button type="button" className="planner-main" onClick={() => onOpenChat(chat.id)}>
-            <span className="planner-row-title">{chat.title ?? 'Untitled chat'}</span>
-            <span className="planner-row-meta">
-              {chat.workspaceName} · {formatRelative(chat.lastActivityAt)}
-            </span>
-          </button>
-          <button
-            type="button"
-            className="planner-btn danger"
-            disabled={busy}
-            onClick={() => removeChat(chat.id)}
-            aria-label="Delete chat"
-          >
-            <Icon name="trash" size={14} />
-          </button>
-        </div>
-      ))}
     </div>
   );
 }

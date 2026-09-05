@@ -46,6 +46,13 @@ export const CreatePlannerWorkspaceRequest = z.object({
 });
 export type CreatePlannerWorkspaceRequest = z.infer<typeof CreatePlannerWorkspaceRequest>;
 
+/** Renames an agent. Only `name` — see `PlannerWorkspaceRegistry.rename`'s doc
+    comment for why the on-disk directory is never touched by this. */
+export const UpdatePlannerWorkspaceRequest = z.object({
+  name: z.string().min(1).max(128),
+});
+export type UpdatePlannerWorkspaceRequest = z.infer<typeof UpdatePlannerWorkspaceRequest>;
+
 /**
  * One row of "this label maps to this model id", checked against the single
  * configured provider endpoint (`PlannerSettingsDto.baseUrl`). Multiple rows

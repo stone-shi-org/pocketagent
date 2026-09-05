@@ -424,6 +424,12 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
 
+  renamePlannerWorkspace: (id: string, name: string) =>
+    request<PlannerWorkspace>(`/api/planner/workspaces/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    }),
+
   deletePlannerWorkspace: (id: string) =>
     request<void>(`/api/planner/workspaces/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
