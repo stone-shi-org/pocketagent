@@ -60,6 +60,9 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
     setDefaultModelId: (id, modelId) => {
       db.prepare('UPDATE planner_workspaces SET default_model_id = ? WHERE id = ?').run(modelId, id);
     },
+    setPath: (id, newPath) => {
+      db.prepare('UPDATE planner_workspaces SET path = ? WHERE id = ?').run(newPath, id);
+    },
     isSeeded: () => readSetting(db, PLANNER_DEFAULT_WORKSPACE_SEEDED_KEY) !== null,
     markSeeded: () => writeSetting(db, PLANNER_DEFAULT_WORKSPACE_SEEDED_KEY, new Date().toISOString()),
   };
@@ -99,6 +102,34 @@ export function setToolEnabledForWorkspace(
        VALUES (@id, @workspaceId, @toolName, @createdAt)
        ON CONFLICT (workspace_id, tool_name) DO NOTHING`,
     ).run({ id: crypto.randomUUID(), workspaceId, toolName, createdAt: Date.now() });
+  }
+}
+
+// ---- planner_global_disabled_tools -------------------------------------------
+
+/**
+ * The coarser layer above `readDisabledToolNames`: a tool disabled here is
+ * off for every agent, full stop — see the migration's own doc comment for
+ * why this is a separate flat table rather than folded into the per-agent
+ * one with a nullable `workspace_id`.
+ */
+export function readGlobalDisabledToolNames(db: Db): Set<string> {
+  const rows = db.prepare('SELECT tool_name FROM planner_global_disabled_tools').all() as {
+    tool_name: string;
+  }[];
+  return new Set(rows.map((r) => r.tool_name));
+}
+
+/** Idempotent either way, same as `setToolEnabledForWorkspace`. */
+export function setToolEnabledGlobally(db: Db, toolName: string, enabled: boolean): void {
+  if (enabled) {
+    db.prepare('DELETE FROM planner_global_disabled_tools WHERE tool_name = ?').run(toolName);
+  } else {
+    db.prepare(
+      `INSERT INTO planner_global_disabled_tools (tool_name, created_at)
+       VALUES (?, ?)
+       ON CONFLICT (tool_name) DO NOTHING`,
+    ).run(toolName, Date.now());
   }
 }
 

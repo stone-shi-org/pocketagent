@@ -5,6 +5,7 @@ import {
   CreatePlannerModelRequest,
   CreatePlannerWorkspaceRequest,
   SetPlannerAgentToolRequest,
+  SetPlannerToolEnabledRequest,
   UpdatePlannerWorkspaceRequest,
   PlannerSendMessageRequest,
   ResolvePlannerApprovalRequest,
@@ -25,6 +26,7 @@ import {
   type PlannerWorkspaceListResponse,
   type TestPlannerModelResponse,
 } from '@pocketagent/protocol';
+import type { Db } from '../db/index.js';
 import { PlannerWorkspaceError } from '../planner/workspaces.js';
 import { PlannerChatError } from '../planner/chats.js';
 import { PlannerLlmError } from '../planner/llm-client.js';
@@ -35,11 +37,13 @@ import {
   insertPlannerModel,
   nextPlannerModelSortOrder,
   readDisabledToolNames,
+  readGlobalDisabledToolNames,
   readPlannerModels,
   readPlannerSettings,
   readPlannerToolApprovals,
   revealPlannerApiKey,
   setToolEnabledForWorkspace,
+  setToolEnabledGlobally,
   writePlannerApiKey,
   writePlannerBaseUrl,
   writePlannerToolApproval,
@@ -195,6 +199,15 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       if (parsed.data.defaultModelId !== undefined) {
         row = app.pocket.plannerWorkspaces.setDefaultModelId(id, parsed.data.defaultModelId);
       }
+      if (parsed.data.path !== undefined) {
+        row = await app.pocket.plannerWorkspaces.setPath(id, parsed.data.path, {
+          create: parsed.data.createPath,
+        });
+        app.log.warn(
+          { id, path: row.path, created: !!parsed.data.createPath },
+          'planner agent re-pointed at a different directory; its existing chats\' transcripts stay under the old one',
+        );
+      }
       return reply.send(row);
     } catch (err) {
       return mapWorkspaceError(reply, err);
@@ -308,20 +321,13 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
-  /** The catalog for a settings page — see `PlannerToolInfo`'s doc comment. */
+  /** The global catalog for a settings page — see `PlannerToolInfo`'s doc
+      comment. `enabled` here is the global switch (PA-6 round 5); an
+      agent's own, further-restricted view is `GET .../workspaces/:id/tools`
+      below. */
   app.get('/api/planner/tools', async () => {
+    const disabled = readGlobalDisabledToolNames(app.pocket.db);
     const response: PlannerToolListResponse = {
-      tools: PLANNER_TOOLS.map((t) => ({ name: t.name, description: t.description, readOnly: t.readOnly })),
-    };
-    return response;
-  });
-
-  /** One agent's own tool subset — see `PlannerAgentToolInfo`'s doc comment. */
-  app.get('/api/planner/workspaces/:id/tools', async (request, reply) => {
-    const { id } = request.params as { id: string };
-    if (!app.pocket.plannerWorkspaces.get(id)) return notFound(reply, 'Workspace not found.');
-    const disabled = readDisabledToolNames(app.pocket.db, id);
-    const response: PlannerAgentToolsResponse = {
       tools: PLANNER_TOOLS.map((t) => ({
         name: t.name,
         description: t.description,
@@ -329,7 +335,52 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
         enabled: !disabled.has(t.name),
       })),
     };
-    return noStore(reply).send(response);
+    return response;
+  });
+
+  app.patch('/api/planner/tools/:name', async (request, reply) => {
+    const { name } = request.params as { name: string };
+    if (!PLANNER_TOOLS.some((t) => t.name === name)) {
+      return notFound(reply, `Unknown tool: ${name}`);
+    }
+    const parsed = SetPlannerToolEnabledRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    setToolEnabledGlobally(app.pocket.db, name, parsed.data.enabled);
+    const disabled = readGlobalDisabledToolNames(app.pocket.db);
+    const response: PlannerToolListResponse = {
+      tools: PLANNER_TOOLS.map((t) => ({
+        name: t.name,
+        description: t.description,
+        readOnly: t.readOnly,
+        enabled: !disabled.has(t.name),
+      })),
+    };
+    return response;
+  });
+
+  /** One agent's own tool subset — see `PlannerAgentToolInfo`'s doc comment.
+      `enabled` is *effective* (global AND per-agent); `disabledGlobally`
+      lets the editor grey out a checkbox the agent can't override. */
+  function buildAgentToolsResponse(db: Db, workspaceId: string): PlannerAgentToolsResponse {
+    const globalDisabled = readGlobalDisabledToolNames(db);
+    const agentDisabled = readDisabledToolNames(db, workspaceId);
+    return {
+      tools: PLANNER_TOOLS.map((t) => ({
+        name: t.name,
+        description: t.description,
+        readOnly: t.readOnly,
+        enabled: !globalDisabled.has(t.name) && !agentDisabled.has(t.name),
+        disabledGlobally: globalDisabled.has(t.name),
+      })),
+    };
+  }
+
+  app.get('/api/planner/workspaces/:id/tools', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!app.pocket.plannerWorkspaces.get(id)) return notFound(reply, 'Workspace not found.');
+    return noStore(reply).send(buildAgentToolsResponse(app.pocket.db, id));
   });
 
   app.post('/api/planner/workspaces/:id/tools', async (request, reply) => {
@@ -343,16 +394,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       return notFound(reply, `Unknown tool: ${parsed.data.toolName}`);
     }
     setToolEnabledForWorkspace(app.pocket.db, id, parsed.data.toolName, parsed.data.enabled);
-    const disabled = readDisabledToolNames(app.pocket.db, id);
-    const response: PlannerAgentToolsResponse = {
-      tools: PLANNER_TOOLS.map((t) => ({
-        name: t.name,
-        description: t.description,
-        readOnly: t.readOnly,
-        enabled: !disabled.has(t.name),
-      })),
-    };
-    return response;
+    return buildAgentToolsResponse(app.pocket.db, id);
   });
 
   app.get('/api/planner/tool-approvals', async () => {

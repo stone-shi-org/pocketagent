@@ -10,6 +10,7 @@ import {
   deletePlannerChat,
   insertPlannerChat,
   readDisabledToolNames,
+  readGlobalDisabledToolNames,
   readPlannerChat,
   readPlannerChats,
   readPlannerSettings,
@@ -114,6 +115,10 @@ interface PlannerTurnStats {
 }
 
 const EMPTY_TURN_STATS: PlannerTurnStats = { elapsedMs: 0, inputTokens: null, outputTokens: null };
+
+/** Reused rather than allocating a fresh empty `Set` per call for an
+    orphaned chat's `toolsFor` — see that method's doc comment. */
+const EMPTY_DISABLED_SET: ReadonlySet<string> = new Set();
 
 /** Folds one LLM call's usage (if the provider sent one) into the running
     total — accumulates rather than replaces, since a turn's tokens are the
@@ -237,18 +242,21 @@ export class PlannerChatService {
 
   /**
    * Tools available to a given agent right now: the injected/global catalog
-   * minus whatever that agent has explicitly disabled — see
-   * `PlannerAgentToolInfo`'s doc comment for why this is a deny-list, not an
-   * allow-list. `workspaceId: null` (an orphaned chat whose workspace was
-   * since deleted) gets the full, unrestricted set — there is no agent
-   * identity left to restrict by, the same reasoning `workspacePathFor`
-   * already falls back on for an orphaned chat's transcript directory.
+   * minus whatever is disabled at either of two layers (PA-6 round 5) — see
+   * `PlannerAgentToolInfo`'s doc comment for why each is a deny-list, not an
+   * allow-list. The global layer (`readGlobalDisabledToolNames`) applies
+   * regardless of `workspaceId`, including `null` (an orphaned chat whose
+   * workspace was since deleted) — a global switch has no agent identity to
+   * be scoped by. The per-agent layer only applies when `workspaceId` is
+   * present; an orphaned chat has no agent left to restrict it further, the
+   * same reasoning `workspacePathFor` already falls back on for its
+   * transcript directory.
    */
   private toolsFor(workspaceId: string | null): readonly PlannerToolDefinition[] {
-    if (!workspaceId) return this.tools;
-    const disabled = readDisabledToolNames(this.opts.db, workspaceId);
-    if (disabled.size === 0) return this.tools;
-    return this.tools.filter((t) => !disabled.has(t.name));
+    const globalDisabled = readGlobalDisabledToolNames(this.opts.db);
+    const agentDisabled = workspaceId ? readDisabledToolNames(this.opts.db, workspaceId) : EMPTY_DISABLED_SET;
+    if (globalDisabled.size === 0 && agentDisabled.size === 0) return this.tools;
+    return this.tools.filter((t) => !globalDisabled.has(t.name) && !agentDisabled.has(t.name));
   }
 
   /**
@@ -263,6 +271,18 @@ export class PlannerChatService {
    */
   private resolveEnabledTool(workspaceId: string | null, name: string): PlannerToolDefinition | undefined {
     return this.toolsFor(workspaceId).find((t) => t.name === name);
+  }
+
+  /** Distinguishes three outcomes for the same "a tool call can't run"
+      moment: a name that doesn't exist in the catalog at all, one that's
+      off globally (PA-6 round 5), and one that's merely restricted for this
+      one agent — so a genuinely unknown name, an operator-wide switch, and a
+      per-agent restriction never read as the same failure to whoever's
+      watching the transcript. */
+  private toolUnavailableMessage(workspaceId: string | null, name: string): string {
+    if (!findPlannerTool(name)) return `Unknown tool: ${name}`;
+    if (readGlobalDisabledToolNames(this.opts.db).has(name)) return `Tool "${name}" is disabled globally.`;
+    return `Tool "${name}" is disabled for this agent.`;
   }
 
   /**
@@ -360,7 +380,7 @@ export class PlannerChatService {
         kind: 'tool_result',
         id: crypto.randomUUID(),
         toolUseId: call.id,
-        content: choice === 'deny' ? 'Denied by the user.' : toolUnavailableMessage(call.function.name),
+        content: choice === 'deny' ? 'Denied by the user.' : this.toolUnavailableMessage(pending.workspaceId, call.function.name),
         truncated: false,
         isError: true,
       });
@@ -562,7 +582,7 @@ export class PlannerChatService {
           kind: 'tool_result',
           id: crypto.randomUUID(),
           toolUseId: call.id,
-          content: toolUnavailableMessage(call.function.name),
+          content: this.toolUnavailableMessage(chat.workspaceId, call.function.name),
           truncated: false,
           isError: true,
         });
@@ -682,14 +702,6 @@ export class PlannerChatService {
   }
 }
 
-/** Distinguishes "the model named a tool that doesn't exist at all" from
-    "the model named a real tool this agent has had disabled" — the same
-    global catalog lookup (`findPlannerTool`) either result is checked
-    against, so a genuinely unknown name and a merely-restricted one never
-    read as the same failure to whoever's watching the transcript. */
-function toolUnavailableMessage(name: string): string {
-  return findPlannerTool(name) ? `Tool "${name}" is disabled for this agent.` : `Unknown tool: ${name}`;
-}
 
 function scopeMessage(choice: PlannerToolApprovalChoice): string | null {
   switch (choice) {

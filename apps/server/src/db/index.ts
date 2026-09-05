@@ -631,6 +631,22 @@ const MIGRATIONS: readonly string[] = [
   CREATE UNIQUE INDEX IF NOT EXISTS idx_planner_agent_disabled_tools_unique
     ON planner_agent_disabled_tools (workspace_id, tool_name);
   `,
+  // PA-6 round 5 (reporter: "in global setting, add section called 'tools'
+  // list global available tools, you can disable or enable globally"): a
+  // second, coarser layer above `planner_agent_disabled_tools` — a tool
+  // disabled here is off for *every* agent, full stop, regardless of that
+  // agent's own per-tool setting. A separate table rather than reusing the
+  // per-agent one with a nullable `workspace_id` (the way
+  // `planner_tool_approvals.scope` does): there is no per-row scope
+  // ambiguity to resolve here, so a flat table of tool names is simpler and
+  // needs no `COALESCE`-based unique index. `tool_name` is the primary key
+  // (no synthetic id) since there is at most one row per tool, globally.
+  `
+  CREATE TABLE IF NOT EXISTS planner_global_disabled_tools (
+    tool_name  TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL
+  );
+  `,
 ];
 
 /**

@@ -55,6 +55,7 @@ import type {
   SetPlannerToolApprovalRequest,
   PlannerAgentToolsResponse,
   SetPlannerAgentToolRequest,
+  SetPlannerToolEnabledRequest,
   UpdatePlannerWorkspaceRequest,
 } from '@pocketagent/protocol';
 
@@ -592,6 +593,12 @@ export const api = {
     ),
 
   listPlannerTools: () => request<PlannerToolListResponse>('/api/planner/tools'),
+
+  setPlannerToolEnabled: (name: string, body: SetPlannerToolEnabledRequest) =>
+    request<PlannerToolListResponse>(`/api/planner/tools/${encodeURIComponent(name)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
 
   listPlannerToolApprovals: () =>
     request<PlannerToolApprovalListResponse>('/api/planner/tool-approvals'),

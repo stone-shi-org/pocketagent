@@ -61,15 +61,23 @@ export const CreatePlannerWorkspaceRequest = z.object({
 export type CreatePlannerWorkspaceRequest = z.infer<typeof CreatePlannerWorkspaceRequest>;
 
 /**
- * Updates an agent. `name` renames it — see `PlannerWorkspaceRegistry.rename`'s
- * doc comment for why the on-disk directory is never touched by this.
+ * Updates an agent. Every field independently optional — only what's sent is
+ * touched, the same convention every other settings PATCH in this codebase
+ * uses. `name` renames it — see `PlannerWorkspaceRegistry.rename`'s doc
+ * comment for why the on-disk directory is never touched by *that*.
  * `defaultModelId` sets (or, with `null`, clears) this agent's own default
- * model; omitted leaves it unchanged, same "only touch what's sent"
- * convention every other settings PATCH in this codebase uses.
+ * model. `path` (PA-6 round 5: "it lacks a way to change existing agent
+ * workspace directory") re-points the agent at a different directory
+ * instead — see `PlannerWorkspaceRegistry.setPath`'s doc comment for the
+ * consequence this has for existing chats' transcripts, which the editor
+ * must disclose before sending this; `createPath` mirrors
+ * `CreatePlannerWorkspaceRequest`'s own flag for a not-yet-existing one.
  */
 export const UpdatePlannerWorkspaceRequest = z.object({
   name: z.string().min(1).max(128).optional(),
   defaultModelId: z.string().max(200).nullable().optional(),
+  path: z.string().min(1).max(4096).optional(),
+  createPath: z.boolean().optional(),
 });
 export type UpdatePlannerWorkspaceRequest = z.infer<typeof UpdatePlannerWorkspaceRequest>;
 
@@ -260,17 +268,26 @@ export type ResolvePlannerApprovalRequest = z.infer<typeof ResolvePlannerApprova
  * PA-6, phase 5: the catalog for a settings page, so "which tool is allowed
  * globally and each workspace" has something to list. `readOnly` tells the
  * editor which tools never pause for approval at all (phase 3) versus which
- * ones a remembered decision or yolo mode actually affects.
+ * ones a remembered decision or yolo mode actually affects. `enabled` (PA-6
+ * round 5: "in global setting, add section called 'tools' ... you can
+ * disable or enable globally") is this tool's *global* on/off switch — off
+ * here means off for every agent, regardless of that agent's own setting
+ * (`PlannerAgentToolInfo.enabled`), which is a second, per-agent layer on
+ * top of this one, not an alternative to it.
  */
 export const PlannerToolInfo = z.object({
   name: z.string(),
   description: z.string(),
   readOnly: z.boolean(),
+  enabled: z.boolean(),
 });
 export type PlannerToolInfo = z.infer<typeof PlannerToolInfo>;
 
 export const PlannerToolListResponse = z.object({ tools: z.array(PlannerToolInfo) });
 export type PlannerToolListResponse = z.infer<typeof PlannerToolListResponse>;
+
+export const SetPlannerToolEnabledRequest = z.object({ enabled: z.boolean() });
+export type SetPlannerToolEnabledRequest = z.infer<typeof SetPlannerToolEnabledRequest>;
 
 /**
  * A pre-configured (rather than chat-triggered) remembered decision — the
@@ -305,21 +322,27 @@ export type SetPlannerToolApprovalRequest = z.infer<typeof SetPlannerToolApprova
 /**
  * PA-6 round 4: "tools can be global, but each agent can select their own
  * available tools." The catalog (`name`/`description`/`readOnly`) stays the
- * global one from `PlannerToolInfo` — `enabled` is this *agent's* own
- * current setting, defaulting to `true` for every tool an agent has never
- * explicitly disabled (see the migration's own doc comment for why the
- * store is a disabled-list, not an allow-list). Distinct from
- * `PlannerToolApprovalRow`: that gates *when a mutating call still has to
- * ask*; this gates whether the tool is offered to the model at all — a
- * disabled tool never appears in the `tools` array sent upstream, and a
- * call to one anyway (a stale conversation, a model that hallucinates a
- * name) is refused the same way an unknown tool name already is.
+ * global one from `PlannerToolInfo`. `enabled` is the *effective* state for
+ * this agent right now — `false` if either this agent has it disabled, or
+ * (PA-6 round 5) it's off globally — defaulting to `true` for every tool
+ * neither has ever explicitly disabled (see the migration's own doc comment
+ * for why the store is a disabled-list, not an allow-list). `disabledGlobally`
+ * lets the editor grey out and explain a checkbox the agent can't override:
+ * toggling *this* agent's own setting back on while a tool is off globally
+ * would silently do nothing, which is worse than not offering the toggle at
+ * all. Distinct from `PlannerToolApprovalRow`: that gates *when a mutating
+ * call still has to ask*; this gates whether the tool is offered to the
+ * model at all — a disabled tool never appears in the `tools` array sent
+ * upstream, and a call to one anyway (a stale conversation, a model that
+ * hallucinates a name) is refused the same way an unknown tool name already
+ * is.
  */
 export const PlannerAgentToolInfo = z.object({
   name: z.string(),
   description: z.string(),
   readOnly: z.boolean(),
   enabled: z.boolean(),
+  disabledGlobally: z.boolean(),
 });
 export type PlannerAgentToolInfo = z.infer<typeof PlannerAgentToolInfo>;
 

@@ -36,6 +36,9 @@ export interface PlannerWorkspaceStore {
       workspace's path needs to change with it. */
   rename(id: string, name: string): void;
   setDefaultModelId(id: string, modelId: string | null): void;
+  /** Re-points an existing row at a different (already realpath-resolved)
+      directory — see `PlannerWorkspaceRegistry.setPath`'s doc comment. */
+  setPath(id: string, newPath: string): void;
   /** Whether `ensureDefaultWorkspace` has already run, ever — see its doc comment. */
   isSeeded(): boolean;
   markSeeded(): void;
@@ -135,25 +138,7 @@ export class PlannerWorkspaceRegistry {
 
     let real: string;
     if (opts?.path) {
-      const absolute = path.resolve(opts.path);
-      if (opts.create) {
-        await fs.mkdir(absolute, { recursive: true });
-      }
-      try {
-        real = await fs.realpath(absolute);
-      } catch {
-        throw new PlannerWorkspaceError(
-          `${opts.path} does not exist. Pass createPath to create it.`,
-          'invalid',
-        );
-      }
-      const stat = await fs.stat(real);
-      if (!stat.isDirectory()) {
-        throw new PlannerWorkspaceError(`${opts.path} is not a directory.`, 'invalid');
-      }
-      if (this.rows.some((r) => r.path === real)) {
-        throw new PlannerWorkspaceError('Another agent already uses this exact directory.', 'invalid');
-      }
+      real = await this.resolveWorkspaceDirectory(opts.path, !!opts.create);
     } else {
       const slug = slugify(trimmed);
       if (slug.length === 0) {
@@ -238,6 +223,63 @@ export class PlannerWorkspaceRegistry {
     const updated = { ...row, defaultModelId: modelId };
     this.rows = this.rows.map((r) => (r.id === id ? updated : r));
     return updated;
+  }
+
+  /**
+   * Re-point an *existing* agent at a different directory — PA-6 round 5:
+   * "currently, it lacks a way to change existing agent workspace
+   * directory." Same validation `create`'s `opts.path` branch already does
+   * (must exist unless `opts.create` is set, must be a directory, must not
+   * collide with another agent's directory).
+   *
+   * Deliberately does **not** move anything on disk. A chat's transcript
+   * lives at `<path at the time>/.transcripts/<chatId>.jsonl`, and
+   * `PlannerChatService.workspacePathFor` reads this row's `path` fresh on
+   * every turn — so the moment this returns, every existing chat in this
+   * agent starts reading and writing under the *new* directory, and
+   * whatever transcripts sat under the old one are simply no longer
+   * reachable through this agent (the files themselves are untouched,
+   * exactly like removing a chat never deletes its transcript). The editor
+   * is responsible for disclosing this before calling it — the same
+   * "explicit action, and it's logged" posture as pointing a path at
+   * creation, just for a repoint instead of a first pick.
+   */
+  async setPath(id: string, requested: string, opts?: { create?: boolean }): Promise<PlannerWorkspaceRow> {
+    const row = this.get(id);
+    if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
+    const real = await this.resolveWorkspaceDirectory(requested, !!opts?.create, id);
+    this.store.setPath(id, real);
+    const updated = { ...row, path: real };
+    this.rows = this.rows.map((r) => (r.id === id ? updated : r));
+    return updated;
+  }
+
+  /**
+   * Shared by `create`'s `opts.path` branch and `setPath`: resolve `requested`
+   * to a real, existing directory (creating it first if `create` is true),
+   * and reject it if it collides with another agent's directory.
+   * `excludeId` lets `setPath` re-point an agent at the directory it already
+   * has without tripping its own collision check.
+   */
+  private async resolveWorkspaceDirectory(requested: string, create: boolean, excludeId?: string): Promise<string> {
+    const absolute = path.resolve(requested);
+    if (create) {
+      await fs.mkdir(absolute, { recursive: true });
+    }
+    let real: string;
+    try {
+      real = await fs.realpath(absolute);
+    } catch {
+      throw new PlannerWorkspaceError(`${requested} does not exist. Pass createPath to create it.`, 'invalid');
+    }
+    const stat = await fs.stat(real);
+    if (!stat.isDirectory()) {
+      throw new PlannerWorkspaceError(`${requested} is not a directory.`, 'invalid');
+    }
+    if (this.rows.some((r) => r.path === real && r.id !== excludeId)) {
+      throw new PlannerWorkspaceError('Another agent already uses this exact directory.', 'invalid');
+    }
+    return real;
   }
 
   /**

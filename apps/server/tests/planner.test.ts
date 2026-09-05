@@ -38,6 +38,10 @@ function makeStore(): PlannerWorkspaceStore {
       const row = rows.find((r) => r.id === id);
       if (row) row.defaultModelId = modelId;
     },
+    setPath: (id, newPath) => {
+      const row = rows.find((r) => r.id === id);
+      if (row) row.path = newPath;
+    },
     isSeeded: () => seeded,
     markSeeded: () => {
       seeded = true;
@@ -141,6 +145,47 @@ describe('PlannerWorkspaceRegistry', () => {
     const registry = new PlannerWorkspaceRegistry(makeStore());
     await registry.create(root, 'First', { path: ws.project });
     await expect(registry.create(root, 'Second', { path: ws.project })).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  // ---- PA-6 round 5: changing an *existing* agent's directory ---------------
+
+  it("re-points an existing agent's directory with setPath", async () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    const row = await registry.create(root, 'Coder');
+    const originalPath = row.path;
+
+    const another = path.join(ws.root, 'another');
+    fs.mkdirSync(another);
+    const updated = await registry.setPath(row.id, another);
+    expect(updated.path).toBe(await fs.promises.realpath(another));
+    expect(updated.path).not.toBe(originalPath);
+    expect(registry.get(row.id)?.path).toBe(updated.path);
+  });
+
+  it('setPath allows re-pointing an agent at a not-yet-existing directory with create', async () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    const row = await registry.create(root, 'Coder');
+    const target = path.join(ws.root, 'not-there-yet');
+    await expect(registry.setPath(row.id, target)).rejects.toMatchObject({ code: 'invalid' });
+
+    const updated = await registry.setPath(row.id, target, { create: true });
+    expect(fs.statSync(updated.path).isDirectory()).toBe(true);
+  });
+
+  it("setPath rejects colliding with another agent's directory, but allows re-pointing at its own", async () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    const a = await registry.create(root, 'A');
+    const b = await registry.create(root, 'B');
+    await expect(registry.setPath(a.id, b.path)).rejects.toMatchObject({ code: 'invalid' });
+
+    // Re-pointing at the directory it already has is not a collision with itself.
+    const unchanged = await registry.setPath(a.id, a.path);
+    expect(unchanged.path).toBe(a.path);
+  });
+
+  it('throws setPath on an unknown workspace', async () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    await expect(registry.setPath('does-not-exist', ws.project)).rejects.toThrow(PlannerWorkspaceError);
   });
 
   it('sets and clears a workspace default model', async () => {
@@ -298,6 +343,42 @@ describe('planner routes over HTTP', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  // ---- PA-6 round 5: changing an existing agent's directory over HTTP -------
+
+  it("re-points an existing agent's directory over HTTP via PATCH path", async () => {
+    const created = (await post('/api/planner/workspaces', { name: 'Coder' })).json();
+    const originalPath = created.path;
+    const another = path.join(t.workspaceRoot, 'agent-new-home');
+    fs.mkdirSync(another);
+
+    const res = await patch(`/api/planner/workspaces/${created.id}`, { path: another });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().path).toBe(fs.realpathSync(another));
+    expect(res.json().path).not.toBe(originalPath);
+  });
+
+  it('re-points at a not-yet-existing directory over HTTP with createPath', async () => {
+    const created = (await post('/api/planner/workspaces', { name: 'Coder' })).json();
+    const target = path.join(t.workspaceRoot, 'agent-brand-new-home');
+    const res = await patch(`/api/planner/workspaces/${created.id}`, { path: target, createPath: true });
+    expect(res.statusCode).toBe(200);
+    expect(fs.statSync(res.json().path).isDirectory()).toBe(true);
+  });
+
+  it('400s re-pointing an agent at a directory that does not exist without createPath', async () => {
+    const created = (await post('/api/planner/workspaces', { name: 'Coder' })).json();
+    const res = await patch(`/api/planner/workspaces/${created.id}`, {
+      path: path.join(t.workspaceRoot, 'never-created'),
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("a plain rename (path omitted) must not touch an agent's directory", async () => {
+    const created = (await post('/api/planner/workspaces', { name: 'Coder' })).json();
+    const renamed = await patch(`/api/planner/workspaces/${created.id}`, { name: 'Coder 2' });
+    expect(renamed.json().path).toBe(created.path);
+  });
+
   it('refuses to remove the default workspace over HTTP', async () => {
     const list = (await get('/api/planner/workspaces')).json().workspaces;
     const defaultWorkspace = list.find((w: { isDefault: boolean }) => w.isDefault);
@@ -407,6 +488,51 @@ describe('planner routes over HTTP', () => {
       enabled: false,
     });
     expect(res2.statusCode).toBe(404);
+  });
+
+  // ---- PA-6 round 5: global tool enable/disable ------------------------------
+
+  it('lists every tool as enabled globally by default', async () => {
+    const { tools } = (await get('/api/planner/tools')).json();
+    expect(tools.length).toBeGreaterThan(0);
+    expect(tools.every((t: { enabled: boolean }) => t.enabled)).toBe(true);
+  });
+
+  it('disables and re-enables a tool globally', async () => {
+    const disabled = await patch('/api/planner/tools/write_file', { enabled: false });
+    expect(disabled.statusCode).toBe(200);
+    expect(disabled.json().tools.find((t: { name: string }) => t.name === 'write_file').enabled).toBe(false);
+
+    const list = (await get('/api/planner/tools')).json().tools;
+    expect(list.find((t: { name: string }) => t.name === 'write_file').enabled).toBe(false);
+
+    const reenabled = await patch('/api/planner/tools/write_file', { enabled: true });
+    expect(reenabled.json().tools.find((t: { name: string }) => t.name === 'write_file').enabled).toBe(true);
+  });
+
+  it('404s disabling an unknown tool globally', async () => {
+    const res = await patch('/api/planner/tools/does_not_exist', { enabled: false });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("a globally-disabled tool shows as disabled (and disabledGlobally) for every agent, even one that hasn't touched it", async () => {
+    await patch('/api/planner/tools/write_file', { enabled: false });
+    const ws = (await post('/api/planner/workspaces', { name: 'Coder' })).json();
+    const tools = (await get(`/api/planner/workspaces/${ws.id}/tools`)).json().tools;
+    const writeFile = tools.find((t: { name: string }) => t.name === 'write_file');
+    expect(writeFile.enabled).toBe(false);
+    expect(writeFile.disabledGlobally).toBe(true);
+  });
+
+  it("re-enabling a tool for one agent does not override a global disable", async () => {
+    await patch('/api/planner/tools/write_file', { enabled: false });
+    const ws = (await post('/api/planner/workspaces', { name: 'Coder' })).json();
+    // Agent-level "enable" is a no-op state (it was never agent-disabled) —
+    // the effective state still follows the global switch.
+    const res = await post(`/api/planner/workspaces/${ws.id}/tools`, { toolName: 'write_file', enabled: true });
+    const writeFile = res.json().tools.find((t: { name: string }) => t.name === 'write_file');
+    expect(writeFile.enabled).toBe(false);
+    expect(writeFile.disabledGlobally).toBe(true);
   });
 
   it('lists no models by default, then CRUDs them in sort order', async () => {

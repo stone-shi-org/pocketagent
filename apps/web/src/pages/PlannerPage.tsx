@@ -278,6 +278,12 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
     void withBusy(() => api.updatePlannerSettings({ yoloEnabled }));
   };
 
+  /** The global on/off switch (PA-6 round 5) — off here means off for every
+      agent, regardless of that agent's own per-tool setting. */
+  const toggleGlobalTool = (name: string, enabled: boolean): void => {
+    void withBusy(() => api.setPlannerToolEnabled(name, { enabled }));
+  };
+
   const addApproval = (): void => {
     if (!newApprovalTool) return;
     if (newApprovalScope === 'workspace' && !newApprovalWorkspaceId) return;
@@ -458,6 +464,31 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
             <Icon name="plus" size={14} /> Add
           </button>
         </div>
+      </div>
+
+      <div className="planner-section">
+        <h3>Tools</h3>
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          Every tool below is available to every agent by default. Turning one off here takes it
+          away from every agent, regardless of that agent's own setting — use an agent's own editor
+          to restrict a tool for just that one instead.
+        </p>
+        {tools.map((t) => (
+          <label key={t.name} className="planner-checkbox-row" style={{ marginBottom: 6 }}>
+            <input
+              type="checkbox"
+              checked={t.enabled}
+              disabled={busy}
+              onChange={(e) => toggleGlobalTool(t.name, e.target.checked)}
+            />
+            <span>
+              <code>{t.name}</code>
+              {t.readOnly && <span className="planner-row-meta"> (read-only)</span>}
+              <br />
+              <span className="planner-row-meta">{t.description}</span>
+            </span>
+          </label>
+        ))}
       </div>
 
       <div className="planner-section">

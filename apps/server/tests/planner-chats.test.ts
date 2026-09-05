@@ -469,6 +469,38 @@ describe('planner chat routes over HTTP', () => {
     expect(findEvent(events, 'permission_request')).toBeUndefined();
   });
 
+  // ---- PA-6 round 5: global tool disable, layered on top of per-agent -------
+
+  it('excludes a globally-disabled tool from what is offered, even for an agent that never touched it', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    await patch(t, '/api/planner/tools/write_file', { enabled: false });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    await sendMessage(t, chat.id, 'hi');
+    const body = JSON.parse(fetchImpl.mock.calls[0]![1].body as string);
+    const toolNames = body.tools.map((spec: { function: { name: string } }) => spec.function.name);
+    expect(toolNames).not.toContain('write_file');
+  });
+
+  it('refuses a globally-disabled tool with a distinct "disabled globally" message, not "disabled for this agent"', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(fakeToolCallResponse('write_file', { path: 'x', content: 'y' }))
+      .mockResolvedValueOnce(fakeCompletionResponse('ok, understood'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    await patch(t, '/api/planner/tools/write_file', { enabled: false });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const { events } = await sendMessage(t, chat.id, 'write a file anyway');
+    const result = findEvent(events, 'tool_result')!;
+    expect(result.isError).toBe(true);
+    expect(result.content).toMatch(/disabled globally/);
+    expect(result.content).not.toMatch(/disabled for this agent/);
+  });
+
   it('executes a read-only tool call immediately (no approval), streaming tool_use/tool_result, and persists them', async () => {
     const fetchImpl = vi
       .fn()

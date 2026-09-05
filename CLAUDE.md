@@ -281,6 +281,33 @@ refusal (`Tool "x" is disabled for this agent.`) is deliberately worded differen
 unknown tool's (`Unknown tool: x`), so the transcript never conflates "doesn't exist" with
 "exists but restricted."
 
+**An existing agent's directory can be changed, not just chosen at creation** (PA-6 round 5:
+"it lacks a way to change existing agent workspace directory"). `PlannerWorkspaceRegistry.setPath`
+shares its validation with `create`'s own `opts.path` branch (must exist unless `create` is set,
+must be a directory, must not collide with another agent's) via a private
+`resolveWorkspaceDirectory` helper. It deliberately moves nothing on disk: a chat's transcript
+lives at `<path at the time>/.transcripts/<chatId>.jsonl`, and `workspacePathFor` reads the row's
+`path` fresh on every turn, so the moment this returns, every existing chat in that agent starts
+reading and writing under the *new* directory — whatever transcripts sat under the old one are
+still there, just no longer reachable through this agent. The editor discloses this before
+calling it, the same "explicit action, and it's logged" posture pointing a path at creation
+already has.
+
+**Tool enablement is two independent layers, not one** (PA-6 round 5: "in global setting, add
+section called 'tools' ... you can disable or enable globally," on top of round 4's per-agent
+subset). `planner_global_disabled_tools` is a flat table (no `workspace_id` at all) — deliberately
+*not* folded into `planner_agent_disabled_tools` with a nullable scope the way
+`planner_tool_approvals.scope` does, because there is no per-row scope ambiguity to resolve here:
+a tool is either off for everyone or it isn't. `PlannerChatService.toolsFor` excludes a tool if
+*either* layer disables it, and the global layer applies even to an orphaned chat with
+`workspaceId: null` (a global switch has no agent identity to be scoped by, unlike the per-agent
+layer, which such a chat has none left to be restricted by). `PlannerAgentToolInfo.enabled` is
+therefore the *effective* state (global AND per-agent); `disabledGlobally` lets the agent editor
+grey out a checkbox that would otherwise silently do nothing while the tool is off globally.
+`toolUnavailableMessage` distinguishes all three refusal reasons in the transcript text itself
+("Unknown tool," "disabled globally," "disabled for this agent") so none of the three ever reads
+as one of the others.
+
 **A chat's transcript is the same `AgentEvent` union a structured session's own event stream
 uses** (`packages/protocol/src/agent-events.ts`), not a parallel shape — reused directly so a
 reopened Pocket Agent chat replays through the exact same `applyEvents` reducer the frontend
