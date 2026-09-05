@@ -145,6 +145,7 @@ export function ProjectsPage({
             {state.error}
           </div>
         )}
+        <PocketAgentsSection onOpenChat={onOpenPlannerChat} onApiError={onApiError} />
         <ProjectList
           state={state}
           search={search}
@@ -155,7 +156,6 @@ export function ProjectsPage({
           onApiError={onApiError}
           emptyHint="Nothing here yet. Tap the compose button to start a chat."
         />
-        <PocketAgentsSection onOpenChat={onOpenPlannerChat} onApiError={onApiError} />
       </div>
 
       <UsageBar />

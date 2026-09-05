@@ -298,7 +298,7 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
           time unless remembered below, or unless yolo mode is on.
         </p>
 
-        <label className="planner-inline" style={{ marginBottom: 10 }}>
+        <label className="planner-checkbox-row" style={{ marginBottom: 10 }}>
           <input
             type="checkbox"
             checked={settings?.yoloEnabled ?? false}

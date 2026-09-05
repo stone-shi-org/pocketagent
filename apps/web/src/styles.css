@@ -5166,6 +5166,28 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   color: var(--text);
 }
 
+/* A checkbox + descriptive label, e.g. "Tool safety"'s yolo toggle —
+   deliberately its own class rather than `.planner-inline`: that class's
+   `input` rule above stretches (`flex: 1`) and pads any input for the
+   text-field rows it was written for, which also caught the checkbox and
+   blew it up into a bordered, padded box the same width as the row —
+   nothing like a checkbox, and visibly misaligned with its label text. */
+.planner-checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.planner-checkbox-row input[type='checkbox'] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  /* Nudges the box to sit level with the first line of a label that wraps
+     onto several lines, instead of stretching to the label's full height. */
+  margin-top: 3px;
+}
+
 .planner-btn {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);

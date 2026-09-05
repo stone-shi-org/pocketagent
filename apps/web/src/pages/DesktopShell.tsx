@@ -437,6 +437,11 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
               {state.error}
             </div>
           )}
+          <PocketAgentsSection
+            onOpenChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
+            onApiError={onApiError}
+            activeChatId={route.name === 'planner-chat' ? route.chatId : null}
+          />
           <ProjectList
             state={state}
             search={search}
@@ -448,11 +453,6 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
             onApiError={onApiError}
             emptyHint="Nothing here yet. Start a chat to see it listed."
-          />
-          <PocketAgentsSection
-            onOpenChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
-            onApiError={onApiError}
-            activeChatId={route.name === 'planner-chat' ? route.chatId : null}
           />
         </div>
 
