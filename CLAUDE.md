@@ -223,6 +223,47 @@ garbage-collected either, and a busy Jira project creates them far faster than a
 does — the editor says so. And `webhook_issue_sessions` is a cache, so a pruned row means the
 next event on that issue starts a fresh conversation rather than continuing one.
 
+### The planner (PA-6)
+
+A second chat surface, in parallel to project chats: the planner talks to a user-configured
+OpenAI-compatible LLM endpoint (`apps/server/src/planner/llm-client.ts`, non-streaming — see
+its own doc comment for why token-level streaming is deferred rather than built ahead of a
+transport to consume it) and calls tools that treat *existing* PocketAgent sessions as
+sub-agents, rather than owning a parallel notion of "workspace" or "session" for them.
+
+**Two registries, not one.** `PlannerWorkspaceRegistry` (`planner/workspaces.ts`) is
+deliberately separate from `WorkspaceRegistry`: a project workspace is one of the user's real
+code repositories, read-only from this server's point of view; a planner workspace is
+app-owned scratch space the planner's own file tools may create, write and delete inside
+freely, the same ownership `data/pocketagent.db` already has. One `default` workspace is
+seeded once at `<repo>/data/planner-workspaces/default/`, guarded by a settings flag so
+deliberately removing it does not silently resurrect it on the next boot — the same
+discipline `workspaces_seeded` applies to project folders.
+
+**No `planner_messages` table.** A chat's transcript is JSONL on disk under
+`<workspace>/.transcripts/<chatId>.jsonl` — the same "transcript is a file, the database only
+indexes it" split `conversations/index.ts` already uses for Claude Code's own transcripts.
+Tool calls and their results are *not* persisted there, only the user's message and the
+model's final reply: the saved transcript stays the clean back-and-forth a human would want
+to read back, and a turn's tool exchange (including any approval pause) is scratch work for
+producing that reply, not part of the conversation itself.
+
+**The tool catalog** (`planner/tools.ts`) splits into read-only (`list_workspaces`,
+`list_sessions`, `read_session_output`, `read_file` — exempt from approval entirely) and
+mutating (`send_instruction`, `write_file`, `mkdir`, `rmdir`, `delete_worktree`,
+`exec_command` — gated, see the invariants list). Every tool that touches a path resolves it
+through the same realpath-then-containment check `workspaces/index.ts` already established,
+extended to accept either a project workspace root or a planner workspace root.
+`send_instruction` sends directly into a live session or resumes a stopped one exactly the
+way `RunExecutor` does for cron/webhooks, including re-validating the session's `cwd` at call
+time rather than trusting a cached value. `delete_worktree` calls the same `WorktreeService`
+the UI's own worktree-delete flow uses, not a second implementation.
+
+**The approval gate is a pause, not a block.** See the invariants list for the full mechanics
+(`planner/approval.ts`); the short version is that a chat turn is one HTTP request/response,
+so a mutating tool call with no remembered decision returns an `approval_required` result
+immediately rather than holding the connection open, and a second request resumes it.
+
 ### The home screen
 
 `projects/index.ts` composes `GET /api/projects`: live sessions and on-disk conversations
@@ -415,6 +456,26 @@ These are load-bearing. Several were bugs first.
   template engine has no field for it, and `x-hub-signature` plus the whole request body are on
   the logger's redact list — with bracket-quoted paths, because pino silently ignores a dotted
   path containing a dash.
+- **The planner's tool-approval gate is the fourth override of the skip-permissions rule, and
+  the first with per-tool, per-workspace-or-global granularity.** Every other override (the
+  global switch, cron, webhooks) is all-or-nothing per session; a planner decision can instead
+  be remembered for one tool in one workspace, or for one tool everywhere, in
+  `planner_tool_approvals` — persistence none of the earlier three needed, because none of them
+  had more than one kind of approval to ask about. The chat itself has no live transport yet
+  (`packages/protocol/src/planner.ts`'s `PlannerTranscriptEntry` doc comment), so an unremembered
+  mutating tool call cannot be answered mid-request the way `StructuredSession.requestPermission`
+  answers one over a WebSocket; `PlannerChatService` instead *pauses* the turn
+  (`PlannerTurnResult.status === 'approval_required'`) and a separate
+  `POST /api/planner/chats/:id/approvals/:approvalId` resumes it. The invariant holds exactly the
+  same way: nothing runs, and nothing decays into an allow, until that second request arrives —
+  there is no timeout in this path either. Read-only tools (`list_workspaces`, `list_sessions`,
+  `read_session_output`, `read_file`) are exempt from the gate entirely, a deliberate product
+  decision (not a default assumed lightly) recorded against PA-6. `plannerYoloEnabled` is this
+  override's own "skip everything" switch, checked live on every call — same "read the flag
+  fresh" discipline `SessionManager.setGlobalSkipPermissions` uses — and it wins over even a
+  remembered *deny*, but never writes one itself: turning it back off must not retroactively make
+  every bypassed call while it was on look individually reviewed, the same reasoning that keeps
+  cron's/webhooks' inverted defaults from quietly becoming the norm elsewhere.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.
