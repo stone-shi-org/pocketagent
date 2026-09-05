@@ -151,10 +151,17 @@ const BAMBOO_LONG_PROSE_VARS = new Set(['trigger.sentence']);
  */
 export const DEFAULT_JIRA_PROMPT_TEMPLATE = `A Jira issue event arrived: {{event}}.
 
-Issue:    {{issue.key}}
-Project:  {{issue.project}} ({{issue.projectKey}})
-Type:     {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
-Changed:  {{changelog.fields}}
+Issue:        {{issue.key}}
+Project:      {{issue.project}} ({{issue.projectKey}})
+Type:         {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
+Assignee:     {{issue.assignee}}
+Reporter:     {{issue.reporter}}
+Updated By:   {{user.displayName}}
+Labels:       {{issue.labels}}
+Changed:      {{changelog.fields}}
+
+Changes:
+{{changelog.summary}}
 
 Summary:
 {{issue.summary}}
@@ -167,9 +174,9 @@ Comment:
 
 Investigate {{issue.key}} in this repository: find the relevant code, work out
 what is going on, and post your findings and analysis as a comment on the Jira
-issue {{issue.key}}. If this event is only an assignee change, check the latest
-comments and ticket history for instructions or feedback before proceeding. Do
-not push a branch or change anything outside this working tree unless told to
+issue {{issue.key}}. If this event is an assignee change or ticket assignment to
+you by a user, treat this and the attached latest comment as active instructions.
+Do not push a branch or change anything outside this working tree unless told to
 above.`;
 
 /**
@@ -198,12 +205,17 @@ tree unless told to above.`;
 
 export const JIRA_PROMPT_TEMPLATE_FIX_ISSUE = `A Jira issue update event arrived: {{event}}.
 
-Issue:    {{issue.key}}
-Project:  {{issue.project}} ({{issue.projectKey}})
-Type:     {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
-Reporter: {{issue.reporter}}
-Labels:   {{issue.labels}}
-Changed:  {{changelog.fields}}
+Issue:        {{issue.key}}
+Project:      {{issue.project}} ({{issue.projectKey}})
+Type:         {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
+Assignee:     {{issue.assignee}}
+Reporter:     {{issue.reporter}}
+Updated By:   {{user.displayName}}
+Labels:       {{issue.labels}}
+Changed:      {{changelog.fields}}
+
+Changes:
+{{changelog.summary}}
 
 Summary:
 {{issue.summary}}
@@ -215,23 +227,30 @@ Comment:
 {{comment.body}}
 
 Workflow Instructions:
-1. Triage the issue and understand what needs to be fixed.
-   - Note on assignee changes: If this event is only an assignee change, check the latest comments before the assignee change for instructions, feedback, or approval from the reporter/user before deciding whether to act.
-2. If the user commented "go ahead" / "fix it" OR if the issue has the tag/label "agent-ready":
-   - Implement the fix in the codebase and run verification tests.
-   - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Fix: ...").
-   - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
-   - Transition/mark the Jira ticket status as "In Review" (or "in-review") and reassign the ticket back to the reporter ({{issue.reporter}}).
+1. Triage & Assessment:
+   - Understand what needs to be fixed from the summary, description, comments, and recent changes.
+   - When the ticket is assigned or reassigned to you by a user (e.g. {{user.displayName}}), treat this event and the attached latest comment as active instructions from the user to proceed (not a stale echo).
+2. Execution Phase (When Approved / Ready):
+   - If the user commented "go ahead" / "fix it" / "approve", or if the issue has the tag/label "agent-ready" or "approved", or if the ticket was assigned to you to fix:
+      - Implement the fix in the codebase and run verification tests.
+      - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Fix: ...").
+      - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
+      - Transition/mark the Jira ticket status as "In Review" (or "in-review") and reassign the ticket back to the reporter ({{issue.reporter}}).
 3. If not yet approved or ready, analyze the root cause, post the findings and proposed solution plan as a comment on the Jira ticket {{issue.key}} without modifying code.`;
 
 export const JIRA_PROMPT_TEMPLATE_NEW_FEATURE = `A Jira feature request event arrived: {{event}}.
 
-Issue:    {{issue.key}}
-Project:  {{issue.project}} ({{issue.projectKey}})
-Type:     {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
-Reporter: {{issue.reporter}}
-Labels:   {{issue.labels}}
-Changed:  {{changelog.fields}}
+Issue:        {{issue.key}}
+Project:      {{issue.project}} ({{issue.projectKey}})
+Type:         {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
+Assignee:     {{issue.assignee}}
+Reporter:     {{issue.reporter}}
+Updated By:   {{user.displayName}}
+Labels:       {{issue.labels}}
+Changed:      {{changelog.fields}}
+
+Changes:
+{{changelog.summary}}
 
 Summary:
 {{issue.summary}}
@@ -248,8 +267,8 @@ Workflow Instructions:
    - Format the plan as a Markdown (.md) document, attach/post it to the Jira ticket, and transition/mark the ticket status to "In Progress" (or "in-progress").
    - Wait for review and approval.
 2. Execution Phase (Once Approved):
-   - Note on assignee changes: If this event is only an assignee change, check the latest comments before the assignee change for instructions, feedback, or approval from the reporter/user before deciding whether to act.
-   - Once a user comments "go ahead" or "approve", or adds the tag/label "agent-ready" or "approved":
+   - When the ticket is assigned or reassigned to you by a user (e.g. {{user.displayName}}), treat this event and the attached latest comment as active instructions from the user to proceed (not a stale echo).
+   - Once a user comments "go ahead" or "approve", or adds the tag/label "agent-ready" or "approved", or assigns the ticket to you to implement:
       - Execute the implementation plan carefully across the codebase.
       - Verify with relevant test suites.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Feature: ...").
@@ -258,12 +277,17 @@ Workflow Instructions:
 
 export const JIRA_PROMPT_TEMPLATE_TASK = `A Jira task event arrived: {{event}}.
 
-Issue:    {{issue.key}}
-Project:  {{issue.project}} ({{issue.projectKey}})
-Type:     {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
-Reporter: {{issue.reporter}}
-Labels:   {{issue.labels}}
-Changed:  {{changelog.fields}}
+Issue:        {{issue.key}}
+Project:      {{issue.project}} ({{issue.projectKey}})
+Type:         {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
+Assignee:     {{issue.assignee}}
+Reporter:     {{issue.reporter}}
+Updated By:   {{user.displayName}}
+Labels:       {{issue.labels}}
+Changed:      {{changelog.fields}}
+
+Changes:
+{{changelog.summary}}
 
 Summary:
 {{issue.summary}}
@@ -277,10 +301,10 @@ Comment:
 Workflow Instructions:
 1. Task Review & Assessment:
    - Understand the task requirements from the summary, description, and comments.
-   - Note on assignee changes: If this event is only an assignee change, check the latest comments before the assignee change for instructions, feedback, or approval from the reporter/user before deciding whether to act.
+   - When the ticket is assigned or reassigned to you by a user (e.g. {{user.displayName}}), treat this event and the attached latest comment as active instructions from the user to proceed (not a stale echo).
    - If the task is complex, you may optionally post your findings or proposed plan as a comment on Jira ticket {{issue.key}} before starting.
 2. Execution Phase (Once Approved / Ready):
-   - If the user commented "go ahead" or "approve", or if the issue has the tag/label "agent-ready" or "approved":
+   - If the user commented "go ahead" or "approve", or if the issue has the tag/label "agent-ready" or "approved", or if the ticket was assigned to you to execute:
       - Implement the requested task directly across the codebase.
       - Verify with relevant test suites.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Task: ...").
@@ -290,12 +314,17 @@ Workflow Instructions:
 
 export const JIRA_PROMPT_TEMPLATE_IMPROVEMENT = `A Jira improvement event arrived: {{event}}.
 
-Issue:    {{issue.key}}
-Project:  {{issue.project}} ({{issue.projectKey}})
-Type:     {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
-Reporter: {{issue.reporter}}
-Labels:   {{issue.labels}}
-Changed:  {{changelog.fields}}
+Issue:        {{issue.key}}
+Project:      {{issue.project}} ({{issue.projectKey}})
+Type:         {{issue.type}}   Status: {{issue.status}}   Priority: {{issue.priority}}
+Assignee:     {{issue.assignee}}
+Reporter:     {{issue.reporter}}
+Updated By:   {{user.displayName}}
+Labels:       {{issue.labels}}
+Changed:      {{changelog.fields}}
+
+Changes:
+{{changelog.summary}}
 
 Summary:
 {{issue.summary}}
@@ -309,10 +338,10 @@ Comment:
 Workflow Instructions:
 1. Improvement Review & Assessment:
    - Understand the improvement requirements from the summary, description, and comments.
-   - Note on assignee changes: If this event is only an assignee change, check the latest comments before the assignee change for instructions, feedback, or approval from the reporter/user before deciding whether to act.
+   - When the ticket is assigned or reassigned to you by a user (e.g. {{user.displayName}}), treat this event and the attached latest comment as active instructions from the user to proceed (not a stale echo).
    - If the improvement is complex, you may optionally post your findings or proposed plan as a comment on Jira ticket {{issue.key}} before starting.
 2. Execution Phase (Once Approved / Ready):
-   - If the user commented "go ahead" or "approve", or if the issue has the tag/label "agent-ready" or "approved":
+   - If the user commented "go ahead" or "approve", or if the issue has the tag/label "agent-ready" or "approved", or if the ticket was assigned to you to execute:
       - Implement the requested improvement directly across the codebase.
       - Verify with relevant test suites.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Improvement: ...").
