@@ -45,3 +45,7 @@ export const PlannerPage = lazy(() =>
 export const PlannerChatPage = lazy(() =>
   import('./pages/PlannerChatPage.js').then((m) => ({ default: m.PlannerChatPage })),
 );
+
+export const PlannerAgentEditorPage = lazy(() =>
+  import('./pages/PlannerAgentEditorPage.js').then((m) => ({ default: m.PlannerAgentEditorPage })),
+);

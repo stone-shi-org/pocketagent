@@ -12,6 +12,7 @@ import {
   AgentsFleetPage,
   CronJobEditorPage,
   CronJobsPage,
+  PlannerAgentEditorPage,
   PlannerChatPage,
   PlannerPage,
   SettingsPage,
@@ -200,7 +201,25 @@ export function App(): JSX.Element {
   if (route.name === 'planner') {
     return (
       <Suspense fallback={<PageFallback />}>
-        <PlannerPage onBack={() => navigate({ name: 'list' })} onApiError={handleApiError} />
+        <PlannerPage
+          onBack={() => navigate({ name: 'list' })}
+          onOpenAgent={(agentId) => navigate({ name: 'planner-agent', agentId })}
+          onApiError={handleApiError}
+        />
+      </Suspense>
+    );
+  }
+
+  if (route.name === 'planner-agent') {
+    return (
+      <Suspense fallback={<PageFallback />}>
+        <PlannerAgentEditorPage
+          key={route.agentId}
+          agentId={route.agentId}
+          onBack={() => navigate({ name: 'planner' })}
+          onDone={() => navigate({ name: 'planner' })}
+          onApiError={handleApiError}
+        />
       </Suspense>
     );
   }

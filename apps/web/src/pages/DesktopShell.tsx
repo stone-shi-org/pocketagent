@@ -17,6 +17,7 @@ import {
   AgentsFleetPage,
   CronJobEditorPage,
   CronJobsPage,
+  PlannerAgentEditorPage,
   PlannerChatPage,
   PlannerPage,
   SettingsPage,
@@ -578,7 +579,24 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
           </Suspense>
         ) : route.name === 'planner' ? (
           <Suspense fallback={<PageFallback />}>
-            <PlannerPage onBack={() => onNavigate({ name: 'list' })} onApiError={onApiError} />
+            <PlannerPage
+              onBack={() => onNavigate({ name: 'list' })}
+              onOpenAgent={(agentId) => onNavigate({ name: 'planner-agent', agentId })}
+              onApiError={onApiError}
+            />
+          </Suspense>
+        ) : route.name === 'planner-agent' ? (
+          <Suspense fallback={<PageFallback />}>
+            <PlannerAgentEditorPage
+              key={route.agentId}
+              agentId={route.agentId}
+              onBack={() => onNavigate({ name: 'planner' })}
+              onDone={() => {
+                void state.refresh();
+                onNavigate({ name: 'planner' });
+              }}
+              onApiError={onApiError}
+            />
           </Suspense>
         ) : route.name === 'planner-chat' ? (
           <Suspense fallback={<PageFallback />}>

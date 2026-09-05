@@ -308,6 +308,21 @@ grey out a checkbox that would otherwise silently do nothing while the tool is o
 ("Unknown tool," "disabled globally," "disabled for this agent") so none of the three ever reads
 as one of the others.
 
+**Editing an agent is its own page, not an inline row** (PA-6 round 5: "once user click edit, it
+will open a new page of agent configure"). `PlannerAgentEditorPage` follows the exact
+`CronJobEditorPage`/`WebhookEditorPage` prop contract (`agentId`, `onApiError`, `onDone`, optional
+`onBack`) and route pattern: `{ name: 'planner-agent'; agentId: string }` in `useHashRoute.ts`'s
+`Route` union, parsed from `#/planner/agent/:id` — checked *before* the existing `planner-chat`
+regex (`#/planner/:chatId`) in `parse()`, the same "detail route before the generic one" ordering
+`cronJob`/`webhook` already establish, since both planner detail routes share the `#/planner/`
+prefix and a chat id could otherwise swallow the literal segment `agent`. `PlannerPage`'s own
+Agents list stays a plain list — name, path, Edit (opens the editor), Delete (a `ConfirmDialog`,
+never the underlying directory or that agent's chats) — creating a new agent is still its own
+quick inline form there, since naming one and picking a scratch directory needs no dedicated page.
+Every field in the editor auto-saves on change except the directory, which is the one field here
+with a real, easy-to-miss consequence (see `PlannerWorkspaceRegistry.setPath` above) and so pauses
+on its own `ConfirmDialog` before applying.
+
 **A chat's transcript is the same `AgentEvent` union a structured session's own event stream
 uses** (`packages/protocol/src/agent-events.ts`), not a parallel shape — reused directly so a
 reopened Pocket Agent chat replays through the exact same `applyEvents` reducer the frontend

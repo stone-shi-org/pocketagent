@@ -23,7 +23,11 @@ export type Route =
   /** The list of planner chats and its inline LLM/model setup — see `PlannerPage`. */
   | { name: 'planner' }
   /** One planner chat — see `PlannerChatPage`. */
-  | { name: 'planner-chat'; chatId: string };
+  | { name: 'planner-chat'; chatId: string }
+  /** One agent's own editor (name, default model, tool subset, directory) —
+      see `PlannerAgentEditorPage`. Always an existing agent's id; creating a
+      new one is still the quick inline form on `PlannerPage` itself. */
+  | { name: 'planner-agent'; agentId: string };
 
 function parse(hash: string): Route {
   const session = /^#\/s\/([^/?]+)/.exec(hash);
@@ -55,6 +59,13 @@ function parse(hash: string): Route {
   if (webhook?.[1]) return { name: 'webhook', webhookId: decodeURIComponent(webhook[1]) };
 
   if (/^#\/hooks$/.exec(hash)) return { name: 'webhooks' };
+
+  // Before the generic single-chat route below, since both start with
+  // `#/planner/` — an agent id is a *second* path segment
+  // (`#/planner/agent/<id>`), unlike a chat id, so this has to run first or
+  // the literal segment `agent` would be misread as a chat id.
+  const plannerAgent = /^#\/planner\/agent\/([^/?]+)/.exec(hash);
+  if (plannerAgent?.[1]) return { name: 'planner-agent', agentId: decodeURIComponent(plannerAgent[1]) };
 
   // Before the bare `#/planner` check, same reason as `cronJob` above.
   const plannerChat = /^#\/planner\/([^/?]+)/.exec(hash);
@@ -93,6 +104,8 @@ function toHash(route: Route): string {
       return '#/planner';
     case 'planner-chat':
       return `#/planner/${encodeURIComponent(route.chatId)}`;
+    case 'planner-agent':
+      return `#/planner/agent/${encodeURIComponent(route.agentId)}`;
     default:
       return '#/';
   }

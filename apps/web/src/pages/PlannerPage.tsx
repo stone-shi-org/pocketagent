@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
 import type {
-  PlannerAgentToolInfo,
   PlannerModel,
   PlannerSettingsDto,
   PlannerToolApprovalRow,
@@ -9,6 +8,7 @@ import type {
   TestPlannerModelResponse,
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
+import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { Icon } from '../components/Icon.js';
 import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
 
@@ -16,6 +16,9 @@ interface Props {
   onApiError: (error: unknown) => void;
   /** Present only on the phone route — see `CronJobsPage`'s identical prop for why. */
   onBack?: () => void;
+  /** Opens an existing agent's own editor (`PlannerAgentEditorPage`) — name,
+      default model, tool subset, directory. */
+  onOpenAgent: (agentId: string) => void;
 }
 
 /**
@@ -27,7 +30,7 @@ interface Props {
  * a menu item — this page is purely configuration now, the same split
  * "Projects" already draws between browsing chats and managing folders.
  */
-export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
+export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Element {
   const [workspaces, setWorkspaces] = useState<PlannerWorkspace[] | null>(null);
   const [models, setModels] = useState<PlannerModel[] | null>(null);
   const [settings, setSettings] = useState<PlannerSettingsDto | null>(null);
@@ -45,8 +48,6 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
   const [newApprovalWorkspaceId, setNewApprovalWorkspaceId] = useState('');
   const [newApprovalTool, setNewApprovalTool] = useState('');
   const [newApprovalDecision, setNewApprovalDecision] = useState<'allow' | 'deny'>('deny');
-  const [renamingAgent, setRenamingAgent] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState('');
   const [newAgentName, setNewAgentName] = useState('');
   const [discovering, setDiscovering] = useState(false);
   const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
@@ -54,9 +55,7 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
   const [testResults, setTestResults] = useState<Record<string, TestPlannerModelResponse | 'testing'>>({});
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
   const [newAgentPath, setNewAgentPath] = useState<{ path: string; create: boolean } | null>(null);
-  const [expandedAgentTools, setExpandedAgentTools] = useState<string | null>(null);
-  const [agentTools, setAgentTools] = useState<PlannerAgentToolInfo[] | null>(null);
-  const [agentToolsBusy, setAgentToolsBusy] = useState(false);
+  const [confirmingDeleteAgent, setConfirmingDeleteAgent] = useState<PlannerWorkspace | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -194,19 +193,6 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
     void Promise.all(models.map((m) => runModelTest(m.id))).finally(() => setTestingAll(false));
   };
 
-  const startRenameAgent = (ws: PlannerWorkspace): void => {
-    setRenamingAgent(ws.id);
-    setRenameValue(ws.name);
-  };
-
-  const saveRenameAgent = (): void => {
-    const id = renamingAgent;
-    const name = renameValue.trim();
-    setRenamingAgent(null);
-    if (!id || !name) return;
-    void withBusy(() => api.renamePlannerWorkspace(id, name));
-  };
-
   const addAgent = (): void => {
     const name = newAgentName.trim();
     if (!name) return;
@@ -228,50 +214,14 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
     setShowDirectoryPicker(false);
   };
 
-  const removeAgent = (id: string): void => {
-    void withBusy(() => api.deletePlannerWorkspace(id));
-  };
-
-  /** `''` means "use the global last-used model" — `defaultModelId: null`. */
-  const setAgentDefaultModel = (id: string, modelId: string): void => {
-    void withBusy(() => api.updatePlannerWorkspace(id, { defaultModelId: modelId || null }));
-  };
-
-  /** Expands/collapses one agent's tool checklist at a time — fetches fresh
-      on expand rather than caching, since another browser tab could have
-      changed it. */
-  const toggleAgentToolsPanel = (ws: PlannerWorkspace): void => {
-    if (expandedAgentTools === ws.id) {
-      setExpandedAgentTools(null);
-      setAgentTools(null);
-      return;
-    }
-    setExpandedAgentTools(ws.id);
-    setAgentTools(null);
-    void (async () => {
-      try {
-        const { tools } = await api.listPlannerAgentTools(ws.id);
-        setAgentTools(tools);
-      } catch (err) {
-        onApiError(err);
-        setError(err instanceof ApiError ? err.message : "Could not load this agent's tools.");
-      }
-    })();
-  };
-
-  const toggleAgentTool = (workspaceId: string, toolName: string, enabled: boolean): void => {
-    setAgentToolsBusy(true);
-    void (async () => {
-      try {
-        const { tools } = await api.setPlannerAgentTool(workspaceId, { toolName, enabled });
-        setAgentTools(tools);
-      } catch (err) {
-        onApiError(err);
-        setError(err instanceof ApiError ? err.message : "Could not update this agent's tools.");
-      } finally {
-        setAgentToolsBusy(false);
-      }
-    })();
+  const confirmRemoveAgent = (): void => {
+    const ws = confirmingDeleteAgent;
+    setConfirmingDeleteAgent(null);
+    if (!ws) return;
+    // Never deletes the underlying directory or its chats' transcripts —
+    // same "removing never deletes" discipline as everywhere else in this
+    // app; only the agent row itself goes away.
+    void withBusy(() => api.deletePlannerWorkspace(ws.id));
   };
 
   const setYolo = (yoloEnabled: boolean): void => {
@@ -576,105 +526,36 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
       <div className="planner-section">
         <h3>Agents</h3>
         <p className="planner-row-meta" style={{ marginBottom: 10 }}>
-          Each agent has its own name, its own scratch directory, and its own chats — see "Pocket
-          Agents" on the home screen. All agents share the LLM endpoint and models configured above.
+          Each agent has its own name, model, tool subset, and directory — see "Pocket Agents" on
+          the home screen for its chats. Open one to configure it.
         </p>
         {workspaces === null && <div className="spinner">Loading…</div>}
         {workspaces?.map((ws) => (
-          <div key={ws.id} className="planner-agent-row">
-            <div className="planner-model-row" style={{ borderBottom: 'none', paddingBottom: 0 }}>
-              {renamingAgent === ws.id ? (
-                <input
-                  autoFocus
-                  type="text"
-                  value={renameValue}
-                  onChange={(e) => setRenameValue(e.target.value)}
-                  onBlur={saveRenameAgent}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') saveRenameAgent();
-                    if (e.key === 'Escape') setRenamingAgent(null);
-                  }}
-                />
-              ) : (
-                <span>
-                  {ws.name}
-                  {ws.isDefault && <span className="planner-row-meta"> (default)</span>}
-                  <br />
-                  <span className="planner-row-meta" title={ws.path}>
-                    {ws.path}
-                  </span>
-                </span>
-              )}
-              <div className="planner-inline">
+          <div key={ws.id} className="planner-model-row">
+            <span>
+              {ws.name}
+              {ws.isDefault && <span className="planner-row-meta"> (default)</span>}
+              <br />
+              <span className="planner-row-meta" title={ws.path}>
+                {ws.path}
+              </span>
+            </span>
+            <div className="planner-row-actions">
+              <button type="button" className="planner-btn" onClick={() => onOpenAgent(ws.id)}>
+                Edit
+              </button>
+              {!ws.isDefault && (
                 <button
                   type="button"
-                  className="planner-btn"
+                  className="planner-btn danger"
                   disabled={busy}
-                  onClick={() => startRenameAgent(ws)}
-                  aria-label={`Rename ${ws.name}`}
+                  onClick={() => setConfirmingDeleteAgent(ws)}
+                  aria-label={`Delete ${ws.name}`}
                 >
-                  Rename
+                  <Icon name="trash" size={14} />
                 </button>
-                {!ws.isDefault && (
-                  <button
-                    type="button"
-                    className="planner-btn danger"
-                    disabled={busy}
-                    onClick={() => removeAgent(ws.id)}
-                    aria-label={`Remove ${ws.name}`}
-                  >
-                    <Icon name="trash" size={14} />
-                  </button>
-                )}
-              </div>
+              )}
             </div>
-
-            <div className="planner-model-row" style={{ paddingTop: 6 }}>
-              <label className="planner-row-meta">
-                Model:{' '}
-                <select
-                  value={ws.defaultModelId ?? ''}
-                  disabled={busy}
-                  onChange={(e) => setAgentDefaultModel(ws.id, e.target.value)}
-                  aria-label={`Default model for ${ws.name}`}
-                >
-                  <option value="">Use global last-used model</option>
-                  {models?.map((m) => (
-                    <option key={m.id} value={m.modelId}>
-                      {m.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button type="button" className="planner-btn" onClick={() => toggleAgentToolsPanel(ws)}>
-                Tools {expandedAgentTools === ws.id ? '▲' : '▼'}
-              </button>
-            </div>
-
-            {expandedAgentTools === ws.id && (
-              <div className="planner-agent-tools-panel">
-                {agentTools === null ? (
-                  <div className="spinner">Loading…</div>
-                ) : (
-                  agentTools.map((t) => (
-                    <label key={t.name} className="planner-checkbox-row" style={{ marginBottom: 4 }}>
-                      <input
-                        type="checkbox"
-                        checked={t.enabled}
-                        disabled={agentToolsBusy}
-                        onChange={(e) => toggleAgentTool(ws.id, t.name, e.target.checked)}
-                      />
-                      <span>
-                        <code>{t.name}</code>
-                        {t.readOnly && <span className="planner-row-meta"> (read-only)</span>}
-                        <br />
-                        <span className="planner-row-meta">{t.description}</span>
-                      </span>
-                    </label>
-                  ))
-                )}
-              </div>
-            )}
           </div>
         ))}
         <div className="planner-inline" style={{ marginTop: 10 }}>
@@ -714,6 +595,17 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
           onClose={() => setShowDirectoryPicker(false)}
           onPick={pickAgentDirectory}
           onApiError={onApiError}
+        />
+      )}
+
+      {confirmingDeleteAgent && (
+        <ConfirmDialog
+          title={`Delete "${confirmingDeleteAgent.name}"?`}
+          body="Its chats and directory are not deleted — only the agent row itself goes away. This can't be undone from here."
+          confirmLabel={busy ? 'Deleting…' : 'Delete'}
+          busy={busy}
+          onConfirm={confirmRemoveAgent}
+          onCancel={() => setConfirmingDeleteAgent(null)}
         />
       )}
     </div>
