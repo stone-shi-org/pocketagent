@@ -162,10 +162,15 @@ Summary:
 Description:
 {{issue.description}}
 
+Comment:
+{{comment.body}}
+
 Investigate {{issue.key}} in this repository: find the relevant code, work out
 what is going on, and post your findings and analysis as a comment on the Jira
-issue {{issue.key}}. Do not push a branch or change anything outside this working
-tree unless told to above.`;
+issue {{issue.key}}. If this event is only an assignee change, check the latest
+comments and ticket history for instructions or feedback before proceeding. Do
+not push a branch or change anything outside this working tree unless told to
+above.`;
 
 /**
  * The starting template for a Bamboo build webhook.
@@ -211,6 +216,7 @@ Comment:
 
 Workflow Instructions:
 1. Triage the issue and understand what needs to be fixed.
+   - Note on assignee changes: If this event is only an assignee change, check the latest comments before the assignee change for instructions, feedback, or approval from the reporter/user before deciding whether to act.
 2. If the user commented "go ahead" / "fix it" OR if the issue has the tag/label "agent-ready":
    - Implement the fix in the codebase and run verification tests.
    - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Fix: ...").
@@ -242,6 +248,7 @@ Workflow Instructions:
    - Format the plan as a Markdown (.md) document, attach/post it to the Jira ticket, and transition/mark the ticket status to "In Progress" (or "in-progress").
    - Wait for review and approval.
 2. Execution Phase (Once Approved):
+   - Note on assignee changes: If this event is only an assignee change, check the latest comments before the assignee change for instructions, feedback, or approval from the reporter/user before deciding whether to act.
    - Once a user comments "go ahead" or "approve", or adds the tag/label "agent-ready" or "approved":
       - Execute the implementation plan carefully across the codebase.
       - Verify with relevant test suites.
@@ -270,6 +277,7 @@ Comment:
 Workflow Instructions:
 1. Task Review & Assessment:
    - Understand the task requirements from the summary, description, and comments.
+   - Note on assignee changes: If this event is only an assignee change, check the latest comments before the assignee change for instructions, feedback, or approval from the reporter/user before deciding whether to act.
    - If the task is complex, you may optionally post your findings or proposed plan as a comment on Jira ticket {{issue.key}} before starting.
 2. Execution Phase (Once Approved / Ready):
    - If the user commented "go ahead" or "approve", or if the issue has the tag/label "agent-ready" or "approved":
@@ -301,6 +309,7 @@ Comment:
 Workflow Instructions:
 1. Improvement Review & Assessment:
    - Understand the improvement requirements from the summary, description, and comments.
+   - Note on assignee changes: If this event is only an assignee change, check the latest comments before the assignee change for instructions, feedback, or approval from the reporter/user before deciding whether to act.
    - If the improvement is complex, you may optionally post your findings or proposed plan as a comment on Jira ticket {{issue.key}} before starting.
 2. Execution Phase (Once Approved / Ready):
    - If the user commented "go ahead" or "approve", or if the issue has the tag/label "agent-ready" or "approved":
@@ -452,7 +461,13 @@ export function jiraTemplateVariables(
   const issue = asRecord(root['issue']);
   const fields = asRecord(issue['fields']);
   const changelog = asRecord(root['changelog']);
-  const comment = asRecord(root['comment']);
+  const rootComment = asRecord(root['comment']);
+  const fieldsComments = Array.isArray(asRecord(fields['comment'])['comments'])
+    ? (asRecord(fields['comment'])['comments'] as unknown[])
+    : [];
+  const lastFieldComment =
+    fieldsComments.length > 0 ? asRecord(fieldsComments[fieldsComments.length - 1]) : {};
+  const comment = Object.keys(rootComment).length > 0 ? rootComment : lastFieldComment;
 
   const items = Array.isArray(changelog['items']) ? changelog['items'] : [];
   const changed = items.map((i) => asRecord(i));
