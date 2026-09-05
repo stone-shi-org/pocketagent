@@ -15,6 +15,7 @@ import type { UsageService } from './usage/index.js';
 import type { WorktreeService } from './git/worktree.js';
 import type { CronService } from './cron/index.js';
 import type { WebhookService } from './webhooks/index.js';
+import type { PlannerWorkspaceRegistry } from './planner/workspaces.js';
 
 export interface PocketContext {
   config: Config;
@@ -23,6 +24,10 @@ export interface PocketContext {
   cron: CronService;
   webhooks: WebhookService;
   workspaces: WorkspaceRegistry;
+  /** PA-6 phase 1: the planner's own app-owned scratch/skills directories. */
+  plannerWorkspaces: PlannerWorkspaceRegistry;
+  /** Where a new planner workspace's directory is created on disk. */
+  plannerWorkspacesRoot: string;
   agents: AgentRegistry;
   db: Db;
   backend: ProcessBackend;

@@ -59,7 +59,19 @@ export async function createTestApp(
     ...configOverrides,
   });
   const db = existingDb ?? openDatabase(':memory:');
-  const { app, context } = await buildApp({ config, db, agyTranscripts, piTranscripts, serveStatic: false });
+  // `config.databasePath` always points at the real `<REPO_ROOT>/data/`
+  // (it is not test-aware, by design — see its doc comment), so without this
+  // override every test that boots an app would create real planner-workspace
+  // directories on the host next to the real database.
+  const plannerWorkspacesRoot = path.join(ws.root, 'planner-workspaces');
+  const { app, context } = await buildApp({
+    config,
+    db,
+    agyTranscripts,
+    piTranscripts,
+    plannerWorkspacesRoot,
+    serveStatic: false,
+  });
   await app.ready();
 
   const login = await app.inject({

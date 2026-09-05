@@ -46,8 +46,11 @@ import { settingsRoutes } from './routes/settings.js';
 import { usageRoutes } from './routes/usage.js';
 import { worktreeRoutes } from './routes/worktrees.js';
 import { webhookRoutes } from './routes/webhooks.js';
+import { plannerRoutes } from './routes/planner.js';
 import { websocketRoutes } from './ws/index.js';
 import { WebhookService } from './webhooks/index.js';
+import { PlannerWorkspaceRegistry } from './planner/workspaces.js';
+import { createPlannerWorkspaceStore } from './planner/store.js';
 import type { PocketContext } from './types.js';
 
 export const VERSION = '0.1.0';
@@ -111,6 +114,14 @@ export interface BuildAppOptions {
   agyTranscripts?: AgyTranscriptStore;
   /** Injected in tests to point at a fixture directory instead of a real `~/.pi`. */
   piTranscripts?: PiTranscriptStore;
+  /**
+   * Injected in tests so each run gets an isolated directory instead of the
+   * real `<REPO_ROOT>/data/planner-workspaces` — `config.databasePath` is not
+   * test-aware (see its own doc comment: always `<REPO_ROOT>/data/pocketagent.db`),
+   * so without this override every test run would create real directories on
+   * the host next to the real database.
+   */
+  plannerWorkspacesRoot?: string;
   serveStatic?: boolean;
 }
 
@@ -177,6 +188,18 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
         'POCKETAGENT_WORKSPACE_ROOTS to seed the list on a fresh database.',
     );
   }
+
+  // PA-6 phase 1: the planner's own app-owned scratch/skills directories,
+  // sibling to `data/pocketagent.db` rather than a user-picked folder —
+  // deriving from `config.databasePath`'s directory rather than hardcoding
+  // `REPO_ROOT` again keeps this in sync if that ever changes, and the test
+  // override above is what keeps a test run from creating real directories
+  // next to the real database.
+  const plannerWorkspacesRoot =
+    options.plannerWorkspacesRoot ?? path.join(path.dirname(config.databasePath), 'planner-workspaces');
+  const plannerWorkspaces = new PlannerWorkspaceRegistry(createPlannerWorkspaceStore(db));
+  await plannerWorkspaces.ensureDefaultWorkspace(plannerWorkspacesRoot);
+
   const agents = createDefaultRegistry({
     shell: config.shell,
     claudeBin: config.claudeBin,
@@ -303,6 +326,8 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     cron,
     webhooks,
     workspaces,
+    plannerWorkspaces,
+    plannerWorkspacesRoot,
     agents,
     db,
     backend,
@@ -416,6 +441,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(worktreeRoutes);
   await app.register(cronRoutes);
   await app.register(webhookRoutes);
+  await app.register(plannerRoutes);
   await app.register(settingsRoutes);
   await app.register(pushRoutes);
   await app.register(usageRoutes);

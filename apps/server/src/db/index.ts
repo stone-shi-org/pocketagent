@@ -479,6 +479,51 @@ const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE webhooks ADD COLUMN auto_select_agent_model INTEGER NOT NULL DEFAULT 0;
   `,
+  // PA-6, phase 1 (foundation): the planner — an LLM chat with tools that treat
+  // existing PocketAgent sessions as sub-agents. This migration lays down only
+  // the two tables phase 1 actually uses; `planner_chats` and
+  // `planner_tool_approvals` (the chat/approval schema) land in the phases that
+  // consume them, so no table sits empty and unread for a release or two.
+  //
+  // `planner_workspaces` are app-owned scratch/skills directories, NOT a
+  // second copy of `workspaces`. A `workspaces` root is one of the user's real
+  // code repositories — PocketAgent only ever reads it and checks containment,
+  // never writes into it unasked. A planner workspace is the opposite: this
+  // app creates it (see `planner/workspaces.ts`'s `ensureDefaultWorkspace`)
+  // and the planner's own file/exec tools (a later phase) are allowed to
+  // write and delete inside it freely, the same ownership `data/pocketagent.db`
+  // already has. `is_default` marks the one seeded at first boot — seeding is
+  // tracked by a `planner_default_workspace_seeded` settings flag rather than
+  // "table is empty", so deliberately removing the default workspace later
+  // does not resurrect it on the next restart, exactly like `workspaces_seeded`.
+  //
+  // `planner_models` is one row per model offered by the single configured
+  // LLM provider (`planner_llm_base_url`/`planner_llm_api_key`, read/written
+  // as bespoke `settings` keys below rather than through `SETTINGS_FIELDS` —
+  // they are not `Config` fields seeded from `.env`, the same reasoning that
+  // keeps `global_skip_permissions` out of that table). Multiple rows are
+  // what a chat's model picker switches between; there is deliberately no
+  // per-model endpoint or key, since the request was "one provider, several
+  // models", not several providers.
+  `
+  CREATE TABLE IF NOT EXISTS planner_workspaces (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    path       TEXT NOT NULL UNIQUE,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS planner_models (
+    id         TEXT PRIMARY KEY,
+    model_id   TEXT NOT NULL,
+    label      TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_planner_models_sort ON planner_models (sort_order);
+  `,
 ];
 
 /**
