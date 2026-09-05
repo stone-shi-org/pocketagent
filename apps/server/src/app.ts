@@ -289,6 +289,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     workspaces,
     plannerWorkspaces,
     sessions,
+    worktrees,
     historyDeps: { sessions, conversations, agyTranscripts, piTranscripts },
     logger: app.log,
     ...(options.plannerLlmFetch ? { llmFetch: options.plannerLlmFetch } : {}),

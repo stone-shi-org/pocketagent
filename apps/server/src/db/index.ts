@@ -559,6 +559,44 @@ const MIGRATIONS: readonly string[] = [
   CREATE INDEX IF NOT EXISTS idx_planner_chats_activity ON planner_chats (last_activity_at DESC);
   CREATE INDEX IF NOT EXISTS idx_planner_chats_workspace ON planner_chats (workspace_id, last_activity_at DESC);
   `,
+  // PA-6, phase 4: remembered decisions for the planner's mutating-tool
+  // approval gate — "remember for this workspace" or "remember globally",
+  // per the reporter's answer to open question 2 (both scopes, offered as a
+  // choice at approval time, uniformly for every mutating tool including
+  // `exec_command`).
+  //
+  // This is new persistence this codebase has never had. Every existing
+  // approval mechanism is coarser: the Claude Agent SDK's own
+  // `allow_session` (`structured-session.ts`) lives only in-memory for the
+  // life of one process, and cron/webhooks each have a single all-or-nothing
+  // `skip_permissions` boolean — neither remembers a decision *per tool*.
+  //
+  // `workspace_id` is deliberately not a foreign key to `planner_workspaces`:
+  // a remembered decision for a workspace that is later deleted should not
+  // vanish along with it (the same row could apply again if a workspace with
+  // the same id could ever come back — it can't, ids are random — so in
+  // practice a dangling row is simply inert, never wrongly reapplied to a
+  // different workspace). `scope = 'global'` rows always have `workspace_id
+  // IS NULL`; enforced by the application, not by the schema, since SQLite
+  // has no partial-CHECK short of a trigger and the write path is the single
+  // place this row is ever created (`planner/approval.ts`).
+  //
+  // The unique index uses `COALESCE(workspace_id, '')`: SQLite treats NULL as
+  // distinct from every other NULL in a unique index, which would otherwise
+  // let two 'global' rows coexist for the same tool.
+  `
+  CREATE TABLE IF NOT EXISTS planner_tool_approvals (
+    id           TEXT PRIMARY KEY,
+    scope        TEXT NOT NULL CHECK (scope IN ('global', 'workspace')),
+    workspace_id TEXT,
+    tool_name    TEXT NOT NULL,
+    decision     TEXT NOT NULL CHECK (decision IN ('allow', 'deny')),
+    created_at   INTEGER NOT NULL
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_planner_tool_approvals_unique
+    ON planner_tool_approvals (scope, COALESCE(workspace_id, ''), tool_name);
+  `,
 ];
 
 /**

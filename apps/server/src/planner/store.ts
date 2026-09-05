@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type { PlannerChat } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import { readSetting, writeSetting } from '../db/index.js';
@@ -251,4 +252,52 @@ export function updatePlannerChat(
 
 export function deletePlannerChat(db: Db, id: string): boolean {
   return db.prepare('DELETE FROM planner_chats WHERE id = ?').run(id).changes > 0;
+}
+
+// ---- planner_tool_approvals ---------------------------------------------------
+
+export type PlannerApprovalScope = 'global' | 'workspace';
+export type PlannerApprovalDecision = 'allow' | 'deny';
+
+/**
+ * `workspaceId` must be non-null for `scope: 'workspace'` and null for
+ * `scope: 'global'` — enforced by the one caller that ever writes this row
+ * (`planner/approval.ts`), not by the schema (see the migration's own doc
+ * comment for why).
+ */
+export function readPlannerToolApproval(
+  db: Db,
+  scope: PlannerApprovalScope,
+  workspaceId: string | null,
+  toolName: string,
+): PlannerApprovalDecision | null {
+  const row = db
+    .prepare(
+      `SELECT decision FROM planner_tool_approvals
+       WHERE scope = ? AND workspace_id IS ? AND tool_name = ?`,
+    )
+    .get(scope, workspaceId, toolName) as { decision: PlannerApprovalDecision } | undefined;
+  return row?.decision ?? null;
+}
+
+export function writePlannerToolApproval(
+  db: Db,
+  scope: PlannerApprovalScope,
+  workspaceId: string | null,
+  toolName: string,
+  decision: PlannerApprovalDecision,
+): void {
+  db.prepare(
+    `INSERT INTO planner_tool_approvals (id, scope, workspace_id, tool_name, decision, created_at)
+     VALUES (@id, @scope, @workspaceId, @toolName, @decision, @createdAt)
+     ON CONFLICT (scope, COALESCE(workspace_id, ''), tool_name)
+     DO UPDATE SET decision = excluded.decision, created_at = excluded.created_at`,
+  ).run({
+    id: crypto.randomUUID(),
+    scope,
+    workspaceId,
+    toolName,
+    decision,
+    createdAt: Date.now(),
+  });
 }

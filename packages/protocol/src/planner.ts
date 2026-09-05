@@ -180,9 +180,49 @@ export const PlannerSendMessageRequest = z.object({
 });
 export type PlannerSendMessageRequest = z.infer<typeof PlannerSendMessageRequest>;
 
-/** Both entries the turn produced, so the composer can append without re-fetching history. */
+/**
+ * PA-6, phase 4: a turn either finished, or paused on a mutating tool call
+ * with no remembered decision. `approvalId` is opaque and short-lived (held
+ * in server memory only, like `StructuredSession`'s own pending-permission
+ * map) — it is resolved by `POST /api/planner/chats/:id/approvals/:approvalId`
+ * and does not survive a server restart, the same limitation a live
+ * session's own pending approval already has.
+ */
+export const PlannerTurnResult = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('completed'), assistantEntry: PlannerTranscriptEntry }),
+  z.object({
+    status: z.literal('approval_required'),
+    approvalId: z.string(),
+    toolName: z.string(),
+    /** Raw JSON the model supplied for the call — no per-tool "nice" rendering yet. */
+    argsSummary: z.string(),
+  }),
+]);
+export type PlannerTurnResult = z.infer<typeof PlannerTurnResult>;
+
+/** The user's entry is always produced immediately, whichever way the turn goes. */
 export const PlannerSendMessageResponse = z.object({
   userEntry: PlannerTranscriptEntry,
-  assistantEntry: PlannerTranscriptEntry,
+  turn: PlannerTurnResult,
 });
 export type PlannerSendMessageResponse = z.infer<typeof PlannerSendMessageResponse>;
+
+/**
+ * `allow_once` runs the tool without remembering anything. `allow_workspace`
+ * / `allow_global` also persist to `planner_tool_approvals`, per the
+ * reporter's answer to open question 2: both scopes are offered, uniformly,
+ * for every mutating tool including `exec_command` — no tool is special-cased
+ * to a narrower choice.
+ */
+export const PlannerToolApprovalChoice = z.enum([
+  'allow_once',
+  'allow_workspace',
+  'allow_global',
+  'deny',
+]);
+export type PlannerToolApprovalChoice = z.infer<typeof PlannerToolApprovalChoice>;
+
+export const ResolvePlannerApprovalRequest = z.object({
+  decision: PlannerToolApprovalChoice,
+});
+export type ResolvePlannerApprovalRequest = z.infer<typeof ResolvePlannerApprovalRequest>;

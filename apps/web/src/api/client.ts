@@ -47,6 +47,8 @@ import type {
   PlannerChatHistoryResponse,
   PlannerSendMessageRequest,
   PlannerSendMessageResponse,
+  PlannerTurnResult,
+  PlannerToolApprovalChoice,
 } from '@pocketagent/protocol';
 
 export class ApiError extends Error {
@@ -463,10 +465,21 @@ export const api = {
   plannerChatHistory: (id: string) =>
     request<PlannerChatHistoryResponse>(`/api/planner/chats/${encodeURIComponent(id)}/history`),
 
-  /** Resolves once the whole assistant reply is in — see the route's doc comment. */
+  /**
+   * Resolves once the turn either finishes or pauses on a mutating tool call
+   * with no remembered decision (`PlannerTurnResult.status`) — see the
+   * route's doc comment.
+   */
   sendPlannerMessage: (id: string, body: PlannerSendMessageRequest) =>
     request<PlannerSendMessageResponse>(`/api/planner/chats/${encodeURIComponent(id)}/messages`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  /** Resolves a turn paused on `approval_required` — see `PlannerTurnResult`. */
+  resolvePlannerApproval: (id: string, approvalId: string, decision: PlannerToolApprovalChoice) =>
+    request<PlannerTurnResult>(
+      `/api/planner/chats/${encodeURIComponent(id)}/approvals/${encodeURIComponent(approvalId)}`,
+      { method: 'POST', body: JSON.stringify({ decision }) },
+    ),
 };

@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { PlannerChat, PlannerModel, PlannerTranscriptEntry } from '@pocketagent/protocol';
+import type {
+  PlannerChat,
+  PlannerModel,
+  PlannerToolApprovalChoice,
+  PlannerTranscriptEntry,
+  PlannerTurnResult,
+} from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 
@@ -9,8 +15,14 @@ interface Props {
   onApiError: (error: unknown) => void;
 }
 
+interface PendingApproval {
+  approvalId: string;
+  toolName: string;
+  argsSummary: string;
+}
+
 /**
- * PA-6, phase 2 (chat core): one planner chat.
+ * PA-6: one planner chat.
  *
  * Deliberately plain message bubbles rather than `Transcript`/`ToolCard` —
  * those are built for the `AgentEvent` live-streaming protocol a structured
@@ -18,6 +30,13 @@ interface Props {
  * `llm-client.ts`'s doc comment). Reusing this app's real chat UI wholesale,
  * as the reporter asked for, is the target once a later phase gives the
  * planner the same event stream to render.
+ *
+ * The inline approval card (PA-6 phase 4) is this page's own, equally
+ * deliberately plain, stand-in for `ApprovalSheet` — a mutating tool call
+ * with no remembered decision pauses the turn and this page renders the
+ * pause as a card in the message list, with the same "once / remember for
+ * this workspace / remember globally / deny" choices as the real approval
+ * sheet, resolved via `POST .../approvals/:id` (`planner/approval.ts`).
  */
 export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Element {
   const [chat, setChat] = useState<PlannerChat | null>(null);
@@ -25,6 +44,7 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
   const [entries, setEntries] = useState<PlannerTranscriptEntry[] | null>(null);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [pending, setPending] = useState<PendingApproval | null>(null);
   const [error, setError] = useState<string | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
 
@@ -51,7 +71,7 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
 
   useEffect(() => {
     messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight });
-  }, [entries]);
+  }, [entries, pending]);
 
   const changeModel = (modelId: string): void => {
     if (!modelId) return;
@@ -66,6 +86,21 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
     })();
   };
 
+  /** Shared tail for both `sendPlannerMessage` and `resolvePlannerApproval`:
+      either the turn is done (append the reply, stop waiting) or it paused
+      again on a different tool call (show that one instead). */
+  const applyTurn = (turn: PlannerTurnResult): void => {
+    if (turn.status === 'completed') {
+      setEntries((prev) => [...(prev ?? []), turn.assistantEntry]);
+      setPending(null);
+      setSending(false);
+    } else {
+      setPending({ approvalId: turn.approvalId, toolName: turn.toolName, argsSummary: turn.argsSummary });
+      // Composer stays disabled (`sending`) while a decision is pending —
+      // there is nothing to send until this turn is resolved one way or another.
+    }
+  };
+
   const send = (): void => {
     const content = input.trim();
     if (!content || sending) return;
@@ -73,9 +108,10 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
     setError(null);
     void (async () => {
       try {
-        const { userEntry, assistantEntry } = await api.sendPlannerMessage(chatId, { content });
-        setEntries((prev) => [...(prev ?? []), userEntry, assistantEntry]);
+        const { userEntry, turn } = await api.sendPlannerMessage(chatId, { content });
+        setEntries((prev) => [...(prev ?? []), userEntry]);
         setInput('');
+        applyTurn(turn);
       } catch (err) {
         onApiError(err);
         setError(
@@ -83,7 +119,21 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
             ? err.message
             : 'Could not reach the planner. Your message was not sent.',
         );
-      } finally {
+        setSending(false);
+      }
+    })();
+  };
+
+  const decide = (decision: PlannerToolApprovalChoice): void => {
+    if (!pending) return;
+    const approvalId = pending.approvalId;
+    void (async () => {
+      try {
+        const turn = await api.resolvePlannerApproval(chatId, approvalId, decision);
+        applyTurn(turn);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not record that decision.');
         setSending(false);
       }
     })();
@@ -127,7 +177,7 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
 
       <div className="planner-messages" ref={messagesRef}>
         {entries === null && <div className="spinner">Loading…</div>}
-        {entries?.length === 0 && (
+        {entries?.length === 0 && !pending && (
           <div className="planner-empty">Say something to get started.</div>
         )}
         {entries?.map((entry, i) => (
@@ -138,8 +188,30 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
             {entry.content}
           </div>
         ))}
-        {sending && (
+        {sending && !pending && (
           <div className="planner-message planner-message--assistant">Thinking…</div>
+        )}
+        {pending && (
+          <div className="planner-approval-card" role="alertdialog" aria-label="Tool approval">
+            <p className="planner-approval-title">
+              The planner wants to run <code>{pending.toolName}</code>
+            </p>
+            <pre className="planner-approval-args">{pending.argsSummary}</pre>
+            <div className="planner-approval-actions">
+              <button type="button" className="planner-btn" onClick={() => decide('allow_once')}>
+                Allow once
+              </button>
+              <button type="button" className="planner-btn" onClick={() => decide('allow_workspace')}>
+                Allow for this workspace
+              </button>
+              <button type="button" className="planner-btn" onClick={() => decide('allow_global')}>
+                Allow globally
+              </button>
+              <button type="button" className="planner-btn danger" onClick={() => decide('deny')}>
+                Deny
+              </button>
+            </div>
+          </div>
         )}
       </div>
 

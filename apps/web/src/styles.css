@@ -5311,3 +5311,38 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   color: var(--text);
   max-height: 160px;
 }
+
+/* PA-6 phase 4: the inline stand-in for `ApprovalSheet` — see
+   `PlannerChatPage`'s doc comment for why this chat gets its own, plainer
+   approval card rather than the real one. */
+.planner-approval-card {
+  align-self: stretch;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  background: var(--bg-elev-2);
+}
+
+.planner-approval-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 550;
+}
+
+.planner-approval-args {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.planner-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

@@ -5,6 +5,7 @@ import {
   CreatePlannerModelRequest,
   CreatePlannerWorkspaceRequest,
   PlannerSendMessageRequest,
+  ResolvePlannerApprovalRequest,
   UpdatePlannerChatRequest,
   UpdatePlannerSettingsRequest,
   type PlannerApiKeyRevealResponse,
@@ -246,13 +247,35 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
     try {
-      const { userEntry, assistantEntry } = await app.pocket.plannerChats.sendMessage(
+      const { userEntry, turn } = await app.pocket.plannerChats.sendMessage(
         id,
         parsed.data.content,
         parsed.data.modelId ? { modelId: parsed.data.modelId } : {},
       );
-      const response: PlannerSendMessageResponse = { userEntry, assistantEntry };
+      const response: PlannerSendMessageResponse = { userEntry, turn };
       return response;
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  /**
+   * Resolves a turn paused on a mutating tool call with no remembered
+   * decision (`PlannerTurnResult.status === 'approval_required'`). See
+   * `planner/approval.ts`'s doc comment for why this is a second request
+   * rather than the first one simply waiting: the planner chat has no live
+   * transport yet to push the question to the browser and receive an answer
+   * without a fresh HTTP round-trip.
+   */
+  app.post('/api/planner/chats/:id/approvals/:approvalId', async (request, reply) => {
+    const { id, approvalId } = request.params as { id: string; approvalId: string };
+    const parsed = ResolvePlannerApprovalRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    try {
+      const turn = await app.pocket.plannerChats.resolveApproval(id, approvalId, parsed.data.decision);
+      return reply.send(turn);
     } catch (err) {
       return mapChatError(reply, err);
     }

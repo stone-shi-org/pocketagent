@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PlannerLlmClient, PlannerLlmError } from '../src/planner/llm-client.js';
@@ -5,8 +6,8 @@ import { authHeaders, createTestApp, type TestApp } from './helpers.js';
 
 /**
  * PA-6: the LLM client, the chat turn loop (phase 2), the read-only
- * tool-calling loop (phase 3), and the `/api/planner/chats` HTTP surface.
- * Still no mutating tools and no approval gate — see PA-6 for those phases.
+ * tool-calling loop (phase 3), and the mutating-tool approval gate (phase
+ * 4), all exercised through the `/api/planner/chats` HTTP surface.
  */
 
 // ---- PlannerLlmClient, unit-level against an injected fetch ----------------
@@ -234,7 +235,8 @@ describe('planner chat routes over HTTP', () => {
     expect(turn.statusCode).toBe(200);
     const body = turn.json();
     expect(body.userEntry).toMatchObject({ role: 'user', content: 'plan my week' });
-    expect(body.assistantEntry).toMatchObject({ role: 'assistant', content: "Here's the plan." });
+    expect(body.turn.status).toBe('completed');
+    expect(body.turn.assistantEntry).toMatchObject({ role: 'assistant', content: "Here's the plan." });
 
     const history = (await get(t, `/api/planner/chats/${chat.id}/history`)).json().entries;
     expect(history).toHaveLength(2);
@@ -243,7 +245,7 @@ describe('planner chat routes over HTTP', () => {
 
     const chats = (await get(t, '/api/planner/chats')).json().chats;
     expect(chats[0].lastModelId).toBe('gpt-4o-mini');
-    expect(chats[0].lastActivityAt).toBe(body.assistantEntry.createdAt);
+    expect(chats[0].lastActivityAt).toBe(body.turn.assistantEntry.createdAt);
 
     const settings = (await get(t, '/api/planner/settings')).json();
     expect(settings.lastModelId).toBe('gpt-4o-mini');
@@ -267,7 +269,10 @@ describe('planner chat routes over HTTP', () => {
       content: 'what workspaces do I have?',
     });
     expect(turn.statusCode).toBe(200);
-    expect(turn.json().assistantEntry.content).toBe('You have one workspace: project.');
+    expect(turn.json().turn).toMatchObject({
+      status: 'completed',
+      assistantEntry: { content: 'You have one workspace: project.' },
+    });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
 
     // The second call carries the assistant's tool-call message and the
@@ -302,7 +307,7 @@ describe('planner chat routes over HTTP', () => {
 
     const turn = await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'loop forever' });
     expect(turn.statusCode).toBe(200);
-    expect(turn.json().assistantEntry.content).toMatch(/too many tool calls/);
+    expect(turn.json().turn.assistantEntry.content).toMatch(/too many tool calls/);
     // Capped, not unbounded.
     expect(fetchImpl.mock.calls.length).toBeLessThanOrEqual(8);
   });
@@ -356,5 +361,146 @@ describe('planner chat routes over HTTP', () => {
     // A further turn still works, landing in the default workspace instead.
     const turn = await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'after deletion' });
     expect(turn.statusCode).toBe(200);
+  });
+
+  // ---- PA-6 phase 4: mutating tools pause for approval ---------------------
+
+  async function mkdirPending(fetchImpl: ReturnType<typeof vi.fn>) {
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+    const turn = await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'make a directory' });
+    return { chat, turn: turn.json() };
+  }
+
+  it('pauses a mutating tool call with no remembered decision', async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'a-new-dir' }));
+    const { turn } = await mkdirPending(fetchImpl);
+
+    expect(turn.turn.status).toBe('approval_required');
+    expect(turn.turn.toolName).toBe('mkdir');
+    expect(JSON.parse(turn.turn.argsSummary)).toEqual({ path: 'a-new-dir' });
+    // The pause happens before the mutating action runs.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('allow_once runs the tool without remembering anything', async () => {
+    // Two-phase setup: the mocked tool call needs an absolute path inside
+    // `t.workspaceRoot` to prove the real filesystem effect happened, but
+    // that root only exists once `createTestApp` has run — so the app is
+    // built with an as-yet-unconfigured mock, then the mock's responses are
+    // queued using the now-known root.
+    const fetchImpl = vi.fn();
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    const targetDir = path.join(t.workspaceRoot, 'made-once');
+    fetchImpl
+      .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: targetDir }))
+      .mockResolvedValueOnce(fakeCompletionResponse('Made it.'))
+      // A second, unrelated chat in the same workspace still has to ask —
+      // nothing was remembered.
+      .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: path.join(t.workspaceRoot, 'made-twice') }));
+
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+    const turn = (await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'make a directory' })).json();
+
+    const resolved = await post(t, `/api/planner/chats/${chat.id}/approvals/${turn.turn.approvalId}`, {
+      decision: 'allow_once',
+    });
+    expect(resolved.statusCode).toBe(200);
+    expect(resolved.json()).toMatchObject({ status: 'completed', assistantEntry: { content: 'Made it.' } });
+    expect((await fs.stat(targetDir)).isDirectory()).toBe(true);
+
+    const secondChat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+    const secondTurn = await post(t, `/api/planner/chats/${secondChat.id}/messages`, { content: 'again' });
+    expect(secondTurn.json().turn.status).toBe('approval_required');
+  });
+
+  it('allow_workspace remembers the decision for every chat in that workspace, but not elsewhere', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'ws-remembered' }))
+      .mockResolvedValueOnce(fakeCompletionResponse('Done once.'))
+      // Second chat, same (default) workspace: the tool call and the final
+      // reply happen in one round trip now — no pause, no separate approval call.
+      .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'ws-remembered-2' }))
+      .mockResolvedValueOnce(fakeCompletionResponse('Done twice.'))
+      // Third chat, a *different* workspace: still has to ask.
+      .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'elsewhere' }));
+    const { chat, turn } = await mkdirPending(fetchImpl);
+
+    const resolved = await post(t, `/api/planner/chats/${chat.id}/approvals/${turn.turn.approvalId}`, {
+      decision: 'allow_workspace',
+    });
+    expect(resolved.json().status).toBe('completed');
+
+    const secondChat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+    const secondTurn = await post(t, `/api/planner/chats/${secondChat.id}/messages`, { content: 'again' });
+    expect(secondTurn.json().turn).toMatchObject({ status: 'completed', assistantEntry: { content: 'Done twice.' } });
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+
+    const otherWs = (await post(t, '/api/planner/workspaces', { name: 'Other' })).json();
+    const otherChat = (await post(t, '/api/planner/chats', { workspaceId: otherWs.id, modelId: 'gpt-4o' })).json();
+    const otherTurn = await post(t, `/api/planner/chats/${otherChat.id}/messages`, { content: 'go' });
+    expect(otherTurn.json().turn.status).toBe('approval_required');
+  });
+
+  it('allow_global remembers the decision for every workspace', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'global-remembered' }))
+      .mockResolvedValueOnce(fakeCompletionResponse('Done.'))
+      // A chat in a *different* workspace: no pause — the decision is global.
+      .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'still-global' }))
+      .mockResolvedValueOnce(fakeCompletionResponse('Also done.'));
+    const { chat, turn } = await mkdirPending(fetchImpl);
+    await post(t, `/api/planner/chats/${chat.id}/approvals/${turn.turn.approvalId}`, {
+      decision: 'allow_global',
+    });
+
+    const otherWs = (await post(t, '/api/planner/workspaces', { name: 'Elsewhere' })).json();
+    const otherChat = (await post(t, '/api/planner/chats', { workspaceId: otherWs.id, modelId: 'gpt-4o' })).json();
+    const otherTurn = await post(t, `/api/planner/chats/${otherChat.id}/messages`, { content: 'go' });
+    expect(otherTurn.json().turn).toMatchObject({ status: 'completed', assistantEntry: { content: 'Also done.' } });
+  });
+
+  it('deny records a denial as the tool result and lets the model try again', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'denied-dir' }))
+      .mockResolvedValueOnce(fakeCompletionResponse('Understood, not creating it.'));
+    const { chat, turn } = await mkdirPending(fetchImpl);
+
+    const resolved = await post(t, `/api/planner/chats/${chat.id}/approvals/${turn.turn.approvalId}`, {
+      decision: 'deny',
+    });
+    expect(resolved.json()).toMatchObject({
+      status: 'completed',
+      assistantEntry: { content: 'Understood, not creating it.' },
+    });
+    await expect(fs.stat(path.join(t.workspaceRoot, 'denied-dir'))).rejects.toThrow();
+
+    const secondCallMessages = JSON.parse(fetchImpl.mock.calls[1]![1].body as string).messages;
+    const toolMessage = secondCallMessages.find((m: { role: string }) => m.role === 'tool');
+    expect(toolMessage.content).toMatch(/Denied/);
+  });
+
+  it('404s resolving an unknown approval id', async () => {
+    t = await createTestApp();
+    const chat = (await post(t, '/api/planner/chats', {})).json();
+    const res = await post(t, `/api/planner/chats/${chat.id}/approvals/does-not-exist`, {
+      decision: 'deny',
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("404s resolving an approval id that belongs to a different chat", async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'x' }));
+    const { turn } = await mkdirPending(fetchImpl);
+    const otherChat = (await post(t, '/api/planner/chats', {})).json();
+    const res = await post(t, `/api/planner/chats/${otherChat.id}/approvals/${turn.turn.approvalId}`, {
+      decision: 'deny',
+    });
+    expect(res.statusCode).toBe(404);
   });
 });

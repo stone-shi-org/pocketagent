@@ -2,32 +2,35 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentEvent, SessionInfo } from '@pocketagent/protocol';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
-import type { SessionManager } from '../sessions/manager.js';
+import type { SessionManager, StructuredLikeSession } from '../sessions/manager.js';
 import { readSessionHistory, type SessionHistoryDeps } from '../sessions/history.js';
+import type { WorktreeService } from '../git/worktree.js';
+import { WorktreeError } from '../git/worktree.js';
 import type { PlannerWorkspaceRegistry } from './workspaces.js';
 
 /**
- * PA-6, phase 3: the planner's read-only tool catalog.
+ * PA-6: the planner's tool catalog.
  *
- * Every tool here is `readOnly: true` per the reporter's answer to open
- * question 1 on PA-6 ("yes please, let's skip gate for those read tools
- * call") — `approval.ts` (a later phase) will special-case exactly this flag
- * rather than these tools individually. Mutating tools (`send_instruction`,
- * `write_file`, `mkdir`, `rmdir`, `delete_worktree`, `exec_command`) are a
- * later phase and do go through the approval gate.
+ * Phase 3 added the read-only tools (`readOnly: true`), which skip the
+ * approval gate entirely per the reporter's answer to open question 1 ("yes
+ * please, let's skip gate for those read tools call"). Phase 4 adds the
+ * mutating ones (`readOnly: false`) — `send_instruction`, `write_file`,
+ * `mkdir`, `rmdir`, `delete_worktree` — which `approval.ts` gates before
+ * `PlannerChatService` ever calls `execute()` on them.
  *
  * Each tool executes against the *existing* PocketAgent subsystems
- * (`WorkspaceRegistry`, `SessionManager`, the per-agent transcript stores) —
- * per the plan, the planner treats other sessions as sub-agents rather than
- * owning a parallel notion of "workspace" or "session" for them. `list_file`/
- * `read_file` additionally accept a planner workspace path, since the
- * planner's own scratch space is just as legitimate a read target.
+ * (`WorkspaceRegistry`, `SessionManager`, `WorktreeService`) — per the plan,
+ * the planner treats other sessions as sub-agents rather than owning a
+ * parallel notion of "workspace" or "session" for them. File tools
+ * additionally accept a planner workspace path, since the planner's own
+ * scratch space is just as legitimate a target.
  */
 
 export interface PlannerToolDeps {
   workspaces: WorkspaceRegistry;
   plannerWorkspaces: PlannerWorkspaceRegistry;
   sessions: SessionManager;
+  worktrees: WorktreeService;
   historyDeps: SessionHistoryDeps;
 }
 
@@ -44,6 +47,7 @@ export interface PlannerToolDefinition {
     transcript or a large file must not blow out the next request's body. */
 const MAX_TOOL_RESULT_CHARS = 20_000;
 const MAX_FILE_READ_BYTES = 200_000;
+const MAX_FILE_WRITE_CHARS = 200_000;
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -81,18 +85,22 @@ export function summarizeEvents(events: readonly AgentEvent[]): string {
   return lines.length > 0 ? lines.join('\n') : '(no transcript content yet)';
 }
 
+function isWithinTrustedRoot(deps: PlannerToolDeps, real: string): boolean {
+  return deps.workspaces.getRoots().some((root) => isContained(root, real)) || deps.plannerWorkspaces.contains(real);
+}
+
 /**
- * Resolves a path the model asked to read against either boundary this
+ * Resolves a path that must already exist against either boundary this
  * server already trusts: an added project workspace (`WorkspaceRegistry`) or
  * a planner workspace (`PlannerWorkspaceRegistry`). Realpath first, then
- * check containment against both root lists with the shared `isContained`
- * primitive — never a string-prefix check, and deliberately **not**
+ * check containment with the shared `isContained` primitive — never a
+ * string-prefix check, and deliberately **not**
  * `WorkspaceRegistry.resolveWorkspacePath`, which requires its target to be a
- * *directory* (it exists to validate a session's cwd); a file read needs the
- * same containment check applied to something `resolveWorkspacePath` would
- * itself reject.
+ * *directory* (it exists to validate a session's cwd); a file needs the same
+ * containment check applied to something `resolveWorkspacePath` would itself
+ * reject.
  */
-async function resolveReadablePath(deps: PlannerToolDeps, requested: string): Promise<string> {
+async function resolveExistingPathWithin(deps: PlannerToolDeps, requested: string): Promise<string> {
   const absolute = path.resolve(requested);
   let real: string;
   try {
@@ -100,14 +108,43 @@ async function resolveReadablePath(deps: PlannerToolDeps, requested: string): Pr
   } catch {
     throw new Error(`Cannot resolve path: ${requested}`);
   }
-  const insideProjectWorkspace = deps.workspaces.getRoots().some((root) => isContained(root, real));
-  if (!insideProjectWorkspace && !deps.plannerWorkspaces.contains(real)) {
+  if (!isWithinTrustedRoot(deps, real)) {
     throw new Error(`${requested} is outside every project workspace and every planner workspace.`);
   }
   return real;
 }
 
+/**
+ * Resolves a path that may not exist yet (for a file/directory about to be
+ * created), by walking up to the nearest ancestor that *does* exist,
+ * containment-checking that ancestor's realpath, and rebuilding the full
+ * target from it. The rebuilt suffix cannot itself be a symlink — none of it
+ * exists yet — so checking only the existing ancestor is sound, the same
+ * reasoning `WorktreeService.create()` relies on for a freshly-minted
+ * worktree path.
+ */
+async function resolveCreatablePath(deps: PlannerToolDeps, requested: string): Promise<string> {
+  const absolute = path.resolve(requested);
+  let probe = absolute;
+  let real: string | null = null;
+  while (real === null) {
+    try {
+      real = await fs.realpath(probe);
+    } catch {
+      const parent = path.dirname(probe);
+      if (parent === probe) throw new Error(`Cannot resolve any existing ancestor of ${requested}.`);
+      probe = parent;
+    }
+  }
+  if (!isWithinTrustedRoot(deps, real)) {
+    throw new Error(`${requested} is outside every project workspace and every planner workspace.`);
+  }
+  const suffix = path.relative(probe, absolute);
+  return suffix ? path.join(real, suffix) : real;
+}
+
 export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
+  // ---- Read-only (PA-6 phase 3) ---------------------------------------------
   {
     name: 'list_workspaces',
     description: "List the project folders (workspaces) PocketAgent's coding agents can run in.",
@@ -181,7 +218,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     readOnly: true,
     async execute(deps, args) {
       const requested = String(args.path ?? '');
-      const real = await resolveReadablePath(deps, requested);
+      const real = await resolveExistingPathWithin(deps, requested);
       const stat = await fs.stat(real);
       if (!stat.isFile()) return `${requested} is not a file.`;
       if (stat.size > MAX_FILE_READ_BYTES) {
@@ -189,6 +226,223 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       }
       const content = await fs.readFile(real, 'utf8');
       return truncate(content, MAX_TOOL_RESULT_CHARS);
+    },
+  },
+
+  // ---- Mutating (PA-6 phase 4) — each goes through the approval gate --------
+  {
+    name: 'send_instruction',
+    description:
+      'Send an instruction (prompt) to an existing PocketAgent session, treating it as a sub-agent. ' +
+      'If the session is not currently running, resumes its conversation into a new session first.',
+    parameters: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: 'A session id from list_sessions.' },
+        prompt: { type: 'string', description: 'The instruction to send.' },
+      },
+      required: ['sessionId', 'prompt'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const sessionId = String(args.sessionId ?? '');
+      const prompt = String(args.prompt ?? '').trim();
+      if (!prompt) return 'No instruction text provided.';
+
+      const info = deps.sessions.find(sessionId);
+      if (!info) return `No session found with id ${sessionId}.`;
+      if (info.transport !== 'structured') {
+        return `Session ${sessionId} is a terminal session; the planner can only instruct structured sessions.`;
+      }
+
+      if (info.status === 'running' || info.status === 'starting') {
+        const live = deps.sessions.get(sessionId);
+        if (!live || !('prompt' in live)) {
+          return `Session ${sessionId} cannot receive prompts right now.`;
+        }
+        const sent = (live as StructuredLikeSession).prompt(prompt);
+        return sent
+          ? `Instruction sent to running session ${sessionId}.`
+          : `Session ${sessionId} ended before the instruction could be sent.`;
+      }
+
+      // Not live: resume into a fresh session. Re-validate `cwd` at call
+      // time rather than trusting the value cached on the old session row —
+      // the same discipline `RunExecutor.run()` applies before every
+      // unattended session start, for the same reason: a folder can be
+      // removed from the workspace list, or deleted, long after that row
+      // was written.
+      if (!info.agentSessionId) return `Session ${sessionId} has no conversation to resume.`;
+      let cwd: string;
+      try {
+        cwd = await deps.workspaces.resolveWorkspacePath(info.cwd);
+      } catch (err) {
+        return `Cannot resume session ${sessionId}: ${(err as Error).message}`;
+      }
+      try {
+        const resumed = await deps.sessions.create({
+          agent: info.agent,
+          cwd,
+          cols: 0,
+          rows: 0,
+          transport: 'structured',
+          resumeAgentSessionId: info.agentSessionId,
+          forkSession: false,
+        });
+        if (resumed.transport !== 'structured') {
+          return `Resuming session ${sessionId} unexpectedly produced a terminal session.`;
+        }
+        const sent = (resumed as StructuredLikeSession).prompt(prompt);
+        return sent
+          ? `Resumed session ${sessionId} as ${resumed.id} and sent the instruction.`
+          : `Resumed session ${sessionId} as ${resumed.id}, but it ended before the instruction could be sent.`;
+      } catch (err) {
+        return `Could not resume session ${sessionId}: ${(err as Error).message}`;
+      }
+    },
+  },
+  {
+    name: 'write_file',
+    description:
+      'Write (create or overwrite) a text file. The parent directory must already exist, inside an ' +
+      'added project workspace or a planner workspace.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        content: { type: 'string' },
+      },
+      required: ['path', 'content'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const requested = String(args.path ?? '');
+      const content = String(args.content ?? '');
+      if (content.length > MAX_FILE_WRITE_CHARS) {
+        return `Refusing: ${content.length} characters is over this tool's ${MAX_FILE_WRITE_CHARS}-character limit.`;
+      }
+      const absolute = path.resolve(requested);
+      const parent = path.dirname(absolute);
+      let realParent: string;
+      try {
+        realParent = await fs.realpath(parent);
+      } catch {
+        return `${requested}'s parent directory does not exist. Create it first with mkdir.`;
+      }
+      if (!isWithinTrustedRoot(deps, realParent)) {
+        return `${requested} is outside every project workspace and every planner workspace.`;
+      }
+      const target = path.join(realParent, path.basename(absolute));
+      try {
+        const existing = await fs.stat(target).catch(() => null);
+        if (existing?.isDirectory()) return `${requested} is a directory, not a file.`;
+        await fs.writeFile(target, content, 'utf8');
+        return `Wrote ${content.length} characters to ${requested}.`;
+      } catch (err) {
+        return `Could not write ${requested}: ${(err as Error).message}`;
+      }
+    },
+  },
+  {
+    name: 'mkdir',
+    description: 'Create a directory (and any missing parent directories), inside a project or planner workspace.',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string' } },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const requested = String(args.path ?? '');
+      let target: string;
+      try {
+        target = await resolveCreatablePath(deps, requested);
+      } catch (err) {
+        return (err as Error).message;
+      }
+      try {
+        await fs.mkdir(target, { recursive: true });
+        return `Created ${requested}.`;
+      } catch (err) {
+        return `Could not create ${requested}: ${(err as Error).message}`;
+      }
+    },
+  },
+  {
+    name: 'rmdir',
+    description:
+      'Remove a directory inside a project or planner workspace. Refuses a non-empty directory unless ' +
+      '`recursive` is true.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        recursive: { type: 'boolean', description: 'Remove the directory and everything inside it.' },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const requested = String(args.path ?? '');
+      const recursive = args.recursive === true;
+      let real: string;
+      try {
+        real = await resolveExistingPathWithin(deps, requested);
+      } catch (err) {
+        return (err as Error).message;
+      }
+      const stat = await fs.stat(real);
+      if (!stat.isDirectory()) return `${requested} is not a directory.`;
+      try {
+        if (recursive) {
+          await fs.rm(real, { recursive: true, force: false });
+        } else {
+          await fs.rmdir(real);
+        }
+        return `Removed ${requested}.`;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOTEMPTY') {
+          return `${requested} is not empty. Pass recursive: true to remove it and everything inside.`;
+        }
+        return `Could not remove ${requested}: ${(err as Error).message}`;
+      }
+    },
+  },
+  {
+    name: 'delete_worktree',
+    description:
+      'Delete a git worktree and its local branch. Refuses if a session is still running in it, if it ' +
+      'has uncommitted changes, or if the branch is unmerged.',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string', description: 'Absolute path to the worktree directory.' } },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const requested = String(args.path ?? '');
+      let worktreeCwd: string;
+      try {
+        worktreeCwd = await deps.workspaces.resolveWorkspacePath(requested);
+      } catch (err) {
+        return `Cannot resolve ${requested}: ${(err as Error).message}`;
+      }
+      if (deps.sessions.hasAliveSessionIn(worktreeCwd)) {
+        return `Refusing: a session is still running in ${requested}. Stop it first.`;
+      }
+      try {
+        const result = await deps.worktrees.remove({ worktreeCwd });
+        return `Removed worktree ${requested} and branch ${result.branch}.`;
+      } catch (err) {
+        if (err instanceof WorktreeError) return `Could not remove worktree: ${err.message}`;
+        throw err;
+      }
     },
   },
 ];
