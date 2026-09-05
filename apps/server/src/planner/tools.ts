@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentEvent, SessionInfo } from '@pocketagent/protocol';
@@ -6,6 +7,7 @@ import type { SessionManager, StructuredLikeSession } from '../sessions/manager.
 import { readSessionHistory, type SessionHistoryDeps } from '../sessions/history.js';
 import type { WorktreeService } from '../git/worktree.js';
 import { WorktreeError } from '../git/worktree.js';
+import { buildChildEnv } from '../sessions/env.js';
 import type { PlannerWorkspaceRegistry } from './workspaces.js';
 
 /**
@@ -13,10 +15,12 @@ import type { PlannerWorkspaceRegistry } from './workspaces.js';
  *
  * Phase 3 added the read-only tools (`readOnly: true`), which skip the
  * approval gate entirely per the reporter's answer to open question 1 ("yes
- * please, let's skip gate for those read tools call"). Phase 4 adds the
- * mutating ones (`readOnly: false`) — `send_instruction`, `write_file`,
- * `mkdir`, `rmdir`, `delete_worktree` — which `approval.ts` gates before
- * `PlannerChatService` ever calls `execute()` on them.
+ * please, let's skip gate for those read tools call"). Phase 4 added the
+ * mutating ones — `send_instruction`, `write_file`, `mkdir`, `rmdir`,
+ * `delete_worktree` — which `approval.ts` gates before `PlannerChatService`
+ * ever calls `execute()` on them. Phase 5 adds `exec_command`, the highest-risk
+ * tool here, gated exactly like the others per the reporter's answer to open
+ * question 2 — no special-cased narrower "remember" scope for it.
  *
  * Each tool executes against the *existing* PocketAgent subsystems
  * (`WorkspaceRegistry`, `SessionManager`, `WorktreeService`) — per the plan,
@@ -32,6 +36,8 @@ export interface PlannerToolDeps {
   sessions: SessionManager;
   worktrees: WorktreeService;
   historyDeps: SessionHistoryDeps;
+  /** The configured shell binary, for `exec_command`. */
+  shell: string;
 }
 
 export interface PlannerToolDefinition {
@@ -48,6 +54,9 @@ export interface PlannerToolDefinition {
 const MAX_TOOL_RESULT_CHARS = 20_000;
 const MAX_FILE_READ_BYTES = 200_000;
 const MAX_FILE_WRITE_CHARS = 200_000;
+/** A chat turn is a synchronous HTTP request/response — a runaway command
+    must not hang it forever. */
+const EXEC_TIMEOUT_MS = 60_000;
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -445,7 +454,91 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       }
     },
   },
+  {
+    name: 'exec_command',
+    description:
+      'Run a shell command inside a project or planner workspace. Output is captured and size-capped, ' +
+      `and the command is killed after ${EXEC_TIMEOUT_MS / 1000}s if it has not finished.`,
+    parameters: {
+      type: 'object',
+      properties: {
+        cwd: { type: 'string', description: 'Directory to run the command in.' },
+        command: { type: 'string', description: 'The shell command line to run.' },
+      },
+      required: ['cwd', 'command'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const requestedCwd = String(args.cwd ?? '');
+      const command = String(args.command ?? '').trim();
+      if (!command) return 'No command provided.';
+
+      let cwd: string;
+      try {
+        cwd = await resolveExistingPathWithin(deps, requestedCwd);
+      } catch (err) {
+        return (err as Error).message;
+      }
+      const stat = await fs.stat(cwd);
+      if (!stat.isDirectory()) return `${requestedCwd} is not a directory.`;
+
+      return runShellCommand(deps.shell, command, cwd);
+    },
+  },
 ];
+
+/**
+ * Runs one command through the configured shell, with the same env-stripping
+ * every other child process this server spawns already gets
+ * (`sessions/env.ts` — `POCKETAGENT_*` must never reach a spawned process,
+ * including one started by the planner). No PTY: this is one-shot output
+ * capture, not an interactive terminal.
+ */
+function runShellCommand(shell: string, command: string, cwd: string): Promise<string> {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(shell, ['-lc', command], { cwd, env: buildChildEnv({ cwd }) });
+    } catch (err) {
+      resolve(`Could not start the shell: ${(err as Error).message}`);
+      return;
+    }
+
+    let output = '';
+    let truncated = false;
+    const onChunk = (chunk: Buffer): void => {
+      if (output.length >= MAX_TOOL_RESULT_CHARS) {
+        truncated = true;
+        return;
+      }
+      output += chunk.toString('utf8');
+    };
+    child.stdout?.on('data', onChunk);
+    child.stderr?.on('data', onChunk);
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, EXEC_TIMEOUT_MS);
+    let timedOut = false;
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve(`Could not run command: ${err.message}`);
+    });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      const status = timedOut
+        ? `timed out after ${EXEC_TIMEOUT_MS / 1000}s and was killed`
+        : signal
+          ? `killed by ${signal}`
+          : `exit code ${code}`;
+      const body = truncate(output, MAX_TOOL_RESULT_CHARS) + (truncated ? '\n…(output truncated)' : '');
+      resolve(`$ ${command}\n(${status})\n${body}`);
+    });
+  });
+}
 
 export function findPlannerTool(name: string): PlannerToolDefinition | undefined {
   return PLANNER_TOOLS.find((t) => t.name === name);

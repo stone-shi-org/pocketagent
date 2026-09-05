@@ -16,7 +16,7 @@ import {
   updatePlannerChat,
   writePlannerLastModelId,
 } from './store.js';
-import { rememberDecisionIfAsked, rememberedDecision } from './approval.js';
+import { resolveApprovalStatus, rememberDecisionIfAsked } from './approval.js';
 import { appendTranscriptEntry, readTranscript } from './transcript.js';
 import { PlannerLlmClient, type PlannerChatMessage, type PlannerLlmToolCall } from './llm-client.js';
 import { PLANNER_TOOLS, findPlannerTool, toOpenAiToolSpecs, type PlannerToolDefinition } from './tools.js';
@@ -49,6 +49,8 @@ export interface PlannerChatServiceOptions {
   sessions: SessionManager;
   worktrees: WorktreeService;
   historyDeps: SessionHistoryDeps;
+  /** The configured shell binary, forwarded to `exec_command`. */
+  shell: string;
   logger?: { warn: (obj: unknown, msg?: string) => void };
   /** Injected in tests so no real network call is ever made. */
   llmFetch?: typeof fetch;
@@ -295,7 +297,7 @@ export class PlannerChatService {
         const tool = findPlannerTool(call.function.name);
 
         if (tool && !tool.readOnly) {
-          const decision = rememberedDecision(this.opts.db, call.function.name, chat.workspaceId);
+          const decision = resolveApprovalStatus(this.opts.db, call.function.name, chat.workspaceId);
           if (decision === null) {
             const pendingId = crypto.randomUUID();
             this.pendingTurns.set(pendingId, {
@@ -343,6 +345,7 @@ export class PlannerChatService {
           sessions: this.opts.sessions,
           worktrees: this.opts.worktrees,
           historyDeps: this.opts.historyDeps,
+          shell: this.opts.shell,
         },
         args,
       );

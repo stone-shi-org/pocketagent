@@ -267,4 +267,81 @@ describe('planner routes over HTTP', () => {
     const res = await post('/api/planner/settings/api-key/reveal');
     expect(res.statusCode).toBe(404);
   });
+
+  // ---- PA-6 phase 5: the tool catalog and remembered-decision management ----
+
+  it('lists the tool catalog with its read-only flags', async () => {
+    const res = await get('/api/planner/tools');
+    expect(res.statusCode).toBe(200);
+    const { tools } = res.json();
+    const byName = Object.fromEntries(tools.map((t: { name: string; readOnly: boolean }) => [t.name, t.readOnly]));
+    expect(byName.list_workspaces).toBe(true);
+    expect(byName.exec_command).toBe(false);
+  });
+
+  it('has no remembered decisions by default', async () => {
+    const res = await get('/api/planner/tool-approvals');
+    expect(res.json().approvals).toEqual([]);
+  });
+
+  it('creates, lists, and deletes a global remembered decision', async () => {
+    const created = await post('/api/planner/tool-approvals', {
+      scope: 'global',
+      toolName: 'exec_command',
+      decision: 'deny',
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({
+      scope: 'global',
+      workspaceId: null,
+      toolName: 'exec_command',
+      decision: 'deny',
+    });
+
+    const list = (await get('/api/planner/tool-approvals')).json().approvals;
+    expect(list).toHaveLength(1);
+
+    const removed = await del(`/api/planner/tool-approvals/${created.json().id}`);
+    expect(removed.statusCode).toBe(204);
+    expect((await get('/api/planner/tool-approvals')).json().approvals).toEqual([]);
+  });
+
+  it('creates a workspace-scoped decision only for a real workspace', async () => {
+    const ws = (await post('/api/planner/workspaces', { name: 'Scoped' })).json();
+    const created = await post('/api/planner/tool-approvals', {
+      scope: 'workspace',
+      workspaceId: ws.id,
+      toolName: 'mkdir',
+      decision: 'allow',
+    });
+    expect(created.statusCode).toBe(201);
+
+    const missingWorkspace = await post('/api/planner/tool-approvals', {
+      scope: 'workspace',
+      toolName: 'mkdir',
+      decision: 'allow',
+    });
+    expect(missingWorkspace.statusCode).toBe(400);
+
+    const unknownWorkspace = await post('/api/planner/tool-approvals', {
+      scope: 'workspace',
+      workspaceId: 'does-not-exist',
+      toolName: 'mkdir',
+      decision: 'allow',
+    });
+    expect(unknownWorkspace.statusCode).toBe(404);
+  });
+
+  it('setting a decision twice for the same scope/tool replaces it, not duplicates it', async () => {
+    await post('/api/planner/tool-approvals', { scope: 'global', toolName: 'rmdir', decision: 'allow' });
+    await post('/api/planner/tool-approvals', { scope: 'global', toolName: 'rmdir', decision: 'deny' });
+    const list = (await get('/api/planner/tool-approvals')).json().approvals;
+    expect(list).toHaveLength(1);
+    expect(list[0].decision).toBe('deny');
+  });
+
+  it('404s deleting an unknown remembered decision', async () => {
+    const res = await del('/api/planner/tool-approvals/does-not-exist');
+    expect(res.statusCode).toBe(404);
+  });
 });

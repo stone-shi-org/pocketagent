@@ -226,3 +226,49 @@ export const ResolvePlannerApprovalRequest = z.object({
   decision: PlannerToolApprovalChoice,
 });
 export type ResolvePlannerApprovalRequest = z.infer<typeof ResolvePlannerApprovalRequest>;
+
+/**
+ * PA-6, phase 5: the catalog for a settings page, so "which tool is allowed
+ * globally and each workspace" has something to list. `readOnly` tells the
+ * editor which tools never pause for approval at all (phase 3) versus which
+ * ones a remembered decision or yolo mode actually affects.
+ */
+export const PlannerToolInfo = z.object({
+  name: z.string(),
+  description: z.string(),
+  readOnly: z.boolean(),
+});
+export type PlannerToolInfo = z.infer<typeof PlannerToolInfo>;
+
+export const PlannerToolListResponse = z.object({ tools: z.array(PlannerToolInfo) });
+export type PlannerToolListResponse = z.infer<typeof PlannerToolListResponse>;
+
+/**
+ * A pre-configured (rather than chat-triggered) remembered decision — the
+ * same `planner_tool_approvals` row the chat's own "remember" buttons write,
+ * surfaced here so a settings page can list, add, and revoke them without
+ * needing a live chat to trigger a pause first.
+ */
+export const PlannerToolApprovalRow = z.object({
+  id: z.string(),
+  scope: z.enum(['global', 'workspace']),
+  workspaceId: z.string().nullable(),
+  toolName: z.string(),
+  decision: z.enum(['allow', 'deny']),
+  createdAt: z.number().int(),
+});
+export type PlannerToolApprovalRow = z.infer<typeof PlannerToolApprovalRow>;
+
+export const PlannerToolApprovalListResponse = z.object({
+  approvals: z.array(PlannerToolApprovalRow),
+});
+export type PlannerToolApprovalListResponse = z.infer<typeof PlannerToolApprovalListResponse>;
+
+/** `workspaceId` is required (and must name a real workspace) when `scope` is `'workspace'`. */
+export const SetPlannerToolApprovalRequest = z.object({
+  scope: z.enum(['global', 'workspace']),
+  workspaceId: z.string().optional(),
+  toolName: z.string().min(1),
+  decision: z.enum(['allow', 'deny']),
+});
+export type SetPlannerToolApprovalRequest = z.infer<typeof SetPlannerToolApprovalRequest>;

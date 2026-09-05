@@ -503,4 +503,59 @@ describe('planner chat routes over HTTP', () => {
     });
     expect(res.statusCode).toBe(404);
   });
+
+  // ---- PA-6 phase 5: yolo mode ------------------------------------------
+
+  it('yolo mode runs a mutating tool immediately, with no pause', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'yolo-dir' }))
+      .mockResolvedValueOnce(fakeCompletionResponse('Done, no questions asked.'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const turn = await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'go' });
+    expect(turn.json().turn).toMatchObject({
+      status: 'completed',
+      assistantEntry: { content: 'Done, no questions asked.' },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('yolo mode does not remember anything — turning it off asks again', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'yolo-dir-1' }))
+      .mockResolvedValueOnce(fakeCompletionResponse('Done once.'))
+      .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'yolo-dir-2' }));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+    await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'go' });
+
+    await patch(t, '/api/planner/settings', { yoloEnabled: false });
+    const secondChat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+    const secondTurn = await post(t, `/api/planner/chats/${secondChat.id}/messages`, { content: 'go again' });
+    expect(secondTurn.json().turn.status).toBe('approval_required');
+  });
+
+  it('yolo mode overrides even a remembered deny', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'denied-then-yolo' }))
+      .mockResolvedValueOnce(fakeCompletionResponse('Denied as expected.'))
+      .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'denied-then-yolo-2' }))
+      .mockResolvedValueOnce(fakeCompletionResponse('Ran anyway.'));
+    const { chat, turn } = await mkdirPending(fetchImpl);
+    await post(t, `/api/planner/chats/${chat.id}/approvals/${turn.turn.approvalId}`, { decision: 'deny' });
+
+    // Nothing was remembered by a plain 'deny' (only allow_workspace/allow_global
+    // persist), so pre-configure a global deny via the settings surface instead.
+    await post(t, '/api/planner/tool-approvals', { scope: 'global', toolName: 'mkdir', decision: 'deny' });
+    await patch(t, '/api/planner/settings', { yoloEnabled: true });
+
+    const secondTurn = await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'try again' });
+    expect(secondTurn.json().turn).toMatchObject({ status: 'completed', assistantEntry: { content: 'Ran anyway.' } });
+  });
 });

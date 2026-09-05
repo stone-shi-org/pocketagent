@@ -291,6 +291,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     sessions,
     worktrees,
     historyDeps: { sessions, conversations, agyTranscripts, piTranscripts },
+    shell: config.shell,
     logger: app.log,
     ...(options.plannerLlmFetch ? { llmFetch: options.plannerLlmFetch } : {}),
   });

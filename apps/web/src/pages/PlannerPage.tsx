@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { PlannerChat, PlannerModel, PlannerSettingsDto, PlannerWorkspace } from '@pocketagent/protocol';
+import type {
+  PlannerChat,
+  PlannerModel,
+  PlannerSettingsDto,
+  PlannerToolApprovalRow,
+  PlannerToolInfo,
+  PlannerWorkspace,
+} from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { formatRelative } from '../components/StatusBadge.js';
@@ -12,17 +19,19 @@ interface Props {
 }
 
 /**
- * PA-6, phase 2 (chat core): the planner's chat list, plus an inline LLM
- * endpoint / model setup so the feature is actually usable end to end
- * without a `curl`. A proper Settings-page section, and a chat page reusing
- * `Transcript`/`ApprovalSheet` once live streaming exists, are later phases
- * — see PA-6.
+ * PA-6: the planner's chat list, plus an inline LLM endpoint / model setup
+ * and tool-safety controls (phase 5) so the feature is actually usable end
+ * to end without a `curl`. A proper Settings-page section, and a chat page
+ * reusing `Transcript`/`ApprovalSheet` once live streaming exists, are later
+ * refinements — see PA-6.
  */
 export function PlannerPage({ onOpenChat, onApiError, onBack }: Props): JSX.Element {
   const [workspaces, setWorkspaces] = useState<PlannerWorkspace[] | null>(null);
   const [models, setModels] = useState<PlannerModel[] | null>(null);
   const [chats, setChats] = useState<PlannerChat[] | null>(null);
   const [settings, setSettings] = useState<PlannerSettingsDto | null>(null);
+  const [tools, setTools] = useState<PlannerToolInfo[]>([]);
+  const [approvals, setApprovals] = useState<PlannerToolApprovalRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -31,20 +40,28 @@ export function PlannerPage({ onOpenChat, onApiError, onBack }: Props): JSX.Elem
   const [revealedApiKey, setRevealedApiKey] = useState<string | null>(null);
   const [newModelId, setNewModelId] = useState('');
   const [newModelLabel, setNewModelLabel] = useState('');
+  const [newApprovalScope, setNewApprovalScope] = useState<'global' | 'workspace'>('global');
+  const [newApprovalWorkspaceId, setNewApprovalWorkspaceId] = useState('');
+  const [newApprovalTool, setNewApprovalTool] = useState('');
+  const [newApprovalDecision, setNewApprovalDecision] = useState<'allow' | 'deny'>('deny');
 
   const load = useCallback(async () => {
     try {
-      const [ws, mo, ch, se] = await Promise.all([
+      const [ws, mo, ch, se, to, ap] = await Promise.all([
         api.listPlannerWorkspaces(),
         api.listPlannerModels(),
         api.listPlannerChats(),
         api.getPlannerSettings(),
+        api.listPlannerTools(),
+        api.listPlannerToolApprovals(),
       ]);
       setWorkspaces(ws.workspaces);
       setModels(mo.models);
       setChats(ch.chats);
       setSettings(se);
       setBaseUrlInput(se.baseUrl ?? '');
+      setTools(to.tools);
+      setApprovals(ap.approvals);
       setError(null);
     } catch (err) {
       onApiError(err);
@@ -114,6 +131,31 @@ export function PlannerPage({ onOpenChat, onApiError, onBack }: Props): JSX.Elem
   const removeChat = (id: string): void => {
     void withBusy(() => api.deletePlannerChat(id));
   };
+
+  const setYolo = (yoloEnabled: boolean): void => {
+    void withBusy(() => api.updatePlannerSettings({ yoloEnabled }));
+  };
+
+  const addApproval = (): void => {
+    if (!newApprovalTool) return;
+    if (newApprovalScope === 'workspace' && !newApprovalWorkspaceId) return;
+    void withBusy(async () => {
+      await api.setPlannerToolApproval({
+        scope: newApprovalScope,
+        toolName: newApprovalTool,
+        decision: newApprovalDecision,
+        ...(newApprovalScope === 'workspace' ? { workspaceId: newApprovalWorkspaceId } : {}),
+      });
+      setNewApprovalTool('');
+    });
+  };
+
+  const removeApproval = (id: string): void => {
+    void withBusy(() => api.deletePlannerToolApproval(id));
+  };
+
+  const workspaceName = (id: string | null): string =>
+    (id && workspaces?.find((w) => w.id === id)?.name) || (id ? '(deleted workspace)' : '');
 
   return (
     <div className="planner-page">
@@ -229,6 +271,88 @@ export function PlannerPage({ onOpenChat, onApiError, onBack }: Props): JSX.Elem
             onChange={(e) => setNewModelLabel(e.target.value)}
           />
           <button type="button" className="planner-btn" disabled={busy} onClick={addModel}>
+            <Icon name="plus" size={14} /> Add
+          </button>
+        </div>
+      </div>
+
+      <div className="planner-section">
+        <h3>Tool safety</h3>
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          Read-only tools (listing workspaces/sessions, reading files/output) never ask. Tools that
+          change something — sending an instruction, writing files, running a command — ask every
+          time unless remembered below, or unless yolo mode is on.
+        </p>
+
+        <label className="planner-inline" style={{ marginBottom: 10 }}>
+          <input
+            type="checkbox"
+            checked={settings?.yoloEnabled ?? false}
+            onChange={(e) => setYolo(e.target.checked)}
+          />
+          <span>
+            <strong>Yolo mode</strong> — skip approval for every tool call, always. This bypasses the
+            safety net entirely; only turn it on if you mean it.
+          </span>
+        </label>
+        {settings?.yoloEnabled && (
+          <div className="error-box" role="alert">
+            Yolo mode is ON. Every mutating tool call runs immediately, with no approval and nothing
+            remembered.
+          </div>
+        )}
+
+        <h3 style={{ marginTop: 14 }}>Remembered decisions</h3>
+        {approvals.length === 0 && (
+          <p className="planner-row-meta">Nothing remembered yet — decisions made in a chat, or added here, show up in this list.</p>
+        )}
+        {approvals.map((a) => (
+          <div key={a.id} className="planner-model-row">
+            <span>
+              <strong>{a.decision}</strong> {a.toolName} —{' '}
+              {a.scope === 'global' ? 'globally' : `workspace: ${workspaceName(a.workspaceId)}`}
+            </span>
+            <button
+              type="button"
+              className="planner-btn danger"
+              disabled={busy}
+              onClick={() => removeApproval(a.id)}
+              aria-label="Forget this decision"
+            >
+              <Icon name="trash" size={14} />
+            </button>
+          </div>
+        ))}
+        <div className="planner-inline" style={{ marginTop: 10, flexWrap: 'wrap' }}>
+          <select value={newApprovalScope} onChange={(e) => setNewApprovalScope(e.target.value as 'global' | 'workspace')}>
+            <option value="global">Globally</option>
+            <option value="workspace">One workspace</option>
+          </select>
+          {newApprovalScope === 'workspace' && (
+            <select value={newApprovalWorkspaceId} onChange={(e) => setNewApprovalWorkspaceId(e.target.value)}>
+              <option value="">Select a workspace…</option>
+              {workspaces?.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
+            </select>
+          )}
+          <select value={newApprovalTool} onChange={(e) => setNewApprovalTool(e.target.value)}>
+            <option value="">Select a tool…</option>
+            {tools
+              .filter((t) => !t.readOnly)
+              .map((t) => (
+                <option key={t.name} value={t.name}>
+                  {t.name}
+                </option>
+              ))}
+          </select>
+          <select value={newApprovalDecision} onChange={(e) => setNewApprovalDecision(e.target.value as 'allow' | 'deny')}>
+            <option value="deny">Always deny</option>
+            <option value="allow">Always allow</option>
+          </select>
+          <button type="button" className="planner-btn" disabled={busy} onClick={addApproval}>
             <Icon name="plus" size={14} /> Add
           </button>
         </div>

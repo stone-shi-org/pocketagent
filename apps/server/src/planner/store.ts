@@ -301,3 +301,45 @@ export function writePlannerToolApproval(
     createdAt: Date.now(),
   });
 }
+
+export interface PlannerToolApprovalRow {
+  id: string;
+  scope: PlannerApprovalScope;
+  workspaceId: string | null;
+  toolName: string;
+  decision: PlannerApprovalDecision;
+  createdAt: number;
+}
+
+/**
+ * Every remembered decision, for a settings page to list/edit — the "which
+ * tool is allowed globally and each workspace" surface, expressed as
+ * ordinary rows in the same table the chat's own approval card writes to
+ * (PA-6 phase 4/5): pre-configuring a decision here and a human choosing
+ * "remember" mid-chat are the same act, just triggered from two different
+ * places.
+ */
+export function readPlannerToolApprovals(db: Db): PlannerToolApprovalRow[] {
+  const rows = db
+    .prepare('SELECT * FROM planner_tool_approvals ORDER BY created_at DESC')
+    .all() as {
+    id: string;
+    scope: PlannerApprovalScope;
+    workspace_id: string | null;
+    tool_name: string;
+    decision: PlannerApprovalDecision;
+    created_at: number;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    scope: r.scope,
+    workspaceId: r.workspace_id,
+    toolName: r.tool_name,
+    decision: r.decision,
+    createdAt: r.created_at,
+  }));
+}
+
+export function deletePlannerToolApproval(db: Db, id: string): boolean {
+  return db.prepare('DELETE FROM planner_tool_approvals WHERE id = ?').run(id).changes > 0;
+}

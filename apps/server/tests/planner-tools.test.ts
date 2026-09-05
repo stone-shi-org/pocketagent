@@ -29,18 +29,19 @@ function depsFor(t: TestApp): PlannerToolDeps {
     sessions,
     worktrees,
     historyDeps: { sessions, conversations, agyTranscripts, piTranscripts },
+    shell: t.context.config.shell,
   };
 }
 
 describe('PLANNER_TOOLS catalog', () => {
-  it('marks exactly the read/write tools read-only or not, matching PA-6 phases 3 and 4', () => {
+  it('marks exactly the read/write tools read-only or not, matching PA-6 phases 3-5', () => {
     const readOnlyNames = PLANNER_TOOLS.filter((t) => t.readOnly).map((t) => t.name).sort();
     const mutatingNames = PLANNER_TOOLS.filter((t) => !t.readOnly).map((t) => t.name).sort();
     expect(readOnlyNames).toEqual(
       ['list_sessions', 'list_workspaces', 'read_file', 'read_session_output'].sort(),
     );
     expect(mutatingNames).toEqual(
-      ['delete_worktree', 'mkdir', 'rmdir', 'send_instruction', 'write_file'].sort(),
+      ['delete_worktree', 'exec_command', 'mkdir', 'rmdir', 'send_instruction', 'write_file'].sort(),
     );
   });
 
@@ -435,5 +436,73 @@ describe('delete_worktree', () => {
     const tool = findPlannerTool('delete_worktree')!;
     const result = await tool.execute(depsFor(t), { path: t.projectDir });
     expect(result).toMatch(/Could not remove worktree/);
+  });
+});
+
+describe('exec_command', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('captures stdout and reports the exit code', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('exec_command')!;
+    const result = await tool.execute(depsFor(t), { cwd: t.projectDir, command: 'echo hello' });
+    expect(result).toContain('exit code 0');
+    expect(result).toContain('hello');
+  });
+
+  it('captures stderr and a non-zero exit code', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('exec_command')!;
+    const result = await tool.execute(depsFor(t), {
+      cwd: t.projectDir,
+      command: 'echo oops >&2; exit 3',
+    });
+    expect(result).toContain('exit code 3');
+    expect(result).toContain('oops');
+  });
+
+  it('runs with the cwd it was given, not the server process cwd', async () => {
+    t = await createTestApp();
+    await fs.writeFile(path.join(t.projectDir, 'marker.txt'), 'x');
+    const tool = findPlannerTool('exec_command')!;
+    const result = await tool.execute(depsFor(t), { cwd: t.projectDir, command: 'ls' });
+    expect(result).toContain('marker.txt');
+  });
+
+  it('strips POCKETAGENT_ environment variables from the child', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('exec_command')!;
+    const result = await tool.execute(depsFor(t), {
+      cwd: t.projectDir,
+      command: 'env | grep -c POCKETAGENT_ || true',
+    });
+    expect(result).toContain('exit code 0');
+    expect(result).toMatch(/(^|\n)0\n/);
+  });
+
+  it('reports empty command without running anything', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('exec_command')!;
+    const result = await tool.execute(depsFor(t), { cwd: t.projectDir, command: '   ' });
+    expect(result).toMatch(/No command provided/);
+  });
+
+  it('refuses a cwd outside every workspace', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('exec_command')!;
+    const result = await tool.execute(depsFor(t), { cwd: '/etc', command: 'echo hi' });
+    expect(result).toMatch(/outside every project workspace/);
+  });
+
+  it('refuses a cwd that is not a directory', async () => {
+    t = await createTestApp();
+    const target = path.join(t.projectDir, 'file.txt');
+    await fs.writeFile(target, 'x');
+    const tool = findPlannerTool('exec_command')!;
+    const result = await tool.execute(depsFor(t), { cwd: target, command: 'echo hi' });
+    expect(result).toMatch(/is not a directory/);
   });
 });

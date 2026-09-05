@@ -6,6 +6,7 @@ import {
   CreatePlannerWorkspaceRequest,
   PlannerSendMessageRequest,
   ResolvePlannerApprovalRequest,
+  SetPlannerToolApprovalRequest,
   UpdatePlannerChatRequest,
   UpdatePlannerSettingsRequest,
   type PlannerApiKeyRevealResponse,
@@ -14,20 +15,27 @@ import {
   type PlannerModelListResponse,
   type PlannerSendMessageResponse,
   type PlannerSettingsDto,
+  type PlannerToolApprovalListResponse,
+  type PlannerToolApprovalRow,
+  type PlannerToolListResponse,
   type PlannerWorkspaceListResponse,
 } from '@pocketagent/protocol';
 import { PlannerWorkspaceError } from '../planner/workspaces.js';
 import { PlannerChatError } from '../planner/chats.js';
 import { PlannerLlmError } from '../planner/llm-client.js';
+import { PLANNER_TOOLS } from '../planner/tools.js';
 import {
   deletePlannerModel,
+  deletePlannerToolApproval,
   insertPlannerModel,
   nextPlannerModelSortOrder,
   readPlannerModels,
   readPlannerSettings,
+  readPlannerToolApprovals,
   revealPlannerApiKey,
   writePlannerApiKey,
   writePlannerBaseUrl,
+  writePlannerToolApproval,
   writePlannerYoloEnabled,
 } from '../planner/store.js';
 
@@ -174,6 +182,58 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       return noStore(reply).send(response);
     },
   );
+
+  /** The catalog for a settings page — see `PlannerToolInfo`'s doc comment. */
+  app.get('/api/planner/tools', async () => {
+    const response: PlannerToolListResponse = {
+      tools: PLANNER_TOOLS.map((t) => ({ name: t.name, description: t.description, readOnly: t.readOnly })),
+    };
+    return response;
+  });
+
+  app.get('/api/planner/tool-approvals', async () => {
+    const response: PlannerToolApprovalListResponse = {
+      approvals: readPlannerToolApprovals(app.pocket.db),
+    };
+    return response;
+  });
+
+  /**
+   * Pre-configure a remembered decision from the settings page — the same
+   * row the chat's own approval card writes via "remember", just triggered
+   * without needing a live chat to pause first first. `scope: 'workspace'`
+   * validates `workspaceId` against the real registry, same as every other
+   * route that accepts one.
+   */
+  app.post('/api/planner/tool-approvals', async (request, reply) => {
+    const parsed = SetPlannerToolApprovalRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    const { scope, toolName, decision } = parsed.data;
+    let workspaceId: string | null = null;
+    if (scope === 'workspace') {
+      if (!parsed.data.workspaceId) {
+        return badRequest(reply, 'workspaceId is required when scope is "workspace".');
+      }
+      if (!app.pocket.plannerWorkspaces.get(parsed.data.workspaceId)) {
+        return notFound(reply, 'Planner workspace not found.');
+      }
+      workspaceId = parsed.data.workspaceId;
+    }
+    writePlannerToolApproval(app.pocket.db, scope, workspaceId, toolName, decision);
+    const row = readPlannerToolApprovals(app.pocket.db).find(
+      (r) => r.scope === scope && r.workspaceId === workspaceId && r.toolName === toolName,
+    ) as PlannerToolApprovalRow;
+    return reply.code(201).send(row);
+  });
+
+  app.delete('/api/planner/tool-approvals/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const removed = deletePlannerToolApproval(app.pocket.db, id);
+    if (!removed) return notFound(reply, 'No such remembered decision.');
+    return reply.code(204).send();
+  });
 
   app.get('/api/planner/chats', async (request) => {
     const { workspaceId } = request.query as { workspaceId?: string };

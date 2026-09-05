@@ -49,6 +49,10 @@ import type {
   PlannerSendMessageResponse,
   PlannerTurnResult,
   PlannerToolApprovalChoice,
+  PlannerToolListResponse,
+  PlannerToolApprovalListResponse,
+  PlannerToolApprovalRow,
+  SetPlannerToolApprovalRequest,
 } from '@pocketagent/protocol';
 
 export class ApiError extends Error {
@@ -482,4 +486,18 @@ export const api = {
       `/api/planner/chats/${encodeURIComponent(id)}/approvals/${encodeURIComponent(approvalId)}`,
       { method: 'POST', body: JSON.stringify({ decision }) },
     ),
+
+  listPlannerTools: () => request<PlannerToolListResponse>('/api/planner/tools'),
+
+  listPlannerToolApprovals: () =>
+    request<PlannerToolApprovalListResponse>('/api/planner/tool-approvals'),
+
+  setPlannerToolApproval: (body: SetPlannerToolApprovalRequest) =>
+    request<PlannerToolApprovalRow>('/api/planner/tool-approvals', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  deletePlannerToolApproval: (id: string) =>
+    request<void>(`/api/planner/tool-approvals/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 };

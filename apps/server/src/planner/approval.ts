@@ -1,10 +1,10 @@
 import type { Db } from '../db/index.js';
-import { readPlannerToolApproval, writePlannerToolApproval } from './store.js';
+import { readPlannerSettings, readPlannerToolApproval, writePlannerToolApproval } from './store.js';
 
 export type PlannerToolApprovalChoice = 'allow_once' | 'allow_workspace' | 'allow_global' | 'deny';
 
 /**
- * PA-6, phase 4: the planner's mutating-tool approval gate.
+ * PA-6: the planner's mutating-tool approval gate.
  *
  * Deliberately not a live, blocking round-trip like
  * `StructuredSession.requestPermission` — that channel exists because a
@@ -13,7 +13,8 @@ export type PlannerToolApprovalChoice = 'allow_once' | 'allow_workspace' | 'allo
  * comment on why streaming is deferred), so instead of blocking an HTTP
  * request indefinitely, `PlannerChatService` *pauses* the turn and returns an
  * `approval_required` result the moment a mutating tool call has no
- * remembered decision; a separate `POST .../approvals/:id` call resumes it.
+ * remembered decision (phase 4) and yolo mode is off (phase 5); a separate
+ * `POST .../approvals/:id` call resumes it.
  *
  * The base invariant — an unanswered approval never decays into an allow —
  * still holds exactly, just via a different mechanism: nothing runs until
@@ -22,14 +23,29 @@ export type PlannerToolApprovalChoice = 'allow_once' | 'allow_workspace' | 'allo
  * (per tool, per workspace or global) nothing else in this codebase has —
  * every existing approval channel is coarser (see the migration's own doc
  * comment in `db/index.ts`).
+ *
+ * `plannerYoloEnabled` is this feature's fourth documented override of
+ * CLAUDE.md's "never answer a prompt for the user" invariant (after the
+ * global switch, cron's inverted default, and webhooks). Checked live on
+ * every call rather than cached, so flipping it off takes effect on the very
+ * next tool call — the same "read the flag fresh" discipline
+ * `SessionManager.setGlobalSkipPermissions` uses. It short-circuits *before*
+ * the remembered-decision lookup and never writes one: yolo is a standing
+ * operator-level override, not a decision to persist, and switching it back
+ * off must not retroactively look like every tool call while it was on had
+ * been individually approved.
  */
 
-/** Checked before ever pausing a turn. A workspace-scoped row wins over a global one. */
-export function rememberedDecision(
+/**
+ * Checked before ever pausing a turn. Yolo wins outright; otherwise a
+ * workspace-scoped remembered row wins over a global one.
+ */
+export function resolveApprovalStatus(
   db: Db,
   toolName: string,
   workspaceId: string | null,
 ): 'allow' | 'deny' | null {
+  if (readPlannerSettings(db).yoloEnabled) return 'allow';
   if (workspaceId) {
     const scoped = readPlannerToolApproval(db, 'workspace', workspaceId, toolName);
     if (scoped) return scoped;
