@@ -8,13 +8,16 @@ export type PlannerToolApprovalChoice = 'allow_once' | 'allow_workspace' | 'allo
  *
  * Deliberately not a live, blocking round-trip like
  * `StructuredSession.requestPermission` — that channel exists because a
- * WebSocket is already open and can push a question to the browser mid-turn.
- * The planner chat is still request/response (see `llm-client.ts`'s doc
- * comment on why streaming is deferred), so instead of blocking an HTTP
- * request indefinitely, `PlannerChatService` *pauses* the turn and returns an
- * `approval_required` result the moment a mutating tool call has no
- * remembered decision (phase 4) and yolo mode is off (phase 5); a separate
- * `POST .../approvals/:id` call resumes it.
+ * genuinely bidirectional WebSocket is already open and can push a question
+ * to the browser mid-turn and wait, in place, for the answer. The planner's
+ * turn is streamed down to the browser (`PlannerChatService`'s generators),
+ * but only one way — there is no channel back up except a fresh HTTP
+ * request — so instead of holding a connection open, `PlannerChatService`
+ * *pauses* the turn: it yields a `permission_request` event and ends that
+ * leg of the stream the moment a mutating tool call has no remembered
+ * decision (phase 4) and yolo mode is off (phase 5); a separate
+ * `POST .../approvals/:id` call (itself another streamed response) resumes
+ * it.
  *
  * The base invariant — an unanswered approval never decays into an allow —
  * still holds exactly, just via a different mechanism: nothing runs until

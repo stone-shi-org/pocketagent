@@ -38,14 +38,18 @@ export interface PlannerLlmClientOptions {
 /**
  * A thin client for any OpenAI-compatible `/chat/completions` endpoint.
  *
- * Non-streaming: the chat loop needs one full assistant turn (text and/or
- * tool calls) per request, not per-token deltas. `structured-session.ts` only
- * started handling partial SDK messages once a WebSocket existed to deliver
- * them token-by-token to a live renderer — the planner has no such transport
- * yet (see `packages/protocol/src/planner.ts`'s `PlannerTranscriptEntry` doc
- * comment), so building streaming here first would be work with nothing
- * downstream to consume it. `stream: false` keeps this client to one
- * request/response with no SSE parser to get wrong.
+ * Non-streaming: every call to this client always sends `stream: false` and
+ * gets back one full assistant turn (text and/or tool calls), not per-token
+ * deltas — even though the planner's own turn *is* streamed to the browser
+ * now (`PlannerChatService`'s generators, drained by `routes/planner.ts`'s
+ * `streamPlannerEvents`). Those are two different layers: a turn can consist
+ * of several of these round-trips (one per tool-calling iteration), and each
+ * one still resolves in a single piece. Parsing a provider's own SSE format
+ * varies enough between OpenAI-compatible implementations that doing it
+ * blind was judged the highest-risk part of this feature — see
+ * `packages/protocol/src/planner.ts`'s `PlannerChatHistoryResponse` doc
+ * comment for the full reasoning. `stream: false` keeps this client to one
+ * request/response with no upstream SSE parser to get wrong.
  *
  * Uses the platform's native `fetch` rather than a dependency, the same
  * choice `sessions/opencode-server.ts` already made for outbound HTTP in this
