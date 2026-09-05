@@ -17,19 +17,25 @@ import {
  * a `changedFields` filter can never match an issue creation.
  */
 
-const facts = (over: Partial<JiraEventFacts> = {}): JiraEventFacts => ({
-  event: 'jira:issue_updated',
-  eventType: 'issue_generic',
-  issueKey: 'PA-1',
-  projectKey: 'PA',
-  issueType: 'Bug',
-  assignee: 'Grace Hopper',
-  labels: ['agent-ready'],
-  changedFields: ['status'],
-  actor: 'Ada',
-  timestamp: 1_756_000_000_000,
-  ...over,
-});
+const facts = (over: Partial<JiraEventFacts> = {}): JiraEventFacts => {
+  const actor = over.actor !== undefined ? over.actor : 'Ada';
+  const actorNames =
+    over.actorNames !== undefined ? over.actorNames : actor ? [actor] : [];
+  return {
+    event: 'jira:issue_updated',
+    eventType: 'issue_generic',
+    issueKey: 'PA-1',
+    projectKey: 'PA',
+    issueType: 'Bug',
+    assignee: 'Grace Hopper',
+    labels: ['agent-ready'],
+    changedFields: ['status'],
+    actor,
+    actorNames,
+    timestamp: 1_756_000_000_000,
+    ...over,
+  };
+};
 
 describe('parseJiraEvent', () => {
   it('extracts the facts a filter needs', () => {
@@ -37,7 +43,8 @@ describe('parseJiraEvent', () => {
       webhookEvent: 'jira:issue_updated',
       issue_event_type_name: 'issue_generic',
       timestamp: 123,
-      user: { displayName: 'Ada' },
+      user: { displayName: 'Ada Lovelace', name: 'ada', emailAddress: 'ada@example.com' },
+      comment: { author: { displayName: 'Ada Lovelace', name: 'ada' } },
       issue: {
         key: 'PA-42',
         fields: {
@@ -57,6 +64,10 @@ describe('parseJiraEvent', () => {
     expect(r.facts.summary).toBe('Login fails on Safari');
     expect(r.facts.assignee).toBe('Grace Hopper');
     expect(r.facts.changedFields).toEqual(['status', 'assignee']);
+    expect(r.facts.actor).toBe('Ada Lovelace');
+    expect(r.facts.actorNames).toContain('Ada Lovelace');
+    expect(r.facts.actorNames).toContain('ada');
+    expect(r.facts.actorNames).toContain('ada@example.com');
     expect(r.facts.timestamp).toBe(123);
   });
 
@@ -155,17 +166,20 @@ describe('evaluateJiraFilter', () => {
   });
 
   it('excludes a listed actor, case-insensitively — the one block-list field', () => {
-    const bot = facts({ actor: 'Agent Bot' });
+    const bot = facts({ actor: 'Agent Bot', actorNames: ['Agent Bot', 'agent-username', 'bot@example.com'] });
     const no = evaluateJiraFilter({ excludeActors: ['agent bot'] }, bot);
     expect(no.matched).toBe(false);
     expect(no.matched === false && no.reason).toMatch(/Agent Bot is excluded/);
+    // Also matches by username/identifier
+    const noByUsername = evaluateJiraFilter({ excludeActors: ['agent-username'] }, bot);
+    expect(noByUsername.matched).toBe(false);
     expect(evaluateJiraFilter({ excludeActors: ['agent bot'] }, facts()).matched).toBe(true);
   });
 
   it('never excludes a null actor — nothing to compare against', () => {
-    expect(evaluateJiraFilter({ excludeActors: ['Agent Bot'] }, facts({ actor: null })).matched).toBe(
-      true,
-    );
+    expect(
+      evaluateJiraFilter({ excludeActors: ['Agent Bot'] }, facts({ actor: null, actorNames: [] })).matched,
+    ).toBe(true);
   });
 
   it('excludeActors combines with an allow-list: matches the allow-list but still excluded', () => {

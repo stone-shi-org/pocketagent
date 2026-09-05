@@ -27,6 +27,8 @@ export interface JiraEventFacts {
   /** Field names in this event's changelog. Empty for a creation. */
   changedFields: string[];
   actor: string | null;
+  /** All candidate identifiers for the actor (displayName, username, accountId, email, comment author). */
+  actorNames: string[];
   /**
    * Epoch ms from *inside* the signed body, so it cannot be forged without
    * breaking the signature. Null when the payload shape omits it.
@@ -69,6 +71,36 @@ export function parseJiraEvent(payload: unknown): JiraParseResult {
     ? (asRecord(root['changelog'])['items'] as unknown[])
     : [];
 
+  const user = asRecord(root['user']);
+  const comment = asRecord(root['comment']);
+  const commentAuthor = asRecord(comment['author']);
+  const commentUpdateAuthor = asRecord(comment['updateAuthor']);
+
+  const actorCandidates = [
+    str(user['displayName']),
+    str(user['name']),
+    str(user['key']),
+    str(user['emailAddress']),
+    str(user['accountId']),
+    str(commentAuthor['displayName']),
+    str(commentAuthor['name']),
+    str(commentAuthor['key']),
+    str(commentAuthor['emailAddress']),
+    str(commentAuthor['accountId']),
+    str(commentUpdateAuthor['displayName']),
+    str(commentUpdateAuthor['name']),
+    str(commentUpdateAuthor['key']),
+    str(commentUpdateAuthor['accountId']),
+  ].filter((s) => s.trim() !== '');
+
+  const actorNames = Array.from(new Set(actorCandidates));
+  const primaryActor =
+    str(user['displayName']) ||
+    str(user['name']) ||
+    str(commentAuthor['displayName']) ||
+    str(commentAuthor['name']) ||
+    null;
+
   return {
     ok: true,
     facts: {
@@ -91,7 +123,8 @@ export function parseJiraEvent(payload: unknown): JiraParseResult {
           return str(item['field']) || str(item['fieldId']);
         })
         .filter((f) => f !== ''),
-      actor: str(asRecord(root['user'])['displayName']) || null,
+      actor: primaryActor,
+      actorNames,
       timestamp: typeof root['timestamp'] === 'number' ? root['timestamp'] : null,
     },
   };
@@ -191,12 +224,21 @@ export function evaluateJiraFilter(
   // The one block-list. Checked last on purpose: it is a veto rather than a
   // requirement, and reads that way — every check above asks "does this
   // qualify", this one asks "is this specifically excluded regardless".
-  if (nonEmpty(filter.excludeActors) && facts.actor !== null) {
-    if (filter.excludeActors.some((a) => eq(a, facts.actor))) {
-      return {
-        matched: false,
-        reason: `Actor ${facts.actor} is excluded.`,
-      };
+  if (nonEmpty(filter.excludeActors)) {
+    const candidates = [
+      ...(Array.isArray(facts.actorNames) ? facts.actorNames : []),
+      ...(facts.actor !== null ? [facts.actor] : []),
+    ].filter((s) => s.trim() !== '');
+    if (candidates.length > 0) {
+      const hit = filter.excludeActors.some((want) =>
+        candidates.some((got) => eq(want, got)),
+      );
+      if (hit) {
+        return {
+          matched: false,
+          reason: `Actor ${facts.actor ?? candidates[0]} is excluded.`,
+        };
+      }
     }
   }
 
