@@ -37,6 +37,8 @@ import type {
   PlannerModel,
   PlannerModelListResponse,
   CreatePlannerModelRequest,
+  DiscoverPlannerModelsResponse,
+  TestPlannerModelResponse,
   PlannerSettingsDto,
   UpdatePlannerSettingsRequest,
   PlannerApiKeyRevealResponse,
@@ -507,6 +509,11 @@ export const api = {
 
   deletePlannerModel: (id: string) =>
     request<void>(`/api/planner/models/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  discoverPlannerModels: () => request<DiscoverPlannerModelsResponse>('/api/planner/models/discover'),
+
+  testPlannerModel: (id: string) =>
+    request<TestPlannerModelResponse>(`/api/planner/models/${encodeURIComponent(id)}/test`, { method: 'POST' }),
 
   getPlannerSettings: () => request<PlannerSettingsDto>('/api/planner/settings'),
 

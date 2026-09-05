@@ -5,6 +5,7 @@ import type {
   PlannerToolApprovalRow,
   PlannerToolInfo,
   PlannerWorkspace,
+  TestPlannerModelResponse,
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
@@ -45,6 +46,10 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
   const [renamingAgent, setRenamingAgent] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [newAgentName, setNewAgentName] = useState('');
+  const [discovering, setDiscovering] = useState(false);
+  const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
+  const [testingAll, setTestingAll] = useState(false);
+  const [testResults, setTestResults] = useState<Record<string, TestPlannerModelResponse | 'testing'>>({});
 
   const load = useCallback(async () => {
     try {
@@ -118,6 +123,68 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
 
   const removeModel = (id: string): void => {
     void withBusy(() => api.deletePlannerModel(id));
+  };
+
+  /** Queries the configured endpoint's own `/models` and adds a row (label =
+      id) for every one not already in the catalog — never touches or removes
+      an existing row, so a model renamed locally never gets clobbered by
+      re-running this. */
+  const discoverModels = (): void => {
+    setDiscovering(true);
+    setDiscoverMessage(null);
+    void (async () => {
+      try {
+        const { modelIds } = await api.discoverPlannerModels();
+        const existingIds = new Set((models ?? []).map((m) => m.modelId));
+        const toAdd = modelIds.filter((id) => !existingIds.has(id));
+        for (const modelId of toAdd) {
+          await api.createPlannerModel({ modelId, label: modelId });
+        }
+        await load();
+        setDiscoverMessage(
+          toAdd.length > 0
+            ? `Added ${toAdd.length} new model${toAdd.length === 1 ? '' : 's'} (${modelIds.length} found, ${
+                modelIds.length - toAdd.length
+              } already configured).`
+            : `No new models — all ${modelIds.length} found ${modelIds.length === 1 ? 'is' : 'are'} already configured.`,
+        );
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not query models from the endpoint.');
+      } finally {
+        setDiscovering(false);
+      }
+    })();
+  };
+
+  /** Shared by the per-row "Test" button and "Test all" — a promise so
+      "test all" can run every model concurrently and await the lot. */
+  const runModelTest = async (id: string): Promise<void> => {
+    setTestResults((prev) => ({ ...prev, [id]: 'testing' }));
+    try {
+      const result = await api.testPlannerModel(id);
+      setTestResults((prev) => ({ ...prev, [id]: result }));
+    } catch (err) {
+      onApiError(err);
+      setTestResults((prev) => ({
+        ...prev,
+        [id]: {
+          ok: false,
+          message: err instanceof ApiError ? err.message : 'Test failed.',
+          latencyMs: 0,
+        },
+      }));
+    }
+  };
+
+  const testModel = (id: string): void => {
+    void runModelTest(id);
+  };
+
+  const testAllModels = (): void => {
+    if (!models || models.length === 0) return;
+    setTestingAll(true);
+    void Promise.all(models.map((m) => runModelTest(m.id))).finally(() => setTestingAll(false));
   };
 
   const startRenameAgent = (ws: PlannerWorkspace): void => {
@@ -249,28 +316,70 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
       </div>
 
       <div className="planner-section">
-        <h3>Models</h3>
-        {models?.length === 0 && (
-          <p className="planner-row-meta">
-            No models configured yet — add at least one to start a chat.
-          </p>
-        )}
-        {models?.map((m) => (
-          <div key={m.id} className="planner-model-row">
-            <span>
-              {m.label} <span className="planner-row-meta">({m.modelId})</span>
-            </span>
+        <div className="planner-section-header">
+          <h3>Models</h3>
+          <div className="planner-section-actions">
             <button
               type="button"
-              className="planner-btn danger"
-              disabled={busy}
-              onClick={() => removeModel(m.id)}
-              aria-label={`Remove ${m.label}`}
+              className="planner-btn"
+              disabled={discovering || !settings?.baseUrl}
+              onClick={discoverModels}
+              title={settings?.baseUrl ? undefined : 'Set an endpoint URL first.'}
             >
-              <Icon name="trash" size={14} />
+              {discovering ? 'Querying…' : 'Query models'}
+            </button>
+            <button
+              type="button"
+              className="planner-btn"
+              disabled={testingAll || !models || models.length === 0}
+              onClick={testAllModels}
+            >
+              {testingAll ? 'Testing…' : 'Test all'}
             </button>
           </div>
-        ))}
+        </div>
+        {discoverMessage && <p className="planner-row-meta">{discoverMessage}</p>}
+        {models?.length === 0 && (
+          <p className="planner-row-meta">
+            No models configured yet — add one below, or query the endpoint above.
+          </p>
+        )}
+        {models?.map((m) => {
+          const result = testResults[m.id];
+          return (
+            <div key={m.id} className="planner-model-row">
+              <span>
+                {m.label} <span className="planner-row-meta">({m.modelId})</span>
+                {result === 'testing' && <span className="planner-row-meta"> — testing…</span>}
+                {result && result !== 'testing' && (
+                  <span className={result.ok ? 'planner-test-ok' : 'planner-test-fail'}>
+                    {' '}
+                    — {result.ok ? `OK (${result.latencyMs}ms)` : 'Failed'}: {result.message}
+                  </span>
+                )}
+              </span>
+              <div className="planner-row-actions">
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={result === 'testing' || testingAll}
+                  onClick={() => testModel(m.id)}
+                >
+                  Test
+                </button>
+                <button
+                  type="button"
+                  className="planner-btn danger"
+                  disabled={busy}
+                  onClick={() => removeModel(m.id)}
+                  aria-label={`Remove ${m.label}`}
+                >
+                  <Icon name="trash" size={14} />
+                </button>
+              </div>
+            </div>
+          );
+        })}
         <div className="planner-inline" style={{ marginTop: 10 }}>
           <input
             type="text"

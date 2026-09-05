@@ -166,6 +166,59 @@ export class PlannerChatService {
     return readTranscriptEvents(this.workspacePathFor(chat), chat.id);
   }
 
+  /** Builds a client against the one configured provider — every caller that
+      needs to talk to it (the turn loop, model discovery, the test button)
+      shares this so `llmFetch` injection and the base-url/api-key lookup
+      never drift between them. Throws `not_configured` if no endpoint is
+      set, same as `resolveModelId`. */
+  private llmClient(): PlannerLlmClient {
+    const settings = readPlannerSettings(this.opts.db);
+    if (!settings.baseUrl) {
+      throw new PlannerChatError('Planner LLM endpoint is not configured.', 'not_configured');
+    }
+    return new PlannerLlmClient({
+      baseUrl: settings.baseUrl,
+      apiKey: revealPlannerApiKey(this.opts.db),
+      ...(this.opts.llmFetch ? { fetchImpl: this.opts.llmFetch } : {}),
+    });
+  }
+
+  /** For the settings page's "query models" button — see `listModels`'s doc
+      comment. Never touches the model catalog itself; the caller decides
+      what to do with the ids. */
+  async discoverModels(): Promise<string[]> {
+    return this.llmClient().listModels();
+  }
+
+  /**
+   * For the settings page's "test" / "test all" buttons: round-trips one
+   * minimal prompt through `modelId` to confirm the endpoint and model id
+   * actually work. Deliberately swallows `PlannerLlmError` into `ok: false`
+   * rather than throwing — a failed test is the expected, common outcome of
+   * clicking this button (a typo'd model id, a rate limit), not a server
+   * error, so the route can always answer 200 with a verdict.
+   */
+  async testModel(modelId: string): Promise<{ ok: boolean; message: string; latencyMs: number }> {
+    const client = this.llmClient();
+    const startedAt = Date.now();
+    try {
+      let content: string | null = null;
+      for await (const chunk of client.streamComplete(modelId, [
+        { role: 'user', content: 'Reply with exactly one word: ok' },
+      ])) {
+        if (chunk.type === 'done') content = chunk.content;
+      }
+      return {
+        ok: true,
+        message: content ? content.trim().slice(0, 200) : '(empty reply)',
+        latencyMs: Date.now() - startedAt,
+      };
+    } catch (err) {
+      const message = err instanceof PlannerLlmError ? err.message : (err as Error).message;
+      return { ok: false, message, latencyMs: Date.now() - startedAt };
+    }
+  }
+
   /**
    * Start a turn: append+yield `user_prompt`, then drive the loop until it
    * finishes (`turn_complete`) or pauses on an unapproved mutating tool call

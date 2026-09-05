@@ -5126,6 +5126,27 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   margin: 0 0 10px;
 }
 
+/* A section header with actions on the right (e.g. Models' "Query models" /
+   "Test all") — its own class rather than reusing `.planner-inline`, which
+   is written for form rows, not a heading + button pair. */
+.planner-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.planner-section-header h3 {
+  margin: 0;
+}
+
+.planner-section-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .planner-field {
   display: flex;
   flex-direction: column;
@@ -5221,6 +5242,25 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
 
 .planner-model-row:last-child {
   border-bottom: none;
+}
+
+/* Groups a row's action buttons (Test, Remove) so `.planner-model-row`'s own
+   `justify-content: space-between` spaces the label away from the group as
+   one unit, instead of spreading all three children evenly and pushing Test
+   away from Remove. */
+.planner-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.planner-test-ok {
+  color: var(--ok);
+}
+
+.planner-test-fail {
+  color: var(--danger);
 }
 
 .planner-empty {

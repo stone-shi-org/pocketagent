@@ -137,6 +137,36 @@ describe('PlannerLlmClient', () => {
     await collect(client.streamComplete('m', [], [{ type: 'function', function: { name: 'x' } }]));
     expect(JSON.parse(fetchImpl.mock.calls[1]![1].body as string).tools).toHaveLength(1);
   });
+
+  it('listModels GETs /models and returns the ids from the "data" array', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ object: 'list', data: [{ id: 'gpt-4o' }, { id: 'gpt-4o-mini' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com/v1', apiKey: 'sk-test', fetchImpl });
+    const ids = await client.listModels();
+    expect(ids).toEqual(['gpt-4o', 'gpt-4o-mini']);
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(url).toBe('https://api.example.com/v1/models');
+    expect(init.method).toBe('GET');
+    expect((init.headers as Record<string, string>).authorization).toBe('Bearer sk-test');
+  });
+
+  it('listModels throws PlannerLlmError when the response has no "data" array', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ object: 'list' }), { status: 200 }),
+    );
+    const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
+    await expect(client.listModels()).rejects.toThrow(/no "data" array/);
+  });
+
+  it('listModels throws PlannerLlmError on a non-2xx response', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response('nope', { status: 401 }));
+    const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
+    await expect(client.listModels()).rejects.toMatchObject({ statusCode: 401 });
+  });
 });
 
 // ---- HTTP surface -----------------------------------------------------------
@@ -652,5 +682,88 @@ describe('planner chat routes over HTTP', () => {
 
     const { events: secondEvents } = await sendMessage(t, chat.id, 'try again');
     expect(findEvent(secondEvents, 'text')?.text).toBe('Ran anyway.');
+  });
+
+  // ---- PA-6 round 4: model discovery + test buttons -------------------------
+
+  function fakeModelsListResponse(ids: string[]): Response {
+    return new Response(
+      JSON.stringify({ object: 'list', data: ids.map((id) => ({ id, object: 'model' })) }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }
+
+  it('discovers models from the endpoint without touching the catalog', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() => fakeModelsListResponse(['gpt-4o', 'gpt-4o-mini']));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com/v1' });
+
+    const res = await get(t, '/api/planner/models/discover');
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ modelIds: ['gpt-4o', 'gpt-4o-mini'] });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0]![0]).toBe('https://api.example.com/v1/models');
+    expect(fetchImpl.mock.calls[0]![1].method).toBe('GET');
+
+    // Discovery itself never creates catalog rows — the editor decides that.
+    expect((await get(t, '/api/planner/models')).json().models).toEqual([]);
+  });
+
+  it('409s discovering models before the endpoint is configured', async () => {
+    t = await createTestApp();
+    const res = await get(t, '/api/planner/models/discover');
+    expect(res.statusCode).toBe(409);
+  });
+
+  it('502s discovering models when the endpoint fails', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response('boom', { status: 500 }));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const res = await get(t, '/api/planner/models/discover');
+    expect(res.statusCode).toBe(502);
+  });
+
+  it('tests a model with a minimal round trip, returning ok and a latency', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() => fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const model = (await post(t, '/api/planner/models', { modelId: 'gpt-4o', label: 'Fast' })).json();
+
+    const res = await post(t, `/api/planner/models/${model.id}/test`, undefined);
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body).toMatchObject({ ok: true, message: 'ok' });
+    expect(body.latencyMs).toBeGreaterThanOrEqual(0);
+
+    // Tests the *model id*, not the catalog row id.
+    const sentBody = JSON.parse(fetchImpl.mock.calls[0]![1].body as string);
+    expect(sentBody.model).toBe('gpt-4o');
+  });
+
+  it('a failed test reports ok: false with the endpoint error, not an HTTP failure', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response('nope', { status: 500 }));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const model = (await post(t, '/api/planner/models', { modelId: 'gpt-4o', label: 'Fast' })).json();
+
+    const res = await post(t, `/api/planner/models/${model.id}/test`, undefined);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: false });
+  });
+
+  it('404s testing an unknown model', async () => {
+    t = await createTestApp();
+    const res = await post(t, '/api/planner/models/does-not-exist/test', undefined);
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('409s testing a model before the endpoint is configured', async () => {
+    t = await createTestApp();
+    // No baseUrl configured, but a model row can still exist.
+    const fetchImpl = vi.fn();
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    const model = (await post(t, '/api/planner/models', { modelId: 'gpt-4o', label: 'Fast' })).json();
+    const res = await post(t, `/api/planner/models/${model.id}/test`, undefined);
+    expect(res.statusCode).toBe(409);
   });
 });

@@ -79,6 +79,52 @@ export interface PlannerLlmClientOptions {
 export class PlannerLlmClient {
   constructor(private readonly opts: PlannerLlmClientOptions) {}
 
+  /**
+   * `GET /models`, the standard OpenAI-compatible discovery endpoint —
+   * returns every model id the provider is willing to list, for the settings
+   * page's "query models" button. Unlike `streamComplete`, this is a plain
+   * JSON GET with no streaming to parse.
+   */
+  async listModels(): Promise<string[]> {
+    const fetchImpl = this.opts.fetchImpl ?? fetch;
+    const url = joinUrl(this.opts.baseUrl, '/models');
+
+    let res: Response;
+    try {
+      res = await fetchImpl(url, {
+        method: 'GET',
+        headers: {
+          ...(this.opts.apiKey ? { authorization: `Bearer ${this.opts.apiKey}` } : {}),
+        },
+      });
+    } catch (err) {
+      throw new PlannerLlmError(`Could not reach the planner LLM endpoint: ${(err as Error).message}`);
+    }
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new PlannerLlmError(
+        `Planner LLM endpoint returned ${res.status}: ${body.slice(0, 500)}`,
+        res.status,
+      );
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = await res.json();
+    } catch (err) {
+      throw new PlannerLlmError(`Planner LLM endpoint's /models response was not valid JSON: ${(err as Error).message}`);
+    }
+
+    const data = (parsed as { data?: unknown }).data;
+    if (!Array.isArray(data)) {
+      throw new PlannerLlmError("Planner LLM endpoint's /models response had no \"data\" array.");
+    }
+    return data
+      .map((entry) => (entry && typeof entry === 'object' ? String((entry as { id?: unknown }).id ?? '') : ''))
+      .filter((id) => id.length > 0);
+  }
+
   async *streamComplete(
     model: string,
     messages: PlannerChatMessage[],

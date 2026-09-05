@@ -81,6 +81,35 @@ export const CreatePlannerModelRequest = z.object({
 export type CreatePlannerModelRequest = z.infer<typeof CreatePlannerModelRequest>;
 
 /**
+ * `GET /api/planner/models/discover` queries the configured endpoint's own
+ * `/models` list (the standard OpenAI-compatible discovery endpoint) and
+ * returns the raw model ids — nothing is added to the catalog server-side.
+ * The editor diffs this against the already-configured list and offers to
+ * create rows for whatever is new, the same "explicit action grants it"
+ * pattern `POST /api/workspaces/add` uses for project folders: discovering a
+ * model must never silently change what a chat's picker offers.
+ */
+export const DiscoverPlannerModelsResponse = z.object({
+  modelIds: z.array(z.string()),
+});
+export type DiscoverPlannerModelsResponse = z.infer<typeof DiscoverPlannerModelsResponse>;
+
+/**
+ * `POST /api/planner/models/:id/test` round-trips one minimal prompt through
+ * the model to confirm the endpoint and model id actually work — never
+ * touches a chat's transcript. `ok: false` covers both a transport failure
+ * and a non-2xx response from the provider; `message` carries whichever one
+ * happened (or a short excerpt of the reply, on success) since the editor
+ * only ever needs one line to show next to the model row.
+ */
+export const TestPlannerModelResponse = z.object({
+  ok: z.boolean(),
+  message: z.string(),
+  latencyMs: z.number().int(),
+});
+export type TestPlannerModelResponse = z.infer<typeof TestPlannerModelResponse>;
+
+/**
  * `hasApiKey` mirrors `Webhook.hasToken` / the omission of `secret` from the
  * webhook read DTO: the key is stored in plaintext (HMAC-style verification
  * would be impossible otherwise, and here the key must be replayed to the

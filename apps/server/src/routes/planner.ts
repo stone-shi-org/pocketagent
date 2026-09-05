@@ -11,6 +11,7 @@ import {
   UpdatePlannerChatRequest,
   UpdatePlannerSettingsRequest,
   type AgentEvent,
+  type DiscoverPlannerModelsResponse,
   type PlannerApiKeyRevealResponse,
   type PlannerChatHistoryResponse,
   type PlannerChatListResponse,
@@ -20,6 +21,7 @@ import {
   type PlannerToolApprovalRow,
   type PlannerToolListResponse,
   type PlannerWorkspaceListResponse,
+  type TestPlannerModelResponse,
 } from '@pocketagent/protocol';
 import { PlannerWorkspaceError } from '../planner/workspaces.js';
 import { PlannerChatError } from '../planner/chats.js';
@@ -211,6 +213,31 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const removed = deletePlannerModel(app.pocket.db, id);
     if (!removed) return notFound(reply, 'Model not found.');
     return reply.code(204).send();
+  });
+
+  // A static segment ('discover'), not a param — Fastify routes it distinctly
+  // from `DELETE /:id` above regardless of registration order.
+  app.get('/api/planner/models/discover', async (_request, reply) => {
+    try {
+      const modelIds = await app.pocket.plannerChats.discoverModels();
+      const response: DiscoverPlannerModelsResponse = { modelIds };
+      return noStore(reply).send(response);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  app.post('/api/planner/models/:id/test', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const model = readPlannerModels(app.pocket.db).find((m) => m.id === id);
+    if (!model) return notFound(reply, 'Model not found.');
+    try {
+      const result = await app.pocket.plannerChats.testModel(model.modelId);
+      const response: TestPlannerModelResponse = result;
+      return noStore(reply).send(response);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
   });
 
   app.get('/api/planner/settings', async () => {
