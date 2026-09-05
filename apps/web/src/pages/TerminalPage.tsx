@@ -7,11 +7,9 @@ import { api, ApiError } from '../api/client.js';
 import { TerminalConnection, type ConnectionState } from '../api/ws-client.js';
 import { createTerminal } from '../terminal/create-terminal.js';
 import { MobileKeyBar, ctrlSequence } from '../components/MobileKeyBar.js';
-import { PromptBox } from '../components/PromptBox.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
 import { Icon } from '../components/Icon.js';
-import { takePendingPrompt } from '../agent/pending-prompt.js';
 import { notifyIdle, ensureNotificationPermission } from '../agent/notifications.js';
 import { getTakeOverSizePref, setTakeOverSizePref } from '../agent/adopted-size-prefs.js';
 
@@ -54,8 +52,6 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
   const [notice, setNotice] = useState<string | null>(null);
   const [hints, setHints] = useState<TerminalHintKind[]>([]);
   const [ctrlActive, setCtrlActive] = useState(false);
-  /** The CLI has printed something, so it is far enough up to be typed at. */
-  const [sawOutput, setSawOutput] = useState(false);
   const [fatal, setFatal] = useState<string | null>(null);
   /**
    * An adopted pane shares its grid with whoever else is attached, so we must
@@ -166,11 +162,9 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
           bundle.term.write(data, () => {
             replaying = false;
           });
-          if (data.length > 0) setSawOutput(true);
         },
 
         onOutput: (data) => {
-          setSawOutput(true);
           bundle.term.write(data);
         },
 
@@ -404,13 +398,6 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
     termRef.current?.focus();
   }, []);
 
-  const sendPrompt = useCallback((text: string): boolean => {
-    const conn = connRef.current;
-    if (!conn) return false;
-    // Send the text and the Enter as one message so the CLI sees an atomic line.
-    return conn.sendInput(`${text}\r`);
-  }, []);
-
   const terminate = useCallback(async () => {
     setStopping(true);
     try {
@@ -463,20 +450,6 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
    * false), so claiming a fixed grid then would describe the wrong mode.
    */
   const mirroringAdoptedPane = hasAttached && session?.adopted === true && !takeOverSize;
-
-  // A prompt typed on the composer, delivered once the CLI can receive it.
-  // Unlike a structured session there is no readiness signal here, so this
-  // waits for the process to have produced something before typing at it.
-  useEffect(() => {
-    if (inputDisabled || !sawOutput) return;
-    const queued = takePendingPrompt(sessionId);
-    // A terminal session has no attach button (`supportsImageAttachment` is
-    // never set below), so `queued.image` should never be set here — but if
-    // a prompt composed for a structured chat somehow ends up delivered to a
-    // terminal one, dropping the image silently beats sending raw keystrokes
-    // it can't do anything with.
-    if (queued) sendPrompt(queued.text);
-  }, [inputDisabled, sawOutput, sessionId, sendPrompt]);
 
   return (
     <div className="terminal-page">
@@ -568,8 +541,6 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
         onToggleCtrl={() => setCtrlActive((v) => !v)}
         disabled={inputDisabled}
       />
-
-      <PromptBox sessionId={sessionId} onSend={sendPrompt} disabled={inputDisabled} />
 
       {confirmingStop && (
         <ConfirmDialog
