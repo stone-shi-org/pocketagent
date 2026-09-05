@@ -34,6 +34,8 @@ export type IconName =
   | 'shield'
   | 'clock'
   | 'webhook'
+  | 'webhook-jira'
+  | 'webhook-bamboo'
   | 'link'
   | 'rotate'
   | 'key'
@@ -235,6 +237,24 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M8.1 9.6 10.6 15.9" />
       <path d="M15.9 9.6 13.4 15.9" />
       <path d="M8.7 8h6.6" />
+    </>
+  ),
+  // A tag with a punched hole: a Jira issue, not a generic event — distinct
+  // silhouette from the plain `webhook` fan-out so a project-tree row can
+  // tell a Jira-triggered webhook apart from a Bamboo one at a glance.
+  'webhook-jira': (
+    <>
+      <path d="M5 5.5h7l7 7-7 7-7-7v-7Z" />
+      <circle cx="8.2" cy="8.2" r="1" fill="currentColor" stroke="none" />
+    </>
+  ),
+  // A bamboo stalk with its nodes: literal reading of the product name, the
+  // same move `agent-shell`'s nautilus makes. Distinct from `branch` (three
+  // circles) and `ellipsis` (three dots) — this is a single stalk with rungs.
+  'webhook-bamboo': (
+    <>
+      <path d="M12 4v16" />
+      <path d="M8.5 8h7M8.5 12h7M8.5 16h7" />
     </>
   ),
   // Two interlocking links, for the endpoint card's header.

@@ -203,12 +203,14 @@ parse → check the payload's own `timestamp` for freshness → **claim idempote
 the row** → evaluate the filter → check the caps → run. Nothing answers 5xx once the body has
 been read, because Jira Data Center does not retry and a 5xx loses the event permanently.
 
-`webhooks/jira.ts` holds payload extraction and filter evaluation, both pure. The filter's
-semantics are OR within a category and AND across categories, with empty meaning *no
-constraint* — so an empty filter matches everything, which is the footgun of the feature and is
-why the editor warns rather than the code choosing a different default. Every non-match records
-a human-readable reason; "why isn't my webhook firing" is the only support question this
-feature generates, and that string is the answer.
+`webhooks/jira.ts` holds payload extraction and filter evaluation, both pure, for the `jira`
+webhook type; `webhooks/bamboo.ts` is the parallel module for `bamboo`, and `webhooks/index.ts`
+branches on `hook.type` (`WebhookType` in `packages/protocol/src/webhooks.ts`) to pick between
+them. The filter's semantics are OR within a category and AND across categories, with empty
+meaning *no constraint* — so an empty filter matches everything, which is the footgun of the
+feature and is why the editor warns rather than the code choosing a different default. Every
+non-match records a human-readable reason; "why isn't my webhook firing" is the only support
+question this feature generates, and that string is the answer.
 
 **The prompt renderer lives in `packages/protocol/src/webhook-template.ts`**, not in the
 server, for the same reason `cron-expr.ts` does: the server renders the prompt that runs and the

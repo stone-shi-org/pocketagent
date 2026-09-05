@@ -790,7 +790,11 @@ function ProjectSection({
             >
               <span className="chat-title">
                 <span className="cron-icon-wrap">
-                  <Icon name="webhook" size={15} className="cron-badge-icon" />
+                  <Icon
+                    name={hook.type === 'jira' ? 'webhook-jira' : 'webhook-bamboo'}
+                    size={15}
+                    className="cron-badge-icon"
+                  />
                   {hook.lastDeliveryStatus !== null && (
                     <span
                       className={`cron-dot cron-dot--${hook.lastDeliveryStatus}`}
