@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type {
+  ModelInfo,
   PlannerChat,
   PlannerModel,
   PlannerToolApprovalChoice,
@@ -8,6 +9,9 @@ import type {
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
+import { Transcript } from '../components/Transcript.js';
+import { PromptBox } from '../components/PromptBox.js';
+import { emptyTranscript, type TextItem, type TranscriptState } from '../agent/transcript.js';
 
 interface Props {
   chatId: string;
@@ -22,31 +26,74 @@ interface PendingApproval {
 }
 
 /**
- * PA-6: one planner chat.
+ * `PlannerTranscriptEntry[]` (one row per turn's user message or assistant
+ * reply, persisted as JSONL — see `planner/transcript.ts`) rendered as the
+ * same `TextItem[]` a structured session's own event stream produces, so
+ * `Transcript` draws a planner chat exactly the way it draws every other
+ * chat in this app: no bubbles, a user turn as a single-line sticky header
+ * (stacking up to three deep — `Transcript.tsx`'s `STICKY_WINDOW`), an
+ * assistant reply as plain markdown with a copy icon. Tool calls are not in
+ * this list at all — they are deliberately not persisted to the transcript
+ * (see `PlannerChatService`'s doc comment) — so a planner transcript only
+ * ever contains `text` items, never `tool`/`thinking`/`turn` ones.
+ */
+function toTranscriptItems(entries: PlannerTranscriptEntry[]): TextItem[] {
+  return entries.map((entry, i) => ({
+    type: 'text',
+    key: `${entry.role}_${i}_${entry.createdAt}`,
+    role: entry.role,
+    text: entry.content,
+    streaming: false,
+  }));
+}
+
+/**
+ * `PlannerModel` (this feature's own catalog row) as the `ModelInfo` shape
+ * `PromptBox`'s model picker already knows how to render — the same picker a
+ * structured session's composer uses, not a second implementation. The
+ * planner has no notion of "effort" (that is a Claude Agent SDK concept —
+ * see `EffortLevel`'s own doc comment) and no per-model description of its
+ * own, so those fields are filled with the same "not applicable" values a
+ * backend that has no such concept already uses elsewhere in this union —
+ * `description: ''` is falsy, so `PromptBox` simply renders no second line
+ * for it, same as any other backend with nothing to say there.
+ */
+function toModelInfos(models: PlannerModel[]): ModelInfo[] {
+  return models.map((m) => ({
+    value: m.modelId,
+    displayName: m.label,
+    description: '',
+    supportsEffort: false,
+    supportedEffortLevels: [],
+  }));
+}
+
+/**
+ * PA-6: one planner chat, rendered as an exact mirror of a structured
+ * session's own chat UI (`Transcript` + `PromptBox`) per the reporter's
+ * request — no separate bubble-based design. What is still planner-specific:
  *
- * Deliberately plain message bubbles rather than `Transcript`/`ToolCard` —
- * those are built for the `AgentEvent` live-streaming protocol a structured
- * session uses, and this chat is request/response for now (see
- * `llm-client.ts`'s doc comment). Reusing this app's real chat UI wholesale,
- * as the reporter asked for, is the target once a later phase gives the
- * planner the same event stream to render.
- *
- * The inline approval card (PA-6 phase 4) is this page's own, equally
- * deliberately plain, stand-in for `ApprovalSheet` — a mutating tool call
- * with no remembered decision pauses the turn and this page renders the
- * pause as a card in the message list, with the same "once / remember for
- * this workspace / remember globally / deny" choices as the real approval
- * sheet, resolved via `POST .../approvals/:id` (`planner/approval.ts`).
+ * - The turn loop is request/response, not a live token stream (see
+ *   `llm-client.ts`'s doc comment) — a full assistant reply lands in one
+ *   piece rather than filling in via `text_delta`, but it renders through
+ *   the exact same `TextItem`/`Transcript` path either way. `state.busy`
+ *   still drives the same "thinking" dots a structured session shows while
+ *   waiting on its own turn.
+ * - The approval card below is this page's own stand-in for `ApprovalSheet`
+ *   — a mutating tool call with no remembered decision pauses the turn, and
+ *   this renders the pause with the same "once / remember for this
+ *   workspace / remember globally / deny" choices, resolved via
+ *   `POST .../approvals/:id` (`planner/approval.ts`). Docked between the
+ *   transcript and the composer rather than a draggable bottom sheet — the
+ *   full `ApprovalSheet` treatment is future scope, not requested here.
  */
 export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Element {
   const [chat, setChat] = useState<PlannerChat | null>(null);
   const [models, setModels] = useState<PlannerModel[]>([]);
   const [entries, setEntries] = useState<PlannerTranscriptEntry[] | null>(null);
-  const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [pending, setPending] = useState<PendingApproval | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const messagesRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -68,10 +115,6 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
   useEffect(() => {
     void load();
   }, [load]);
-
-  useEffect(() => {
-    messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight });
-  }, [entries, pending]);
 
   const changeModel = (modelId: string): void => {
     if (!modelId) return;
@@ -101,16 +144,18 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
     }
   };
 
-  const send = (): void => {
-    const content = input.trim();
-    if (!content || sending) return;
+  /** `PromptBox.onSend` is synchronous by contract (see its own props doc):
+      a `true` return clears the composer immediately, matching how a real
+      session's prompt clears on submit rather than waiting for a reply. */
+  const handleSend = (content: string): boolean => {
+    const trimmed = content.trim();
+    if (!trimmed || sending) return false;
     setSending(true);
     setError(null);
     void (async () => {
       try {
-        const { userEntry, turn } = await api.sendPlannerMessage(chatId, { content });
+        const { userEntry, turn } = await api.sendPlannerMessage(chatId, { content: trimmed });
         setEntries((prev) => [...(prev ?? []), userEntry]);
-        setInput('');
         applyTurn(turn);
       } catch (err) {
         onApiError(err);
@@ -122,6 +167,7 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
         setSending(false);
       }
     })();
+    return true;
   };
 
   const decide = (decision: PlannerToolApprovalChoice): void => {
@@ -139,11 +185,10 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
     })();
   };
 
-  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
+  const transcriptState: TranscriptState = {
+    ...emptyTranscript(),
+    items: entries === null ? [] : toTranscriptItems(entries),
+    busy: sending && !pending,
   };
 
   return (
@@ -153,20 +198,6 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
           <Icon name="chevron-left" size={16} />
         </button>
         <span className="planner-chat-title">{chat?.title ?? 'Untitled chat'}</span>
-        <select
-          value={chat?.lastModelId ?? ''}
-          onChange={(e) => changeModel(e.target.value)}
-          aria-label="Model"
-        >
-          <option value="" disabled>
-            Select a model…
-          </option>
-          {models.map((m) => (
-            <option key={m.id} value={m.modelId}>
-              {m.label}
-            </option>
-          ))}
-        </select>
       </div>
 
       {error && (
@@ -175,65 +206,44 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
         </div>
       )}
 
-      <div className="planner-messages" ref={messagesRef}>
-        {entries === null && <div className="spinner">Loading…</div>}
-        {entries?.length === 0 && !pending && (
-          <div className="planner-empty">Say something to get started.</div>
-        )}
-        {entries?.map((entry, i) => (
-          <div
-            key={i}
-            className={`planner-message planner-message--${entry.role}`}
-          >
-            {entry.content}
-          </div>
-        ))}
-        {sending && !pending && (
-          <div className="planner-message planner-message--assistant">Thinking…</div>
-        )}
-        {pending && (
-          <div className="planner-approval-card" role="alertdialog" aria-label="Tool approval">
-            <p className="planner-approval-title">
-              The planner wants to run <code>{pending.toolName}</code>
-            </p>
-            <pre className="planner-approval-args">{pending.argsSummary}</pre>
-            <div className="planner-approval-actions">
-              <button type="button" className="planner-btn" onClick={() => decide('allow_once')}>
-                Allow once
-              </button>
-              <button type="button" className="planner-btn" onClick={() => decide('allow_workspace')}>
-                Allow for this workspace
-              </button>
-              <button type="button" className="planner-btn" onClick={() => decide('allow_global')}>
-                Allow globally
-              </button>
-              <button type="button" className="planner-btn danger" onClick={() => decide('deny')}>
-                Deny
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
+      {entries === null ? (
+        <div className="spinner">Loading…</div>
+      ) : (
+        <Transcript state={transcriptState} />
+      )}
 
-      <div className="planner-composer">
-        <textarea
-          rows={1}
-          placeholder="Message the planner…"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={onKeyDown}
-          disabled={sending}
-        />
-        <button
-          type="button"
-          className="planner-new"
-          disabled={sending || input.trim().length === 0}
-          onClick={send}
-          aria-label="Send"
-        >
-          <Icon name="arrow-up" size={16} />
-        </button>
-      </div>
+      {pending && (
+        <div className="planner-approval-card" role="alertdialog" aria-label="Tool approval">
+          <p className="planner-approval-title">
+            The planner wants to run <code>{pending.toolName}</code>
+          </p>
+          <pre className="planner-approval-args">{pending.argsSummary}</pre>
+          <div className="planner-approval-actions">
+            <button type="button" className="planner-btn" onClick={() => decide('allow_once')}>
+              Allow once
+            </button>
+            <button type="button" className="planner-btn" onClick={() => decide('allow_workspace')}>
+              Allow for this workspace
+            </button>
+            <button type="button" className="planner-btn" onClick={() => decide('allow_global')}>
+              Allow globally
+            </button>
+            <button type="button" className="planner-btn danger" onClick={() => decide('deny')}>
+              Deny
+            </button>
+          </div>
+        </div>
+      )}
+
+      <PromptBox
+        sessionId={`planner_${chatId}`}
+        onSend={handleSend}
+        disabled={sending || pending !== null}
+        models={toModelInfos(models)}
+        currentModel={chat?.lastModelId ?? null}
+        onSetModel={changeModel}
+        busy={sending && !pending}
+      />
     </div>
   );
 }
