@@ -5351,6 +5351,18 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   white-space: nowrap;
 }
 
+.planner-chat-title-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  background: var(--bg);
+  color: var(--text);
+}
+
 /* PA-6: the inline stand-in for `ApprovalSheet` — see `PlannerChatPage`'s
    doc comment for why this chat gets its own, plainer, docked approval card
    rather than the real draggable bottom sheet. Sits directly between

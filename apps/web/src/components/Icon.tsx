@@ -14,6 +14,7 @@ export type IconName =
   | 'chevron-down'
   | 'chevron-left'
   | 'compose'
+  | 'edit'
   | 'code'
   | 'terminal'
   | 'search'
@@ -95,6 +96,16 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <path d="M18.5 13.2V18a2.5 2.5 0 0 1-2.5 2.5H6A2.5 2.5 0 0 1 3.5 18V8A2.5 2.5 0 0 1 6 5.5h4.8" />
       <path d="M16.4 3.9a1.9 1.9 0 0 1 2.7 2.7l-7.2 7.2-3.4.7.7-3.4Z" />
+    </>
+  ),
+
+  // A bare pencil, for renaming something that already exists — `compose`'s
+  // square-plus-pencil is "write something new here" and reads wrong next to
+  // a title that already has text in it.
+  edit: (
+    <>
+      <path d="M4 20h4.2L18.8 9.4a2.1 2.1 0 0 0 0-3l-1.2-1.2a2.1 2.1 0 0 0-3 0L4 15.8Z" />
+      <path d="M13.5 6.5 17.5 10.5" />
     </>
   ),
 

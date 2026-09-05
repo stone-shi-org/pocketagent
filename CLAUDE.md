@@ -323,6 +323,28 @@ Every field in the editor auto-saves on change except the directory, which is th
 with a real, easy-to-miss consequence (see `PlannerWorkspaceRegistry.setPath` above) and so pauses
 on its own `ConfirmDialog` before applying.
 
+**A chat auto-titles itself from its first prompt, and a user can always override it** (PA-6
+round 6: "all chat currently is 'untitled chat', after first prompt, agent should find a suitable
+name"). `PlannerChatService.sendMessage` checks `chat.title === null` before persisting anything
+else, so this fires at most once per chat and only on whichever message first has usable text —
+an all-whitespace prompt leaves `title` `null` and it tries again next time.
+`deriveChatTitle` (`planner/chats.ts`) is a "first non-empty line, truncated to 80 characters"
+heuristic, deliberately mirroring rather than reusing `conversations/index.ts`'s own
+`fallbackTitle` for a coding-agent session with no external title-generating process: that
+function's Jira-webhook-specific parsing (extracting `[KEY] Summary`, stripping an untrusted
+fence's preamble) doesn't apply to a prompt a human typed directly into a chat, and importing it
+anyway would leave a Pocket Agent chat's title deriver carrying logic a future reader would have
+to puzzle out the relevance of. No LLM call — the title needs to exist before the turn's own LLM
+call even starts, and a chat with a bad auto-title is one edit away from a better one.
+`PlannerChatPage`'s header has an edit icon next to the title (new `edit` `IconName` — a bare
+pencil, distinct from `compose`'s square-plus-pencil "write something new" glyph, which reads
+wrong next to a title that already has text) that swaps it for an input; saving with an empty
+value clears the title back to `null` rather than being rejected, the same "empty string means
+unset" convention this app's other nullable-text settings use, and it's the deliberate way back
+out of a bad auto-generated title without having to type a replacement. No new server route or
+protocol type was needed for this half — `rename` (`PlannerChatService.rename`) and `PATCH
+/api/planner/chats/:id` already existed and worked; only the frontend needed the affordance.
+
 **A chat's transcript is the same `AgentEvent` union a structured session's own event stream
 uses** (`packages/protocol/src/agent-events.ts`), not a parallel shape — reused directly so a
 reopened Pocket Agent chat replays through the exact same `applyEvents` reducer the frontend

@@ -296,6 +296,76 @@ describe('planner chat routes over HTTP', () => {
 
     const modeled = await patch(t, `/api/planner/chats/${chat.id}`, { modelId: 'gpt-4o' });
     expect(modeled.json().lastModelId).toBe('gpt-4o');
+
+    // Clearing it back to untitled — the frontend's rename-to-empty affordance.
+    const cleared = await patch(t, `/api/planner/chats/${chat.id}`, { title: null });
+    expect(cleared.json().title).toBeNull();
+  });
+
+  // ---- PA-6 round 6: auto-titling an untitled chat from its first prompt ----
+
+  it("auto-titles an untitled chat from its first prompt's first line", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+    expect(chat.title).toBeNull();
+
+    await sendMessage(t, chat.id, 'Plan my week\nwith some extra detail on the second line');
+    const list = (await get(t, '/api/planner/chats')).json().chats;
+    expect(list.find((c: { id: string }) => c.id === chat.id).title).toBe('Plan my week');
+  });
+
+  it('truncates a long first line to 80 characters with an ellipsis', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const longPrompt = 'x'.repeat(120);
+    await sendMessage(t, chat.id, longPrompt);
+    const list = (await get(t, '/api/planner/chats')).json().chats;
+    const title = list.find((c: { id: string }) => c.id === chat.id).title as string;
+    expect(title).toHaveLength(80);
+    expect(title.endsWith('…')).toBe(true);
+  });
+
+  it('never overwrites a title once set, including one the auto-titler picked', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    await sendMessage(t, chat.id, 'first message sets the title');
+    await sendMessage(t, chat.id, 'a totally different second message');
+    const list = (await get(t, '/api/planner/chats')).json().chats;
+    expect(list.find((c: { id: string }) => c.id === chat.id).title).toBe('first message sets the title');
+  });
+
+  it('does not overwrite a title a user set manually before ever sending a message', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o', title: 'My own title' })).json();
+
+    await sendMessage(t, chat.id, 'hello');
+    const list = (await get(t, '/api/planner/chats')).json().chats;
+    expect(list.find((c: { id: string }) => c.id === chat.id).title).toBe('My own title');
+  });
+
+  it('leaves an all-whitespace first prompt untitled and tries again on the next message', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    await sendMessage(t, chat.id, '   ');
+    let list = (await get(t, '/api/planner/chats')).json().chats;
+    expect(list.find((c: { id: string }) => c.id === chat.id).title).toBeNull();
+
+    await sendMessage(t, chat.id, 'now a real prompt');
+    list = (await get(t, '/api/planner/chats')).json().chats;
+    expect(list.find((c: { id: string }) => c.id === chat.id).title).toBe('now a real prompt');
   });
 
   it('deletes a chat', async () => {

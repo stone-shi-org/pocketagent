@@ -324,6 +324,18 @@ export class PlannerChatService {
    * route can still answer a clean HTTP error status for these instead of
    * having to fold them into the event stream: nothing has been written to
    * the response yet at that point.
+   *
+   * Auto-titles an untitled chat from this prompt (PA-6 round 6: "all chat
+   * currently is 'untitled chat', after first prompt, agent should find a
+   * suitable name") — checked before persisting anything else, so it only
+   * ever fires once per chat, on whichever message first has usable text
+   * (an all-whitespace one leaves `title` `null` and this tries again next
+   * time). This never blocks on the LLM: `deriveChatTitle` is the same
+   * "first non-empty line, truncated" heuristic `conversations/index.ts`'s
+   * own `fallbackTitle` uses for a coding-agent session with no external
+   * title-generating process — minus that function's Jira-webhook-specific
+   * parsing, which doesn't apply to a prompt a human typed directly into a
+   * chat. A user can always override it — see `rename`.
    */
   async *sendMessage(
     id: string,
@@ -333,6 +345,11 @@ export class PlannerChatService {
     const chat = this.requireChat(id);
     const modelId = this.resolveModelId(chat, opts.modelId);
     const workspacePath = this.workspacePathFor(chat);
+
+    if (chat.title === null) {
+      const title = deriveChatTitle(content);
+      if (title) updatePlannerChat(this.opts.db, chat.id, { title });
+    }
 
     const userEvent: AgentEvent = { kind: 'user_prompt', id: crypto.randomUUID(), text: content };
     await appendTranscriptEvent(workspacePath, chat.id, userEvent);
@@ -702,6 +719,20 @@ export class PlannerChatService {
   }
 }
 
+
+/** Best-effort title from a chat's first prompt: the first non-empty line,
+    truncated to 80 characters — see `sendMessage`'s doc comment for why this
+    mirrors, rather than reuses, `conversations/index.ts`'s own
+    `fallbackTitle`. Returns `null` for a prompt with no usable text (e.g.
+    all whitespace), leaving the chat to try again on its next message. */
+function deriveChatTitle(firstPrompt: string): string | null {
+  const firstLine = firstPrompt
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (!firstLine) return null;
+  return firstLine.length > 80 ? `${firstLine.slice(0, 79)}…` : firstLine;
+}
 
 function scopeMessage(choice: PlannerToolApprovalChoice): string | null {
   switch (choice) {

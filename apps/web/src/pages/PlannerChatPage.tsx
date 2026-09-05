@@ -72,6 +72,8 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
   const [transcript, setTranscript] = useState<TranscriptState | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleInput, setTitleInput] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -107,6 +109,30 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
     })();
   };
 
+  const startEditingTitle = (): void => {
+    setTitleInput(chat?.title ?? '');
+    setEditingTitle(true);
+  };
+
+  /** Empty input clears the title back to "Untitled chat" rather than being
+      rejected — the same "empty string means unset" convention this app's
+      other nullable-text settings use, and it's a deliberate way back out of
+      a bad auto-generated title if the user doesn't want to type a new one. */
+  const saveTitle = (): void => {
+    setEditingTitle(false);
+    const trimmed = titleInput.trim();
+    if (trimmed === (chat?.title ?? '')) return;
+    void (async () => {
+      try {
+        const updated = await api.updatePlannerChat(chatId, { title: trimmed || null });
+        setChat(updated);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not rename this chat.');
+      }
+    })();
+  };
+
   /** Folds one streamed event into the live transcript — same reducer a
       structured session's WebSocket events go through. */
   const onStreamEvent = (event: AgentEvent): void => {
@@ -121,9 +147,19 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
     if (!trimmed || sending) return false;
     setSending(true);
     setError(null);
+    // The server auto-titles an untitled chat from its first prompt (see
+    // `PlannerChatService.sendMessage`'s doc comment) — the turn's own
+    // streamed events don't carry the chat row itself, so this is the one
+    // spot that needs to notice "this was the first message" and re-fetch
+    // afterward for the new title to show up without a manual reload.
+    const wasUntitled = chat?.title == null;
     void (async () => {
       try {
         await api.sendPlannerMessage(chatId, { content: trimmed }, onStreamEvent);
+        if (wasUntitled) {
+          const { chats } = await api.listPlannerChats();
+          setChat((prev) => chats.find((c) => c.id === chatId) ?? prev);
+        }
       } catch (err) {
         onApiError(err);
         setError(
@@ -164,7 +200,27 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
         <button type="button" className="planner-btn" onClick={onBack} aria-label="Back">
           <Icon name="chevron-left" size={16} />
         </button>
-        <span className="planner-chat-title">{chat?.title ?? 'Untitled chat'}</span>
+        {editingTitle ? (
+          <input
+            autoFocus
+            className="planner-chat-title-input"
+            value={titleInput}
+            placeholder="Untitled chat"
+            onChange={(e) => setTitleInput(e.target.value)}
+            onBlur={saveTitle}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+              if (e.key === 'Escape') setEditingTitle(false);
+            }}
+          />
+        ) : (
+          <>
+            <span className="planner-chat-title">{chat?.title ?? 'Untitled chat'}</span>
+            <button type="button" className="planner-btn" onClick={startEditingTitle} aria-label="Rename chat">
+              <Icon name="edit" size={14} />
+            </button>
+          </>
+        )}
       </div>
 
       {error && (
