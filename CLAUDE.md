@@ -270,16 +270,21 @@ way `RunExecutor` does for cron/webhooks, including re-validating the session's 
 time rather than trusting a cached value. `delete_worktree` calls the same `WorktreeService`
 the UI's own worktree-delete flow uses, not a second implementation.
 
-**A turn is streamed, not request/response.** `PlannerChatService.sendMessage`/`resolveApproval`
-(`planner/chats.ts`) are async generators that `yield` one `AgentEvent` at a time as each step
-of the turn happens; `routes/planner.ts`'s `streamPlannerEvents` drains one onto the HTTP
-response as `text/event-stream` frames, and the browser reads it via `fetch` + a manual
-`ReadableStream` reader (`api/client.ts`'s `streamPlannerEvents`) rather than `EventSource`,
-since sending a message needs a POST body. What "streamed" does *not* mean: the upstream LLM
-call itself is still `stream: false` (`llm-client.ts`) — parsing a provider's own SSE format
-varies enough between OpenAI-compatible implementations that doing it blind was judged the
-highest-risk part of this feature, so a tool call's bar and the final reply each arrive as one
-complete step rather than filling in token-by-token. Both service methods validate
+**A turn is streamed at both levels, not request/response.** `PlannerChatService.sendMessage`/
+`resolveApproval` (`planner/chats.ts`) are async generators that `yield` one `AgentEvent` at a
+time as each step of the turn happens; `routes/planner.ts`'s `streamPlannerEvents` drains one
+onto the HTTP response as `text/event-stream` frames, and the browser reads it via `fetch` + a
+manual `ReadableStream` reader (`api/client.ts`'s `streamPlannerEvents`) rather than
+`EventSource`, since sending a message needs a POST body. The upstream LLM call itself is also
+streamed (`llm-client.ts`'s `streamComplete`, `stream: true`): it parses the upstream provider's
+own OpenAI-compatible SSE format and re-yields each content delta as a `text_delta` `AgentEvent`,
+so the final reply fills in token-by-token the same way a structured session's own turn does — a
+tool call's bar, by contrast, still only appears once the whole call is known, since a partial
+tool call is not executable. `text_delta` is deliberately never persisted (`driveLoop` yields it
+directly, bypassing the `emit()` helper that every other event goes through) — only the fully
+assembled `text` event survives to the transcript, the same "deltas are transport, not history"
+split a structured session's own JSONL transcript already relies on, so reopening a chat replays
+the finished reply as one block rather than re-streaming it. Both service methods validate
 synchronously *before* their first `yield` (chat exists, an approval id is still pending, an
 LLM endpoint is configured), so a precondition failure can still answer a normal HTTP error
 status; past that point the service never throws again — an in-flight failure (e.g. the LLM

@@ -18,7 +18,13 @@ import {
 } from './store.js';
 import { resolveApprovalStatus, rememberDecisionIfAsked } from './approval.js';
 import { appendTranscriptEvent, readTranscriptEvents } from './transcript.js';
-import { PlannerLlmClient, PlannerLlmError, type PlannerChatMessage, type PlannerLlmToolCall } from './llm-client.js';
+import {
+  PlannerLlmClient,
+  PlannerLlmError,
+  type PlannerChatMessage,
+  type PlannerLlmCompletion,
+  type PlannerLlmToolCall,
+} from './llm-client.js';
 import { PLANNER_TOOLS, findPlannerTool, toOpenAiToolSpecs, type PlannerToolDefinition } from './tools.js';
 
 export class PlannerChatError extends Error {
@@ -294,6 +300,15 @@ export class PlannerChatService {
    * turn and a fresh one share exactly one code path for "what does the model
    * see"), then either finishes the turn or hands off to `processToolCalls`.
    *
+   * Streams the reply token-by-token — `PlannerLlmClient.streamComplete`'s
+   * `text_delta` events are re-yielded here as `AgentEvent`s but never
+   * persisted (`this.emit` is deliberately not used for them): only the fully
+   * assembled `text` survives to the transcript once the model finishes, the
+   * same "deltas are transport, not history" split a structured session's own
+   * JSONL transcript already relies on. A partial tool call is not
+   * executable, so tool-call chunks are accumulated inside the client and
+   * never surface here until the whole call is known.
+   *
    * Never throws past the first `yield` of the *containing* `sendMessage`
    * call: an LLM failure here becomes an in-band error (`finishTurn` with
    * `isError: true`), not a rejected promise — once SSE headers are sent
@@ -322,13 +337,34 @@ export class PlannerChatService {
       ...(this.opts.llmFetch ? { fetchImpl: this.opts.llmFetch } : {}),
     });
 
-    let completion;
+    const textBlockId = crypto.randomUUID();
+    let completion: PlannerLlmCompletion | null = null;
     try {
-      completion = await client.complete(modelId, messages, toOpenAiToolSpecs(this.tools), signal);
+      for await (const chunk of client.streamComplete(modelId, messages, toOpenAiToolSpecs(this.tools), signal)) {
+        if (chunk.type === 'text_delta') {
+          yield { kind: 'text_delta', id: textBlockId, text: chunk.text };
+        } else {
+          completion = chunk;
+        }
+      }
     } catch (err) {
       this.opts.logger?.warn({ err, chat: chat.id, model: modelId }, 'planner LLM call failed');
       const message = err instanceof PlannerLlmError ? err.message : (err as Error).message;
       yield* this.finishTurn(chat, workspacePath, modelId, `Could not reach the LLM endpoint: ${message}`, true);
+      return;
+    }
+
+    if (!completion) {
+      // Should not happen — `streamComplete` always yields exactly one
+      // `done` event or throws — but a stream that somehow ends without
+      // either must not leave the turn hanging forever.
+      yield* this.finishTurn(
+        chat,
+        workspacePath,
+        modelId,
+        'The LLM endpoint closed the connection without a response.',
+        true,
+      );
       return;
     }
 

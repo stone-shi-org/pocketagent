@@ -49,11 +49,15 @@ function toModelInfos(models: PlannerModel[]): ModelInfo[] {
  * `text/event-stream` response and call `onStreamEvent` for each event as it
  * arrives — a tool call's bar appears the moment the model decides to make
  * it, fills in with its result once that finishes, and the final reply
- * lands as one `text` event (see `llm-client.ts`'s doc comment for why that
- * last part is not itself token-streamed). Every event is also persisted
- * server-side, so reopening this chat replays the exact same sequence via
- * `applyEvents` on load — a tool call from three turns ago still renders as
- * a real, expandable `ToolCard`.
+ * arrives token-by-token as `text_delta` events (parsed live from the
+ * upstream provider's own SSE stream — see `llm-client.ts`'s doc comment)
+ * before a final `text` event closes it out. The same `applyEvent` reducer a
+ * structured session already uses handles both, so this needed no reducer
+ * changes of its own. Only the completed `text` event is persisted
+ * server-side — `text_delta` is transport, not history — so reopening this
+ * chat replays the finished reply as one block rather than re-streaming it;
+ * a tool call from three turns ago still renders as a real, expandable
+ * `ToolCard`.
  *
  * The approval card below is this page's own, deliberately plain stand-in
  * for `ApprovalSheet` — driven by the exact same `TranscriptState.pending`

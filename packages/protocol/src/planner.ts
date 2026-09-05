@@ -166,14 +166,15 @@ export type UpdatePlannerChatRequest = z.infer<typeof UpdatePlannerChatRequest>;
  * (`ToolCard`), and `permission_request`/`permission_resolved` render
  * through the real pending-approval machinery.
  *
- * What replaces "streaming" here: the *turn* is streamed (each event reaches
- * the browser the moment it happens — the model decided to call a tool, the
- * tool finished, the reply is ready), not each token of the final text
- * block. Getting token-level deltas too would mean parsing the upstream
- * provider's own SSE format, which varies enough between OpenAI-compatible
- * implementations that doing it blind is the highest-risk part of this
- * feature; this stops one level short of that on purpose. See
- * `planner/llm-client.ts`'s doc comment.
+ * The turn is streamed at both levels: each event reaches the browser the
+ * moment it happens (the model decided to call a tool, the tool finished),
+ * and the final reply's own text arrives token-by-token as `text_delta`
+ * events, parsed live from the upstream provider's own SSE stream
+ * (`planner/llm-client.ts`'s `streamComplete`). `text_delta` is transient —
+ * it is never persisted to this history, only the fully assembled `text`
+ * event is, the same "deltas are transport, not history" split a structured
+ * session's own JSONL transcript already relies on; a reopened chat replays
+ * the completed `text` and never re-streams it token by token.
  */
 export const PlannerChatHistoryResponse = z.object({
   events: z.array(AgentEvent),

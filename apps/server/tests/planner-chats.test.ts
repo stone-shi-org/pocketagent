@@ -12,43 +12,58 @@ import { authHeaders, createTestApp, type TestApp } from './helpers.js';
 
 // ---- PlannerLlmClient, unit-level against an injected fetch ----------------
 
-function fakeCompletionResponse(content: string): Response {
-  return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+/** Joins fake SSE data frames (each already JSON-encoded) into one
+    OpenAI-style streamed response body, terminated the standard way. */
+function sseResponse(dataLines: string[]): Response {
+  const body = dataLines.map((line) => `data: ${line}\n\n`).join('') + 'data: [DONE]\n\n';
+  return new Response(body, {
     status: 200,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'text/event-stream' },
   });
 }
 
+function fakeCompletionResponse(content: string): Response {
+  return sseResponse([JSON.stringify({ choices: [{ delta: { content } }] })]);
+}
+
 function fakeToolCallResponse(name: string, args: Record<string, unknown>, callId = 'call_1'): Response {
-  return new Response(
+  return sseResponse([
     JSON.stringify({
       choices: [
         {
-          message: {
-            content: null,
-            tool_calls: [
-              { id: callId, type: 'function', function: { name, arguments: JSON.stringify(args) } },
-            ],
+          delta: {
+            tool_calls: [{ index: 0, id: callId, function: { name, arguments: JSON.stringify(args) } }],
           },
         },
       ],
     }),
-    { status: 200, headers: { 'content-type': 'application/json' } },
-  );
+  ]);
+}
+
+/** Drains a `streamComplete` async generator into a plain array, since most
+    assertions below want to inspect the whole sequence (or just its `done`
+    tail) rather than react to each event as it arrives. */
+async function collect<T>(gen: AsyncGenerator<T>): Promise<T[]> {
+  const out: T[] = [];
+  for await (const event of gen) out.push(event);
+  return out;
 }
 
 describe('PlannerLlmClient', () => {
-  it('sends the model, messages, and Authorization header, and returns the reply text', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('hello there'));
+  it('sends the model, messages, and Authorization header, and streams the reply text', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() => fakeCompletionResponse('hello there'));
     const client = new PlannerLlmClient({
       baseUrl: 'https://api.example.com/v1',
       apiKey: 'sk-test',
       fetchImpl,
     });
 
-    const reply = await client.complete('gpt-4o-mini', [{ role: 'user', content: 'hi' }]);
+    const events = await collect(client.streamComplete('gpt-4o-mini', [{ role: 'user', content: 'hi' }]));
 
-    expect(reply).toEqual({ content: 'hello there', toolCalls: [] });
+    expect(events).toEqual([
+      { type: 'text_delta', text: 'hello there' },
+      { type: 'done', content: 'hello there', toolCalls: [] },
+    ]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(url).toBe('https://api.example.com/v1/chat/completions');
@@ -57,66 +72,69 @@ describe('PlannerLlmClient', () => {
     expect(body).toEqual({
       model: 'gpt-4o-mini',
       messages: [{ role: 'user', content: 'hi' }],
-      stream: false,
+      stream: true,
     });
   });
 
   it('omits the Authorization header when no API key is configured', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    const fetchImpl = vi.fn().mockImplementation(() => fakeCompletionResponse('ok'));
     const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
-    await client.complete('m', []);
+    await collect(client.streamComplete('m', []));
     const [, init] = fetchImpl.mock.calls[0]!;
     expect((init.headers as Record<string, string>).authorization).toBeUndefined();
   });
 
   it('strips a trailing slash from baseUrl before appending the path', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    const fetchImpl = vi.fn().mockImplementation(() => fakeCompletionResponse('ok'));
     const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com/v1/', apiKey: null, fetchImpl });
-    await client.complete('m', []);
+    await collect(client.streamComplete('m', []));
     expect(fetchImpl.mock.calls[0]![0]).toBe('https://api.example.com/v1/chat/completions');
   });
 
   it('throws PlannerLlmError on a non-2xx response, including the status', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(new Response('server exploded', { status: 500 }));
+    const fetchImpl = vi.fn().mockImplementation(() => new Response('server exploded', { status: 500 }));
     const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
-    await expect(client.complete('m', [])).rejects.toThrow(PlannerLlmError);
-    await expect(client.complete('m', [])).rejects.toMatchObject({ statusCode: 500 });
+    await expect(collect(client.streamComplete('m', []))).rejects.toThrow(PlannerLlmError);
+    await expect(collect(client.streamComplete('m', []))).rejects.toMatchObject({ statusCode: 500 });
   });
 
-  it('throws PlannerLlmError when the response has no message content', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ choices: [{}] }), { status: 200 }),
-    );
+  it('throws PlannerLlmError when the stream has no message content or tool calls', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() => sseResponse([JSON.stringify({ choices: [{ delta: {} }] })]));
     const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
-    await expect(client.complete('m', [])).rejects.toThrow(/no message content/);
+    await expect(collect(client.streamComplete('m', []))).rejects.toThrow(/no message content/);
+  });
+
+  it('throws PlannerLlmError when the stream has no chunks at all', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() => sseResponse([]));
+    const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
+    await expect(collect(client.streamComplete('m', []))).rejects.toThrow(/empty stream/);
   });
 
   it('throws PlannerLlmError when fetch itself rejects (network failure)', async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
     const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
-    await expect(client.complete('m', [])).rejects.toThrow(/Could not reach/);
+    await expect(collect(client.streamComplete('m', []))).rejects.toThrow(/Could not reach/);
   });
 
-  it('parses tool_calls out of the response, with null content', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(fakeToolCallResponse('list_workspaces', {}));
+  it('parses tool_calls out of the stream, with null content', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() => fakeToolCallResponse('list_workspaces', {}));
     const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
-    const completion = await client.complete('m', []);
-    expect(completion.content).toBeNull();
-    expect(completion.toolCalls).toEqual([
+    const events = await collect(client.streamComplete('m', []));
+    const done = events.find((e) => e.type === 'done') as { content: string | null; toolCalls: unknown[] };
+    expect(done.content).toBeNull();
+    expect(done.toolCalls).toEqual([
       { id: 'call_1', type: 'function', function: { name: 'list_workspaces', arguments: '{}' } },
     ]);
   });
 
   it('sends a tools array only when tools are passed', async () => {
-    // `mockImplementation`, not `mockResolvedValue`: a `Response` body can
-    // only be read once, and this test drives two calls through the mock.
     const fetchImpl = vi.fn().mockImplementation(() => fakeCompletionResponse('ok'));
     const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
 
-    await client.complete('m', []);
+    await collect(client.streamComplete('m', []));
     expect(JSON.parse(fetchImpl.mock.calls[0]![1].body as string)).not.toHaveProperty('tools');
 
-    await client.complete('m', [], [{ type: 'function', function: { name: 'x' } }]);
+    await collect(client.streamComplete('m', [], [{ type: 'function', function: { name: 'x' } }]));
     expect(JSON.parse(fetchImpl.mock.calls[1]![1].body as string).tools).toHaveLength(1);
   });
 });
@@ -144,6 +162,15 @@ function findEvent(
   kind: string,
 ): { kind: string; [key: string]: unknown } | undefined {
   return events.find((e) => e.kind === kind);
+}
+
+/** `text_delta` events stream live but are never persisted (see `driveLoop`'s
+    doc comment) — so a comparison against the on-disk history has to ignore
+    them, the same way the persistence layer itself does. */
+function dropTextDeltas(
+  events: Array<{ kind: string; [key: string]: unknown }>,
+): Array<{ kind: string; [key: string]: unknown }> {
+  return events.filter((e) => e.kind !== 'text_delta');
 }
 
 describe('planner chat routes over HTTP', () => {
@@ -269,13 +296,14 @@ describe('planner chat routes over HTTP', () => {
     const { res: turn, events } = await sendMessage(t, chat.id, 'plan my week');
     expect(turn.statusCode).toBe(200);
     expect(turn.headers['content-type']).toMatch(/text\/event-stream/);
-    expect(events.map((e) => e.kind)).toEqual(['user_prompt', 'text', 'turn_complete']);
+    expect(events.map((e) => e.kind)).toEqual(['user_prompt', 'text_delta', 'text', 'turn_complete']);
     expect(events[0]).toMatchObject({ text: 'plan my week' });
-    expect(events[1]).toMatchObject({ text: "Here's the plan." });
-    expect(events[2]).toMatchObject({ isError: false });
+    expect(findEvent(events, 'text_delta')).toMatchObject({ text: "Here's the plan." });
+    expect(findEvent(events, 'text')).toMatchObject({ text: "Here's the plan." });
+    expect(findEvent(events, 'turn_complete')).toMatchObject({ isError: false });
 
     const history = (await get(t, `/api/planner/chats/${chat.id}/history`)).json().events;
-    expect(history).toEqual(events);
+    expect(history).toEqual(dropTextDeltas(events));
 
     const chats = (await get(t, '/api/planner/chats')).json().chats;
     expect(chats[0].lastModelId).toBe('gpt-4o-mini');
@@ -305,11 +333,12 @@ describe('planner chat routes over HTTP', () => {
       'user_prompt',
       'tool_use',
       'tool_result',
+      'text_delta',
       'text',
       'turn_complete',
     ]);
     expect(events[1]).toMatchObject({ name: 'list_workspaces', input: {} });
-    expect(events[3]).toMatchObject({ text: 'You have one workspace: project.' });
+    expect(findEvent(events, 'text')).toMatchObject({ text: 'You have one workspace: project.' });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
 
     // The second call carries the assistant's tool-call message and the
@@ -332,7 +361,7 @@ describe('planner chat routes over HTTP', () => {
     // Every event — including the tool call and its result — is now visible
     // on reload, unlike phase 3/4's design: the whole point of this fix.
     const history = (await get(t, `/api/planner/chats/${chat.id}/history`)).json().events;
-    expect(history).toEqual(events);
+    expect(history).toEqual(dropTextDeltas(events));
   });
 
   it('gives up after too many tool-call iterations rather than looping forever', async () => {
@@ -454,7 +483,13 @@ describe('planner chat routes over HTTP', () => {
 
     const { res: resolved, events: resumedEvents } = await resolve(t, chat.id, pending.id as string, 'allow_once');
     expect(resolved.statusCode).toBe(200);
-    expect(resumedEvents.map((e) => e.kind)).toEqual(['permission_resolved', 'tool_result', 'text', 'turn_complete']);
+    expect(resumedEvents.map((e) => e.kind)).toEqual([
+      'permission_resolved',
+      'tool_result',
+      'text_delta',
+      'text',
+      'turn_complete',
+    ]);
     expect(findEvent(resumedEvents, 'text')?.text).toBe('Made it.');
     expect((await fs.stat(targetDir)).isDirectory()).toBe(true);
 
@@ -481,7 +516,14 @@ describe('planner chat routes over HTTP', () => {
 
     const secondChat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
     const { events: secondEvents } = await sendMessage(t, secondChat.id, 'again');
-    expect(secondEvents.map((e) => e.kind)).toEqual(['user_prompt', 'tool_use', 'tool_result', 'text', 'turn_complete']);
+    expect(secondEvents.map((e) => e.kind)).toEqual([
+      'user_prompt',
+      'tool_use',
+      'tool_result',
+      'text_delta',
+      'text',
+      'turn_complete',
+    ]);
     expect(findEvent(secondEvents, 'text')?.text).toBe('Done twice.');
     expect(fetchImpl).toHaveBeenCalledTimes(4);
 
@@ -516,7 +558,13 @@ describe('planner chat routes over HTTP', () => {
     const { chat, pending } = await mkdirPending(fetchImpl);
 
     const { events: resumedEvents } = await resolve(t, chat.id, pending.id as string, 'deny');
-    expect(resumedEvents.map((e) => e.kind)).toEqual(['permission_resolved', 'tool_result', 'text', 'turn_complete']);
+    expect(resumedEvents.map((e) => e.kind)).toEqual([
+      'permission_resolved',
+      'tool_result',
+      'text_delta',
+      'text',
+      'turn_complete',
+    ]);
     expect(findEvent(resumedEvents, 'permission_resolved')).toMatchObject({ decision: 'deny' });
     expect(findEvent(resumedEvents, 'tool_result')).toMatchObject({ isError: true });
     expect(findEvent(resumedEvents, 'text')?.text).toBe('Understood, not creating it.');
@@ -558,7 +606,14 @@ describe('planner chat routes over HTTP', () => {
     const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
 
     const { events } = await sendMessage(t, chat.id, 'go');
-    expect(events.map((e) => e.kind)).toEqual(['user_prompt', 'tool_use', 'tool_result', 'text', 'turn_complete']);
+    expect(events.map((e) => e.kind)).toEqual([
+      'user_prompt',
+      'tool_use',
+      'tool_result',
+      'text_delta',
+      'text',
+      'turn_complete',
+    ]);
     expect(findEvent(events, 'text')?.text).toBe('Done, no questions asked.');
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
