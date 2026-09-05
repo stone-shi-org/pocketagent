@@ -24,6 +24,7 @@ import {
   type PlannerChatMessage,
   type PlannerLlmCompletion,
   type PlannerLlmToolCall,
+  type PlannerLlmUsage,
 } from './llm-client.js';
 import { PLANNER_TOOLS, findPlannerTool, toOpenAiToolSpecs, type PlannerToolDefinition } from './tools.js';
 
@@ -82,6 +83,47 @@ interface PendingPlannerTurn {
   /** Index into `toolCalls` of the call awaiting a decision. */
   index: number;
   iteration: number;
+  /** Accumulated so far — see `PlannerTurnStats`'s own doc comment for why
+      this has to survive the pause/resume boundary rather than restart at
+      zero when a batch resumes. */
+  stats: PlannerTurnStats;
+}
+
+/**
+ * Running per-turn stats for the settings-page-adjacent "small text after
+ * each turn" ask: tokens/sec, total input/output tokens, and (via
+ * `TurnCompleteEvent.completedAt`) a timestamp. Threaded through every stage
+ * of the loop — `driveLoop`, `processToolCalls`, and across an approval
+ * pause via `PendingPlannerTurn.stats` — because a turn can involve several
+ * LLM round trips (once per tool-call batch), and the totals shown at the
+ * end have to cover the whole turn, not just its last round trip.
+ *
+ * `elapsedMs` only ever accumulates time spent actually waiting on the LLM
+ * (`driveLoop`'s `streamComplete` call) — never tool execution time, and
+ * never an approval pause (a human deciding is not the agent "working",
+ * and its duration is arbitrary and would swamp everything else). Tokens
+ * stay `null` until a provider actually returns a `usage` block (not every
+ * OpenAI-compatible implementation honors `stream_options.include_usage`),
+ * so a footer can tell "never reported" from "reported zero".
+ */
+interface PlannerTurnStats {
+  elapsedMs: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+}
+
+const EMPTY_TURN_STATS: PlannerTurnStats = { elapsedMs: 0, inputTokens: null, outputTokens: null };
+
+/** Folds one LLM call's usage (if the provider sent one) into the running
+    total — accumulates rather than replaces, since a turn's tokens are the
+    sum across every round trip it took. */
+function addUsage(stats: PlannerTurnStats, usage: PlannerLlmUsage | null): PlannerTurnStats {
+  if (!usage) return stats;
+  return {
+    ...stats,
+    inputTokens: (stats.inputTokens ?? 0) + usage.promptTokens,
+    outputTokens: (stats.outputTokens ?? 0) + usage.completionTokens,
+  };
 }
 
 /**
@@ -243,7 +285,7 @@ export class PlannerChatService {
     await appendTranscriptEvent(workspacePath, chat.id, userEvent);
     yield userEvent;
 
-    yield* this.driveLoop(chat, workspacePath, modelId, 0, opts.signal);
+    yield* this.driveLoop(chat, workspacePath, modelId, 0, EMPTY_TURN_STATS, opts.signal);
   }
 
   /**
@@ -313,7 +355,15 @@ export class PlannerChatService {
       });
     }
 
-    yield* this.processToolCalls(chat, workspacePath, pending.modelId, pending.toolCalls, pending.index + 1, pending.iteration);
+    yield* this.processToolCalls(
+      chat,
+      workspacePath,
+      pending.modelId,
+      pending.toolCalls,
+      pending.index + 1,
+      pending.iteration,
+      pending.stats,
+    );
   }
 
   /** Persist then yield — every event this service produces goes through here, so the two never drift apart. */
@@ -329,6 +379,7 @@ export class PlannerChatService {
     modelId: string,
     text: string,
     isError: boolean,
+    stats: PlannerTurnStats,
   ): AsyncGenerator<AgentEvent> {
     if (text.length > 0) {
       yield* this.emit(workspacePath, chat.id, { kind: 'text', id: crypto.randomUUID(), text });
@@ -338,10 +389,11 @@ export class PlannerChatService {
       stopReason: isError ? 'error' : 'end_turn',
       isError,
       numTurns: null,
-      durationMs: null,
+      durationMs: stats.elapsedMs,
       costUsd: null,
-      inputTokens: null,
-      outputTokens: null,
+      inputTokens: stats.inputTokens,
+      outputTokens: stats.outputTokens,
+      completedAt: Date.now(),
     });
     updatePlannerChat(this.opts.db, chat.id, { lastModelId: modelId, lastActivityAt: Date.now() });
     writePlannerLastModelId(this.opts.db, modelId);
@@ -374,10 +426,11 @@ export class PlannerChatService {
     workspacePath: string,
     modelId: string,
     iteration: number,
+    stats: PlannerTurnStats,
     signal?: AbortSignal,
   ): AsyncGenerator<AgentEvent> {
     if (iteration >= MAX_TOOL_ITERATIONS) {
-      yield* this.finishTurn(chat, workspacePath, modelId, GIVE_UP_MESSAGE, true);
+      yield* this.finishTurn(chat, workspacePath, modelId, GIVE_UP_MESSAGE, true, stats);
       return;
     }
 
@@ -392,6 +445,10 @@ export class PlannerChatService {
 
     const textBlockId = crypto.randomUUID();
     let completion: PlannerLlmCompletion | null = null;
+    // `elapsedMs` only ever covers this — the LLM actually generating a
+    // reply — never tool execution or an approval pause; see
+    // `PlannerTurnStats`'s doc comment for why.
+    const llmStartedAt = Date.now();
     try {
       for await (const chunk of client.streamComplete(modelId, messages, toOpenAiToolSpecs(this.tools), signal)) {
         if (chunk.type === 'text_delta') {
@@ -403,9 +460,14 @@ export class PlannerChatService {
     } catch (err) {
       this.opts.logger?.warn({ err, chat: chat.id, model: modelId }, 'planner LLM call failed');
       const message = err instanceof PlannerLlmError ? err.message : (err as Error).message;
-      yield* this.finishTurn(chat, workspacePath, modelId, `Could not reach the LLM endpoint: ${message}`, true);
+      const failedStats = { ...stats, elapsedMs: stats.elapsedMs + (Date.now() - llmStartedAt) };
+      yield* this.finishTurn(chat, workspacePath, modelId, `Could not reach the LLM endpoint: ${message}`, true, failedStats);
       return;
     }
+    const nextStats = addUsage(
+      { ...stats, elapsedMs: stats.elapsedMs + (Date.now() - llmStartedAt) },
+      completion?.usage ?? null,
+    );
 
     if (!completion) {
       // Should not happen — `streamComplete` always yields exactly one
@@ -417,12 +479,13 @@ export class PlannerChatService {
         modelId,
         'The LLM endpoint closed the connection without a response.',
         true,
+        nextStats,
       );
       return;
     }
 
     if (completion.toolCalls.length === 0) {
-      yield* this.finishTurn(chat, workspacePath, modelId, completion.content ?? '', false);
+      yield* this.finishTurn(chat, workspacePath, modelId, completion.content ?? '', false, nextStats);
       return;
     }
 
@@ -438,7 +501,7 @@ export class PlannerChatService {
       });
     }
 
-    yield* this.processToolCalls(chat, workspacePath, modelId, completion.toolCalls, 0, iteration + 1);
+    yield* this.processToolCalls(chat, workspacePath, modelId, completion.toolCalls, 0, iteration + 1, nextStats);
   }
 
   /**
@@ -455,6 +518,7 @@ export class PlannerChatService {
     toolCalls: PlannerLlmToolCall[],
     startIndex: number,
     iteration: number,
+    stats: PlannerTurnStats,
   ): AsyncGenerator<AgentEvent> {
     for (let index = startIndex; index < toolCalls.length; index++) {
       const call = toolCalls[index]!;
@@ -483,6 +547,7 @@ export class PlannerChatService {
             toolCalls,
             index,
             iteration,
+            stats,
           });
           const args = safeParseArgs(call.function.arguments);
           yield* this.emit(workspacePath, chat.id, {
@@ -525,7 +590,7 @@ export class PlannerChatService {
     }
 
     // Every call in this batch resolved — ask the model what's next.
-    yield* this.driveLoop(chat, workspacePath, modelId, iteration, undefined);
+    yield* this.driveLoop(chat, workspacePath, modelId, iteration, stats, undefined);
   }
 
   private async executeTool(tool: PlannerToolDefinition, rawArguments: string, chat: PlannerChat): Promise<string> {

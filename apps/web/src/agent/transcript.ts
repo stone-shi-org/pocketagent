@@ -66,6 +66,10 @@ export interface TurnItem {
   durationMs: number | null;
   inputTokens: number | null;
   outputTokens: number | null;
+  /** Epoch ms the turn finished, for a footer to render a local-timezone
+      timestamp. `null` for a backend that doesn't set it (see
+      `TurnCompleteEvent.completedAt`'s own doc comment). */
+  completedAt: number | null;
 }
 
 /** Output from a slash command that resolved locally, without a model turn. */
@@ -282,6 +286,7 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
             durationMs: event.durationMs,
             inputTokens: event.inputTokens,
             outputTokens: event.outputTokens,
+            completedAt: event.completedAt ?? null,
           },
         ],
       };

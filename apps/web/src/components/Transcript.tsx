@@ -363,8 +363,18 @@ function TurnFooter({ item }: { item: Extract<TranscriptItem, { type: 'turn' }> 
   if (item.inputTokens !== null || item.outputTokens !== null) {
     bits.push(`${item.inputTokens ?? 0}↑ ${item.outputTokens ?? 0}↓`);
   }
+  // Tokens/sec only means something for actual generation time, so it needs
+  // both a duration and an output-token count — either missing (a backend
+  // that doesn't report usage, or an instant/errored turn) just omits this
+  // bit rather than showing a fabricated or divide-by-zero rate.
+  if (item.durationMs !== null && item.durationMs > 0 && item.outputTokens !== null) {
+    bits.push(`${(item.outputTokens / (item.durationMs / 1000)).toFixed(1)} tok/s`);
+  }
   if (item.costUsd !== null) bits.push(`$${item.costUsd.toFixed(4)}`);
   if (item.isError) bits.push('error');
+  // The viewer's own local time zone, via `toLocaleTimeString`'s default
+  // (no explicit `timeZone` option) — never the server's.
+  if (item.completedAt !== null) bits.push(new Date(item.completedAt).toLocaleTimeString());
 
   if (bits.length === 0) return <div className="turn-sep" />;
   return <div className="turn-footer">{bits.join(' · ')}</div>;

@@ -62,7 +62,7 @@ describe('PlannerLlmClient', () => {
 
     expect(events).toEqual([
       { type: 'text_delta', text: 'hello there' },
-      { type: 'done', content: 'hello there', toolCalls: [] },
+      { type: 'done', content: 'hello there', toolCalls: [], usage: null },
     ]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0]!;
@@ -73,6 +73,7 @@ describe('PlannerLlmClient', () => {
       model: 'gpt-4o-mini',
       messages: [{ role: 'user', content: 'hi' }],
       stream: true,
+      stream_options: { include_usage: true },
     });
   });
 
@@ -346,6 +347,57 @@ describe('planner chat routes over HTTP', () => {
     // user message — not an empty or stale list.
     const sentMessages = JSON.parse(fetchImpl.mock.calls[0]![1].body as string).messages;
     expect(sentMessages).toEqual([{ role: 'user', content: 'plan my week' }]);
+  });
+
+  it('turn_complete carries durationMs, token usage, and a completedAt timestamp when the provider reports usage', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() =>
+      sseResponse([
+        JSON.stringify({ choices: [{ delta: { content: 'hi' } }] }),
+        JSON.stringify({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 3 } }),
+      ]),
+    );
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const before = Date.now();
+    const { events } = await sendMessage(t, chat.id, 'hi');
+    const turnComplete = findEvent(events, 'turn_complete')!;
+    expect(turnComplete.inputTokens).toBe(10);
+    expect(turnComplete.outputTokens).toBe(3);
+    expect(turnComplete.durationMs as number).toBeGreaterThanOrEqual(0);
+    expect(turnComplete.completedAt as number).toBeGreaterThanOrEqual(before);
+
+    // The client always opts into usage reporting.
+    const body = JSON.parse(fetchImpl.mock.calls[0]![1].body as string);
+    expect(body.stream_options).toEqual({ include_usage: true });
+  });
+
+  it('turn_complete sums token usage across every LLM round trip a tool-calling turn made', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        sseResponse([
+          JSON.stringify({
+            choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'list_workspaces', arguments: '{}' } }] } }],
+          }),
+          JSON.stringify({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 2 } }),
+        ]),
+      )
+      .mockResolvedValueOnce(
+        sseResponse([
+          JSON.stringify({ choices: [{ delta: { content: 'done' } }] }),
+          JSON.stringify({ choices: [], usage: { prompt_tokens: 25, completion_tokens: 5 } }),
+        ]),
+      );
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const { events } = await sendMessage(t, chat.id, 'what workspaces do I have?');
+    const turnComplete = findEvent(events, 'turn_complete')!;
+    expect(turnComplete.inputTokens).toBe(35); // 10 + 25
+    expect(turnComplete.outputTokens).toBe(7); // 2 + 5
   });
 
   it('executes a read-only tool call immediately (no approval), streaming tool_use/tool_result, and persists them', async () => {

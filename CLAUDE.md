@@ -291,6 +291,20 @@ status; past that point the service never throws again — an in-flight failure 
 endpoint erroring) becomes an in-band `text`/`turn_complete(isError: true)` event instead,
 because headers are already committed by then and there is no status left to change.
 
+**`turn_complete`'s stats are LLM time only.** `finishTurn` populates `durationMs`/
+`inputTokens`/`outputTokens`/`completedAt` (the last one new, and optional on the shared
+`TurnCompleteEvent` — a structured session's own `normalize.ts` doesn't set it) so the same
+`TurnFooter` a structured session's turn already renders through also shows Pocket Agent's
+tokens/sec, token totals, and a local-timezone timestamp with zero new frontend code.
+`PlannerTurnStats` (`planner/chats.ts`) threads a running total across every LLM round trip a
+tool-calling turn makes — and across an approval pause, via `PendingPlannerTurn.stats` — but
+`elapsedMs` only ever accumulates time spent actually waiting on `streamComplete`, never tool
+execution and never a human's approval-pause time; the latter is arbitrary and would make
+tokens/sec meaningless. Token counts come from `stream_options.include_usage: true`, sent on
+every request; not every OpenAI-compatible implementation honors it, so `usage` — and therefore
+the rendered token/tps bits — is `null` rather than a fabricated zero when a provider never
+reports one.
+
 **The approval gate is a pause, not a block.** See the invariants list for the full mechanics
 (`planner/approval.ts`); the short version is that a mutating tool call with no remembered
 decision emits a `permission_request` event and ends that leg of the stream rather than

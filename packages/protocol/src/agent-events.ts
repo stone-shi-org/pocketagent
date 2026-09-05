@@ -150,6 +150,16 @@ export const TurnCompleteEvent = z.object({
   costUsd: z.number().nullable(),
   inputTokens: z.number().int().nullable(),
   outputTokens: z.number().int().nullable(),
+  /**
+   * Wall-clock epoch ms at which the turn finished, for a footer to render a
+   * timestamp in the viewer's own timezone (`new Date(x).toLocaleTimeString()`
+   * already does that with no timezone math needed). Optional rather than
+   * required: only Pocket Agent chats populate it so far (`planner/chats.ts`'s
+   * `finishTurn`) — a structured session's own `normalize.ts` does not, so an
+   * older persisted transcript or a structured-session turn simply renders
+   * without the timestamp bit rather than failing to parse.
+   */
+  completedAt: z.number().int().optional(),
 });
 
 /** Anything worth surfacing that is not part of the conversation proper. */

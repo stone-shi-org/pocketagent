@@ -13,9 +13,20 @@ export type PlannerChatMessage =
   | { role: 'assistant'; content: string | null; tool_calls?: PlannerLlmToolCall[] }
   | { role: 'tool'; tool_call_id: string; content: string };
 
+/** OpenAI's own `usage` shape, snake_case for the same reason as the wire
+    types above. `null` when the provider never sent one — not every
+    OpenAI-compatible implementation honors `stream_options.include_usage`,
+    so the settings-page turn footer simply omits the tokens/tps bits rather
+    than showing a fabricated zero. */
+export interface PlannerLlmUsage {
+  promptTokens: number;
+  completionTokens: number;
+}
+
 export interface PlannerLlmCompletion {
   content: string | null;
   toolCalls: PlannerLlmToolCall[];
+  usage: PlannerLlmUsage | null;
 }
 
 /**
@@ -147,6 +158,14 @@ export class PlannerLlmClient {
           model,
           messages,
           stream: true,
+          // Asks for a final usage-only chunk (`choices: []`, a `usage`
+          // object) before `[DONE]` — the standard OpenAI streaming opt-in,
+          // silently ignored by any compatible implementation that doesn't
+          // support it (an unknown JSON field, not an unknown parameter
+          // name). Without it there is no token count to compute tokens/sec
+          // from, so the turn footer just omits that bit — see `usage`
+          // below.
+          stream_options: { include_usage: true },
           ...(tools && tools.length > 0 ? { tools } : {}),
         }),
         ...(signal ? { signal } : {}),
@@ -177,6 +196,7 @@ export class PlannerLlmClient {
     const toolCallsByIndex = new Map<number, { id: string; name: string; args: string }>();
     let contentSoFar = '';
     let sawAnyChunk = false;
+    let usage: PlannerLlmUsage | null = null;
     let buffer = '';
 
     const handleLine = (line: string): PlannerLlmStreamEvent | null => {
@@ -192,6 +212,18 @@ export class PlannerLlmClient {
         return null; // A malformed chunk is dropped rather than aborting the whole stream.
       }
       sawAnyChunk = true;
+
+      // The `stream_options.include_usage` chunk carries a top-level `usage`
+      // alongside an empty `choices: []` — captured here rather than
+      // returned as its own stream event, the same "assemble internally,
+      // surface only in `done`" treatment tool-call chunks already get.
+      const rawUsage = (parsed as { usage?: { prompt_tokens?: number; completion_tokens?: number } | null }).usage;
+      if (rawUsage) {
+        usage = {
+          promptTokens: rawUsage.prompt_tokens ?? 0,
+          completionTokens: rawUsage.completion_tokens ?? 0,
+        };
+      }
 
       const choice = (
         parsed as {
@@ -261,7 +293,7 @@ export class PlannerLlmClient {
       throw new PlannerLlmError('Planner LLM response had no message content or tool calls.');
     }
 
-    yield { type: 'done', content, toolCalls };
+    yield { type: 'done', content, toolCalls, usage };
   }
 }
 
