@@ -37,13 +37,21 @@ export const PlannerWorkspaceListResponse = z.object({
 export type PlannerWorkspaceListResponse = z.infer<typeof PlannerWorkspaceListResponse>;
 
 /**
- * Unlike a project workspace, the caller does not name an arbitrary absolute
- * path. A planner workspace is app-owned scratch space, so the app decides
- * where on disk it lives (a fresh directory under the planner workspaces
- * root); the caller only names it.
+ * `path` omitted (the original PA-6 behavior): a planner workspace is
+ * app-owned scratch space, so the app decides where on disk it lives (a
+ * fresh directory under the planner workspaces root) and the caller only
+ * names it. `path` given: the caller instead points this agent at a
+ * specific directory anywhere on the host, picked the same way `POST
+ * /api/workspaces/add` lets a user pick a project folder — `createPath`
+ * mirrors that endpoint's own `create` flag for a not-yet-existing
+ * directory. **Providing `path` is the moment full read/write/delete trust
+ * is handed to that directory**, exactly the trust an auto-created scratch
+ * folder already has — see `PlannerWorkspaceRegistry.create`'s doc comment.
  */
 export const CreatePlannerWorkspaceRequest = z.object({
   name: z.string().min(1).max(128),
+  path: z.string().min(1).max(4096).optional(),
+  createPath: z.boolean().optional(),
 });
 export type CreatePlannerWorkspaceRequest = z.infer<typeof CreatePlannerWorkspaceRequest>;
 

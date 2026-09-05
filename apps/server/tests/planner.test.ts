@@ -107,6 +107,38 @@ describe('PlannerWorkspaceRegistry', () => {
     await expect(registry.create(root, '***')).rejects.toMatchObject({ code: 'invalid' });
   });
 
+  // ---- PA-6 round 4: pointing an agent at an existing directory --------------
+
+  it('points a workspace at an existing directory when opts.path is given, instead of creating one under root', async () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    const row = await registry.create(root, 'Pointed', { path: ws.project });
+    expect(row.path).toBe(await fs.promises.realpath(ws.project));
+    // A directory anywhere on the host, not nested under `root` at all.
+    expect(row.path.startsWith(root)).toBe(false);
+  });
+
+  it('rejects opts.path pointing at a directory that does not exist, unless opts.create is set', async () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    const missing = path.join(ws.root, 'does-not-exist-yet');
+    await expect(registry.create(root, 'Pointed', { path: missing })).rejects.toMatchObject({ code: 'invalid' });
+
+    const row = await registry.create(root, 'Pointed', { path: missing, create: true });
+    expect(fs.statSync(row.path).isDirectory()).toBe(true);
+  });
+
+  it('rejects opts.path pointing at a file rather than a directory', async () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    const filePath = path.join(ws.root, 'a-file.txt');
+    fs.writeFileSync(filePath, 'hi');
+    await expect(registry.create(root, 'Pointed', { path: filePath })).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  it('rejects opts.path when another agent already uses that exact directory', async () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    await registry.create(root, 'First', { path: ws.project });
+    await expect(registry.create(root, 'Second', { path: ws.project })).rejects.toMatchObject({ code: 'invalid' });
+  });
+
   it('refuses to remove the default workspace', async () => {
     const store = makeStore();
     const registry = new PlannerWorkspaceRegistry(store);
@@ -214,6 +246,34 @@ describe('planner routes over HTTP', () => {
 
     const list = (await get('/api/planner/workspaces')).json().workspaces;
     expect(list.find((w: { id: string }) => w.id === row.id)).toBeUndefined();
+  });
+
+  it('creates a workspace pointed at an existing directory when path is given', async () => {
+    const created = await post('/api/planner/workspaces', { name: 'Pointed', path: t.workspaceRoot });
+    expect(created.statusCode).toBe(201);
+    const row = created.json();
+    expect(row.path).toBe(fs.realpathSync(t.workspaceRoot));
+  });
+
+  it('400s creating a workspace pointed at a directory that does not exist without createPath', async () => {
+    const res = await post('/api/planner/workspaces', {
+      name: 'Pointed',
+      path: path.join(t.workspaceRoot, 'not-there-yet'),
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('creates a not-yet-existing directory when createPath is set', async () => {
+    const target = path.join(t.workspaceRoot, 'brand-new-agent-dir');
+    const created = await post('/api/planner/workspaces', { name: 'Pointed', path: target, createPath: true });
+    expect(created.statusCode).toBe(201);
+    expect(fs.statSync(created.json().path).isDirectory()).toBe(true);
+  });
+
+  it('400s a second agent pointed at the same exact directory', async () => {
+    await post('/api/planner/workspaces', { name: 'First', path: t.workspaceRoot });
+    const res = await post('/api/planner/workspaces', { name: 'Second', path: t.workspaceRoot });
+    expect(res.statusCode).toBe(400);
   });
 
   it('refuses to remove the default workspace over HTTP', async () => {

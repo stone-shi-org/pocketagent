@@ -487,10 +487,10 @@ export const api = {
   listPlannerWorkspaces: () =>
     request<PlannerWorkspaceListResponse>('/api/planner/workspaces'),
 
-  createPlannerWorkspace: (name: string) =>
+  createPlannerWorkspace: (name: string, opts?: { path?: string; createPath?: boolean }) =>
     request<PlannerWorkspace>('/api/planner/workspaces', {
       method: 'POST',
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, ...opts }),
     }),
 
   renamePlannerWorkspace: (id: string, name: string) =>

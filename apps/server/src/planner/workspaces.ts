@@ -101,35 +101,71 @@ export class PlannerWorkspaceRegistry {
   }
 
   /**
-   * Create a new planner workspace as a fresh directory under `root`.
+   * Create a new planner workspace, either as a fresh directory under `root`
+   * (the original behavior — the app decides where it lives, the caller only
+   * names it, directory names slugified/de-duplicated so two workspaces can
+   * share a display name without colliding on disk) or, when `opts.path` is
+   * given, pointed at an arbitrary directory the caller chose.
    *
-   * Unlike a project workspace, the caller does not name an arbitrary
-   * absolute path — a planner workspace is app-owned scratch space, so the
-   * app decides where on disk it lives; the caller only names it. Directory
-   * names are slugified and de-duplicated so two workspaces can share a
-   * display name without colliding on disk.
+   * The latter is a deliberate widening, mirroring `WorkspaceRegistry.add`'s
+   * own `create` flag for project folders: passing `opts.path` is the moment
+   * this agent's tools (write_file, exec_command, rmdir, ...) are handed full
+   * read/write/delete trust over that directory, forever — the same trust an
+   * auto-created scratch folder already has, just for a directory a human
+   * picked rather than one this app generated. `opts.create` allows a
+   * not-yet-existing directory (mkdir'd here) the same way `WorkspaceRegistry
+   * .add({create: true})` does; without it, the path must already exist.
    */
-  async create(root: string, name: string): Promise<PlannerWorkspaceRow> {
+  async create(
+    root: string,
+    name: string,
+    opts?: { path?: string; create?: boolean },
+  ): Promise<PlannerWorkspaceRow> {
     const trimmed = name.trim();
     if (trimmed.length === 0 || trimmed.length > 128) {
       throw new PlannerWorkspaceError('Name must be 1-128 characters.', 'invalid');
     }
-    const slug = slugify(trimmed);
-    if (slug.length === 0) {
-      throw new PlannerWorkspaceError(
-        'Name must contain at least one letter or digit.',
-        'invalid',
-      );
+
+    let real: string;
+    if (opts?.path) {
+      const absolute = path.resolve(opts.path);
+      if (opts.create) {
+        await fs.mkdir(absolute, { recursive: true });
+      }
+      try {
+        real = await fs.realpath(absolute);
+      } catch {
+        throw new PlannerWorkspaceError(
+          `${opts.path} does not exist. Pass createPath to create it.`,
+          'invalid',
+        );
+      }
+      const stat = await fs.stat(real);
+      if (!stat.isDirectory()) {
+        throw new PlannerWorkspaceError(`${opts.path} is not a directory.`, 'invalid');
+      }
+      if (this.rows.some((r) => r.path === real)) {
+        throw new PlannerWorkspaceError('Another agent already uses this exact directory.', 'invalid');
+      }
+    } else {
+      const slug = slugify(trimmed);
+      if (slug.length === 0) {
+        throw new PlannerWorkspaceError(
+          'Name must contain at least one letter or digit.',
+          'invalid',
+        );
+      }
+      const existingDirNames = new Set(this.rows.map((r) => path.basename(r.path)));
+      let dirName = slug;
+      let suffix = 2;
+      while (existingDirNames.has(dirName)) {
+        dirName = `${slug}-${suffix++}`;
+      }
+      const dirPath = path.join(root, dirName);
+      await fs.mkdir(dirPath, { recursive: true });
+      real = await fs.realpath(dirPath);
     }
-    const existingDirNames = new Set(this.rows.map((r) => path.basename(r.path)));
-    let dirName = slug;
-    let suffix = 2;
-    while (existingDirNames.has(dirName)) {
-      dirName = `${slug}-${suffix++}`;
-    }
-    const dirPath = path.join(root, dirName);
-    await fs.mkdir(dirPath, { recursive: true });
-    const real = await fs.realpath(dirPath);
+
     const row: PlannerWorkspaceRow = {
       id: crypto.randomUUID(),
       name: trimmed,

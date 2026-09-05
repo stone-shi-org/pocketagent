@@ -9,6 +9,7 @@ import type {
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
+import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
 
 interface Props {
   onApiError: (error: unknown) => void;
@@ -50,6 +51,8 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
   const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
   const [testingAll, setTestingAll] = useState(false);
   const [testResults, setTestResults] = useState<Record<string, TestPlannerModelResponse | 'testing'>>({});
+  const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
+  const [newAgentPath, setNewAgentPath] = useState<{ path: string; create: boolean } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -204,9 +207,21 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
     const name = newAgentName.trim();
     if (!name) return;
     void withBusy(async () => {
-      await api.createPlannerWorkspace(name);
+      await api.createPlannerWorkspace(
+        name,
+        newAgentPath ? { path: newAgentPath.path, createPath: newAgentPath.create } : undefined,
+      );
       setNewAgentName('');
+      setNewAgentPath(null);
     });
+  };
+
+  /** Called from `PlannerDirectoryPicker` — just records the choice, since
+      the agent isn't created until "Add agent" is pressed (the name field
+      might still be empty). */
+  const pickAgentDirectory = (path: string, opts?: { create?: boolean }): void => {
+    setNewAgentPath({ path, create: opts?.create ?? false });
+    setShowDirectoryPicker(false);
   };
 
   const removeAgent = (id: string): void => {
@@ -506,6 +521,10 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
               <span>
                 {ws.name}
                 {ws.isDefault && <span className="planner-row-meta"> (default)</span>}
+                <br />
+                <span className="planner-row-meta" title={ws.path}>
+                  {ws.path}
+                </span>
               </span>
             )}
             <div className="planner-inline">
@@ -546,7 +565,31 @@ export function PlannerPage({ onApiError, onBack }: Props): JSX.Element {
             <Icon name="plus" size={14} /> Add agent
           </button>
         </div>
+        {newAgentPath ? (
+          <p className="planner-row-meta" style={{ marginTop: 6 }}>
+            Directory: <code title={newAgentPath.path}>{newAgentPath.path}</code>
+            {newAgentPath.create && ' (will be created)'} —{' '}
+            <button type="button" className="planner-link-btn" onClick={() => setNewAgentPath(null)}>
+              use an app-created scratch folder instead
+            </button>
+          </p>
+        ) : (
+          <p className="planner-row-meta" style={{ marginTop: 6 }}>
+            Defaults to an app-created scratch folder —{' '}
+            <button type="button" className="planner-link-btn" onClick={() => setShowDirectoryPicker(true)}>
+              pick an existing directory instead
+            </button>
+          </p>
+        )}
       </div>
+
+      {showDirectoryPicker && (
+        <PlannerDirectoryPicker
+          onClose={() => setShowDirectoryPicker(false)}
+          onPick={pickAgentDirectory}
+          onApiError={onApiError}
+        />
+      )}
     </div>
   );
 }

@@ -247,6 +247,18 @@ never touches the directory, see `PlannerWorkspaceRegistry.rename`), guarded by 
 flag so deliberately removing it does not silently resurrect it on the next boot — the same
 discipline `workspaces_seeded` applies to project folders.
 
+**A planner workspace's directory can also be user-chosen, not just app-created.**
+`PlannerWorkspaceRegistry.create`'s `opts.path` (wired from `CreatePlannerWorkspaceRequest.path`,
+picked via the same host directory browser `AddProject` uses for a project folder —
+`PlannerDirectoryPicker`) points an agent at an arbitrary existing directory instead of a fresh
+one under the planner workspaces root; `opts.create` allows a not-yet-existing one, mirroring
+`WorkspaceRegistry.add`'s own `create` flag. This is a deliberate widening, not an oversight:
+picking a path here hands that agent's tools (`write_file`, `exec_command`, `rmdir`, ...) the
+*same* full read/write/delete trust an auto-created scratch folder already has, just for a
+directory a human chose — logged the same way `POST /api/workspaces/add` logs a project folder
+being added. Two agents may never point at the exact same directory (checked at creation) to
+avoid two "agents" silently sharing one identity for `PlannerWorkspaceRegistry.contains`.
+
 **A chat's transcript is the same `AgentEvent` union a structured session's own event stream
 uses** (`packages/protocol/src/agent-events.ts`), not a parallel shape — reused directly so a
 reopened Pocket Agent chat replays through the exact same `applyEvents` reducer the frontend

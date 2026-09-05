@@ -154,7 +154,19 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     }
     const { plannerWorkspaces, plannerWorkspacesRoot } = app.pocket;
     try {
-      const row = await plannerWorkspaces.create(plannerWorkspacesRoot, parsed.data.name);
+      const row = await plannerWorkspaces.create(plannerWorkspacesRoot, parsed.data.name, {
+        path: parsed.data.path,
+        create: parsed.data.createPath,
+      });
+      if (parsed.data.path) {
+        // Same disclosure `POST /api/workspaces/add` logs for a project
+        // folder — this is the moment full read/write/delete trust over
+        // `row.path` is granted to this agent's own tools.
+        app.log.warn(
+          { path: row.path, created: !!parsed.data.createPath },
+          'planner agent pointed at an existing directory; its tools may now freely modify it',
+        );
+      }
       return reply.code(201).send(row);
     } catch (err) {
       return mapWorkspaceError(reply, err);
