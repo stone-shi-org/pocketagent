@@ -2,14 +2,21 @@ import crypto from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import {
   CreateWebhookRequest,
+  DEFAULT_BAMBOO_PROMPT_TEMPLATE,
+  DEFAULT_JIRA_PROMPT_TEMPLATE,
   UpdateWebhookRequest,
   WEBHOOK_RESERVED_SLUGS,
   WEBHOOK_SLUG_RE,
   WebhookTestRequest,
 } from '@pocketagent/protocol';
-import type { JiraProjectMapEntry, JiraPromptTemplateMapEntry } from '@pocketagent/protocol';
+import type {
+  BambooPlanMapEntry,
+  BambooPromptTemplateMapEntry,
+  JiraProjectMapEntry,
+  JiraPromptTemplateMapEntry,
+} from '@pocketagent/protocol';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
-import type { WebhookSpec } from '../webhooks/index.js';
+import type { WebhookSpec, WebhookSpecCommon } from '../webhooks/index.js';
 import { WebhookServiceError } from '../webhooks/index.js';
 import { resolveWorkspaceCwdOrReply, structuredAgentProblem } from './shared.js';
 import { webhookDeliveryRoutes } from './webhook-delivery.js';
@@ -18,8 +25,8 @@ import { webhookDeliveryRoutes } from './webhook-delivery.js';
 const DEFAULT_DELIVERY_LIMIT = 50;
 const MAX_DELIVERY_LIMIT = 200;
 
-function badRequest(reply: FastifyReply, message: string): FastifyReply {
-  return reply.code(400).send({ error: { code: 'bad_request', message } });
+function badRequest(reply: FastifyReply, message: string, code = 'bad_request'): FastifyReply {
+  return reply.code(400).send({ error: { code, message } });
 }
 
 export const webhookRoutes: FastifyPluginAsync = async (app) => {
@@ -87,18 +94,32 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     const agentProblem = structuredAgentProblem(agents, body.agent, 'triggered by a webhook');
     if (agentProblem !== null) return badRequest(reply, agentProblem);
 
-    const projectMap = await resolveProjectMap(workspaces, body.config.projectMap, reply);
-    if (projectMap === null) return reply;
+    // Bamboo cannot compute a request signature — it only supports a static
+    // custom header — so `hmac` would 401 every real delivery forever with no
+    // way for the operator to diagnose why. Reject the configuration outright
+    // rather than accept one that can never work.
+    if (body.config.type === 'bamboo' && body.authMode === 'hmac') {
+      return badRequest(
+        reply,
+        'A Bamboo webhook can only use bearer-token auth: Bamboo has no way to sign a request body, only to send a static header.',
+        'bamboo_requires_bearer',
+      );
+    }
 
-    const templateMapDup = checkPromptTemplateMapDuplicates(body.config.promptTemplateMap);
+    const routeMap =
+      body.config.type === 'bamboo'
+        ? await resolvePlanMap(workspaces, body.config.planMap, reply)
+        : await resolveProjectMap(workspaces, body.config.projectMap, reply);
+    if (routeMap === null) return reply;
+
+    const templateMapDup =
+      body.config.type === 'bamboo'
+        ? checkBambooPromptTemplateMapDuplicates(body.config.promptTemplateMap)
+        : checkPromptTemplateMapDuplicates(body.config.promptTemplateMap);
     if (templateMapDup !== null) return badRequest(reply, templateMapDup);
 
     try {
-      const created = webhooks.create({
-        ...specFrom(body, projectMap, body.config.promptTemplateMap),
-        slug,
-        cwd,
-      });
+      const created = webhooks.create(specFrom(body, routeMap, body.config.promptTemplateMap, slug, cwd));
       return reply.code(201).send({
         webhook: webhooks.toWebhook(created.row),
         secret: created.secret,
@@ -133,27 +154,47 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
       if (agentProblem !== null) return badRequest(reply, agentProblem);
     }
 
-    // `config` replaces wholesale, so the project map is re-resolved in full
-    // whenever it is sent — same as the filter object just above it.
-    let projectMap: JiraProjectMapEntry[] | undefined;
-    let promptTemplateMap: JiraPromptTemplateMapEntry[] | undefined;
-    if (body.config !== undefined) {
-      const resolved = await resolveProjectMap(workspaces, body.config.projectMap, reply);
-      if (resolved === null) return reply;
-      projectMap = resolved;
+    const existing = webhooks.get(request.params.id);
+    const effectiveAuthMode = body.authMode ?? existing.auth_mode;
+    if (existing.type === 'bamboo' && effectiveAuthMode === 'hmac') {
+      return badRequest(
+        reply,
+        'A Bamboo webhook can only use bearer-token auth: Bamboo has no way to sign a request body, only to send a static header.',
+        'bamboo_requires_bearer',
+      );
+    }
 
-      const templateMapDup = checkPromptTemplateMapDuplicates(body.config.promptTemplateMap);
+    // `config` replaces wholesale, so the route map is re-resolved in full
+    // whenever it is sent — same as the filter object just above it.
+    let routeMap: JiraProjectMapEntry[] | BambooPlanMapEntry[] | undefined;
+    let promptTemplateMap: JiraPromptTemplateMapEntry[] | BambooPromptTemplateMapEntry[] | undefined;
+    if (body.config !== undefined) {
+      const resolved =
+        body.config.type === 'bamboo'
+          ? await resolvePlanMap(workspaces, body.config.planMap, reply)
+          : await resolveProjectMap(workspaces, body.config.projectMap, reply);
+      if (resolved === null) return reply;
+      routeMap = resolved;
+
+      const templateMapDup =
+        body.config.type === 'bamboo'
+          ? checkBambooPromptTemplateMapDuplicates(body.config.promptTemplateMap)
+          : checkPromptTemplateMapDuplicates(body.config.promptTemplateMap);
       if (templateMapDup !== null) return badRequest(reply, templateMapDup);
       promptTemplateMap = body.config.promptTemplateMap;
     }
 
     try {
-      const patch: Partial<WebhookSpec> = {
+      const patch: Partial<WebhookSpecCommon> & {
+        filter?: WebhookSpec['filter'];
+        routeMap?: JiraProjectMapEntry[] | BambooPlanMapEntry[];
+        promptTemplateMap?: JiraPromptTemplateMapEntry[] | BambooPromptTemplateMapEntry[];
+      } = {
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.slug !== undefined ? { slug: body.slug } : {}),
         ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
         ...(body.config !== undefined
-          ? { filter: body.config.filter, projectMap, promptTemplateMap }
+          ? { filter: body.config.filter, routeMap, promptTemplateMap }
           : {}),
         ...(body.authMode !== undefined ? { authMode: body.authMode } : {}),
         ...(cwd !== undefined ? { cwd } : {}),
@@ -378,17 +419,50 @@ function checkProjectMapDuplicates(entries: { projectKey: string }[]): string | 
 }
 
 /**
- * Reject a blank or duplicate issue type in prompt template map.
+ * Reject a blank or (case-insensitively) duplicate plan key — the Bamboo
+ * equivalent of `checkProjectMapDuplicates`.
  */
-function checkPromptTemplateMapDuplicates(entries: JiraPromptTemplateMapEntry[]): string | null {
+function checkPlanMapDuplicates(entries: { planKey: string }[]): string | null {
   const seen = new Set<string>();
   for (const entry of entries) {
-    const key = entry.issueType.trim().toLowerCase();
-    if (key === '') return 'A prompt template mapping needs an issue type.';
-    if (seen.has(key)) return `Issue type "${entry.issueType.trim()}" is mapped more than once.`;
+    const key = entry.planKey.trim().toUpperCase();
+    if (key === '') return 'A plan mapping needs a plan key.';
+    if (seen.has(key)) return `Plan "${key}" is mapped more than once.`;
     seen.add(key);
   }
   return null;
+}
+
+/** Shared by `checkPromptTemplateMapDuplicates` and its Bamboo counterpart below. */
+function checkTemplateMapDuplicates<T>(
+  entries: T[],
+  keyOf: (entry: T) => string,
+  keyLabel: string,
+): string | null {
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const raw = keyOf(entry);
+    const key = raw.trim().toLowerCase();
+    if (key === '') return `A prompt template mapping needs a${/^[aeiou]/i.test(keyLabel) ? 'n' : ''} ${keyLabel}.`;
+    if (seen.has(key)) {
+      const article = keyLabel[0]?.toUpperCase() + keyLabel.slice(1);
+      return `${article} "${raw.trim()}" is mapped more than once.`;
+    }
+    seen.add(key);
+  }
+  return null;
+}
+
+/**
+ * Reject a blank or duplicate issue type in prompt template map.
+ */
+function checkPromptTemplateMapDuplicates(entries: JiraPromptTemplateMapEntry[]): string | null {
+  return checkTemplateMapDuplicates(entries, (e) => e.issueType, 'issue type');
+}
+
+/** Reject a blank or duplicate build state in a Bamboo prompt template map. */
+function checkBambooPromptTemplateMapDuplicates(entries: BambooPromptTemplateMapEntry[]): string | null {
+  return checkTemplateMapDuplicates(entries, (e) => e.buildState, 'build state');
 }
 
 /**
@@ -417,35 +491,93 @@ async function resolveProjectMap(
   return resolved;
 }
 
+/** The Bamboo equivalent of `resolveProjectMap`, keyed on plan key instead of project key. */
+async function resolvePlanMap(
+  workspaces: WorkspaceRegistry,
+  entries: { planKey: string; cwd: string }[],
+  reply: FastifyReply,
+): Promise<BambooPlanMapEntry[] | null> {
+  const dupProblem = checkPlanMapDuplicates(entries);
+  if (dupProblem !== null) {
+    badRequest(reply, dupProblem);
+    return null;
+  }
+  const resolved: BambooPlanMapEntry[] = [];
+  for (const entry of entries) {
+    const cwd = await resolveWorkspaceCwdOrReply(workspaces, entry.cwd, reply);
+    if (cwd === null) return null;
+    resolved.push({ planKey: entry.planKey.trim().toUpperCase(), cwd });
+  }
+  return resolved;
+}
+
 /** The reveal/rotate responses must never sit in an intermediary's cache. */
 function noStore(reply: FastifyReply): FastifyReply {
   return reply.header('cache-control', 'no-store');
 }
 
+/**
+ * Build the complete create spec from a validated request.
+ *
+ * Takes `slug`/`cwd` directly and returns a whole `WebhookSpec`, rather than
+ * an `Omit<WebhookSpec, 'slug' | 'cwd'>` spread together with them at the call
+ * site: `Omit` is defined via `keyof`, which does not distribute over a union
+ * the way a plain object literal return does, so it quietly erases
+ * `WebhookSpec`'s discriminated-union shape and makes every member look like
+ * it needs every field. Returning the literal directly keeps the type checker
+ * able to tell "this object has `type: 'bamboo'`, so it needs `planMap`" from
+ * "this one has `type: 'jira'`, so it needs `projectMap`".
+ *
+ * `promptTemplate` has no schema-level default any more (see
+ * `CreateWebhookRequest` in `packages/protocol/src/webhooks.ts`): a `.default()`
+ * cannot see `body.config.type` to pick between `DEFAULT_JIRA_PROMPT_TEMPLATE`
+ * and `DEFAULT_BAMBOO_PROMPT_TEMPLATE`, so that choice is made here instead,
+ * the same way agent-transport and slug-uniqueness checks already live at the
+ * route rather than in the schema.
+ */
 function specFrom(
   body: CreateWebhookRequest,
-  projectMap: JiraProjectMapEntry[],
-  promptTemplateMap: JiraPromptTemplateMapEntry[],
-): Omit<WebhookSpec, 'slug' | 'cwd'> {
-  return {
+  routeMap: JiraProjectMapEntry[] | BambooPlanMapEntry[],
+  promptTemplateMap: JiraPromptTemplateMapEntry[] | BambooPromptTemplateMapEntry[],
+  slug: string,
+  cwd: string,
+): WebhookSpec {
+  const common = {
+    slug,
+    cwd,
     name: body.name,
     enabled: body.enabled,
-    type: 'jira',
-    filter: body.config.filter,
-    projectMap,
-    promptTemplateMap,
     authMode: body.authMode,
     agent: body.agent,
     worktreeMode: body.worktreeMode,
     model: body.model ?? null,
     ...('effort' in body ? { effort: body.effort ?? null } : {}),
     skipPermissions: body.skipPermissions,
-    promptTemplate: body.promptTemplate,
+    promptTemplate:
+      body.promptTemplate ??
+      (body.config.type === 'bamboo' ? DEFAULT_BAMBOO_PROMPT_TEMPLATE : DEFAULT_JIRA_PROMPT_TEMPLATE),
     conversationMode: body.conversationMode,
     overlapPolicy: body.overlapPolicy,
     maxConcurrent: body.maxConcurrent,
     debounceSeconds: body.debounceSeconds,
     storePayloads: body.storePayloads,
+  };
+
+  if (body.config.type === 'bamboo') {
+    return {
+      ...common,
+      type: 'bamboo',
+      filter: body.config.filter,
+      planMap: routeMap as BambooPlanMapEntry[],
+      promptTemplateMap: promptTemplateMap as BambooPromptTemplateMapEntry[],
+    };
+  }
+  return {
+    ...common,
+    type: 'jira',
+    filter: body.config.filter,
+    projectMap: routeMap as JiraProjectMapEntry[],
+    promptTemplateMap: promptTemplateMap as JiraPromptTemplateMapEntry[],
   };
 }
 

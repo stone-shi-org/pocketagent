@@ -11,10 +11,12 @@ import type {
   SessionInfo,
   WebhookDeliveryStatus,
   WebhookSummary,
+  WebhookType,
 } from '@pocketagent/protocol';
-import { JiraWebhookFilter } from '@pocketagent/protocol';
+import { BambooWebhookFilter, JiraWebhookFilter } from '@pocketagent/protocol';
 import type { ConversationStore } from '../conversations/index.js';
 import { describeJiraFilter } from '../webhooks/jira.js';
+import { describeBambooFilter } from '../webhooks/bamboo.js';
 import { GitStatusTracker } from '../git/status.js';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
 import {
@@ -179,8 +181,8 @@ export class ProjectService {
         id: row.id,
         name: row.name,
         enabled: row.enabled === 1,
-        type: 'jira',
-        triggerLabel: describeWebhookTrigger(row.filter_json),
+        type: row.type as WebhookType,
+        triggerLabel: describeWebhookTrigger(row.type as WebhookType, row.filter_json),
         lastDeliveryAt: row.last_delivery_at,
         lastDeliveryStatus: (row.last_delivery_status as WebhookDeliveryStatus | null) ?? null,
         skipPermissionsEnabled: row.skip_permissions === 1,
@@ -424,12 +426,17 @@ function push(map: Map<string, ChatSummary[]>, cwd: string, chat: ChatSummary): 
  * inverting that order for. A filter we cannot read simply describes itself as
  * unfiltered, which is what the row literally says.
  */
-function describeWebhookTrigger(filterJson: string): string {
+function describeWebhookTrigger(type: WebhookType, filterJson: string): string {
   try {
-    const parsed = JiraWebhookFilter.safeParse(JSON.parse(filterJson));
+    const raw = JSON.parse(filterJson);
+    if (type === 'bamboo') {
+      const parsed = BambooWebhookFilter.safeParse(raw);
+      return describeBambooFilter(parsed.success ? parsed.data : {});
+    }
+    const parsed = JiraWebhookFilter.safeParse(raw);
     return describeJiraFilter(parsed.success ? parsed.data : {});
   } catch {
-    return describeJiraFilter({});
+    return type === 'bamboo' ? describeBambooFilter({}) : describeJiraFilter({});
   }
 }
 

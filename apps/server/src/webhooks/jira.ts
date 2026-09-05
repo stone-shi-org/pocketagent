@@ -1,5 +1,6 @@
 import type { JiraWebhookFilter } from '@pocketagent/protocol';
 import { JIRA_ISSUE_KEY_RE } from '@pocketagent/protocol';
+import { resolveMappedPromptTemplate } from './template-routing.js';
 
 /**
  * Reading a Jira webhook payload, and deciding whether it should run.
@@ -238,43 +239,21 @@ export function resolveProjectRoute(
 /**
  * Determine which prompt template to use based on the issue type.
  *
- * Checks in order:
- * 1. Specific issue type match in `map` (case-insensitive, ignoring "All type" / "*").
- * 2. Fallback entry in `map` matching "All type" / "*" / "All types" / "all" (case-insensitive).
- * 3. Default webhook `defaultTemplate`.
+ * A thin adapter over `resolveMappedPromptTemplate`, which is now the shared
+ * implementation (Bamboo's `resolvePromptTemplateByBuildState` is the other
+ * adapter) — the algorithm never depended on the field being called
+ * "issueType", only on the map/wildcard/default shape.
  */
 export function resolvePromptTemplate(
   map: { issueType: string; promptTemplate: string }[],
   defaultTemplate: string,
   issueType: string | null,
 ): string {
-  if (map.length === 0) return defaultTemplate;
-
-  // 1. Check exact match for issueType (excluding wildcard / 'all type' entries)
-  if (issueType !== null && issueType.trim() !== '') {
-    const direct = map.find((e) => {
-      const type = e.issueType.trim().toLowerCase();
-      if (type === '*' || type === 'all type' || type === 'all types' || type === 'all') {
-        return false;
-      }
-      return eq(e.issueType, issueType);
-    });
-    if (direct && direct.promptTemplate.trim() !== '') {
-      return direct.promptTemplate;
-    }
-  }
-
-  // 2. Check fallback entry for "All type" / "*"
-  const fallback = map.find((e) => {
-    const type = e.issueType.trim().toLowerCase();
-    return type === '*' || type === 'all type' || type === 'all types' || type === 'all';
-  });
-  if (fallback && fallback.promptTemplate.trim() !== '') {
-    return fallback.promptTemplate;
-  }
-
-  // 3. Fall back to top-level prompt template
-  return defaultTemplate;
+  return resolveMappedPromptTemplate(
+    map.map((e) => ({ key: e.issueType, promptTemplate: e.promptTemplate })),
+    defaultTemplate,
+    issueType,
+  );
 }
 
 /** A one-line description of what a filter accepts, for the home-screen row. */

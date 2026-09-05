@@ -2,7 +2,6 @@ import { z } from 'zod';
 import { EffortLevel } from './agent-events.js';
 import { LIMITS } from './limits.js';
 import { CronOverlapPolicy, CronWorktreeMode } from './cron.js';
-import { DEFAULT_JIRA_PROMPT_TEMPLATE } from './webhook-template.js';
 
 /**
  * Inbound webhooks: an outside system starting agent work.
@@ -14,7 +13,7 @@ import { DEFAULT_JIRA_PROMPT_TEMPLATE } from './webhook-template.js';
  */
 
 /** Extensible by design: a second provider adds a member, not a new shape. */
-export const WebhookType = z.enum(['jira']);
+export const WebhookType = z.enum(['jira', 'bamboo']);
 export type WebhookType = z.infer<typeof WebhookType>;
 
 /**
@@ -184,6 +183,49 @@ export const JiraPromptTemplateMapEntry = z.object({
 export type JiraPromptTemplateMapEntry = z.infer<typeof JiraPromptTemplateMapEntry>;
 
 /**
+ * Which Bamboo build deliveries actually run — same philosophy as
+ * `JiraWebhookFilter`: every field means "no constraint" when absent or
+ * empty, OR within a category, AND across categories. `planKeys` compare
+ * case-insensitively, upper-cased on both sides, like Jira's `projectKeys`.
+ *
+ * `excludeTriggerReasons` mirrors `excludeActors` — a block-list rather than
+ * an allow-list — for the same loop-prevention reason: an agent that pushes a
+ * fix can retrigger the very plan that started it.
+ */
+export const BambooWebhookFilter = z.object({
+  planKeys: z.array(z.string().min(1).max(32)).max(50).optional(),
+  buildStates: z.array(z.enum(['Successful', 'Failed', 'Unknown'])).max(3).optional(),
+  notificationTypes: z.array(z.string().min(1).max(64)).max(20).optional(),
+  excludeTriggerReasons: z.array(Name).max(30).optional(),
+});
+export type BambooWebhookFilter = z.infer<typeof BambooWebhookFilter>;
+
+/**
+ * One row of "builds of this plan go to this directory" — the Bamboo
+ * equivalent of `JiraProjectMapEntry`, keyed on plan key instead of project
+ * key for the same reason: a plan key is the one field Bamboo always sends
+ * that identifies where the code being built actually lives.
+ */
+export const BambooPlanMapEntry = z.object({
+  planKey: z.string().min(1).max(32),
+  cwd: z.string().min(1).max(4096),
+});
+export type BambooPlanMapEntry = z.infer<typeof BambooPlanMapEntry>;
+
+/**
+ * One row pairing a build state with a specific prompt template.
+ *
+ * `buildState` can be "All states" / "*" (fallback rule) or a specific value
+ * (`Successful`, `Failed`, `Unknown`) — the Bamboo equivalent of
+ * `JiraPromptTemplateMapEntry.issueType`.
+ */
+export const BambooPromptTemplateMapEntry = z.object({
+  buildState: z.string().min(1).max(64),
+  promptTemplate: z.string().min(1).max(LIMITS.maxInputChars),
+});
+export type BambooPromptTemplateMapEntry = z.infer<typeof BambooPromptTemplateMapEntry>;
+
+/**
  * Discriminated on `type` so a second provider is purely additive.
  *
  * A discriminated union cannot be `.partial()`-ed, so a PATCH replaces `config`
@@ -210,6 +252,18 @@ export const WebhookConfig = z.discriminatedUnion('type', [
     filter: JiraWebhookFilter,
     projectMap: z.array(JiraProjectMapEntry).max(50).default([]),
     promptTemplateMap: z.array(JiraPromptTemplateMapEntry).max(50).default([]),
+  }),
+  /**
+   * `planMap`/`promptTemplateMap` follow `projectMap`'s rule exactly: empty
+   * means "no routing, everything runs in the webhook's own `cwd`"; once
+   * non-empty, an unmapped plan is filtered rather than falling back, because
+   * "unrouted" and "nobody set this plan up yet" are different situations.
+   */
+  z.object({
+    type: z.literal('bamboo'),
+    filter: BambooWebhookFilter,
+    planMap: z.array(BambooPlanMapEntry).max(50).default([]),
+    promptTemplateMap: z.array(BambooPromptTemplateMapEntry).max(50).default([]),
   }),
 ]);
 export type WebhookConfig = z.infer<typeof WebhookConfig>;
@@ -286,11 +340,16 @@ export const CreateWebhookRequest = WebhookFields.extend({
   maxConcurrent: z.number().int().min(1).max(10).default(2),
   debounceSeconds: z.number().int().min(0).max(3600).default(10),
   storePayloads: z.boolean().default(true),
-  promptTemplate: z
-    .string()
-    .min(1)
-    .max(LIMITS.maxInputChars)
-    .default(DEFAULT_JIRA_PROMPT_TEMPLATE),
+  /**
+   * No `.default()` here, unlike before this field had a second provider:
+   * `DEFAULT_JIRA_PROMPT_TEMPLATE` is Jira-specific, and a `.default()` cannot
+   * see the sibling `config.type` to pick between it and
+   * `DEFAULT_BAMBOO_PROMPT_TEMPLATE`. The route applies the type-appropriate
+   * default when this is omitted, exactly like `specFrom` already resolves
+   * other cross-field concerns (slug derivation, agent-transport checks) that
+   * a schema alone cannot express.
+   */
+  promptTemplate: z.string().min(1).max(LIMITS.maxInputChars).optional(),
   /**
    * Defaults to **false**, unlike `CreateCronJobRequest.skipPermissions`.
    *
@@ -523,7 +582,7 @@ export const WebhookSummary = z.object({
   name: z.string(),
   enabled: z.boolean(),
   type: WebhookType,
-  /** Pre-composed, e.g. `Jira issue events · ENG, PLAT`. */
+  /** Pre-composed, e.g. `Jira issue events · ENG, PLAT` or `Bamboo · Failed · EM-EM`. */
   triggerLabel: z.string(),
   lastDeliveryAt: z.number().int().nullable(),
   lastDeliveryStatus: WebhookDeliveryStatus.nullable(),

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AgentInfo,
+  BambooWebhookFilter,
   CronWorktreeMode,
   JiraWebhookFilter,
   ProjectInfo,
@@ -8,15 +9,19 @@ import type {
   WebhookConversationMode,
   WebhookDelivery,
   WebhookDeliveryCounts,
+  WebhookType,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
 import {
+  BAMBOO_TEMPLATE_VARS,
+  DEFAULT_BAMBOO_PROMPT_TEMPLATE,
   DEFAULT_JIRA_PROMPT_TEMPLATE,
   JIRA_PROMPT_TEMPLATES,
   JIRA_TEMPLATE_VARS,
   WEBHOOK_SLUG_RE,
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
+import { CopyButton } from '../components/CopyButton.js';
 import { Icon, type IconName } from '../components/Icon.js';
 import { SecretReveal } from '../components/SecretReveal.js';
 import { SelectRowNative } from '../components/SelectRowNative.js';
@@ -45,6 +50,35 @@ const EVENT_CHOICES = [
 
 /** Statuses that mean "this delivery never became a run". */
 const DID_NOT_RUN = new Set(['filtered', 'duplicate', 'throttled', 'skipped', 'rejected', 'invalid']);
+
+/** The three build states Bamboo can report. */
+const BUILD_STATE_CHOICES: readonly ('Successful' | 'Failed' | 'Unknown')[] = [
+  'Failed',
+  'Successful',
+  'Unknown',
+];
+
+/**
+ * The recommended webhook body template for Bamboo's own admin UI — see
+ * `BambooEventFacts` in `apps/server/src/webhooks/bamboo.ts` for the fields it
+ * produces. Every field a string, so an empty Bamboo variable never breaks the
+ * JSON. Shown verbatim in the "Set this up in Bamboo" panel, since Bamboo (unlike
+ * Jira) does not POST a fixed shape — the operator has to configure this body.
+ */
+const BAMBOO_WEBHOOK_TEMPLATE = `{
+  "notification": "\${bamboo.webhook.notification.description}",
+  "timestamp": "\${bamboo.webhook.timestamp}",
+  "planKey": "\${bamboo.planKey}",
+  "planName": "\${bamboo.buildPlanName}",
+  "buildNumber": "\${bamboo.buildNumber}",
+  "buildResultKey": "\${bamboo.buildResultKey}",
+  "buildState": "\${bamboo.buildState}",
+  "triggerReason": "\${bamboo.trigger.reason}",
+  "triggerSentence": "\${bamboo.trigger.name.for.sentence}",
+  "buildResultUrl": "\${bamboo.buildResultsUrl}",
+  "startedAt": "\${bamboo.date.started}",
+  "finishedAt": "\${bamboo.date.finished}"
+}`;
 
 const csvToList = (raw: string): string[] =>
   raw
@@ -97,6 +131,12 @@ export function WebhookEditorPage({
   const [preview, setPreview] = useState<string | null>(null);
 
   // ---- The form -------------------------------------------------------------
+  /**
+   * Fixed at creation, like the rest of a webhook's shape-defining fields
+   * (changing it later would orphan the filter/map). Read-only once the
+   * webhook has an id.
+   */
+  const [type, setType] = useState<WebhookType>('jira');
   const [name, setName] = useState('');
   const [slug, setSlug] = useState('');
   const [enabled, setEnabled] = useState(true);
@@ -123,6 +163,20 @@ export function WebhookEditorPage({
   const [labels, setLabels] = useState('');
   const [labelMode, setLabelMode] = useState<'any' | 'all'>('any');
   const [excludeActors, setExcludeActors] = useState('');
+
+  // ---- The Bamboo filter -----------------------------------------------------
+  const [planKeys, setPlanKeys] = useState('');
+  const [buildStates, setBuildStates] = useState<string[]>(['Failed']);
+  const [notificationTypes, setNotificationTypes] = useState('');
+  const [excludeTriggerReasons, setExcludeTriggerReasons] = useState('');
+
+  // ---- Per-plan routing (Bamboo's equivalent of the Jira project map) --------
+  const [planMap, setPlanMap] = useState<{ id: string; planKey: string; cwd: string }[]>([]);
+
+  // ---- Per-build-state prompt template routing (Bamboo) -----------------------
+  const [bambooPromptTemplateMap, setBambooPromptTemplateMap] = useState<
+    { id: string; buildState: string; promptTemplate: string }[]
+  >([]);
 
   // ---- Per-project routing ----------------------------------------------------
   // `id` is a client-only key for React's benefit; it never reaches the server.
@@ -197,6 +251,7 @@ export function WebhookEditorPage({
     };
 
     function hydrate(hook: Webhook): void {
+      setType(hook.type);
       setName(hook.name);
       setSlug(hook.slug);
       setEnabled(hook.enabled);
@@ -214,6 +269,30 @@ export function WebhookEditorPage({
       setDebounceSeconds(hook.debounceSeconds);
       setStorePayloads(hook.storePayloads);
       setDeliveryPath(hook.deliveryPath);
+
+      if (hook.config.type === 'bamboo') {
+        const f = hook.config.filter;
+        setPlanKeys((f.planKeys ?? []).join(', '));
+        setBuildStates(f.buildStates ?? []);
+        setNotificationTypes((f.notificationTypes ?? []).join(', '));
+        setExcludeTriggerReasons((f.excludeTriggerReasons ?? []).join(', '));
+        setPlanMap(
+          hook.config.planMap.map((e) => ({ id: crypto.randomUUID(), planKey: e.planKey, cwd: e.cwd })),
+        );
+        setDirectoryMode(hook.config.planMap.length > 0 ? 'auto-map' : 'workspace');
+        setBambooPromptTemplateMap(
+          (hook.config.promptTemplateMap ?? []).map((e) => ({
+            id: crypto.randomUUID(),
+            buildState: e.buildState,
+            promptTemplate: e.promptTemplate,
+          })),
+        );
+        setPromptTemplateMode(
+          (hook.config.promptTemplateMap ?? []).length > 0 ? 'by-issue-type' : 'single',
+        );
+        return;
+      }
+
       const f = hook.config.filter;
       setEvents(f.events ?? []);
       setProjectKeys((f.projectKeys ?? []).join(', '));
@@ -325,6 +404,22 @@ export function WebhookEditorPage({
   const filterIsEmpty =
     Object.keys(filter).filter((k) => k !== 'excludeActors').length === 0;
 
+  const bambooFilter = useMemo((): BambooWebhookFilter => {
+    const f: BambooWebhookFilter = {};
+    const pk = csvToList(planKeys).map((k) => k.toUpperCase());
+    if (pk.length > 0) f.planKeys = pk;
+    if (buildStates.length > 0) f.buildStates = buildStates as BambooWebhookFilter['buildStates'];
+    const nt = csvToList(notificationTypes);
+    if (nt.length > 0) f.notificationTypes = nt;
+    const ex = csvToList(excludeTriggerReasons);
+    if (ex.length > 0) f.excludeTriggerReasons = ex;
+    return f;
+  }, [planKeys, buildStates, notificationTypes, excludeTriggerReasons]);
+
+  /** Same footgun warning as `filterIsEmpty`, for a Bamboo webhook's filter. */
+  const bambooFilterIsEmpty =
+    Object.keys(bambooFilter).filter((k) => k !== 'excludeTriggerReasons').length === 0;
+
   const addProjectRoute = (): void => {
     // Blank, not the base `cwd`: a pre-filled row looks already-configured,
     // which is exactly how a mapping silently ends up routing to the same
@@ -413,6 +508,68 @@ export function WebhookEditorPage({
   const effectivePromptTemplateMap =
     promptTemplateMode === 'by-issue-type' ? cleanedPromptTemplateMap : [];
 
+  // ---- Bamboo plan map (mirrors the Jira project-map handlers above) --------
+  const addPlanRoute = (): void => {
+    setPlanMap((prev) => [...prev, { id: crypto.randomUUID(), planKey: '', cwd: '' }]);
+  };
+  const removePlanRoute = (id: string): void => {
+    setPlanMap((prev) => prev.filter((r) => r.id !== id));
+  };
+  const updatePlanRoute = (id: string, patch: Partial<{ planKey: string; cwd: string }>): void => {
+    setPlanMap((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  };
+  const cleanedPlanMap = useMemo(
+    () =>
+      planMap
+        .map((r) => ({ planKey: r.planKey.trim().toUpperCase(), cwd: r.cwd }))
+        .filter((r) => r.planKey !== '' && r.cwd !== ''),
+    [planMap],
+  );
+  const planMapDuplicate = useMemo(() => {
+    const seen = new Set<string>();
+    for (const r of cleanedPlanMap) {
+      if (seen.has(r.planKey)) return r.planKey;
+      seen.add(r.planKey);
+    }
+    return null;
+  }, [cleanedPlanMap]);
+  const effectivePlanMap = directoryMode === 'auto-map' ? cleanedPlanMap : [];
+
+  // ---- Bamboo prompt-template-by-build-state map (mirrors the Jira one) -----
+  const addBambooPromptTemplateRoute = (): void => {
+    setBambooPromptTemplateMap((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), buildState: 'All states', promptTemplate: DEFAULT_BAMBOO_PROMPT_TEMPLATE },
+    ]);
+  };
+  const removeBambooPromptTemplateRoute = (id: string): void => {
+    setBambooPromptTemplateMap((prev) => prev.filter((r) => r.id !== id));
+  };
+  const updateBambooPromptTemplateRoute = (
+    id: string,
+    patch: Partial<{ buildState: string; promptTemplate: string }>,
+  ): void => {
+    setBambooPromptTemplateMap((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  };
+  const cleanedBambooPromptTemplateMap = useMemo(
+    () =>
+      bambooPromptTemplateMap
+        .map((r) => ({ buildState: r.buildState.trim(), promptTemplate: r.promptTemplate.trim() }))
+        .filter((r) => r.buildState !== '' && r.promptTemplate !== ''),
+    [bambooPromptTemplateMap],
+  );
+  const bambooPromptTemplateMapDuplicate = useMemo(() => {
+    const seen = new Set<string>();
+    for (const r of cleanedBambooPromptTemplateMap) {
+      const key = r.buildState.toLowerCase();
+      if (seen.has(key)) return r.buildState;
+      seen.add(key);
+    }
+    return null;
+  }, [cleanedBambooPromptTemplateMap]);
+  const effectiveBambooPromptTemplateMap =
+    promptTemplateMode === 'by-issue-type' ? cleanedBambooPromptTemplateMap : [];
+
   const slugProblem =
     slug.trim() === '' ? null : WEBHOOK_SLUG_RE.test(slug.trim()) ? null : 'Lowercase letters, digits and dashes only.';
 
@@ -430,22 +587,35 @@ export function WebhookEditorPage({
       setError(slugProblem);
       return;
     }
+    if (type === 'bamboo' && authMode === 'hmac') {
+      setError('A Bamboo webhook can only use bearer-token auth — Bamboo cannot sign a request body.');
+      return;
+    }
     if (directoryMode === 'auto-map') {
-      if (projectMapDuplicate !== null) {
-        setError(`Project "${projectMapDuplicate}" is mapped more than once.`);
+      const dup = type === 'bamboo' ? planMapDuplicate : projectMapDuplicate;
+      if (dup !== null) {
+        setError(`${type === 'bamboo' ? 'Plan' : 'Project'} "${dup}" is mapped more than once.`);
         return;
       }
-      if (cleanedProjectMap.length === 0) {
-        setError('Add at least one project mapping, or switch to Workspace mode.');
+      const empty = type === 'bamboo' ? cleanedPlanMap.length === 0 : cleanedProjectMap.length === 0;
+      if (empty) {
+        setError(
+          `Add at least one ${type === 'bamboo' ? 'plan' : 'project'} mapping, or switch to Workspace mode.`,
+        );
         return;
       }
     }
     if (promptTemplateMode === 'by-issue-type') {
-      if (promptTemplateMapDuplicate !== null) {
-        setError(`Issue type "${promptTemplateMapDuplicate}" is mapped more than once.`);
+      const dup = type === 'bamboo' ? bambooPromptTemplateMapDuplicate : promptTemplateMapDuplicate;
+      if (dup !== null) {
+        setError(
+          `${type === 'bamboo' ? 'Build state' : 'Issue type'} "${dup}" is mapped more than once.`,
+        );
         return;
       }
-      if (cleanedPromptTemplateMap.length === 0) {
+      const empty =
+        type === 'bamboo' ? cleanedBambooPromptTemplateMap.length === 0 : cleanedPromptTemplateMap.length === 0;
+      if (empty) {
         setError('Add at least one prompt template mapping, or switch to Single template mode.');
         return;
       }
@@ -456,12 +626,20 @@ export function WebhookEditorPage({
     const common = {
       name: name.trim(),
       enabled,
-      config: {
-        type: 'jira' as const,
-        filter,
-        projectMap: effectiveProjectMap,
-        promptTemplateMap: effectivePromptTemplateMap,
-      },
+      config:
+        type === 'bamboo'
+          ? {
+              type: 'bamboo' as const,
+              filter: bambooFilter,
+              planMap: effectivePlanMap,
+              promptTemplateMap: effectiveBambooPromptTemplateMap,
+            }
+          : {
+              type: 'jira' as const,
+              filter,
+              projectMap: effectiveProjectMap,
+              promptTemplateMap: effectivePromptTemplateMap,
+            },
       authMode,
       cwd,
       agent,
@@ -673,7 +851,9 @@ export function WebhookEditorPage({
         <div className="settings-header-title">
           <h1>{isNew ? 'New webhook' : name || 'Webhook'}</h1>
           <p className="settings-header-sub">
-            Starts an agent when Jira sends a matching issue event.
+            {type === 'bamboo'
+              ? 'Starts an agent when Bamboo reports a build event.'
+              : 'Starts an agent when Jira sends a matching issue event.'}
           </p>
         </div>
       </div>
@@ -696,31 +876,54 @@ export function WebhookEditorPage({
             }
             onChange={setSlug}
           />
-          {/* Kept even with one option: the section's shape does not change when a
-              second type lands, and the row documents that this is a dimension. */}
+          {/* Fixed at creation: changing it later would orphan the filter/map below. */}
           <SelectRowNative
-            busy={busy}
+            busy={busy || !isNew}
             label="Trigger"
-            value="jira"
-            options={[{ value: 'jira', label: 'Jira issue events' }]}
-            onChange={() => undefined}
+            value={type}
+            options={[
+              { value: 'jira', label: 'Jira issue events' },
+              { value: 'bamboo', label: 'Bamboo build events' },
+            ]}
+            help={!isNew ? 'Cannot be changed once a webhook is created.' : undefined}
+            onChange={(v) => {
+              const next = v as WebhookType;
+              setType(next);
+              // Swap the still-untouched default template to the new type's own —
+              // but leave anything the operator actually typed alone.
+              setPromptTemplate((prev) =>
+                prev === DEFAULT_JIRA_PROMPT_TEMPLATE || prev === DEFAULT_BAMBOO_PROMPT_TEMPLATE
+                  ? next === 'bamboo'
+                    ? DEFAULT_BAMBOO_PROMPT_TEMPLATE
+                    : DEFAULT_JIRA_PROMPT_TEMPLATE
+                  : prev,
+              );
+              // Bamboo cannot compute a request signature — only bearer works.
+              if (next === 'bamboo' && authMode === 'hmac') setAuthMode('bearer');
+            }}
           />
           <SelectRowNative
             busy={busy}
             label="Authentication"
             value={authMode}
-            options={[
-              { value: 'hmac', label: 'Signature (recommended)' },
-              { value: 'bearer', label: 'Bearer token' },
-            ]}
+            options={
+              type === 'bamboo'
+                ? [{ value: 'bearer', label: 'Bearer token' }]
+                : [
+                    { value: 'hmac', label: 'Signature (recommended)' },
+                    { value: 'bearer', label: 'Bearer token' },
+                  ]
+            }
             help={
-              authMode === 'hmac'
-                ? 'Jira signs each request with the secret. Only a sender holding the secret can produce a valid body.'
-                : 'A token in a header. It proves who sent the request but nothing about the payload, and it lands in every proxy log along the way.'
+              type === 'bamboo'
+                ? 'Bamboo can only send a static custom header, not a computed signature — bearer is the only option that can work.'
+                : authMode === 'hmac'
+                  ? 'Jira signs each request with the secret. Only a sender holding the secret can produce a valid body.'
+                  : 'A token in a header. It proves who sent the request but nothing about the payload, and it lands in every proxy log along the way.'
             }
             onChange={(v) => setAuthMode(v as 'hmac' | 'bearer')}
           />
-          {authMode === 'bearer' && (
+          {authMode === 'bearer' && type === 'jira' && (
             <div className="warn-callout" role="alert">
               A bearer token authenticates nothing about the body: anyone holding it can send any
               payload at all. Prefer a signature unless the sender cannot produce one.
@@ -778,6 +981,29 @@ export function WebhookEditorPage({
               Anyone who can reach this URL and knows the secret can start an agent on this machine
               {skipPermissions ? ', with every tool approval bypassed.' : '.'}
             </p>
+            {type === 'bamboo' && (
+              // Unlike Jira, Bamboo does not POST a fixed shape — the operator has
+              // to paste a body template into Bamboo's own webhook admin screen.
+              // This is the one thing that page needs and Jira's editor never did.
+              <div className="settings-row settings-row-stacked">
+                <div className="settings-row-info">
+                  <label className="settings-row-label">Set this up in Bamboo</label>
+                  <p className="transport-hint">
+                    Create a webhook on the Bamboo plan (or globally) pointed at the URL above, set
+                    its notification to <strong>&ldquo;All Builds Completed&rdquo;</strong> (this
+                    webhook&rsquo;s own filter below decides which builds actually run — narrowing
+                    in Bamboo too is supported, but can make a webhook go quiet with no error if the
+                    two disagree), add the header{' '}
+                    <code>Authorization: Bearer {token ?? '<token — reveal above>'}</code>, and paste
+                    this as the webhook body:
+                  </p>
+                </div>
+                <div className="hook-preview-wrap">
+                  <pre className="hook-preview">{BAMBOO_WEBHOOK_TEMPLATE}</pre>
+                  <CopyButton text={BAMBOO_WEBHOOK_TEMPLATE} label="Copy Bamboo webhook template" />
+                </div>
+              </div>
+            )}
           </SectionCard>
         </div>
       )}
@@ -788,6 +1014,73 @@ export function WebhookEditorPage({
           icon="folder"
           desc="Every field left empty means “match anything”."
         >
+          {type === 'bamboo' ? (
+            <>
+              <TextRow
+                label="Plan keys"
+                value={planKeys}
+                busy={busy}
+                mono
+                placeholder="EM-EM"
+                help="Comma-separated Bamboo plan keys. Empty matches every plan."
+                onChange={setPlanKeys}
+              />
+              <div className="settings-row settings-row-stacked">
+                <div className="settings-row-info">
+                  <label className="settings-row-label">Build state</label>
+                  <p className="transport-hint">
+                    The primary control — Bamboo can be configured to send every build
+                    (recommended) and let this decide what runs, or narrow the notification
+                    Bamboo sends itself.
+                  </p>
+                </div>
+                <div className="toggle-chip-group">
+                  {BUILD_STATE_CHOICES.map((s) => {
+                    const on = buildStates.includes(s);
+                    return (
+                      <button
+                        key={s}
+                        type="button"
+                        className={`toggle-chip${on ? ' active' : ''}`}
+                        disabled={busy}
+                        aria-pressed={on}
+                        onClick={() =>
+                          setBuildStates((prev) =>
+                            on ? prev.filter((v) => v !== s) : [...prev, s],
+                          )
+                        }
+                      >
+                        {s}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <TextRow
+                label="Notification types"
+                value={notificationTypes}
+                busy={busy}
+                placeholder="Plan status changed"
+                help="Comma-separated, matched against Bamboo's own notification description. Empty matches any."
+                onChange={setNotificationTypes}
+              />
+              <TextRow
+                label="Ignore trigger"
+                value={excludeTriggerReasons}
+                busy={busy}
+                placeholder="agent-bot"
+                help="Comma-separated text to exclude, matched against the fuller trigger wording (which can include a commit message) — e.g. this agent's own commits, so a fix it pushes doesn't re-trigger this webhook."
+                onChange={setExcludeTriggerReasons}
+              />
+              {bambooFilterIsEmpty && (
+                <div className="warn-callout" role="alert">
+                  Nothing is filtered. This will start an agent for every build event on every plan
+                  Bamboo sends to this webhook.
+                </div>
+              )}
+            </>
+          ) : (
+            <>
           <div className="settings-row settings-row-stacked">
             <div className="settings-row-info">
               <label className="settings-row-label">Events</label>
@@ -906,6 +1199,8 @@ export function WebhookEditorPage({
               the Jira user can see.
             </div>
           )}
+            </>
+          )}
         </SectionCard>
       </div>
 
@@ -917,17 +1212,32 @@ export function WebhookEditorPage({
             value={promptTemplateMode}
             options={[
               { value: 'single', label: 'Single prompt template' },
-              { value: 'by-issue-type', label: 'Auto pick by Jira issue type' },
+              {
+                value: 'by-issue-type',
+                label: type === 'bamboo' ? 'Auto pick by build state' : 'Auto pick by Jira issue type',
+              },
             ]}
             help={
               promptTemplateMode === 'single'
                 ? 'Every delivery uses the single template configured below.'
-                : 'Routes prompt templates by Jira issue type (or "All type" fallback).'
+                : type === 'bamboo'
+                  ? 'Routes prompt templates by build state (or "All states" fallback).'
+                  : 'Routes prompt templates by Jira issue type (or "All type" fallback).'
             }
             onChange={(v) => setPromptTemplateMode(v as 'single' | 'by-issue-type')}
           />
 
           {promptTemplateMode === 'single' ? (
+            type === 'bamboo' ? (
+              <TextRow
+                label="Prompt template"
+                value={promptTemplate}
+                busy={busy}
+                multiline
+                rows={10}
+                onChange={setPromptTemplate}
+              />
+            ) : (
             <>
               <SelectRowNative
                 busy={busy}
@@ -962,6 +1272,67 @@ export function WebhookEditorPage({
                 onChange={setPromptTemplate}
               />
             </>
+            )
+          ) : type === 'bamboo' ? (
+            <div className="settings-row settings-row-stacked">
+              <div className="settings-row-info">
+                <label className="settings-row-label">Build state template rules</label>
+                <p className="transport-hint">
+                  Incoming deliveries match build-state rules from top to bottom. Use &ldquo;All
+                  states&rdquo; as the fallback template.
+                </p>
+              </div>
+              {bambooPromptTemplateMap.length === 0 && (
+                <p className="transport-hint">
+                  No build-state prompt templates configured yet. Add at least one rule.
+                </p>
+              )}
+              {bambooPromptTemplateMap.map((row) => (
+                <div key={row.id} className="prompt-map-card">
+                  <div className="prompt-map-header">
+                    <select
+                      className="settings-select prompt-map-type-select"
+                      value={row.buildState}
+                      disabled={busy}
+                      aria-label="Build state selector"
+                      onChange={(e) => updateBambooPromptTemplateRoute(row.id, { buildState: e.target.value })}
+                    >
+                      <option value="All states">All states (Fallback)</option>
+                      <option value="Successful">Successful</option>
+                      <option value="Failed">Failed</option>
+                      <option value="Unknown">Unknown</option>
+                    </select>
+                    <button
+                      type="button"
+                      className="round-btn prompt-map-remove"
+                      disabled={busy}
+                      aria-label={`Remove mapping for ${row.buildState || 'blank'}`}
+                      onClick={() => removeBambooPromptTemplateRoute(row.id)}
+                    >
+                      <Icon name="close" size={16} />
+                    </button>
+                  </div>
+                  <textarea
+                    className="settings-input settings-textarea prompt-map-textarea"
+                    rows={6}
+                    value={row.promptTemplate}
+                    disabled={busy}
+                    placeholder="Enter prompt template for this build state..."
+                    aria-label={`Prompt template for ${row.buildState || 'build state'}`}
+                    onChange={(e) => updateBambooPromptTemplateRoute(row.id, { promptTemplate: e.target.value })}
+                  />
+                </div>
+              ))}
+              <button type="button" disabled={busy} onClick={addBambooPromptTemplateRoute}>
+                <Icon name="plus" size={16} />
+                Add build state template
+              </button>
+              {bambooPromptTemplateMapDuplicate !== null && (
+                <div className="warn-callout" role="alert">
+                  Build state &quot;{bambooPromptTemplateMapDuplicate}&quot; is mapped more than once.
+                </div>
+              )}
+            </div>
           ) : (
             <div className="settings-row settings-row-stacked">
               <div className="settings-row-info">
@@ -1083,14 +1454,15 @@ export function WebhookEditorPage({
             <div className="settings-row-info">
               <label className="settings-row-label">Insert a value</label>
               <p className="transport-hint">
-                Text written by a Jira user is wrapped in markers and labelled as data, not
-                instructions. Keep that shape.
+                {type === 'bamboo'
+                  ? 'Text embedded in a Bamboo build trigger (it can include a commit message) is wrapped in markers and labelled as data, not instructions. Keep that shape.'
+                  : 'Text written by a Jira user is wrapped in markers and labelled as data, not instructions. Keep that shape.'}
               </p>
             </div>
             {/* Rendered from the same array the server renderer iterates, so a
                 variable that exists in one but not the other is impossible. */}
             <div className="toggle-chip-group">
-              {JIRA_TEMPLATE_VARS.map((v) => (
+              {(type === 'bamboo' ? BAMBOO_TEMPLATE_VARS : JIRA_TEMPLATE_VARS).map((v) => (
                 <button
                   key={v.name}
                   type="button"
@@ -1130,12 +1502,17 @@ export function WebhookEditorPage({
             value={conversationMode}
             options={[
               { value: 'per-delivery', label: 'Starts a fresh chat' },
-              { value: 'per-issue', label: 'Continues one chat per issue' },
+              {
+                value: 'per-issue',
+                label: type === 'bamboo' ? 'Continues one chat per plan' : 'Continues one chat per issue',
+              },
             ]}
             help={
               conversationMode === 'per-delivery'
-                ? 'Every event is a cold start: the agent re-reads the issue each time and knows nothing about earlier events.'
-                : 'The agent keeps the issue’s history, at the cost of a transcript that grows for as long as people keep editing that ticket.'
+                ? `Every event is a cold start: the agent re-reads the ${type === 'bamboo' ? 'build' : 'issue'} each time and knows nothing about earlier events.`
+                : type === 'bamboo'
+                  ? 'The agent keeps the plan’s history across build failures, at the cost of a transcript that grows for as long as the plan keeps failing.'
+                  : 'The agent keeps the issue’s history, at the cost of a transcript that grows for as long as people keep editing that ticket.'
             }
             onChange={(v) => setConversationMode(v as WebhookConversationMode)}
           />
@@ -1172,12 +1549,17 @@ export function WebhookEditorPage({
             value={directoryMode}
             options={[
               { value: 'workspace', label: 'Workspace' },
-              { value: 'auto-map', label: 'Auto map by Jira project' },
+              {
+                value: 'auto-map',
+                label: type === 'bamboo' ? 'Auto map by Bamboo plan' : 'Auto map by Jira project',
+              },
             ]}
             help={
               directoryMode === 'workspace'
                 ? 'Every delivery runs in one directory, picked below.'
-                : 'Each Jira project key routes to its own directory, configured below — there is no single directory picker in this mode.'
+                : type === 'bamboo'
+                  ? 'Each Bamboo plan key routes to its own directory, configured below — there is no single directory picker in this mode.'
+                  : 'Each Jira project key routes to its own directory, configured below — there is no single directory picker in this mode.'
             }
             onChange={(v) => setDirectoryMode(v as 'workspace' | 'auto-map')}
           />
@@ -1217,8 +1599,8 @@ export function WebhookEditorPage({
               !selectedIsRepo
                 ? 'This directory is not a git repository, so there is no worktree to make. Without one, the agent works directly in the folder itself.'
                 : worktreeMode === 'none'
-                  ? 'The agent works directly in your checkout. A prompt built partly from someone else’s Jira text will be editing the tree you are working in.'
-                  : 'Per-delivery worktrees are never cleaned up automatically — deleting one would destroy the output it produced. A busy Jira project can create hundreds.'
+                  ? `The agent works directly in your checkout. A prompt built partly from ${type === 'bamboo' ? "a Bamboo build trigger's text" : "someone else’s Jira text"} will be editing the tree you are working in.`
+                  : `Per-delivery worktrees are never cleaned up automatically — deleting one would destroy the output it produced. A busy ${type === 'bamboo' ? 'Bamboo plan' : 'Jira project'} can create hundreds.`
             }
             onChange={(v) => setWorktreeMode(v as CronWorktreeMode)}
           />
@@ -1226,14 +1608,81 @@ export function WebhookEditorPage({
             // The one containment boundary is unavailable here, and the approval
             // toggle is off, so say so rather than letting the two combine quietly.
             <div className="warn-callout" role="alert">
-              With no worktree and approvals bypassed, an agent driven by someone else’s Jira text
-              will edit this folder directly, unsupervised.
+              With no worktree and approvals bypassed, an agent driven by{' '}
+              {type === 'bamboo' ? "a Bamboo build trigger's text" : 'someone else’s Jira text'} will
+              edit this folder directly, unsupervised.
             </div>
           )}
         </SectionCard>
       </div>
 
-      {directoryMode === 'auto-map' && (
+      {directoryMode === 'auto-map' && type === 'bamboo' && (
+        <div id="section-automap">
+          <SectionCard
+            title="Route by Bamboo plan"
+            icon="folder"
+            desc="Each Bamboo plan key routes to its own directory. A delivery for a plan not listed here is filtered rather than guessed at — add at least one row."
+          >
+            {planMap.length === 0 && (
+              <p className="transport-hint">
+                No plans mapped yet. Every delivery will be filtered until you add one.
+              </p>
+            )}
+            {planMap.map((row) => (
+              <div key={row.id} className="settings-row settings-row-stacked">
+                <div className="project-map-row">
+                  <input
+                    type="text"
+                    className="settings-input mono project-map-key"
+                    value={row.planKey}
+                    placeholder="EM-EM"
+                    disabled={busy}
+                    spellCheck={false}
+                    aria-label="Bamboo plan key"
+                    onChange={(e) => updatePlanRoute(row.id, { planKey: e.target.value })}
+                  />
+                  <select
+                    className="settings-select project-map-dir"
+                    value={row.cwd}
+                    disabled={busy}
+                    aria-label="Directory"
+                    onChange={(e) => updatePlanRoute(row.id, { cwd: e.target.value })}
+                  >
+                    <option value="" disabled>
+                      Choose a directory
+                    </option>
+                    {dirOptions.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="round-btn project-map-remove"
+                    disabled={busy}
+                    aria-label={`Remove the ${row.planKey || 'blank'} mapping`}
+                    onClick={() => removePlanRoute(row.id)}
+                  >
+                    <Icon name="close" size={16} />
+                  </button>
+                </div>
+              </div>
+            ))}
+            <button type="button" disabled={busy} onClick={addPlanRoute}>
+              <Icon name="plus" size={16} />
+              Add plan
+            </button>
+            {planMapDuplicate !== null && (
+              <div className="warn-callout" role="alert">
+                Plan &quot;{planMapDuplicate}&quot; is mapped more than once.
+              </div>
+            )}
+          </SectionCard>
+        </div>
+      )}
+
+      {directoryMode === 'auto-map' && type === 'jira' && (
         <div id="section-automap">
           <SectionCard
             title="Route by Jira project"
@@ -1362,11 +1811,16 @@ export function WebhookEditorPage({
           {skipPermissions && (
             // Stronger than the cron editor's warning, and the difference is
             // material: a cron job's prompt is written by the operator, this one
-            // is built partly from text an outsider typed into a ticket.
+            // is built partly from text an outsider typed into a ticket (Jira) or
+            // embedded in a build trigger, which can carry a commit message from
+            // anyone with push access (Bamboo).
             <div className="warn-callout" role="alert">
-              This webhook will run with every tool approval bypassed, on a prompt built partly from
-              text someone else wrote in Jira. It will edit files and run commands without asking.
-              Consider a per-delivery worktree and a required label.
+              This webhook will run with every tool approval bypassed, on a prompt built partly from{' '}
+              {type === 'bamboo'
+                ? "text embedded in a Bamboo build trigger (which can include a commit message from anyone with push access)"
+                : 'text someone else wrote in Jira'}
+              . It will edit files and run commands without asking. Consider a per-delivery worktree
+              {type === 'bamboo' ? ' and a plan-key filter' : ' and a required label'}.
             </div>
           )}
           <NumberRow
@@ -1448,7 +1902,7 @@ export function WebhookEditorPage({
             {visibleDeliveries.length === 0 ? (
               <p className="transport-hint">
                 {deliveries.length === 0
-                  ? 'No deliveries yet. Until one arrives, nothing confirms Jira can reach this server.'
+                  ? `No deliveries yet. Until one arrives, nothing confirms ${type === 'bamboo' ? 'Bamboo' : 'Jira'} can reach this server.`
                   : 'No deliveries have started a run.'}
               </p>
             ) : (

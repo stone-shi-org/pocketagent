@@ -4975,6 +4975,21 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   overflow: auto;
 }
 
+/* Lets a `CopyButton` sit at the corner of a `.hook-preview` block, e.g. the
+   Bamboo webhook body template — the button itself is a light-surface control,
+   so it is positioned over the dark preview rather than inheriting its colors. */
+.hook-preview-wrap {
+  position: relative;
+}
+.hook-preview-wrap .hook-preview {
+  padding-right: 40px;
+}
+.hook-preview-wrap .copy-btn {
+  position: absolute;
+  top: 18px;
+  right: 8px;
+}
+
 /* ---- Rows in the project tree ---- */
 
 .cron-line .cron-job-row {

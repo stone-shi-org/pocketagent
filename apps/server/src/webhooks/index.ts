@@ -1,5 +1,8 @@
 import crypto from 'node:crypto';
 import type {
+  BambooPlanMapEntry,
+  BambooPromptTemplateMapEntry,
+  BambooWebhookFilter,
   JiraProjectMapEntry,
   JiraPromptTemplateMapEntry,
   JiraWebhookFilter,
@@ -15,12 +18,18 @@ import type {
   WebhookHit,
   WebhookSignatureState,
   WebhookSummary,
+  WebhookType,
 } from '@pocketagent/protocol';
 import {
+  BAMBOO_SAMPLE_PAYLOAD,
+  BambooWebhookFilter as BambooWebhookFilterSchema,
+  DEFAULT_BAMBOO_PROMPT_TEMPLATE,
   DEFAULT_JIRA_PROMPT_TEMPLATE,
   JIRA_SAMPLE_PAYLOAD,
   JiraWebhookFilter as JiraWebhookFilterSchema,
+  bambooTemplateVariables,
   jiraTemplateVariables,
+  renderBambooTemplate,
   renderJiraTemplate,
 } from '@pocketagent/protocol';
 import type { Db, WebhookDeliveryRow, WebhookHitLogRow, WebhookRow } from '../db/index.js';
@@ -63,6 +72,69 @@ import {
   resolveProjectRoute,
   resolvePromptTemplate,
 } from './jira.js';
+import type { BambooEventFacts } from './bamboo.js';
+import {
+  describeBambooFilter,
+  evaluateBambooFilter,
+  parseBambooEvent,
+  resolvePlanRoute,
+  resolvePromptTemplateByBuildState,
+} from './bamboo.js';
+
+/** The parsed facts for either provider — everything past parsing treats this opaquely by field, not by type. */
+type AnyEventFacts = JiraEventFacts | BambooEventFacts;
+
+/** The subject key used structurally: the per-subject conversation cache and branch names. */
+function subjectKeyOf(type: WebhookType, facts: AnyEventFacts): string {
+  return type === 'bamboo' ? (facts as BambooEventFacts).planKey : (facts as JiraEventFacts).issueKey;
+}
+
+/** The key project/plan routing matches against — Jira routes by project, Bamboo by plan (its only natural unit). */
+function routeKeyOf(type: WebhookType, facts: AnyEventFacts): string | null {
+  return type === 'bamboo' ? (facts as BambooEventFacts).planKey : (facts as JiraEventFacts).projectKey;
+}
+
+/** The key prompt-template routing matches against — Jira by issue type, Bamboo by build state. */
+function templateRouteKeyOf(type: WebhookType, facts: AnyEventFacts): string | null {
+  return type === 'bamboo' ? (facts as BambooEventFacts).buildState : (facts as JiraEventFacts).issueType;
+}
+
+/** A short session title. Bamboo has no "summary" field, so it composes one from plan/build facts. */
+function titleOf(hookName: string, type: WebhookType, facts: AnyEventFacts): string {
+  if (type === 'bamboo') {
+    const b = facts as BambooEventFacts;
+    return `[${b.planKey}] Build ${b.buildNumber ?? '?'} ${b.buildState.toLowerCase()}`;
+  }
+  const j = facts as JiraEventFacts;
+  return j.summary ? `[${j.issueKey}] ${j.summary}` : `${hookName} · ${j.issueKey}`;
+}
+
+/** The generic delivery-row fields every provider's facts map onto (see `db/index.ts`'s `issue_key`/`project_key` columns). */
+function deliveryRowFieldsOf(
+  type: WebhookType,
+  facts: AnyEventFacts,
+): { event: string; eventType: string | null; issueKey: string; projectKey: string | null; actor: string | null; timestamp: number | null } {
+  if (type === 'bamboo') {
+    const b = facts as BambooEventFacts;
+    return {
+      event: b.notification,
+      eventType: b.buildState,
+      issueKey: b.planKey,
+      projectKey: b.projectKey,
+      actor: null,
+      timestamp: b.timestamp,
+    };
+  }
+  const j = facts as JiraEventFacts;
+  return {
+    event: j.event,
+    eventType: j.eventType,
+    issueKey: j.issueKey,
+    projectKey: j.projectKey,
+    actor: j.actor,
+    timestamp: j.timestamp,
+  };
+}
 
 /** How often to reconcile deliveries against session liveness and prune. */
 const SWEEP_INTERVAL_MS = 30_000;
@@ -144,15 +216,11 @@ export interface WebhookServiceOptions {
   now?: () => number;
 }
 
-/** The fields a create/update accepts, already normalized by the route. */
-export interface WebhookSpec {
+/** Fields shared by every provider — the part the ticket that added Bamboo called "reuse as-is". */
+export interface WebhookSpecCommon {
   name: string;
   slug: string;
   enabled: boolean;
-  type: 'jira';
-  filter: JiraWebhookFilter;
-  projectMap: JiraProjectMapEntry[];
-  promptTemplateMap?: JiraPromptTemplateMapEntry[];
   authMode: WebhookAuthMode;
   cwd: string;
   agent: string;
@@ -166,6 +234,35 @@ export interface WebhookSpec {
   maxConcurrent: number;
   debounceSeconds: number;
   storePayloads: boolean;
+}
+
+/** The fields a create/update accepts, already normalized by the route. */
+export type WebhookSpec =
+  | (WebhookSpecCommon & {
+      type: 'jira';
+      filter: JiraWebhookFilter;
+      projectMap: JiraProjectMapEntry[];
+      promptTemplateMap?: JiraPromptTemplateMapEntry[];
+    })
+  | (WebhookSpecCommon & {
+      type: 'bamboo';
+      filter: BambooWebhookFilter;
+      planMap: BambooPlanMapEntry[];
+      promptTemplateMap?: BambooPromptTemplateMapEntry[];
+    });
+
+/**
+ * `update()`'s patch shape for the type-specific fields, deliberately *not*
+ * `Partial<WebhookSpec>` — a `Partial` of a discriminated union distributes
+ * per-member, so `patch.projectMap` would not type-check against the Bamboo
+ * member at all. `routeMap` is the one generic name for "whichever provider's
+ * project/plan map this is", since a webhook's `type` never changes after
+ * creation and the caller (the route) already knows which shape it is sending.
+ */
+interface WebhookSpecConfigPatch {
+  filter?: JiraWebhookFilter | BambooWebhookFilter;
+  routeMap?: JiraProjectMapEntry[] | BambooPlanMapEntry[];
+  promptTemplateMap?: JiraPromptTemplateMapEntry[] | BambooPromptTemplateMapEntry[];
 }
 
 /** What the delivery route needs back to answer the request. */
@@ -334,14 +431,15 @@ export class WebhookService {
       return this.invalid(hook, input, 'The request body was not valid JSON.');
     }
 
-    const parsed = parseJiraEvent(payload);
+    const parsed = hook.type === 'bamboo' ? parseBambooEvent(payload) : parseJiraEvent(payload);
     if (!parsed.ok) return this.invalid(hook, input, parsed.reason);
-    const facts = parsed.facts;
+    const facts: AnyEventFacts = parsed.facts;
+    const row = deliveryRowFieldsOf(hook.type as WebhookType, facts);
 
     // 4. Freshness, from the signed body. Skew is logged, because a silent clock
     //    check is indistinguishable from the feature being broken.
-    if (facts.timestamp !== null) {
-      const skew = this.now() - facts.timestamp;
+    if (row.timestamp !== null) {
+      const skew = this.now() - row.timestamp;
       if (Math.abs(skew) > FRESHNESS_WINDOW_MS) {
         this.opts.logger?.warn(
           { webhook: hook.name, skewMs: skew, windowMs: FRESHNESS_WINDOW_MS },
@@ -367,11 +465,11 @@ export class WebhookService {
         body_hash: bodyHash,
         delivery_header: input.deliveryHeader,
         signature_state: signature.state,
-        event: facts.event,
-        event_type: facts.eventType,
-        issue_key: facts.issueKey,
-        project_key: facts.projectKey,
-        actor: facts.actor,
+        event: row.event,
+        event_type: row.eventType,
+        issue_key: row.issueKey,
+        project_key: row.projectKey,
+        actor: row.actor,
         payload_json: this.storablePayload(hook, payload),
         payload_bytes: input.rawBody.byteLength,
         payload_truncated: input.rawBody.byteLength > MAX_STORED_PAYLOAD_BYTES ? 1 : 0,
@@ -402,19 +500,27 @@ export class WebhookService {
   private async dispatch(
     hook: WebhookRow,
     deliveryId: string,
-    facts: JiraEventFacts,
+    facts: AnyEventFacts,
     payload: unknown,
   ): Promise<DeliveryOutcome> {
+    const type = hook.type as WebhookType;
+
     // 6. Filter. A non-match is a success that started nothing.
-    const verdict = evaluateJiraFilter(this.filterFor(hook), facts);
+    const verdict =
+      type === 'bamboo'
+        ? evaluateBambooFilter(this.filterFor(hook) as BambooWebhookFilter, facts as BambooEventFacts)
+        : evaluateJiraFilter(this.filterFor(hook) as JiraWebhookFilter, facts as JiraEventFacts);
     if (!verdict.matched) {
       this.closeDelivery(hook, deliveryId, 'filtered', verdict.reason);
       return accepted('filtered', deliveryId, verdict.reason);
     }
 
-    // 6b. Route by project. An empty map always resolves to `hook.cwd`; a
-    // non-empty one filters a project nobody mapped rather than guessing.
-    const route = resolveProjectRoute(this.projectMapFor(hook), hook.cwd, facts.projectKey);
+    // 6b. Route by project/plan. An empty map always resolves to `hook.cwd`; a
+    // non-empty one filters an unrouted project/plan rather than guessing.
+    const route =
+      type === 'bamboo'
+        ? resolvePlanRoute(this.routeMapFor(hook) as { planKey: string; cwd: string }[], hook.cwd, routeKeyOf(type, facts))
+        : resolveProjectRoute(this.routeMapFor(hook) as { projectKey: string; cwd: string }[], hook.cwd, routeKeyOf(type, facts));
     if (!route.matched) {
       this.closeDelivery(hook, deliveryId, 'filtered', route.reason);
       return accepted('filtered', deliveryId, route.reason);
@@ -427,19 +533,19 @@ export class WebhookService {
       return accepted('throttled', deliveryId, cap);
     }
 
-    const conversationKey =
-      hook.conversation_mode === 'per-issue' ? facts.issueKey : `hook:${hook.id}`;
+    const subjectKey = subjectKeyOf(type, facts);
+    const conversationKey = hook.conversation_mode === 'per-issue' ? subjectKey : `hook:${hook.id}`;
     if (hook.overlap_policy === 'skip' && this.hasActiveRunFor(hook, conversationKey, deliveryId)) {
       const reason =
         hook.conversation_mode === 'per-issue'
-          ? `A run for ${facts.issueKey} was still in progress.`
+          ? `A run for ${subjectKey} was still in progress.`
           : 'The previous run for this webhook was still in progress.';
       this.closeDelivery(hook, deliveryId, 'skipped', reason);
       return accepted('skipped', deliveryId, reason);
     }
 
     // 8. Render, then run.
-    const prompt = this.renderPrompt(hook, deliveryId, payload, facts.issueType);
+    const prompt = this.renderPrompt(hook, deliveryId, payload, templateRouteKeyOf(type, facts));
     updateWebhookDelivery(this.db, deliveryId, {
       rendered_prompt: prompt.text,
       payload_truncated: prompt.truncated ? 1 : 0,
@@ -467,16 +573,17 @@ export class WebhookService {
   private async startRun(
     hook: WebhookRow,
     deliveryId: string,
-    facts: JiraEventFacts,
+    facts: AnyEventFacts,
     prompt: string,
     cwd: string,
   ): Promise<{ sessionId: string | null; error: string | null }> {
+    const subjectKey = subjectKeyOf(hook.type as WebhookType, facts);
     const startedAt = this.now();
     updateWebhookDelivery(this.db, deliveryId, { started_at: startedAt });
-    const sink = this.sinkFor(hook, deliveryId, facts.issueKey, startedAt, cwd);
+    const sink = this.sinkFor(hook, deliveryId, subjectKey, startedAt, cwd);
 
     if (hook.conversation_mode === 'per-issue') {
-      const mapped = readWebhookIssueSession(this.db, hook.id, facts.issueKey);
+      const mapped = readWebhookIssueSession(this.db, hook.id, subjectKey);
       const sameProject = mapped !== null && (mapped.cwd === cwd || isContained(cwd, mapped.cwd));
 
       // Case 1: the conversation is still live in the same project directory.
@@ -619,23 +726,24 @@ export class WebhookService {
     });
   }
 
-  private specFor(hook: WebhookRow, facts: JiraEventFacts, cwd: string): Omit<RunSpec, 'prompt'> {
+  private specFor(hook: WebhookRow, facts: AnyEventFacts, cwd: string): Omit<RunSpec, 'prompt'> {
+    const type = hook.type as WebhookType;
+    const subjectKey = subjectKeyOf(type, facts);
     const worktree: RunSpec['worktree'] =
       hook.worktree_mode === 'new-branch'
         ? {
             mode: 'new-branch',
-            // Minted from the *issue key*, not from untrusted text: a branch
-            // name reaches git and the filesystem, and the key is the one
-            // untrusted value validated against a pattern rather than escaped.
-            branchName: mintBranchName(`${hook.name}-${facts.issueKey}`, 'UTC', this.now(), 'webhook'),
+            // Minted from the *subject key* (issue/plan key), not from
+            // untrusted text: a branch name reaches git and the filesystem,
+            // and the key is the one untrusted value validated against a
+            // pattern rather than escaped.
+            branchName: mintBranchName(`${hook.name}-${subjectKey}`, 'UTC', this.now(), 'webhook'),
           }
         : hook.worktree_mode === 'current-branch'
           ? { mode: 'current-branch' }
           : { mode: 'none' };
 
-    const title = facts.summary
-      ? `[${facts.issueKey}] ${facts.summary}`
-      : `${hook.name} · ${facts.issueKey}`;
+    const title = titleOf(hook.name, type, facts);
 
     return {
       cwd,
@@ -654,22 +762,31 @@ export class WebhookService {
     hook: WebhookRow,
     deliveryId: string,
     payload: unknown,
-    issueType?: string | null,
+    routeKey?: string | null,
   ): { text: string; truncated: boolean } {
-    const vars = jiraTemplateVariables(payload, {
-      webhookName: hook.name,
-      deliveryId,
-    });
+    const type = hook.type as WebhookType;
+    const extra = { webhookName: hook.name, deliveryId };
+    // A fresh nonce per delivery: a fixed one would eventually appear in an
+    // issue description or a commit message, and the fence would then be
+    // closable from inside.
+    const nonce = crypto.randomBytes(8).toString('hex');
+
+    if (type === 'bamboo') {
+      const template = resolvePromptTemplateByBuildState(
+        this.promptTemplateMapFor(hook) as BambooPromptTemplateMapEntry[],
+        hook.prompt_template,
+        routeKey ?? null,
+      );
+      const result = renderBambooTemplate(template, bambooTemplateVariables(payload, extra), { nonce });
+      return { text: result.text, truncated: result.truncated };
+    }
+
     const template = resolvePromptTemplate(
-      this.promptTemplateMapFor(hook),
+      this.promptTemplateMapFor(hook) as JiraPromptTemplateMapEntry[],
       hook.prompt_template,
-      issueType ?? null,
+      routeKey ?? null,
     );
-    // A fresh nonce per delivery: a fixed one would eventually appear in a Jira
-    // description, and the fence would then be closable from inside.
-    const result = renderJiraTemplate(template, vars, {
-      nonce: crypto.randomBytes(8).toString('hex'),
-    });
+    const result = renderJiraTemplate(template, jiraTemplateVariables(payload, extra), { nonce });
     return { text: result.text, truncated: result.truncated };
   }
 
@@ -890,10 +1007,12 @@ export class WebhookService {
     return raw.toString('utf8').slice(0, MAX_STORED_PAYLOAD_BYTES);
   }
 
-  private filterFor(hook: WebhookRow): JiraWebhookFilter {
+  private filterFor(hook: WebhookRow): JiraWebhookFilter | BambooWebhookFilter {
     try {
-      const parsed = JiraWebhookFilterSchema.safeParse(JSON.parse(hook.filter_json));
-      return parsed.success ? parsed.data : {};
+      const parsed = JSON.parse(hook.filter_json);
+      const schema = hook.type === 'bamboo' ? BambooWebhookFilterSchema : JiraWebhookFilterSchema;
+      const result = schema.safeParse(parsed);
+      return result.success ? result.data : {};
     } catch {
       // A filter we cannot read must not become "match everything": that would
       // turn a storage bug into an agent storm. An empty object is the same
@@ -905,24 +1024,37 @@ export class WebhookService {
     }
   }
 
-  private projectMapFor(hook: WebhookRow): JiraProjectMapEntry[] {
+  /**
+   * `project_map_json` holds `JiraProjectMapEntry[]` (`{ projectKey, cwd }`)
+   * for a `type: 'jira'` webhook, or `BambooPlanMapEntry[]` (`{ planKey, cwd }`)
+   * for `type: 'bamboo'` — the same column, reused rather than migrated (see
+   * `db/index.ts`'s doc comment on the column).
+   */
+  private routeMapFor(hook: WebhookRow): JiraProjectMapEntry[] | BambooPlanMapEntry[] {
     try {
       const parsed = JSON.parse(hook.project_map_json) as unknown;
-      return Array.isArray(parsed) ? (parsed as JiraProjectMapEntry[]) : [];
+      return Array.isArray(parsed)
+        ? (parsed as JiraProjectMapEntry[] | BambooPlanMapEntry[])
+        : [];
     } catch {
       // Same reasoning as `filterFor`: an unreadable map must not silently
-      // become "no routing", which would run every project in `hook.cwd` —
-      // but there is no way to express "block everything" here either, so log
-      // loudly and treat it as unrouted, which is what the row literally says.
-      this.opts.logger?.warn({ webhook: hook.id }, 'webhook project map JSON is unreadable');
+      // become "no routing", which would run every project/plan in `hook.cwd`
+      // — but there is no way to express "block everything" here either, so
+      // log loudly and treat it as unrouted, which is what the row literally
+      // says.
+      this.opts.logger?.warn({ webhook: hook.id }, 'webhook route map JSON is unreadable');
       return [];
     }
   }
 
-  private promptTemplateMapFor(hook: WebhookRow): JiraPromptTemplateMapEntry[] {
+  private promptTemplateMapFor(
+    hook: WebhookRow,
+  ): JiraPromptTemplateMapEntry[] | BambooPromptTemplateMapEntry[] {
     try {
       const parsed = JSON.parse(hook.prompt_template_map_json) as unknown;
-      return Array.isArray(parsed) ? (parsed as JiraPromptTemplateMapEntry[]) : [];
+      return Array.isArray(parsed)
+        ? (parsed as JiraPromptTemplateMapEntry[] | BambooPromptTemplateMapEntry[])
+        : [];
     } catch {
       this.opts.logger?.warn({ webhook: hook.id }, 'webhook prompt template map JSON is unreadable');
       return [];
@@ -964,7 +1096,7 @@ export class WebhookService {
       auth_token_hash: token !== undefined ? sha256(Buffer.from(token, 'utf8')) : null,
       secret_set_at: now,
       filter_json: JSON.stringify(spec.filter),
-      project_map_json: JSON.stringify(spec.projectMap),
+      project_map_json: JSON.stringify(spec.type === 'bamboo' ? spec.planMap : spec.projectMap),
       prompt_template_map_json: JSON.stringify(spec.promptTemplateMap ?? []),
       cwd: spec.cwd,
       agent: spec.agent,
@@ -989,7 +1121,7 @@ export class WebhookService {
     return { row: this.get(id), secret, ...(token !== undefined ? { token } : {}) };
   }
 
-  update(id: string, patch: Partial<WebhookSpec>): WebhookRow {
+  update(id: string, patch: Partial<WebhookSpecCommon> & WebhookSpecConfigPatch): WebhookRow {
     const existing = this.get(id);
     if (patch.slug !== undefined && patch.slug.toLowerCase() !== existing.slug) {
       const clash = readWebhookBySlug(this.db, patch.slug);
@@ -998,17 +1130,20 @@ export class WebhookService {
       }
       this.opts.logger?.info(
         { webhook: id, from: existing.slug, to: patch.slug.toLowerCase() },
-        'webhook path changed; Jira must be updated to match',
+        'webhook path changed; upstream must be updated to match',
       );
     }
 
+    // `routeMap` is generic on purpose: it lands in `project_map_json`
+    // whichever provider's shape it is (`JiraProjectMapEntry[]` or
+    // `BambooPlanMapEntry[]`) — see that column's doc comment in `db/index.ts`.
     updateWebhook(this.db, id, {
       ...(patch.name !== undefined ? { name: patch.name } : {}),
       ...(patch.slug !== undefined ? { slug: patch.slug.toLowerCase() } : {}),
       ...(patch.enabled !== undefined ? { enabled: patch.enabled ? 1 : 0 } : {}),
       ...(patch.filter !== undefined ? { filter_json: JSON.stringify(patch.filter) } : {}),
-      ...(patch.projectMap !== undefined
-        ? { project_map_json: JSON.stringify(patch.projectMap) }
+      ...(patch.routeMap !== undefined
+        ? { project_map_json: JSON.stringify(patch.routeMap) }
         : {}),
       ...(patch.promptTemplateMap !== undefined
         ? { prompt_template_map_json: JSON.stringify(patch.promptTemplateMap) }
@@ -1095,15 +1230,17 @@ export class WebhookService {
    */
   async test(id: string, rawPayload?: string): Promise<DeliveryOutcome> {
     const hook = this.get(id);
-    const text = rawPayload ?? JSON.stringify(JIRA_SAMPLE_PAYLOAD);
+    const type = hook.type as WebhookType;
+    const text = rawPayload ?? JSON.stringify(type === 'bamboo' ? BAMBOO_SAMPLE_PAYLOAD : JIRA_SAMPLE_PAYLOAD);
     let payload: unknown;
     try {
       payload = JSON.parse(text);
     } catch {
       throw new WebhookServiceError('That is not valid JSON.', 'invalid_filter');
     }
-    const parsed = parseJiraEvent(payload);
+    const parsed = type === 'bamboo' ? parseBambooEvent(payload) : parseJiraEvent(payload);
     if (!parsed.ok) throw new WebhookServiceError(parsed.reason, 'invalid_filter');
+    const row = deliveryRowFieldsOf(type, parsed.facts);
 
     const deliveryId = crypto.randomUUID();
     insertWebhookDelivery(this.db, {
@@ -1114,11 +1251,11 @@ export class WebhookService {
       // tests of the same payload both run.
       body_hash: null,
       signature_state: 'skipped',
-      event: parsed.facts.event,
-      event_type: parsed.facts.eventType,
-      issue_key: parsed.facts.issueKey,
-      project_key: parsed.facts.projectKey,
-      actor: parsed.facts.actor,
+      event: row.event,
+      event_type: row.eventType,
+      issue_key: row.issueKey,
+      project_key: row.projectKey,
+      actor: row.actor,
       payload_json: this.storablePayload(hook, payload),
       payload_bytes: Buffer.byteLength(text, 'utf8'),
       received_at: this.now(),
@@ -1132,19 +1269,53 @@ export class WebhookService {
     opts: { payload?: string; promptTemplate?: string },
   ): { prompt: string; missing: string[]; truncated: boolean; filteredReason: string | null } {
     const hook = this.get(id);
-    const text = opts.payload ?? this.lastPayloadFor(id) ?? JSON.stringify(JIRA_SAMPLE_PAYLOAD);
+    const type = hook.type as WebhookType;
+    const text =
+      opts.payload ?? this.lastPayloadFor(id) ?? JSON.stringify(type === 'bamboo' ? BAMBOO_SAMPLE_PAYLOAD : JIRA_SAMPLE_PAYLOAD);
     let payload: unknown;
     try {
       payload = JSON.parse(text);
     } catch {
       throw new WebhookServiceError('That is not valid JSON.', 'invalid_filter');
     }
+
+    if (type === 'bamboo') {
+      const parsed = parseBambooEvent(payload);
+      const template =
+        opts.promptTemplate ??
+        resolvePromptTemplateByBuildState(
+          this.promptTemplateMapFor(hook) as BambooPromptTemplateMapEntry[],
+          hook.prompt_template,
+          parsed.ok ? parsed.facts.buildState : null,
+        );
+      const rendered = renderBambooTemplate(
+        template,
+        bambooTemplateVariables(payload, { webhookName: hook.name, deliveryId: 'preview' }),
+        { nonce: crypto.randomBytes(8).toString('hex') },
+      );
+      const filteredReason = !parsed.ok
+        ? parsed.reason
+        : (() => {
+            const v = evaluateBambooFilter(this.filterFor(hook) as BambooWebhookFilter, parsed.facts);
+            if (!v.matched) return v.reason;
+            const r = resolvePlanRoute(
+              this.routeMapFor(hook) as { planKey: string; cwd: string }[],
+              hook.cwd,
+              parsed.facts.planKey,
+            );
+            return r.matched ? null : r.reason;
+          })();
+      return { prompt: rendered.text, missing: rendered.missing, truncated: rendered.truncated, filteredReason };
+    }
+
     const parsed = parseJiraEvent(payload);
-    const template = opts.promptTemplate ?? resolvePromptTemplate(
-      this.promptTemplateMapFor(hook),
-      hook.prompt_template,
-      parsed.ok ? parsed.facts.issueType : null,
-    );
+    const template =
+      opts.promptTemplate ??
+      resolvePromptTemplate(
+        this.promptTemplateMapFor(hook) as JiraPromptTemplateMapEntry[],
+        hook.prompt_template,
+        parsed.ok ? parsed.facts.issueType : null,
+      );
     const rendered = renderJiraTemplate(
       template,
       jiraTemplateVariables(payload, { webhookName: hook.name, deliveryId: 'preview' }),
@@ -1153,9 +1324,13 @@ export class WebhookService {
     const filteredReason = !parsed.ok
       ? parsed.reason
       : (() => {
-          const v = evaluateJiraFilter(this.filterFor(hook), parsed.facts);
+          const v = evaluateJiraFilter(this.filterFor(hook) as JiraWebhookFilter, parsed.facts);
           if (!v.matched) return v.reason;
-          const r = resolveProjectRoute(this.projectMapFor(hook), hook.cwd, parsed.facts.projectKey);
+          const r = resolveProjectRoute(
+            this.routeMapFor(hook) as { projectKey: string; cwd: string }[],
+            hook.cwd,
+            parsed.facts.projectKey,
+          );
           return r.matched ? null : r.reason;
         })();
     return {
@@ -1176,22 +1351,37 @@ export class WebhookService {
   // -------------------------------------------------------------------------
 
   toWebhook(row: WebhookRow): Webhook {
+    const type = row.type as WebhookType;
     const filter = this.filterFor(row);
-    const projectMap = this.projectMapFor(row);
+    const routeMap = this.routeMapFor(row);
     const promptTemplateMap = this.promptTemplateMapFor(row);
     const workspaceLabel =
-      projectMap.length > 0 ? 'Auto-mapped' : this.opts.workspaces.labelFor(row.cwd);
+      routeMap.length > 0 ? 'Auto-mapped' : this.opts.workspaces.labelFor(row.cwd);
+    const config: Webhook['config'] =
+      type === 'bamboo'
+        ? {
+            type: 'bamboo',
+            filter: filter as BambooWebhookFilter,
+            planMap: routeMap as BambooPlanMapEntry[],
+            promptTemplateMap: promptTemplateMap as BambooPromptTemplateMapEntry[],
+          }
+        : {
+            type: 'jira',
+            filter: filter as JiraWebhookFilter,
+            projectMap: routeMap as JiraProjectMapEntry[],
+            promptTemplateMap: promptTemplateMap as JiraPromptTemplateMapEntry[],
+          };
     return {
       id: row.id,
       name: row.name,
       slug: row.slug,
       enabled: row.enabled === 1,
-      type: 'jira',
+      type,
       deliveryPath: `/api/hooks/${row.slug}`,
       authMode: row.auth_mode as WebhookAuthMode,
       hasToken: row.auth_token_hash !== null,
       secretSetAt: row.secret_set_at,
-      config: { type: 'jira', filter, projectMap, promptTemplateMap },
+      config,
       cwd: row.cwd,
       workspaceLabel,
       agent: row.agent,
@@ -1321,17 +1511,21 @@ export class WebhookService {
   summariesByCwd(): Map<string, WebhookSummary[]> {
     const out = new Map<string, WebhookSummary[]>();
     for (const row of readWebhooks(this.db)) {
+      const type = row.type as WebhookType;
       const summary: WebhookSummary = {
         id: row.id,
         name: row.name,
         enabled: row.enabled === 1,
-        type: 'jira',
-        triggerLabel: describeJiraFilter(this.filterFor(row)),
+        type,
+        triggerLabel:
+          type === 'bamboo'
+            ? describeBambooFilter(this.filterFor(row) as BambooWebhookFilter)
+            : describeJiraFilter(this.filterFor(row) as JiraWebhookFilter),
         lastDeliveryAt: row.last_delivery_at,
         lastDeliveryStatus: (row.last_delivery_status as WebhookDeliveryStatus | null) ?? null,
         skipPermissionsEnabled: row.skip_permissions === 1,
       };
-      const cwds = new Set([row.cwd, ...this.projectMapFor(row).map((e) => e.cwd)]);
+      const cwds = new Set([row.cwd, ...this.routeMapFor(row).map((e) => e.cwd)]);
       for (const cwd of cwds) {
         const list = out.get(cwd) ?? [];
         list.push(summary);
@@ -1439,4 +1633,4 @@ function scrubSecrets(value: unknown, depth = 0): unknown {
   return value;
 }
 
-export { DEFAULT_JIRA_PROMPT_TEMPLATE };
+export { DEFAULT_JIRA_PROMPT_TEMPLATE, DEFAULT_BAMBOO_PROMPT_TEMPLATE };

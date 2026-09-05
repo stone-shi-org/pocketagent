@@ -378,6 +378,8 @@ const MIGRATIONS: readonly string[] = [
 
     event                    TEXT,
     event_type               TEXT,
+    -- issue_key/project_key hold a Bamboo planKey/derived-project-key for a
+    -- type: 'bamboo' webhook -- reused rather than migrated to a neutral name.
     issue_key                TEXT,
     project_key              TEXT,
     actor                    TEXT,
@@ -914,7 +916,7 @@ export interface WebhookRow {
   /** Lowercase; the last segment of the delivery URL. Unique. */
   slug: string;
   enabled: number;
-  /** `'jira'`. Discriminates `filter_json`. */
+  /** `'jira' | 'bamboo'`. Discriminates every field below tagged "type-specific". */
   type: string;
   /** `'hmac' | 'bearer'`. */
   auth_mode: string;
@@ -925,9 +927,22 @@ export interface WebhookRow {
   secret_set_at: number;
   /** Raw JSON of a type-specific filter; parsed and validated by the caller. */
   filter_json: string;
-  /** Raw JSON of `JiraProjectMapEntry[]`; `'[]'` means no per-project routing. */
+  /**
+   * Raw JSON of `JiraProjectMapEntry[]` (`type: 'jira'`) or `BambooPlanMapEntry[]`
+   * (`type: 'bamboo'`) — a Bamboo webhook reuses this column keyed on `planKey`
+   * rather than `projectKey`. `'[]'` means no per-project/per-plan routing. The
+   * column kept its original name rather than being migrated to something
+   * provider-neutral: it is already a typed container read back through the
+   * schema matching `type`, and a rename would touch every read/write site for
+   * no functional gain.
+   */
   project_map_json: string;
-  /** Raw JSON of `JiraPromptTemplateMapEntry[]`; `'[]'` means no per-issue-type template routing. */
+  /**
+   * Raw JSON of `JiraPromptTemplateMapEntry[]` (`type: 'jira'`, keyed on
+   * `issueType`) or `BambooPromptTemplateMapEntry[]` (`type: 'bamboo'`, keyed
+   * on `buildState`). `'[]'` means no per-issue-type/per-build-state template
+   * routing.
+   */
   prompt_template_map_json: string;
   cwd: string;
   agent: string;
