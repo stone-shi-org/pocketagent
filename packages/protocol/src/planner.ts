@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { LIMITS } from './limits.js';
+import { AgentEvent } from './agent-events.js';
 
 /**
  * PA-6, phase 1 (foundation): the planner — an LLM chat (any OpenAI-compatible
@@ -122,28 +123,6 @@ export const PlannerApiKeyRevealResponse = z.object({
 });
 export type PlannerApiKeyRevealResponse = z.infer<typeof PlannerApiKeyRevealResponse>;
 
-/**
- * PA-6, phase 2 (chat core): a planner chat and its transcript.
- *
- * Deliberately not the `AgentEvent` union `agent-events.ts` defines for a
- * structured session. That union exists to carry *live, incremental* SDK
- * output (partial-message deltas, tool-call lifecycles) over a WebSocket to a
- * renderer built for exactly that shape. Phase 2's chat loop is
- * request/response, one full assistant message per turn — see
- * `planner/llm-client.ts`'s doc comment for why streaming is deferred — so
- * reusing `AgentEvent` here would mean emitting a union designed for partial
- * delivery to describe something that was never partial. A dedicated,
- * minimal transcript entry now, and a switch to `AgentEvent` if and when a
- * later phase adds real token-level streaming and tool-call events, keeps
- * each shape honest about what it actually carries.
- */
-export const PlannerTranscriptEntry = z.object({
-  role: z.enum(['user', 'assistant']),
-  content: z.string(),
-  createdAt: z.number().int(),
-});
-export type PlannerTranscriptEntry = z.infer<typeof PlannerTranscriptEntry>;
-
 export const PlannerChat = z.object({
   id: z.string(),
   /** Null when the owning workspace was later deleted — see `workspace_id`'s `ON DELETE SET NULL`. */
@@ -175,8 +154,29 @@ export const UpdatePlannerChatRequest = z.object({
 });
 export type UpdatePlannerChatRequest = z.infer<typeof UpdatePlannerChatRequest>;
 
+/**
+ * PA-6: a chat's transcript, as the same `AgentEvent` union a structured
+ * session's own event stream produces (`agent-events.ts`) — reused directly,
+ * not a parallel shape, per the reporter's "exact feature mirror" request.
+ * Persisted as JSONL, one event per line (`apps/server/src/planner/transcript.ts`),
+ * and replayed through the exact same `applyEvents` reducer the frontend
+ * already has, so a reopened planner chat renders identically to a resumed
+ * structured session: `user_prompt`/`text` render as the real chat UI does,
+ * `tool_use`/`tool_result` render as a real, expandable tool-call bar
+ * (`ToolCard`), and `permission_request`/`permission_resolved` render
+ * through the real pending-approval machinery.
+ *
+ * What replaces "streaming" here: the *turn* is streamed (each event reaches
+ * the browser the moment it happens — the model decided to call a tool, the
+ * tool finished, the reply is ready), not each token of the final text
+ * block. Getting token-level deltas too would mean parsing the upstream
+ * provider's own SSE format, which varies enough between OpenAI-compatible
+ * implementations that doing it blind is the highest-risk part of this
+ * feature; this stops one level short of that on purpose. See
+ * `planner/llm-client.ts`'s doc comment.
+ */
 export const PlannerChatHistoryResponse = z.object({
-  entries: z.array(PlannerTranscriptEntry),
+  events: z.array(AgentEvent),
 });
 export type PlannerChatHistoryResponse = z.infer<typeof PlannerChatHistoryResponse>;
 
@@ -186,33 +186,6 @@ export const PlannerSendMessageRequest = z.object({
   modelId: z.string().max(200).optional(),
 });
 export type PlannerSendMessageRequest = z.infer<typeof PlannerSendMessageRequest>;
-
-/**
- * PA-6, phase 4: a turn either finished, or paused on a mutating tool call
- * with no remembered decision. `approvalId` is opaque and short-lived (held
- * in server memory only, like `StructuredSession`'s own pending-permission
- * map) — it is resolved by `POST /api/planner/chats/:id/approvals/:approvalId`
- * and does not survive a server restart, the same limitation a live
- * session's own pending approval already has.
- */
-export const PlannerTurnResult = z.discriminatedUnion('status', [
-  z.object({ status: z.literal('completed'), assistantEntry: PlannerTranscriptEntry }),
-  z.object({
-    status: z.literal('approval_required'),
-    approvalId: z.string(),
-    toolName: z.string(),
-    /** Raw JSON the model supplied for the call — no per-tool "nice" rendering yet. */
-    argsSummary: z.string(),
-  }),
-]);
-export type PlannerTurnResult = z.infer<typeof PlannerTurnResult>;
-
-/** The user's entry is always produced immediately, whichever way the turn goes. */
-export const PlannerSendMessageResponse = z.object({
-  userEntry: PlannerTranscriptEntry,
-  turn: PlannerTurnResult,
-});
-export type PlannerSendMessageResponse = z.infer<typeof PlannerSendMessageResponse>;
 
 /**
  * `allow_once` runs the tool without remembering anything. `allow_workspace`

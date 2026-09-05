@@ -223,30 +223,41 @@ garbage-collected either, and a busy Jira project creates them far faster than a
 does — the editor says so. And `webhook_issue_sessions` is a cache, so a pruned row means the
 next event on that issue starts a fresh conversation rather than continuing one.
 
-### The planner (PA-6)
+### Pocket Agent (PA-6)
 
-A second chat surface, in parallel to project chats: the planner talks to a user-configured
-OpenAI-compatible LLM endpoint (`apps/server/src/planner/llm-client.ts`, non-streaming — see
-its own doc comment for why token-level streaming is deferred rather than built ahead of a
-transport to consume it) and calls tools that treat *existing* PocketAgent sessions as
-sub-agents, rather than owning a parallel notion of "workspace" or "session" for them.
+A second chat surface, in parallel to project chats: **Pocket Agent** (user-facing name;
+internal code, tables, and routes are still `planner*` — a full identifier rename was judged
+higher-risk than the user-visible-text rename actually requested, and out of scope) talks to a
+user-configured OpenAI-compatible LLM endpoint (`apps/server/src/planner/llm-client.ts`) and
+calls tools that treat *existing* PocketAgent sessions as sub-agents, rather than owning a
+parallel notion of "workspace" or "session" for them. The home screen's **"Pocket Agents"**
+section (`components/PocketAgentsSection.tsx`) sits parallel to "Projects": one row per agent
+(a planner workspace), its chats nested underneath — read/navigate only, the same split
+"Projects" itself draws between browsing chats and managing folders; adding, renaming, or
+removing an agent lives on the settings page instead.
 
 **Two registries, not one.** `PlannerWorkspaceRegistry` (`planner/workspaces.ts`) is
 deliberately separate from `WorkspaceRegistry`: a project workspace is one of the user's real
-code repositories, read-only from this server's point of view; a planner workspace is
-app-owned scratch space the planner's own file tools may create, write and delete inside
-freely, the same ownership `data/pocketagent.db` already has. One `default` workspace is
-seeded once at `<repo>/data/planner-workspaces/default/`, guarded by a settings flag so
-deliberately removing it does not silently resurrect it on the next boot — the same
+code repositories, read-only from this server's point of view; a planner workspace — an
+"agent" in the UI — is app-owned scratch space the planner's own file tools may create, write
+and delete inside freely, the same ownership `data/pocketagent.db` already has. One `Pocket
+Agent` workspace is seeded once at `<repo>/data/planner-workspaces/default/` (the *directory*
+keeps its `default` name always; only the *display* name a user sees was renamed — a rename
+never touches the directory, see `PlannerWorkspaceRegistry.rename`), guarded by a settings
+flag so deliberately removing it does not silently resurrect it on the next boot — the same
 discipline `workspaces_seeded` applies to project folders.
 
-**No `planner_messages` table.** A chat's transcript is JSONL on disk under
-`<workspace>/.transcripts/<chatId>.jsonl` — the same "transcript is a file, the database only
-indexes it" split `conversations/index.ts` already uses for Claude Code's own transcripts.
-Tool calls and their results are *not* persisted there, only the user's message and the
-model's final reply: the saved transcript stays the clean back-and-forth a human would want
-to read back, and a turn's tool exchange (including any approval pause) is scratch work for
-producing that reply, not part of the conversation itself.
+**A chat's transcript is the same `AgentEvent` union a structured session's own event stream
+uses** (`packages/protocol/src/agent-events.ts`), not a parallel shape — reused directly so a
+reopened Pocket Agent chat replays through the exact same `applyEvents` reducer the frontend
+already has for a resumed structured session, rendering tool calls as real, expandable
+`ToolCard`s. Persisted as JSONL on disk under `<workspace>/.transcripts/<chatId>.jsonl` — the
+same "transcript is a file, the database only indexes it" split `conversations/index.ts`
+already uses for Claude Code's own transcripts, with no `planner_messages` table. Every event a
+turn produces — the user's message, each tool call and its result, permission events, the
+final reply — is persisted in order, unlike the design's first cut, which kept only the user
+message and final reply and discarded the tool trace; the fix (still tracked under PA-6)
+followed a review round asking for exactly that visibility.
 
 **The tool catalog** (`planner/tools.ts`) splits into read-only (`list_workspaces`,
 `list_sessions`, `read_session_output`, `read_file` — exempt from approval entirely) and
@@ -259,10 +270,31 @@ way `RunExecutor` does for cron/webhooks, including re-validating the session's 
 time rather than trusting a cached value. `delete_worktree` calls the same `WorktreeService`
 the UI's own worktree-delete flow uses, not a second implementation.
 
+**A turn is streamed, not request/response.** `PlannerChatService.sendMessage`/`resolveApproval`
+(`planner/chats.ts`) are async generators that `yield` one `AgentEvent` at a time as each step
+of the turn happens; `routes/planner.ts`'s `streamPlannerEvents` drains one onto the HTTP
+response as `text/event-stream` frames, and the browser reads it via `fetch` + a manual
+`ReadableStream` reader (`api/client.ts`'s `streamPlannerEvents`) rather than `EventSource`,
+since sending a message needs a POST body. What "streamed" does *not* mean: the upstream LLM
+call itself is still `stream: false` (`llm-client.ts`) — parsing a provider's own SSE format
+varies enough between OpenAI-compatible implementations that doing it blind was judged the
+highest-risk part of this feature, so a tool call's bar and the final reply each arrive as one
+complete step rather than filling in token-by-token. Both service methods validate
+synchronously *before* their first `yield` (chat exists, an approval id is still pending, an
+LLM endpoint is configured), so a precondition failure can still answer a normal HTTP error
+status; past that point the service never throws again — an in-flight failure (e.g. the LLM
+endpoint erroring) becomes an in-band `text`/`turn_complete(isError: true)` event instead,
+because headers are already committed by then and there is no status left to change.
+
 **The approval gate is a pause, not a block.** See the invariants list for the full mechanics
-(`planner/approval.ts`); the short version is that a chat turn is one HTTP request/response,
-so a mutating tool call with no remembered decision returns an `approval_required` result
-immediately rather than holding the connection open, and a second request resumes it.
+(`planner/approval.ts`); the short version is that a mutating tool call with no remembered
+decision emits a `permission_request` event and ends that leg of the stream rather than
+holding the connection open, and a second request (`POST .../approvals/:id`, itself another
+streamed response) resumes it. The pause card in the UI is a deliberately plain stand-in for
+the real `ApprovalSheet` — driven by the same `TranscriptState.pending` the real sheet reads,
+just with its own four choices (once / remember for this workspace / remember globally / deny)
+instead of `ApprovalSheet`'s two, since the shared `PermissionDecision` type has no
+workspace/global concept of its own.
 
 ### The home screen
 
@@ -461,12 +493,13 @@ These are load-bearing. Several were bugs first.
   global switch, cron, webhooks) is all-or-nothing per session; a planner decision can instead
   be remembered for one tool in one workspace, or for one tool everywhere, in
   `planner_tool_approvals` — persistence none of the earlier three needed, because none of them
-  had more than one kind of approval to ask about. The chat itself has no live transport yet
-  (`packages/protocol/src/planner.ts`'s `PlannerTranscriptEntry` doc comment), so an unremembered
-  mutating tool call cannot be answered mid-request the way `StructuredSession.requestPermission`
-  answers one over a WebSocket; `PlannerChatService` instead *pauses* the turn
-  (`PlannerTurnResult.status === 'approval_required'`) and a separate
-  `POST /api/planner/chats/:id/approvals/:approvalId` resumes it. The invariant holds exactly the
+  had more than one kind of approval to ask about. The chat's transport is one-way — an SSE
+  response stream down to the browser, no channel back up except a fresh request — so an
+  unremembered mutating tool call cannot be answered mid-request the way
+  `StructuredSession.requestPermission` answers one over a genuinely bidirectional WebSocket;
+  `PlannerChatService` instead *pauses* the turn (yields a `permission_request` event and ends
+  that leg of the stream) and a separate `POST /api/planner/chats/:id/approvals/:approvalId`
+  resumes it. The invariant holds exactly the
   same way: nothing runs, and nothing decays into an allow, until that second request arrives —
   there is no timeout in this path either. Read-only tools (`list_workspaces`, `list_sessions`,
   `read_session_output`, `read_file`) are exempt from the gate entirely, a deliberate product

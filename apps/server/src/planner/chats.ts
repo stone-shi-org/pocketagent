@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { PlannerChat, PlannerToolApprovalChoice, PlannerTranscriptEntry, PlannerTurnResult } from '@pocketagent/protocol';
+import type { AgentEvent, PlannerChat, PlannerToolApprovalChoice } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 import type { SessionManager } from '../sessions/manager.js';
@@ -17,8 +17,8 @@ import {
   writePlannerLastModelId,
 } from './store.js';
 import { resolveApprovalStatus, rememberDecisionIfAsked } from './approval.js';
-import { appendTranscriptEntry, readTranscript } from './transcript.js';
-import { PlannerLlmClient, type PlannerChatMessage, type PlannerLlmToolCall } from './llm-client.js';
+import { appendTranscriptEvent, readTranscriptEvents } from './transcript.js';
+import { PlannerLlmClient, PlannerLlmError, type PlannerChatMessage, type PlannerLlmToolCall } from './llm-client.js';
 import { PLANNER_TOOLS, findPlannerTool, toOpenAiToolSpecs, type PlannerToolDefinition } from './tools.js';
 
 export class PlannerChatError extends Error {
@@ -58,43 +58,44 @@ export interface PlannerChatServiceOptions {
   tools?: readonly PlannerToolDefinition[];
 }
 
-/** State for a turn parked on an unanswered mutating-tool approval. Held only
-    in memory — like `StructuredSession`'s own pending-permission map, this
-    does not survive a server restart; see `PlannerTurnResult`'s doc comment
-    in the protocol package. */
+/**
+ * State for a turn parked on an unanswered mutating-tool approval. Held only
+ * in memory — like `StructuredSession`'s own pending-permission map, this
+ * does not survive a server restart (see `PlannerChatHistoryResponse`'s doc
+ * comment in the protocol package). Deliberately thin: `messages` is never
+ * stored here — `driveLoop` always rebuilds the LLM message list fresh from
+ * the persisted transcript (`eventsToLlmMessages`), so resuming a paused
+ * batch only needs to remember *which* call is still waiting and where in
+ * the tool-iteration budget the turn was.
+ */
 interface PendingPlannerTurn {
   chatId: string;
   workspaceId: string | null;
   modelId: string;
-  messages: PlannerChatMessage[];
   toolCalls: PlannerLlmToolCall[];
   /** Index into `toolCalls` of the call awaiting a decision. */
   index: number;
   iteration: number;
 }
 
-type TurnStep =
-  | { done: true; content: string }
-  | {
-      done: false;
-      pendingId: string;
-      toolName: string;
-      argsSummary: string;
-    };
-
 /**
  * PA-6: planner chat CRUD and the turn loop.
  *
- * Phase 2 added a text-only loop; phase 3 added read-only tool-calling; phase
- * 4 adds mutating tools gated by remembered approvals or a pause-and-resume
- * round-trip (`approval.ts`'s doc comment explains why a pause rather than a
- * blocking wait). Read-only tools still execute immediately, no gate.
+ * The loop is now a streaming one: `sendMessage`/`resolveApproval` are async
+ * generators that `yield` one `AgentEvent` at a time — the same union a
+ * structured session's own event stream produces — as each step of the turn
+ * happens, rather than computing the whole turn and returning one JSON blob
+ * at the end. Every yielded event is also persisted to the transcript file
+ * immediately, in the same order, so the chat's history *is* the event log a
+ * later `history()` call replays. See `routes/planner.ts` for how these
+ * events reach the browser (an SSE response) and `llm-client.ts`'s doc
+ * comment for exactly what "streaming" does and does not mean here.
  *
- * Tool calls and their results are **not** persisted to the transcript —
- * only the user's message and the model's final text reply are. The
- * transcript stays the clean back-and-forth a human would want to read back;
- * a turn's tool exchange (including any approval pause) is scratch work for
- * producing that reply, not part of the conversation itself.
+ * Read-only tools still execute the moment they're called, no gate. A
+ * mutating tool without a remembered decision or yolo still pauses the turn
+ * — `PendingPlannerTurn` — and is resumed by a second call
+ * (`resolveApproval`), the same architecture phase 4 introduced; only the
+ * transport carrying each step to the browser changed.
  */
 export class PlannerChatService {
   private readonly tools: readonly PlannerToolDefinition[];
@@ -154,189 +155,292 @@ export class PlannerChatService {
     return deletePlannerChat(this.opts.db, id);
   }
 
-  async history(id: string): Promise<PlannerTranscriptEntry[]> {
+  async history(id: string): Promise<AgentEvent[]> {
     const chat = this.requireChat(id);
-    return readTranscript(this.workspacePathFor(chat), chat.id);
+    return readTranscriptEvents(this.workspacePathFor(chat), chat.id);
   }
 
   /**
-   * Run one turn: append the user message, then drive the tool loop until it
-   * finishes or pauses on an unapproved mutating tool call.
+   * Start a turn: append+yield `user_prompt`, then drive the loop until it
+   * finishes (`turn_complete`) or pauses on an unapproved mutating tool call
+   * (`permission_request`, with no matching `permission_resolved` yet).
    *
-   * Throws `PlannerChatError('not_configured')` before ever calling out if
-   * there is no provider base URL or no model to use — a clear, immediate
-   * error beats a confusing failure from `fetch` against an empty string.
+   * Validates synchronously, before the first `yield` — no provider base URL
+   * or no model to use throws `PlannerChatError('not_configured')` — so the
+   * route can still answer a clean HTTP error status for these instead of
+   * having to fold them into the event stream: nothing has been written to
+   * the response yet at that point.
    */
-  async sendMessage(
+  async *sendMessage(
     id: string,
     content: string,
     opts: { modelId?: string; signal?: AbortSignal } = {},
-  ): Promise<{ userEntry: PlannerTranscriptEntry; turn: PlannerTurnResult }> {
+  ): AsyncGenerator<AgentEvent> {
     const chat = this.requireChat(id);
     const modelId = this.resolveModelId(chat, opts.modelId);
-
     const workspacePath = this.workspacePathFor(chat);
-    const userEntry: PlannerTranscriptEntry = { role: 'user', content, createdAt: Date.now() };
-    await appendTranscriptEntry(workspacePath, chat.id, userEntry);
-    const history = await readTranscript(workspacePath, chat.id);
-    const messages: PlannerChatMessage[] = history.map((entry) => ({
-      role: entry.role,
-      content: entry.content,
-    }));
 
-    const turn = await this.driveAndFinish(chat, modelId, messages, 0, opts.signal);
-    return { userEntry, turn };
+    const userEvent: AgentEvent = { kind: 'user_prompt', id: crypto.randomUUID(), text: content };
+    await appendTranscriptEvent(workspacePath, chat.id, userEvent);
+    yield userEvent;
+
+    yield* this.driveLoop(chat, workspacePath, modelId, 0, opts.signal);
   }
 
   /**
    * Resolve a paused turn's approval and continue it — possibly pausing
    * again on a *different* tool call in the same batch, possibly finishing.
+   *
+   * Throws `PlannerChatError('not_found')` (before any `yield`, same
+   * reasoning as `sendMessage`) if the approval id is unknown — already
+   * resolved, or lost to a server restart, per this feature's own documented
+   * limitation.
    */
-  async resolveApproval(
+  async *resolveApproval(
     chatId: string,
     approvalId: string,
     choice: PlannerToolApprovalChoice,
-    signal?: AbortSignal,
-  ): Promise<PlannerTurnResult> {
+  ): AsyncGenerator<AgentEvent> {
     const pending = this.pendingTurns.get(approvalId);
     if (!pending || pending.chatId !== chatId) {
       throw new PlannerChatError('No pending approval with that id for this chat.', 'not_found');
     }
     this.pendingTurns.delete(approvalId);
     const chat = this.requireChat(chatId);
-
+    const workspacePath = this.workspacePathFor(chat);
     const call = pending.toolCalls[pending.index]!;
-    rememberDecisionIfAsked(this.opts.db, choice, call.function.name, pending.workspaceId);
-    const resultText =
-      choice === 'deny' ? 'Denied by user.' : await this.executeTool(call.function.name, call.function.arguments);
-    pending.messages.push({ role: 'tool', tool_call_id: call.id, content: resultText });
+    const tool = findPlannerTool(call.function.name);
 
-    return this.driveAndFinish(
-      chat,
-      pending.modelId,
-      pending.messages,
-      pending.iteration,
-      signal,
-      { toolCalls: pending.toolCalls, index: pending.index + 1 },
-    );
+    if (choice !== 'allow_once') {
+      rememberDecisionIfAsked(this.opts.db, choice, call.function.name, pending.workspaceId);
+    }
+
+    if (choice === 'deny' || !tool) {
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'permission_resolved',
+        id: approvalId,
+        decision: 'deny',
+        message: null,
+      });
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'tool_result',
+        id: crypto.randomUUID(),
+        toolUseId: call.id,
+        content: choice === 'deny' ? 'Denied by the user.' : `Unknown tool: ${call.function.name}`,
+        truncated: false,
+        isError: true,
+      });
+    } else {
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'permission_resolved',
+        id: approvalId,
+        // `PermissionDecision` has no `allow_workspace`/`allow_global` of its
+        // own (that finer grain is a planner-only concept the shared union
+        // does not need) — the reducer only ever reads `decision === 'deny'`
+        // to flip a tool card's `denied` flag, so collapsing every allow
+        // variant to `'allow'` here is lossless for rendering. `message`
+        // carries the scope for a human reading the raw event.
+        decision: 'allow',
+        message: scopeMessage(choice),
+      });
+      const resultText = await this.executeTool(tool, call.function.arguments, chat);
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'tool_result',
+        id: crypto.randomUUID(),
+        toolUseId: call.id,
+        content: resultText,
+        truncated: false,
+        isError: false,
+      });
+    }
+
+    yield* this.processToolCalls(chat, workspacePath, pending.modelId, pending.toolCalls, pending.index + 1, pending.iteration);
   }
 
-  /** Runs the loop, then persists+returns a `completed` result or returns a `approval_required` one. */
-  private async driveAndFinish(
+  /** Persist then yield — every event this service produces goes through here, so the two never drift apart. */
+  private async *emit(workspacePath: string, chatId: string, event: AgentEvent): AsyncGenerator<AgentEvent> {
+    await appendTranscriptEvent(workspacePath, chatId, event);
+    yield event;
+  }
+
+  /** Ends a turn: emits the final `text` (or nothing, if `text` is empty) and `turn_complete`, and updates the chat row. */
+  private async *finishTurn(
     chat: PlannerChat,
+    workspacePath: string,
     modelId: string,
-    messages: PlannerChatMessage[],
+    text: string,
+    isError: boolean,
+  ): AsyncGenerator<AgentEvent> {
+    if (text.length > 0) {
+      yield* this.emit(workspacePath, chat.id, { kind: 'text', id: crypto.randomUUID(), text });
+    }
+    yield* this.emit(workspacePath, chat.id, {
+      kind: 'turn_complete',
+      stopReason: isError ? 'error' : 'end_turn',
+      isError,
+      numTurns: null,
+      durationMs: null,
+      costUsd: null,
+      inputTokens: null,
+      outputTokens: null,
+    });
+    updatePlannerChat(this.opts.db, chat.id, { lastModelId: modelId, lastActivityAt: Date.now() });
+    writePlannerLastModelId(this.opts.db, modelId);
+  }
+
+  /**
+   * Calls the LLM with the transcript rebuilt fresh from disk (always —
+   * never a `messages` array threaded through calls, so a resumed-after-pause
+   * turn and a fresh one share exactly one code path for "what does the model
+   * see"), then either finishes the turn or hands off to `processToolCalls`.
+   *
+   * Never throws past the first `yield` of the *containing* `sendMessage`
+   * call: an LLM failure here becomes an in-band error (`finishTurn` with
+   * `isError: true`), not a rejected promise — once SSE headers are sent
+   * (which happens after `sendMessage`'s first `user_prompt` yield), the
+   * route can no longer change the HTTP status, so every failure from this
+   * point on has to be representable as an event instead.
+   */
+  private async *driveLoop(
+    chat: PlannerChat,
+    workspacePath: string,
+    modelId: string,
     iteration: number,
     signal?: AbortSignal,
-    resumeBatch?: { toolCalls: PlannerLlmToolCall[]; index: number },
-  ): Promise<PlannerTurnResult> {
+  ): AsyncGenerator<AgentEvent> {
+    if (iteration >= MAX_TOOL_ITERATIONS) {
+      yield* this.finishTurn(chat, workspacePath, modelId, GIVE_UP_MESSAGE, true);
+      return;
+    }
+
     const settings = readPlannerSettings(this.opts.db);
-    // `sendMessage`/an earlier call in this same turn already checked
-    // `settings.baseUrl` is set before any of this ran.
+    const events = await readTranscriptEvents(workspacePath, chat.id);
+    const messages = eventsToLlmMessages(events);
     const client = new PlannerLlmClient({
       baseUrl: settings.baseUrl!,
       apiKey: revealPlannerApiKey(this.opts.db),
       ...(this.opts.llmFetch ? { fetchImpl: this.opts.llmFetch } : {}),
     });
 
-    let step: TurnStep;
+    let completion;
     try {
-      step = await this.runToolLoop(chat, modelId, messages, client, iteration, signal, resumeBatch);
+      completion = await client.complete(modelId, messages, toOpenAiToolSpecs(this.tools), signal);
     } catch (err) {
       this.opts.logger?.warn({ err, chat: chat.id, model: modelId }, 'planner LLM call failed');
-      throw err;
+      const message = err instanceof PlannerLlmError ? err.message : (err as Error).message;
+      yield* this.finishTurn(chat, workspacePath, modelId, `Could not reach the LLM endpoint: ${message}`, true);
+      return;
     }
 
-    if (!step.done) {
-      return { status: 'approval_required', approvalId: step.pendingId, toolName: step.toolName, argsSummary: step.argsSummary };
+    if (completion.toolCalls.length === 0) {
+      yield* this.finishTurn(chat, workspacePath, modelId, completion.content ?? '', false);
+      return;
     }
 
-    const workspacePath = this.workspacePathFor(chat);
-    const assistantEntry: PlannerTranscriptEntry = {
-      role: 'assistant',
-      content: step.content,
-      createdAt: Date.now(),
-    };
-    await appendTranscriptEntry(workspacePath, chat.id, assistantEntry);
-    updatePlannerChat(this.opts.db, chat.id, { lastModelId: modelId, lastActivityAt: assistantEntry.createdAt });
-    writePlannerLastModelId(this.opts.db, modelId);
+    for (const call of completion.toolCalls) {
+      const args = safeParseArgs(call.function.arguments);
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'tool_use',
+        id: call.id,
+        name: call.function.name,
+        input: args,
+        summary: summarizeToolCall(call.function.name, args),
+        filePath: extractFilePath(args),
+      });
+    }
 
-    return { status: 'completed', assistantEntry };
+    yield* this.processToolCalls(chat, workspacePath, modelId, completion.toolCalls, 0, iteration + 1);
   }
 
   /**
-   * Calls the LLM, executing read-only tool calls immediately and mutating
-   * ones once approved (remembered or freshly granted), until it replies
-   * with plain text, a mutating call needs a decision, or the iteration cap
-   * is hit.
+   * Executes (or pauses on) each tool call in `toolCalls` from `startIndex`
+   * onward. Read-only tools and remembered/yolo'd mutating ones run
+   * immediately; a mutating one with no decision pauses the turn right there
+   * — `pendingTurns` remembers only *where*, since `driveLoop` re-derives
+   * everything else from the transcript once resumed.
    */
-  private async runToolLoop(
+  private async *processToolCalls(
     chat: PlannerChat,
+    workspacePath: string,
     modelId: string,
-    messages: PlannerChatMessage[],
-    client: PlannerLlmClient,
+    toolCalls: PlannerLlmToolCall[],
+    startIndex: number,
     iteration: number,
-    signal?: AbortSignal,
-    resumeBatch?: { toolCalls: PlannerLlmToolCall[]; index: number },
-  ): Promise<TurnStep> {
-    const toolSpecs = toOpenAiToolSpecs(this.tools);
-    let batch = resumeBatch;
+  ): AsyncGenerator<AgentEvent> {
+    for (let index = startIndex; index < toolCalls.length; index++) {
+      const call = toolCalls[index]!;
+      const tool = findPlannerTool(call.function.name);
 
-    for (;;) {
-      if (!batch) {
-        if (iteration >= MAX_TOOL_ITERATIONS) return { done: true, content: GIVE_UP_MESSAGE };
-        const completion = await client.complete(modelId, messages, toolSpecs, signal);
-        iteration++;
-        if (completion.toolCalls.length === 0) return { done: true, content: completion.content ?? '' };
-        messages.push({ role: 'assistant', content: completion.content, tool_calls: completion.toolCalls });
-        batch = { toolCalls: completion.toolCalls, index: 0 };
+      if (!tool) {
+        yield* this.emit(workspacePath, chat.id, {
+          kind: 'tool_result',
+          id: crypto.randomUUID(),
+          toolUseId: call.id,
+          content: `Unknown tool: ${call.function.name}`,
+          truncated: false,
+          isError: true,
+        });
+        continue;
       }
 
-      while (batch.index < batch.toolCalls.length) {
-        const call = batch.toolCalls[batch.index]!;
-        const tool = findPlannerTool(call.function.name);
-
-        if (tool && !tool.readOnly) {
-          const decision = resolveApprovalStatus(this.opts.db, call.function.name, chat.workspaceId);
-          if (decision === null) {
-            const pendingId = crypto.randomUUID();
-            this.pendingTurns.set(pendingId, {
-              chatId: chat.id,
-              workspaceId: chat.workspaceId,
-              modelId,
-              messages,
-              toolCalls: batch.toolCalls,
-              index: batch.index,
-              iteration,
-            });
-            return { done: false, pendingId, toolName: call.function.name, argsSummary: call.function.arguments };
-          }
-          if (decision === 'deny') {
-            messages.push({ role: 'tool', tool_call_id: call.id, content: 'Denied by a remembered decision.' });
-            batch.index++;
-            continue;
-          }
-          // decision === 'allow': fall through and execute below.
+      if (!tool.readOnly) {
+        const decision = resolveApprovalStatus(this.opts.db, tool.name, chat.workspaceId);
+        if (decision === null) {
+          const approvalId = crypto.randomUUID();
+          this.pendingTurns.set(approvalId, {
+            chatId: chat.id,
+            workspaceId: chat.workspaceId,
+            modelId,
+            toolCalls,
+            index,
+            iteration,
+          });
+          const args = safeParseArgs(call.function.arguments);
+          yield* this.emit(workspacePath, chat.id, {
+            kind: 'permission_request',
+            id: approvalId,
+            toolName: tool.name,
+            input: args,
+            title: `Run ${tool.name}`,
+            displayName: null,
+            filePath: extractFilePath(args),
+            reason: null,
+            canAllowForSession: false,
+            questions: null,
+          });
+          return; // paused — the rest of this batch waits for `resolveApproval`
         }
-
-        const resultText = await this.executeTool(call.function.name, call.function.arguments);
-        messages.push({ role: 'tool', tool_call_id: call.id, content: resultText });
-        batch.index++;
+        if (decision === 'deny') {
+          yield* this.emit(workspacePath, chat.id, {
+            kind: 'tool_result',
+            id: crypto.randomUUID(),
+            toolUseId: call.id,
+            content: 'Denied by a remembered decision.',
+            truncated: false,
+            isError: true,
+          });
+          continue;
+        }
+        // decision === 'allow': fall through and execute below.
       }
 
-      batch = undefined; // batch fully resolved — ask the model what's next
+      const resultText = await this.executeTool(tool, call.function.arguments, chat);
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'tool_result',
+        id: crypto.randomUUID(),
+        toolUseId: call.id,
+        content: resultText,
+        truncated: false,
+        isError: false,
+      });
     }
+
+    // Every call in this batch resolved — ask the model what's next.
+    yield* this.driveLoop(chat, workspacePath, modelId, iteration, undefined);
   }
 
-  private async executeTool(name: string, rawArguments: string): Promise<string> {
-    const tool = findPlannerTool(name);
-    if (!tool) return `Unknown tool: ${name}`;
-    let args: Record<string, unknown>;
-    try {
-      args = rawArguments ? (JSON.parse(rawArguments) as Record<string, unknown>) : {};
-    } catch {
-      return `Invalid JSON arguments for tool "${name}".`;
-    }
+  private async executeTool(tool: PlannerToolDefinition, rawArguments: string, chat: PlannerChat): Promise<string> {
+    const args = safeParseArgs(rawArguments);
     try {
       return await tool.execute(
         {
@@ -350,7 +454,8 @@ export class PlannerChatService {
         args,
       );
     } catch (err) {
-      return `Error running tool "${name}": ${(err as Error).message}`;
+      this.opts.logger?.warn({ err, tool: tool.name, chat: chat.id }, 'planner tool execution failed');
+      return `Error running tool "${tool.name}": ${(err as Error).message}`;
     }
   }
 
@@ -388,4 +493,99 @@ export class PlannerChatService {
     }
     return fallback.path;
   }
+}
+
+function scopeMessage(choice: PlannerToolApprovalChoice): string | null {
+  switch (choice) {
+    case 'allow_workspace':
+      return 'Remembered: always allow for this workspace.';
+    case 'allow_global':
+      return 'Remembered: always allow everywhere.';
+    default:
+      return null;
+  }
+}
+
+function safeParseArgs(rawArguments: string): Record<string, unknown> {
+  if (!rawArguments) return {};
+  try {
+    const parsed: unknown = JSON.parse(rawArguments);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Best-effort one-line summary for a `tool_use` event, matching `AgentEvent.summary`'s
+    doc comment ("e.g. `Read hello.txt`") closely enough without per-tool special-casing. */
+function summarizeToolCall(name: string, args: Record<string, unknown>): string {
+  const entries = Object.entries(args).map(([key, value]) => `${key}: ${JSON.stringify(value)}`);
+  const preview = entries.join(', ');
+  const full = preview.length > 0 ? `${name}(${preview})` : `${name}()`;
+  return full.length > 200 ? `${full.slice(0, 200)}…` : full;
+}
+
+function extractFilePath(args: Record<string, unknown>): string | null {
+  return typeof args.path === 'string' ? args.path : null;
+}
+
+/**
+ * Rebuilds the OpenAI-style message list a `/chat/completions` call needs
+ * from a chat's persisted `AgentEvent[]`, so the LLM always sees the exact
+ * same history a human reopening the chat would see rendered.
+ *
+ * Only ever runs over *completed* turns (an in-progress, paused turn's state
+ * lives in `PendingPlannerTurn`, never in the persisted file until it
+ * resolves) — so every `tool_use` here is guaranteed a matching `tool_result`
+ * somewhere later in the stream, possibly with `permission_request`/
+ * `permission_resolved` interleaved between them (skipped here; they carry
+ * nothing the LLM's own message format has room for). Consecutive `tool_use`
+ * events are grouped into one assistant message with a `tool_calls` array —
+ * matching however many calls one real completion actually returned in a
+ * single response — followed by one `tool`-role message per call.
+ */
+function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatMessage[] {
+  const messages: PlannerChatMessage[] = [];
+  let pendingCalls: PlannerLlmToolCall[] | null = null;
+  const resultsById = new Map<string, string>();
+
+  const flushPendingCalls = (): void => {
+    if (!pendingCalls) return;
+    const calls = pendingCalls;
+    pendingCalls = null;
+    messages.push({ role: 'assistant', content: null, tool_calls: calls });
+    for (const call of calls) {
+      messages.push({ role: 'tool', tool_call_id: call.id, content: resultsById.get(call.id) ?? '' });
+    }
+  };
+
+  for (const event of events) {
+    switch (event.kind) {
+      case 'user_prompt':
+        flushPendingCalls();
+        messages.push({ role: 'user', content: event.text });
+        break;
+      case 'text':
+        flushPendingCalls();
+        messages.push({ role: 'assistant', content: event.text });
+        break;
+      case 'tool_use':
+        (pendingCalls ??= []).push({
+          id: event.id,
+          type: 'function',
+          function: { name: event.name, arguments: JSON.stringify(event.input) },
+        });
+        break;
+      case 'tool_result':
+        resultsById.set(event.toolUseId, event.content);
+        break;
+      default:
+        // `notice`, `turn_complete`, `permission_request`, `permission_resolved`,
+        // and everything else this union carries for a structured session are
+        // not part of an LLM's own message format.
+        break;
+    }
+  }
+  flushPendingCalls();
+  return messages;
 }

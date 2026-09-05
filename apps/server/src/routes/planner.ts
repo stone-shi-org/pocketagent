@@ -10,11 +10,11 @@ import {
   SetPlannerToolApprovalRequest,
   UpdatePlannerChatRequest,
   UpdatePlannerSettingsRequest,
+  type AgentEvent,
   type PlannerApiKeyRevealResponse,
   type PlannerChatHistoryResponse,
   type PlannerChatListResponse,
   type PlannerModelListResponse,
-  type PlannerSendMessageResponse,
   type PlannerSettingsDto,
   type PlannerToolApprovalListResponse,
   type PlannerToolApprovalRow,
@@ -68,10 +68,67 @@ function mapChatError(reply: FastifyReply, err: unknown): FastifyReply | never {
   if (err instanceof PlannerLlmError) {
     // 502: the request into this server was fine, the configured upstream
     // failed or is unreachable — not this server's own fault, and not the
-    // caller's either.
+    // caller's either. In practice this branch is now unreachable from the
+    // streaming routes below (`PlannerChatService.driveLoop` catches its own
+    // `PlannerLlmError` and yields an in-band error event instead — see that
+    // method's doc comment for why), but kept for any future caller that
+    // still surfaces the LLM client's own error type as a rejection.
     return reply.code(502).send({ error: { code: 'llm_error', message: err.message } });
   }
   throw err;
+}
+
+/**
+ * Drains an `AgentEvent` generator (`PlannerChatService.sendMessage` /
+ * `.resolveApproval`) onto the response as newline-delimited SSE frames.
+ *
+ * The one call to `.next()` before anything is written is the load-bearing
+ * part: both service methods validate synchronously (chat exists, an
+ * approval id is still pending, an LLM endpoint is configured) *before*
+ * their first `yield`, so a precondition failure rejects that first
+ * `.next()` and this can still answer a normal HTTP error status — headers
+ * are not sent yet. Once past that first event, the response is committed to
+ * being a stream; nothing after this point can change the status code, which
+ * is exactly why the service itself never throws past its own first yield
+ * (see `driveLoop`'s doc comment) — an in-flight failure has to become an
+ * event, not a rejection, because this function no longer has form left to
+ * turn a promise rejection into.
+ */
+async function streamPlannerEvents(
+  reply: FastifyReply,
+  generator: AsyncGenerator<AgentEvent>,
+): Promise<void> {
+  let first: IteratorResult<AgentEvent>;
+  try {
+    first = await generator.next();
+  } catch (err) {
+    mapChatError(reply, err);
+    return;
+  }
+
+  reply.hijack();
+  reply.raw.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-store',
+    connection: 'keep-alive',
+  });
+
+  const write = (event: AgentEvent): void => {
+    reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+  };
+
+  try {
+    if (!first.done) write(first.value);
+    for await (const event of generator) {
+      write(event);
+    }
+  } catch (err) {
+    // Not expected in normal operation (see this function's doc comment),
+    // but if something still throws mid-stream there is no status left to
+    // change — a final in-band notice is the only way left to say so.
+    write({ kind: 'notice', level: 'error', text: `Unexpected error: ${(err as Error).message}` });
+  }
+  reply.raw.end();
 }
 
 /**
@@ -300,7 +357,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const { id } = request.params as { id: string };
     try {
       const response: PlannerChatHistoryResponse = {
-        entries: await app.pocket.plannerChats.history(id),
+        events: await app.pocket.plannerChats.history(id),
       };
       return response;
     } catch (err) {
@@ -309,9 +366,10 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
   });
 
   /**
-   * Synchronous today: the response only arrives once the whole assistant
-   * reply is in — see `llm-client.ts`'s doc comment for why phase 2 is
-   * request/response rather than streamed. The frontend disables its
+   * Streams one turn as it happens — see `streamPlannerEvents`'s doc comment
+   * for the precondition-vs-in-band-error split this depends on, and
+   * `PlannerChatHistoryResponse`'s doc comment (protocol package) for what
+   * "streamed" does and does not mean here. The frontend disables its
    * composer for the duration, the same "one turn in flight at a time"
    * discipline `PromptBox` already applies to a structured session.
    */
@@ -321,26 +379,24 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     if (!parsed.success) {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
-    try {
-      const { userEntry, turn } = await app.pocket.plannerChats.sendMessage(
-        id,
-        parsed.data.content,
-        parsed.data.modelId ? { modelId: parsed.data.modelId } : {},
-      );
-      const response: PlannerSendMessageResponse = { userEntry, turn };
-      return response;
-    } catch (err) {
-      return mapChatError(reply, err);
-    }
+    const generator = app.pocket.plannerChats.sendMessage(
+      id,
+      parsed.data.content,
+      parsed.data.modelId ? { modelId: parsed.data.modelId } : {},
+    );
+    await streamPlannerEvents(reply, generator);
   });
 
   /**
    * Resolves a turn paused on a mutating tool call with no remembered
-   * decision (`PlannerTurnResult.status === 'approval_required'`). See
-   * `planner/approval.ts`'s doc comment for why this is a second request
+   * decision (a `permission_request` event with no matching
+   * `permission_resolved` yet — see `PlannerChatService.processToolCalls`).
+   * See `planner/approval.ts`'s doc comment for why this is a second request
    * rather than the first one simply waiting: the planner chat has no live
-   * transport yet to push the question to the browser and receive an answer
-   * without a fresh HTTP round-trip.
+   * bidirectional transport, only a one-way event stream down to the
+   * browser, so resuming needs its own request the same way it did before
+   * streaming existed — only the response shape (another event stream, not
+   * one JSON object) changed.
    */
   app.post('/api/planner/chats/:id/approvals/:approvalId', async (request, reply) => {
     const { id, approvalId } = request.params as { id: string; approvalId: string };
@@ -348,11 +404,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     if (!parsed.success) {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
-    try {
-      const turn = await app.pocket.plannerChats.resolveApproval(id, approvalId, parsed.data.decision);
-      return reply.send(turn);
-    } catch (err) {
-      return mapChatError(reply, err);
-    }
+    const generator = app.pocket.plannerChats.resolveApproval(id, approvalId, parsed.data.decision);
+    await streamPlannerEvents(reply, generator);
   });
 };

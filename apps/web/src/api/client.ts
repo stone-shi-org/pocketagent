@@ -46,8 +46,6 @@ import type {
   UpdatePlannerChatRequest,
   PlannerChatHistoryResponse,
   PlannerSendMessageRequest,
-  PlannerSendMessageResponse,
-  PlannerTurnResult,
   PlannerToolApprovalChoice,
   PlannerToolListResponse,
   PlannerToolApprovalListResponse,
@@ -98,6 +96,75 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return body as T;
+}
+
+/**
+ * POSTs `body` and reads the response as a stream of `AgentEvent`s — one
+ * `data: <json>\n\n` frame per event, matching `streamPlannerEvents` on the
+ * server (`routes/planner.ts`). Not built on `request()` above: that helper
+ * awaits the *whole* body as one JSON value, which is exactly what a
+ * streamed turn cannot do — events have to reach `onEvent` as they arrive,
+ * not once the connection closes. `EventSource` was not an option either: it
+ * only ever issues a `GET`, and sending a message needs a body.
+ *
+ * A non-2xx response is assumed to be the same JSON error shape `request()`
+ * handles, since a precondition failure (chat not found, no LLM configured)
+ * is answered *before* the route ever switches into streaming mode — see
+ * `streamPlannerEvents`'s own doc comment server-side.
+ */
+async function streamPlannerEvents(
+  path: string,
+  body: unknown,
+  onEvent: (event: AgentEvent) => void,
+): Promise<void> {
+  const response = await fetch(path, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    let parsed: unknown;
+    try {
+      parsed = text ? JSON.parse(text) : {};
+    } catch {
+      throw new ApiError(`Unexpected response from server (${response.status}).`, response.status, 'bad_response');
+    }
+    const err = (parsed as { error?: { code?: string; message?: string } }).error;
+    throw new ApiError(
+      err?.message ?? `Request failed (${response.status}).`,
+      response.status,
+      err?.code ?? 'unknown',
+    );
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) return;
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let boundary = buffer.indexOf('\n\n');
+    while (boundary >= 0) {
+      const frame = buffer.slice(0, boundary).trim();
+      buffer = buffer.slice(boundary + 2);
+      if (frame.length > 0) {
+        const jsonText = frame.startsWith('data:') ? frame.slice(5).trim() : frame;
+        try {
+          onEvent(JSON.parse(jsonText) as AgentEvent);
+        } catch {
+          // A malformed frame is dropped rather than aborting the rest of
+          // the stream — the turn already in flight server-side keeps going
+          // either way.
+        }
+      }
+      boundary = buffer.indexOf('\n\n');
+    }
+  }
 }
 
 export const api = {
@@ -476,21 +543,27 @@ export const api = {
     request<PlannerChatHistoryResponse>(`/api/planner/chats/${encodeURIComponent(id)}/history`),
 
   /**
-   * Resolves once the turn either finishes or pauses on a mutating tool call
-   * with no remembered decision (`PlannerTurnResult.status`) — see the
-   * route's doc comment.
+   * Streams one turn's `AgentEvent`s as they happen — see
+   * `PlannerChatHistoryResponse`'s doc comment (protocol package) for what
+   * that does and does not mean — calling `onEvent` for each, in order.
+   * Resolves once the turn either finishes (`turn_complete`) or pauses on a
+   * mutating tool call with no remembered decision (`permission_request`
+   * with no matching `permission_resolved` yet).
    */
-  sendPlannerMessage: (id: string, body: PlannerSendMessageRequest) =>
-    request<PlannerSendMessageResponse>(`/api/planner/chats/${encodeURIComponent(id)}/messages`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
+  sendPlannerMessage: (id: string, body: PlannerSendMessageRequest, onEvent: (event: AgentEvent) => void) =>
+    streamPlannerEvents(`/api/planner/chats/${encodeURIComponent(id)}/messages`, body, onEvent),
 
-  /** Resolves a turn paused on `approval_required` — see `PlannerTurnResult`. */
-  resolvePlannerApproval: (id: string, approvalId: string, decision: PlannerToolApprovalChoice) =>
-    request<PlannerTurnResult>(
+  /** Resolves a turn paused on an unanswered `permission_request`. */
+  resolvePlannerApproval: (
+    id: string,
+    approvalId: string,
+    decision: PlannerToolApprovalChoice,
+    onEvent: (event: AgentEvent) => void,
+  ) =>
+    streamPlannerEvents(
       `/api/planner/chats/${encodeURIComponent(id)}/approvals/${encodeURIComponent(approvalId)}`,
-      { method: 'POST', body: JSON.stringify({ decision }) },
+      { decision },
+      onEvent,
     ),
 
   listPlannerTools: () => request<PlannerToolListResponse>('/api/planner/tools'),

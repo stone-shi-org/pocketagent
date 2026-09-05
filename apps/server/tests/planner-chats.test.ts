@@ -123,6 +123,29 @@ describe('PlannerLlmClient', () => {
 
 // ---- HTTP surface -----------------------------------------------------------
 
+/**
+ * The streaming routes (`POST .../messages`, `POST .../approvals/:id`)
+ * answer `text/event-stream`: newline-delimited `data: <json>\n\n` frames,
+ * one per `AgentEvent`. `app.inject()` still buffers the whole response body
+ * (it waits for the response to end either way), so a real turn's full event
+ * sequence is available in one `res.payload` string — this just splits it
+ * back into the array `PlannerChatService`'s generator actually yielded.
+ */
+function parseEvents(res: { payload: string }): Array<{ kind: string; [key: string]: unknown }> {
+  return res.payload
+    .split('\n\n')
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0)
+    .map((chunk) => JSON.parse(chunk.replace(/^data: /, '')));
+}
+
+function findEvent(
+  events: Array<{ kind: string; [key: string]: unknown }>,
+  kind: string,
+): { kind: string; [key: string]: unknown } | undefined {
+  return events.find((e) => e.kind === kind);
+}
+
 describe('planner chat routes over HTTP', () => {
   let t: TestApp;
 
@@ -143,6 +166,18 @@ describe('planner chat routes over HTTP', () => {
     t2.app.inject({ method: 'PATCH', url, headers: authHeaders(t2.cookie), payload });
   const del = (t2: TestApp, url: string) =>
     t2.app.inject({ method: 'DELETE', url, headers: authHeaders(t2.cookie) });
+
+  /** Sends a message and returns the turn's full parsed event sequence. */
+  const sendMessage = async (t2: TestApp, chatId: string, content: string) => {
+    const res = await post(t2, `/api/planner/chats/${chatId}/messages`, { content });
+    return { res, events: parseEvents(res) };
+  };
+
+  /** Resolves a paused approval and returns the rest of the turn's events. */
+  const resolve = async (t2: TestApp, chatId: string, approvalId: string, decision: string) => {
+    const res = await post(t2, `/api/planner/chats/${chatId}/approvals/${approvalId}`, { decision });
+    return { res, events: parseEvents(res) };
+  };
 
   it('creates a chat defaulting to the default workspace', async () => {
     t = await createTestApp();
@@ -196,7 +231,7 @@ describe('planner chat routes over HTTP', () => {
     const chat = (await post(t, '/api/planner/chats', {})).json();
     const history = await get(t, `/api/planner/chats/${chat.id}/history`);
     expect(history.statusCode).toBe(200);
-    expect(history.json().entries).toEqual([]);
+    expect(history.json().events).toEqual([]);
   });
 
   it('404s sending a message to an unknown chat', async () => {
@@ -221,7 +256,7 @@ describe('planner chat routes over HTTP', () => {
     expect(res.statusCode).toBe(409);
   });
 
-  it('completes a turn end-to-end: persists both entries, updates the chat and the global last-used model', async () => {
+  it('completes a turn end-to-end: streams user_prompt/text/turn_complete, updates the chat and the global last-used model', async () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValue(fakeCompletionResponse("Here's the plan."));
@@ -231,21 +266,20 @@ describe('planner chat routes over HTTP', () => {
     const model = await post(t, '/api/planner/models', { modelId: 'gpt-4o-mini', label: 'Fast' });
     const chat = (await post(t, '/api/planner/chats', { modelId: model.json().modelId })).json();
 
-    const turn = await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'plan my week' });
+    const { res: turn, events } = await sendMessage(t, chat.id, 'plan my week');
     expect(turn.statusCode).toBe(200);
-    const body = turn.json();
-    expect(body.userEntry).toMatchObject({ role: 'user', content: 'plan my week' });
-    expect(body.turn.status).toBe('completed');
-    expect(body.turn.assistantEntry).toMatchObject({ role: 'assistant', content: "Here's the plan." });
+    expect(turn.headers['content-type']).toMatch(/text\/event-stream/);
+    expect(events.map((e) => e.kind)).toEqual(['user_prompt', 'text', 'turn_complete']);
+    expect(events[0]).toMatchObject({ text: 'plan my week' });
+    expect(events[1]).toMatchObject({ text: "Here's the plan." });
+    expect(events[2]).toMatchObject({ isError: false });
 
-    const history = (await get(t, `/api/planner/chats/${chat.id}/history`)).json().entries;
-    expect(history).toHaveLength(2);
-    expect(history[0].role).toBe('user');
-    expect(history[1].role).toBe('assistant');
+    const history = (await get(t, `/api/planner/chats/${chat.id}/history`)).json().events;
+    expect(history).toEqual(events);
 
     const chats = (await get(t, '/api/planner/chats')).json().chats;
     expect(chats[0].lastModelId).toBe('gpt-4o-mini');
-    expect(chats[0].lastActivityAt).toBe(body.turn.assistantEntry.createdAt);
+    expect(chats[0].lastActivityAt).toBeGreaterThan(0);
 
     const settings = (await get(t, '/api/planner/settings')).json();
     expect(settings.lastModelId).toBe('gpt-4o-mini');
@@ -256,7 +290,7 @@ describe('planner chat routes over HTTP', () => {
     expect(sentMessages).toEqual([{ role: 'user', content: 'plan my week' }]);
   });
 
-  it('executes a read-only tool call immediately (no approval) and feeds the result back', async () => {
+  it('executes a read-only tool call immediately (no approval), streaming tool_use/tool_result, and persists them', async () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce(fakeToolCallResponse('list_workspaces', {}))
@@ -265,14 +299,17 @@ describe('planner chat routes over HTTP', () => {
     await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
     const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
 
-    const turn = await post(t, `/api/planner/chats/${chat.id}/messages`, {
-      content: 'what workspaces do I have?',
-    });
+    const { res: turn, events } = await sendMessage(t, chat.id, 'what workspaces do I have?');
     expect(turn.statusCode).toBe(200);
-    expect(turn.json().turn).toMatchObject({
-      status: 'completed',
-      assistantEntry: { content: 'You have one workspace: project.' },
-    });
+    expect(events.map((e) => e.kind)).toEqual([
+      'user_prompt',
+      'tool_use',
+      'tool_result',
+      'text',
+      'turn_complete',
+    ]);
+    expect(events[1]).toMatchObject({ name: 'list_workspaces', input: {} });
+    expect(events[3]).toMatchObject({ text: 'You have one workspace: project.' });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
 
     // The second call carries the assistant's tool-call message and the
@@ -292,11 +329,10 @@ describe('planner chat routes over HTTP', () => {
       { path: t.workspaceRoot, name: path.basename(t.workspaceRoot), isGitRepo: false },
     ]);
 
-    // Only the user message and the final text reply land in the persisted
-    // transcript — the tool exchange is scratch work for this turn only.
-    const history = (await get(t, `/api/planner/chats/${chat.id}/history`)).json().entries;
-    expect(history).toHaveLength(2);
-    expect(history.map((e: { role: string }) => e.role)).toEqual(['user', 'assistant']);
+    // Every event — including the tool call and its result — is now visible
+    // on reload, unlike phase 3/4's design: the whole point of this fix.
+    const history = (await get(t, `/api/planner/chats/${chat.id}/history`)).json().events;
+    expect(history).toEqual(events);
   });
 
   it('gives up after too many tool-call iterations rather than looping forever', async () => {
@@ -305,9 +341,12 @@ describe('planner chat routes over HTTP', () => {
     await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
     const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
 
-    const turn = await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'loop forever' });
+    const { res: turn, events } = await sendMessage(t, chat.id, 'loop forever');
     expect(turn.statusCode).toBe(200);
-    expect(turn.json().turn.assistantEntry.content).toMatch(/too many tool calls/);
+    const textEvent = findEvent(events, 'text');
+    expect(textEvent?.text).toMatch(/too many tool calls/);
+    const doneEvent = findEvent(events, 'turn_complete');
+    expect(doneEvent).toMatchObject({ isError: true });
     // Capped, not unbounded.
     expect(fetchImpl.mock.calls.length).toBeLessThanOrEqual(8);
   });
@@ -332,14 +371,21 @@ describe('planner chat routes over HTTP', () => {
     ]);
   });
 
-  it('502s when the configured LLM endpoint errors', async () => {
+  it('turns an LLM failure into an in-band error event, not an HTTP error status', async () => {
+    // Once the stream has started (right after `user_prompt`), the response
+    // status is already committed — see `streamPlannerEvents`'s doc comment
+    // for why an upstream failure has to become a `text`/`turn_complete`
+    // event instead of a different HTTP status the way a pre-phase-6 502
+    // once did.
     const fetchImpl = vi.fn().mockResolvedValue(new Response('boom', { status: 500 }));
     t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
     await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
     const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
-    const res = await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'hi' });
-    expect(res.statusCode).toBe(502);
-    expect(res.json().error.code).toBe('llm_error');
+    const { res, events } = await sendMessage(t, chat.id, 'hi');
+    expect(res.statusCode).toBe(200);
+    expect(events.map((e) => e.kind)).toEqual(['user_prompt', 'text', 'turn_complete']);
+    expect(findEvent(events, 'text')?.text).toMatch(/Could not reach the LLM endpoint/);
+    expect(findEvent(events, 'turn_complete')).toMatchObject({ isError: true });
   });
 
   it('a chat surviving its workspace deletion still has a readable, appendable transcript', async () => {
@@ -369,17 +415,18 @@ describe('planner chat routes over HTTP', () => {
     t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
     await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
     const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
-    const turn = await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'make a directory' });
-    return { chat, turn: turn.json() };
+    const { events } = await sendMessage(t, chat.id, 'make a directory');
+    const pending = findEvent(events, 'permission_request');
+    return { chat, events, pending: pending as { id: string; toolName: string; input: unknown } };
   }
 
   it('pauses a mutating tool call with no remembered decision', async () => {
     const fetchImpl = vi.fn().mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'a-new-dir' }));
-    const { turn } = await mkdirPending(fetchImpl);
+    const { events, pending } = await mkdirPending(fetchImpl);
 
-    expect(turn.turn.status).toBe('approval_required');
-    expect(turn.turn.toolName).toBe('mkdir');
-    expect(JSON.parse(turn.turn.argsSummary)).toEqual({ path: 'a-new-dir' });
+    expect(events.map((e) => e.kind)).toEqual(['user_prompt', 'tool_use', 'permission_request']);
+    expect(pending.toolName).toBe('mkdir');
+    expect(pending.input).toEqual({ path: 'a-new-dir' });
     // The pause happens before the mutating action runs.
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
@@ -402,18 +449,18 @@ describe('planner chat routes over HTTP', () => {
 
     await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
     const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
-    const turn = (await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'make a directory' })).json();
+    const { events: firstEvents } = await sendMessage(t, chat.id, 'make a directory');
+    const pending = findEvent(firstEvents, 'permission_request')!;
 
-    const resolved = await post(t, `/api/planner/chats/${chat.id}/approvals/${turn.turn.approvalId}`, {
-      decision: 'allow_once',
-    });
+    const { res: resolved, events: resumedEvents } = await resolve(t, chat.id, pending.id as string, 'allow_once');
     expect(resolved.statusCode).toBe(200);
-    expect(resolved.json()).toMatchObject({ status: 'completed', assistantEntry: { content: 'Made it.' } });
+    expect(resumedEvents.map((e) => e.kind)).toEqual(['permission_resolved', 'tool_result', 'text', 'turn_complete']);
+    expect(findEvent(resumedEvents, 'text')?.text).toBe('Made it.');
     expect((await fs.stat(targetDir)).isDirectory()).toBe(true);
 
     const secondChat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
-    const secondTurn = await post(t, `/api/planner/chats/${secondChat.id}/messages`, { content: 'again' });
-    expect(secondTurn.json().turn.status).toBe('approval_required');
+    const { events: secondEvents } = await sendMessage(t, secondChat.id, 'again');
+    expect(findEvent(secondEvents, 'permission_request')).toBeDefined();
   });
 
   it('allow_workspace remembers the decision for every chat in that workspace, but not elsewhere', async () => {
@@ -427,22 +474,21 @@ describe('planner chat routes over HTTP', () => {
       .mockResolvedValueOnce(fakeCompletionResponse('Done twice.'))
       // Third chat, a *different* workspace: still has to ask.
       .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'elsewhere' }));
-    const { chat, turn } = await mkdirPending(fetchImpl);
+    const { chat, pending } = await mkdirPending(fetchImpl);
 
-    const resolved = await post(t, `/api/planner/chats/${chat.id}/approvals/${turn.turn.approvalId}`, {
-      decision: 'allow_workspace',
-    });
-    expect(resolved.json().status).toBe('completed');
+    const { events: resumedEvents } = await resolve(t, chat.id, pending.id as string, 'allow_workspace');
+    expect(findEvent(resumedEvents, 'turn_complete')).toMatchObject({ isError: false });
 
     const secondChat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
-    const secondTurn = await post(t, `/api/planner/chats/${secondChat.id}/messages`, { content: 'again' });
-    expect(secondTurn.json().turn).toMatchObject({ status: 'completed', assistantEntry: { content: 'Done twice.' } });
+    const { events: secondEvents } = await sendMessage(t, secondChat.id, 'again');
+    expect(secondEvents.map((e) => e.kind)).toEqual(['user_prompt', 'tool_use', 'tool_result', 'text', 'turn_complete']);
+    expect(findEvent(secondEvents, 'text')?.text).toBe('Done twice.');
     expect(fetchImpl).toHaveBeenCalledTimes(4);
 
     const otherWs = (await post(t, '/api/planner/workspaces', { name: 'Other' })).json();
     const otherChat = (await post(t, '/api/planner/chats', { workspaceId: otherWs.id, modelId: 'gpt-4o' })).json();
-    const otherTurn = await post(t, `/api/planner/chats/${otherChat.id}/messages`, { content: 'go' });
-    expect(otherTurn.json().turn.status).toBe('approval_required');
+    const { events: otherEvents } = await sendMessage(t, otherChat.id, 'go');
+    expect(findEvent(otherEvents, 'permission_request')).toBeDefined();
   });
 
   it('allow_global remembers the decision for every workspace', async () => {
@@ -453,15 +499,13 @@ describe('planner chat routes over HTTP', () => {
       // A chat in a *different* workspace: no pause — the decision is global.
       .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'still-global' }))
       .mockResolvedValueOnce(fakeCompletionResponse('Also done.'));
-    const { chat, turn } = await mkdirPending(fetchImpl);
-    await post(t, `/api/planner/chats/${chat.id}/approvals/${turn.turn.approvalId}`, {
-      decision: 'allow_global',
-    });
+    const { chat, pending } = await mkdirPending(fetchImpl);
+    await resolve(t, chat.id, pending.id as string, 'allow_global');
 
     const otherWs = (await post(t, '/api/planner/workspaces', { name: 'Elsewhere' })).json();
     const otherChat = (await post(t, '/api/planner/chats', { workspaceId: otherWs.id, modelId: 'gpt-4o' })).json();
-    const otherTurn = await post(t, `/api/planner/chats/${otherChat.id}/messages`, { content: 'go' });
-    expect(otherTurn.json().turn).toMatchObject({ status: 'completed', assistantEntry: { content: 'Also done.' } });
+    const { events: otherEvents } = await sendMessage(t, otherChat.id, 'go');
+    expect(findEvent(otherEvents, 'text')?.text).toBe('Also done.');
   });
 
   it('deny records a denial as the tool result and lets the model try again', async () => {
@@ -469,15 +513,13 @@ describe('planner chat routes over HTTP', () => {
       .fn()
       .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'denied-dir' }))
       .mockResolvedValueOnce(fakeCompletionResponse('Understood, not creating it.'));
-    const { chat, turn } = await mkdirPending(fetchImpl);
+    const { chat, pending } = await mkdirPending(fetchImpl);
 
-    const resolved = await post(t, `/api/planner/chats/${chat.id}/approvals/${turn.turn.approvalId}`, {
-      decision: 'deny',
-    });
-    expect(resolved.json()).toMatchObject({
-      status: 'completed',
-      assistantEntry: { content: 'Understood, not creating it.' },
-    });
+    const { events: resumedEvents } = await resolve(t, chat.id, pending.id as string, 'deny');
+    expect(resumedEvents.map((e) => e.kind)).toEqual(['permission_resolved', 'tool_result', 'text', 'turn_complete']);
+    expect(findEvent(resumedEvents, 'permission_resolved')).toMatchObject({ decision: 'deny' });
+    expect(findEvent(resumedEvents, 'tool_result')).toMatchObject({ isError: true });
+    expect(findEvent(resumedEvents, 'text')?.text).toBe('Understood, not creating it.');
     await expect(fs.stat(path.join(t.workspaceRoot, 'denied-dir'))).rejects.toThrow();
 
     const secondCallMessages = JSON.parse(fetchImpl.mock.calls[1]![1].body as string).messages;
@@ -496,9 +538,9 @@ describe('planner chat routes over HTTP', () => {
 
   it("404s resolving an approval id that belongs to a different chat", async () => {
     const fetchImpl = vi.fn().mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'x' }));
-    const { turn } = await mkdirPending(fetchImpl);
+    const { pending } = await mkdirPending(fetchImpl);
     const otherChat = (await post(t, '/api/planner/chats', {})).json();
-    const res = await post(t, `/api/planner/chats/${otherChat.id}/approvals/${turn.turn.approvalId}`, {
+    const res = await post(t, `/api/planner/chats/${otherChat.id}/approvals/${pending.id}`, {
       decision: 'deny',
     });
     expect(res.statusCode).toBe(404);
@@ -515,11 +557,9 @@ describe('planner chat routes over HTTP', () => {
     await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
     const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
 
-    const turn = await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'go' });
-    expect(turn.json().turn).toMatchObject({
-      status: 'completed',
-      assistantEntry: { content: 'Done, no questions asked.' },
-    });
+    const { events } = await sendMessage(t, chat.id, 'go');
+    expect(events.map((e) => e.kind)).toEqual(['user_prompt', 'tool_use', 'tool_result', 'text', 'turn_complete']);
+    expect(findEvent(events, 'text')?.text).toBe('Done, no questions asked.');
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
@@ -532,12 +572,12 @@ describe('planner chat routes over HTTP', () => {
     t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
     await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
     const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
-    await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'go' });
+    await sendMessage(t, chat.id, 'go');
 
     await patch(t, '/api/planner/settings', { yoloEnabled: false });
     const secondChat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
-    const secondTurn = await post(t, `/api/planner/chats/${secondChat.id}/messages`, { content: 'go again' });
-    expect(secondTurn.json().turn.status).toBe('approval_required');
+    const { events: secondEvents } = await sendMessage(t, secondChat.id, 'go again');
+    expect(findEvent(secondEvents, 'permission_request')).toBeDefined();
   });
 
   it('yolo mode overrides even a remembered deny', async () => {
@@ -547,15 +587,15 @@ describe('planner chat routes over HTTP', () => {
       .mockResolvedValueOnce(fakeCompletionResponse('Denied as expected.'))
       .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'denied-then-yolo-2' }))
       .mockResolvedValueOnce(fakeCompletionResponse('Ran anyway.'));
-    const { chat, turn } = await mkdirPending(fetchImpl);
-    await post(t, `/api/planner/chats/${chat.id}/approvals/${turn.turn.approvalId}`, { decision: 'deny' });
+    const { chat, pending } = await mkdirPending(fetchImpl);
+    await resolve(t, chat.id, pending.id as string, 'deny');
 
     // Nothing was remembered by a plain 'deny' (only allow_workspace/allow_global
     // persist), so pre-configure a global deny via the settings surface instead.
     await post(t, '/api/planner/tool-approvals', { scope: 'global', toolName: 'mkdir', decision: 'deny' });
     await patch(t, '/api/planner/settings', { yoloEnabled: true });
 
-    const secondTurn = await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'try again' });
-    expect(secondTurn.json().turn).toMatchObject({ status: 'completed', assistantEntry: { content: 'Ran anyway.' } });
+    const { events: secondEvents } = await sendMessage(t, chat.id, 'try again');
+    expect(findEvent(secondEvents, 'text')?.text).toBe('Ran anyway.');
   });
 });
