@@ -5,13 +5,13 @@ import {
   ProjectRequest,
   RemoveChatRequest,
   WorkspaceRequest,
-  type AgentEvent,
   type ModelInfo,
 } from '@pocketagent/protocol';
 import os from 'node:os';
 import path from 'node:path';
 import { browseDirectory, discoverFolders } from '../discover/index.js';
 import { SessionError } from '../sessions/manager.js';
+import { readSessionHistory } from '../sessions/history.js';
 import { WorkspaceError } from '../workspaces/index.js';
 import { hideChat, readAgentDefaults } from '../db/index.js';
 import { VIRTUAL_SHELL_CWD } from '../projects/index.js';
@@ -444,36 +444,16 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
    * to, lazily started if needed.
    */
   app.get<{ Params: { id: string } }>('/api/sessions/:id/history', async (request, reply) => {
-    const resumedFrom = sessions.resumedConversationId(request.params.id);
-    if (!resumedFrom) return reply.send({ events: [] });
-
-    const info = sessions.find(request.params.id);
-    const events = await historyForAgent(info?.agent, resumedFrom, info?.cwd);
+    const { conversationId, events } = await readSessionHistory(
+      { sessions, conversations, agyTranscripts, piTranscripts },
+      request.params.id,
+    );
+    if (!conversationId) return reply.send({ events: [] });
     // The transcript is gone, unreadable, or (for `conversations`) outside a
     // workspace root. Not fatal either way: the session still works, it just
     // opens without its backstory.
-    return reply.send({ conversationId: resumedFrom, events });
+    return reply.send({ conversationId, events });
   });
-
-  /** See the `/api/sessions/:id/history` route above for why the store differs per agent. */
-  async function historyForAgent(
-    agent: string | undefined,
-    conversationId: string,
-    cwd: string | undefined,
-  ): Promise<AgentEvent[]> {
-    switch (agent) {
-      case 'agy':
-        return agyTranscripts.history(conversationId);
-      case 'pi':
-        return cwd ? piTranscripts.history(conversationId, cwd) : [];
-      case 'codex':
-        return sessions.codexHistory(conversationId);
-      case 'opencode':
-        return sessions.opencodeHistory(conversationId);
-      default:
-        return (await conversations.history(conversationId)) ?? [];
-    }
-  }
 
   app.get<{ Params: { id: string } }>('/api/sessions/:id', async (request, reply) => {
     const info = sessions.find(request.params.id);

@@ -202,12 +202,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     options.plannerWorkspacesRoot ?? path.join(path.dirname(config.databasePath), 'planner-workspaces');
   const plannerWorkspaces = new PlannerWorkspaceRegistry(createPlannerWorkspaceStore(db));
   await plannerWorkspaces.ensureDefaultWorkspace(plannerWorkspacesRoot);
-  const plannerChats = new PlannerChatService({
-    db,
-    plannerWorkspaces,
-    logger: app.log,
-    ...(options.plannerLlmFetch ? { llmFetch: options.plannerLlmFetch } : {}),
-  });
+  // `plannerChats` itself is constructed further down, once `sessions`,
+  // `conversations`, and the transcript stores it needs for read-only tools
+  // (PA-6 phase 3) exist.
 
   const agents = createDefaultRegistry({
     shell: config.shell,
@@ -286,6 +283,16 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
       'global skip-permissions switch is ON: every session bypasses approval instead of asking',
     );
   }
+
+  const plannerChats = new PlannerChatService({
+    db,
+    workspaces,
+    plannerWorkspaces,
+    sessions,
+    historyDeps: { sessions, conversations, agyTranscripts, piTranscripts },
+    logger: app.log,
+    ...(options.plannerLlmFetch ? { llmFetch: options.plannerLlmFetch } : {}),
+  });
 
   const usage = new UsageService([
     createClaudeUsageSource({

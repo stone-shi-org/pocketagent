@@ -1,11 +1,12 @@
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PlannerLlmClient, PlannerLlmError } from '../src/planner/llm-client.js';
 import { authHeaders, createTestApp, type TestApp } from './helpers.js';
 
 /**
- * PA-6, phase 2 (chat core): the LLM client, the chat turn loop, and the
- * `/api/planner/chats` HTTP surface. Still no tools and no approval gate —
- * see PA-6 for the phases that add them.
+ * PA-6: the LLM client, the chat turn loop (phase 2), the read-only
+ * tool-calling loop (phase 3), and the `/api/planner/chats` HTTP surface.
+ * Still no mutating tools and no approval gate — see PA-6 for those phases.
  */
 
 // ---- PlannerLlmClient, unit-level against an injected fetch ----------------
@@ -15,6 +16,24 @@ function fakeCompletionResponse(content: string): Response {
     status: 200,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+function fakeToolCallResponse(name: string, args: Record<string, unknown>, callId = 'call_1'): Response {
+  return new Response(
+    JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [
+              { id: callId, type: 'function', function: { name, arguments: JSON.stringify(args) } },
+            ],
+          },
+        },
+      ],
+    }),
+    { status: 200, headers: { 'content-type': 'application/json' } },
+  );
 }
 
 describe('PlannerLlmClient', () => {
@@ -28,7 +47,7 @@ describe('PlannerLlmClient', () => {
 
     const reply = await client.complete('gpt-4o-mini', [{ role: 'user', content: 'hi' }]);
 
-    expect(reply).toBe('hello there');
+    expect(reply).toEqual({ content: 'hello there', toolCalls: [] });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(url).toBe('https://api.example.com/v1/chat/completions');
@@ -75,6 +94,29 @@ describe('PlannerLlmClient', () => {
     const fetchImpl = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
     const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
     await expect(client.complete('m', [])).rejects.toThrow(/Could not reach/);
+  });
+
+  it('parses tool_calls out of the response, with null content', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeToolCallResponse('list_workspaces', {}));
+    const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
+    const completion = await client.complete('m', []);
+    expect(completion.content).toBeNull();
+    expect(completion.toolCalls).toEqual([
+      { id: 'call_1', type: 'function', function: { name: 'list_workspaces', arguments: '{}' } },
+    ]);
+  });
+
+  it('sends a tools array only when tools are passed', async () => {
+    // `mockImplementation`, not `mockResolvedValue`: a `Response` body can
+    // only be read once, and this test drives two calls through the mock.
+    const fetchImpl = vi.fn().mockImplementation(() => fakeCompletionResponse('ok'));
+    const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
+
+    await client.complete('m', []);
+    expect(JSON.parse(fetchImpl.mock.calls[0]![1].body as string)).not.toHaveProperty('tools');
+
+    await client.complete('m', [], [{ type: 'function', function: { name: 'x' } }]);
+    expect(JSON.parse(fetchImpl.mock.calls[1]![1].body as string).tools).toHaveLength(1);
   });
 });
 
@@ -210,6 +252,59 @@ describe('planner chat routes over HTTP', () => {
     // user message — not an empty or stale list.
     const sentMessages = JSON.parse(fetchImpl.mock.calls[0]![1].body as string).messages;
     expect(sentMessages).toEqual([{ role: 'user', content: 'plan my week' }]);
+  });
+
+  it('executes a read-only tool call immediately (no approval) and feeds the result back', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(fakeToolCallResponse('list_workspaces', {}))
+      .mockResolvedValueOnce(fakeCompletionResponse('You have one workspace: project.'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const turn = await post(t, `/api/planner/chats/${chat.id}/messages`, {
+      content: 'what workspaces do I have?',
+    });
+    expect(turn.statusCode).toBe(200);
+    expect(turn.json().assistantEntry.content).toBe('You have one workspace: project.');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    // The second call carries the assistant's tool-call message and the
+    // executed tool's result, in addition to the original user turn.
+    const secondCallMessages = JSON.parse(fetchImpl.mock.calls[1]![1].body as string).messages;
+    expect(secondCallMessages).toHaveLength(3);
+    expect(secondCallMessages[0]).toEqual({ role: 'user', content: 'what workspaces do I have?' });
+    expect(secondCallMessages[1]).toMatchObject({
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ function: { name: 'list_workspaces' } }],
+    });
+    expect(secondCallMessages[2].role).toBe('tool');
+    // `createTestApp` registers `t.workspaceRoot` itself as the workspace
+    // root — see the identical note in `planner-tools.test.ts`.
+    expect(JSON.parse(secondCallMessages[2].content)).toEqual([
+      { path: t.workspaceRoot, name: path.basename(t.workspaceRoot), isGitRepo: false },
+    ]);
+
+    // Only the user message and the final text reply land in the persisted
+    // transcript — the tool exchange is scratch work for this turn only.
+    const history = (await get(t, `/api/planner/chats/${chat.id}/history`)).json().entries;
+    expect(history).toHaveLength(2);
+    expect(history.map((e: { role: string }) => e.role)).toEqual(['user', 'assistant']);
+  });
+
+  it('gives up after too many tool-call iterations rather than looping forever', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() => fakeToolCallResponse('list_workspaces', {}));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const turn = await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'loop forever' });
+    expect(turn.statusCode).toBe(200);
+    expect(turn.json().assistantEntry.content).toMatch(/too many tool calls/);
+    // Capped, not unbounded.
+    expect(fetchImpl.mock.calls.length).toBeLessThanOrEqual(8);
   });
 
   it('a second turn sends the full prior history to the LLM', async () => {
