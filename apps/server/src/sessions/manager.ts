@@ -1419,6 +1419,13 @@ export class SessionManager {
       status: session.status,
       busy: session.busy,
       busySince: session.busySince,
+      // Keep this in the in-memory event buffer only: terminal output and
+      // normalized agent events deliberately are not persisted. A live row
+      // still needs the same actionable signal as the open transcript.
+      rateLimit:
+        session.transport === 'structured'
+          ? session.buffer.findByKind('rate_limit').at(-1) ?? null
+          : null,
       cols: session.cols,
       rows: session.rows,
       pid: session.pid,
@@ -1460,6 +1467,7 @@ export class SessionManager {
       // History rows are dead by definition; nothing to be busy about.
       busy: false,
       busySince: null,
+      rateLimit: null,
       cols: row.cols,
       rows: row.rows,
       pid: row.pid,

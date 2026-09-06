@@ -20,6 +20,7 @@ function chat(title: string): ChatSummary {
     adoptTargetId: null,
     cronJobId: null,
     webhookId: null,
+    rateLimit: null,
   };
 }
 

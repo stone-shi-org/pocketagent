@@ -262,6 +262,7 @@ export class ProjectService {
         adoptTargetId: null,
         cronJobId: cronByConversation.get(conversation.id) ?? null,
         webhookId: webhookByConversation.get(conversation.id) ?? null,
+        rateLimit: null,
       });
     }
 
@@ -480,6 +481,7 @@ function chatFromSession(
     directoryBusy: false,
     busySince: session.busySince,
     adoptTargetId: session.adoptTargetId,
+    rateLimit: session.rateLimit,
   };
 }
 

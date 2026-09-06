@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { EffortLevel, ModelInfo, SessionTransport } from './agent-events.js';
+import { EffortLevel, ModelInfo, RateLimitEvent, SessionTransport } from './agent-events.js';
 import { CronJobSummary } from './cron.js';
 import { WebhookSummary } from './webhooks.js';
 
@@ -108,6 +108,8 @@ export const SessionInfo = z.object({
    * when two agents are running in different projects at once.
    */
   busySince: z.number().int().nullable(),
+  /** The most recent provider usage refusal observed by this live session. */
+  rateLimit: RateLimitEvent.nullable(),
 });
 export type SessionInfo = z.infer<typeof SessionInfo>;
 
@@ -292,6 +294,8 @@ export const ChatSummary = z.object({
    * fact about the conversation, never a count.
    */
   webhookId: z.string().nullable(),
+  /** Carried from the representative live session for an actionable row badge. */
+  rateLimit: RateLimitEvent.nullable(),
 });
 export type ChatSummary = z.infer<typeof ChatSummary>;
 

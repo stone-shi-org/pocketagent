@@ -37,8 +37,10 @@ import { LIMITS } from './limits.js';
  * v10 added the `rate_limit` agent event. Older bundles do not know that
  * discriminant and would otherwise silently discard the session overlay
  * signal while continuing on the same socket.
+ * v11 added the live session/list-row copy of that rate-limit signal. An
+ * older bundle would otherwise keep its old project-list shape after deploy.
  */
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 11;
 
 /**
  * WebSocket close codes the server uses for conditions the client must not

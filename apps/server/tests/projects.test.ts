@@ -50,6 +50,7 @@ function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
     adopted: false,
     adoptTargetId: null,
     skipPermissionsEnabled: false,
+    rateLimit: null,
     ...overrides,
   };
 }
@@ -229,6 +230,19 @@ describe('ProjectService', () => {
       conversationId: 'conv-old',
       status: null,
     });
+  });
+
+  it('carries a live session limit refusal into its chat row', async () => {
+    const limit = {
+      kind: 'rate_limit' as const,
+      provider: 'claude' as const,
+      resetsAt: 1_788_673_800_000,
+      limitType: 'five_hour',
+      resetsAtLabel: null,
+    };
+    const [project] = await service.list([makeSession({ cwd: ws.project, rateLimit: limit })]);
+
+    expect(project?.chats[0]?.rateLimit).toEqual(limit);
   });
 
   it('shows a resumed conversation once, as the live session', async () => {

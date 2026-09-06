@@ -1768,6 +1768,16 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   flex: 0 0 auto; animation: pulse 1.6s ease-in-out infinite;
 }
 
+/* A list-row equivalent of the open-chat limit overlay. It is deliberately
+   inline: compact project rows have no stable corner where an overlay would
+   remain readable beside the title and running dot. */
+.chat-rate-limit-badge {
+  display: inline-flex;
+  margin-right: 5px;
+  color: #a95f00;
+  vertical-align: -1px;
+}
+
 .confirm-body { font-size: 14px; line-height: 1.5; margin: 0 0 12px; }
 .confirm-body.dim { color: var(--text-dim); font-size: 13px; }
 .confirm-list { font-size: 13px; line-height: 1.55; color: var(--text-dim); padding-left: 20px; margin: 0 0 8px; }

@@ -29,6 +29,16 @@ const GIT_STATUS_LABEL: Record<'dirty' | 'unpushed', string> = {
   unpushed: 'Commits not pushed',
 };
 
+function rateLimitLabel(chat: ChatSummary): string | null {
+  const limit = chat.rateLimit;
+  if (!limit) return null;
+  if (limit.resetsAt !== null) {
+    return `Usage limit reached. Resets ${new Date(limit.resetsAt).toLocaleString()}.`;
+  }
+  if (limit.resetsAtLabel) return `Usage limit reached. Resets ${limit.resetsAtLabel}.`;
+  return 'Usage limit reached. Reset time unavailable.';
+}
+
 /**
  * A deep link into code-server for a project's folder, or null if no
  * code-server base URL is configured for this host (`HostInfo.codeServerBaseUrl`)
@@ -879,6 +889,16 @@ function ProjectSection({
                           className="chat-cron-badge"
                           aria-label="Started by a webhook"
                         />
+                      )}
+                      {rateLimitLabel(chat) && (
+                        <span
+                          className="chat-rate-limit-badge"
+                          role="img"
+                          aria-label={rateLimitLabel(chat) ?? undefined}
+                          title={rateLimitLabel(chat) ?? undefined}
+                        >
+                          <Icon name="clock" size={13} />
+                        </span>
                       )}
                       {chat.title}
                     </span>
