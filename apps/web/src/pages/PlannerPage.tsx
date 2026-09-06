@@ -51,6 +51,11 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   const [newAgentName, setNewAgentName] = useState('');
   const [discovering, setDiscovering] = useState(false);
   const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
+  /** Model ids the endpoint reported, cached for type-ahead only — see
+      `discoverModels`. Deliberately not persisted: it is a suggestion list,
+      and a stale one is worse than one click to refresh it. */
+  const [discoveredIds, setDiscoveredIds] = useState<string[]>([]);
+  const [confirmingDeleteAllModels, setConfirmingDeleteAllModels] = useState(false);
   const [testingAll, setTestingAll] = useState(false);
   const [testResults, setTestResults] = useState<Record<string, TestPlannerModelResponse | 'testing'>>({});
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
@@ -131,28 +136,26 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
     void withBusy(() => api.deletePlannerModel(id));
   };
 
-  /** Queries the configured endpoint's own `/models` and adds a row (label =
-      id) for every one not already in the catalog — never touches or removes
-      an existing row, so a model renamed locally never gets clobbered by
-      re-running this. */
+  /**
+   * Queries the configured endpoint's own `/models` and *caches* the ids for
+   * type-ahead — it deliberately adds nothing to the catalog (PA-6 round 7:
+   * "Query model will only 'cache' the model, and don't add. This is to
+   * provide user type ahead suggestion"). A provider can list hundreds of
+   * models; adding them all made the catalog and every chat's model picker
+   * unusable. Adding stays an explicit click on a suggestion, or the
+   * id + label form below.
+   */
   const discoverModels = (): void => {
     setDiscovering(true);
     setDiscoverMessage(null);
     void (async () => {
       try {
         const { modelIds } = await api.discoverPlannerModels();
-        const existingIds = new Set((models ?? []).map((m) => m.modelId));
-        const toAdd = modelIds.filter((id) => !existingIds.has(id));
-        for (const modelId of toAdd) {
-          await api.createPlannerModel({ modelId, label: modelId });
-        }
-        await load();
+        setDiscoveredIds(modelIds);
         setDiscoverMessage(
-          toAdd.length > 0
-            ? `Added ${toAdd.length} new model${toAdd.length === 1 ? '' : 's'} (${modelIds.length} found, ${
-                modelIds.length - toAdd.length
-              } already configured).`
-            : `No new models — all ${modelIds.length} found ${modelIds.length === 1 ? 'is' : 'are'} already configured.`,
+          modelIds.length > 0
+            ? `${modelIds.length} model${modelIds.length === 1 ? '' : 's'} available — start typing an id below to pick one.`
+            : 'The endpoint listed no models.',
         );
       } catch (err) {
         onApiError(err);
@@ -161,6 +164,27 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
         setDiscovering(false);
       }
     })();
+  };
+
+  /**
+   * Adds one suggestion straight from the type-ahead list, labelled with its
+   * own id — the label field is for a nickname, and requiring one before a
+   * one-click add would defeat the point of the list.
+   *
+   * Deliberately leaves the typed filter alone: the id just added drops out
+   * of `modelSuggestions` by itself (it is now configured), so "type gemin,
+   * click three of them" works without retyping between each.
+   */
+  const addDiscoveredModel = (modelId: string): void => {
+    void withBusy(() => api.createPlannerModel({ modelId, label: modelId }));
+  };
+
+  const confirmDeleteAllModels = (): void => {
+    setConfirmingDeleteAllModels(false);
+    void withBusy(async () => {
+      await api.deleteAllPlannerModels();
+      setTestResults({});
+    });
   };
 
   /** Shared by the per-row "Test" button and "Test all" — a promise so
@@ -251,6 +275,21 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   const removeApproval = (id: string): void => {
     void withBusy(() => api.deletePlannerToolApproval(id));
   };
+
+  /**
+   * Type-ahead matches for whatever is typed in the model-id field: cached
+   * ids that contain it, minus ones already in the catalog, capped so a
+   * provider listing hundreds of models can't turn this into an endless
+   * scroll. Empty input shows nothing — the list is a filter, not a browser.
+   */
+  const configuredModelIds = new Set((models ?? []).map((m) => m.modelId));
+  const typedModelId = newModelId.trim().toLowerCase();
+  const modelSuggestions =
+    typedModelId.length === 0
+      ? []
+      : discoveredIds
+          .filter((id) => !configuredModelIds.has(id) && id.toLowerCase().includes(typedModelId))
+          .slice(0, 12);
 
   const workspaceName = (id: string | null): string =>
     (id && workspaces?.find((w) => w.id === id)?.name) || (id ? '(deleted workspace)' : '');
@@ -353,12 +392,21 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
             >
               {testingAll ? 'Testing…' : 'Test all'}
             </button>
+            <button
+              type="button"
+              className="planner-btn danger"
+              disabled={busy || !models || models.length === 0}
+              onClick={() => setConfirmingDeleteAllModels(true)}
+            >
+              Delete all
+            </button>
           </div>
         </div>
         {discoverMessage && <p className="planner-row-meta">{discoverMessage}</p>}
         {models?.length === 0 && (
           <p className="planner-row-meta">
-            No models configured yet — add one below, or query the endpoint above.
+            No models configured yet — query the endpoint above, then pick from the suggestions as
+            you type an id below.
           </p>
         )}
         {models?.map((m) => {
@@ -414,6 +462,28 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
             <Icon name="plus" size={14} /> Add
           </button>
         </div>
+        {modelSuggestions.length > 0 && (
+          <div className="planner-suggestions" role="listbox" aria-label="Matching models">
+            {modelSuggestions.map((modelId) => (
+              <button
+                key={modelId}
+                type="button"
+                role="option"
+                aria-selected={false}
+                className="planner-suggestion"
+                disabled={busy}
+                onClick={() => addDiscoveredModel(modelId)}
+              >
+                <Icon name="plus" size={13} /> {modelId}
+              </button>
+            ))}
+          </div>
+        )}
+        {newModelId.trim().length > 0 && discoveredIds.length === 0 && (
+          <p className="planner-row-meta" style={{ marginTop: 6 }}>
+            Query the endpoint above to get suggestions, or type a full id and a label and press Add.
+          </p>
+        )}
       </div>
 
       <div className="planner-section">
@@ -595,6 +665,17 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
           onClose={() => setShowDirectoryPicker(false)}
           onPick={pickAgentDirectory}
           onApiError={onApiError}
+        />
+      )}
+
+      {confirmingDeleteAllModels && (
+        <ConfirmDialog
+          title={`Delete all ${models?.length ?? 0} models?`}
+          body="This only empties the catalog you pick from. Chats and agents keep whatever model they already had — the id is just a string the endpoint either accepts or doesn't."
+          confirmLabel={busy ? 'Deleting…' : 'Delete all'}
+          busy={busy}
+          onConfirm={confirmDeleteAllModels}
+          onCancel={() => setConfirmingDeleteAllModels(false)}
         />
       )}
 

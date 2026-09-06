@@ -32,6 +32,7 @@ import { PlannerChatError } from '../planner/chats.js';
 import { PlannerLlmError } from '../planner/llm-client.js';
 import { PLANNER_TOOLS } from '../planner/tools.js';
 import {
+  deleteAllPlannerModels,
   deletePlannerModel,
   deletePlannerToolApproval,
   insertPlannerModel,
@@ -245,6 +246,17 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     };
     insertPlannerModel(db, row);
     return reply.code(201).send(row);
+  });
+
+  /**
+   * Empty the catalog (PA-6 round 7's "delete all"). A distinct path from
+   * `DELETE /:id` below rather than a magic `:id` value, so there is no way
+   * for a stray/mistyped id to wipe every row.
+   */
+  app.delete('/api/planner/models', async (_request, reply) => {
+    const removed = deleteAllPlannerModels(app.pocket.db);
+    app.log.info({ removed }, 'planner model catalog emptied');
+    return reply.code(204).send();
   });
 
   app.delete('/api/planner/models/:id', async (request, reply) => {

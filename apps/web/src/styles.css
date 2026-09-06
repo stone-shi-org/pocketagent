@@ -5269,6 +5269,44 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   flex: none;
 }
 
+/* Type-ahead matches under the model-id field. A plain wrapped row of
+   chips rather than an absolutely-positioned combobox popover: this sits
+   inside a scrolling settings page on a phone, where an overlay anchored to
+   an input is exactly what ends up clipped or mispositioned once the
+   keyboard opens. */
+.planner-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.planner-suggestion {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 5px 9px;
+  font-size: 12.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.planner-suggestion:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.planner-suggestion:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .planner-test-ok {
   color: var(--ok);
 }

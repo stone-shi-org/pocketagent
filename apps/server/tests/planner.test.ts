@@ -551,6 +551,41 @@ describe('planner routes over HTTP', () => {
     expect((await get('/api/planner/models')).json().models).toHaveLength(1);
   });
 
+  // ---- PA-6 round 7: emptying the model catalog -----------------------------
+
+  it('deletes every model at once', async () => {
+    await post('/api/planner/models', { modelId: 'gpt-4o', label: 'Capable' });
+    await post('/api/planner/models', { modelId: 'gpt-4o-mini', label: 'Fast' });
+    expect((await get('/api/planner/models')).json().models).toHaveLength(2);
+
+    const res = await del('/api/planner/models');
+    expect(res.statusCode).toBe(204);
+    expect((await get('/api/planner/models')).json().models).toEqual([]);
+  });
+
+  it('delete-all is a no-op on an already-empty catalog', async () => {
+    const res = await del('/api/planner/models');
+    expect(res.statusCode).toBe(204);
+    expect((await get('/api/planner/models')).json().models).toEqual([]);
+  });
+
+  it("delete-all leaves an agent's default model and a chat's own model alone", async () => {
+    // Neither column has an FK to `planner_models` (see the store's own doc
+    // comment) — emptying the catalog must not cascade into either.
+    const model = (await post('/api/planner/models', { modelId: 'gpt-4o', label: 'Capable' })).json();
+    const ws = (await post('/api/planner/workspaces', { name: 'Coder' })).json();
+    await patch(`/api/planner/workspaces/${ws.id}`, { defaultModelId: model.modelId });
+    const chat = (await post('/api/planner/chats', { workspaceId: ws.id })).json();
+    expect(chat.lastModelId).toBe('gpt-4o');
+
+    expect((await del('/api/planner/models')).statusCode).toBe(204);
+
+    const agents = (await get('/api/planner/workspaces')).json().workspaces;
+    expect(agents.find((w: { id: string }) => w.id === ws.id).defaultModelId).toBe('gpt-4o');
+    const chats = (await get('/api/planner/chats')).json().chats;
+    expect(chats.find((c: { id: string }) => c.id === chat.id).lastModelId).toBe('gpt-4o');
+  });
+
   it('settings default to unconfigured, off, and no remembered model', async () => {
     const res = await get('/api/planner/settings');
     expect(res.statusCode).toBe(200);

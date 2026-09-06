@@ -111,10 +111,13 @@ export type CreatePlannerModelRequest = z.infer<typeof CreatePlannerModelRequest
  * `GET /api/planner/models/discover` queries the configured endpoint's own
  * `/models` list (the standard OpenAI-compatible discovery endpoint) and
  * returns the raw model ids — nothing is added to the catalog server-side.
- * The editor diffs this against the already-configured list and offers to
- * create rows for whatever is new, the same "explicit action grants it"
- * pattern `POST /api/workspaces/add` uses for project folders: discovering a
- * model must never silently change what a chat's picker offers.
+ * The editor caches them client-side purely to drive type-ahead in its
+ * add-a-model field, and only an explicit click on a suggestion creates a
+ * row (PA-6 round 7). Same "explicit action grants it" pattern
+ * `POST /api/workspaces/add` uses for project folders: discovering a model
+ * must never silently change what a chat's picker offers — and a provider
+ * that lists hundreds of models would otherwise bury the handful anyone
+ * actually uses.
  */
 export const DiscoverPlannerModelsResponse = z.object({
   modelIds: z.array(z.string()),

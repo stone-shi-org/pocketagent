@@ -529,6 +529,8 @@ export const api = {
   deletePlannerModel: (id: string) =>
     request<void>(`/api/planner/models/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
+  deleteAllPlannerModels: () => request<void>('/api/planner/models', { method: 'DELETE' }),
+
   discoverPlannerModels: () => request<DiscoverPlannerModelsResponse>('/api/planner/models/discover'),
 
   testPlannerModel: (id: string) =>

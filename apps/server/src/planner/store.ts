@@ -178,6 +178,19 @@ export function deletePlannerModel(db: Db, id: string): boolean {
   return db.prepare('DELETE FROM planner_models WHERE id = ?').run(id).changes > 0;
 }
 
+/**
+ * Empties the catalog in one statement — PA-6 round 7's "delete all" button.
+ * Safe to call on an already-empty table (returns 0). Nothing else needs
+ * cleaning up alongside it: `planner_chats.last_model_id` and
+ * `planner_workspaces.default_model_id` deliberately have no FK to this
+ * table, so a chat or an agent still naming a model that is no longer
+ * catalogued keeps working — the id is just a string the provider either
+ * accepts or doesn't (see both columns' own doc comments).
+ */
+export function deleteAllPlannerModels(db: Db): number {
+  return db.prepare('DELETE FROM planner_models').run().changes;
+}
+
 /** Appends new models after whatever is already configured. */
 export function nextPlannerModelSortOrder(db: Db): number {
   const row = db.prepare('SELECT MAX(sort_order) as maxOrder FROM planner_models').get() as {
