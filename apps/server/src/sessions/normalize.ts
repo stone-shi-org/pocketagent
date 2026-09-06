@@ -780,13 +780,7 @@ export function normalizeOpencodeEvent(message: unknown): AgentEvent[] {
         },
       ];
     case 'session.error':
-      return [
-        {
-          kind: 'notice',
-          level: 'error',
-          text: extractOpencodeErrorMessage(properties.error),
-        },
-      ];
+      return normalizeOpencodeSessionError(properties.error);
     case 'permission.updated':
       return [normalizeOpencodePermission(properties)];
     case 'permission.replied': {
@@ -798,6 +792,38 @@ export function normalizeOpencodeEvent(message: unknown): AgentEvent[] {
     default:
       return [];
   }
+}
+
+function normalizeOpencodeSessionError(error: unknown): AgentEvent[] {
+  const text = extractOpencodeErrorMessage(error);
+  const notice: AgentEvent = { kind: 'notice', level: 'error', text };
+  // OpenCode passes provider errors through its `session.error` bus event.
+  // Providers do not share a stable response shape here, so only recognize
+  // explicit HTTP 429/status names and familiar quota wording; a generic
+  // provider failure must remain a notice, never a false exhausted account.
+  if (!isOpencodeRateLimit(error, text)) return [notice];
+  return [
+    { kind: 'rate_limit', provider: 'opencode', resetsAt: null, limitType: null, resetsAtLabel: null },
+    notice,
+  ];
+}
+
+function isOpencodeRateLimit(error: unknown, message: string): boolean {
+  const seen = new Set<unknown>();
+  const has429 = (value: unknown): boolean => {
+    if (!isRecord(value) || seen.has(value)) return false;
+    seen.add(value);
+    for (const key of ['status', 'statusCode', 'status_code', 'code']) {
+      if (value[key] === 429 || value[key] === '429') return true;
+    }
+    return Object.values(value).some((child) => has429(child));
+  };
+  const name = isRecord(error) ? str(error.name) ?? '' : '';
+  return (
+    has429(error) ||
+    /rate.?limit|too.?many.?requests|quota|resource.?exhausted/i.test(name) ||
+    /\b429\b|rate.?limit|too many requests|quota|resource.?exhausted/i.test(message)
+  );
 }
 
 function normalizeOpencodePart(properties: Record<string, unknown>): AgentEvent[] {

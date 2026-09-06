@@ -39,8 +39,10 @@ import { LIMITS } from './limits.js';
  * signal while continuing on the same socket.
  * v11 added the live session/list-row copy of that rate-limit signal. An
  * older bundle would otherwise keep its old project-list shape after deploy.
+ * v12 added OpenCode as a rate-limit provider. Older bundles reject the new
+ * enum value, so they must reconnect rather than drop the overlay event.
  */
-export const PROTOCOL_VERSION = 11;
+export const PROTOCOL_VERSION = 12;
 
 /**
  * WebSocket close codes the server uses for conditions the client must not

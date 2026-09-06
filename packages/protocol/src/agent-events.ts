@@ -177,7 +177,7 @@ export const NoticeEvent = z.object({
  */
 export const RateLimitEvent = z.object({
   kind: z.literal('rate_limit'),
-  provider: z.enum(['claude', 'agy']),
+  provider: z.enum(['claude', 'agy', 'opencode']),
   /** Epoch milliseconds when known directly from the provider. */
   resetsAt: z.number().int().nullable(),
   /** Provider-specific window, such as Claude's `five_hour`, when supplied. */

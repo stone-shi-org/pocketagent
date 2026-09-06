@@ -1171,6 +1171,21 @@ describe('normalizeOpencodeEvent: session lifecycle', () => {
     expect(events).toEqual([{ kind: 'notice', level: 'error', text: 'boom' }]);
   });
 
+  it('maps an OpenCode provider 429 into a limit event while keeping its error notice', () => {
+    expect(
+      normalizeOpencodeEvent({
+        type: 'session.error',
+        properties: {
+          sessionID: 'ses_1',
+          error: { name: 'AI_APICallError', data: { statusCode: 429, message: 'Too many requests' } },
+        },
+      }),
+    ).toEqual([
+      { kind: 'rate_limit', provider: 'opencode', resetsAt: null, limitType: null, resetsAtLabel: null },
+      { kind: 'notice', level: 'error', text: 'Too many requests' },
+    ]);
+  });
+
   it('falls back to the error name when there is no message', () => {
     const events = normalizeOpencodeEvent({
       type: 'session.error',
