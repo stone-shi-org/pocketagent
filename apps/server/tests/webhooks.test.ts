@@ -261,6 +261,23 @@ describe('webhook management', () => {
     expect(rows[0]?.webhook_id).toBeNull();
     expect(rows[0]?.webhook_name).toBe('Triage new bugs');
   });
+
+  it('patches webhook name and other fields without error', async () => {
+    const hook = await createWebhook();
+    const res = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/webhooks/${hook.id}`,
+      headers: authHeaders(ctx.cookie),
+      payload: { name: 'Renamed triage webhook' },
+    });
+    expect(res.statusCode).toBe(200);
+    const patched = res.json();
+    expect(patched.name).toBe('Renamed triage webhook');
+    expect(patched.slug).toBe(SLUG);
+
+    const fetched = (await get(`/api/webhooks/${hook.id}`)).json();
+    expect(fetched.name).toBe('Renamed triage webhook');
+  });
 });
 
 describe('webhook delivery: signature verification', () => {
