@@ -32,9 +32,9 @@ const OPTS: ClaudeProviderOptions = {
   bin: 'claude',
   baseUrl: 'https://api.deepseek.com/anthropic',
   apiKey: 'sk-test-key',
-  model: 'deepseek-chat',
+  model: 'deepseek-v4-pro',
   smallModel: null,
-  staticModels: parseModelList('deepseek-chat,deepseek-reasoner'),
+  staticModels: parseModelList('deepseek-v4-pro,deepseek-v4-flash'),
 };
 
 const START = { cwd: '/tmp', cols: 80, rows: 24 };
@@ -44,7 +44,7 @@ describe('claude provider variants', () => {
     const env = createClaudeProviderAdapter(OPTS).buildCommand(START).env ?? {};
     expect(env.ANTHROPIC_BASE_URL).toBe('https://api.deepseek.com/anthropic');
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe('sk-test-key');
-    expect(env.ANTHROPIC_MODEL).toBe('deepseek-chat');
+    expect(env.ANTHROPIC_MODEL).toBe('deepseek-v4-pro');
   });
 
   it('pins the small-model slots, falling back to the main model', () => {
@@ -52,13 +52,13 @@ describe('claude provider variants', () => {
     // unset it sends an Anthropic id the gateway does not know, and the failure
     // lands mid-session rather than at spawn.
     const env = createClaudeProviderAdapter(OPTS).buildCommand(START).env ?? {};
-    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('deepseek-chat');
-    expect(env.ANTHROPIC_SMALL_FAST_MODEL).toBe('deepseek-chat');
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('deepseek-v4-pro');
+    expect(env.ANTHROPIC_SMALL_FAST_MODEL).toBe('deepseek-v4-pro');
 
     const explicit = createClaudeProviderAdapter({ ...OPTS, smallModel: 'deepseek-lite' })
       .buildCommand(START).env ?? {};
     expect(explicit.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('deepseek-lite');
-    expect(explicit.ANTHROPIC_MODEL).toBe('deepseek-chat');
+    expect(explicit.ANTHROPIC_MODEL).toBe('deepseek-v4-pro');
   });
 
   it('neutralizes an operator-exported Anthropic key', () => {
@@ -113,8 +113,8 @@ describe('claude provider variants', () => {
 
   it('declares its own model catalog instead of reporting Anthropic ids', () => {
     expect(createClaudeProviderAdapter(OPTS).staticModels?.map((m) => m.value)).toEqual([
-      'deepseek-chat',
-      'deepseek-reasoner',
+      'deepseek-v4-pro',
+      'deepseek-v4-flash',
     ]);
     // Effort is a Claude-model concept the SDK maps onto Anthropic ids; showing
     // the control for a third-party model would be a switch that does nothing.
@@ -149,9 +149,9 @@ describe('claude provider variants', () => {
           providerLabel: 'DeepSeek',
           baseUrl: 'https://api.deepseek.com/anthropic',
           apiKey: 'sk-test-key',
-          model: 'deepseek-chat',
+          model: 'deepseek-v4-pro',
           smallModel: null,
-          models: 'deepseek-chat',
+          models: 'deepseek-v4-pro',
         },
       ],
     });
@@ -215,9 +215,9 @@ describe('claude provider variants', () => {
           providerLabel: 'DeepSeek',
           baseUrl: 'https://api.deepseek.com/anthropic',
           apiKey: 'sk-test-key',
-          model: 'deepseek-chat',
+          model: 'deepseek-v4-pro',
           smallModel: null,
-          models: 'deepseek-chat',
+          models: 'deepseek-v4-pro',
         },
       ],
     });
@@ -264,6 +264,46 @@ describe('the configured variant ids and the protocol list cannot drift', () => 
           `${provider.id} is missing from CLAUDE_TRANSCRIPT_AGENT_IDS`,
         ).toBe(true);
       }
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('ships DeepSeek defaults that are real catalog ids, not retired aliases', () => {
+    // Regression guard for a real mistake: the first cut of this feature took
+    // `deepseek-chat`/`deepseek-reasoner` from a ticket description instead of
+    // from `GET https://api.deepseek.com/models`, which actually advertises
+    // `deepseek-v4-pro` / `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`.
+    //
+    // The aliases do still resolve, so nothing failed — they just BOTH serve
+    // `deepseek-v4-flash`, which put two entries in the picker that were the
+    // same model, one of them named as though it reasons. A provider that
+    // silently accepts a stale id is worse than one that rejects it, which is
+    // why this is asserted rather than left to the next person to notice.
+    const ws = makeWorkspace();
+    try {
+      const config = loadConfig({
+        NODE_ENV: 'test',
+        LOG_LEVEL: 'silent',
+        POCKETAGENT_AUTH_TOKEN: TEST_TOKEN,
+        POCKETAGENT_WORKSPACE_ROOTS: ws.root,
+      } as NodeJS.ProcessEnv);
+      const deepseek = config.claudeProviders.find((p) => p.id === 'claude-deepseek');
+
+      const retired = ['deepseek-chat', 'deepseek-reasoner'];
+      const listed = (deepseek?.models ?? '').split(',').map((m) => m.trim());
+      expect(listed).not.toEqual(expect.arrayContaining(retired));
+      expect(retired).not.toContain(deepseek?.model);
+      expect(retired).not.toContain(deepseek?.smallModel);
+
+      // Every advertised entry must be distinct, or the picker shows one model
+      // under two names — the actual symptom the aliases produced.
+      expect(new Set(listed).size).toBe(listed.length);
+
+      // And the small slot must not silently inherit the expensive main model:
+      // it drives conversation titles and compaction, which run constantly.
+      expect(deepseek?.smallModel).not.toBeNull();
+      expect(deepseek?.smallModel).not.toBe(deepseek?.model);
     } finally {
       ws.cleanup();
     }

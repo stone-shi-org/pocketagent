@@ -84,11 +84,14 @@ const RawEnv = z.object({
    * published base URL, for the reason `POCKETAGENT_CODE_SERVER_URL` states —
    * a wrong guess points at nothing.
    *
-   * `_MODELS` is a comma-separated catalog for the picker. It must come from
-   * the gateway's own `/models`: a gateway's ids are installation-specific
-   * (the omniroute instance this was built against rejects DeepSeek's own
-   * `deepseek-chat` as ambiguous and wants `deepseek-v4-flash`), so a
-   * hardcoded table would offer models the endpoint refuses.
+   * `_MODELS` is a comma-separated catalog for the picker, and it must come
+   * from the provider's own `/models` rather than from documentation or memory.
+   * Both live endpoints punish guessing, in opposite ways: the omniroute
+   * instance this was built against *rejects* an unknown id outright (a bare
+   * `deepseek-chat` comes back "ambiguous"), while DeepSeek *silently accepts*
+   * its retired `deepseek-chat`/`deepseek-reasoner` aliases and serves
+   * `deepseek-v4-flash` for both — so a stale list there does not fail, it just
+   * quietly offers one model twice under two names.
    */
   POCKETAGENT_DEEPSEEK_API_KEY: z.string().optional(),
   POCKETAGENT_DEEPSEEK_BASE_URL: z.string().optional(),
@@ -356,9 +359,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         // Claude Code, so it is the one base URL worth defaulting.
         baseUrl: e.POCKETAGENT_DEEPSEEK_BASE_URL?.trim() || 'https://api.deepseek.com/anthropic',
         apiKey: e.POCKETAGENT_DEEPSEEK_API_KEY?.trim() || null,
-        model: e.POCKETAGENT_DEEPSEEK_MODEL?.trim() || 'deepseek-chat',
-        smallModel: e.POCKETAGENT_DEEPSEEK_SMALL_MODEL?.trim() || null,
-        models: e.POCKETAGENT_DEEPSEEK_MODELS?.trim() || 'deepseek-chat,deepseek-reasoner',
+        // Ids taken from DeepSeek's own `GET /models`, which advertises
+        // `deepseek-v4-pro`, `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp`.
+        // The older `deepseek-chat`/`deepseek-reasoner` aliases still resolve, but
+        // both of them serve `deepseek-v4-flash` — so offering the pair in a picker
+        // shows two entries that are the same model, one of them named as though it
+        // reasons. Verified against the live API, 2026-09-06.
+        model: e.POCKETAGENT_DEEPSEEK_MODEL?.trim() || 'deepseek-v4-pro',
+        // Explicit rather than falling back to the main model: the small slot drives
+        // conversation titles and compaction summaries, which run often and do not
+        // need the expensive model. Leaving it null would put compaction on `pro`.
+        smallModel: e.POCKETAGENT_DEEPSEEK_SMALL_MODEL?.trim() || 'deepseek-v4-flash',
+        models: e.POCKETAGENT_DEEPSEEK_MODELS?.trim() || 'deepseek-v4-pro,deepseek-v4-flash',
       },
       {
         id: 'claude-omniroute',

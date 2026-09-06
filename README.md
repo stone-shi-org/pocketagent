@@ -150,9 +150,9 @@ running keeps running.
 | `POCKETAGENT_CLAUDE_BIN` | `claude` | Claude Code executable, resolved on `PATH`. |
 | `POCKETAGENT_DEEPSEEK_API_KEY` | — | Enables "Claude Code (DeepSeek)". Unset hides the entry. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
 | `POCKETAGENT_DEEPSEEK_BASE_URL` | `https://api.deepseek.com/anthropic` | Anthropic-compatible endpoint. |
-| `POCKETAGENT_DEEPSEEK_MODEL` | `deepseek-chat` | Model sent as `ANTHROPIC_MODEL`. |
-| `POCKETAGENT_DEEPSEEK_SMALL_MODEL` | main model | Model for titles and compaction summaries. |
-| `POCKETAGENT_DEEPSEEK_MODELS` | `deepseek-chat,deepseek-reasoner` | Comma-separated catalog for the model picker. |
+| `POCKETAGENT_DEEPSEEK_MODEL` | `deepseek-v4-pro` | Model sent as `ANTHROPIC_MODEL`. |
+| `POCKETAGENT_DEEPSEEK_SMALL_MODEL` | `deepseek-v4-flash` | Model for titles and compaction summaries. Defaulted to the cheap model explicitly, since it runs often. |
+| `POCKETAGENT_DEEPSEEK_MODELS` | `deepseek-v4-pro,deepseek-v4-flash` | Comma-separated catalog for the model picker. Take ids from the provider's own `/models`: DeepSeek's retired `deepseek-chat`/`deepseek-reasoner` aliases still resolve but both serve `deepseek-v4-flash`. |
 | `POCKETAGENT_OMNIROUTE_API_KEY` | — | Enables "Claude Code (Omniroute)". |
 | `POCKETAGENT_OMNIROUTE_BASE_URL` | — | Gateway base URL. No default: a gateway address is per-installation. |
 | `POCKETAGENT_OMNIROUTE_MODEL` | — | Model sent as `ANTHROPIC_MODEL`. |
