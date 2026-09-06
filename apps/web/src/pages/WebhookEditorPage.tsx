@@ -716,7 +716,10 @@ export function WebhookEditorPage({
           // On create an empty field is left absent so the agent's cached
           // default applies — distinct from the explicit `null` a PATCH sends.
           ...(model.trim() !== '' ? { model: model.trim() } : {}),
-          ...(effort.trim() !== '' ? { effort: effort.trim() } : {}),
+          // Same reasoning as `worktreeMode` above: a Pocket Agent run has no
+          // effort level, so a value left over from a coding agent the user
+          // switched away from would be saved and shown back as if it applied.
+          ...(!isPocketAgent && effort.trim() !== '' ? { effort: effort.trim() } : {}),
         });
         // Stay on the page: the response carries the secret, and pasting it into
         // Jira is the next thing the user has to do. Navigating away — which is
@@ -745,7 +748,7 @@ export function WebhookEditorPage({
           // Explicit `null`: an emptied field means "clear it", and an omitted
           // key would silently keep the old value.
           model: model.trim() === '' ? null : model.trim(),
-          effort: effort.trim() === '' ? null : effort.trim(),
+          effort: isPocketAgent || effort.trim() === '' ? null : effort.trim(),
         });
         setDeliveryPath(updated.deliveryPath);
       }
