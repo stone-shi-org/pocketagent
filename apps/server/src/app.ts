@@ -322,6 +322,8 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     workspaces,
     worktrees,
     agents,
+    plannerWorkspaces,
+    plannerChats,
     logger: app.log,
   });
 

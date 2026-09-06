@@ -69,8 +69,19 @@ export const cronRoutes: FastifyPluginAsync = async (app) => {
       return badRequest(reply, `Unknown time zone "${timeZone}".`);
     }
 
-    const cwd = await resolveWorkspaceCwdOrReply(workspaces, body.cwd, reply);
-    if (cwd === null) return reply;
+    let cwd: string;
+    if (body.agent === 'pocketagent') {
+      const plannerWs = app.pocket.plannerWorkspaces.list().find((w) => w.path === body.cwd || w.id === body.cwd)
+        ?? app.pocket.plannerWorkspaces.getDefault();
+      if (!plannerWs) {
+        return badRequest(reply, 'No Pocket Agent workspace found.');
+      }
+      cwd = plannerWs.path;
+    } else {
+      const resolved = await resolveWorkspaceCwdOrReply(workspaces, body.cwd, reply);
+      if (resolved === null) return reply;
+      cwd = resolved;
+    }
 
     const agentCheck = checkAgent(body.agent);
     if (agentCheck !== null) return badRequest(reply, agentCheck);
@@ -128,11 +139,21 @@ export const cronRoutes: FastifyPluginAsync = async (app) => {
       if (agentCheck !== null) return badRequest(reply, agentCheck);
     }
 
+    const targetAgent = body.agent ?? cron.get(request.params.id)?.agent;
     let cwd: string | undefined;
     if (body.cwd !== undefined) {
-      const resolved = await resolveWorkspaceCwdOrReply(workspaces, body.cwd, reply);
-      if (resolved === null) return reply;
-      cwd = resolved;
+      if (targetAgent === 'pocketagent') {
+        const plannerWs = app.pocket.plannerWorkspaces.list().find((w) => w.path === body.cwd || w.id === body.cwd)
+          ?? app.pocket.plannerWorkspaces.getDefault();
+        if (!plannerWs) {
+          return badRequest(reply, 'No Pocket Agent workspace found.');
+        }
+        cwd = plannerWs.path;
+      } else {
+        const resolved = await resolveWorkspaceCwdOrReply(workspaces, body.cwd, reply);
+        if (resolved === null) return reply;
+        cwd = resolved;
+      }
     }
 
     const patch: Partial<CronJobSpec> = {
@@ -231,6 +252,7 @@ export const cronRoutes: FastifyPluginAsync = async (app) => {
 
   /** A cron job is always a structured session. See `structuredAgentProblem`. */
   function checkAgent(id: string): string | null {
+    if (id === 'pocketagent') return null;
     return structuredAgentProblem(agents, id, 'scheduled');
   }
 };

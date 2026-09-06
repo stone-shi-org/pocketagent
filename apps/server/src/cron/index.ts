@@ -28,6 +28,8 @@ import type { SessionManager } from '../sessions/manager.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 import type { WorktreeService } from '../git/worktree.js';
 import type { AgentRegistry } from '../agents/registry.js';
+import type { PlannerWorkspaceRegistry } from '../planner/workspaces.js';
+import type { PlannerChatService } from '../planner/chats.js';
 import type { RunSink, RunSpec } from '../runs/executor.js';
 import { RunExecutor, mintBranchName } from '../runs/executor.js';
 
@@ -80,6 +82,8 @@ export interface CronServiceOptions {
   workspaces: WorkspaceRegistry;
   worktrees: WorktreeService;
   agents: AgentRegistry;
+  plannerWorkspaces?: PlannerWorkspaceRegistry;
+  plannerChats?: PlannerChatService;
   logger?: { info: (o: object, m?: string) => void; warn: (o: object, m?: string) => void };
   /** Injectable for tests, so schedule behaviour is checkable without waiting. */
   now?: () => number;
@@ -318,6 +322,9 @@ export class CronService {
     }
   }
 
+  /** Tracks in-flight pocketagent turns by run id. */
+  private readonly inFlightPlannerRuns = new Set<string>();
+
   /**
    * Close out runs whose session is gone.
    *
@@ -331,6 +338,18 @@ export class CronService {
    */
   private reconcileActiveRuns(): void {
     for (const run of readActiveCronRuns(this.db)) {
+      if (run.agent === 'pocketagent') {
+        if (this.inFlightPlannerRuns.has(run.id)) continue;
+        updateCronRun(this.db, run.id, {
+          status: 'failed',
+          error: run.error ?? 'The Pocket Agent turn ended unexpectedly.',
+          finished_at: this.now(),
+        });
+        if (run.job_id !== null) {
+          updateCronJob(this.db, run.job_id, { last_run_status: 'failed' });
+        }
+        continue;
+      }
       if (run.session_id === null) continue;
       if (this.executor.isAlive(run.session_id)) continue;
       updateCronRun(this.db, run.id, {
@@ -345,12 +364,15 @@ export class CronService {
   }
 
   private hasActiveRun(jobId: string): boolean {
-    return readActiveCronRuns(this.db, jobId).some(
+    return readActiveCronRuns(this.db, jobId).some((run) => {
+      if (run.agent === 'pocketagent') {
+        return this.inFlightPlannerRuns.has(run.id);
+      }
       // A null session id means still mid-composite, which counts as active:
       // nothing may escape `startRun` with the row open, so this is a run that
       // has not finished resolving a directory or creating a session yet.
-      (run) => run.session_id === null || this.executor.isAlive(run.session_id),
-    );
+      return run.session_id === null || this.executor.isAlive(run.session_id);
+    });
   }
 
   private async fire(job: CronJobRow, scheduledFor: number): Promise<void> {
@@ -374,7 +396,7 @@ export class CronService {
   // -------------------------------------------------------------------------
 
   /**
-   * Record a run, then hand it to the shared executor.
+   * Record a run, then hand it to the shared executor or drive Pocket Agent directly.
    *
    * The run row is inserted *first*, so nothing can happen unrecorded, and the
    * sink below is the only thing that writes to it afterwards. Every failure
@@ -407,6 +429,10 @@ export class CronService {
       error: null,
     });
 
+    if (job.agent === 'pocketagent') {
+      return this.startPlannerRun(runId, job, startedAt);
+    }
+
     const sink: RunSink = {
       onCwd: (cwd) => {
         updateCronRun(this.db, runId, { cwd });
@@ -437,6 +463,106 @@ export class CronService {
     };
 
     await this.executor.start(runId, this.specFor(job, scheduledFor), sink);
+    return readCronRun(this.db, runId) as CronRunRow;
+  }
+
+  private async startPlannerRun(
+    runId: string,
+    job: CronJobRow,
+    startedAt: number,
+  ): Promise<CronRunRow> {
+    const plannerChats = this.opts.plannerChats;
+    const plannerWorkspaces = this.opts.plannerWorkspaces;
+
+    if (!plannerChats || !plannerWorkspaces) {
+      const error = 'Pocket Agent service is not configured.';
+      updateCronRun(this.db, runId, { status: 'failed', error, finished_at: this.now() });
+      updateCronJob(this.db, job.id, {
+        last_run_at: startedAt,
+        last_run_status: 'failed',
+        last_error: error,
+      });
+      return readCronRun(this.db, runId) as CronRunRow;
+    }
+
+    const ws = plannerWorkspaces.list().find((w) => w.path === job.cwd || w.id === job.cwd)
+      ?? plannerWorkspaces.getDefault();
+
+    if (!ws) {
+      const error = 'No Pocket Agent workspace available.';
+      updateCronRun(this.db, runId, { status: 'failed', error, finished_at: this.now() });
+      updateCronJob(this.db, job.id, {
+        last_run_at: startedAt,
+        last_run_status: 'failed',
+        last_error: error,
+      });
+      return readCronRun(this.db, runId) as CronRunRow;
+    }
+
+    let chat: ReturnType<PlannerChatService['create']>;
+    try {
+      chat = plannerChats.create({
+        workspaceId: ws.id,
+        title: job.name,
+        modelId: job.model ?? undefined,
+      });
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      updateCronRun(this.db, runId, { status: 'failed', error, finished_at: this.now() });
+      updateCronJob(this.db, job.id, {
+        last_run_at: startedAt,
+        last_run_status: 'failed',
+        last_error: error,
+      });
+      return readCronRun(this.db, runId) as CronRunRow;
+    }
+
+    // Record session and agent session ids matching chat.id
+    updateCronRun(this.db, runId, {
+      status: 'running',
+      session_id: `planner_${chat.id}`,
+      agent_session_id: chat.id,
+      cwd: ws.path,
+    });
+    updateCronJob(this.db, job.id, {
+      last_run_at: startedAt,
+      last_run_status: 'running',
+      last_error: null,
+    });
+
+    this.inFlightPlannerRuns.add(runId);
+
+    // Run the turn asynchronously
+    (async () => {
+      let turnFailed = false;
+      let turnError: string | null = null;
+      try {
+        const stream = plannerChats.sendMessage(chat.id, job.prompt, {
+          modelId: job.model ?? undefined,
+        });
+        for await (const event of stream) {
+          if (event.kind === 'turn_complete') {
+            if (event.isError) {
+              turnFailed = true;
+              turnError = 'The agent reported an error.';
+            }
+          }
+        }
+      } catch (err) {
+        turnFailed = true;
+        turnError = err instanceof Error ? err.message : String(err);
+      } finally {
+        this.inFlightPlannerRuns.delete(runId);
+        const status: CronRunStatus = turnFailed ? 'failed' : 'succeeded';
+        updateCronRun(this.db, runId, { status, error: turnError, finished_at: this.now() });
+        updateCronJob(this.db, job.id, {
+          last_run_at: startedAt,
+          last_run_status: status,
+          last_error: turnError,
+        });
+      }
+    })();
+
     return readCronRun(this.db, runId) as CronRunRow;
   }
 
@@ -673,6 +799,17 @@ export class CronService {
   toJob(row: CronJobRow): CronJob {
     const adapter = this.opts.agents.get(row.agent);
     const preset = parsePreset(row.preset_json);
+    let agentDisplayName = adapter?.displayName ?? row.agent;
+    let workspaceLabel = this.opts.workspaces.labelFor(row.cwd);
+    if (row.agent === 'pocketagent') {
+      agentDisplayName = 'Pocket Agent';
+      const plannerWs = this.opts.plannerWorkspaces?.list().find((w) => w.path === row.cwd || w.id === row.cwd);
+      if (plannerWs) {
+        workspaceLabel = plannerWs.name;
+      } else if (workspaceLabel === row.cwd) {
+        workspaceLabel = 'Pocket Agent';
+      }
+    }
     return {
       id: row.id,
       name: row.name,
@@ -684,9 +821,9 @@ export class CronService {
           ? { kind: 'preset', preset }
           : { kind: 'expression' },
       cwd: row.cwd,
-      workspaceLabel: this.opts.workspaces.labelFor(row.cwd),
+      workspaceLabel,
       agent: row.agent,
-      agentDisplayName: adapter?.displayName ?? row.agent,
+      agentDisplayName,
       worktreeMode: row.worktree_mode as CronJob['worktreeMode'],
       model: row.model,
       ...(row.effort_set === 1 ? { effort: row.effort } : {}),

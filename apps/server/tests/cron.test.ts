@@ -216,6 +216,15 @@ describe('cron job routes', () => {
     expect(project.cronJobs).toHaveLength(1);
     expect(project.cronJobs[0].name).toBe('Nightly review');
   });
+
+  it('allows pocketagent as the agent and resolves to default planner workspace', async () => {
+    const res = await post(validJob({ agent: 'pocketagent', cwd: '' }));
+    expect(res.statusCode).toBe(201);
+    const job = res.json();
+    expect(job.agent).toBe('pocketagent');
+    expect(job.agentDisplayName).toBe('Pocket Agent');
+    expect(job.workspaceLabel).toBe('Pocket Agent');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -535,6 +544,72 @@ describe('cron worktree mode', () => {
     expect(branches[0]).toMatch(/^nightly-review-\d{8}-\d{4}-[0-9a-f]{6}$/);
     // The session ran in the worktree, not the project root.
     expect(cwds[0]).toContain('.worktrees/');
+    db.close();
+  });
+
+  it('runs Pocket Agent cron job creating a planner chat and updating run status', async () => {
+    const db = openDatabase(':memory:');
+    const clock = Date.parse('2026-08-28T12:00:00Z');
+    let sentMessage = '';
+    const plannerChats = {
+      create: () => ({ id: 'chat-456' }),
+      sendMessage: async function* (_chatId: string, content: string) {
+        sentMessage = content;
+        yield { kind: 'turn_complete', id: 'evt-1', isError: false, completedAt: clock };
+      },
+    };
+    const plannerWorkspaces = {
+      list: () => [{ id: 'pw-1', name: 'Pocket Agent', path: '/tmp/planner/default', isDefault: true }],
+      getDefault: () => ({ id: 'pw-1', name: 'Pocket Agent', path: '/tmp/planner/default', isDefault: true }),
+    };
+
+    const cron = new CronService({
+      db,
+      sessions: {} as unknown as SessionManager,
+      workspaces: {
+        labelFor: (p: string) => p,
+      } as unknown as WorkspaceRegistry,
+      worktrees: {} as unknown as WorktreeService,
+      agents: { get: () => undefined } as unknown as AgentRegistry,
+      plannerChats: plannerChats as unknown as any,
+      plannerWorkspaces: plannerWorkspaces as unknown as any,
+      now: () => clock,
+    });
+
+    insertCronJob(db, {
+      id: 'job-pocket',
+      name: 'Pocket Agent Routine',
+      enabled: 1,
+      cron_expr: '0 * * * *',
+      time_zone: 'UTC',
+      schedule_kind: 'expression',
+      preset_json: null,
+      cwd: '/tmp/planner/default',
+      agent: 'pocketagent',
+      worktree_mode: 'none',
+      model: null,
+      effort: null,
+      effort_set: 0,
+      skip_permissions: 1,
+      prompt: 'Check notes and draft summary.',
+      overlap_policy: 'skip',
+      created_at: clock,
+      updated_at: clock,
+      next_run_at: clock - 60_000,
+      last_run_at: null,
+      last_run_status: null,
+      last_error: null,
+    });
+
+    await cron.init();
+
+    expect(sentMessage).toBe('Check notes and draft summary.');
+    const runs = readCronRuns(db, { jobId: 'job-pocket', limit: 10 });
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.agent).toBe('pocketagent');
+    expect(runs[0]?.session_id).toBe('planner_chat-456');
+    expect(runs[0]?.agent_session_id).toBe('chat-456');
+    expect(runs[0]?.status).toBe('succeeded');
     db.close();
   });
 });

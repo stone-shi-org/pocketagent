@@ -207,7 +207,7 @@ const CronJobFields = z
     cronExpr: z.string().min(1).max(200),
     /** Omitted on create means the server's own zone, captured at that moment. */
     timeZone: z.string().min(1).max(64),
-    cwd: z.string().min(1).max(4096),
+    cwd: z.string().max(4096),
     agent: z.string().min(1).max(64),
     worktreeMode: CronWorktreeMode,
     /**

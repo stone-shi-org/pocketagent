@@ -5,6 +5,8 @@ import type {
   CronJobRun,
   CronSchedulePreset,
   CronWorktreeMode,
+  PlannerModel,
+  PlannerWorkspace,
   ProjectInfo,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
@@ -25,6 +27,8 @@ interface Props {
   onOpenSession: (sessionId: string) => void;
   /** Navigate to a finished transcript. */
   onOpenChat: (conversationId: string) => void;
+  /** Navigate to a planner chat. */
+  onOpenPlannerChat?: (chatId: string) => void;
   onDone: () => void;
   onBack?: () => void;
 }
@@ -51,6 +55,7 @@ export function CronJobEditorPage({
   onApiError,
   onOpenSession,
   onOpenChat,
+  onOpenPlannerChat,
   onDone,
   onBack,
 }: Props): JSX.Element {
@@ -58,6 +63,8 @@ export function CronJobEditorPage({
 
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
+  const [plannerWorkspaces, setPlannerWorkspaces] = useState<PlannerWorkspace[]>([]);
+  const [plannerModels, setPlannerModels] = useState<PlannerModel[]>([]);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [runs, setRuns] = useState<CronJobRun[]>([]);
   const [loading, setLoading] = useState(true);
@@ -103,13 +110,17 @@ export function CronJobEditorPage({
       api.listAgents(),
       api.listWorkspaces(),
       api.listProjects().catch(() => ({ projects: [] as ProjectInfo[] })),
+      api.listPlannerWorkspaces().catch(() => ({ workspaces: [] as PlannerWorkspace[] })),
+      api.listPlannerModels().catch(() => ({ models: [] as PlannerModel[] })),
       isNew ? Promise.resolve(null) : api.getCronJob(jobId),
     ])
-      .then(([a, w, p, job]) => {
+      .then(([a, w, p, pw, pm, job]) => {
         if (cancelled) return;
         setAgents(a.agents);
         setWorkspaces(w.workspaces);
         setProjects(p.projects);
+        setPlannerWorkspaces(pw.workspaces);
+        setPlannerModels(pm.models);
 
         if (job) {
           hydrate(job);
@@ -189,11 +200,28 @@ export function CronJobEditorPage({
     }
   }, [effectiveExpr, timeZone, exprError]);
 
+  const isPocketAgent = agent === 'pocketagent';
+
   const structuredAgents = agents.filter((a) => a.transports.includes('structured'));
+  const agentOptions = useMemo(() => {
+    const opts = structuredAgents.map((a) => ({
+      value: a.id,
+      label: a.available ? a.displayName : `${a.displayName} (not installed)`,
+    }));
+    opts.push({ value: 'pocketagent', label: 'Pocket Agent' });
+    return opts;
+  }, [structuredAgents]);
+
   const selectedAgent = agents.find((a) => a.id === agent) ?? null;
 
   const flatProjects = useMemo(() => flattenProjects(projects), [projects]);
   const dirOptions = useMemo(() => {
+    if (isPocketAgent) {
+      return plannerWorkspaces.map((w) => ({
+        value: w.path,
+        label: w.name,
+      }));
+    }
     const seen = new Set<string>();
     const out: { value: string; label: string }[] = [];
     for (const w of workspaces) {
@@ -207,7 +235,7 @@ export function CronJobEditorPage({
       out.push({ value: p.cwd, label: p.workspaceLabel || p.name });
     }
     return out;
-  }, [workspaces, flatProjects]);
+  }, [isPocketAgent, plannerWorkspaces, workspaces, flatProjects]);
 
   const save = async (): Promise<void> => {
     if (busy) return;
@@ -275,13 +303,31 @@ export function CronJobEditorPage({
     }
   };
 
+  const openRun = (run: CronJobRun): void => {
+    if (run.agent === 'pocketagent' || run.sessionId?.startsWith('planner_')) {
+      const chatId = run.agentSessionId ?? run.sessionId?.replace(/^planner_/, '');
+      if (chatId) {
+        if (onOpenPlannerChat) onOpenPlannerChat(chatId);
+        else window.location.hash = `#/planner/${encodeURIComponent(chatId)}`;
+        return;
+      }
+    }
+    // Prefer the session: `GET /api/sessions/:id/history` resolves for every
+    // agent, live or finished. The conversation id is the fallback for when the
+    // session row itself has been pruned, and only resolves for claude.
+    if (run.sessionId) onOpenSession(run.sessionId);
+    else if (run.agentSessionId) onOpenChat(run.agentSessionId);
+  };
+
   const runNow = async (): Promise<void> => {
     setBusy(true);
     setError(null);
     try {
       const run = await api.runCronJobNow(jobId);
       await loadRuns();
-      if (run.sessionId) onOpenSession(run.sessionId);
+      if (run.sessionId) {
+        openRun(run);
+      }
     } catch (err) {
       onApiError(err);
       setError(err instanceof ApiError ? err.message : 'Could not start the run.');
@@ -300,14 +346,6 @@ export function CronJobEditorPage({
       setError(err instanceof ApiError ? err.message : 'Could not delete the job.');
       setBusy(false);
     }
-  };
-
-  const openRun = (run: CronJobRun): void => {
-    // Prefer the session: `GET /api/sessions/:id/history` resolves for every
-    // agent, live or finished. The conversation id is the fallback for when the
-    // session row itself has been pruned, and only resolves for claude.
-    if (run.sessionId) onOpenSession(run.sessionId);
-    else if (run.agentSessionId) onOpenChat(run.agentSessionId);
   };
 
   const body = loading ? (
@@ -344,7 +382,7 @@ export function CronJobEditorPage({
         />
         <SelectRowNative
           busy={busy}
-          label="Project"
+          label={isPocketAgent ? 'Workspace' : 'Project'}
           value={cwd}
           options={dirOptions}
           onChange={setCwd}
@@ -353,31 +391,42 @@ export function CronJobEditorPage({
           busy={busy}
           label="Agent"
           value={agent}
-          options={structuredAgents.map((a) => ({
-            value: a.id,
-            label: a.available ? a.displayName : `${a.displayName} (not installed)`,
-          }))}
-          onChange={setAgent}
+          options={agentOptions}
+          onChange={(newAgent) => {
+            setAgent(newAgent);
+            if (newAgent === 'pocketagent') {
+              setWorktreeMode('none');
+              if (plannerWorkspaces.length > 0 && !plannerWorkspaces.some((w) => w.path === cwd)) {
+                setCwd(plannerWorkspaces[0]?.path ?? '');
+              }
+            } else {
+              if (workspaces.length > 0 && !workspaces.some((w) => w.path === cwd) && !flatProjects.some((p) => p.cwd === cwd)) {
+                setCwd(workspaces[0]?.path ?? '');
+              }
+            }
+          }}
         />
-        <SelectRowNative
-          busy={busy}
-          label="Working copy"
-          value={worktreeMode}
-          options={[
-            { value: 'none', label: 'The project directory — runs in place' },
-            { value: 'new-branch', label: 'A fresh worktree per run — new branch each time' },
-            {
-              value: 'current-branch',
-              label: 'A worktree off the current branch — new branch from its tip',
-            },
-          ]}
-          help={
-            worktreeMode !== 'none'
-              ? 'Each run gets its own worktree under .worktrees/ in the project. These accumulate and are not cleaned up automatically — that is where the run’s work is.'
-              : undefined
-          }
-          onChange={(v) => setWorktreeMode(v as CronWorktreeMode)}
-        />
+        {!isPocketAgent && (
+          <SelectRowNative
+            busy={busy}
+            label="Working copy"
+            value={worktreeMode}
+            options={[
+              { value: 'none', label: 'The project directory — runs in place' },
+              { value: 'new-branch', label: 'A fresh worktree per run — new branch each time' },
+              {
+                value: 'current-branch',
+                label: 'A worktree off the current branch — new branch from its tip',
+              },
+            ]}
+            help={
+              worktreeMode !== 'none'
+                ? 'Each run gets its own worktree under .worktrees/ in the project. These accumulate and are not cleaned up automatically — that is where the run’s work is.'
+                : undefined
+            }
+            onChange={(v) => setWorktreeMode(v as CronWorktreeMode)}
+          />
+        )}
       </SectionCard>
 
       <SectionCard title="Prompt" icon="compose" desc="Sent to the agent the moment the run starts.">
@@ -514,30 +563,46 @@ export function CronJobEditorPage({
         </div>
       </SectionCard>
 
-      <SectionCard title="Model & effort" icon="code" desc="Free text — each agent has its own vocabulary.">
+      <SectionCard
+        title={isPocketAgent ? 'Model' : 'Model & effort'}
+        icon="code"
+        desc={isPocketAgent ? 'Select a configured Pocket Agent model.' : 'Free text — each agent has its own vocabulary.'}
+      >
         <TextRow
           label="Model"
           value={model}
           busy={busy}
-          placeholder={selectedAgent?.defaultModel ?? "the agent's default"}
+          placeholder={
+            isPocketAgent
+              ? plannerModels[0]?.label ?? 'Default model'
+              : selectedAgent?.defaultModel ?? "the agent's default"
+          }
           listId="cron-model-options"
           onChange={setModel}
         >
           <datalist id="cron-model-options">
-            {(selectedAgent?.cachedModels ?? []).map((m) => (
-              <option key={m.value} value={m.value}>
-                {m.displayName}
-              </option>
-            ))}
+            {isPocketAgent
+              ? plannerModels.map((m) => (
+                  <option key={m.id} value={m.modelId}>
+                    {m.label} ({m.modelId})
+                  </option>
+                ))
+              : (selectedAgent?.cachedModels ?? []).map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.displayName}
+                  </option>
+                ))}
           </datalist>
         </TextRow>
-        <TextRow
-          label="Effort"
-          value={effort}
-          busy={busy}
-          placeholder={selectedAgent?.defaultEffort ?? "the model's default"}
-          onChange={setEffort}
-        />
+        {!isPocketAgent && (
+          <TextRow
+            label="Effort"
+            value={effort}
+            busy={busy}
+            placeholder={selectedAgent?.defaultEffort ?? "the model's default"}
+            onChange={setEffort}
+          />
+        )}
       </SectionCard>
 
       <SectionCard title="Approvals" icon="shield">
