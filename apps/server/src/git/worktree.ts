@@ -188,6 +188,26 @@ export class WorktreeService {
       return { branch: branchName, mainCwd, remote: null };
     }
 
+    const hasGit = await pathExists(path.join(worktreeCwd, '.git'));
+    if (!hasGit) {
+      // Broken worktree directory without .git pointer. Clean up the directory and local branch.
+      await fs.rm(worktreeCwd, { recursive: true, force: true });
+      const branchName = path.basename(worktreeCwd);
+      if (await branchExists(mainCwd, branchName)) {
+        try {
+          await execFileAsync('git', ['branch', '-D', branchName], { cwd: mainCwd });
+        } catch {
+          /* ignore if branch cannot be deleted */
+        }
+      }
+      try {
+        await execFileAsync('git', ['worktree', 'prune'], { cwd: mainCwd });
+      } catch {
+        /* ignore */
+      }
+      return { branch: branchName, mainCwd, remote: null };
+    }
+
     const branch = await readGitBranch(worktreeCwd);
     if (!branch) {
       // A detached-HEAD worktree — never produced by `create()`, which always
