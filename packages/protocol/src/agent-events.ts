@@ -169,6 +169,23 @@ export const NoticeEvent = z.object({
   text: z.string(),
 });
 
+/**
+ * The provider refused a turn because the account's usage allowance is
+ * exhausted. This is deliberately separate from a generic error notice: the
+ * browser can keep a small, actionable session overlay visible even after the
+ * failed turn itself has finished.
+ */
+export const RateLimitEvent = z.object({
+  kind: z.literal('rate_limit'),
+  provider: z.enum(['claude', 'agy']),
+  /** Epoch milliseconds when known directly from the provider. */
+  resetsAt: z.number().int().nullable(),
+  /** Provider-specific window, such as Claude's `five_hour`, when supplied. */
+  limitType: z.string().nullable(),
+  /** A fallback from the cached usage endpoint when no timestamp is available. */
+  resetsAtLabel: z.string().nullable(),
+});
+
 /** Echo of what the user sent, so replay reconstructs the whole transcript. */
 export const UserPromptEvent = z.object({
   kind: z.literal('user_prompt'),
@@ -321,6 +338,7 @@ export type PermissionRequestEvent = z.infer<typeof PermissionRequestEvent>;
 export type PermissionResolvedEvent = z.infer<typeof PermissionResolvedEvent>;
 export type TurnCompleteEvent = z.infer<typeof TurnCompleteEvent>;
 export type NoticeEvent = z.infer<typeof NoticeEvent>;
+export type RateLimitEvent = z.infer<typeof RateLimitEvent>;
 export type UserPromptEvent = z.infer<typeof UserPromptEvent>;
 export type CommandsAvailableEvent = z.infer<typeof CommandsAvailableEvent>;
 export type CommandOutputEvent = z.infer<typeof CommandOutputEvent>;
@@ -336,6 +354,7 @@ export const AgentEvent = z.discriminatedUnion('kind', [
   PermissionResolvedEvent,
   TurnCompleteEvent,
   NoticeEvent,
+  RateLimitEvent,
   UserPromptEvent,
   CommandsAvailableEvent,
   CommandOutputEvent,

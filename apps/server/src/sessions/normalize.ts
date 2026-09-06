@@ -28,11 +28,37 @@ export function normalizeSdkMessage(message: unknown): AgentEvent[] {
       return [normalizeResult(message)];
     case 'stream_event':
       return normalizeStreamEvent(message);
+    case 'rate_limit_event':
+      return normalizeClaudeRateLimit(message);
     case 'conversation_reset':
       return [{ kind: 'conversation_reset', newConversationId: str(message.new_conversation_id) ?? '' }];
     default:
       return [];
   }
+}
+
+/**
+ * The SDK emits this independently of the final result message. Only a
+ * rejected allowance blocks a turn; the allowed/near-limit updates remain
+ * available to the account-level usage bar and must not leave a false session
+ * error overlay behind.
+ */
+function normalizeClaudeRateLimit(message: Record<string, unknown>): AgentEvent[] {
+  const info = isRecord(message.rate_limit_info) ? message.rate_limit_info : null;
+  if (!info || str(info.status) !== 'rejected') return [];
+  const rawResetsAt = num(info.resetsAt);
+  // Claude Code has reported epoch milliseconds here. Guard the older
+  // seconds-shaped value too, so the wire event remains an epoch-ms contract.
+  const resetsAt = rawResetsAt === null ? null : rawResetsAt < 100_000_000_000 ? rawResetsAt * 1000 : rawResetsAt;
+  return [
+    {
+      kind: 'rate_limit',
+      provider: 'claude',
+      resetsAt,
+      limitType: str(info.rateLimitType) ?? null,
+      resetsAtLabel: null,
+    },
+  ];
 }
 
 /**
@@ -578,6 +604,12 @@ function normalizeAgyResult(message: Record<string, unknown>): AgentEvent[] {
   // `agy exited with code 1` in `AgySession.runTurn`, discarding the one
   // piece of text that actually explains what happened.
   if (isError && errorText) {
+    if (isAgyQuotaError(errorText)) {
+      // agy's structured stream names the exhaustion but does not include its
+      // reset time. The browser fills that one field from the existing,
+      // account-level `/usage` cache without guessing from error prose.
+      events.push({ kind: 'rate_limit', provider: 'agy', resetsAt: null, limitType: null, resetsAtLabel: null });
+    }
     events.push({ kind: 'notice', level: 'error', text: errorText });
   }
   events.push({
@@ -592,6 +624,10 @@ function normalizeAgyResult(message: Record<string, unknown>): AgentEvent[] {
     outputTokens: num(usage.output_tokens),
   });
   return events;
+}
+
+function isAgyQuotaError(error: string): boolean {
+  return /\bresource_exhausted\b|\bquota\b|\bcode\s*429\b|\brate[ -]?limit(?:ed)?\b/i.test(error);
 }
 
 /**

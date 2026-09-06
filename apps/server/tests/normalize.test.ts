@@ -374,6 +374,21 @@ describe('normalizeSdkMessage: robustness', () => {
   });
 });
 
+describe('normalizeSdkMessage: rate limits', () => {
+  it('maps a rejected Claude allowance to a session-level limit event', () => {
+    expect(normalizeSdkMessage({
+      type: 'rate_limit_event',
+      rate_limit_info: { status: 'rejected', resetsAt: 1_800_000_000, rateLimitType: 'five_hour' },
+    })).toEqual([
+      { kind: 'rate_limit', provider: 'claude', resetsAt: 1_800_000_000_000, limitType: 'five_hour', resetsAtLabel: null },
+    ]);
+  });
+
+  it('does not turn a near-limit warning into a blocking limit event', () => {
+    expect(normalizeSdkMessage({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed_warning' } })).toEqual([]);
+  });
+});
+
 describe('summarizeToolUse', () => {
   it('summarizes the common tools readably', () => {
     expect(summarizeToolUse('Read', { file_path: '/a/b/c.ts' })).toBe('Read c.ts');
@@ -837,6 +852,13 @@ describe('normalizeAgyMessage: result', () => {
       },
     });
     expect(events).toEqual([
+      {
+        kind: 'rate_limit',
+        provider: 'agy',
+        resetsAt: null,
+        limitType: null,
+        resetsAtLabel: null,
+      },
       {
         kind: 'notice',
         level: 'error',

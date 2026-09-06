@@ -4,6 +4,7 @@ import type {
   ModelInfo,
   PermissionRequestEvent,
   PromptImage,
+  RateLimitEvent,
   SlashCommandInfo,
 } from '@pocketagent/protocol';
 
@@ -112,6 +113,8 @@ export interface TranscriptState {
    * rather than guessing a specific level.
    */
   effort: EffortLevel | null;
+  /** The latest provider limit refusal for this structured session. */
+  rateLimit: RateLimitEvent | null;
 }
 
 export function emptyTranscript(): TranscriptState {
@@ -126,6 +129,7 @@ export function emptyTranscript(): TranscriptState {
     effort: null,
     commands: [],
     models: [],
+    rateLimit: null,
   };
 }
 
@@ -300,6 +304,9 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
         ],
       };
 
+    case 'rate_limit':
+      return { ...state, rateLimit: event };
+
     // REPLACE semantics, per the SDK's own `commands_changed` doc comment —
     // this is the full current list, not a delta, whether it arrived from
     // that push or from the initial `supportedCommands()` fetch.
@@ -344,6 +351,7 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
         commands: state.commands,
         models: state.models,
         effort: state.effort,
+        rateLimit: state.rateLimit,
         items: [{ type: 'notice', key: `reset_${event.newConversationId}`, level: 'info', text: 'Conversation cleared.' }],
       };
 

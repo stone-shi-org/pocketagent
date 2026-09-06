@@ -185,6 +185,25 @@ describe('transcript: approvals', () => {
 });
 
 describe('transcript: turns', () => {
+  it('keeps the latest provider-limit signal as session state, not a transient turn item', () => {
+    const state = applyEvent(emptyTranscript(), {
+      kind: 'rate_limit',
+      provider: 'claude',
+      resetsAt: 1_800_000_000_000,
+      limitType: 'five_hour',
+      resetsAtLabel: null,
+    });
+
+    expect(state.rateLimit).toEqual({
+      kind: 'rate_limit',
+      provider: 'claude',
+      resetsAt: 1_800_000_000_000,
+      limitType: 'five_hour',
+      resetsAtLabel: null,
+    });
+    expect(state.items).toEqual([]);
+  });
+
   it('tracks busy state between prompt and completion', () => {
     let state = applyEvent(emptyTranscript(), { kind: 'user_prompt', id: 'u', text: 'go' });
     expect(state.busy).toBe(true);

@@ -84,6 +84,24 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         },
         onAgentEvent: (event) => {
           setTranscript((prev) => applyEvent(prev, event));
+          if (event.kind === 'rate_limit' && event.resetsAt === null) {
+            // agy reports the exhaustion in its turn stream but puts the reset
+            // schedule in `/usage`; use the already-cached endpoint rather
+            // than parsing an unstable provider error sentence.
+            void api.getUsage().then(({ usage }) => {
+              const agentUsage = usage.find((entry) => entry.agent === event.provider);
+              const windows = agentUsage?.windows ?? [];
+              const exhausted = windows.find((window) => window.percentUsed >= 100) ?? windows[0];
+              const resetLabel = exhausted?.resetsAtLabel ?? agentUsage?.resetsAtLabel ?? null;
+              if (!resetLabel) return;
+              setTranscript((prev) =>
+                applyEvent(prev, { ...event, resetsAtLabel: resetLabel }),
+              );
+            }).catch(() => {
+              // The initial limit signal is still useful even if usage cannot
+              // be refreshed (e.g. the agent binary disappeared mid-session).
+            });
+          }
           if (event.kind === 'permission_request') {
             // Only fires when the tab is hidden; the sheet is enough otherwise.
             void notifyApproval(event.title, sessionId);
@@ -315,6 +333,8 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         {costLabel && <span className="chip muted">{costLabel}</span>}
       </div>
 
+      {transcript.rateLimit && <RateLimitOverlay limit={transcript.rateLimit} />}
+
       {showFiles && transcript.files.length > 0 && (
         <ul className="file-list">
           {transcript.files.map((file) => (
@@ -374,6 +394,28 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           onCancel={() => setConfirmingStop(false)}
         />
       )}
+    </div>
+  );
+}
+
+function RateLimitOverlay({ limit }: { limit: NonNullable<TranscriptState['rateLimit']> }): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const reset = limit.resetsAt
+    ? new Date(limit.resetsAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+    : limit.resetsAtLabel;
+  const detail = reset ? `Usage limit reached. Resets ${reset}.` : 'Usage limit reached. Reset time is unavailable.';
+  return (
+    <div className="rate-limit-overlay" role="status">
+      <button
+        type="button"
+        className={open ? 'rate-limit-icon open' : 'rate-limit-icon'}
+        aria-label={detail}
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Icon name="clock" size={18} />
+        <span className="rate-limit-tooltip" role="tooltip">{detail}</span>
+      </button>
     </div>
   );
 }
