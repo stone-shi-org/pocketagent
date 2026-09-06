@@ -5,6 +5,7 @@ import { api } from '../api/client.js';
 import { agentAccentClass, agentIconName } from '../agent/agent-icon.js';
 import { lastPlainLines } from '../agent/strip-ansi.js';
 import { applyFleetEvent, applyFleetEvents, emptyFleetPreview, type FleetPreviewState } from '../agent/fleet-preview.js';
+import { stopAffordance, terminalKindTag } from '../agent/fleet-groups.js';
 import { Icon } from './Icon.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 
@@ -81,6 +82,14 @@ export function AgentCard({ session, onOpen, onApiError, onStopped }: Props): JS
   }, [session.id]);
 
   const lines = session.transport === 'terminal' ? lastPlainLines(rawTail, PREVIEW_LINES) : preview.lines;
+  // Null for a structured card. The fleet view's group heading says "terminal
+  // session" but deliberately does not say *tmux* (see `groupFleet`), so this
+  // is where a terminal card names what is actually holding its PTY — the
+  // distinction someone scanning for their tmux pane is looking for.
+  const kindTag = terminalKindTag(session);
+  // "Stop this agent" is wrong for two of the three kinds of card — see
+  // `stopAffordance`, which shares its strings with `TerminalPage`'s dialog.
+  const stopWords = stopAffordance(session);
   // `SessionInfo.busy` is coarse (mid-turn or not); a structured card's own
   // richer event stream corrects the one case that would otherwise mislead —
   // see `FleetPreviewState.awaitingApproval`'s doc comment.
@@ -114,6 +123,7 @@ export function AgentCard({ session, onOpen, onApiError, onStopped }: Props): JS
           <span className="agent-card-title">
             <span className="title">{session.title}</span>
             <span className="meta">
+              {kindTag && <span className="agent-card-tag">{kindTag}</span>}
               {session.agentDisplayName} · {session.workspaceLabel}
             </span>
           </span>
@@ -151,17 +161,17 @@ export function AgentCard({ session, onOpen, onApiError, onStopped }: Props): JS
         type="button"
         className="agent-card-stop"
         onClick={() => setConfirmingStop(true)}
-        aria-label={`Stop ${session.title}`}
-        title="Stop agent"
+        aria-label={stopWords.ariaLabel}
+        title={stopWords.tooltip}
       >
         <Icon name="close" size={14} />
       </button>
 
       {confirmingStop && (
         <ConfirmDialog
-          title="Stop this agent?"
-          body={`${session.title} will be stopped.`}
-          confirmLabel={stopping ? 'Stopping…' : 'Stop'}
+          title={stopWords.confirmTitle}
+          body={stopWords.confirmBody}
+          confirmLabel={stopping ? stopWords.busyLabel : stopWords.confirmLabel}
           busy={stopping}
           onConfirm={() => void stop()}
           onCancel={() => setConfirmingStop(false)}

@@ -3768,6 +3768,63 @@ button.chat-rate-limit-badge {
   align-items: start;
 }
 
+/* One group per kind of session — agents, then terminals (PA-22). A heading
+   plus a hint line rather than a tab bar or a filter: both groups are usually
+   small and a person watching the fleet wants to see everything at once, just
+   not told that a tmux pane is an agent. */
+.fleet-section + .fleet-section {
+  margin-top: 26px;
+}
+.fleet-section-head {
+  margin: 0 0 12px;
+}
+.fleet-section-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+.fleet-section-head h2 svg {
+  color: var(--text-dim);
+}
+.fleet-section-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 7px;
+  line-height: 18px;
+}
+.fleet-section-hint {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* Names what holds a terminal card's PTY (`tmux`, `direct`, `adopted pane`).
+   Inline in the meta line, so it ellipsizes with it rather than being a
+   separate row of chrome on a card that is mostly output preview. */
+.agent-card-tag {
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 4px;
+  vertical-align: 1px;
+}
+
+
 .agent-card {
   position: relative;
   display: block;
