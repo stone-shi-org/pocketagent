@@ -39,6 +39,14 @@ export interface TerminalConnectionHandlers {
   onResized?: (cols: number, rows: number) => void;
   onError?: (code: string, message: string) => void;
   /**
+   * A prompt this client sent is waiting for another agent to finish in the
+   * same working tree (PA-11), and the follow-up when it is finally sent or
+   * cancelled. The message is persisted and never dropped — surfacing it is
+   * what stops a typed message looking like it vanished.
+   */
+  onPromptQueued?: (promptId: string, position: number, treeRoot: string) => void;
+  onPromptReleased?: (promptId: string, reason: 'sent' | 'cancelled') => void;
+  /**
    * The server closed the socket for a reason retrying cannot fix (a
    * protocol version skew after this tab's bundle went stale, so far). Distinct
    * from `onError`, which is for a recoverable, server-sent `error` frame —
@@ -294,6 +302,12 @@ export class TerminalConnection {
       case 'resized':
         this.handlers.onResized?.(message.cols, message.rows);
         break;
+      case 'prompt_queued':
+        this.handlers.onPromptQueued?.(message.promptId, message.position, message.treeRoot);
+        break;
+      case 'prompt_released':
+        this.handlers.onPromptReleased?.(message.promptId, message.reason);
+        break;
       case 'error':
         this.handlers.onError?.(message.code, message.message);
         break;
@@ -357,6 +371,17 @@ export class TerminalConnection {
   sendPrompt(text: string, image?: PromptImage): boolean {
     if (!this.sessionId) return false;
     return this.send({ type: 'prompt', sessionId: this.sessionId, text, ...(image ? { image } : {}) });
+  }
+
+  /**
+   * Cancel a queued prompt, or send it anyway.
+   *
+   * `force` is the one override of the directory queue in the whole app, and it
+   * lives here on purpose: a human is present to own the consequence.
+   */
+  sendQueuedPromptAction(promptId: string, action: 'cancel' | 'force'): boolean {
+    if (!this.sessionId) return false;
+    return this.send({ type: 'queued_prompt', sessionId: this.sessionId, promptId, action });
   }
 
   /** Answer a pending approval. `answer` carries the choice for a question-shaped tool. */

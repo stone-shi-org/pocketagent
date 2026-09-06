@@ -52,7 +52,9 @@ import { WebhookService } from './webhooks/index.js';
 import { PlannerWorkspaceRegistry } from './planner/workspaces.js';
 import { createPlannerWorkspaceStore } from './planner/store.js';
 import { PlannerChatService } from './planner/chats.js';
+import type { QueuedRunSummary } from '@pocketagent/protocol';
 import type { PocketContext } from './types.js';
+import { PromptQueueService } from './sessions/prompt-queue.js';
 
 export const VERSION = '0.1.0';
 
@@ -254,12 +256,22 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     );
   }
 
+  /**
+   * Assigned once the two queue producers exist, below.
+   *
+   * A forward reference rather than reordering service construction: the getter
+   * is called per request, never at construction, and `ProjectService` is built
+   * before `WebhookService` because plenty of things between the two need it.
+   */
+  let queuedWork: () => Map<string, QueuedRunSummary[]> = () => new Map();
+
   const projects = new ProjectService({
     workspaces,
     conversations,
     db,
     version: VERSION,
     getCodeServerBaseUrl: () => config.codeServerBaseUrl,
+    getQueuedWork: () => queuedWork(),
   });
   const worktrees = new WorktreeService({ workspaces });
 
@@ -341,12 +353,35 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     logger: app.log,
   });
 
+  // PA-11: one queue, shared. A webhook delivery, a scheduled run and a human's
+  // own prompt all contend for the same working trees, so they have to be
+  // ordered against each other rather than each keeping a private queue.
+  const promptQueue = new PromptQueueService({
+    db,
+    sessions,
+    queue: webhooks.runQueue,
+    logger: app.log,
+  });
+
+  queuedWork = (): Map<string, QueuedRunSummary[]> => {
+    const merged = new Map<string, QueuedRunSummary[]>();
+    for (const source of [webhooks.queuedByTree(), promptQueue.queuedByTree()]) {
+      for (const [tree, items] of source) {
+        merged.set(tree, [...(merged.get(tree) ?? []), ...items]);
+      }
+    }
+    // One line per tree, in the order the work will actually run.
+    for (const [, items] of merged) items.sort((a, b) => a.position - b.position);
+    return merged;
+  };
+
   const context: PocketContext = {
     config,
     auth,
     sessions,
     cron,
     webhooks,
+    promptQueue,
     workspaces,
     plannerWorkspaces,
     plannerWorkspacesRoot,
@@ -376,7 +411,10 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await cron.init();
 
   // Same ordering reason as cron's: this reconciles delivery rows against an
-  // already-reconciled session table.
+  // already-reconciled session table. It also adopts whatever was left queued
+  // on a working tree by the previous server — including this boot's queued
+  // prompts, since `PromptQueueService` has already registered itself with the
+  // shared queue above.
   webhooks.init();
 
   await app.register(cookie);

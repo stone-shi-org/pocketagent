@@ -213,8 +213,8 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
           ? { conversationMode: body.conversationMode }
           : {}),
         ...(body.overlapPolicy !== undefined ? { overlapPolicy: body.overlapPolicy } : {}),
+        ...(body.directoryPolicy !== undefined ? { directoryPolicy: body.directoryPolicy } : {}),
         ...(body.maxConcurrent !== undefined ? { maxConcurrent: body.maxConcurrent } : {}),
-        ...(body.debounceSeconds !== undefined ? { debounceSeconds: body.debounceSeconds } : {}),
         ...(body.storePayloads !== undefined ? { storePayloads: body.storePayloads } : {}),
       };
       return reply.send(webhooks.toWebhook(webhooks.update(request.params.id, patch)));
@@ -272,6 +272,49 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
             .send({ error: { code: 'not_found', message: 'No such delivery.' } });
         }
         return reply.send(webhooks.toDeliveryDetail(row));
+      } catch (err) {
+        return mapError(reply, err);
+      }
+    },
+  );
+
+  /**
+   * Act on a delivery waiting for a working tree (PA-11).
+   *
+   * `cancel` records it as `skipped` — which already means "never started, on
+   * purpose" — and `front` moves it to the head of its own line. There is
+   * deliberately **no** action that starts it while another agent holds the
+   * tree: that is the corruption this feature exists to prevent, and the one
+   * override lives on a human's own prompt over the WebSocket, where a person
+   * is present to own the consequence.
+   *
+   * A POST so the Origin check covers it, like every other mutating route here.
+   */
+  app.post<{ Params: { id: string; deliveryId: string }; Body: { action?: string } }>(
+    '/api/webhooks/:id/deliveries/:deliveryId/queue',
+    async (request, reply) => {
+      try {
+        const row = webhooks.delivery(request.params.deliveryId);
+        if (row.webhook_id !== request.params.id) {
+          return reply
+            .code(404)
+            .send({ error: { code: 'not_found', message: 'No such delivery.' } });
+        }
+        const action = request.body?.action;
+        if (action !== 'cancel' && action !== 'front') {
+          return reply.code(400).send({
+            error: { code: 'bad_request', message: 'action must be "cancel" or "front".' },
+          });
+        }
+        if (!webhooks.resolveQueued(request.params.deliveryId, action)) {
+          return reply.code(409).send({
+            error: {
+              code: 'conflict',
+              message: 'That delivery is no longer waiting — it may have already started.',
+            },
+          });
+        }
+        return reply.send({ ok: true });
       } catch (err) {
         return mapError(reply, err);
       }
@@ -562,8 +605,8 @@ function specFrom(
       (body.config.type === 'bamboo' ? DEFAULT_BAMBOO_PROMPT_TEMPLATE : DEFAULT_JIRA_PROMPT_TEMPLATE),
     conversationMode: body.conversationMode,
     overlapPolicy: body.overlapPolicy,
+    directoryPolicy: body.directoryPolicy,
     maxConcurrent: body.maxConcurrent,
-    debounceSeconds: body.debounceSeconds,
     storePayloads: body.storePayloads,
   };
 

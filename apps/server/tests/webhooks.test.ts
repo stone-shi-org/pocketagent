@@ -2,11 +2,12 @@ import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { JIRA_SAMPLE_PAYLOAD } from '@pocketagent/protocol';
 import { REDACT_PATHS } from '../src/app.js';
 import {
   openDatabase,
+  pruneOldWebhookDeliveries,
   pruneOldWebhookHits,
   readWebhookDeliveries,
   readWebhookHits,
@@ -956,7 +957,15 @@ describe('webhook delivery: caps and overlap', () => {
   });
 
   it('allows an overlapping delivery when the policy says so', async () => {
-    const hook = await createWebhook({ overlapPolicy: 'allow', maxConcurrent: 5 });
+    // `directoryPolicy: 'allow'` is what makes this test about `overlapPolicy`
+    // alone. The two gates are orthogonal (PA-11): with the directory policy at
+    // its default, a second delivery into the same folder queues no matter what
+    // the overlap policy says, which is asserted separately below.
+    const hook = await createWebhook({
+      overlapPolicy: 'allow',
+      directoryPolicy: 'allow',
+      maxConcurrent: 5,
+    });
     expect((await deliver(SLUG, payloadFor({ timestamp: 1 + Date.now() }), { secret: hook.secret })).json().status).toBe('running');
     expect((await deliver(SLUG, payloadFor({ timestamp: 2 + Date.now() }), { secret: hook.secret })).json().status).toBe('running');
   });
@@ -1160,6 +1169,303 @@ describe('webhook autoSelectAgentModel', () => {
   });
 });
 
+describe('webhook delivery: the directory queue (PA-11)', () => {
+  /** The delivery row for one issue key. */
+  const rowFor = (webhookId: string, issueKey: string) =>
+    readWebhookDeliveries(ctx.db, { webhookId, limit: 20 }).find((r) => r.issue_key === issueKey);
+
+  const payloadForIssue = (issueKey: string): string =>
+    JSON.stringify({
+      ...(JIRA_SAMPLE_PAYLOAD as object),
+      timestamp: Date.now(),
+      issue: { key: issueKey, fields: { project: { key: 'ENG' }, labels: [] } },
+    });
+
+  it('queues a second delivery into the same directory, and answers 202', async () => {
+    // `worktreeMode: 'none'` means every delivery runs directly in the project
+    // folder, so the second one would be a second agent in a directory the
+    // first is already editing. `overlapPolicy: 'allow'` is set so the *only*
+    // thing that can defer it is the directory gate.
+    const hook = await createWebhook({ overlapPolicy: 'allow', maxConcurrent: 5 });
+    expect((await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret })).json().status).toBe('running');
+
+    const second = await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret });
+    // 202, never 4xx: Jira Data Center does not retry usefully, and the work is
+    // persisted rather than refused.
+    expect(second.statusCode).toBe(202);
+    expect(second.json().status).toBe('queued');
+    expect(second.json().sessionId).toBeNull();
+    expect(second.json().reason).toMatch(/queued at position 1/i);
+  });
+
+  it('does not queue a delivery that gets a directory of its own', async () => {
+    // `current-branch` mints `wt/<base>-<rand>` per run, so two deliveries can
+    // never collide. Queueing them would serialize exactly the parallelism
+    // per-run worktrees exist to provide.
+    execFileSync('git', ['init', '-q'], { cwd: ctx.projectDir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: ctx.projectDir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: ctx.projectDir });
+    fs.writeFileSync(path.join(ctx.projectDir, 'file.txt'), 'x\n');
+    execFileSync('git', ['add', 'file.txt'], { cwd: ctx.projectDir });
+    execFileSync('git', ['commit', '-q', '-m', 'initial'], { cwd: ctx.projectDir });
+
+    const hook = await createWebhook({
+      worktreeMode: 'current-branch',
+      overlapPolicy: 'allow',
+      maxConcurrent: 5,
+    });
+    expect((await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret })).json().status).toBe('running');
+    expect((await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret })).json().status).toBe('running');
+  });
+
+  it('queues behind a human working in the same directory', async () => {
+    // The queue observes *every* session, not just its own runs. A person
+    // mid-turn in the project folder is exactly as much of a hazard as another
+    // delivery, and a queue that only knew about webhooks would miss it.
+    const hook = await createWebhook({ overlapPolicy: 'allow', maxConcurrent: 5 });
+    const mine = await ctx.context.sessions.create({
+      agent: 'claude',
+      cwd: ctx.projectDir,
+      cols: 0,
+      rows: 0,
+      transport: 'structured',
+      title: 'mine',
+    });
+    expect(mine.transport).toBe('structured');
+    // `busySince` is stamped by the prompt, and that is what "occupied" means.
+    expect((mine as { prompt: (t: string) => boolean }).prompt('hello')).toBe(true);
+    expect(ctx.context.sessions.busyTreeRoots()).toContain(ctx.projectDir);
+
+    const res = await deliver(SLUG, payloadForIssue('ENG-9'), { secret: hook.secret });
+    expect(res.json().status).toBe('queued');
+  });
+
+  it('does not count a queued delivery against the concurrency caps', async () => {
+    // A waiter holds no session, so counting it would make the queue throttle
+    // itself: the first waiter would fill the cap and every later delivery
+    // would be dropped instead of queued.
+    const hook = await createWebhook({ overlapPolicy: 'allow', maxConcurrent: 2 });
+    expect((await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret })).json().status).toBe('running');
+    expect((await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret })).json().status).toBe('queued');
+    expect((await deliver(SLUG, payloadForIssue('ENG-3'), { secret: hook.secret })).json().status).toBe('queued');
+    expect((await deliver(SLUG, payloadForIssue('ENG-4'), { secret: hook.secret })).json().status).toBe('queued');
+  });
+
+  it('still skips rather than queues when the overlap policy says skip', async () => {
+    // The two gates are ordered, and the overlap policy comes first: a webhook
+    // told to skip a same-conversation collision must keep skipping, or PA-11
+    // would silently redefine what `skip` means.
+    const hook = await createWebhook({ overlapPolicy: 'skip', maxConcurrent: 5 });
+    expect((await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret })).json().status).toBe('running');
+    expect((await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret })).json().status).toBe('skipped');
+  });
+
+  it('runs everything in the directory, unqueued, when the policy says allow', async () => {
+    const hook = await createWebhook({
+      overlapPolicy: 'allow',
+      directoryPolicy: 'allow',
+      maxConcurrent: 5,
+    });
+    expect((await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret })).json().status).toBe('running');
+    expect((await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret })).json().status).toBe('running');
+  });
+
+  it('cancels a queued delivery as skipped, and lets the next one through', async () => {
+    const hook = await createWebhook({ overlapPolicy: 'allow', maxConcurrent: 5 });
+    await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret });
+    const queued = await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret });
+    const deliveryId = queued.json().deliveryId;
+
+    const res = await post(`/api/webhooks/${hook.id}/deliveries/${deliveryId}/queue`, {
+      action: 'cancel',
+    });
+    expect(res.statusCode).toBe(200);
+
+    const row = rowFor(hook.id, 'ENG-2');
+    // `skipped` already means "never started, on purpose", which is what a
+    // human cancelling a waiter is.
+    expect(row?.status).toBe('skipped');
+    expect(row?.reason).toMatch(/removed from the queue/i);
+
+    // Cancelling twice is a conflict, not a second cancellation.
+    expect((await post(`/api/webhooks/${hook.id}/deliveries/${deliveryId}/queue`, { action: 'cancel' })).statusCode).toBe(409);
+  });
+
+  it('moves a queued delivery to the front without starting it', async () => {
+    const hook = await createWebhook({ overlapPolicy: 'allow', maxConcurrent: 5 });
+    await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret });
+    await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret });
+    const last = await deliver(SLUG, payloadForIssue('ENG-3'), { secret: hook.secret });
+
+    const res = await post(
+      `/api/webhooks/${hook.id}/deliveries/${last.json().deliveryId}/queue`,
+      { action: 'front' },
+    );
+    expect(res.statusCode).toBe(200);
+    // Reordered, but still waiting: there is deliberately no route that starts
+    // a delivery while another agent holds the directory.
+    expect(rowFor(hook.id, 'ENG-3')?.status).toBe('queued');
+    expect(ctx.context.webhooks.queuePositionOf(last.json().deliveryId)).toBe(1);
+  });
+
+  it('rejects an unknown queue action', async () => {
+    const hook = await createWebhook({ overlapPolicy: 'allow', maxConcurrent: 5 });
+    await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret });
+    const queued = await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret });
+    const res = await post(
+      `/api/webhooks/${hook.id}/deliveries/${queued.json().deliveryId}/queue`,
+      { action: 'run-anyway' },
+    );
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('reports queued work per working tree, for the project tree', async () => {
+    const hook = await createWebhook({ overlapPolicy: 'allow', maxConcurrent: 5 });
+    await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret });
+    await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret });
+
+    const byTree = ctx.context.webhooks.queuedByTree();
+    const waiting = byTree.get(ctx.projectDir);
+    expect(waiting).toHaveLength(1);
+    expect(waiting?.[0]).toMatchObject({ kind: 'webhook', title: 'ENG-2', position: 1 });
+
+    // And it reaches the home screen, on the directory that is blocked.
+    const projects = await ctx.context.projects.list(ctx.context.sessions.list());
+    const project = projects.find((p) => p.cwd === ctx.projectDir);
+    expect(project?.queued).toHaveLength(1);
+    expect(project?.queued[0]?.title).toBe('ENG-2');
+  });
+
+  it('keeps a queued delivery through a restart and runs it afterwards', async () => {
+    const db = openDatabase(':memory:');
+    const first = await createTestApp({}, db);
+    let hookId = '';
+    try {
+      const created = await first.app.inject({
+        method: 'POST',
+        url: '/api/webhooks',
+        headers: authHeaders(first.cookie),
+        payload: {
+          name: 'persisted queue',
+          slug: 'pq',
+          cwd: first.projectDir,
+          agent: 'claude',
+          config: { type: 'jira', filter: {} },
+          overlapPolicy: 'allow',
+          maxConcurrent: 5,
+        },
+      });
+      expect(created.statusCode).toBe(201);
+      const hook = created.json();
+      hookId = hook.id;
+
+      const send = (issueKey: string) => {
+        const body = JSON.stringify({
+          ...(JIRA_SAMPLE_PAYLOAD as object),
+          timestamp: Date.now(),
+          issue: { key: issueKey, fields: { project: { key: 'ENG' }, labels: [] } },
+        });
+        return first.app.inject({
+          method: 'POST',
+          url: '/api/hooks/pq',
+          headers: { 'content-type': 'application/json', 'x-hub-signature': sign(hook.secret, body) },
+          payload: body,
+        });
+      };
+
+      expect((await send('ENG-1')).json().status).toBe('running');
+      expect((await send('ENG-2')).json().status).toBe('queued');
+    } finally {
+      // `close()`, not `cleanup()`: the webhook's directory has to outlive this
+      // server, or the adopted delivery would fail containment on the way back
+      // up rather than running.
+      await first.app.close();
+    }
+
+    // Same database, new process-equivalent. Nothing is mid-turn any more, so
+    // the adopted waiter is free to run — and it must not have been force-failed
+    // by the "close out whatever the dead server left open" pass, which is why
+    // `queued` is deliberately excluded from that predicate.
+    const second = await createTestApp(
+      { POCKETAGENT_WORKSPACE_ROOTS: first.workspaceRoot },
+      db,
+    );
+    try {
+      await vi.waitFor(() => {
+        const row = readWebhookDeliveries(db, { webhookId: hookId, limit: 10 }).find(
+          (r) => r.issue_key === 'ENG-2',
+        );
+        expect(row?.status).not.toBe('queued');
+        expect(row?.session_id).toBeTruthy();
+      }, 10_000);
+    } finally {
+      await second.cleanup();
+      await first.cleanup();
+    }
+  });
+
+  it('fails a queued delivery whose webhook was deleted while it waited', async () => {
+    const hook = await createWebhook({ overlapPolicy: 'allow', maxConcurrent: 5 });
+    await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret });
+    const queued = await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret });
+    const deliveryId = queued.json().deliveryId;
+
+    await ctx.app.inject({
+      method: 'DELETE',
+      url: `/api/webhooks/${hook.id}`,
+      headers: authHeaders(ctx.cookie),
+    });
+
+    // Deleting keeps delivery history (`webhook_id` is ON DELETE SET NULL), so
+    // the waiter is still there — but its configuration is gone, and running it
+    // would apply a webhook nobody has any more.
+    expect(ctx.context.webhooks.resolveQueued(deliveryId, 'front')).toBe(true);
+    // Free the directory, so the waiter is actually reached.
+    for (const info of ctx.context.sessions.list()) ctx.context.sessions.terminate(info.id);
+    ctx.context.webhooks.sweep();
+    await vi.waitFor(() => {
+      const row = readWebhookDeliveries(ctx.db, { limit: 20 }).find((r) => r.id === deliveryId);
+      expect(row?.status).toBe('failed');
+      expect(row?.error).toMatch(/deleted while this delivery was queued/i);
+    }, 10_000);
+  });
+
+  it('never prunes a queued delivery', () => {
+    // Pruning a waiter would silently discard work already answered with a 202.
+    // A queued row is in neither the "open" nor the "noise" partition, and this
+    // is the assertion that keeps it out of both.
+    const now = Date.now();
+    ctx.db
+      .prepare(
+        `INSERT INTO webhooks (id, name, slug, enabled, type, auth_mode, secret, auth_token_hash,
+          secret_set_at, filter_json, project_map_json, prompt_template_map_json, cwd, agent,
+          worktree_mode, model, effort, effort_set, skip_permissions, auto_select_agent_model,
+          prompt_template, conversation_mode, overlap_policy, directory_policy, max_concurrent,
+          store_payloads, created_at, updated_at, last_delivery_at, last_delivery_status, last_error)
+         VALUES ('w1','w','w',1,'jira','hmac','s',NULL,?,'{}','[]','[]','/tmp','claude','none',NULL,
+          NULL,0,0,0,'p','per-delivery','allow','queue',2,1,?,?,NULL,NULL,NULL)`,
+      )
+      .run(now, now, now);
+    const insert = (id: string, status: string, receivedAt: number): void => {
+      ctx.db
+        .prepare(
+          `INSERT INTO webhook_deliveries (id, webhook_id, webhook_name, agent, status, trigger,
+            signature_state, skip_permissions_enabled, payload_bytes, payload_truncated,
+            received_at, queue_key, queued_at, queued_spec_json)
+           VALUES (?, 'w1', 'w', 'claude', ?, 'delivery', 'valid', 0, 0, 0, ?, '/tmp', ?, '{}')`,
+        )
+        .run(id, status, receivedAt, receivedAt);
+    };
+    insert('queued-1', 'queued', 1);
+    for (let i = 0; i < 5; i += 1) insert(`ok-${i}`, 'succeeded', 100 + i);
+
+    pruneOldWebhookDeliveries(ctx.db, { keepRunsPerWebhook: 2, keepNoisePerWebhook: 2 });
+
+    const ids = readWebhookDeliveries(ctx.db, { webhookId: 'w1', limit: 50 }).map((r) => r.id);
+    expect(ids).toContain('queued-1');
+  });
+});
+
 describe('webhook Jira component worktrees', () => {
   it('creates and shares worktree for Jira tickets with same component', async () => {
     // Initialize git repo in projectDir
@@ -1214,14 +1520,43 @@ describe('webhook Jira component worktrees', () => {
       },
     });
 
+    // PA-11: the second ticket resolves to the *same* worktree, so it must not
+    // start while the first agent is mid-turn in it — that is the corruption
+    // this queue exists to prevent. It waits, and it is answered 202: nothing
+    // is lost, and a 4xx would only make Jira retry harder.
     const res2 = await deliver(SLUG, payload2, { secret: hook.secret });
     expect(res2.statusCode).toBe(202);
     const outcome2 = res2.json();
-    expect(outcome2.sessionId).toBeTruthy();
+    expect(outcome2.status).toBe('queued');
+    expect(outcome2.sessionId).toBeNull();
 
-    const session2 = ctx.context.sessions.get(outcome2.sessionId);
-    expect(session2).toBeDefined();
-    // Both sessions for component 'Auth' use the exact same worktree directory
-    expect(session2?.spec.cwd).toBe(session1?.spec.cwd);
+    const queuedRow = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 }).find(
+      (r) => r.issue_key === 'PA-102',
+    );
+    expect(queuedRow?.status).toBe('queued');
+    expect(queuedRow?.queue_key).toBe(session1?.spec.cwd);
+    // Frozen at delivery time, because the payload may not have been stored and
+    // re-rendering later would re-decide the agent, model and branch.
+    expect(queuedRow?.queued_spec_json).toBeTruthy();
+    expect(queuedRow?.rendered_prompt).toContain('PA-102');
+
+    // Once the first agent's session is gone the tree is free, and the waiter
+    // runs — in the very same worktree, which is the sharing the original
+    // behaviour got right and this must preserve.
+    ctx.context.sessions.terminate(outcome1.sessionId);
+    // The sweep is the guaranteed backstop for a tree freed by a session that
+    // died without its delivery seeing a `turn_complete` — driven directly here
+    // rather than waiting 30s for the timer, exactly as the cron tests drive
+    // `tick`.
+    ctx.context.webhooks.sweep();
+
+    await vi.waitFor(() => {
+      const row = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 }).find(
+        (r) => r.issue_key === 'PA-102',
+      );
+      expect(row?.status).not.toBe('queued');
+      expect(row?.session_id).toBeTruthy();
+      expect(row?.cwd).toBe(session1?.spec.cwd);
+    }, 10_000);
   });
 });

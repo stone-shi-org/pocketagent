@@ -300,6 +300,38 @@ export const ChatSummary = z.object({
 export type ChatSummary = z.infer<typeof ChatSummary>;
 
 /**
+ * One piece of agent work waiting for a working tree to come free (PA-11).
+ *
+ * Listed on `ProjectInfo` beside `cronJobs` and `webhooks` rather than folded
+ * into `chats`, and for a stronger reason than either: a queued item has no
+ * transcript *yet* and may never get one — it is a decision that has been made
+ * and not yet acted on. The client renders these as a synthetic "Queued" group
+ * under the directory they are waiting on, which disappears by itself when the
+ * array empties.
+ */
+export const QueuedRunSummary = z.object({
+  /** Delivery id, or the queued-prompt id for a human's own follow-up. */
+  id: z.string(),
+  /** `webhook` for an inbound delivery, `prompt` for a queued human message. */
+  kind: z.enum(['webhook', 'prompt']),
+  /** What the row says: the issue/plan key, or the chat's title. */
+  title: z.string(),
+  /** Set for `kind: 'webhook'`, so the row can open the webhook's editor. */
+  webhookId: z.string().nullable(),
+  webhookName: z.string().nullable(),
+  /** Set for `kind: 'prompt'`, so the row can open the chat that is waiting. */
+  sessionId: z.string().nullable(),
+  agent: z.string().nullable(),
+  agentDisplayName: z.string(),
+  /** 1-based place in line for this working tree. */
+  position: z.number().int(),
+  queuedAt: z.number().int(),
+  /** Surfaced on every waiting row, never only at creation. */
+  skipPermissionsEnabled: z.boolean(),
+});
+export type QueuedRunSummary = z.infer<typeof QueuedRunSummary>;
+
+/**
  * A workspace directory, with everything that has happened in it.
  *
  * `worktrees` folds in any linked git worktree of this checkout that would
@@ -358,6 +390,15 @@ export interface ProjectInfo {
    * would hide precisely the case that needs attention.
    */
   webhooks: WebhookSummary[];
+  /**
+   * Agent work waiting for *this* directory, in line order.
+   *
+   * Filed against the working tree that is actually blocked, so a queue behind
+   * a component worktree appears under that worktree's row rather than under
+   * the main checkout. Empty for the overwhelming majority of directories, and
+   * the client draws nothing when it is empty.
+   */
+  queued: QueuedRunSummary[];
   worktrees: ProjectInfo[];
   /** True when this worktree or directory no longer exists on disk. */
   isDeleted?: boolean;
@@ -377,6 +418,7 @@ export const ProjectInfo: z.ZodType<ProjectInfo> = z.lazy(() =>
     chats: z.array(ChatSummary),
     cronJobs: z.array(CronJobSummary),
     webhooks: z.array(WebhookSummary),
+    queued: z.array(QueuedRunSummary),
     worktrees: z.array(ProjectInfo),
     isDeleted: z.boolean().optional(),
   }),

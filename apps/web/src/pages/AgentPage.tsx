@@ -59,6 +59,17 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   /** Prior conversation, kept apart from the live transcript on purpose: a
       replay frame replaces the live one wholesale and would otherwise wipe it. */
   const [history, setHistory] = useState<TranscriptItem[]>([]);
+  /**
+   * A prompt of ours parked on a busy working tree (PA-11), or null.
+   *
+   * Replayed on attach as well as pushed live, so reconnecting mid-wait shows
+   * the same thing rather than an apparently empty composer.
+   */
+  const [queuedPrompt, setQueuedPrompt] = useState<{
+    promptId: string;
+    position: number;
+    treeRoot: string;
+  } | null>(null);
 
   useEffect(() => {
     // Plain closure variable, not a ref: every handler below is recreated
@@ -120,6 +131,16 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         },
         onPendingPermissions: (requests) => {
           setTranscript((prev) => mergePending(prev, requests));
+        },
+        // PA-11. A prompt held back because another agent is mid-turn in the
+        // same working tree. Surfaced as its own banner rather than folded into
+        // `setNotice`, because it is not a notice — it is a state with two
+        // actions, and it must not be dismissible into invisibility.
+        onPromptQueued: (promptId, position, treeRoot) => {
+          setQueuedPrompt({ promptId, position, treeRoot });
+        },
+        onPromptReleased: (promptId) => {
+          setQueuedPrompt((prev) => (prev?.promptId === promptId ? null : prev));
         },
         onExit: () => {
           setStatus((prev) => (isTerminalStatus(prev) ? prev : 'exited'));
@@ -356,6 +377,41 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
       {!fatal && connection === 'reconnecting' && (
         <div className="notice" role="status">
           Reconnecting… the agent keeps working.
+        </div>
+      )}
+      {/* Not dismissible, unlike `notice`: the message is real and undelivered,
+          so the only ways out are the two buttons. "Send anyway" is the single
+          override of the directory queue in the app — offered because a human
+          who knows the other run is harmless must be able to say so, and an
+          override they can see beats one they cannot. */}
+      {queuedPrompt && (
+        <div className="notice notice--queued" role="status">
+          <span>
+            Waiting for another agent working in{' '}
+            <code>{queuedPrompt.treeRoot}</code>
+            {queuedPrompt.position > 1 ? ` · position ${queuedPrompt.position}` : ''}. Your
+            message will be sent as soon as it finishes.
+          </span>
+          <span className="notice-actions">
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() =>
+                connRef.current?.sendQueuedPromptAction(queuedPrompt.promptId, 'force')
+              }
+            >
+              Send anyway
+            </button>
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() =>
+                connRef.current?.sendQueuedPromptAction(queuedPrompt.promptId, 'cancel')
+              }
+            >
+              Cancel
+            </button>
+          </span>
         </div>
       )}
 

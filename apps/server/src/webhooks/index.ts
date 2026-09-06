@@ -14,10 +14,12 @@ import type {
   WebhookDeliveryDetail,
   WebhookDeliveryStatus,
   WebhookDeliveryTrigger,
+  WebhookDirectoryPolicy,
+  QueuedRunSummary,
   WebhookHistoryEntry,
   WebhookHit,
+  WebhookOverlapPolicy,
   WebhookSignatureState,
-  WebhookSummary,
   WebhookType,
 } from '@pocketagent/protocol';
 import {
@@ -46,6 +48,7 @@ import {
   pruneOldWebhookHits,
   pruneOldWebhookIssueSessions,
   readActiveWebhookDeliveries,
+  readQueuedWebhookDeliveries,
   readWebhook,
   readWebhookBySlug,
   readWebhookDeliveries,
@@ -67,9 +70,11 @@ import type { PocketRunSpec, RunSink, RunSpec } from '../runs/executor.js';
 import { RunExecutor, mintBranchName } from '../runs/executor.js';
 import type { PlannerChatService } from '../planner/chats.js';
 import type { PlannerWorkspaceRegistry } from '../planner/workspaces.js';
+import type { QueueStore, QueuedItem } from '../runs/queue.js';
+import { RunQueue } from '../runs/queue.js';
+import { treeRootOf, worktreePathFor } from '../git/worktree-paths.js';
 import type { JiraEventFacts } from './jira.js';
 import {
-  describeJiraFilter,
   evaluateJiraFilter,
   parseJiraEvent,
   resolveComponentBranchName,
@@ -79,7 +84,6 @@ import {
 } from './jira.js';
 import type { BambooEventFacts } from './bamboo.js';
 import {
-  describeBambooFilter,
   evaluateBambooFilter,
   parseBambooEvent,
   resolvePlanRoute,
@@ -243,9 +247,9 @@ export interface WebhookSpecCommon {
   autoSelectAgentModel?: boolean;
   promptTemplate: string;
   conversationMode: WebhookConversationMode;
-  overlapPolicy: 'skip' | 'allow';
+  overlapPolicy: WebhookOverlapPolicy;
+  directoryPolicy: WebhookDirectoryPolicy;
   maxConcurrent: number;
-  debounceSeconds: number;
   storePayloads: boolean;
 }
 
@@ -299,19 +303,57 @@ export interface DeliveryOutcome {
   duplicate: boolean;
 }
 
+/**
+ * Everything needed to start one delivery's run, decided at delivery time.
+ *
+ * Serialized into `webhook_deliveries.queued_spec_json` when a delivery has to
+ * wait. Deliberately *not* the facts it was derived from: re-deriving later
+ * would re-read a payload that may not have been stored and re-decide the
+ * agent, model and branch against a webhook whose configuration has since
+ * changed. What was decided is what runs.
+ *
+ * The per-issue conversation decision is the one thing *not* frozen — see
+ * `startRun`. Whether an issue's conversation is live, ended, or elsewhere is a
+ * fact about right now, so it is asked again at the moment the run starts.
+ */
+interface FrozenRun {
+  subjectKey: string;
+  prompt: string;
+  /** The routed project directory, before any worktree is made. */
+  cwd: string;
+  /**
+   * The effective agent, after any Jira-label override.
+   *
+   * Frozen with the rest, because a label can move a delivery *across* the
+   * coding/pocket boundary in either direction (PA-10) and re-resolving when a
+   * queued run finally starts could pick a different kind of agent than the one
+   * this delivery was accepted as.
+   */
+  agent: string;
+  /**
+   * Which kind of run, resolved before the queue sees it — the two take
+   * different spec types, and only one of them occupies a working tree.
+   */
+  spec:
+    | { kind: 'coding'; run: Omit<RunSpec, 'prompt'> }
+    | { kind: 'pocket'; run: Omit<PocketRunSpec, 'prompt'> };
+}
+
 export class WebhookService {
   private timer: NodeJS.Timeout | null = null;
   private readonly db: Db;
   private readonly executor: RunExecutor;
   /**
-   * Pending debounce timers, keyed by `webhookId:issueKey`.
+   * The directory queue (PA-11), and which tree each in-flight delivery holds.
    *
-   * In memory rather than in the database because a debounce is a *delay*, not a
-   * commitment: if the server restarts inside the window the right answer is to
-   * drop it, not to fire a burst of stale runs at boot for the same reason the
-   * cron scheduler refuses to catch up on a backlog.
+   * `heldKeys` is what makes the release exact: a delivery that was granted a
+   * tree has to hand back the *same* key when it settles, and asking the row
+   * for it later would break for a delivery that started without queueing at
+   * all (the common case, which still holds a tree while it runs).
    */
-  private readonly debounced = new Map<string, NodeJS.Timeout>();
+  private readonly queue: RunQueue;
+  private readonly heldKeys = new Map<string, string>();
+  private unsubscribeTreeIdle: (() => void) | null = null;
 
   constructor(private readonly opts: WebhookServiceOptions) {
     this.db = opts.db;
@@ -324,7 +366,57 @@ export class WebhookService {
       ...(opts.logger !== undefined ? { logger: opts.logger } : {}),
       ...(opts.now !== undefined ? { now: opts.now } : {}),
     });
+    this.queue = new RunQueue({
+      // Asked of the sessions, never cached — see `SessionManager.busyTreeRoots`.
+      busyTreeRoots: () => opts.sessions.busyTreeRoots(),
+      ...(opts.logger !== undefined ? { logger: opts.logger } : {}),
+    });
+    this.queue.register(this.queueStore);
   }
+
+  /**
+   * How the queue reads and writes `webhook_deliveries`.
+   *
+   * `RunQueue` itself never touches a table, exactly as `RunExecutor` never
+   * does; this is the webhook half of that split.
+   */
+  private readonly queueStore: QueueStore = {
+    pending: (): QueuedItem[] => {
+      const items: QueuedItem[] = [];
+      for (const row of readQueuedWebhookDeliveries(this.db)) {
+        // A row with no frozen spec cannot be run — it can only have come from
+        // a write that was interrupted between the status and the spec. Close
+        // it out rather than leaving it queued forever behind nothing.
+        if (row.queued_spec_json === null || row.queue_key === null) {
+          updateWebhookDelivery(this.db, row.id, {
+            status: 'failed',
+            error: 'This delivery was queued but its saved run was incomplete.',
+            finished_at: this.now(),
+          });
+          continue;
+        }
+        items.push({
+          id: row.id,
+          key: row.queue_key,
+          enqueuedAt: row.queued_at ?? row.received_at,
+          run: () => this.runQueued(row.id),
+        });
+      }
+      return items;
+    },
+    onQueued: (item, position): void => {
+      this.opts.logger?.info(
+        { deliveryId: item.id, key: item.key, position },
+        'webhook delivery queued behind another agent in the same working tree',
+      );
+    },
+    onDequeued: (item, reason): void => {
+      if (reason !== 'cancelled') return;
+      // `skipped` already means "never started, on purpose", which is exactly
+      // what a human cancelling a waiter is.
+      this.closeDeliveryById(item.id, 'skipped', 'Removed from the queue.');
+    },
+  };
 
   private now(): number {
     return this.opts.now?.() ?? Date.now();
@@ -345,6 +437,11 @@ export class WebhookService {
         'closed out webhook deliveries left open by a previous server',
       );
     }
+    // Only now is the liveness picture true, so only now can the queue decide
+    // what is free. `markStaleWebhookDeliveriesFailed` deliberately leaves
+    // `queued` rows alone (see `QUEUED_DELIVERY`), so this adopts them.
+    this.unsubscribeTreeIdle = this.opts.sessions.onTreeIdle(() => this.queue.pump());
+    this.queue.init();
     this.timer = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
     this.timer.unref?.();
   }
@@ -355,8 +452,12 @@ export class WebhookService {
       clearInterval(this.timer);
       this.timer = null;
     }
-    for (const timer of this.debounced.values()) clearTimeout(timer);
-    this.debounced.clear();
+    this.unsubscribeTreeIdle?.();
+    this.unsubscribeTreeIdle = null;
+    // Waiters stay `queued` on disk; only the in-memory queue is dropped, so
+    // the next boot adopts them rather than losing them.
+    this.queue.clear();
+    this.heldKeys.clear();
     this.executor.abandonAll('The server shut down while this delivery was in progress.');
   }
 
@@ -394,6 +495,10 @@ export class WebhookService {
           row.error ?? 'The session ended before the delivery completed.',
         );
       }
+      // The backstop for the queue. `onTreeIdle` is the fast path; this catches
+      // a tree freed by something that never emitted one — a session evicted by
+      // the sweep, a crashed run — so a queue can be late but never stuck.
+      this.queue.pump();
       pruneOldWebhookDeliveries(this.db, {
         keepRunsPerWebhook: KEEP_RUNS_PER_WEBHOOK,
         keepNoisePerWebhook: KEEP_NOISE_PER_WEBHOOK,
@@ -584,14 +689,56 @@ export class WebhookService {
       return accepted('skipped', deliveryId, reason);
     }
 
-    // 8. Render, then run.
+    // 8. Render the prompt, and resolve the whole run, *before* the directory
+    //    gate below. A queued delivery has to freeze both: `storePayloads` may
+    //    be false, so the payload that produced this prompt may not exist to
+    //    re-render from later, and re-resolving would re-decide the agent,
+    //    model and branch from data that has since moved on. What runs in an
+    //    hour is what was decided now.
     const prompt = this.renderPrompt(hook, deliveryId, payload, templateRouteKeyOf(type, facts));
+    const resolved = this.resolveAgent(hook, facts);
+    // A Pocket Agent run has no cwd, no worktree and no branch, so there is no
+    // coding spec to build and nothing for the directory gate below to key on.
+    const built =
+      resolved.plannerWorkspaceId !== null
+        ? null
+        : this.specFor(hook, facts, route.cwd);
+    const frozen: FrozenRun = {
+      subjectKey,
+      prompt: prompt.text,
+      cwd: route.cwd,
+      agent: resolved.agent,
+      spec:
+        built !== null
+          ? { kind: 'coding', run: built.spec }
+          : {
+              kind: 'pocket',
+              run: this.pocketSpecFor(
+                hook,
+                facts,
+                resolved.plannerWorkspaceId as string,
+                resolved.model,
+              ),
+            },
+    };
     updateWebhookDelivery(this.db, deliveryId, {
       rendered_prompt: prompt.text,
       payload_truncated: prompt.truncated ? 1 : 0,
     });
 
-    const started = await this.startRun(hook, deliveryId, facts, prompt.text, route.cwd);
+    // 9. The directory gate. Two agents in one working tree corrupt each
+    //    other's work, so unless this run gets a directory of its own, it waits
+    //    for whoever is mid-turn in that tree to conclude.
+    const queueKey = this.queueKeyFor(hook, frozen, built?.sharedTree ?? null);
+    if (queueKey !== null && hook.directory_policy === 'queue') {
+      const acquired = this.queue.tryAcquire(queueKey, deliveryId);
+      if (!acquired.granted) {
+        return this.parkDelivery(hook, deliveryId, queueKey, frozen, acquired.position);
+      }
+      this.heldKeys.set(deliveryId, queueKey);
+    }
+
+    const started = await this.startRun(hook, deliveryId, frozen);
     return {
       // PA-10: keyed on `started`, not on `sessionId !== null` — a Pocket Agent
       // run succeeds with no session at all, and the old test would have
@@ -607,6 +754,143 @@ export class WebhookService {
   }
 
   /**
+   * The working tree this delivery would occupy, or null if it gets its own.
+   *
+   * `per-issue` is checked first and wins: when an issue already has a
+   * conversation in a directory, *that* directory is where the run goes,
+   * whatever the worktree mode would otherwise have minted.
+   */
+  private queueKeyFor(
+    hook: WebhookRow,
+    frozen: FrozenRun,
+    sharedTree: string | null,
+  ): string | null {
+    // A Pocket Agent run occupies no working tree: its workspace is app-owned
+    // planner scratch space, it creates no worktree and no session, and this
+    // queue's whole notion of "busy" is a session mid-turn in a checkout. It
+    // therefore takes no key — the same rule as a run that mints its own
+    // directory. Two pocket runs in one planner workspace can still touch the
+    // same scratch files; serializing *that* would need occupancy derived from
+    // in-flight pocket runs rather than sessions, which is a separate change.
+    if (frozen.spec.kind === 'pocket') return null;
+    if (hook.conversation_mode === 'per-issue') {
+      const mapped = readWebhookIssueSession(this.db, hook.id, frozen.subjectKey);
+      if (mapped !== null && (mapped.cwd === frozen.cwd || isContained(frozen.cwd, mapped.cwd))) {
+        return treeRootOf(mapped.cwd);
+      }
+    }
+    return sharedTree;
+  }
+
+  /**
+   * Park a delivery behind whatever holds its working tree.
+   *
+   * Answers **2xx**, always. Jira Data Center does not retry and a 4xx only
+   * makes it retry harder, so "accepted, and it will run shortly" is the honest
+   * answer — the work is persisted and nothing has been lost. A full queue is
+   * recorded as `throttled`, matching what a concurrency cap already does.
+   */
+  private parkDelivery(
+    hook: WebhookRow,
+    deliveryId: string,
+    queueKey: string,
+    frozen: FrozenRun,
+    position: number,
+  ): DeliveryOutcome {
+    const queuedAt = this.now();
+    // Persisted before the enqueue so the row is never `queued` with no spec to
+    // run, which is the one state `pending()` cannot recover from.
+    updateWebhookDelivery(this.db, deliveryId, {
+      status: 'queued',
+      queue_key: queueKey,
+      queued_at: queuedAt,
+      queued_spec_json: JSON.stringify(frozen),
+      reason: `Waiting for another agent to finish in ${queueKey}.`,
+    });
+    const enqueued = this.queue.enqueue(
+      { id: deliveryId, key: queueKey, enqueuedAt: queuedAt, run: () => this.runQueued(deliveryId) },
+      this.queueStore,
+    );
+    if (!enqueued) {
+      const reason = 'The queue for this directory is full.';
+      this.closeDelivery(hook, deliveryId, 'throttled', reason);
+      updateWebhookDelivery(this.db, deliveryId, { queued_at: null, queued_spec_json: null });
+      return accepted('throttled', deliveryId, reason);
+    }
+    updateWebhook(this.db, hook.id, {
+      last_delivery_at: queuedAt,
+      last_delivery_status: 'queued',
+      last_error: null,
+    });
+    return {
+      status: 'queued',
+      httpStatus: 202,
+      deliveryId,
+      sessionId: null,
+      reason: `Queued at position ${position}, waiting for ${queueKey}.`,
+      duplicate: false,
+    };
+  }
+
+  /**
+   * Run a delivery the queue has just granted its working tree.
+   *
+   * Never throws: the queue has nobody to report an exception to, and a run
+   * that dies here must still release the tree it was handed.
+   */
+  private async runQueued(deliveryId: string): Promise<void> {
+    const row = readWebhookDelivery(this.db, deliveryId);
+    if (row === null) return;
+    const key = row.queue_key;
+    if (key !== null) this.heldKeys.set(deliveryId, key);
+
+    const release = (): void => {
+      if (key !== null) this.queue.release(key, deliveryId);
+      this.heldKeys.delete(deliveryId);
+    };
+
+    const hook = row.webhook_id !== null ? readWebhook(this.db, row.webhook_id) : null;
+    // A webhook deleted or switched off while this waited. The delivery is
+    // history now, not work: running it would apply a configuration nobody has
+    // any more, and `webhook_issue_sessions` has already CASCADEd away.
+    if (hook === null || hook.enabled !== 1) {
+      this.settleDelivery(
+        deliveryId,
+        row.webhook_id,
+        'failed',
+        hook === null
+          ? 'The webhook was deleted while this delivery was queued.'
+          : 'The webhook was switched off while this delivery was queued.',
+        row.received_at,
+      );
+      release();
+      return;
+    }
+
+    let frozen: FrozenRun;
+    try {
+      frozen = JSON.parse(row.queued_spec_json ?? '') as FrozenRun;
+    } catch {
+      this.settleDelivery(
+        deliveryId,
+        row.webhook_id,
+        'failed',
+        'This delivery was queued but its saved run could not be read.',
+        row.received_at,
+      );
+      release();
+      return;
+    }
+
+    updateWebhookDelivery(this.db, deliveryId, { status: 'starting', reason: null });
+    const started = await this.startRun(hook, deliveryId, frozen);
+    // `startRun` failing means no session was ever created, so nothing will
+    // ever settle it — the tree has to come back now or the queue stalls on a
+    // holder that does not exist.
+    if (started.sessionId === null) release();
+  }
+
+  /**
    * Start (or continue) the run for one delivery.
    *
    * `per-issue` has three cases, and the middle one is the reason the mapping
@@ -617,32 +901,31 @@ export class WebhookService {
   private async startRun(
     hook: WebhookRow,
     deliveryId: string,
-    facts: AnyEventFacts,
-    prompt: string,
-    cwd: string,
+    frozen: FrozenRun,
   ): Promise<{
     started: boolean;
     sessionId: string | null;
     plannerChatId?: string;
     error: string | null;
   }> {
-    const subjectKey = subjectKeyOf(hook.type as WebhookType, facts);
+    const { subjectKey, prompt, cwd } = frozen;
     const startedAt = this.now();
     updateWebhookDelivery(this.db, deliveryId, { started_at: startedAt });
     const sink = this.sinkFor(hook, deliveryId, subjectKey, startedAt, cwd);
 
-    const resolved = this.resolveAgent(hook, facts);
+    // The saved agent may have been a coding agent that a Jira label moved to a
+    // Pocket Agent (or the reverse), so the row's own `agent` is corrected to
+    // what actually ran rather than left describing something that did not.
+    // Read off the frozen run, not re-resolved: a queued delivery must run the
+    // agent it was accepted as, not whatever the labels would say now.
+    this.recordEffectiveAgent(deliveryId, frozen.agent);
 
     // PA-10: a Pocket Agent run. Checked before everything below because none
     // of it applies — the three `per-issue` session cases are about resuming a
     // *session*, and a pocket conversation is a chat that `startPocketAgent`
     // resumes itself from the mapping row.
-    if (resolved.plannerWorkspaceId !== null) {
-      // The saved agent may have been a coding agent that a Jira label moved
-      // to a Pocket Agent, so the row's own `agent` is corrected here rather
-      // than left describing something that did not run. (The same is true in
-      // reverse on the coding path; see `recordEffectiveAgent`.)
-      this.recordEffectiveAgent(deliveryId, resolved.agent);
+    if (frozen.spec.kind === 'pocket') {
+      const pocketSpec = frozen.spec.run;
       const mapped =
         hook.conversation_mode === 'per-issue'
           ? readWebhookIssueSession(this.db, hook.id, subjectKey)
@@ -650,7 +933,7 @@ export class WebhookService {
       const outcome = await this.executor.startPocketAgent(
         deliveryId,
         {
-          ...this.pocketSpecFor(hook, facts, resolved.plannerWorkspaceId, resolved.model),
+          ...pocketSpec,
           prompt,
           ...(mapped?.planner_chat_id ? { resumeChatId: mapped.planner_chat_id } : {}),
         },
@@ -663,7 +946,7 @@ export class WebhookService {
         : { started: false, sessionId: null, error: outcome.error };
     }
 
-    this.recordEffectiveAgent(deliveryId, resolved.agent);
+    const codingSpec = frozen.spec.run;
 
     if (hook.conversation_mode === 'per-issue') {
       const mapped = readWebhookIssueSession(this.db, hook.id, subjectKey);
@@ -693,7 +976,7 @@ export class WebhookService {
         const outcome = await this.executor.start(
           deliveryId,
           {
-            ...this.specFor(hook, facts, cwd),
+            ...codingSpec,
             reuseCwd: mapped.cwd,
             resume: { agentSessionId: mapped.agent_session_id },
             prompt,
@@ -706,11 +989,7 @@ export class WebhookService {
       }
     }
 
-    const outcome = await this.executor.start(
-      deliveryId,
-      { ...this.specFor(hook, facts, cwd), prompt },
-      sink,
-    );
+    const outcome = await this.executor.start(deliveryId, { ...codingSpec, prompt }, sink);
     return outcome.ok
       ? { started: true, sessionId: outcome.sessionId, error: null }
       : { started: false, sessionId: null, error: outcome.error };
@@ -771,6 +1050,11 @@ export class WebhookService {
         remember({ cwd });
       },
       onSessionStarted: (sessionId) => {
+        // The session is real now, so `busyTreeRoots` can hold the tree and the
+        // start-window grant must not: a grant outliving a session that dies
+        // unnoticed would block the tree with nothing left to release it.
+        const held = this.heldKeys.get(deliveryId);
+        if (held !== undefined) this.queue.started(held, deliveryId);
         updateWebhookDelivery(this.db, deliveryId, { status: 'running', session_id: sessionId });
         updateWebhook(this.db, hook.id, {
           last_delivery_at: startedAt,
@@ -819,6 +1103,10 @@ export class WebhookService {
       error,
       finished_at: this.now(),
     });
+    // The turn is over, so the working tree is free. Done here rather than only
+    // in the sink so *every* way a delivery can end releases it — including the
+    // sweep closing out a session that died without a `turn_complete`.
+    this.releaseTree(deliveryId);
     if (webhookId !== null) {
       updateWebhook(this.db, webhookId, {
         // A delivery that failed before its session existed never reached
@@ -828,6 +1116,107 @@ export class WebhookService {
         last_error: error,
       });
     }
+  }
+
+  /**
+   * Hand back the working tree a delivery was holding, if any.
+   *
+   * Keyed on what was actually granted rather than re-derived from the row: a
+   * delivery that ran without ever queueing still holds its tree, and a late
+   * release must not evict whatever took its place — `RunQueue.release` checks
+   * the holder before clearing.
+   */
+  private releaseTree(deliveryId: string): void {
+    const key = this.heldKeys.get(deliveryId);
+    if (key === undefined) return;
+    this.heldKeys.delete(deliveryId);
+    this.queue.release(key, deliveryId);
+  }
+
+  /** Close out a queued delivery by id, when the hook row may be gone. */
+  private closeDeliveryById(
+    deliveryId: string,
+    status: WebhookDeliveryStatus,
+    reason: string,
+  ): void {
+    const now = this.now();
+    updateWebhookDelivery(this.db, deliveryId, {
+      status,
+      reason,
+      finished_at: now,
+      queued_at: null,
+      queued_spec_json: null,
+    });
+  }
+
+  /**
+   * Take a queued delivery out of the queue, or move it to the front of its
+   * own line.
+   *
+   * `front` deliberately cannot jump the *tree* — it only reorders waiters, and
+   * still waits for the directory. Bypassing occupancy is the hazard this
+   * feature exists to prevent, so there is no route that does it for a webhook;
+   * the only override lives on a human's own prompt, where a human is present
+   * to own the consequence.
+   */
+  resolveQueued(deliveryId: string, action: 'cancel' | 'front'): boolean {
+    if (action === 'cancel') return this.queue.cancel(deliveryId);
+    return this.queue.moveToFront(deliveryId);
+  }
+
+  /**
+   * The shared queue, for the other producers.
+   *
+   * This service happens to construct it (it was the first caller, exactly as
+   * it was for `RunExecutor`), but it does not own the trees — a human's queued
+   * prompt has to be ordered against a delivery, so both go through this one
+   * instance.
+   */
+  get runQueue(): RunQueue {
+    return this.queue;
+  }
+
+  /** 1-based place in line, or null when this delivery is not waiting. */
+  queuePositionOf(deliveryId: string): number | null {
+    return this.queue.positionOf(deliveryId);
+  }
+
+  /**
+   * Everything waiting right now, keyed by the working tree it waits on.
+   *
+   * Read by `ProjectService` to draw the synthetic "Queued" group. Built from
+   * the live queue rather than from the rows, because a *position* is a fact
+   * about the other waiters and persisting it would mean rewriting every row
+   * each time one is granted.
+   */
+  queuedByTree(): Map<string, QueuedRunSummary[]> {
+    const byTree = new Map<string, QueuedRunSummary[]>();
+    for (const row of readQueuedWebhookDeliveries(this.db)) {
+      if (row.queue_key === null) continue;
+      const position = this.queue.positionOf(row.id);
+      // Not in the live queue means it is mid-transition (just granted, or
+      // adopted-and-failed); the row will settle on its own.
+      if (position === null) continue;
+      const list = byTree.get(row.queue_key) ?? [];
+      list.push({
+        id: row.id,
+        kind: 'webhook',
+        // The issue/plan key is what identifies the waiting work to a human;
+        // the webhook's own name is on the row beside it anyway.
+        title: row.issue_key ?? row.webhook_name,
+        webhookId: row.webhook_id,
+        webhookName: row.webhook_name,
+        sessionId: null,
+        agent: row.agent,
+        agentDisplayName: this.opts.agents.get(row.agent)?.displayName ?? row.agent,
+        position,
+        queuedAt: row.queued_at ?? row.received_at,
+        skipPermissionsEnabled: row.skip_permissions_enabled === 1,
+      });
+      byTree.set(row.queue_key, list);
+    }
+    for (const [, list] of byTree) list.sort((a, b) => a.position - b.position);
+    return byTree;
   }
 
   /** Close out a delivery that will never run, and stamp the webhook. */
@@ -914,16 +1303,41 @@ export class WebhookService {
     };
   }
 
-  private specFor(hook: WebhookRow, facts: AnyEventFacts, cwd: string): Omit<RunSpec, 'prompt'> {
+  /**
+   * Build the run, and say which working tree two deliveries could collide in.
+   *
+   * `sharedTree` is the queue's whole input, and it is null far more often than
+   * not. A run that mints its *own* directory has nothing to contend for, and
+   * keying it would serialize exactly the per-branch parallelism worktrees
+   * exist to provide:
+   *
+   * - `none` — runs directly in the routed project folder, so every delivery
+   *   of that route collides. Shared.
+   * - `new-branch` with a Jira component — `resolveComponentBranchName` is
+   *   deterministic (`feature/<component>`) and `reuseExisting` is on, so two
+   *   different issues in one component deliberately land in one worktree.
+   *   Shared, and the case the ticket was filed about.
+   * - `new-branch` without one — `mintBranchName` carries a timestamp and three
+   *   random bytes. Private.
+   * - `current-branch` — mints `wt/<base>-<rand>`; git refuses to check one
+   *   branch out twice anyway. Private.
+   */
+  private specFor(
+    hook: WebhookRow,
+    facts: AnyEventFacts,
+    cwd: string,
+  ): { spec: Omit<RunSpec, 'prompt'>; sharedTree: string | null } {
     const type = hook.type as WebhookType;
     const subjectKey = subjectKeyOf(type, facts);
     let worktreeBranchName = mintBranchName(`${hook.name}-${subjectKey}`, 'UTC', this.now(), 'webhook');
+    let branchIsShared = false;
 
     if (type === 'jira') {
       const jFacts = facts as JiraEventFacts;
       const componentBranch = resolveComponentBranchName(jFacts.component);
       if (componentBranch !== null) {
         worktreeBranchName = componentBranch;
+        branchIsShared = true;
       }
     }
 
@@ -941,16 +1355,26 @@ export class WebhookService {
 
     const { agent: effectiveAgent, model: effectiveModel } = this.resolveAgent(hook, facts);
 
+    const sharedTree =
+      hook.worktree_mode === 'none'
+        ? treeRootOf(cwd)
+        : hook.worktree_mode === 'new-branch' && branchIsShared
+          ? treeRootOf(worktreePathFor(cwd, worktreeBranchName))
+          : null;
+
     return {
-      cwd,
-      agent: effectiveAgent,
-      title,
-      skipPermissions: hook.skip_permissions === 1,
-      model: effectiveModel,
-      ...(hook.effort_set === 1 ? { effort: hook.effort } : {}),
-      worktree,
-      notStructuredMessage:
-        'A webhook run needs a structured session, but a terminal one was created.',
+      spec: {
+        cwd,
+        agent: effectiveAgent,
+        title,
+        skipPermissions: hook.skip_permissions === 1,
+        model: effectiveModel,
+        ...(hook.effort_set === 1 ? { effort: hook.effort } : {}),
+        worktree,
+        notStructuredMessage:
+          'A webhook run needs a structured session, but a terminal one was created.',
+      },
+      sharedTree,
     };
   }
 
@@ -1030,15 +1454,26 @@ export class WebhookService {
     return row.session_id === null || this.executor.isAlive(row.session_id);
   }
 
-  /** As `capReason`, this must exclude the delivery doing the asking. */
+  /**
+   * As `capReason`, this must exclude the delivery doing the asking.
+   *
+   * Queued rows count as active here, and deliberately *not* in `capReason`.
+   * The two questions differ: a cap asks "how much is running" (a waiter runs
+   * nothing and holds no session, so counting it would let a queue throttle
+   * itself), while the overlap policy asks "is there already work for this
+   * conversation" — and a `skip` webhook whose previous delivery is merely
+   * *waiting* must still skip, or a third delivery would jump the line and run
+   * ahead of the one already in it.
+   */
   private hasActiveRunFor(
     hook: WebhookRow,
     conversationKey: string,
     selfId: string,
   ): boolean {
-    const rows = readActiveWebhookDeliveries(this.db, hook.id).filter(
-      (d) => d.id !== selfId && this.isRunActive(d),
-    );
+    const rows = [
+      ...readActiveWebhookDeliveries(this.db, hook.id),
+      ...readQueuedWebhookDeliveries(this.db, hook.id),
+    ].filter((d) => d.id !== selfId && (d.status === 'queued' || this.isRunActive(d)));
     if (hook.conversation_mode !== 'per-issue') return rows.length > 0;
     return rows.some((d) => d.issue_key === conversationKey);
   }
@@ -1110,6 +1545,9 @@ export class WebhookService {
       planner_chat_id: null,
       cwd: null,
       error: null,
+      queue_key: null,
+      queued_at: null,
+      queued_spec_json: null,
     };
   }
 
@@ -1312,8 +1750,8 @@ export class WebhookService {
       prompt_template: spec.promptTemplate,
       conversation_mode: spec.conversationMode,
       overlap_policy: spec.overlapPolicy,
+      directory_policy: spec.directoryPolicy,
       max_concurrent: spec.maxConcurrent,
-      debounce_seconds: spec.debounceSeconds,
       store_payloads: spec.storePayloads ? 1 : 0,
       created_at: now,
       updated_at: now,
@@ -1369,8 +1807,8 @@ export class WebhookService {
         ? { conversation_mode: patch.conversationMode }
         : {}),
       ...(patch.overlapPolicy !== undefined ? { overlap_policy: patch.overlapPolicy } : {}),
+      ...(patch.directoryPolicy !== undefined ? { directory_policy: patch.directoryPolicy } : {}),
       ...(patch.maxConcurrent !== undefined ? { max_concurrent: patch.maxConcurrent } : {}),
-      ...(patch.debounceSeconds !== undefined ? { debounce_seconds: patch.debounceSeconds } : {}),
       ...(patch.storePayloads !== undefined
         ? { store_payloads: patch.storePayloads ? 1 : 0 }
         : {}),
@@ -1600,9 +2038,9 @@ export class WebhookService {
       autoSelectAgentModel: row.auto_select_agent_model === 1,
       promptTemplate: row.prompt_template,
       conversationMode: row.conversation_mode as WebhookConversationMode,
-      overlapPolicy: row.overlap_policy as 'skip' | 'allow',
+      overlapPolicy: row.overlap_policy as WebhookOverlapPolicy,
+      directoryPolicy: row.directory_policy as WebhookDirectoryPolicy,
       maxConcurrent: row.max_concurrent,
-      debounceSeconds: row.debounce_seconds,
       storePayloads: row.store_payloads === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -1639,6 +2077,9 @@ export class WebhookService {
       plannerChatId: row.planner_chat_id,
       cwd: row.cwd,
       error: row.error,
+      queuedAt: row.queued_at,
+      queueKey: row.queue_key,
+      queuePosition: row.status === 'queued' ? this.queue.positionOf(row.id) : null,
     };
   }
 
@@ -1723,44 +2164,12 @@ export class WebhookService {
       ran: sum('starting', 'running', 'succeeded', 'failed'),
       filtered: sum('filtered', 'duplicate', 'throttled', 'skipped'),
       rejected: sum('rejected', 'invalid'),
+      // Its own bucket, in neither `ran` nor `filtered`: a waiter has not run
+      // and was not turned away.
+      queued: sum('queued'),
     };
   }
 
-  /**
-   * For the home screen's project tree, keyed by cwd like `CronService`'s.
-   *
-   * A webhook can route to more than one directory now, so it is listed under
-   * every one of them — `row.cwd` plus every mapped `cwd`, deduplicated — not
-   * just its own. A directory that is only ever reached through the project
-   * map is exactly the "configured but maybe never fired" case CLAUDE.md
-   * already argues a webhook row must not hide.
-   */
-  summariesByCwd(): Map<string, WebhookSummary[]> {
-    const out = new Map<string, WebhookSummary[]>();
-    for (const row of readWebhooks(this.db)) {
-      const type = row.type as WebhookType;
-      const summary: WebhookSummary = {
-        id: row.id,
-        name: row.name,
-        enabled: row.enabled === 1,
-        type,
-        triggerLabel:
-          type === 'bamboo'
-            ? describeBambooFilter(this.filterFor(row) as BambooWebhookFilter)
-            : describeJiraFilter(this.filterFor(row) as JiraWebhookFilter),
-        lastDeliveryAt: row.last_delivery_at,
-        lastDeliveryStatus: (row.last_delivery_status as WebhookDeliveryStatus | null) ?? null,
-        skipPermissionsEnabled: row.skip_permissions === 1,
-      };
-      const cwds = new Set([row.cwd, ...this.routeMapFor(row).map((e) => e.cwd)]);
-      for (const cwd of cwds) {
-        const list = out.get(cwd) ?? [];
-        list.push(summary);
-        out.set(cwd, list);
-      }
-    }
-    return out;
-  }
 }
 
 // ---------------------------------------------------------------------------

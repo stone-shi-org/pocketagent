@@ -8,6 +8,7 @@ import type {
   CronRunStatus,
   HostInfo,
   ProjectInfo,
+  QueuedRunSummary,
   SessionInfo,
   WebhookDeliveryStatus,
   WebhookSummary,
@@ -18,6 +19,9 @@ import type { ConversationStore } from '../conversations/index.js';
 import { describeJiraFilter } from '../webhooks/jira.js';
 import { describeBambooFilter } from '../webhooks/bamboo.js';
 import { GitStatusTracker } from '../git/status.js';
+// `findWorktreeRoot` lives in a pure path module rather than here, so the run
+// queue can roll a cwd up to its working tree without importing this service.
+import { findWorktreeRoot } from '../git/worktree-paths.js';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
 import {
   AUTO_HIDDEN_DIRS,
@@ -60,6 +64,16 @@ export interface ProjectServiceOptions {
   getCodeServerBaseUrl?: () => string | null;
   /** Overridable in tests, so a scenario can force a fresh `git status` between two `list()` calls. */
   gitStatusTtlMs?: number;
+  /**
+   * Agent work waiting on a working tree, keyed by that tree (PA-11).
+   *
+   * A getter composed by the caller rather than a service handed in, because
+   * two independent producers contribute — inbound webhook deliveries and a
+   * human's own queued prompts — and this service has no business knowing
+   * either exists. Optional: a queue is a strict addition to the tree, so every
+   * existing construction keeps working and simply reports none.
+   */
+  getQueuedWork?: () => Map<string, QueuedRunSummary[]>;
 }
 
 export class ProjectService {
@@ -71,6 +85,7 @@ export class ProjectService {
   private readonly conversationLimit: number;
   private readonly getCodeServerBaseUrl: () => string | null;
   private readonly gitStatus: GitStatusTracker;
+  private readonly getQueuedWork: () => Map<string, QueuedRunSummary[]>;
 
   constructor(options: ProjectServiceOptions) {
     this.workspaces = options.workspaces;
@@ -81,6 +96,7 @@ export class ProjectService {
     this.conversationLimit = options.conversationLimit ?? 60;
     this.getCodeServerBaseUrl = options.getCodeServerBaseUrl ?? (() => null);
     this.gitStatus = new GitStatusTracker(options.gitStatusTtlMs);
+    this.getQueuedWork = options.getQueuedWork ?? ((): Map<string, QueuedRunSummary[]> => new Map());
   }
 
   /**
@@ -238,6 +254,16 @@ export class ProjectService {
       if (!byCwd.has(cwd)) byCwd.set(cwd, []);
     }
 
+    // And every working tree something is queued on (PA-11). A queue can form
+    // on a per-component worktree whose first delivery is still running, so
+    // that tree may have no chat of its own yet — and a queue nobody can see is
+    // indistinguishable from work that was silently dropped, which is precisely
+    // what this feature exists to avoid.
+    const queuedByTree = this.getQueuedWork();
+    for (const cwd of queuedByTree.keys()) {
+      if (!byCwd.has(cwd)) byCwd.set(cwd, []);
+    }
+
     for (const conversation of conversations) {
       if (resumedFrom.has(conversation.id)) continue;
       // Removed from the list by the user. The transcript is still on disk and
@@ -287,9 +313,11 @@ export class ProjectService {
           isWorkspace: true,
           chats: shellChats,
           // The virtual Shell project is not a real directory, so no job and no
-          // webhook can ever be configured against it.
+          // webhook can ever be configured against it — and nothing can be
+          // queued on a tree that does not exist.
           cronJobs: [],
           webhooks: [],
+          queued: [],
           worktrees: [],
           mainRepoCwd: null,
         });
@@ -311,6 +339,9 @@ export class ProjectService {
           chats: [],
           cronJobs: [],
           webhooks: virtualWebhooks,
+          // A routed webhook's queue belongs to the directory it is waiting on,
+          // which is a real one — never to this synthetic grouping row.
+          queued: [],
           worktrees: [],
           mainRepoCwd: null,
         });
@@ -371,6 +402,7 @@ export class ProjectService {
         chats,
         cronJobs: cronByCwd.get(cwd) ?? [],
         webhooks: webhookByCwd.get(cwd) ?? [],
+        queued: queuedByTree.get(cwd) ?? [],
         worktrees: [],
         mainRepoCwd,
         ...(!exists ? { isDeleted: true } : {}),
@@ -648,20 +680,6 @@ export async function readGitBranch(dir: string): Promise<string | null> {
   return branchMatch?.[1]?.trim() || null;
 }
 
-/**
- * If `dir` is inside a worktree (`<main>/.worktrees/<slug>/...`), returns the
- * worktree root `<main>/.worktrees/<slug>`.
- */
-export function findWorktreeRoot(dir: string): string | null {
-  const marker = `${path.sep}.worktrees${path.sep}`;
-  const idx = dir.indexOf(marker);
-  if (idx === -1) return null;
-  const mainPart = dir.slice(0, idx);
-  const after = dir.slice(idx + marker.length);
-  const slug = after.split(path.sep)[0];
-  if (!slug) return null;
-  return path.join(mainPart, '.worktrees', slug);
-}
 
 /**
  * The main checkout's working directory, when `dir` is a linked git worktree

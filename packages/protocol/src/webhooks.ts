@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { EffortLevel } from './agent-events.js';
 import { LIMITS } from './limits.js';
-import { CronOverlapPolicy, CronWorktreeMode } from './cron.js';
+import { CronWorktreeMode } from './cron.js';
 
 /**
  * Inbound webhooks: an outside system starting agent work.
@@ -35,12 +35,49 @@ export const WebhookConversationMode = z.enum(['per-delivery', 'per-issue']);
 export type WebhookConversationMode = z.infer<typeof WebhookConversationMode>;
 
 /**
+ * What to do when another agent is mid-turn in the working tree a delivery
+ * would run in (PA-11).
+ *
+ * Deliberately separate from `overlapPolicy`, which asks a different question:
+ * that one is scoped to *this webhook's own conversation*, while a directory
+ * can be occupied by another webhook entirely, by a scheduled job, or by a
+ * human typing in a chat. One field could not express both, and folding them
+ * would silently change what `skip` means.
+ *
+ * `queue` holds the delivery until the tree is free — it loses no work, it only
+ * delays it. `allow` is the old behaviour, which was never a considered choice:
+ * before this existed, nothing checked at all. The editor warns on `allow`
+ * rather than refusing it, since two read-only runs in one directory is a
+ * legitimate thing to want.
+ */
+export const WebhookDirectoryPolicy = z.enum(['queue', 'allow']);
+export type WebhookDirectoryPolicy = z.infer<typeof WebhookDirectoryPolicy>;
+
+/**
+ * As `CronOverlapPolicy`, plus `queue`.
+ *
+ * Webhook-only: queueing a *cron* firing is a different question, tangled up
+ * with the scheduler's deliberate refusal to catch up on a backlog (a week
+ * offline would otherwise queue 168 hourly runs), so `CronOverlapPolicy` is
+ * left alone. A superset, so every stored value still parses.
+ */
+export const WebhookOverlapPolicy = z.enum(['skip', 'allow', 'queue']);
+export type WebhookOverlapPolicy = z.infer<typeof WebhookOverlapPolicy>;
+
+/**
  * More statuses than a cron run has, because most deliveries never become runs.
  *
  * `rejected` auth failed · `invalid` authentic but unusable · `duplicate` body
  * already seen · `filtered` matched no filter · `throttled` over a concurrency
- * cap · `skipped` refused by the overlap policy · then the run's own four,
- * identical to `CronRunStatus`.
+ * cap or a full queue · `skipped` refused by the overlap policy, or cancelled
+ * out of the queue by a human · `queued` waiting for another agent to finish in
+ * the same working tree · then the run's own four, identical to `CronRunStatus`.
+ *
+ * `queued` is the only non-terminal status that is not also *running*: it holds
+ * no session, so it counts against neither the concurrency caps nor the
+ * "force-fail whatever a dead server left open" pass at boot. See
+ * `QUEUED_DELIVERY` in the server's `db/index.ts` for the three predicates that
+ * had to learn about it.
  */
 export const WebhookDeliveryStatus = z.enum([
   'rejected',
@@ -49,6 +86,7 @@ export const WebhookDeliveryStatus = z.enum([
   'filtered',
   'throttled',
   'skipped',
+  'queued',
   'starting',
   'running',
   'succeeded',
@@ -324,15 +362,10 @@ const WebhookFields = z
     autoSelectAgentModel: z.boolean(),
     promptTemplate: z.string().min(1).max(LIMITS.maxInputChars),
     conversationMode: WebhookConversationMode,
-    overlapPolicy: CronOverlapPolicy,
+    overlapPolicy: WebhookOverlapPolicy,
+    directoryPolicy: WebhookDirectoryPolicy,
     /** Runs this webhook may have going at once. The global cap still applies. */
     maxConcurrent: z.number().int().min(1).max(10),
-    /**
-     * Collapse a burst on one issue into a single run. Only meaningful for
-     * `per-issue`, where a chatty automation rule would otherwise append turn
-     * after turn to one conversation, each paying for the whole history.
-     */
-    debounceSeconds: z.number().int().min(0).max(3600),
     /** Keep raw payloads for debugging. Bounded and scrubbed regardless. */
     storePayloads: z.boolean(),
   })
@@ -347,9 +380,9 @@ export const CreateWebhookRequest = WebhookFields.extend({
   authMode: WebhookAuthMode.default('hmac'),
   worktreeMode: CronWorktreeMode.default('none'),
   conversationMode: WebhookConversationMode.default('per-delivery'),
-  overlapPolicy: CronOverlapPolicy.default('skip'),
+  overlapPolicy: WebhookOverlapPolicy.default('skip'),
+  directoryPolicy: WebhookDirectoryPolicy.default('queue'),
   maxConcurrent: z.number().int().min(1).max(10).default(2),
-  debounceSeconds: z.number().int().min(0).max(3600).default(10),
   storePayloads: z.boolean().default(true),
   /**
    * No `.default()` here, unlike before this field had a second provider:
@@ -392,6 +425,8 @@ export const WebhookDeliveryCounts = z.object({
   ran: z.number().int(),
   filtered: z.number().int(),
   rejected: z.number().int(),
+  /** Waiting on a working tree right now — work that has not happened yet. */
+  queued: z.number().int(),
 });
 export type WebhookDeliveryCounts = z.infer<typeof WebhookDeliveryCounts>;
 
@@ -433,9 +468,9 @@ export const Webhook = z.object({
   autoSelectAgentModel: z.boolean(),
   promptTemplate: z.string(),
   conversationMode: WebhookConversationMode,
-  overlapPolicy: CronOverlapPolicy,
+  overlapPolicy: WebhookOverlapPolicy,
+  directoryPolicy: WebhookDirectoryPolicy,
   maxConcurrent: z.number().int(),
-  debounceSeconds: z.number().int(),
   storePayloads: z.boolean(),
   createdAt: z.number().int(),
   updatedAt: z.number().int(),
@@ -513,6 +548,18 @@ export const WebhookDelivery = z.object({
   plannerChatId: z.string().nullable(),
   cwd: z.string().nullable(),
   error: z.string().nullable(),
+  /** When this delivery was parked on a working tree. Null if it never queued. */
+  queuedAt: z.number().int().nullable(),
+  /**
+   * 1-based place in line while `status` is `queued`, else null.
+   *
+   * Derived from the live queue rather than stored: a position is a fact about
+   * the other rows, so persisting it would mean rewriting every waiter's row
+   * each time one is granted or cancelled.
+   */
+  queuePosition: z.number().int().nullable(),
+  /** The working tree this delivery is waiting on. Null if it never queued. */
+  queueKey: z.string().nullable(),
 });
 export type WebhookDelivery = z.infer<typeof WebhookDelivery>;
 

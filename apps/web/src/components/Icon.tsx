@@ -34,6 +34,7 @@ export type IconName =
   | 'minimize'
   | 'shield'
   | 'clock'
+  | 'queue'
   | 'webhook'
   | 'webhook-jira'
   | 'webhook-bamboo'
@@ -234,6 +235,18 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <circle cx="12" cy="12" r="8.5" />
       <path d="M12 7.5V12l3 2" />
+    </>
+  ),
+  // Three stacked bars with the top one held back: a line of things waiting
+  // their turn. Deliberately not `clock` (already the scheduled-job glyph, and
+  // a queue is not a schedule) and not an hourglass, which reads as "slow"
+  // rather than "next".
+  queue: (
+    <>
+      <path d="M4 7.5h11" />
+      <path d="M4 12h16" />
+      <path d="M4 16.5h16" />
+      <circle cx="19" cy="7.5" r="1.6" />
     </>
   ),
   // Three nodes joined by two arcs: one event fanning out along a path.

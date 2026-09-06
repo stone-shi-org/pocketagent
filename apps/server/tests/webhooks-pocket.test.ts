@@ -544,4 +544,31 @@ describe('the Jira label can name a Pocket Agent', () => {
     const chats = (await get(t, `/api/planner/chats?workspaceId=${ws.id}`)).json().chats;
     expect(chats).toHaveLength(1);
   });
+
+  it('never queues on a directory, because it occupies none (PA-11)', async () => {
+    // The directory queue serializes deliveries that would share a *working
+    // tree*. A Pocket Agent run has no cwd, no worktree and no session — its
+    // workspace is app-owned planner scratch space — so it must take no queue
+    // key at all. Keying it on the webhook's configured `cwd` (which is what a
+    // coding delivery with `worktreeMode: 'none'` uses) would make two pocket
+    // deliveries serialize behind a directory neither of them ever touches.
+    const fetchImpl = vi.fn().mockImplementation(() => textReply('ok'));
+    const { hookId, slug, secret } = await setupPocketWebhook(fetchImpl, {
+      // `allow` so the *conversation* gate cannot be what lets these through:
+      // the only thing under test is the directory gate.
+      overlapPolicy: 'allow',
+      maxConcurrent: 5,
+    });
+
+    await deliver(t, slug, secret, payloadFor({ timestamp: Date.now() }));
+    await deliver(t, slug, secret, payloadFor({ timestamp: Date.now() + 1 }));
+
+    const deliveries = (await get(t, `/api/webhooks/${hookId}/deliveries`)).json()
+      .deliveries as Record<string, unknown>[];
+    expect(deliveries).toHaveLength(2);
+    for (const d of deliveries) {
+      expect(d.status).not.toBe('queued');
+      expect(d.queueKey).toBeNull();
+    }
+  });
 });

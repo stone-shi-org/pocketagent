@@ -275,6 +275,86 @@ next event on that issue starts a fresh conversation rather than continuing one.
 inherits none of the worktree problem (a planner workspace is app-owned scratch space, reused
 rather than multiplied) but does inherit the cache one: a pruned row starts a fresh chat.
 
+### The directory queue (PA-11)
+
+`runs/queue.ts` (`RunQueue`) serializes work that would otherwise share one **working tree**.
+Two agents editing one checkout corrupt each other — a hazard `CronOverlapPolicy`'s own doc
+comment recorded long before anything enforced it, and one the webhook path hits for real: a
+Jira **component** maps to a *fixed* branch (`feature/<component>`), so two different issues in
+one component deliberately resolve to the same worktree, and `worktreeMode: 'none'` runs every
+delivery straight in the project folder.
+
+It lives in `runs/` beside the executor, and for the same reason: **the directory does not
+belong to the webhook.** A cron job, the planner's `send_instruction` and a human typing in a
+chat all start work in the same trees, so a queue owned by one trigger could not see the others
+— and observing every session is the entire point. Producers register a `QueueStore` (a
+`RunSink`-shaped split: `WebhookService` writes `webhook_deliveries`, `PromptQueueService`
+writes `session_prompt_queue`, and `RunQueue` never touches a table). One instance is shared;
+`WebhookService` happens to construct it and exposes it as `runQueue`.
+
+**The key is the working tree, and it is not a containment test.** `treeRootOf`
+(`git/worktree-paths.ts`) rolls a cwd up to its worktree root, so a session in
+`<tree>/apps/server` occupies `<tree>` — but a run in `<project>` does *not* block one in
+`<project>/.worktrees/x`. Those are separate checkouts, and blocking across them would
+serialize the very parallelism worktrees exist to provide. Same tree, or no conflict. Runs that
+mint their own directory (`current-branch`, or `new-branch` with a per-run minted name) get **no
+key at all** and never queue. `worktreePathFor` is exported and used by both
+`WorktreeService.create` and the key computation, because the queue names a directory before it
+exists and two copies of that formula would eventually disagree.
+
+**Occupancy is derived, never leased.** A tree is busy because a live structured session rooted
+in it is mid-turn (`SessionManager.busyTreeRoots`, from `busySince`), not because a row says so.
+Three things follow: a crash cannot strand a lock (after a restart nothing is mid-turn, so every
+tree is free); "concludes" means exactly `turn_complete`, so a session that is alive but waiting
+for you is *not* a holder — which is the boundary the ticket asked for; and the start-window
+grant that `tryAcquire` records is handed back by `RunQueue.started` the moment a session
+exists, because a grant that outlived a session killed unnoticed would block the tree with
+nothing left to release it. `tryAcquire` is synchronous from check to claim and **must stay
+that way** — an `await` between the two hands one tree to two runs.
+
+**There is no timeout, anywhere.** A run parked on an unanswered approval is genuinely still
+working, so it keeps its tree and the queue waits indefinitely. That is the standing
+no-decay-into-allow rule, not a bug: the answer is that every waiter is visible in the project
+tree and individually cancellable. Depth caps (`DEFAULT_MAX_QUEUED_PER_KEY`,
+`DEFAULT_MAX_QUEUED_TOTAL`) bound a bulk-edit burst; the pump runs on a session going idle
+(`SessionManager.onTreeIdle`) with the existing 30s webhook sweep as the guaranteed backstop, so
+a queue can be late but never stuck.
+
+`WebhookDeliveryStatus` gains `queued`, and it is a **third class** of row — in neither
+`OPEN_DELIVERY` nor `NOISE_STATUSES`. Every consumer of those two had to be checked: a waiter
+holds no session so it must not count against `capReason` (a queue that throttles itself), must
+not be force-failed by `markStaleWebhookDeliveriesFailed` at boot, and must never be pruned
+(that would discard work already answered 202) — but it *must* be visible to
+`hasActiveRunFor`, or a third delivery jumps the line. `queued_spec_json` freezes the fully
+resolved run, prompt included, because `storePayloads` may be false and re-resolving later would
+re-decide the agent, model and branch. Per-webhook `directoryPolicy` (`queue` | `allow`)
+governs the gate, defaulting to `queue` **and backfilled to it for existing webhooks** — a
+deliberate behaviour change approved on the ticket, on the grounds that the previous behaviour
+was the absence of any check rather than a considered `allow`, and that queueing loses nothing.
+It is orthogonal to `overlapPolicy` (which gained `queue` as a third value, webhook-only): that
+one is scoped to a webhook's own conversation, this one to a directory anything can be working
+in. The gate order is `filter → route → caps → overlap → render → directory → run`.
+
+**A human's own prompt queues too, under stricter rules.** `sessions/prompt-queue.ts`
+intercepts `case 'prompt'` in `ws/index.ts`: if a *different* session is mid-turn in the same
+tree, the message is persisted, the client is told (`prompt_queued`, replayed on attach beside
+`pendingPermissions`), and it goes in when the tree frees. It must never be silent, never be
+lost, and always be escapable — `force` sends it anyway and is the **only** override of tree
+occupancy in the app, deliberately available only here, where a person is present to own the
+consequence. A webhook's "run next" merely reorders waiters. A full queue *sends* a human's
+message rather than dropping it: the cap exists to bound a machine-generated burst, and a person
+pressing send is not that. An attached image is not persisted — `ws/index.ts` has already
+written it into the workspace and named it in the prompt text, and a 7 MB base64 row does not
+belong in a database that otherwise holds metadata.
+
+`ProjectInfo.queued` surfaces waiters as a synthetic, collapsible **"Queued"** group in the
+project tree, modelled on `ProjectList`'s existing "Deleted worktrees" group rather than on a
+`ProjectInfo` — a waiter is not a directory and has no chats. It is filed against the tree that
+is actually blocked, so a queue behind a component worktree appears under that worktree's row,
+and it vanishes on its own when the array empties. `debounceSeconds` was **removed** in the same
+work: it was stored, editable and displayed, and delayed nothing whatsoever (its timer map was
+only ever cleared, never populated), and the queue now covers the burst it was meant to smooth.
+
 ### Pocket Agent (PA-6)
 
 A second chat surface, in parallel to project chats: **Pocket Agent** (user-facing name;
@@ -705,6 +785,38 @@ These are load-bearing. Several were bugs first.
   leave the tool looking individually approved for everyone. And it is disclosed persistently:
   `PlannerChatPage` renders a standing callout on every visit, per the first invariant's "not
   just at the moment it was created".
+- **One agent per working tree, and occupancy is derived rather than leased.** `RunQueue`
+  (`runs/queue.ts`) keys on `treeRootOf` — the working tree, so a cwd below a tree root rolls up
+  to it, and a run in `<project>` deliberately does **not** conflict with one in
+  `<project>/.worktrees/x` (separate checkouts; blocking across them would serialize the
+  parallelism worktrees exist for). A tree is busy because a live structured session in it is
+  mid-turn (`busySince`), never because a row says so, so a crash cannot strand a lock and
+  "concludes" means exactly `turn_complete` — a session that is alive but waiting for you holds
+  nothing. The only stated claim is the start-window grant, handed back by `RunQueue.started` as
+  soon as a session exists; keeping it would block a tree whose session died unnoticed.
+  `tryAcquire` is synchronous from check to claim and must stay so — an `await` between the two
+  gives one tree to two runs. Runs that mint their own directory take no key and never queue, and
+  neither does a **Pocket Agent** delivery (PA-10): it has no cwd, no worktree and no session, so
+  there is no checkout to contend for and nothing this queue's derived occupancy could observe.
+  Two pocket runs in one planner workspace can still touch the same scratch files; serializing
+  that would need occupancy derived from in-flight pocket runs rather than sessions.
+- **A queued delivery is a third class of row, in neither `OPEN_DELIVERY` nor
+  `NOISE_STATUSES`.** It holds no session, so counting it in `capReason` makes a queue throttle
+  itself, force-failing it in `markStaleWebhookDeliveriesFailed` destroys work already answered
+  202, and pruning it discards that work silently — but it *must* be visible to
+  `hasActiveRunFor`, or a third delivery jumps the line. All four are asserted in
+  `apps/server/tests/webhooks.test.ts`. Queueing answers **2xx immediately** and never holds the
+  connection: Jira Data Center does not retry usefully, and a held connection is a timeout in
+  disguise.
+- **The queue has no timeout, and exactly one override.** A run parked on an unanswered approval
+  is genuinely still working, so it keeps its tree and waiters wait indefinitely — the same
+  no-decay rule the approval invariants state, which is why every waiter is visible in the
+  project tree and individually cancellable. A webhook's "run next" only reorders waiters;
+  the sole bypass of tree occupancy anywhere is `force` on a *human's own* queued prompt
+  (`sessions/prompt-queue.ts`), available only where a person is present to own it. A queued
+  human prompt must never be silent (`prompt_queued`, replayed on attach), never be lost (it is
+  persisted), and a full queue *sends* it rather than dropping it — the depth cap exists to bound
+  a machine burst, and a person pressing send is not that.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.

@@ -15,6 +15,7 @@ import type { UsageService } from './usage/index.js';
 import type { WorktreeService } from './git/worktree.js';
 import type { CronService } from './cron/index.js';
 import type { WebhookService } from './webhooks/index.js';
+import type { PromptQueueService } from './sessions/prompt-queue.js';
 import type { PlannerWorkspaceRegistry } from './planner/workspaces.js';
 import type { PlannerChatService } from './planner/chats.js';
 
@@ -24,6 +25,8 @@ export interface PocketContext {
   sessions: SessionManager;
   cron: CronService;
   webhooks: WebhookService;
+  /** PA-11: a human's follow-up prompts waiting on a busy working tree. */
+  promptQueue: PromptQueueService;
   workspaces: WorkspaceRegistry;
   /** PA-6 phase 1: the planner's own app-owned scratch/skills directories. */
   plannerWorkspaces: PlannerWorkspaceRegistry;

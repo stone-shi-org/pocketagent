@@ -458,6 +458,18 @@ export const api = {
       `/api/webhooks/${encodeURIComponent(id)}/deliveries/${encodeURIComponent(deliveryId)}`,
     ),
 
+  /**
+   * Act on a delivery waiting for a working tree (PA-11).
+   *
+   * `front` reorders waiters; it deliberately cannot start one while another
+   * agent holds the directory — that is the corruption the queue prevents.
+   */
+  resolveQueuedDelivery: (id: string, deliveryId: string, action: 'cancel' | 'front') =>
+    request<{ ok: true }>(
+      `/api/webhooks/${encodeURIComponent(id)}/deliveries/${encodeURIComponent(deliveryId)}/queue`,
+      { method: 'POST', body: JSON.stringify({ action }) },
+    ),
+
   clearWebhookDeliveries: (id: string) =>
     request<{ ok: true; removed: number }>(
       `/api/webhooks/${encodeURIComponent(id)}/deliveries`,

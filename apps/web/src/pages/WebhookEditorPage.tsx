@@ -8,6 +8,8 @@ import type {
   ProjectInfo,
   Webhook,
   WebhookConversationMode,
+  WebhookDirectoryPolicy,
+  WebhookOverlapPolicy,
   WebhookDelivery,
   WebhookDeliveryCounts,
   WebhookType,
@@ -54,7 +56,13 @@ const EVENT_CHOICES = [
   { value: 'comment_updated', label: 'comment edited' },
 ];
 
-/** Statuses that mean "this delivery never became a run". */
+/**
+ * Statuses that mean "this delivery never became a run".
+ *
+ * `queued` is deliberately absent: a waiting delivery is going to run, so
+ * hiding it behind "show the ones that did not run" would bury exactly the
+ * deliveries someone is looking for when they ask why nothing has happened yet.
+ */
 const DID_NOT_RUN = new Set(['filtered', 'duplicate', 'throttled', 'skipped', 'rejected', 'invalid']);
 
 /** The three build states Bamboo can report. */
@@ -159,9 +167,11 @@ export function WebhookEditorPage({
   const [skipPermissions, setSkipPermissions] = useState(false);
   const [autoSelectAgentModel, setAutoSelectAgentModel] = useState(false);
   const [conversationMode, setConversationMode] = useState<WebhookConversationMode>('per-delivery');
-  const [overlapPolicy, setOverlapPolicy] = useState<'skip' | 'allow'>('skip');
+  const [overlapPolicy, setOverlapPolicy] = useState<WebhookOverlapPolicy>('skip');
+  // PA-11. Defaults to `queue`, matching the server: two agents in one working
+  // tree corrupt each other, and waiting loses nothing.
+  const [directoryPolicy, setDirectoryPolicy] = useState<WebhookDirectoryPolicy>('queue');
   const [maxConcurrent, setMaxConcurrent] = useState(2);
-  const [debounceSeconds, setDebounceSeconds] = useState(10);
   const [storePayloads, setStorePayloads] = useState(true);
 
   // ---- The filter -----------------------------------------------------------
@@ -281,8 +291,8 @@ export function WebhookEditorPage({
       setAutoSelectAgentModel(hook.autoSelectAgentModel ?? false);
       setConversationMode(hook.conversationMode);
       setOverlapPolicy(hook.overlapPolicy);
+      setDirectoryPolicy(hook.directoryPolicy);
       setMaxConcurrent(hook.maxConcurrent);
-      setDebounceSeconds(hook.debounceSeconds);
       setStorePayloads(hook.storePayloads);
       setDeliveryPath(hook.deliveryPath);
 
@@ -701,8 +711,8 @@ export function WebhookEditorPage({
       worktreeMode: isPocketAgent ? ('none' as CronWorktreeMode) : worktreeMode,
       conversationMode,
       overlapPolicy,
+      directoryPolicy,
       maxConcurrent,
-      debounceSeconds,
       storePayloads,
       skipPermissions,
       autoSelectAgentModel,
@@ -1586,28 +1596,45 @@ export function WebhookEditorPage({
             }
             onChange={(v) => setConversationMode(v as WebhookConversationMode)}
           />
-          {conversationMode === 'per-issue' && (
-            <NumberRow
-              label="Wait before starting"
-              unit="seconds"
-              value={debounceSeconds}
-              min={0}
-              max={3600}
-              busy={busy}
-              help="Collapses a burst of edits on one issue into a single run. A bulk edit otherwise appends one turn per changed field."
-              onChange={setDebounceSeconds}
-            />
-          )}
           <SelectRowNative
             busy={busy}
             label="If a run is already going"
             value={overlapPolicy}
             options={[
               { value: 'skip', label: 'Skip the new delivery' },
+              { value: 'queue', label: 'Queue it' },
               { value: 'allow', label: 'Start it anyway' },
             ]}
-            onChange={(v) => setOverlapPolicy(v as 'skip' | 'allow')}
+            help={
+              overlapPolicy === 'skip'
+                ? `A second event for the same ${conversationMode === 'per-issue' ? (type === 'bamboo' ? 'plan' : 'issue') : 'webhook'} is dropped while the first is still working.`
+                : overlapPolicy === 'queue'
+                  ? 'The second event waits for the first to finish instead of being dropped.'
+                  : 'Both run at once. Only sane with a separate working copy per run — otherwise use the directory rule below.'
+            }
+            onChange={(v) => setOverlapPolicy(v as WebhookOverlapPolicy)}
           />
+          <SelectRowNative
+            busy={busy}
+            label="If another agent is in the same directory"
+            value={directoryPolicy}
+            options={[
+              { value: 'queue', label: 'Wait for it to finish' },
+              { value: 'allow', label: 'Start anyway' },
+            ]}
+            help={
+              directoryPolicy === 'queue'
+                ? 'Deliveries that would land in a directory another agent is working in wait their turn, and appear under “Queued” on the home screen. This covers every source — another webhook, a scheduled job, or you.'
+                : 'Two agents may edit the same working copy at the same time.'
+            }
+            onChange={(v) => setDirectoryPolicy(v as WebhookDirectoryPolicy)}
+          />
+          {directoryPolicy === 'allow' && (
+            <div className="warn-callout" role="alert">
+              Two agents editing one working copy overwrite each other’s changes. Only choose
+              this if every run gets its own working copy, or if the runs only ever read.
+            </div>
+          )}
         </SectionCard>
       </div>
 
@@ -1950,7 +1977,7 @@ export function WebhookEditorPage({
             min={1}
             max={10}
             busy={busy}
-            help="Over this, a delivery is recorded and dropped rather than queued. Webhook runs are also capped globally so two session slots always stay free for you."
+            help="How many runs this webhook may have actually going at once. Over this, a delivery is recorded and dropped — this cap counts running agents, so it is not relieved by the directory queue. Webhook runs are also capped globally so two session slots always stay free for you."
             onChange={setMaxConcurrent}
           />
           <div className="settings-row">

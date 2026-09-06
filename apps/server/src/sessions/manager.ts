@@ -14,6 +14,7 @@ import {
 import type { AgentRegistry } from '../agents/registry.js';
 import { resolveExecutable } from '../agents/registry.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
+import { treeRootOf } from '../git/worktree-paths.js';
 import type { AdoptionService } from '../adopt/index.js';
 import type { ProcessBackend } from '../backends/index.js';
 import { PtySession } from './pty-session.js';
@@ -331,11 +332,74 @@ export class SessionManager {
 
   private readonly approvalTimers = new Map<string, NodeJS.Timeout>();
 
+  /**
+   * Called when a working tree may have just come free.
+   *
+   * The run queue subscribes here so a directory released by *any* session —
+   * a webhook run, a cron run, or a human's own chat — starts whatever was
+   * waiting on it. Without this the queue would only notice on its 30s sweep.
+   */
+  private readonly treeIdleListeners = new Set<(treeRoot: string) => void>();
+
+  /** Subscribe to "a working tree may be free now". Returns an unsubscribe. */
+  onTreeIdle(listener: (treeRoot: string) => void): () => void {
+    this.treeIdleListeners.add(listener);
+    return () => this.treeIdleListeners.delete(listener);
+  }
+
+  private notifyTreeIdle(cwd: string): void {
+    const root = treeRootOf(cwd);
+    for (const listener of this.treeIdleListeners) {
+      try {
+        listener(root);
+      } catch (err) {
+        this.opts.logger?.warn({ err, root }, 'tree-idle listener threw');
+      }
+    }
+  }
+
+  /**
+   * Working trees with a live session mid-turn right now.
+   *
+   * This is the run queue's whole notion of "occupied", and it is derived on
+   * every call rather than cached: a stale answer either blocks a free tree
+   * forever or hands out one that is still busy. `busySince` is stamped when a
+   * prompt goes in and cleared on `turn_complete`, so a session that is alive
+   * but waiting for its next prompt is *not* counted — which is exactly the
+   * "until previous one concludes (waiting for user)" boundary.
+   *
+   * Terminal sessions are excluded deliberately. A PTY has no end-of-turn
+   * signal, only the classifier's advisory idle hint, so counting one would
+   * mean a queue that never drains — the same judgement `terminal/classifier.ts`
+   * is forbidden from making.
+   */
+  busyTreeRoots(): string[] {
+    const roots: string[] = [];
+    for (const session of this.live.values()) {
+      if (session.transport !== 'structured') continue;
+      if (session.busySince === null) continue;
+      if (session.status !== 'running' && session.status !== 'starting') continue;
+      roots.push(treeRootOf(session.spec.cwd));
+    }
+    return roots;
+  }
+
   /** Attach the manager's own listeners to a session. */
   private wire(session: ManagedSession): void {
-    session.on('status', () => this.persist(session));
+    session.on('status', () => {
+      this.persist(session);
+      // A session that is no longer running holds no working tree. This is a
+      // separate signal from `exit` on purpose: `StructuredSession.terminate`
+      // sets `killed` without ever emitting one, so without this a killed
+      // session's tree would stay blocked until the 30s sweep noticed.
+      if (session.status !== 'running' && session.status !== 'starting') {
+        this.notifyTreeIdle(session.spec.cwd);
+      }
+    });
     session.on('exit', () => {
       this.persist(session);
+      // A dead session holds nothing, so its tree may now be free.
+      this.notifyTreeIdle(session.spec.cwd);
       // Keep the object (and its output buffer) around so the user can read the
       // final screen after the process dies. The sweep evicts it later.
       this.opts.logger?.info(
@@ -438,6 +502,12 @@ export class SessionManager {
    * no debouncing is needed here the way `onPermissionChange` needs it.
    */
   private onTurnComplete(session: StructuredLikeSession): void {
+    // First, regardless of notification settings: the turn is over, so this
+    // session no longer holds its working tree. The early returns below are
+    // about *push notifications*, and letting them skip this would make the
+    // queue depend on whether notifications happen to be configured.
+    this.notifyTreeIdle(session.spec.cwd);
+
     const push = this.opts.push;
     if (!push?.isEnabled()) return;
     if (this.attachedCount(session.id) !== 0) return;

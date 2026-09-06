@@ -33,9 +33,23 @@ function filterSections(projects: ProjectInfo[], needle: string): ProjectInfo[] 
     // carried along, so a hit shows only what matched.
     const cronJobs = project.cronJobs.filter((j) => j.name.toLowerCase().includes(needle));
     const webhooks = project.webhooks.filter((w) => w.name.toLowerCase().includes(needle));
+    // Queued work is searchable on the same argument, one step further: a
+    // directory whose only contents are a waiting delivery is exactly the thing
+    // someone typing an issue key into the box is trying to find.
+    const queued = project.queued.filter(
+      (q) =>
+        q.title.toLowerCase().includes(needle) ||
+        (q.webhookName ?? '').toLowerCase().includes(needle),
+    );
     const worktrees = filterSections(project.worktrees, needle);
-    if (chats.length > 0 || cronJobs.length > 0 || webhooks.length > 0 || worktrees.length > 0) {
-      out.push({ ...project, chats, cronJobs, webhooks, worktrees });
+    if (
+      chats.length > 0 ||
+      cronJobs.length > 0 ||
+      webhooks.length > 0 ||
+      queued.length > 0 ||
+      worktrees.length > 0
+    ) {
+      out.push({ ...project, chats, cronJobs, webhooks, queued, worktrees });
     }
   }
   return out;

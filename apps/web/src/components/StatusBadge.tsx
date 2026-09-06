@@ -55,6 +55,16 @@ export function WebhookStatusIcon({ status }: { status: string }): JSX.Element {
           <span>{status === 'failed' ? 'Failed' : status === 'rejected' ? 'Rejected' : 'Invalid'}</span>
         </span>
       );
+    case 'queued':
+      // Its own badge rather than falling through to the dim default, which
+      // would print the bare word "queued" and read like a dead end. A waiter
+      // is work that is going to happen.
+      return (
+        <span className="webhook-status-badge status--active" title="Waiting for the directory">
+          <Icon name="queue" size={11} />
+          <span>Queued</span>
+        </span>
+      );
     case 'throttled':
     case 'disabled':
       return (

@@ -83,7 +83,7 @@ interface Attachment {
 }
 
 export const websocketRoutes: FastifyPluginAsync = async (app) => {
-  const { sessions, config } = app.pocket;
+  const { sessions, config, promptQueue } = app.pocket;
 
   app.get('/api/ws', { websocket: true }, (socket, request) => {
     const ws = socket as unknown as WebSocket;
@@ -119,6 +119,21 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
     const sendError = (code: ErrorCode, message: string, sessionId?: string): void => {
       send({ type: 'error', code, message, ...(sessionId ? { sessionId } : {}) });
     };
+
+    // PA-11: tell this client when one of its prompts is parked on a busy
+    // working tree, and again when it is finally sent or cancelled. Filtered to
+    // sessions this socket is attached to, so an unrelated chat's queue does not
+    // arrive here — and unsubscribed on close alongside every other listener.
+    const unsubscribeQueue = promptQueue.subscribe({
+      onQueued: (sessionId, promptId, position, treeRoot) => {
+        if (!attachments.has(sessionId)) return;
+        send({ type: 'prompt_queued', sessionId, promptId, position, treeRoot });
+      },
+      onReleased: (sessionId, promptId, reason) => {
+        if (!attachments.has(sessionId)) return;
+        send({ type: 'prompt_released', sessionId, promptId, reason });
+      },
+    });
 
     const detachFrom = (sessionId: string): void => {
       const attachment = attachments.get(sessionId);
@@ -245,6 +260,20 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
       if (!peek) sessions.attach(sessionId);
 
       send(attached);
+
+      // Re-surface prompts of this session still parked on a busy working tree,
+      // for the same reason `pendingPermissions` is replayed above: a phone that
+      // reconnects must not be left looking at a message that seems to have
+      // vanished.
+      for (const parked of promptQueue.forSession(sessionId)) {
+        send({
+          type: 'prompt_queued',
+          sessionId,
+          promptId: parked.promptId,
+          position: parked.position,
+          treeRoot: parked.treeRoot,
+        });
+      }
 
       if (!session.isAlive()) {
         send({
@@ -407,10 +436,32 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
             }
           }
 
+          // The directory gate for a human's own message. Only ever *defers* it
+          // — the prompt is persisted, the client is told, and it goes in as
+          // soon as whoever is working in the same tree concludes. An attached
+          // image has already been written into the workspace and named in
+          // `promptText` above, which is why deferring does not lose it.
+          const parked = promptQueue.submit(session, promptText);
+          if (parked.queued) break;
+
           if (session instanceof StructuredSession) {
             session.prompt(promptText, message.image);
           } else {
             session.prompt(promptText);
+          }
+          break;
+        }
+
+        case 'queued_prompt': {
+          // No `requireStructured` here: cancelling a message that is waiting
+          // must keep working even if the session has since died, or the row
+          // and its tree claim would be unreachable.
+          if (!promptQueue.resolve(message.promptId, message.action)) {
+            sendError(
+              'not_found',
+              'That queued message is no longer waiting.',
+              message.sessionId,
+            );
           }
           break;
         }
@@ -483,6 +534,7 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
 
     const cleanup = (): void => {
       clearInterval(heartbeat);
+      unsubscribeQueue();
       // Detach only. The PTY keeps running: that is the whole point.
       for (const sessionId of [...attachments.keys()]) detachFrom(sessionId);
     };

@@ -43,7 +43,7 @@ import { LIMITS } from './limits.js';
  * enum value, so they must reconnect rather than drop the overlay event.
  * v13 added Codex as a rate-limit provider for the same reason.
  */
-export const PROTOCOL_VERSION = 13;
+export const PROTOCOL_VERSION = 14;
 
 /**
  * WebSocket close codes the server uses for conditions the client must not
@@ -210,6 +210,21 @@ export const SetEffortMessage = z.object({
   effort: EffortLevel.nullable(),
 });
 
+/**
+ * Take a queued prompt out of the queue, or send it regardless.
+ *
+ * `force` is the deliberate escape hatch: the queue exists to stop two agents
+ * sharing a tree, but a human who knows the other run is harmless must be able
+ * to say so, and an override they can see beats one they cannot. It is the only
+ * way to jump a *tree* — "run next" on a webhook row merely reorders waiters.
+ */
+export const ResolveQueuedPromptMessage = z.object({
+  type: z.literal('queued_prompt'),
+  sessionId: SessionId,
+  promptId: z.string().min(1).max(128),
+  action: z.enum(['cancel', 'force']),
+});
+
 export const ClientMessage = z.discriminatedUnion('type', [
   AttachMessage,
   DetachMessage,
@@ -220,6 +235,7 @@ export const ClientMessage = z.discriminatedUnion('type', [
   PromptMessage,
   PermissionMessage,
   InterruptMessage,
+  ResolveQueuedPromptMessage,
   SetModelMessage,
   SetEffortMessage,
 ]);
@@ -347,6 +363,34 @@ export const ResizedMessage = z.object({
   rows: z.number().int().nonnegative(),
 });
 
+/**
+ * A prompt this client sent is waiting for the working tree to come free.
+ *
+ * The message is *not* lost and *not* silently dropped — it is persisted and
+ * will be delivered when whatever is mid-turn in the same directory finishes.
+ * Sent instead of the prompt being handed to the agent, so the composer can
+ * say so; without this frame a typed message would simply appear to vanish,
+ * which is the one outcome this feature must never produce.
+ */
+export const PromptQueuedMessage = z.object({
+  type: z.literal('prompt_queued'),
+  sessionId: SessionId,
+  /** Opaque id, echoed back by `cancel_prompt` / `force_prompt`. */
+  promptId: z.string(),
+  /** 1-based place in line for this working tree. */
+  position: z.number().int().positive(),
+  /** The directory being waited on, for the "who is blocking me" line. */
+  treeRoot: z.string(),
+});
+
+/** A queued prompt has been handed to the agent, or taken out of the queue. */
+export const PromptReleasedMessage = z.object({
+  type: z.literal('prompt_released'),
+  sessionId: SessionId,
+  promptId: z.string(),
+  reason: z.enum(['sent', 'cancelled']),
+});
+
 export const PongMessage = z.object({
   type: z.literal('pong'),
 });
@@ -360,6 +404,8 @@ export const ServerMessage = z.discriminatedUnion('type', [
   ErrorMessage,
   HintMessage,
   ResizedMessage,
+  PromptQueuedMessage,
+  PromptReleasedMessage,
   PongMessage,
 ]);
 export type ServerMessage = z.infer<typeof ServerMessage>;

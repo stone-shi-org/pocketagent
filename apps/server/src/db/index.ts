@@ -699,6 +699,74 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE webhook_issue_sessions ADD COLUMN planner_chat_id TEXT;
   ALTER TABLE planner_chats ADD COLUMN skip_tool_approvals INTEGER NOT NULL DEFAULT 0;
   `,
+  // PA-11: the directory queue. A delivery that cannot start because another
+  // agent is mid-turn in the same working tree waits here instead of running
+  // concurrently (corrupting the tree) or being dropped.
+  //
+  // `queued_spec_json` freezes the *fully resolved* run — prompt included — at
+  // delivery time. It has to: `store_payloads` may be false, so the payload
+  // that produced this run may not exist to re-render from, and even when it
+  // does, re-rendering later would re-decide the agent, model and branch from
+  // data that has since changed. Nullable rather than NOT NULL because the
+  // overwhelming majority of deliveries never queue, and SQLite cannot relax a
+  // NOT NULL later without rebuilding the table.
+  `
+  ALTER TABLE webhook_deliveries ADD COLUMN queue_key TEXT;
+  ALTER TABLE webhook_deliveries ADD COLUMN queued_at INTEGER;
+  ALTER TABLE webhook_deliveries ADD COLUMN queued_spec_json TEXT;
+
+  CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_queued
+    ON webhook_deliveries (queue_key, queued_at)
+    WHERE status = 'queued';
+  `,
+  // PA-11: per-webhook directory policy, and the removal of `debounce_seconds`.
+  //
+  // `'queue'` is the backfilled default for *existing* webhooks as well as new
+  // ones, which is a deliberate behaviour change approved on the ticket: the
+  // previous behaviour for two deliveries racing into one directory was not a
+  // considered `allow`, it was the absence of any check at all, and queueing
+  // loses no work — unlike the same-webhook `skip` policy, it only delays.
+  //
+  // `debounce_seconds` is dropped rather than left dormant. It was stored,
+  // editable and displayed, and it delayed nothing whatsoever: the timer map
+  // that would have implemented it was only ever cleared, never populated. A
+  // column that promises a behaviour the code does not have is worse than no
+  // column, and the queue now covers the burst it was meant to smooth.
+  `
+  ALTER TABLE webhooks ADD COLUMN directory_policy TEXT NOT NULL DEFAULT 'queue';
+  ALTER TABLE webhooks DROP COLUMN debounce_seconds;
+  `,
+  // PA-11: a human's own follow-up prompt, waiting for a working tree.
+  //
+  // Persisted rather than held in memory, unlike the dead debounce map it
+  // replaces, and for the opposite reason: a debounce was a delay nobody had
+  // been promised, whereas this is a message a person typed and pressed send
+  // on. Losing it to a restart would be the one outcome this feature must never
+  // produce, so the row outlives the process and is re-queued at boot.
+  //
+  // An attached image is deliberately *not* stored here. `ws/index.ts` has
+  // already written it into the workspace and appended its path to `text`, so
+  // the agent can still read it; keeping the base64 would put rows of several
+  // megabytes into a database that otherwise holds only metadata.
+  //
+  // `session_id` is not a foreign key, for the same reason `cron_runs.session_id`
+  // is not: `pruneOldSessions` and `SessionManager.forget` delete session rows,
+  // and a CASCADE would silently discard a queued message while a RESTRICT
+  // would make pruning fail.
+  `
+  CREATE TABLE IF NOT EXISTS session_prompt_queue (
+    id         TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    tree_root  TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_session_prompt_queue_tree
+    ON session_prompt_queue (tree_root, created_at);
+  CREATE INDEX IF NOT EXISTS idx_session_prompt_queue_session
+    ON session_prompt_queue (session_id);
+  `,
 ];
 
 /**
@@ -1203,8 +1271,14 @@ export interface WebhookRow {
   conversation_mode: string;
   /** `'skip' | 'allow'`, evaluated per conversation key. */
   overlap_policy: string;
+  /**
+   * `'queue' | 'allow'` — what to do when another agent is mid-turn in the
+   * working tree this delivery would run in. Orthogonal to `overlap_policy`,
+   * which is scoped to this webhook's own conversation rather than to a
+   * directory that any trigger (or a human) can be working in.
+   */
+  directory_policy: string;
   max_concurrent: number;
-  debounce_seconds: number;
   store_payloads: number;
   created_at: number;
   updated_at: number;
@@ -1251,6 +1325,17 @@ export interface WebhookDeliveryRow {
   planner_chat_id: string | null;
   cwd: string | null;
   error: string | null;
+  /**
+   * The working tree this delivery is (or was) waiting on, from `treeRootOf`.
+   * Null for every delivery that never queued.
+   */
+  queue_key: string | null;
+  queued_at: number | null;
+  /**
+   * The frozen `RunSpec` this delivery will run, as JSON — prompt included.
+   * See the migration comment for why it is frozen rather than re-derived.
+   */
+  queued_spec_json: string | null;
 }
 
 export interface WebhookIssueSessionRow {
@@ -1282,6 +1367,21 @@ export interface WebhookHitLogRow {
 
 /** Statuses a delivery can still leave, mirroring `readActiveCronRuns`'s pair. */
 const OPEN_DELIVERY = `status IN ('starting', 'running')`;
+
+/**
+ * Deliveries waiting on a working tree (PA-11).
+ *
+ * Deliberately a *third* class, in neither `OPEN_DELIVERY` nor
+ * `NOISE_STATUSES`, and every consumer of those two had to be checked:
+ *
+ * - not open, because `capReason` counts open rows against the concurrency caps
+ *   and a queued row holds no session — counting it would let a queue throttle
+ *   itself — and because `markStaleWebhookDeliveriesFailed` force-fails every
+ *   open row at boot, which would destroy work that was accepted with a 202;
+ * - not noise, because pruning is what noise means, and a queued row is work
+ *   that has not happened yet.
+ */
+const QUEUED_DELIVERY = `status = 'queued'`;
 
 /**
  * Delivery statuses that represent noise rather than work.
@@ -1336,13 +1436,13 @@ export function insertWebhook(db: Db, row: WebhookRow): void {
        id, name, slug, enabled, type, auth_mode, secret, auth_token_hash,
        secret_set_at, filter_json, project_map_json, prompt_template_map_json, cwd, agent, worktree_mode, model, effort,
        effort_set, skip_permissions, auto_select_agent_model, prompt_template, conversation_mode,
-       overlap_policy, max_concurrent, debounce_seconds, store_payloads,
+       overlap_policy, directory_policy, max_concurrent, store_payloads,
        created_at, updated_at, last_delivery_at, last_delivery_status, last_error
      ) VALUES (
        @id, @name, @slug, @enabled, @type, @auth_mode, @secret, @auth_token_hash,
        @secret_set_at, @filter_json, @project_map_json, @prompt_template_map_json, @cwd, @agent, @worktree_mode, @model, @effort,
        @effort_set, @skip_permissions, @auto_select_agent_model, @prompt_template, @conversation_mode,
-       @overlap_policy, @max_concurrent, @debounce_seconds, @store_payloads,
+       @overlap_policy, @directory_policy, @max_concurrent, @store_payloads,
        @created_at, @updated_at, @last_delivery_at, @last_delivery_status, @last_error
      )`,
   ).run(row);
@@ -1386,13 +1486,15 @@ export function insertWebhookDelivery(db: Db, row: WebhookDeliveryRow): void {
        delivery_header, event, event_type, issue_key, project_key, actor,
        signature_state, skip_permissions_enabled, payload_json, payload_bytes,
        payload_truncated, rendered_prompt, reason, received_at, started_at,
-       finished_at, session_id, agent_session_id, planner_chat_id, cwd, error
+       finished_at, session_id, agent_session_id, planner_chat_id, cwd, error,
+       queue_key, queued_at, queued_spec_json
      ) VALUES (
        @id, @webhook_id, @webhook_name, @agent, @status, @trigger, @body_hash,
        @delivery_header, @event, @event_type, @issue_key, @project_key, @actor,
        @signature_state, @skip_permissions_enabled, @payload_json, @payload_bytes,
        @payload_truncated, @rendered_prompt, @reason, @received_at, @started_at,
-       @finished_at, @session_id, @agent_session_id, @planner_chat_id, @cwd, @error
+       @finished_at, @session_id, @agent_session_id, @planner_chat_id, @cwd, @error,
+       @queue_key, @queued_at, @queued_spec_json
      )`,
   ).run(row);
 }
@@ -1466,6 +1568,32 @@ export function countActiveWebhookDeliveries(db: Db): number {
 }
 
 /**
+ * Deliveries parked on a working tree, oldest first.
+ *
+ * `RunQueue` is rebuilt from these at boot: the in-memory queue does not
+ * survive a restart, but the frozen spec on each row does, so queued work
+ * resumes rather than being silently dropped.
+ */
+export function readQueuedWebhookDeliveries(db: Db, webhookId?: string): WebhookDeliveryRow[] {
+  if (webhookId !== undefined) {
+    return db
+      .prepare(
+        `SELECT * FROM webhook_deliveries
+          WHERE webhook_id = ? AND ${QUEUED_DELIVERY}
+          ORDER BY queued_at ASC, received_at ASC`,
+      )
+      .all(webhookId) as WebhookDeliveryRow[];
+  }
+  return db
+    .prepare(
+      `SELECT * FROM webhook_deliveries
+        WHERE ${QUEUED_DELIVERY}
+        ORDER BY queued_at ASC, received_at ASC`,
+    )
+    .all() as WebhookDeliveryRow[];
+}
+
+/**
  * Anything still `starting`/`running` at boot belongs to a dead server.
  *
  * Same reasoning as `markStaleCronRunsFailed`: a webhook run is always a
@@ -1505,6 +1633,11 @@ export function pruneOldWebhookDeliveries(
       .prepare(
         `DELETE FROM webhook_deliveries
           WHERE NOT ${OPEN_DELIVERY}
+            -- A queued delivery is work that has not happened yet, and it is
+            -- neither open nor noise: without this it lands in the negated
+            -- (real runs) partition and can be pruned out from under the
+            -- queue, silently dropping work already answered with a 202.
+            AND NOT ${QUEUED_DELIVERY}
             AND webhook_id IS NOT NULL
             AND ${noisePredicate('', negate)}
             AND id NOT IN (
@@ -1518,6 +1651,40 @@ export function pruneOldWebhookDeliveries(
       .run(keep).changes;
 
   return prune(false, opts.keepNoisePerWebhook) + prune(true, opts.keepRunsPerWebhook);
+}
+
+/** One prompt a human sent that is waiting for a working tree (PA-11). */
+export interface SessionPromptQueueRow {
+  id: string;
+  session_id: string;
+  tree_root: string;
+  text: string;
+  created_at: number;
+}
+
+export function insertQueuedPrompt(db: Db, row: SessionPromptQueueRow): void {
+  db.prepare(
+    `INSERT INTO session_prompt_queue (id, session_id, tree_root, text, created_at)
+     VALUES (@id, @session_id, @tree_root, @text, @created_at)`,
+  ).run(row);
+}
+
+export function readQueuedPrompts(db: Db): SessionPromptQueueRow[] {
+  return db
+    .prepare('SELECT * FROM session_prompt_queue ORDER BY created_at ASC')
+    .all() as SessionPromptQueueRow[];
+}
+
+export function readQueuedPrompt(db: Db, id: string): SessionPromptQueueRow | null {
+  return (
+    (db.prepare('SELECT * FROM session_prompt_queue WHERE id = ?').get(id) as
+      | SessionPromptQueueRow
+      | undefined) ?? null
+  );
+}
+
+export function deleteQueuedPrompt(db: Db, id: string): number {
+  return db.prepare('DELETE FROM session_prompt_queue WHERE id = ?').run(id).changes;
 }
 
 export function deleteWebhookDeliveriesFor(db: Db, webhookId: string): number {

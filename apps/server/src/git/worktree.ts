@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 import { findMainRepoCwd, readGitBranch } from '../projects/index.js';
 import { parsePorcelainV2 } from './status.js';
+import { worktreePathFor } from './worktree-paths.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -103,7 +104,7 @@ export class WorktreeService {
       const exists = await branchExists(projectCwd, requested);
       if (exists) {
         if (input.reuseExisting) {
-          const existingPath = path.join(projectCwd, '.worktrees', slugify(requested));
+          const existingPath = worktreePathFor(projectCwd, requested);
           if (await pathExists(existingPath)) {
             const resolved = await this.workspaces.resolveWorkspacePath(existingPath);
             return { cwd: resolved, branch: requested };
@@ -122,7 +123,7 @@ export class WorktreeService {
       branch = `wt/${base}-${crypto.randomBytes(3).toString('hex')}`;
     }
 
-    const worktreePath = path.join(projectCwd, '.worktrees', slugify(branch));
+    const worktreePath = worktreePathFor(projectCwd, branch);
     if (await pathExists(worktreePath)) {
       if (input.reuseExisting) {
         const resolved = await this.workspaces.resolveWorkspacePath(worktreePath);
@@ -294,11 +295,6 @@ async function pathExists(target: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-/** Directory-segment-safe form of a branch name: hierarchical refs like `feature/x` collapse to one segment. */
-function slugify(branch: string): string {
-  return branch.replace(/\//g, '-');
 }
 
 /** Lets git itself be the source of truth for ref-name rules rather than reinventing them. */

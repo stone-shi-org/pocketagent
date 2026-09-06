@@ -5,6 +5,7 @@ import type {
   DeleteWorktreeResponse,
   HostInfo,
   ProjectInfo,
+  QueuedRunSummary,
 } from '@pocketagent/protocol';
 import { describeCron } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
@@ -112,6 +113,12 @@ export interface ProjectsState {
   deleteWorktree: (cwd: string) => Promise<DeleteWorktreeResponse>;
   /** Follow-up to `deleteWorktree`; also propagates rather than swallowing. */
   deleteRemoteBranch: (body: DeleteRemoteBranchRequest) => Promise<void>;
+  /**
+   * Cancel a queued webhook delivery, or move it to the front of its line
+   * (PA-11). Swallow-then-`refresh()` like the rest, so the row goes at once
+   * rather than up to `REFRESH_MS` later.
+   */
+  resolveQueued: (item: QueuedRunSummary, action: 'cancel' | 'front') => Promise<void>;
 }
 
 /**
@@ -216,6 +223,28 @@ export function useProjects(
       } catch (err) {
         onApiError(err);
         setError(err instanceof ApiError ? err.message : 'Could not remove that chat.');
+      } finally {
+        await refresh();
+      }
+    },
+    [onApiError, refresh],
+  );
+
+  /**
+   * A queued delivery, cancelled or bumped to the front.
+   *
+   * Only webhook-kind rows have an owning webhook to address; a queued *prompt*
+   * belongs to a chat and is resolved over that chat's WebSocket instead, where
+   * the "send anyway" escape hatch lives.
+   */
+  const resolveQueued = useCallback(
+    async (item: QueuedRunSummary, action: 'cancel' | 'front') => {
+      if (item.kind !== 'webhook' || item.webhookId === null) return;
+      try {
+        await api.resolveQueuedDelivery(item.webhookId, item.id, action);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not update the queue.');
       } finally {
         await refresh();
       }
@@ -408,6 +437,7 @@ export function useProjects(
     removeProject,
     deleteWorktree,
     deleteRemoteBranch,
+    resolveQueued,
   };
 }
 
@@ -445,6 +475,10 @@ export function ProjectList({
 }: ListProps): JSX.Element {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [expandedDeleted, setExpandedDeleted] = useState<Set<string>>(() => new Set());
+  // Keyed by the *parent's* cwd, exactly as `expandedDeleted` is. Open by
+  // default: a queue is a thing waiting to happen, and hiding it behind a
+  // closed group is how "why hasn't my ticket run" becomes a support question.
+  const [collapsedQueued, setCollapsedQueued] = useState<Set<string>>(() => new Set());
   const [expandedChats, setExpandedChats] = useState<Set<string>>(() => new Set());
   const [menuFor, setMenuFor] = useState<string | null>(null);
   // A delete flow can outlive its three-dot menu closing (it opens its own
@@ -472,6 +506,14 @@ export function ProjectList({
       return next;
     });
 
+  const toggleQueued = (cwd: string): void =>
+    setCollapsedQueued((prev) => {
+      const next = new Set(prev);
+      if (next.has(cwd)) next.delete(cwd);
+      else next.add(cwd);
+      return next;
+    });
+
   const showMoreChats = (cwd: string): void =>
     setExpandedChats((prev) => new Set(prev).add(cwd));
 
@@ -488,6 +530,8 @@ export function ProjectList({
     toggle,
     expandedDeleted,
     toggleDeleted,
+    collapsedQueued,
+    toggleQueued,
     expandedChats,
     showMoreChats,
     menuFor,
@@ -541,6 +585,8 @@ interface ProjectSectionProps {
   toggle: (cwd: string) => void;
   expandedDeleted: Set<string>;
   toggleDeleted: (cwd: string) => void;
+  collapsedQueued: Set<string>;
+  toggleQueued: (cwd: string) => void;
   expandedChats: Set<string>;
   showMoreChats: (cwd: string) => void;
   menuFor: string | null;
@@ -572,6 +618,8 @@ function ProjectSection({
   toggle,
   expandedDeleted,
   toggleDeleted,
+  collapsedQueued,
+  toggleQueued,
   expandedChats,
   showMoreChats,
   menuFor,
@@ -592,6 +640,11 @@ function ProjectSection({
   // A search that hid a folder's other chats should not also hide the ones it
   // matched, so collapsing is ignored while searching.
   const isCollapsed = !searching && collapsed.has(project.cwd);
+  // Inverted state, unlike `expandedDeleted`: the queue is open unless someone
+  // closed it, because work waiting on this directory is information rather
+  // than clutter — a queue nobody notices is the support question this whole
+  // feature exists to answer.
+  const isQueuedExpanded = !collapsedQueued.has(project.cwd);
 
   const isVirtualWebhooks = project.cwd === 'virtual:webhooks';
   const isVirtualShell = project.cwd === 'virtual:shell';
@@ -682,6 +735,14 @@ function ProjectSection({
               {isVirtualWebhooks ? project.webhooks.length : project.chats.length}
             </span>
           )}
+          {/* Shown even when expanded, and even when collapsed alongside the
+              chat count: work waiting on this directory is the one thing a
+              glance at a folded row most needs to surface. */}
+          {project.queued.length > 0 && (
+            <span className="project-count project-count--queued" title="Waiting for this directory">
+              {project.queued.length} waiting
+            </span>
+          )}
         </button>
         {!isVirtualWebhooks && !project.isDeleted && (
           <button
@@ -767,7 +828,8 @@ function ProjectSection({
       {!isCollapsed &&
         project.chats.length === 0 &&
         project.cronJobs.length === 0 &&
-        project.webhooks.length === 0 && <div className="project-empty">No chats yet</div>}
+        project.webhooks.length === 0 &&
+        project.queued.length === 0 && <div className="project-empty">No chats yet</div>}
 
       {/* Scheduled jobs sit above the chats: a job is what is *going* to
           happen, and it is a spec rather than a conversation — there is no
@@ -867,6 +929,118 @@ function ProjectSection({
             </button>
           </div>
         ))}
+
+      {/* PA-11: the virtual "Queued" subdirectory. Work waiting for this
+          directory to come free, in the order it will run. Modelled on the
+          "Deleted worktrees" group — a synthetic, collapsible grouping row
+          rather than a `ProjectInfo` — because a waiter is not a directory and
+          has no chats of its own. It disappears by itself: the server stops
+          sending the rows, and the next poll drops the group. */}
+      {!isCollapsed && project.queued.length > 0 && (
+        <div className="queued-group">
+          <button
+            type="button"
+            className="project-name queued-toggle"
+            onClick={() => toggleQueued(project.cwd)}
+            aria-expanded={isQueuedExpanded}
+            title="Waiting for another agent to finish in this directory"
+          >
+            <span className="project-icon">
+              <Icon name="queue" className="folder" />
+            </span>
+            <span className="project-label">Queued</span>
+            <Icon
+              name="chevron-down"
+              className={`project-caret${isQueuedExpanded ? '' : ' closed'}`}
+            />
+            <span className="project-count">{project.queued.length}</span>
+          </button>
+          {isQueuedExpanded &&
+            project.queued.map((item) => (
+              <div key={item.id} className="chat-line queued-line">
+                <button
+                  type="button"
+                  className="chat-row queued-row"
+                  onClick={() => {
+                    // A waiting delivery has no transcript to open, so its row
+                    // goes to the webhook that created it; a waiting prompt
+                    // belongs to a chat, which does.
+                    if (item.kind === 'prompt' && item.sessionId !== null) {
+                      open({
+                        id: item.sessionId,
+                        sessionId: item.sessionId,
+                        conversationId: null,
+                        title: item.title,
+                        agent: item.agent,
+                        agentDisplayName: item.agentDisplayName,
+                        transport: 'structured',
+                        status: null,
+                        live: true,
+                        updatedAt: item.queuedAt,
+                        messageCount: null,
+                        directoryBusy: true,
+                        busySince: null,
+                        adoptTargetId: null,
+                        cronJobId: null,
+                        webhookId: null,
+                        rateLimit: null,
+                      });
+                    } else if (onOpenWebhook && item.webhookId !== null) {
+                      onOpenWebhook(item.webhookId);
+                    }
+                  }}
+                  title={
+                    item.kind === 'webhook'
+                      ? `${item.title} — queued by ${item.webhookName ?? 'a webhook'}`
+                      : `${item.title} — your message is waiting`
+                  }
+                >
+                  <span className="chat-title">
+                    <span className="queued-position" aria-label={`Position ${item.position}`}>
+                      {item.position}
+                    </span>
+                    {item.title}
+                    {item.skipPermissionsEnabled && (
+                      <Icon
+                        name="shield"
+                        size={13}
+                        className="cron-shield"
+                        aria-label="Approvals bypassed"
+                      />
+                    )}
+                  </span>
+                  <span className="cron-line-when">
+                    {item.kind === 'webhook' ? (item.webhookName ?? 'webhook') : 'your message'}
+                  </span>
+                </button>
+                {item.kind === 'webhook' && (
+                  <>
+                    {item.position > 1 && (
+                      <button
+                        type="button"
+                        className="round-btn plain queued-action"
+                        onClick={() => void state.resolveQueued(item, 'front')}
+                        title="Run this one next"
+                        aria-label="Run this one next"
+                      >
+                        <Icon name="arrow-up" size={16} />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="round-btn plain queued-action"
+                      onClick={() => void state.resolveQueued(item, 'cancel')}
+                      title="Remove from the queue"
+                      aria-label="Remove from the queue"
+                    >
+                      <Icon name="close" size={16} />
+                    </button>
+                  </>
+                )}
+              </div>
+            ))}
+        </div>
+      )}
 
       {(() => {
         // A search that hid a folder's other chats already narrowed this to
@@ -1030,6 +1204,8 @@ function ProjectSection({
                   toggle={toggle}
                   expandedDeleted={expandedDeleted}
                   toggleDeleted={toggleDeleted}
+                  collapsedQueued={collapsedQueued}
+                  toggleQueued={toggleQueued}
                   expandedChats={expandedChats}
                   showMoreChats={showMoreChats}
                   menuFor={menuFor}
@@ -1079,6 +1255,8 @@ function ProjectSection({
                         toggle={toggle}
                         expandedDeleted={expandedDeleted}
                         toggleDeleted={toggleDeleted}
+                        collapsedQueued={collapsedQueued}
+                        toggleQueued={toggleQueued}
                         expandedChats={expandedChats}
                         showMoreChats={showMoreChats}
                         menuFor={menuFor}

@@ -37,6 +37,7 @@ function project(name: string, titles: string[], worktrees: ProjectInfo[] = []):
     chats: titles.map(chat),
     cronJobs: [],
     webhooks: [],
+    queued: [],
     worktrees,
   };
 }
