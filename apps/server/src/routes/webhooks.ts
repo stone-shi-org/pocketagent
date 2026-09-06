@@ -205,6 +205,9 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
         // default", which is a different thing from an omitted key.
         ...('effort' in body ? { effort: body.effort ?? null } : {}),
         ...(body.skipPermissions !== undefined ? { skipPermissions: body.skipPermissions } : {}),
+        ...(body.autoSelectAgentModel !== undefined
+          ? { autoSelectAgentModel: body.autoSelectAgentModel }
+          : {}),
         ...(body.promptTemplate !== undefined ? { promptTemplate: body.promptTemplate } : {}),
         ...(body.conversationMode !== undefined
           ? { conversationMode: body.conversationMode }
@@ -553,6 +556,7 @@ function specFrom(
     model: body.model ?? null,
     ...('effort' in body ? { effort: body.effort ?? null } : {}),
     skipPermissions: body.skipPermissions,
+    autoSelectAgentModel: body.autoSelectAgentModel,
     promptTemplate:
       body.promptTemplate ??
       (body.config.type === 'bamboo' ? DEFAULT_BAMBOO_PROMPT_TEMPLATE : DEFAULT_JIRA_PROMPT_TEMPLATE),

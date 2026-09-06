@@ -69,6 +69,7 @@ import {
   describeJiraFilter,
   evaluateJiraFilter,
   parseJiraEvent,
+  resolveLabelOverrides,
   resolveProjectRoute,
   resolvePromptTemplate,
 } from './jira.js';
@@ -228,6 +229,7 @@ export interface WebhookSpecCommon {
   model: string | null;
   effort?: string | null;
   skipPermissions: boolean;
+  autoSelectAgentModel?: boolean;
   promptTemplate: string;
   conversationMode: WebhookConversationMode;
   overlapPolicy: 'skip' | 'allow';
@@ -745,12 +747,29 @@ export class WebhookService {
 
     const title = titleOf(hook.name, type, facts);
 
+    let effectiveAgent = hook.agent;
+    let effectiveModel = hook.model;
+
+    if (hook.auto_select_agent_model === 1 && type === 'jira') {
+      const jFacts = facts as JiraEventFacts;
+      if (Array.isArray(jFacts.labels) && jFacts.labels.length > 0) {
+        const availableAgentIds = this.opts.agents.list().map((a) => a.id);
+        const overrides = resolveLabelOverrides(jFacts.labels, availableAgentIds);
+        if (overrides.agent) {
+          effectiveAgent = overrides.agent;
+        }
+        if (overrides.model) {
+          effectiveModel = overrides.model;
+        }
+      }
+    }
+
     return {
       cwd,
-      agent: hook.agent,
+      agent: effectiveAgent,
       title,
       skipPermissions: hook.skip_permissions === 1,
-      model: hook.model,
+      model: effectiveModel,
       ...(hook.effort_set === 1 ? { effort: hook.effort } : {}),
       worktree,
       notStructuredMessage:
@@ -1105,6 +1124,7 @@ export class WebhookService {
       effort: spec.effort ?? null,
       effort_set: 'effort' in spec ? 1 : 0,
       skip_permissions: spec.skipPermissions ? 1 : 0,
+      auto_select_agent_model: spec.autoSelectAgentModel ? 1 : 0,
       prompt_template: spec.promptTemplate,
       conversation_mode: spec.conversationMode,
       overlap_policy: spec.overlapPolicy,
@@ -1156,6 +1176,9 @@ export class WebhookService {
       ...('effort' in patch ? { effort: patch.effort ?? null, effort_set: 1 } : {}),
       ...(patch.skipPermissions !== undefined
         ? { skip_permissions: patch.skipPermissions ? 1 : 0 }
+        : {}),
+      ...(patch.autoSelectAgentModel !== undefined
+        ? { auto_select_agent_model: patch.autoSelectAgentModel ? 1 : 0 }
         : {}),
       ...(patch.promptTemplate !== undefined ? { prompt_template: patch.promptTemplate } : {}),
       ...(patch.conversationMode !== undefined
@@ -1390,6 +1413,7 @@ export class WebhookService {
       model: row.model,
       ...(row.effort_set === 1 ? { effort: row.effort } : {}),
       skipPermissionsEnabled: row.skip_permissions === 1,
+      autoSelectAgentModel: row.auto_select_agent_model === 1,
       promptTemplate: row.prompt_template,
       conversationMode: row.conversation_mode as WebhookConversationMode,
       overlapPolicy: row.overlap_policy as 'skip' | 'allow',

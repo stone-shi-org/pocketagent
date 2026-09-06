@@ -311,6 +311,7 @@ const WebhookFields = z
     model: z.string().min(1).max(200).nullable(),
     effort: EffortLevel.nullable(),
     skipPermissions: z.boolean(),
+    autoSelectAgentModel: z.boolean(),
     promptTemplate: z.string().min(1).max(LIMITS.maxInputChars),
     conversationMode: WebhookConversationMode,
     overlapPolicy: CronOverlapPolicy,
@@ -368,6 +369,7 @@ export const CreateWebhookRequest = WebhookFields.extend({
    * deliveries look supervised.
    */
   skipPermissions: z.boolean().default(false),
+  autoSelectAgentModel: z.boolean().default(false),
 });
 export type CreateWebhookRequest = z.infer<typeof CreateWebhookRequest>;
 
@@ -418,6 +420,7 @@ export const Webhook = z.object({
    */
   effort: EffortLevel.nullable().optional(),
   skipPermissionsEnabled: z.boolean(),
+  autoSelectAgentModel: z.boolean(),
   promptTemplate: z.string(),
   conversationMode: WebhookConversationMode,
   overlapPolicy: CronOverlapPolicy,

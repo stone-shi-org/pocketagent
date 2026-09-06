@@ -475,6 +475,10 @@ const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE webhooks ADD COLUMN prompt_template_map_json TEXT NOT NULL DEFAULT '[]';
   `,
+  // Auto-select agent and model from Jira issue labels (e.g. agent:claude, model:sonnet).
+  `
+  ALTER TABLE webhooks ADD COLUMN auto_select_agent_model INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 /**
@@ -953,6 +957,7 @@ export interface WebhookRow {
   /** 1 when `effort` was set explicitly — including explicitly to null. */
   effort_set: number;
   skip_permissions: number;
+  auto_select_agent_model: number;
   prompt_template: string;
   /** `'per-delivery' | 'per-issue'`. */
   conversation_mode: string;
@@ -1086,13 +1091,13 @@ export function insertWebhook(db: Db, row: WebhookRow): void {
     `INSERT INTO webhooks (
        id, name, slug, enabled, type, auth_mode, secret, auth_token_hash,
        secret_set_at, filter_json, project_map_json, prompt_template_map_json, cwd, agent, worktree_mode, model, effort,
-       effort_set, skip_permissions, prompt_template, conversation_mode,
+       effort_set, skip_permissions, auto_select_agent_model, prompt_template, conversation_mode,
        overlap_policy, max_concurrent, debounce_seconds, store_payloads,
        created_at, updated_at, last_delivery_at, last_delivery_status, last_error
      ) VALUES (
        @id, @name, @slug, @enabled, @type, @auth_mode, @secret, @auth_token_hash,
        @secret_set_at, @filter_json, @project_map_json, @prompt_template_map_json, @cwd, @agent, @worktree_mode, @model, @effort,
-       @effort_set, @skip_permissions, @prompt_template, @conversation_mode,
+       @effort_set, @skip_permissions, @auto_select_agent_model, @prompt_template, @conversation_mode,
        @overlap_policy, @max_concurrent, @debounce_seconds, @store_payloads,
        @created_at, @updated_at, @last_delivery_at, @last_delivery_status, @last_error
      )`,
