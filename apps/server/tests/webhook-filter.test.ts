@@ -4,9 +4,11 @@ import {
   describeJiraFilter,
   evaluateJiraFilter,
   parseJiraEvent,
+  resolveComponentBranchName,
   resolveLabelOverrides,
   resolveProjectRoute,
   resolvePromptTemplate,
+  sanitizeBranchSegment,
 } from '../src/webhooks/jira.js';
 
 /**
@@ -30,6 +32,8 @@ const facts = (over: Partial<JiraEventFacts> = {}): JiraEventFacts => {
     issueType: 'Bug',
     assignee: 'Grace Hopper',
     labels: ['agent-ready'],
+    components: ['Frontend'],
+    component: 'Frontend',
     changedFields: ['status'],
     actor,
     actorNames,
@@ -54,6 +58,7 @@ describe('parseJiraEvent', () => {
           summary: 'Login fails on Safari',
           assignee: { displayName: 'Grace Hopper' },
           labels: ['x', 'y'],
+          components: [{ name: 'Auth' }, { name: 'Billing' }],
         },
       },
       changelog: { items: [{ field: 'status' }, { fieldId: 'assignee' }] },
@@ -64,6 +69,8 @@ describe('parseJiraEvent', () => {
     expect(r.facts.projectKey).toBe('PA'); // upper-cased
     expect(r.facts.summary).toBe('Login fails on Safari');
     expect(r.facts.assignee).toBe('Grace Hopper');
+    expect(r.facts.components).toEqual(['Auth', 'Billing']);
+    expect(r.facts.component).toBe('Auth');
     expect(r.facts.changedFields).toEqual(['status', 'assignee']);
     expect(r.facts.actor).toBe('Ada Lovelace');
     expect(r.facts.actorNames).toContain('Ada Lovelace');
@@ -383,5 +390,32 @@ describe('resolveLabelOverrides', () => {
   it('returns empty object when no matching labels exist', () => {
     expect(resolveLabelOverrides(['bug', 'frontend', 'urgent'])).toEqual({});
     expect(resolveLabelOverrides([])).toEqual({});
+  });
+});
+
+describe('sanitizeBranchSegment', () => {
+  it('sanitizes component names for branch safety', () => {
+    expect(sanitizeBranchSegment('Auth')).toBe('Auth');
+    expect(sanitizeBranchSegment('frontend-ui')).toBe('frontend-ui');
+    expect(sanitizeBranchSegment('user management / auth')).toBe('user-management-auth');
+    expect(sanitizeBranchSegment('feature/component')).toBe('feature-component');
+    expect(sanitizeBranchSegment('...special$$chars!@#...')).toBe('special-chars');
+    expect(sanitizeBranchSegment('   trailing-spaces   ')).toBe('trailing-spaces');
+  });
+});
+
+describe('resolveComponentBranchName', () => {
+  it('constructs feature/XXXX branch name from component', () => {
+    expect(resolveComponentBranchName('Auth')).toBe('feature/Auth');
+    expect(resolveComponentBranchName('frontend-ui')).toBe('feature/frontend-ui');
+    expect(resolveComponentBranchName('user / auth')).toBe('feature/user-auth');
+  });
+
+  it('returns null for empty or invalid components', () => {
+    expect(resolveComponentBranchName(null)).toBe(null);
+    expect(resolveComponentBranchName(undefined)).toBe(null);
+    expect(resolveComponentBranchName('')).toBe(null);
+    expect(resolveComponentBranchName('   ')).toBe(null);
+    expect(resolveComponentBranchName('$$$')).toBe(null);
   });
 });

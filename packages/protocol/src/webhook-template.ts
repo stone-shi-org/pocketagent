@@ -77,6 +77,8 @@ export const JIRA_TEMPLATE_VARS: readonly TemplateVarSpec[] = [
   { name: 'issue.assignee', kind: 'prose', description: 'Assignee display name.', example: 'Ada Lovelace' },
   { name: 'issue.reporter', kind: 'prose', description: 'Reporter display name.', example: 'Grace Hopper' },
   { name: 'issue.labels', kind: 'prose', description: 'Labels, comma-separated.', example: 'agent-ready, backend' },
+  { name: 'issue.components', kind: 'prose', description: 'Components, comma-separated.', example: 'auth, frontend' },
+  { name: 'issue.component', kind: 'prose', description: 'Primary component name.', example: 'auth' },
   { name: 'issue.summary', kind: 'prose', description: 'The issue title. Written by a user.', example: 'Login fails on Safari' },
   { name: 'issue.description', kind: 'prose', description: 'The issue body. Written by a user.', example: 'Steps to reproduce…' },
   { name: 'user.displayName', kind: 'prose', description: 'Who triggered the event.', example: 'Ada Lovelace' },
@@ -517,6 +519,16 @@ export function jiraTemplateVariables(
       .map((l) => str(l))
       .filter((l) => l !== '')
       .join(', '),
+    'issue.components': (Array.isArray(fields['components']) ? fields['components'] : [])
+      .slice(0, LABELS_MAX_ITEMS)
+      .map((c) => (typeof c === 'string' ? c.trim() : str(asRecord(c)['name']).trim()))
+      .filter((c) => c !== '')
+      .join(', '),
+    'issue.component': (Array.isArray(fields['components']) && fields['components'].length > 0
+      ? typeof fields['components'][0] === 'string'
+        ? (fields['components'][0] as string).trim()
+        : str(asRecord(fields['components'][0])['name']).trim()
+      : ''),
     'issue.summary': str(fields['summary']),
     'issue.description': str(fields['description']),
     'user.displayName': str(asRecord(root['user'])['displayName']),

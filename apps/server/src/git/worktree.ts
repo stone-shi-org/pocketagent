@@ -33,6 +33,8 @@ export interface CreateWorktreeInput {
   branchMode: 'new' | 'current';
   /** Required when `branchMode` is `'new'`. */
   branchName?: string;
+  /** If true and the branch already has an existing worktree, reuse and return it instead of throwing. */
+  reuseExisting?: boolean;
 }
 
 export interface CreateWorktreeOutput {
@@ -98,7 +100,15 @@ export class WorktreeService {
     if (input.branchMode === 'new') {
       const requested = input.branchName?.trim() ?? '';
       await assertValidBranchName(requested);
-      if (await branchExists(projectCwd, requested)) {
+      const exists = await branchExists(projectCwd, requested);
+      if (exists) {
+        if (input.reuseExisting) {
+          const existingPath = path.join(projectCwd, '.worktrees', slugify(requested));
+          if (await pathExists(existingPath)) {
+            const resolved = await this.workspaces.resolveWorkspacePath(existingPath);
+            return { cwd: resolved, branch: requested };
+          }
+        }
         throw new WorktreeError(`Branch "${requested}" already exists.`, 'branch_exists');
       }
       branch = requested;
@@ -114,6 +124,10 @@ export class WorktreeService {
 
     const worktreePath = path.join(projectCwd, '.worktrees', slugify(branch));
     if (await pathExists(worktreePath)) {
+      if (input.reuseExisting) {
+        const resolved = await this.workspaces.resolveWorkspacePath(worktreePath);
+        return { cwd: resolved, branch };
+      }
       throw new WorktreeError(
         `${worktreePath} already exists. Remove it or pick a different branch name.`,
         'already_exists',

@@ -184,7 +184,9 @@ export class RunExecutor {
         const created = await this.opts.worktrees.create({
           projectCwd,
           branchMode: worktree.mode === 'new-branch' ? 'new' : 'current',
-          ...(worktree.mode === 'new-branch' ? { branchName: worktree.branchName } : {}),
+          ...(worktree.mode === 'new-branch'
+            ? { branchName: worktree.branchName, reuseExisting: true }
+            : {}),
         });
         cwd = created.cwd;
       } catch (err) {

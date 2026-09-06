@@ -24,6 +24,10 @@ export interface JiraEventFacts {
   /** Display name of the issue's assignee, or `null` when unassigned. */
   assignee: string | null;
   labels: string[];
+  /** Component names on the issue. Empty when none assigned. */
+  components: string[];
+  /** Primary component name (the first component) or `null` if none. */
+  component: string | null;
   /** Field names in this event's changelog. Empty for a creation. */
   changedFields: string[];
   actor: string | null;
@@ -101,6 +105,15 @@ export function parseJiraEvent(payload: unknown): JiraParseResult {
     str(commentAuthor['name']) ||
     null;
 
+  const rawComponents = Array.isArray(fields['components']) ? (fields['components'] as unknown[]) : [];
+  const components = rawComponents
+    .map((c) => {
+      if (typeof c === 'string') return c.trim();
+      const rec = asRecord(c);
+      return str(rec['name']).trim();
+    })
+    .filter((c) => c !== '');
+
   return {
     ok: true,
     facts: {
@@ -117,6 +130,8 @@ export function parseJiraEvent(payload: unknown): JiraParseResult {
       labels: (Array.isArray(fields['labels']) ? fields['labels'] : [])
         .map((l) => str(l))
         .filter((l) => l !== ''),
+      components,
+      component: components[0] ?? null,
       changedFields: changelogItems
         .map((i) => {
           const item = asRecord(i);
@@ -299,6 +314,36 @@ export function resolvePromptTemplate(
 }
 
 /**
+ * Sanitize a Jira component name so it is safe to use in a git branch name (e.g. `feature/XXXX`).
+ *
+ * Rules:
+ * - Replaces any character that isn't alphanumeric, `-`, `_`, or `.` with `-`
+ * - Collapses consecutive dashes/dots
+ * - Strips leading/trailing dashes and dots
+ * - Trims length to 64 chars
+ */
+export function sanitizeBranchSegment(raw: string): string {
+  const sanitized = raw
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/[-_.]+/g, (match) => (match.includes('-') ? '-' : (match[0] ?? '-')))
+    .replace(/^[-_.]+|[-_.]+$/g, '');
+  return sanitized.slice(0, 64);
+}
+
+/**
+ * Given a Jira component name (or list of component names), construct the branch name
+ * formatted as `feature/XXXX` where XXXX is the component name.
+ * Returns `null` if no valid component is present.
+ */
+export function resolveComponentBranchName(component: string | null | undefined): string | null {
+  if (!component) return null;
+  const clean = sanitizeBranchSegment(component);
+  if (!clean) return null;
+  return `feature/${clean}`;
+}
+
+/**
  * Extract agent and model overrides from Jira issue labels.
  *
  * Supported label formats:
@@ -315,7 +360,7 @@ export function resolveLabelOverrides(
 
   for (const raw of labels) {
     const label = raw.trim();
-    const agentMatch = /^agent[:\-]([a-zA-Z0-9_\-]+)$/i.exec(label);
+    const agentMatch = /^agent[:-]([a-zA-Z0-9_-]+)$/i.exec(label);
     if (agentMatch && agentMatch[1]) {
       const candidate = agentMatch[1].trim().toLowerCase();
       if (!availableAgentIds || availableAgentIds.includes(candidate)) {
@@ -323,7 +368,7 @@ export function resolveLabelOverrides(
       }
     }
 
-    const modelMatch = /^model[:\-](.+)$/i.exec(label);
+    const modelMatch = /^model[:-](.+)$/i.exec(label);
     if (modelMatch && modelMatch[1]) {
       const candidate = modelMatch[1].trim();
       if (candidate !== '') {
