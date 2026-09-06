@@ -138,7 +138,7 @@ describe('planner tools against a real app context', () => {
     expect(result).toMatch(/No session found/);
   });
 
-  it('read_session_output reports no transcript for a terminal session (never resumes a conversation)', async () => {
+  it('read_session_output reads live terminal session output and strips ANSI', async () => {
     t = await createTestApp();
     const created = await t.app.inject({
       method: 'POST',
@@ -147,6 +147,150 @@ describe('planner tools against a real app context', () => {
       payload: { agent: 'shell', cwd: t.projectDir },
     });
     const sessionId = created.json().id as string;
+    const session = t.context.sessions.get(sessionId)!;
+    session.buffer.clear();
+    session.buffer.append('running \x1b[32mtests\x1b[0m\nall passed');
+
+    const tool = findPlannerTool('read_session_output')!;
+    const result = await tool.execute(depsFor(t), { sessionId });
+    expect(result).toBe('running tests\nall passed');
+  });
+
+  it('read_session_output reports (no terminal output yet) when a live terminal buffer is empty', async () => {
+    t = await createTestApp();
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: authHeaders(t.cookie),
+      payload: { agent: 'shell', cwd: t.projectDir },
+    });
+    const sessionId = created.json().id as string;
+    const session = t.context.sessions.get(sessionId)!;
+    session.buffer.clear();
+
+    const tool = findPlannerTool('read_session_output')!;
+    const result = await tool.execute(depsFor(t), { sessionId });
+    expect(result).toBe('(no terminal output yet)');
+  });
+
+  it('read_session_output reads live structured session events from memory buffer', async () => {
+    t = await createTestApp();
+    // Insert a dummy session record in db and create a structured session in live map
+    const sessionId = 'live-structured-session';
+    t.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
+         VALUES (?, 'Test Chat', 'agy', 'agy', ?, 'running', 'structured', ?, 80, 24)`,
+      )
+      .run(sessionId, t.projectDir, Date.now());
+
+    // Create a mock structured session and register it in live map
+    const { EventBuffer } = await import('../src/terminal/event-buffer.js');
+    const buffer = new EventBuffer(1024 * 1024);
+    buffer.append({ kind: 'user_prompt', id: '1', text: 'help me refactor this code' });
+    buffer.append({ kind: 'text', id: '2', text: 'I am refactoring the function now.' });
+
+    (t.context.sessions as unknown as { live: Map<string, unknown> }).live.set(sessionId, {
+      id: sessionId,
+      status: 'running',
+      pid: null,
+      cols: 80,
+      rows: 24,
+      exitCode: null,
+      exitSignal: null,
+      startedAt: Date.now(),
+      endedAt: null,
+      lastActivityAt: Date.now(),
+      externalId: null,
+      agentSessionId: null,
+      transport: 'structured',
+      spec: { agent: 'agy', cwd: t.projectDir, createdAt: Date.now(), title: 'Test Chat' },
+      buffer,
+      isAlive: () => false,
+      terminate: () => {},
+      dispose: () => {},
+    });
+
+    const tool = findPlannerTool('read_session_output')!;
+    const result = await tool.execute(depsFor(t), { sessionId });
+    expect(result).toContain('[user] help me refactor this code');
+    expect(result).toContain('[assistant] I am refactoring the function now.');
+  });
+
+  it('read_session_output combines prior transcript and live buffered events for a resumed structured session', async () => {
+    const brainDir = path.join(t?.workspaceRoot ?? '/tmp', 'fake-brain');
+    await fs.mkdir(path.join(brainDir, 'convo-prior', '.system_generated', 'logs'), { recursive: true });
+    await fs.writeFile(
+      path.join(brainDir, 'convo-prior', '.system_generated', 'logs', 'transcript.jsonl'),
+      JSON.stringify({
+        step_index: 0,
+        source: 'USER_EXPLICIT',
+        type: 'USER_INPUT',
+        status: 'DONE',
+        created_at: '2026-08-22T18:26:34Z',
+        content: '<USER_REQUEST>\ninitial request\n</USER_REQUEST>',
+      }) + '\n',
+    );
+
+    const { AgyTranscriptStore } = await import('../src/conversations/agy.js');
+    t = await createTestApp({}, undefined, new AgyTranscriptStore({ brainDir }));
+
+    const sessionId = 'resumed-structured-session';
+    t.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
+         VALUES (?, 'Resumed Chat', 'agy', 'agy', ?, 'running', 'structured', ?, 80, 24)`,
+      )
+      .run(sessionId, t.projectDir, Date.now());
+
+    const { EventBuffer } = await import('../src/terminal/event-buffer.js');
+    const buffer = new EventBuffer(1024 * 1024);
+    buffer.append({ kind: 'user_prompt', id: 'live-1', text: 'follow up question' });
+    buffer.append({ kind: 'text', id: 'live-2', text: 'follow up answer' });
+
+    (t.context.sessions as unknown as { live: Map<string, unknown> }).live.set(sessionId, {
+      id: sessionId,
+      status: 'running',
+      pid: null,
+      cols: 80,
+      rows: 24,
+      exitCode: null,
+      exitSignal: null,
+      startedAt: Date.now(),
+      endedAt: null,
+      lastActivityAt: Date.now(),
+      externalId: null,
+      agentSessionId: null,
+      transport: 'structured',
+      spec: {
+        agent: 'agy',
+        cwd: t.projectDir,
+        createdAt: Date.now(),
+        title: 'Resumed Chat',
+        resumeAgentSessionId: 'convo-prior',
+      },
+      buffer,
+      isAlive: () => false,
+      terminate: () => {},
+      dispose: () => {},
+    });
+
+    const tool = findPlannerTool('read_session_output')!;
+    const result = await tool.execute(depsFor(t), { sessionId });
+    expect(result).toContain('[user] initial request');
+    expect(result).toContain('[user] follow up question');
+    expect(result).toContain('[assistant] follow up answer');
+  });
+
+  it('read_session_output reports no transcript for a finished terminal session', async () => {
+    t = await createTestApp();
+    const sessionId = 'finished-terminal-session';
+    t.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
+         VALUES (?, 'Terminal Chat', 'shell', 'bash', ?, 'stopped', 'terminal', ?, 80, 24)`,
+      )
+      .run(sessionId, t.projectDir, Date.now());
 
     const tool = findPlannerTool('read_session_output')!;
     const result = await tool.execute(depsFor(t), { sessionId });

@@ -5,6 +5,7 @@ import type { AgentEvent, SessionInfo } from '@pocketagent/protocol';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
 import type { SessionManager, StructuredLikeSession } from '../sessions/manager.js';
 import { readSessionHistory, type SessionHistoryDeps } from '../sessions/history.js';
+import { stripAnsi } from '../terminal/classifier.js';
 import type { WorktreeService } from '../git/worktree.js';
 import { WorktreeError } from '../git/worktree.js';
 import { buildChildEnv } from '../sessions/env.js';
@@ -207,8 +208,24 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     async execute(deps, args) {
       const sessionId = String(args.sessionId ?? '');
       if (!deps.sessions.find(sessionId)) return `No session found with id ${sessionId}.`;
+      const live = deps.sessions.get(sessionId);
+      if (live) {
+        if (live.transport === 'terminal') {
+          const raw = live.buffer.replayAfter(0).data;
+          const text = stripAnsi(raw).trim();
+          if (text.length === 0) return '(no terminal output yet)';
+          return truncate(text, MAX_TOOL_RESULT_CHARS);
+        }
+        const buffered = live.buffer.replayAfter(0).events.map((e) => e.event);
+        const { events: priorEvents } = await readSessionHistory(deps.historyDeps, sessionId);
+        const allEvents = [...priorEvents, ...buffered];
+        if (allEvents.length === 0) {
+          return 'This session has no readable transcript yet (it has not resumed or produced a conversation).';
+        }
+        return truncate(summarizeEvents(allEvents), MAX_TOOL_RESULT_CHARS);
+      }
       const { conversationId, events } = await readSessionHistory(deps.historyDeps, sessionId);
-      if (!conversationId) {
+      if (!conversationId || events.length === 0) {
         return 'This session has no readable transcript yet (it has not resumed or produced a conversation).';
       }
       return truncate(summarizeEvents(events), MAX_TOOL_RESULT_CHARS);
