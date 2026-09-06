@@ -53,6 +53,25 @@ function makeFakeClaude(result: string): { bin: string; cleanup: () => void } {
   return { bin, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
 
+/**
+ * A fake `claude` that records the directory it was spawned in, so a test can
+ * assert *where* the usage probe runs — see `usage/probe-cwd.ts` for why that
+ * is load-bearing rather than incidental.
+ */
+function makeCwdRecordingClaude(): { bin: string; cwdFile: string; cleanup: () => void } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pa-fake-claude-cwd-'));
+  const bin = path.join(dir, 'claude');
+  const cwdFile = path.join(dir, 'cwd.txt');
+  fs.writeFileSync(
+    bin,
+    `#!/usr/bin/env node\n` +
+      `require('node:fs').writeFileSync(${JSON.stringify(cwdFile)}, process.cwd());\n` +
+      `process.stdout.write(JSON.stringify({ result: 'Current session: 1% used \u00b7 resets Aug 13, 4:29pm (UTC)' }));\n`,
+    { mode: 0o755 },
+  );
+  return { bin, cwdFile, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+}
+
 /** A fake `codex app-server --stdio`: answers `initialize` and `account/rateLimits/read`. */
 function makeFakeCodex(rateLimits: unknown): { bin: string; cleanup: () => void } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pa-fake-codex-'));
@@ -154,6 +173,24 @@ describe('GET /api/usage', () => {
       expect(windows.length).toBe(2);
       expect(windows[0]).toMatchObject({ label: '5-hour', percentUsed: 46 });
       expect(windows[1]).toMatchObject({ label: 'Weekly', percentUsed: 30 });
+    });
+
+    it('probes from the temp directory, never from a workspace', async () => {
+      // Regression: the probe used to run in `workspaceRoots[0] ?? cwd()`, and
+      // since every `claude -p` invocation files a transcript under the
+      // directory it ran in, a five-minute poll filed hundreds of one-line
+      // "/usage" transcripts inside a real project — which then showed up in
+      // the project tree as chats. The cwd is meaningless to `/usage` itself,
+      // so the only requirement is that it is somewhere nothing scans.
+      const fake = makeCwdRecordingClaude();
+      fakes.push(fake);
+      t = await createTestApp({ ...NO_CODEX, ...NO_AGY, POCKETAGENT_CLAUDE_BIN: fake.bin });
+
+      const res = await t.app.inject({ method: 'GET', url: '/api/usage', headers: headers(t) });
+      expect(res.statusCode).toBe(200);
+
+      const probedIn = fs.realpathSync(fs.readFileSync(fake.cwdFile, 'utf8').trim());
+      expect(probedIn).toBe(fs.realpathSync(os.tmpdir()));
     });
 
     it('reports unavailable, rather than failing the request, when the binary cannot run', async () => {

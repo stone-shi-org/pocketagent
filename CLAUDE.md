@@ -116,6 +116,16 @@ there is the *conversation*, not the process.
   Resuming eagerly on tap used to spawn a subprocess per idle look at old history, and made
   that chat's row read as live (see the home screen's merge rule below) before anyone had
   said anything to it.
+  **Not every transcript is a conversation.** Any headless `claude -p <something>` files one,
+  so `readTranscriptMeta` flags a transcript holding a local slash command with no reply and
+  nothing a human typed (`localCommandOnly`) and `list()` skips it — *without* consuming the
+  caller's limit, or a directory full of them answers `list(40)` with nothing while every real
+  chat sits just past the window. This is the second half of a fix whose first half is
+  `usage/probe-cwd.ts`: the rate-limit poller ran `claude -p "/usage"` every five minutes from
+  `workspaceRoots[0] ?? process.cwd()`, so it filed 288 transcripts a day *inside a workspace*
+  and the project tree grew a project named after that directory, full of chats titled
+  `/usage`. The poller now probes from `os.tmpdir()`, which is outside every workspace root by
+  construction. Anything else that shells out to an agent must pick its cwd the same way.
 - `adopt/index.ts` — attaches to a pane on a *foreign* tmux socket. Off unless
   `POCKETAGENT_ADOPT_TMUX_SOCKET` is set. The browser only ever sends an opaque
   sha256-derived id; the server builds the argv. Adopted sessions always use the direct

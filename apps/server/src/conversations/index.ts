@@ -27,6 +27,19 @@ import type { WorkspaceRegistry } from '../workspaces/index.js';
 const HEAD_BYTES = 256 * 1024;
 const TAIL_BYTES = 256 * 1024;
 
+/**
+ * How many probe transcripts `list()` will read past its own limit before it
+ * gives up and answers short.
+ *
+ * Skipping a probe must not consume the caller's budget, or a directory that
+ * accumulated a few hundred of them (the usage poller filed one every five
+ * minutes for weeks before it was pointed at the temp directory — see
+ * `usage/probe-cwd.ts`) would push every real chat out of `list(40)`. But the
+ * scan still has to be bounded: this runs on every `/api/projects` poll, and
+ * a directory of thousands must not turn into thousands of reads each time.
+ */
+const MAX_PROBE_SKIPS = 200;
+
 export interface ConversationStoreOptions {
   /** Overridable for tests. Defaults to `~/.claude/projects`. */
   projectsDir?: string;
@@ -101,8 +114,14 @@ export class ConversationStore {
     // most likely being written to right now.
     const claimedLive = new Set<string>();
 
-    for (const entry of files.slice(0, limit)) {
+    for (const entry of files.slice(0, limit + MAX_PROBE_SKIPS)) {
+      if (results.length >= limit) break;
       const meta = await readTranscriptMeta(entry.file);
+
+      // Not a conversation: a headless `-p "/usage"`-style probe leaves a
+      // transcript behind exactly like a real session does, and listing those
+      // fills the project tree with chats nobody started.
+      if (meta.localCommandOnly) continue;
 
       // The transcript records its own working directory, which is
       // authoritative — the directory-name encoding is lossy, so a path
@@ -328,6 +347,11 @@ export interface TranscriptMeta {
   lastPrompt: string | null;
   gitBranch: string | null;
   messageCount: number;
+  /**
+   * The transcript holds a local slash command and nothing else — no reply,
+   * and nothing a human typed. See `MAX_PROBE_SKIPS` for why that matters.
+   */
+  localCommandOnly: boolean;
 }
 
 /**
@@ -380,10 +404,12 @@ export async function readTranscriptMeta(file: string): Promise<TranscriptMeta> 
     lastPrompt: null,
     gitBranch: null,
     messageCount: 0,
+    localCommandOnly: false,
   };
   let aiTitle: string | null = null;
   let firstPrompt: string | null = null;
   let slashPrompt: string | null = null;
+  let sawAssistant = false;
 
   let text: string;
   try {
@@ -453,6 +479,7 @@ export async function readTranscriptMeta(file: string): Promise<TranscriptMeta> 
       }
       case 'assistant':
         meta.messageCount++;
+        sawAssistant = true;
         break;
     }
   }
@@ -461,6 +488,12 @@ export async function readTranscriptMeta(file: string): Promise<TranscriptMeta> 
   // prompt (or slash command) is a far better label than "Untitled".
   const promptForTitle = firstPrompt ?? slashPrompt;
   meta.title = aiTitle ?? (promptForTitle ? fallbackTitle(promptForTitle) : null);
+
+  // A slash command, no reply, and nothing a human typed: the residue of a
+  // headless probe rather than a conversation. `/clear` in a real chat still
+  // has the rest of that chat around it, and a slash command the agent
+  // actually answered has an `assistant` record.
+  meta.localCommandOnly = slashPrompt !== null && firstPrompt === null && !sawAssistant;
 
   return meta;
 }
