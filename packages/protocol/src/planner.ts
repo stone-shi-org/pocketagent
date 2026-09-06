@@ -193,6 +193,23 @@ export const PlannerChat = z.object({
   lastModelId: z.string().nullable(),
   createdAt: z.number().int(),
   lastActivityAt: z.number().int(),
+  /**
+   * PA-10: this chat's mutating tool calls run without pausing for approval.
+   *
+   * Set **only** by an unattended trigger that already carries its own
+   * skip-permissions decision — today, an inbound webhook whose
+   * `skipPermissions` is on — and there is deliberately no way to ask for it
+   * over HTTP: `CreatePlannerChatRequest` has no such field, so a browser
+   * cannot mint a pre-approved chat. It is a property of the chat's
+   * *provenance*, which is why it lives on the row rather than being threaded
+   * through a turn: it has to survive an approval pause, a server restart, and
+   * a `per-issue` webhook reusing the same chat for a later delivery.
+   *
+   * Exposed on the read DTO because CLAUDE.md's first invariant requires it:
+   * "a session running with it must say so persistently in the UI, not just at
+   * the moment it was created". `PlannerChatPage` badges it.
+   */
+  skipToolApprovalsEnabled: z.boolean(),
 });
 export type PlannerChat = z.infer<typeof PlannerChat>;
 
@@ -359,3 +376,81 @@ export const SetPlannerAgentToolRequest = z.object({
   enabled: z.boolean(),
 });
 export type SetPlannerAgentToolRequest = z.infer<typeof SetPlannerAgentToolRequest>;
+
+// ---- Pocket Agents as a selectable "agent" ----------------------------------
+
+/**
+ * PA-10: the namespace that lets a Pocket Agent be chosen anywhere a *coding*
+ * agent id is chosen — today, an inbound webhook's `agent` field.
+ *
+ * A webhook (and a cron job, and a session) identifies its agent by a single
+ * opaque string resolved against the server's `AgentRegistry` (`claude`,
+ * `codex`, …). Rather than adding a parallel `agentKind` discriminator plus a
+ * `plannerWorkspaceId` to every one of those specs — two fields whose
+ * either/or invariant no type could express, and which every existing reader
+ * of `agent` would have to learn about — a Pocket Agent occupies the *same*
+ * value space under a reserved prefix: `pocket:<plannerWorkspaceId>`.
+ *
+ * That choice is what makes the second half of PA-10 ("the Jira tag should
+ * support pocket agent too") fall out for free: `resolveLabelOverrides` reads
+ * one string out of one Jira label, so a value space with room for a Pocket
+ * Agent is the only shape that can express it at all.
+ *
+ * The prefix is a `:`-bearing string precisely *because* no registry agent id
+ * can contain one — `AgentRegistry` ids are bare lowercase words — so a
+ * collision is impossible rather than merely unlikely, and an old row written
+ * before this feature existed can never accidentally parse as a Pocket Agent.
+ *
+ * Parsing lives here, in the protocol package, for the same reason
+ * `cron-expr.ts` and `webhook-template.ts` do: the server resolves the id to a
+ * planner workspace and the editor has to build and recognise the same string,
+ * and a second copy of "does this start with `pocket:`" in `apps/web` is a
+ * divergence waiting to happen.
+ */
+export const POCKET_AGENT_ID_PREFIX = 'pocket:';
+
+/** Build the agent id for a Pocket Agent (planner workspace). */
+export function pocketAgentId(plannerWorkspaceId: string): string {
+  return `${POCKET_AGENT_ID_PREFIX}${plannerWorkspaceId}`;
+}
+
+/**
+ * The planner workspace id inside a Pocket Agent agent id, or `null` when this
+ * is an ordinary coding-agent id.
+ *
+ * Returns `null` for a bare `'pocket:'` with nothing after it too, so a
+ * truncated or hand-edited value degrades to "not a Pocket Agent" (and is then
+ * rejected as an unknown *coding* agent) rather than to "some Pocket Agent".
+ */
+export function parsePocketAgentId(agent: string): string | null {
+  if (!agent.startsWith(POCKET_AGENT_ID_PREFIX)) return null;
+  const id = agent.slice(POCKET_AGENT_ID_PREFIX.length);
+  return id.length > 0 ? id : null;
+}
+
+/** Whether this agent id names a Pocket Agent rather than a coding agent. */
+export function isPocketAgentId(agent: string): boolean {
+  return parsePocketAgentId(agent) !== null;
+}
+
+/**
+ * The token a Jira label uses to name a Pocket Agent: `agent:pocket-<slug>`.
+ *
+ * A Jira label cannot carry the `pocket:<uuid>` id itself — `resolveLabelOverrides`
+ * matches `[a-zA-Z0-9_-]+` after the first separator, so a second colon ends
+ * the match, and a workspace uuid is unusable to type by hand regardless. So a
+ * label names a Pocket Agent by a slug of its *display name*, resolved against
+ * the live list at delivery time.
+ *
+ * Deliberately the same slug shape `PlannerWorkspaceRegistry`'s own directory
+ * naming uses, so "Release Notes" is `pocket-release-notes` in a label and
+ * `release-notes` on disk — one mental model, not two.
+ */
+export const POCKET_AGENT_LABEL_PREFIX = 'pocket-';
+
+export function pocketAgentLabelSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}

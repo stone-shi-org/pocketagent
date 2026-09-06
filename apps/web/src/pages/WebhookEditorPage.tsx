@@ -4,6 +4,7 @@ import type {
   BambooWebhookFilter,
   CronWorktreeMode,
   JiraWebhookFilter,
+  PlannerWorkspace,
   ProjectInfo,
   Webhook,
   WebhookConversationMode,
@@ -19,6 +20,9 @@ import {
   JIRA_PROMPT_TEMPLATES,
   JIRA_TEMPLATE_VARS,
   WEBHOOK_SLUG_RE,
+  parsePocketAgentId,
+  pocketAgentId,
+  pocketAgentLabelSlug,
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { CopyButton } from '../components/CopyButton.js';
@@ -35,6 +39,8 @@ interface Props {
   onApiError: (error: unknown) => void;
   onOpenSession: (sessionId: string) => void;
   onOpenChat: (conversationId: string) => void;
+  /** PA-10: opens a Pocket Agent delivery's chat — its only transcript. */
+  onOpenPlannerChat: (chatId: string) => void;
   onDone: () => void;
   onBack?: () => void;
 }
@@ -104,6 +110,7 @@ export function WebhookEditorPage({
   onApiError,
   onOpenSession,
   onOpenChat,
+  onOpenPlannerChat,
   onDone,
   onBack,
 }: Props): JSX.Element {
@@ -113,6 +120,8 @@ export function WebhookEditorPage({
   const isNew = id === 'new';
 
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  /** PA-10: Pocket Agents, selectable in the same Agent dropdown as coding agents. */
+  const [pocketAgents, setPocketAgents] = useState<PlannerWorkspace[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
@@ -222,10 +231,15 @@ export function WebhookEditorPage({
       api.listWorkspaces(),
       api.listProjects().catch(() => ({ projects: [] as ProjectInfo[] })),
       isNew ? Promise.resolve(null) : api.getWebhook(id),
+      // Tolerated failure, like `listProjects` above: a webhook stays fully
+      // editable with no Pocket Agents available, the dropdown just has one
+      // fewer group.
+      api.listPlannerWorkspaces().catch(() => ({ workspaces: [] as PlannerWorkspace[] })),
     ])
-      .then(([a, w, p, hook]) => {
+      .then(([a, w, p, hook, pocket]) => {
         if (cancelled) return;
         setAgents(a.agents);
+        setPocketAgents(pocket.workspaces);
         setWorkspaces(w.workspaces);
         setProjects(p.projects);
 
@@ -331,6 +345,41 @@ export function WebhookEditorPage({
 
   const structuredAgents = agents.filter((a) => a.transports.includes('structured'));
   const selectedAgent = agents.find((a) => a.id === agent) ?? null;
+
+  /**
+   * PA-10: whether the chosen agent is a Pocket Agent.
+   *
+   * Parsed with the protocol's own helper rather than a local `startsWith`, so
+   * this and the server can never disagree about what a Pocket Agent id looks
+   * like — the same argument that keeps the cron solver and the prompt renderer
+   * in `packages/protocol`.
+   */
+  const pocketWorkspaceId = parsePocketAgentId(agent);
+  const isPocketAgent = pocketWorkspaceId !== null;
+  const selectedPocketAgent = pocketAgents.find((w) => w.id === pocketWorkspaceId) ?? null;
+
+  /**
+   * One value space, two groups. `SelectRowNative` renders a flat list, so the
+   * grouping is carried by the label prefix rather than by an `<optgroup>`.
+   *
+   * A Pocket Agent that was deleted after this webhook was saved is appended as
+   * its own option, so the select does not silently snap to the first entry and
+   * make the next save quietly rewrite the agent — the same reason the coding
+   * list keeps `(not installed)` agents visible rather than filtering them out.
+   */
+  const agentOptions = useMemo(() => {
+    const options = structuredAgents.map((a) => ({
+      value: a.id,
+      label: a.available ? a.displayName : `${a.displayName} (not installed)`,
+    }));
+    for (const w of pocketAgents) {
+      options.push({ value: pocketAgentId(w.id), label: `Pocket Agent · ${w.name}` });
+    }
+    if (isPocketAgent && selectedPocketAgent === null) {
+      options.push({ value: agent, label: 'Pocket Agent (deleted)' });
+    }
+    return options;
+  }, [structuredAgents, pocketAgents, agent, isPocketAgent, selectedPocketAgent]);
 
   const flatProjects = useMemo(() => flattenProjects(projects), [projects]);
   const dirOptions = useMemo(() => {
@@ -646,7 +695,10 @@ export function WebhookEditorPage({
       cwd,
       agent,
       promptTemplate,
-      worktreeMode,
+      // PA-10: a Pocket Agent run has no project checkout to branch, so saving
+      // anything else here would persist a setting the run silently ignores —
+      // and would then be shown back to the user as if it applied.
+      worktreeMode: isPocketAgent ? ('none' as CronWorktreeMode) : worktreeMode,
       conversationMode,
       overlapPolicy,
       maxConcurrent,
@@ -712,6 +764,10 @@ export function WebhookEditorPage({
       const res = await api.sendTestDelivery(id);
       await loadDeliveries();
       if (res.sessionId) onOpenSession(res.sessionId);
+      // PA-10: a pocket test delivery has no session, so without this branch
+      // the button appeared to do nothing at all — `sessionId` is null by
+      // design and `reason` is null on success.
+      else if (res.plannerChatId) onOpenPlannerChat(res.plannerChatId);
       else if (res.reason) setError(`Test delivery: ${res.status} — ${res.reason}`);
     } catch (err) {
       onApiError(err);
@@ -751,6 +807,13 @@ export function WebhookEditorPage({
   };
 
   const openDelivery = (d: WebhookDelivery): void => {
+    // PA-10: a Pocket Agent delivery has exactly one place to go and no tiers
+    // to fall back through — the chat *is* the transcript, live or finished —
+    // so it is checked first and independently of the session rule below.
+    if (d.plannerChatId) {
+      onOpenPlannerChat(d.plannerChatId);
+      return;
+    }
     // The same three-tier rule the cron run list uses: prefer the session, since
     // `GET /api/sessions/:id/history` resolves for every agent, live or
     // finished. The conversation id is the fallback for when the session row has
@@ -1580,35 +1643,39 @@ export function WebhookEditorPage({
             busy={busy}
             label="Agent"
             value={agent}
-            options={structuredAgents.map((a) => ({
-              value: a.id,
-              label: a.available ? a.displayName : `${a.displayName} (not installed)`,
-            }))}
+            options={agentOptions}
+            help={
+              isPocketAgent
+                ? `Runs in the Pocket Agent's own workspace${selectedPocketAgent ? ` (${selectedPocketAgent.path})` : ''}, not in a project directory — so the working copy, effort and worktree settings below do not apply. Its transcript opens as a Pocket Agent chat.`
+                : undefined
+            }
             onChange={setAgent}
           />
-          <SelectRowNative
-            busy={busy || !selectedIsRepo}
-            label="Working copy"
-            value={worktreeMode}
-            options={
-              selectedIsRepo
-                ? [
-                    { value: 'new-branch', label: 'A new worktree per delivery' },
-                    { value: 'current-branch', label: 'A worktree on the current branch' },
-                    { value: 'none', label: 'The project directory itself' },
-                  ]
-                : [{ value: 'none', label: 'The project directory itself' }]
-            }
-            help={
-              !selectedIsRepo
-                ? 'This directory is not a git repository, so there is no worktree to make. Without one, the agent works directly in the folder itself.'
-                : worktreeMode === 'none'
-                  ? `The agent works directly in your checkout. A prompt built partly from ${type === 'bamboo' ? "a Bamboo build trigger's text" : "someone else’s Jira text"} will be editing the tree you are working in.`
-                  : `Per-delivery worktrees are never cleaned up automatically — deleting one would destroy the output it produced. A busy ${type === 'bamboo' ? 'Bamboo plan' : 'Jira project'} can create hundreds.`
-            }
-            onChange={(v) => setWorktreeMode(v as CronWorktreeMode)}
-          />
-          {!selectedIsRepo && skipPermissions && (
+          {!isPocketAgent && (
+            <SelectRowNative
+              busy={busy || !selectedIsRepo}
+              label="Working copy"
+              value={worktreeMode}
+              options={
+                selectedIsRepo
+                  ? [
+                      { value: 'new-branch', label: 'A new worktree per delivery' },
+                      { value: 'current-branch', label: 'A worktree on the current branch' },
+                      { value: 'none', label: 'The project directory itself' },
+                    ]
+                  : [{ value: 'none', label: 'The project directory itself' }]
+              }
+              help={
+                !selectedIsRepo
+                  ? 'This directory is not a git repository, so there is no worktree to make. Without one, the agent works directly in the folder itself.'
+                  : worktreeMode === 'none'
+                    ? `The agent works directly in your checkout. A prompt built partly from ${type === 'bamboo' ? "a Bamboo build trigger's text" : "someone else’s Jira text"} will be editing the tree you are working in.`
+                    : `Per-delivery worktrees are never cleaned up automatically — deleting one would destroy the output it produced. A busy ${type === 'bamboo' ? 'Bamboo plan' : 'Jira project'} can create hundreds.`
+              }
+              onChange={(v) => setWorktreeMode(v as CronWorktreeMode)}
+            />
+          )}
+          {!isPocketAgent && !selectedIsRepo && skipPermissions && (
             // The one containment boundary is unavailable here, and the approval
             // toggle is off, so say so rather than letting the two combine quietly.
             <div className="warn-callout" role="alert">
@@ -1762,7 +1829,11 @@ export function WebhookEditorPage({
             label="Model"
             value={model}
             busy={busy}
-            placeholder={selectedAgent?.defaultModel ?? "the agent's default"}
+            placeholder={
+              isPocketAgent
+                ? (selectedPocketAgent?.defaultModelId ?? "this Pocket Agent's default model")
+                : (selectedAgent?.defaultModel ?? "the agent's default")
+            }
             listId="webhook-model-options"
             onChange={setModel}
           >
@@ -1776,13 +1847,15 @@ export function WebhookEditorPage({
               ))}
             </datalist>
           </TextRow>
-          <TextRow
-            label="Effort"
-            value={effort}
-            busy={busy}
-            placeholder={selectedAgent?.defaultEffort ?? "the model's default"}
-            onChange={setEffort}
-          />
+          {!isPocketAgent && (
+            <TextRow
+              label="Effort"
+              value={effort}
+              busy={busy}
+              placeholder={selectedAgent?.defaultEffort ?? "the model's default"}
+              onChange={setEffort}
+            />
+          )}
           {type === 'jira' && (
             <div className="settings-row">
               <div className="settings-row-main">
@@ -1795,6 +1868,18 @@ export function WebhookEditorPage({
                     <code>model:&lt;name&gt;</code> (e.g. <code>model:Sonnet</code>,{' '}
                     <code>model:opus</code>, <code>model:pro</code>, <code>model:flash</code>) to
                     dynamically override the default agent and model for this delivery.
+                  </p>
+                  <p className="transport-hint">
+                    A Pocket Agent is named by a slug of its display name:{' '}
+                    <code>agent:pocket-&lt;name&gt;</code>
+                    {pocketAgents.length > 0 && (
+                      <>
+                        {' '}
+                        — e.g.{' '}
+                        <code>{`agent:pocket-${pocketAgentLabelSlug(pocketAgents[0]?.name ?? '')}`}</code>
+                      </>
+                    )}
+                    . An unrecognised label is ignored, leaving the agent chosen above.
                   </p>
                 </div>
                 <div className="settings-row-control">
@@ -1941,7 +2026,8 @@ export function WebhookEditorPage({
             ) : (
               <div className="webhook-history-panel" style={{ border: 'none', background: 'transparent' }}>
                 {visibleDeliveries.map((d) => {
-                  const openable = d.sessionId !== null || d.agentSessionId !== null;
+                  const openable =
+                    d.sessionId !== null || d.agentSessionId !== null || d.plannerChatId !== null;
                   return (
                     <div key={d.id} className={`history-row${DID_NOT_RUN.has(d.status) ? ' inert' : ''}`}>
                       <button

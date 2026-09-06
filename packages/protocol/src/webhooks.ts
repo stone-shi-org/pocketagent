@@ -302,6 +302,16 @@ const WebhookFields = z
     config: WebhookConfig,
     authMode: WebhookAuthMode,
     cwd: z.string().min(1).max(4096),
+    /**
+     * A coding-agent id from the server's `AgentRegistry` (`claude`, `codex`,
+     * …), **or** a Pocket Agent as `pocket:<plannerWorkspaceId>` — see
+     * `POCKET_AGENT_ID_PREFIX` in `planner.ts` for why PA-10 widened this one
+     * string instead of adding a discriminator beside it.
+     *
+     * Still just a bounded string here: which coding agents exist lives in the
+     * registry and which Pocket Agents exist lives in `planner_workspaces`, so
+     * neither is expressible in a schema. Both are checked in the route.
+     */
     agent: z.string().min(1).max(64),
     worktreeMode: CronWorktreeMode,
     /**
@@ -490,6 +500,17 @@ export const WebhookDelivery = z.object({
   finishedAt: z.number().int().nullable(),
   sessionId: z.string().nullable(),
   agentSessionId: z.string().nullable(),
+  /**
+   * PA-10: the Pocket Agent chat this delivery ran in, when its agent was a
+   * Pocket Agent rather than a coding agent.
+   *
+   * Mutually exclusive with `sessionId`/`agentSessionId` in practice — a pocket
+   * run creates no session at all — and it is what the delivery row links to
+   * (`#/planner/<id>`), so a pocket delivery is as inspectable as a coding one.
+   * Non-null is therefore also the honest client-side test for "this was a
+   * pocket run", which is why the UI does not need `agent` parsed a second time.
+   */
+  plannerChatId: z.string().nullable(),
   cwd: z.string().nullable(),
   error: z.string().nullable(),
 });

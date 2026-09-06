@@ -29,6 +29,7 @@ import {
   JiraWebhookFilter as JiraWebhookFilterSchema,
   bambooTemplateVariables,
   jiraTemplateVariables,
+  parsePocketAgentId,
   renderBambooTemplate,
   renderJiraTemplate,
 } from '@pocketagent/protocol';
@@ -62,8 +63,10 @@ import { isContained } from '../workspaces/index.js';
 import type { WorktreeService } from '../git/worktree.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import { safeTokenEqual } from '../auth/index.js';
-import type { RunSink, RunSpec } from '../runs/executor.js';
+import type { PocketRunSpec, RunSink, RunSpec } from '../runs/executor.js';
 import { RunExecutor, mintBranchName } from '../runs/executor.js';
+import type { PlannerChatService } from '../planner/chats.js';
+import type { PlannerWorkspaceRegistry } from '../planner/workspaces.js';
 import type { JiraEventFacts } from './jira.js';
 import {
   describeJiraFilter,
@@ -208,6 +211,13 @@ export interface WebhookServiceOptions {
   workspaces: WorkspaceRegistry;
   worktrees: WorktreeService;
   agents: AgentRegistry;
+  /**
+   * PA-10: needed to run a webhook whose agent is a Pocket Agent
+   * (`pocket:<plannerWorkspaceId>`) — the registry resolves the id to a
+   * display name and proves it still exists, and the chat service runs the turn.
+   */
+  plannerWorkspaces: PlannerWorkspaceRegistry;
+  plannerChats: PlannerChatService;
   /** Ceiling shared with interactive sessions; the reservation is carved from it. */
   maxSessions: number;
   logger?: {
@@ -274,6 +284,17 @@ export interface DeliveryOutcome {
   httpStatus: number;
   deliveryId: string | null;
   sessionId: string | null;
+  /**
+   * PA-10: set instead of `sessionId` when the delivery ran in a Pocket Agent.
+   *
+   * Only consumed by `POST /api/webhooks/:id/test`, whose caller (the editor's
+   * "Send test" button) navigates straight to what the test started. Without
+   * it, testing a pocket webhook looks like nothing happened: `sessionId` is
+   * null by design and `reason` is null on success, so the editor had no branch
+   * to take. Never reaches `/api/hooks/:slug`'s response, which says nothing
+   * about internals to an unauthenticated caller.
+   */
+  plannerChatId?: string | null;
   reason: string | null;
   duplicate: boolean;
 }
@@ -298,6 +319,7 @@ export class WebhookService {
       sessions: opts.sessions,
       workspaces: opts.workspaces,
       worktrees: opts.worktrees,
+      plannerChats: opts.plannerChats,
       label: 'webhook delivery',
       ...(opts.logger !== undefined ? { logger: opts.logger } : {}),
       ...(opts.now !== undefined ? { now: opts.now } : {}),
@@ -348,6 +370,21 @@ export class WebhookService {
   sweep(): void {
     try {
       for (const row of readActiveWebhookDeliveries(this.db)) {
+        // PA-10: a pocket run. Still-parked and still-streaming runs are both
+        // `isPocketRunAlive`, since a pocket run only leaves the executor's
+        // in-flight map when it settles — so reaching here means the turn is
+        // genuinely gone (its chat was deleted mid-turn, say) and the row would
+        // otherwise hold a concurrency slot until the next restart.
+        if (row.planner_chat_id !== null) {
+          if (this.executor.isPocketRunAlive(row.id)) continue;
+          this.settleDelivery(
+            row.id,
+            row.webhook_id,
+            'failed',
+            row.error ?? 'The Pocket Agent chat ended before the delivery completed.',
+          );
+          continue;
+        }
         if (row.session_id === null) continue;
         if (this.executor.isAlive(row.session_id)) continue;
         this.settleDelivery(
@@ -556,10 +593,14 @@ export class WebhookService {
 
     const started = await this.startRun(hook, deliveryId, facts, prompt.text, route.cwd);
     return {
-      status: started.sessionId !== null ? 'running' : 'failed',
+      // PA-10: keyed on `started`, not on `sessionId !== null` — a Pocket Agent
+      // run succeeds with no session at all, and the old test would have
+      // reported every one of them as failed.
+      status: started.started ? 'running' : 'failed',
       httpStatus: 202,
       deliveryId,
       sessionId: started.sessionId,
+      ...(started.plannerChatId !== undefined ? { plannerChatId: started.plannerChatId } : {}),
       reason: started.error,
       duplicate: false,
     };
@@ -579,11 +620,50 @@ export class WebhookService {
     facts: AnyEventFacts,
     prompt: string,
     cwd: string,
-  ): Promise<{ sessionId: string | null; error: string | null }> {
+  ): Promise<{
+    started: boolean;
+    sessionId: string | null;
+    plannerChatId?: string;
+    error: string | null;
+  }> {
     const subjectKey = subjectKeyOf(hook.type as WebhookType, facts);
     const startedAt = this.now();
     updateWebhookDelivery(this.db, deliveryId, { started_at: startedAt });
     const sink = this.sinkFor(hook, deliveryId, subjectKey, startedAt, cwd);
+
+    const resolved = this.resolveAgent(hook, facts);
+
+    // PA-10: a Pocket Agent run. Checked before everything below because none
+    // of it applies — the three `per-issue` session cases are about resuming a
+    // *session*, and a pocket conversation is a chat that `startPocketAgent`
+    // resumes itself from the mapping row.
+    if (resolved.plannerWorkspaceId !== null) {
+      // The saved agent may have been a coding agent that a Jira label moved
+      // to a Pocket Agent, so the row's own `agent` is corrected here rather
+      // than left describing something that did not run. (The same is true in
+      // reverse on the coding path; see `recordEffectiveAgent`.)
+      this.recordEffectiveAgent(deliveryId, resolved.agent);
+      const mapped =
+        hook.conversation_mode === 'per-issue'
+          ? readWebhookIssueSession(this.db, hook.id, subjectKey)
+          : null;
+      const outcome = await this.executor.startPocketAgent(
+        deliveryId,
+        {
+          ...this.pocketSpecFor(hook, facts, resolved.plannerWorkspaceId, resolved.model),
+          prompt,
+          ...(mapped?.planner_chat_id ? { resumeChatId: mapped.planner_chat_id } : {}),
+        },
+        sink,
+      );
+      // `sessionId` stays null for a pocket run — there is no session. The
+      // delivery's link is `planner_chat_id`, set through `sink.onPlannerChat`.
+      return outcome.ok
+        ? { started: true, sessionId: null, plannerChatId: outcome.chatId, error: null }
+        : { started: false, sessionId: null, error: outcome.error };
+    }
+
+    this.recordEffectiveAgent(deliveryId, resolved.agent);
 
     if (hook.conversation_mode === 'per-issue') {
       const mapped = readWebhookIssueSession(this.db, hook.id, subjectKey);
@@ -602,7 +682,7 @@ export class WebhookService {
             prompt,
             sink,
           );
-          return { sessionId: ok ? mapped.session_id : null, error: null };
+          return { started: ok, sessionId: ok ? mapped.session_id : null, error: null };
         }
       }
       // Case 2: the conversation exists in the same project directory but its
@@ -621,8 +701,8 @@ export class WebhookService {
           sink,
         );
         return outcome.ok
-          ? { sessionId: outcome.sessionId, error: null }
-          : { sessionId: null, error: outcome.error };
+          ? { started: true, sessionId: outcome.sessionId, error: null }
+          : { started: false, sessionId: null, error: outcome.error };
       }
     }
 
@@ -632,8 +712,27 @@ export class WebhookService {
       sink,
     );
     return outcome.ok
-      ? { sessionId: outcome.sessionId, error: null }
-      : { sessionId: null, error: outcome.error };
+      ? { started: true, sessionId: outcome.sessionId, error: null }
+      : { started: false, sessionId: null, error: outcome.error };
+  }
+
+  /**
+   * Correct the delivery row's `agent` to what is actually about to run.
+   *
+   * `blankRow` copies the webhook's *configured* agent, because the row has to
+   * exist (it is the idempotency claim) long before the filter has matched or
+   * the prompt has rendered. With `autoSelectAgentModel` on, a Jira label can
+   * then choose a different agent, and before PA-10 the row kept describing the
+   * configured one — a latent wrong-history bug that becomes a visible one once
+   * the override can cross between a coding agent and a Pocket Agent, since
+   * `agentDisplayName` and the row's transcript link both key off it.
+   *
+   * A no-op when nothing was overridden, which is the overwhelmingly common case.
+   */
+  private recordEffectiveAgent(deliveryId: string, agent: string): void {
+    const row = readWebhookDelivery(this.db, deliveryId);
+    if (row === null || row.agent === agent) return;
+    updateWebhookDelivery(this.db, deliveryId, { agent });
   }
 
   private sinkFor(
@@ -643,7 +742,12 @@ export class WebhookService {
     startedAt: number,
     resolvedCwd: string,
   ): RunSink {
-    const remember = (patch: { sessionId?: string; agentSessionId?: string; cwd?: string }): void => {
+    const remember = (patch: {
+      sessionId?: string;
+      agentSessionId?: string;
+      plannerChatId?: string;
+      cwd?: string;
+    }): void => {
       if (hook.conversation_mode !== 'per-issue') return;
       const existing = readWebhookIssueSession(this.db, hook.id, issueKey);
       // `resolvedCwd`, not `hook.cwd`: the routed directory for *this*
@@ -654,6 +758,7 @@ export class WebhookService {
         issue_key: issueKey,
         agent_session_id: patch.agentSessionId ?? existing?.agent_session_id ?? null,
         session_id: patch.sessionId ?? existing?.session_id ?? null,
+        planner_chat_id: patch.plannerChatId ?? existing?.planner_chat_id ?? null,
         cwd,
         created_at: existing?.created_at ?? startedAt,
         updated_at: startedAt,
@@ -677,6 +782,24 @@ export class WebhookService {
       onAgentSessionId: (agentSessionId) => {
         updateWebhookDelivery(this.db, deliveryId, { agent_session_id: agentSessionId });
         remember({ agentSessionId });
+      },
+      /**
+       * PA-10: the pocket counterpart of `onSessionStarted` — it stamps the
+       * webhook the same way, because for a pocket run this *is* the moment the
+       * run became real, and the row's `last_delivery_status` would otherwise
+       * never leave `starting`.
+       */
+      onPlannerChat: (plannerChatId) => {
+        updateWebhookDelivery(this.db, deliveryId, {
+          status: 'running',
+          planner_chat_id: plannerChatId,
+        });
+        updateWebhook(this.db, hook.id, {
+          last_delivery_at: startedAt,
+          last_delivery_status: 'running',
+          last_error: null,
+        });
+        remember({ plannerChatId });
       },
       onSettled: (status, error) => {
         this.settleDelivery(deliveryId, hook.id, status, error, startedAt);
@@ -729,6 +852,68 @@ export class WebhookService {
     });
   }
 
+  /**
+   * PA-10: which agent this delivery actually runs, and whether it is a Pocket
+   * Agent.
+   *
+   * Split out of `specFor` because the answer is needed *before* a spec can be
+   * built — the two kinds of run take different spec types — and because it is
+   * needed a second time by `startRun`, which has to choose between
+   * `executor.start` and `executor.startPocketAgent`. Computing it once here
+   * also means the Jira-label override is applied identically on both paths.
+   *
+   * `resolveLabelOverrides` can move a delivery *across* the boundary in either
+   * direction: `agent:pocket-release-notes` on a webhook configured with
+   * `claude` turns that delivery into a pocket run, and `agent:claude` on a
+   * pocket-configured webhook turns it back into a coding run. That is the
+   * feature the ticket asked for ("The Jira tag should support pocket agent
+   * too"), and it is why nothing downstream may assume the run kind from the
+   * *saved* `hook.agent`.
+   */
+  private resolveAgent(
+    hook: WebhookRow,
+    facts: AnyEventFacts,
+  ): { agent: string; model: string | null; plannerWorkspaceId: string | null } {
+    const type = hook.type as WebhookType;
+    let agent = hook.agent;
+    let model = hook.model;
+
+    if (hook.auto_select_agent_model === 1 && type === 'jira') {
+      const jFacts = facts as JiraEventFacts;
+      if (Array.isArray(jFacts.labels) && jFacts.labels.length > 0) {
+        const overrides = resolveLabelOverrides(
+          jFacts.labels,
+          this.opts.agents.list().map((a) => a.id),
+          this.opts.plannerWorkspaces.list().map((w) => ({ id: w.id, name: w.name })),
+        );
+        if (overrides.agent) agent = overrides.agent;
+        if (overrides.model) model = overrides.model;
+      }
+    }
+
+    return { agent, model, plannerWorkspaceId: parsePocketAgentId(agent) };
+  }
+
+  /**
+   * The spec for a Pocket Agent run. No worktree, no branch, no cwd: a planner
+   * workspace is app-owned scratch space that the planner's own tools write to
+   * directly, so `worktreeMode` and `effort` are simply not expressible here
+   * and are ignored rather than silently reinterpreted.
+   */
+  private pocketSpecFor(
+    hook: WebhookRow,
+    facts: AnyEventFacts,
+    plannerWorkspaceId: string,
+    model: string | null,
+  ): Omit<PocketRunSpec, 'prompt'> {
+    return {
+      plannerWorkspaceId,
+      title: titleOf(hook.name, hook.type as WebhookType, facts),
+      skipPermissions: hook.skip_permissions === 1,
+      model,
+    };
+  }
+
   private specFor(hook: WebhookRow, facts: AnyEventFacts, cwd: string): Omit<RunSpec, 'prompt'> {
     const type = hook.type as WebhookType;
     const subjectKey = subjectKeyOf(type, facts);
@@ -754,22 +939,7 @@ export class WebhookService {
 
     const title = titleOf(hook.name, type, facts);
 
-    let effectiveAgent = hook.agent;
-    let effectiveModel = hook.model;
-
-    if (hook.auto_select_agent_model === 1 && type === 'jira') {
-      const jFacts = facts as JiraEventFacts;
-      if (Array.isArray(jFacts.labels) && jFacts.labels.length > 0) {
-        const availableAgentIds = this.opts.agents.list().map((a) => a.id);
-        const overrides = resolveLabelOverrides(jFacts.labels, availableAgentIds);
-        if (overrides.agent) {
-          effectiveAgent = overrides.agent;
-        }
-        if (overrides.model) {
-          effectiveModel = overrides.model;
-        }
-      }
-    }
+    const { agent: effectiveAgent, model: effectiveModel } = this.resolveAgent(hook, facts);
 
     return {
       cwd,
@@ -851,6 +1021,12 @@ export class WebhookService {
    * the row open, so this is a delivery still mid-composite.
    */
   private isRunActive(row: WebhookDeliveryRow): boolean {
+    // PA-10: a pocket run has no session, so the "no session yet" shortcut
+    // below would make one look active forever — including one parked on an
+    // approval that nobody will ever answer after a restart. Liveness for a
+    // pocket run is asked of the executor instead, which is still the *session*
+    // discipline (ask, never time out), just of the only thing there is to ask.
+    if (row.planner_chat_id !== null) return this.executor.isPocketRunAlive(row.id);
     return row.session_id === null || this.executor.isAlive(row.session_id);
   }
 
@@ -931,6 +1107,7 @@ export class WebhookService {
       finished_at: null,
       session_id: null,
       agent_session_id: null,
+      planner_chat_id: null,
       cwd: null,
       error: null,
     };
@@ -1415,7 +1592,7 @@ export class WebhookService {
       cwd: row.cwd,
       workspaceLabel,
       agent: row.agent,
-      agentDisplayName: this.opts.agents.get(row.agent)?.displayName ?? row.agent,
+      agentDisplayName: this.agentDisplayName(row.agent),
       worktreeMode: row.worktree_mode as 'none' | 'new-branch' | 'current-branch',
       model: row.model,
       ...(row.effort_set === 1 ? { effort: row.effort } : {}),
@@ -1459,9 +1636,28 @@ export class WebhookService {
       finishedAt: row.finished_at,
       sessionId: row.session_id,
       agentSessionId: row.agent_session_id,
+      plannerChatId: row.planner_chat_id,
       cwd: row.cwd,
       error: row.error,
     };
+  }
+
+  /**
+   * PA-10: one place that turns a stored `agent` into something readable,
+   * whichever value space it came from.
+   *
+   * A Pocket Agent falls back to its bare id when the planner workspace has
+   * since been deleted, exactly as a coding agent falls back to its id when it
+   * is no longer registered — an orphaned row still has to describe itself, the
+   * same discipline `webhook_name` is copied for.
+   */
+  private agentDisplayName(agent: string): string {
+    const plannerWorkspaceId = parsePocketAgentId(agent);
+    if (plannerWorkspaceId !== null) {
+      const workspace = this.opts.plannerWorkspaces.get(plannerWorkspaceId);
+      return workspace ? `Pocket Agent · ${workspace.name}` : agent;
+    }
+    return this.opts.agents.get(agent)?.displayName ?? agent;
   }
 
   toDeliveryDetail(row: WebhookDeliveryRow): WebhookDeliveryDetail {

@@ -223,6 +223,19 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
         )}
       </div>
 
+      {chat?.skipToolApprovalsEnabled === true && (
+        // PA-10 disclosure. CLAUDE.md's first invariant requires that a session
+        // running with approvals bypassed "say so persistently in the UI, not
+        // just at the moment it was created" — this chat was created by an
+        // unattended trigger whose skip-permissions toggle was on, so every
+        // mutating tool call in it runs without asking. Rendered on every visit,
+        // not once.
+        <div className="warn-callout" role="status">
+          Tool approvals are bypassed in this chat. It was started by a trigger
+          configured to skip them, so its file and command tools run without asking.
+        </div>
+      )}
+
       {error && (
         <div className="error-box" role="alert">
           {error}

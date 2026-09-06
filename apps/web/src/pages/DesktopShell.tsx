@@ -560,6 +560,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
               onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
               onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
               onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
+              onOpenPlannerChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
               onApiError={onApiError}
             />
           </Suspense>
@@ -575,6 +576,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
               }}
               onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
               onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
+              onOpenPlannerChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
               onApiError={onApiError}
             />
           </Suspense>

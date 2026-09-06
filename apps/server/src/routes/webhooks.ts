@@ -18,7 +18,7 @@ import type {
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 import type { WebhookSpec, WebhookSpecCommon } from '../webhooks/index.js';
 import { WebhookServiceError } from '../webhooks/index.js';
-import { resolveWorkspaceCwdOrReply, structuredAgentProblem } from './shared.js';
+import { resolveWorkspaceCwdOrReply, webhookAgentProblem } from './shared.js';
 import { webhookDeliveryRoutes } from './webhook-delivery.js';
 
 /** Default page size for a delivery list. */
@@ -30,7 +30,7 @@ function badRequest(reply: FastifyReply, message: string, code = 'bad_request'):
 }
 
 export const webhookRoutes: FastifyPluginAsync = async (app) => {
-  const { webhooks, workspaces, agents } = app.pocket;
+  const { webhooks, workspaces, agents, plannerWorkspaces } = app.pocket;
 
   const mapError = (reply: FastifyReply, err: unknown): FastifyReply | never => {
     if (err instanceof WebhookServiceError) {
@@ -91,7 +91,7 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     const cwd = await resolveWorkspaceCwdOrReply(workspaces, body.cwd, reply);
     if (cwd === null) return reply;
 
-    const agentProblem = structuredAgentProblem(agents, body.agent, 'triggered by a webhook');
+    const agentProblem = webhookAgentProblem(agents, plannerWorkspaces, body.agent);
     if (agentProblem !== null) return badRequest(reply, agentProblem);
 
     // Bamboo cannot compute a request signature — it only supports a static
@@ -150,7 +150,7 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     }
 
     if (body.agent !== undefined) {
-      const agentProblem = structuredAgentProblem(agents, body.agent, 'triggered by a webhook');
+      const agentProblem = webhookAgentProblem(agents, plannerWorkspaces, body.agent);
       if (agentProblem !== null) return badRequest(reply, agentProblem);
     }
 

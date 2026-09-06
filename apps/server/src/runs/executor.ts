@@ -5,6 +5,8 @@ import type { WorkspaceRegistry } from '../workspaces/index.js';
 import { WorkspaceError } from '../workspaces/index.js';
 import type { WorktreeService } from '../git/worktree.js';
 import { WorktreeError } from '../git/worktree.js';
+import type { PlannerChatService } from '../planner/chats.js';
+import { PlannerChatError } from '../planner/chats.js';
 
 /**
  * The worktree → session → prompt composite, shared by every trigger that
@@ -84,6 +86,14 @@ export interface RunSink {
   onSessionStarted(sessionId: string): void;
   /** Arrives asynchronously in the first event; links the run to a transcript on disk. */
   onAgentSessionId(agentSessionId: string): void;
+  /**
+   * PA-10: the Pocket Agent chat this run is happening in — the pocket
+   * equivalent of `onSessionStarted`, and the only handle a pocket run has.
+   *
+   * Optional so `CronService`'s sink, which cannot start a pocket run today,
+   * needs no change at all. `startPocketAgent` is the only caller.
+   */
+  onPlannerChat?(chatId: string): void;
   onSettled(status: 'succeeded' | 'failed', error: string | null): void;
 }
 
@@ -91,10 +101,64 @@ export type RunOutcome =
   | { ok: true; sessionId: string; cwd: string; session: StructuredLikeSession }
   | { ok: false; error: string };
 
+/**
+ * PA-10: what to run when the trigger's agent is a *Pocket Agent* rather than
+ * a coding agent.
+ *
+ * A separate spec rather than a variant of `RunSpec`, because almost nothing
+ * carries over: a Pocket Agent chat has no worktree (its workspace is
+ * app-owned scratch space that the planner's own tools write to directly), no
+ * git branch, no `cwd` to validate against the project workspace list, no
+ * effort level, and no session. What survives is the part the trigger actually
+ * cares about — a directory-less place to put one prompt, and a sink to report
+ * it through.
+ */
+export interface PocketRunSpec {
+  /** The planner workspace ("agent") to run in. */
+  plannerWorkspaceId: string;
+  /** Becomes the chat's title, so the run is identifiable in the Pocket Agent list. */
+  title: string;
+  prompt: string;
+  /**
+   * The trigger's own skip-permissions decision, passed straight through to
+   * `PlannerChat.skipToolApprovalsEnabled`.
+   *
+   * With it off, a mutating tool call parks the turn and the run stays
+   * genuinely in progress until a human answers in the Pocket Agent UI —
+   * never a timeout, never a decay into an allow. That is the same
+   * "unattended run waits forever" behaviour a cron job with the toggle off
+   * already has, and the reason the sink observes the chat rather than only
+   * draining its own generator.
+   */
+  skipPermissions: boolean;
+  /** The planner model id to use; absent/null leaves the chat's own default. */
+  model?: string | null;
+  /**
+   * Continue this chat instead of creating one — a webhook's `per-issue` mode,
+   * where the conversation belongs to the issue.
+   *
+   * A chat id that no longer resolves (deleted from the Pocket Agent UI, or
+   * pruned) silently starts a fresh chat rather than failing the run: the
+   * mapping row is a cache, exactly as it already is for a session.
+   */
+  resumeChatId?: string;
+}
+
+export type PocketRunOutcome = { ok: true; chatId: string } | { ok: false; error: string };
+
 export interface RunExecutorOptions {
   sessions: SessionManager;
   workspaces: WorkspaceRegistry;
   worktrees: WorktreeService;
+  /**
+   * PA-10: required only to start a *Pocket Agent* run (`startPocketAgent`).
+   *
+   * Optional because `CronService` constructs an executor before this feature
+   * reached it, and a cron job still cannot name a Pocket Agent — absent, a
+   * pocket run fails with a clear message rather than crashing, which is the
+   * same posture every other missing precondition in this file takes.
+   */
+  plannerChats?: PlannerChatService;
   logger?: { info: (o: object, m?: string) => void; warn: (o: object, m?: string) => void };
   /** Prefixes the "run failed unexpectedly" log line, so the two callers are distinguishable. */
   label?: string;
@@ -109,6 +173,12 @@ export class RunExecutor {
    * shutdown does not need the caller to remember anything.
    */
   private readonly inFlight = new Map<string, RunSink>();
+  /**
+   * PA-10: teardown for a pocket run's chat observer, keyed the same way as
+   * `inFlight`, so settling a run — including from `abandonAll` — always
+   * detaches its listener instead of leaking one per delivery.
+   */
+  private readonly pocketDisposers = new Map<string, () => void>();
 
   constructor(private readonly opts: RunExecutorOptions) {}
 
@@ -266,6 +336,156 @@ export class RunExecutor {
   }
 
   /**
+   * PA-10: the Pocket Agent equivalent of `start` — chat → watch → prompt.
+   *
+   * Deliberately its own method rather than a branch inside `run()`: the two
+   * share the *contract* (never throws, exactly one `onSettled`, liveness asked
+   * rather than timed) but none of the steps. There is no directory to
+   * re-validate, no worktree to mint and no session to create; what there is
+   * instead is a chat, and a turn that is driven by a generator nobody else is
+   * holding.
+   *
+   * Two things here are subtler than they look.
+   *
+   * First, the ordering still matches `run()`'s "watch before prompt", and for
+   * a sharper reason: `sendMessage` is a generator, so *nothing happens* until
+   * its first `next()`. Subscribing before that call is therefore not merely
+   * early enough — it is the only way to be sure no event is missed, since the
+   * first `next()` can already produce `user_prompt` and, for a trivially short
+   * turn, everything after it.
+   *
+   * Second, the run is settled by the *observer*, not by draining the
+   * generator, because a turn that parks on an approval ends its generator
+   * while genuinely still running. When a human eventually answers in the
+   * Pocket Agent UI, the continuation is driven by `resolveApproval` streaming
+   * to their browser; the observer is what lets this run's sink see the
+   * `turn_complete` that comes out of it. Draining still happens — somebody has
+   * to pull the generator or the turn never advances — but it is the pump, not
+   * the sensor.
+   */
+  async startPocketAgent(
+    runId: string,
+    spec: PocketRunSpec,
+    sink: RunSink,
+  ): Promise<PocketRunOutcome> {
+    const fail = (message: string): PocketRunOutcome => {
+      this.settleNow(runId, sink, 'failed', message);
+      return { ok: false, error: message };
+    };
+
+    const planner = this.opts.plannerChats;
+    if (planner === undefined) {
+      return fail('This trigger names a Pocket Agent, but Pocket Agents are not available here.');
+    }
+
+    // 1. Resolve the chat. `resumeChatId` is a cache hint, so a stale one
+    //    starts a fresh chat rather than failing the run.
+    let chat = spec.resumeChatId !== undefined ? planner.get(spec.resumeChatId) : null;
+    if (chat === null) {
+      try {
+        chat = planner.create({
+          workspaceId: spec.plannerWorkspaceId,
+          title: spec.title,
+          ...(spec.model !== undefined && spec.model !== null ? { modelId: spec.model } : {}),
+          skipToolApprovals: spec.skipPermissions,
+        });
+      } catch (err) {
+        if (err instanceof PlannerChatError) {
+          return fail(
+            err.code === 'not_found'
+              ? 'The Pocket Agent this trigger names no longer exists.'
+              : err.message,
+          );
+        }
+        throw err;
+      }
+    }
+    const chatId = chat.id;
+    sink.onPlannerChat?.(chatId);
+
+    // 2. Watch, before the turn can produce anything. See the doc comment.
+    this.inFlight.set(runId, sink);
+    let settled = false;
+    const settle = (status: 'succeeded' | 'failed', error: string | null): void => {
+      if (settled) return;
+      settled = true;
+      this.inFlight.delete(runId);
+      this.pocketDisposers.get(runId)?.();
+      this.pocketDisposers.delete(runId);
+      sink.onSettled(status, error);
+    };
+
+    const unsubscribe = planner.observe(chatId, (event) => {
+      if (event.kind === 'turn_complete') {
+        settle(
+          event.isError ? 'failed' : 'succeeded',
+          event.isError ? 'The Pocket Agent reported an error.' : null,
+        );
+      }
+      if (event.kind === 'permission_request') {
+        // Not a failure and not a settle: the run is parked, exactly as a
+        // coding-agent run parked on an unanswered approval is. Logged because
+        // "my webhook says running and nothing is happening" has exactly one
+        // answer, and this line is it.
+        this.opts.logger?.info(
+          { label: this.opts.label, runId, chatId, toolName: event.toolName },
+          'pocket agent run is waiting for a tool approval',
+        );
+      }
+    });
+    this.pocketDisposers.set(runId, unsubscribe);
+
+    // 3. Prompt, and keep pumping. The first `next()` is awaited separately so
+    //    a synchronous precondition failure (no LLM endpoint configured, no
+    //    model chosen) still becomes a `failed` run with its own message rather
+    //    than an unhandled rejection in the background drain below.
+    const turn = planner.sendMessage(chatId, spec.prompt);
+    try {
+      const first = await turn.next();
+      if (first.done === true) {
+        // A turn that produced nothing at all. Nothing can settle it later, so
+        // it has to be settled here or the row stays open forever.
+        settle('failed', 'The Pocket Agent turn ended without producing anything.');
+        return { ok: false, error: 'The Pocket Agent turn ended without producing anything.' };
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      settle('failed', message);
+      return { ok: false, error: message };
+    }
+
+    void (async () => {
+      try {
+        while (true) {
+          const next = await turn.next();
+          if (next.done === true) break;
+        }
+      } catch (err) {
+        this.opts.logger?.warn(
+          { label: this.opts.label, runId, chatId, err },
+          'pocket agent run failed while streaming',
+        );
+        settle('failed', err instanceof Error ? err.message : String(err));
+      }
+    })();
+
+    return { ok: true, chatId };
+  }
+
+  /**
+   * Liveness for a pocket run, asked of this executor rather than of a session
+   * — a pocket run has none.
+   *
+   * In-memory only, and that is the honest answer: after a restart nothing is
+   * pumping that turn any more, and the caller's own boot-time "close out rows
+   * a previous server left open" pass is what reconciles it. Same no-timeout
+   * discipline as `isAlive`.
+   */
+  isPocketRunAlive(runId: string): boolean {
+    return this.inFlight.has(runId);
+  }
+
+  /**
    * Attach completion listeners for one run.
    *
    * The first `turn_complete` ends the run. One run is one prompt and one turn
@@ -326,6 +546,11 @@ export class RunExecutor {
       sink.onSettled('failed', reason);
     }
     this.inFlight.clear();
+    // PA-10: a pocket run's listener lives on `PlannerChatService`, which
+    // outlives this executor's shutdown, so dropping `inFlight` alone would
+    // leave it attached and firing into an already-settled sink.
+    for (const dispose of this.pocketDisposers.values()) dispose();
+    this.pocketDisposers.clear();
   }
 
   /**

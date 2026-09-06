@@ -177,6 +177,7 @@ export function App(): JSX.Element {
           onOpenWebhook={(webhookId) => navigate({ name: 'webhook', webhookId })}
           onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
           onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
+          onOpenPlannerChat={(chatId) => navigate({ name: 'planner-chat', chatId })}
           onApiError={handleApiError}
         />
       </Suspense>
@@ -193,6 +194,7 @@ export function App(): JSX.Element {
           onDone={() => navigate({ name: 'webhooks' })}
           onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
           onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
+          onOpenPlannerChat={(chatId) => navigate({ name: 'planner-chat', chatId })}
           onApiError={handleApiError}
         />
       </Suspense>

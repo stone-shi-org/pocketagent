@@ -656,6 +656,41 @@ const MIGRATIONS: readonly string[] = [
   ALTER TABLE cron_jobs ADD COLUMN resume_agent_session_id TEXT;
   ALTER TABLE cron_jobs ADD COLUMN delete_after_run INTEGER NOT NULL DEFAULT 0;
   `,
+  // PA-10 (reporter: "Today, webhook can only select code agent, need add
+  // 'pocket agent' agents in there too. The Jira tag should support pocket
+  // agent too."): a webhook's `agent` may now name a Pocket Agent as
+  // `pocket:<planner_workspace_id>` (see `POCKET_AGENT_ID_PREFIX`). No column
+  // changes for that part — `webhooks.agent` is already TEXT and the whole
+  // point of the namespaced-id design is that every existing row and reader
+  // stays valid. What *is* new is where a pocket run's output lives.
+  //
+  // `webhook_deliveries.planner_chat_id` is the pocket equivalent of
+  // `session_id`/`agent_session_id`: a pocket run creates no session, so
+  // without it a delivery would have nothing to link to. Deliberately not a
+  // foreign key, for exactly the reason `session_id` isn't one — a chat can be
+  // deleted from the Pocket Agent UI long after the delivery, and a CASCADE
+  // would quietly destroy history while a RESTRICT would make deleting a chat
+  // fail. An orphaned id simply stops resolving, the same way a pruned
+  // `session_id` does.
+  //
+  // `webhook_issue_sessions.planner_chat_id` is what makes `per-issue` mode
+  // work for a Pocket Agent: that table is already the "which conversation
+  // belongs to this issue" cache, and a pocket conversation is a chat rather
+  // than a session. Still a cache — a pruned row means the next event on that
+  // issue starts a fresh chat, exactly as it already means for a session.
+  //
+  // `planner_chats.skip_tool_approvals` records that a chat's mutating tool
+  // calls are pre-approved because an unattended trigger created it with its
+  // own skip-permissions decision already made. On the *chat* rather than
+  // threaded through a turn because it has to survive an approval pause, a
+  // restart, and a `per-issue` webhook reusing the chat for a later delivery.
+  // `DEFAULT 0`, so every chat that already exists — and every chat a human
+  // creates — is unaffected: there is no HTTP field that can set this.
+  `
+  ALTER TABLE webhook_deliveries ADD COLUMN planner_chat_id TEXT;
+  ALTER TABLE webhook_issue_sessions ADD COLUMN planner_chat_id TEXT;
+  ALTER TABLE planner_chats ADD COLUMN skip_tool_approvals INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 /**
@@ -1204,6 +1239,8 @@ export interface WebhookDeliveryRow {
   /** Not a foreign key — see the migration comment. */
   session_id: string | null;
   agent_session_id: string | null;
+  /** PA-10: set instead of `session_id` when the agent was a Pocket Agent. Not a foreign key either. */
+  planner_chat_id: string | null;
   cwd: string | null;
   error: string | null;
 }
@@ -1213,6 +1250,8 @@ export interface WebhookIssueSessionRow {
   issue_key: string;
   agent_session_id: string | null;
   session_id: string | null;
+  /** PA-10: the Pocket Agent chat handling this issue, for a pocket-agent webhook. */
+  planner_chat_id: string | null;
   cwd: string;
   created_at: number;
   updated_at: number;
@@ -1339,13 +1378,13 @@ export function insertWebhookDelivery(db: Db, row: WebhookDeliveryRow): void {
        delivery_header, event, event_type, issue_key, project_key, actor,
        signature_state, skip_permissions_enabled, payload_json, payload_bytes,
        payload_truncated, rendered_prompt, reason, received_at, started_at,
-       finished_at, session_id, agent_session_id, cwd, error
+       finished_at, session_id, agent_session_id, planner_chat_id, cwd, error
      ) VALUES (
        @id, @webhook_id, @webhook_name, @agent, @status, @trigger, @body_hash,
        @delivery_header, @event, @event_type, @issue_key, @project_key, @actor,
        @signature_state, @skip_permissions_enabled, @payload_json, @payload_bytes,
        @payload_truncated, @rendered_prompt, @reason, @received_at, @started_at,
-       @finished_at, @session_id, @agent_session_id, @cwd, @error
+       @finished_at, @session_id, @agent_session_id, @planner_chat_id, @cwd, @error
      )`,
   ).run(row);
 }
@@ -1510,13 +1549,18 @@ export function readWebhookIssueSession(
 export function upsertWebhookIssueSession(db: Db, row: WebhookIssueSessionRow): void {
   db.prepare(
     `INSERT INTO webhook_issue_sessions (
-       webhook_id, issue_key, agent_session_id, session_id, cwd, created_at, updated_at
+       webhook_id, issue_key, agent_session_id, session_id, planner_chat_id, cwd, created_at, updated_at
      ) VALUES (
-       @webhook_id, @issue_key, @agent_session_id, @session_id, @cwd, @created_at, @updated_at
+       @webhook_id, @issue_key, @agent_session_id, @session_id, @planner_chat_id, @cwd, @created_at, @updated_at
      )
      ON CONFLICT (webhook_id, issue_key) DO UPDATE SET
        agent_session_id = COALESCE(excluded.agent_session_id, agent_session_id),
        session_id       = excluded.session_id,
+       -- COALESCE, like \`agent_session_id\`: a pocket chat, once known, is the
+       -- issue's conversation until the row is pruned. \`session_id\` is the one
+       -- column that must be overwritable with NULL, because it is the *live*
+       -- handle and a dead session has to stop looking alive.
+       planner_chat_id  = COALESCE(excluded.planner_chat_id, planner_chat_id),
        cwd              = excluded.cwd,
        updated_at       = excluded.updated_at`,
   ).run(row);

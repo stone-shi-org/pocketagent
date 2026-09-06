@@ -480,7 +480,14 @@ export const api = {
 
   /** Runs a payload through the real pipeline with auth skipped. */
   sendTestDelivery: (id: string, payload?: string) =>
-    request<{ deliveryId: string | null; status: string; sessionId: string | null; reason: string | null }>(
+    request<{
+      deliveryId: string | null;
+      status: string;
+      sessionId: string | null;
+      /** PA-10: set instead of `sessionId` when the webhook's agent is a Pocket Agent. */
+      plannerChatId?: string | null;
+      reason: string | null;
+    }>(
       `/api/webhooks/${encodeURIComponent(id)}/test`,
       { method: 'POST', body: JSON.stringify(payload !== undefined ? { payload } : {}) },
     ),

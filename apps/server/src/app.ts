@@ -331,6 +331,10 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     workspaces,
     worktrees,
     agents,
+    // PA-10: a webhook's agent may be a Pocket Agent. `plannerChats` is
+    // constructed above precisely so this ordering works.
+    plannerWorkspaces,
+    plannerChats,
     // Shared with interactive sessions: the service carves a reservation out of
     // this so a Jira delivery storm can never take the user's last slots.
     maxSessions: config.maxSessions,

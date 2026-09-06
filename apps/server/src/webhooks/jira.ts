@@ -1,5 +1,10 @@
 import type { JiraWebhookFilter } from '@pocketagent/protocol';
-import { JIRA_ISSUE_KEY_RE } from '@pocketagent/protocol';
+import {
+  JIRA_ISSUE_KEY_RE,
+  POCKET_AGENT_LABEL_PREFIX,
+  pocketAgentId,
+  pocketAgentLabelSlug,
+} from '@pocketagent/protocol';
 import { resolveMappedPromptTemplate } from './template-routing.js';
 
 /**
@@ -348,13 +353,35 @@ export function resolveComponentBranchName(component: string | null | undefined)
  *
  * Supported label formats:
  * - Agent: `agent:<agent-id>` or `agent-<agent-id>` (e.g. `agent:claude`, `agent:agy`, `agent-codex`)
+ * - Pocket Agent: `agent:pocket-<slug-of-agent-name>` (e.g. `agent:pocket-release-notes`)
  * - Model: `model:<model-name>` or `model-<model-name>` (e.g. `model:Sonnet`, `model:opus`, `model:pro`, `model-flash`)
  *
  * If multiple matching labels are present, the last non-empty one takes precedence.
+ *
+ * PA-10 ("The Jira tag should support pocket agent too") added the Pocket
+ * Agent form. It names an agent by a **slug of its display name**, not by its
+ * id, for two reasons: the id is a uuid nobody can type into a label, and the
+ * regex below stops at the second separator, so the `pocket:<uuid>` wire form
+ * could not survive a label anyway. Resolution is against the live list passed
+ * in, so renaming a Pocket Agent changes which label matches it — the same
+ * trade-off every other free-text field in a Jira filter already makes
+ * (`assignees`, `labels`, `issueTypes` all compare names, because a webhook
+ * filter has no Jira credentials to resolve a name to an id).
+ *
+ * An unrecognised agent label is **ignored**, leaving the webhook's configured
+ * agent in place, rather than failing the delivery. That is the pre-existing
+ * behaviour for coding agents and it is the right one here too: a typo'd label
+ * on a ticket should not silently stop work the operator did configure.
  */
 export function resolveLabelOverrides(
   labels: string[],
   availableAgentIds?: string[],
+  /**
+   * The Pocket Agents a `pocket-<slug>` label may name. Omitted means "no
+   * Pocket Agents are selectable here", which is how every caller that predates
+   * PA-10 keeps behaving exactly as before.
+   */
+  pocketAgents?: readonly { id: string; name: string }[],
 ): { agent?: string; model?: string } {
   const result: { agent?: string; model?: string } = {};
 
@@ -363,7 +390,17 @@ export function resolveLabelOverrides(
     const agentMatch = /^agent[:-]([a-zA-Z0-9_-]+)$/i.exec(label);
     if (agentMatch && agentMatch[1]) {
       const candidate = agentMatch[1].trim().toLowerCase();
-      if (!availableAgentIds || availableAgentIds.includes(candidate)) {
+      // Checked before the coding-agent list, so a coding agent literally
+      // called `pocket-…` could not shadow the namespace. No registry id looks
+      // like that today; relying on that rather than asserting it is how the
+      // ambiguity would eventually appear.
+      if (candidate.startsWith(POCKET_AGENT_LABEL_PREFIX)) {
+        const slug = candidate.slice(POCKET_AGENT_LABEL_PREFIX.length);
+        const match = (pocketAgents ?? []).find((a) => pocketAgentLabelSlug(a.name) === slug);
+        if (match) {
+          result.agent = pocketAgentId(match.id);
+        }
+      } else if (!availableAgentIds || availableAgentIds.includes(candidate)) {
         result.agent = candidate;
       }
     }

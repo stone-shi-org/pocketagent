@@ -47,7 +47,25 @@ export function resolveApprovalStatus(
   db: Db,
   toolName: string,
   workspaceId: string | null,
+  /**
+   * PA-10: this chat's tool calls are pre-approved because an unattended
+   * trigger created it with its own skip-permissions decision already made
+   * (`PlannerChat.skipToolApprovalsEnabled`).
+   *
+   * Sits beside `yoloEnabled` rather than replacing it, and behaves exactly
+   * like it in the two ways that matter: it short-circuits *before* the
+   * remembered-decision lookup, and it never writes one. Where it differs is
+   * blast radius — yolo is a standing operator switch over every chat, this is
+   * one chat whose provenance is a webhook that was explicitly configured to
+   * bypass approval. Turning that webhook's toggle off later must not
+   * retroactively make the calls it already ran look individually reviewed,
+   * which is why nothing is persisted here either.
+   *
+   * A human chat never sets it: there is no HTTP field that can.
+   */
+  chatSkipsApprovals = false,
 ): 'allow' | 'deny' | null {
+  if (chatSkipsApprovals) return 'allow';
   if (readPlannerSettings(db).yoloEnabled) return 'allow';
   if (workspaceId) {
     const scoped = readPlannerToolApproval(db, 'workspace', workspaceId, toolName);

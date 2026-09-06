@@ -154,9 +154,65 @@ function addUsage(stats: PlannerTurnStats, usage: PlannerLlmUsage | null): Plann
 export class PlannerChatService {
   private readonly tools: readonly PlannerToolDefinition[];
   private readonly pendingTurns = new Map<string, PendingPlannerTurn>();
+  /**
+   * PA-10: side-channel observers of one chat's persisted events, keyed by
+   * chat id.
+   *
+   * A chat turn is a *pull*-based generator: nothing happens unless someone
+   * drains it, and whoever drains it is the only one who sees the events. That
+   * is exactly right for a browser, and exactly wrong for an inbound webhook,
+   * because of the approval pause. A webhook-started turn that parks on
+   * `permission_request` ends that leg of the generator; when a human later
+   * answers in the Pocket Agent UI, the continuation is driven by
+   * `resolveApproval` streaming to *their* browser, and the webhook's own
+   * `RunSink` would never learn the run finished — the delivery row would sit
+   * in `running` forever, holding a concurrency slot.
+   *
+   * So the sink observes the chat instead of only draining its own generator,
+   * which is the direct analogue of `RunExecutor.watch` listening to
+   * `session.on('event')` rather than to whoever called `prompt()`. Notified
+   * from `emit`, the single choke point every persisted event already goes
+   * through, so no future event kind can bypass it.
+   *
+   * In memory, single-process, and deliberately not durable: a restart closes
+   * out open deliveries via `markStaleWebhookDeliveriesFailed` anyway, the same
+   * fate `pendingTurns` and a live session's listeners already share.
+   */
+  private readonly observers = new Map<string, Set<(event: AgentEvent) => void>>();
 
   constructor(private readonly opts: PlannerChatServiceOptions) {
     this.tools = opts.tools ?? PLANNER_TOOLS;
+  }
+
+  /**
+   * Watch one chat's events regardless of who is driving the turn. Returns the
+   * unsubscribe function.
+   *
+   * A listener must not throw — one bad observer must not break the turn that
+   * is merely notifying it — so `notify` swallows and logs instead.
+   */
+  observe(chatId: string, listener: (event: AgentEvent) => void): () => void {
+    const set = this.observers.get(chatId) ?? new Set();
+    set.add(listener);
+    this.observers.set(chatId, set);
+    return () => {
+      const current = this.observers.get(chatId);
+      if (!current) return;
+      current.delete(listener);
+      if (current.size === 0) this.observers.delete(chatId);
+    };
+  }
+
+  private notify(chatId: string, event: AgentEvent): void {
+    const set = this.observers.get(chatId);
+    if (!set) return;
+    for (const listener of [...set]) {
+      try {
+        listener(event);
+      } catch (err) {
+        this.opts.logger?.warn({ err, chatId }, 'planner chat observer threw');
+      }
+    }
   }
 
   list(workspaceId?: string): PlannerChat[] {
@@ -167,7 +223,18 @@ export class PlannerChatService {
     return readPlannerChat(this.opts.db, id);
   }
 
-  create(input: { workspaceId?: string; title?: string; modelId?: string }): PlannerChat {
+  create(input: {
+    workspaceId?: string;
+    title?: string;
+    modelId?: string;
+    /**
+     * PA-10: pre-approve this chat's mutating tool calls. Only an unattended
+     * trigger that already carries its own skip-permissions decision passes
+     * this — `CreatePlannerChatRequest` has no such field, so no HTTP client
+     * can. See `PlannerChat.skipToolApprovalsEnabled`.
+     */
+    skipToolApprovals?: boolean;
+  }): PlannerChat {
     const workspace = input.workspaceId
       ? this.opts.plannerWorkspaces.get(input.workspaceId)
       : this.opts.plannerWorkspaces.getDefault();
@@ -185,6 +252,7 @@ export class PlannerChatService {
       lastModelId: input.modelId ?? workspace.defaultModelId ?? readPlannerSettings(this.opts.db).lastModelId,
       createdAt: now,
       lastActivityAt: now,
+      skipToolApprovalsEnabled: input.skipToolApprovals === true,
     };
     insertPlannerChat(this.opts.db, chat);
     return chat;
@@ -208,6 +276,12 @@ export class PlannerChatService {
     for (const [pendingId, pending] of this.pendingTurns) {
       if (pending.chatId === id) this.pendingTurns.delete(pendingId);
     }
+    // Same reasoning for observers (PA-10): a deleted chat will never emit
+    // again, so a webhook sink still watching it would leak for the life of
+    // the process. It has already been settled by its own run — the delivery
+    // row is closed out either by `turn_complete` or, if the chat was deleted
+    // mid-turn, by the sweep at the next restart.
+    this.observers.delete(id);
     return deletePlannerChat(this.opts.db, id);
   }
 
@@ -439,6 +513,7 @@ export class PlannerChatService {
   /** Persist then yield — every event this service produces goes through here, so the two never drift apart. */
   private async *emit(workspacePath: string, chatId: string, event: AgentEvent): AsyncGenerator<AgentEvent> {
     await appendTranscriptEvent(workspacePath, chatId, event);
+    this.notify(chatId, event);
     yield event;
   }
 
@@ -607,7 +682,12 @@ export class PlannerChatService {
       }
 
       if (!tool.readOnly) {
-        const decision = resolveApprovalStatus(this.opts.db, tool.name, chat.workspaceId);
+        const decision = resolveApprovalStatus(
+          this.opts.db,
+          tool.name,
+          chat.workspaceId,
+          chat.skipToolApprovalsEnabled,
+        );
         if (decision === null) {
           const approvalId = crypto.randomUUID();
           this.pendingTurns.set(approvalId, {

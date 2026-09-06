@@ -228,10 +228,52 @@ editor previews it, and duplicating the renderer in `apps/web` guarantees the pr
 lies about what the agent will be told. One exported array drives both the substitution and the
 editor's variable chips, so a variable existing in one but not the other is impossible.
 
+**A webhook's agent may be a Pocket Agent, not only a coding agent** (PA-10, reporter: "Today,
+webhook can only select code agent, need add 'pocket agent' agents in there too. The Jira tag
+should support pocket agent too."). The two halves of that request forced one design decision:
+a Pocket Agent occupies the *same* `agent` value space as a coding agent, under the reserved
+prefix `pocket:<plannerWorkspaceId>` (`POCKET_AGENT_ID_PREFIX` and friends in
+`packages/protocol/src/planner.ts`, so the server and the editor cannot disagree about the
+shape). The alternative — an `agentKind` discriminator plus a sibling `plannerWorkspaceId` —
+would have added two fields whose either/or invariant no type could express, and every existing
+reader of `agent` would have had to learn about it; worse, it could not express the second half
+at all, since `resolveLabelOverrides` reads *one string* out of one Jira label. The prefix
+contains a `:` precisely because no `AgentRegistry` id can, making a collision impossible
+rather than merely unlikely. A Jira label names one by a slug of its display name
+(`agent:pocket-release-notes`), because a uuid is untypeable and the label regex stops at the
+second separator.
+
+Downstream, a pocket run is a **different composite**, not a relaxed one:
+`RunExecutor.startPocketAgent` replaces worktree → session → prompt with chat → watch → prompt,
+reporting through the same `RunSink` (plus one optional `onPlannerChat`). There is no
+directory to re-validate, no branch to mint, no session, and so no `effort` — the editor hides
+the rows that do not apply and `worktreeMode` is saved as `none` rather than persisting a
+setting the run ignores. Two subtleties carry the design. First, `sendMessage` is a generator,
+so *nothing happens* until its first `next()`; subscribing before that call is the only way to
+be sure no event is missed, which is a sharper version of the executor's existing "watch before
+prompt" rule. Second, the run is settled by a **chat observer**
+(`PlannerChatService.observe`, notified from `emit`), not by draining the generator — a turn
+parked on an approval ends its generator while genuinely still running, and when a human
+answers in the Pocket Agent UI the continuation streams to *their* browser, so without the
+observer the delivery row would sit in `running` forever holding a concurrency slot. Draining
+still happens; it is the pump, not the sensor. `webhook_deliveries.planner_chat_id` is the
+pocket counterpart of `session_id` (the delivery links to `#/planner/<chatId>`), and
+`webhook_issue_sessions.planner_chat_id` is what makes `per-issue` mode work for a chat rather
+than a session.
+
+One pre-existing bug had to be fixed to make this correct: `blankRow` copies the webhook's
+*configured* agent, because the row must exist (it is the idempotency claim) before the filter
+has matched — so with `autoSelectAgentModel` on, a label-overridden delivery used to keep
+describing the agent that did not run. `recordEffectiveAgent` now corrects it, which matters
+far more once the override can cross between a coding agent and a Pocket Agent, since
+`agentDisplayName` and the row's transcript link both key off it.
+
 Known limitations, both inherited and made worse: per-delivery worktrees are not
 garbage-collected either, and a busy Jira project creates them far faster than a nightly job
 does — the editor says so. And `webhook_issue_sessions` is a cache, so a pruned row means the
-next event on that issue starts a fresh conversation rather than continuing one.
+next event on that issue starts a fresh conversation rather than continuing one. A pocket run
+inherits none of the worktree problem (a planner workspace is app-owned scratch space, reused
+rather than multiplied) but does inherit the cache one: a pruned row starts a fresh chat.
 
 ### Pocket Agent (PA-6)
 
@@ -562,6 +604,17 @@ These are load-bearing. Several were bugs first.
   row and **every delivery**, and the value is copied onto the delivery row at delivery time so
   turning the toggle off later does not retroactively make last week's bypassed deliveries look
   supervised. Asserted in `apps/server/tests/webhooks.test.ts`.
+- **A webhook's `agent` has one value space, and only the route knows what is in it.** A
+  coding-agent id and a Pocket Agent (`pocket:<plannerWorkspaceId>`) are both legal values of the
+  same string (PA-10), so nothing downstream may infer the run kind from the *saved* `hook.agent`:
+  a Jira `agent:` label can move a single delivery across that boundary in either direction, and
+  `WebhookService.resolveAgent` is the one place that decides. The schema still validates only a
+  bounded string, because which coding agents exist lives in the registry and which Pocket Agents
+  exist lives in `planner_workspaces` — `webhookAgentProblem` checks whichever applies, and it is
+  a *branch*, not a relaxation: the structured-transport requirement is meaningless for a planner
+  chat, so what replaces it is "this planner workspace still exists". Cron is deliberately **not**
+  widened; `CreateCronJobRequest` still accepts a coding agent only, and doing otherwise is its
+  own decision with its own disclosure work.
 - **A webhook delivery is authenticated over the raw request bytes, in constant time.**
   HMAC-SHA256 of the body exactly as received — never of a re-serialized parse, which validates
   cleanly in a unit test with canonical JSON and then fails on every real Jira payload, because
@@ -636,6 +689,22 @@ These are load-bearing. Several were bugs first.
   remembered *deny*, but never writes one itself: turning it back off must not retroactively make
   every bypassed call while it was on look individually reviewed, the same reasoning that keeps
   cron's/webhooks' inverted defaults from quietly becoming the norm elsewhere.
+- **`PlannerChat.skipToolApprovalsEnabled` is the fifth override, and the narrowest one yet**
+  (PA-10). It pre-approves the mutating tool calls of **one chat**, because that chat was created
+  by an unattended trigger — today only an inbound webhook — whose own `skipPermissions` was
+  already on. It is not a new decision, it is the existing one reaching the planner's gate: a
+  webhook with the toggle *off* still parks its pocket turn on the first mutating call and waits
+  **forever** for a human to answer in the Pocket Agent UI, with no timeout added anywhere, which
+  is exactly cron's own "unattended run waits forever" behaviour. Three things keep it from
+  widening. It lives on the chat row rather than being threaded through a turn, because it has to
+  survive an approval pause, a restart and a `per-issue` webhook reusing the chat — but that row
+  can only be written by the server: `CreatePlannerChatRequest` has **no such field**, so no
+  browser can mint a pre-approved chat, and `apps/server/tests/webhooks-pocket.test.ts` asserts
+  that a client asking for one is ignored. It short-circuits *before* the remembered-decision
+  lookup and, like yolo, **never writes one** — turning the webhook's toggle off later must not
+  leave the tool looking individually approved for everyone. And it is disclosed persistently:
+  `PlannerChatPage` renders a standing callout on every visit, per the first invariant's "not
+  just at the moment it was created".
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.

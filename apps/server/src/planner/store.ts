@@ -276,6 +276,7 @@ interface PlannerChatDbRow {
   last_model_id: string | null;
   created_at: number;
   last_activity_at: number;
+  skip_tool_approvals: number;
 }
 
 function chatFromDbRow(row: PlannerChatDbRow): PlannerChat {
@@ -287,6 +288,7 @@ function chatFromDbRow(row: PlannerChatDbRow): PlannerChat {
     lastModelId: row.last_model_id,
     createdAt: row.created_at,
     lastActivityAt: row.last_activity_at,
+    skipToolApprovalsEnabled: row.skip_tool_approvals === 1,
   };
 }
 
@@ -311,9 +313,11 @@ export function readPlannerChat(db: Db, id: string): PlannerChat | null {
 export function insertPlannerChat(db: Db, chat: PlannerChat): void {
   db.prepare(
     `INSERT INTO planner_chats
-       (id, workspace_id, workspace_name, title, last_model_id, created_at, last_activity_at)
-     VALUES (@id, @workspaceId, @workspaceName, @title, @lastModelId, @createdAt, @lastActivityAt)`,
-  ).run(chat);
+       (id, workspace_id, workspace_name, title, last_model_id, created_at, last_activity_at,
+        skip_tool_approvals)
+     VALUES (@id, @workspaceId, @workspaceName, @title, @lastModelId, @createdAt, @lastActivityAt,
+        @skipToolApprovals)`,
+  ).run({ ...chat, skipToolApprovals: chat.skipToolApprovalsEnabled ? 1 : 0 });
 }
 
 /** Partial update: only the keys present in `patch` are touched. */

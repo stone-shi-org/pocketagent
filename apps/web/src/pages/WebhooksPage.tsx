@@ -13,6 +13,8 @@ interface Props {
   /** Opens a call-history row's live or finished transcript. */
   onOpenSession: (sessionId: string) => void;
   onOpenChat: (conversationId: string) => void;
+  /** PA-10: opens a Pocket Agent delivery's chat — its only transcript. */
+  onOpenPlannerChat: (chatId: string) => void;
   onApiError: (error: unknown) => void;
   /**
    * Present only on the phone route. `DesktopShell` renders this in its right
@@ -41,6 +43,7 @@ export function WebhooksPage({
   onOpenWebhook,
   onOpenSession,
   onOpenChat,
+  onOpenPlannerChat,
   onApiError,
   onBack,
 }: Props): JSX.Element {
@@ -235,6 +238,7 @@ export function WebhooksPage({
       <WebhookHistoryPanel
         onOpenSession={onOpenSession}
         onOpenChat={onOpenChat}
+        onOpenPlannerChat={onOpenPlannerChat}
         onOpenWebhook={onOpenWebhook}
         onApiError={onApiError}
       />

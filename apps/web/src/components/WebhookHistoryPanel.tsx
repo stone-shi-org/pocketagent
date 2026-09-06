@@ -9,6 +9,8 @@ interface Props {
   /** Opens a `kind: 'delivery'` row's live or finished transcript. */
   onOpenSession: (sessionId: string) => void;
   onOpenChat: (conversationId: string) => void;
+  /** PA-10: opens a Pocket Agent delivery's chat — its only transcript. */
+  onOpenPlannerChat: (chatId: string) => void;
   /** Opens a `kind: 'hit', reason: 'disabled'` row's owning webhook. */
   onOpenWebhook: (webhookId: string) => void;
   onApiError: (error: unknown) => void;
@@ -26,7 +28,7 @@ const statusFor = (e: WebhookHistoryEntry): string =>
 
 const isOpenable = (e: WebhookHistoryEntry): boolean =>
   e.kind === 'delivery'
-    ? e.sessionId !== null || e.agentSessionId !== null
+    ? e.sessionId !== null || e.agentSessionId !== null || e.plannerChatId !== null
     : e.reason === 'disabled' && e.webhookId !== null;
 
 const titleFor = (e: WebhookHistoryEntry): string => {
@@ -35,7 +37,7 @@ const titleFor = (e: WebhookHistoryEntry): string => {
       ? 'Open the disabled webhook’s editor'
       : 'No webhook has this path';
   }
-  return e.sessionId !== null || e.agentSessionId !== null
+  return e.sessionId !== null || e.agentSessionId !== null || e.plannerChatId !== null
     ? 'Open this delivery’s transcript'
     : (e.reason ?? 'No transcript available');
 };
@@ -47,6 +49,7 @@ const titleFor = (e: WebhookHistoryEntry): string => {
 export function WebhookHistoryPanel({
   onOpenSession,
   onOpenChat,
+  onOpenPlannerChat,
   onOpenWebhook,
   onApiError,
 }: Props): JSX.Element {
@@ -78,7 +81,10 @@ export function WebhookHistoryPanel({
       if (e.reason === 'disabled' && e.webhookId !== null) onOpenWebhook(e.webhookId);
       return;
     }
-    if (e.sessionId) onOpenSession(e.sessionId);
+    // PA-10 first: a pocket delivery's chat is its only transcript, with no
+    // session or conversation id to fall back through.
+    if (e.plannerChatId) onOpenPlannerChat(e.plannerChatId);
+    else if (e.sessionId) onOpenSession(e.sessionId);
     else if (e.agentSessionId) onOpenChat(e.agentSessionId);
   };
 
