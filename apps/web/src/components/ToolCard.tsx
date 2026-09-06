@@ -3,13 +3,14 @@ import type { ToolItem } from '../agent/transcript.js';
 import { collapseContext, diffFromToolInput, diffLines, diffStat } from '../agent/diff.js';
 import { renderMarkdown } from '../agent/markdown.js';
 import { planFromToolInput } from '../agent/plan.js';
-
-/**
- * Tools whose result is noise once you can see the summary. `ExitPlanMode`'s
- * result just echoes the same plan text already rendered from its input, so
- * showing it again under "Result" would be a second copy of the same markdown.
- */
-const QUIET_TOOLS = new Set(['TodoWrite', 'ExitPlanMode']);
+import {
+  QUIET_TOOLS,
+  formatToolInput,
+  stateLabel,
+  toolCallText,
+  toolState,
+} from '../agent/tool-text.js';
+import { CopyButton } from './CopyButton.js';
 
 /**
  * Past this, a running tool call gets flagged as long-running rather than just
@@ -26,15 +27,7 @@ export function ToolCard({ item }: { item: ToolItem }): JSX.Element {
   const lines = diff ? diffLines(diff.before, diff.after) : null;
   const stat = lines ? diffStat(lines) : null;
 
-  const state = item.denied
-    ? 'denied'
-    : item.awaitingApproval
-      ? 'waiting'
-      : item.isError
-        ? 'error'
-        : item.result !== null
-          ? 'ok'
-          : 'running';
+  const state = toolState(item);
 
   // Elapsed time since this card first rendered, ticking while `running` so a
   // hung tool call looks different from one that just started — a CSS pulse
@@ -55,26 +48,48 @@ export function ToolCard({ item }: { item: ToolItem }): JSX.Element {
 
   return (
     <div className={`tool-card ${state}`}>
-      <button type="button" className="tool-head" onClick={() => setOpen((v) => !v)}>
-        <span
-          className={`tool-dot ${state}${longRunning ? ' long-running' : ''}`}
-          aria-hidden="true"
-          title={longRunning ? `Still running after ${formatElapsed(elapsedMs)} — no result yet` : undefined}
-        />
-        <span className="tool-summary">{item.summary}</span>
-        {stat && (stat.added > 0 || stat.removed > 0) && (
-          <span className="diff-stat">
-            <span className="add">+{stat.added}</span>
-            <span className="del">−{stat.removed}</span>
+      {/*
+        The bar is a row of three controls rather than one big button: a copy
+        icon nested inside the toggle would be invalid HTML and would toggle the
+        card on every copy. The chevron keeps its own button so the copy icon can
+        sit to its left, where the ticket (PA-16) asked for it.
+      */}
+      <div className="tool-head">
+        <button
+          type="button"
+          className="tool-head-main"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+        >
+          <span
+            className={`tool-dot ${state}${longRunning ? ' long-running' : ''}`}
+            aria-hidden="true"
+            title={longRunning ? `Still running after ${formatElapsed(elapsedMs)} — no result yet` : undefined}
+          />
+          <span className="tool-summary">{item.summary}</span>
+          {stat && (stat.added > 0 || stat.removed > 0) && (
+            <span className="diff-stat">
+              <span className="add">+{stat.added}</span>
+              <span className="del">−{stat.removed}</span>
+            </span>
+          )}
+          <span className="tool-state">
+            {state === 'running' ? formatElapsed(elapsedMs) ?? '…' : stateLabel(state)}
           </span>
-        )}
-        <span className="tool-state">
-          {state === 'running' ? formatElapsed(elapsedMs) ?? '…' : stateLabel(state)}
-        </span>
-        <span className="chev" aria-hidden="true">
-          {open ? '▾' : '▸'}
-        </span>
-      </button>
+        </button>
+        <CopyButton text={toolCallText(item)} label="Copy tool call" />
+        <button
+          type="button"
+          className="tool-chev"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-label={open ? 'Collapse tool call' : 'Expand tool call'}
+        >
+          <span className="chev" aria-hidden="true">
+            {open ? '▾' : '▸'}
+          </span>
+        </button>
+      </div>
 
       {open && (
         <div className="tool-body">
@@ -83,7 +98,7 @@ export function ToolCard({ item }: { item: ToolItem }): JSX.Element {
           ) : lines ? (
             <DiffView lines={lines} />
           ) : (
-            <pre className="tool-input">{formatInput(item.input)}</pre>
+            <pre className="tool-input">{formatToolInput(item.input)}</pre>
           )}
 
           {item.result !== null && !QUIET_TOOLS.has(item.name) && (
@@ -121,21 +136,6 @@ function DiffView({ lines }: { lines: ReturnType<typeof diffLines> }): JSX.Eleme
   );
 }
 
-function stateLabel(state: string): string {
-  switch (state) {
-    case 'waiting':
-      return 'needs approval';
-    case 'denied':
-      return 'denied';
-    case 'error':
-      return 'failed';
-    case 'running':
-      return '…';
-    default:
-      return '';
-  }
-}
-
 /** `null` under a second, so a fresh card still shows the plain "…" state. */
 function formatElapsed(ms: number): string | null {
   const totalSec = Math.floor(ms / 1000);
@@ -143,16 +143,4 @@ function formatElapsed(ms: number): string | null {
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
-}
-
-/** Show the interesting arguments, not a wall of JSON. */
-function formatInput(input: Record<string, unknown>): string {
-  const entries = Object.entries(input).filter(([, v]) => v !== undefined && v !== null);
-  if (entries.length === 0) return '(no arguments)';
-  return entries
-    .map(([k, v]) => {
-      const value = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
-      return `${k}: ${value}`;
-    })
-    .join('\n\n');
 }

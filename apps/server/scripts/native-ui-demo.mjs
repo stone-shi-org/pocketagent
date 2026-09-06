@@ -151,10 +151,46 @@ heading('Cost chip and file list appear');
 
 heading('Tool cards expand to show details');
 {
-  await page.locator('.tool-card .tool-head').first().click();
+  await page.locator('.tool-card .tool-head-main').first().click();
   await page.waitForSelector('.tool-card .tool-body');
   check(true, 'tool card expanded');
-  await page.locator('.tool-card .tool-head').first().click();
+  await page.locator('.tool-card .tool-head-main').first().click();
+  check(
+    (await page.locator('.tool-card .tool-body').count()) === 0,
+    'tool card collapsed again',
+  );
+
+  // The chevron is its own button now that a copy icon sits to its left
+  // (PA-16); both must still toggle the same card.
+  await page.locator('.tool-card .tool-chev').first().click();
+  await page.waitForSelector('.tool-card .tool-body');
+  check(true, 'the chevron button toggles too');
+  await page.locator('.tool-card .tool-chev').first().click();
+}
+
+heading('A tool card can be copied from its collapsed bar');
+{
+  const card = page.locator('.tool-card').first();
+  check(await card.locator('.copy-btn').isVisible(), 'copy icon shown on the collapsed bar');
+  check(
+    (await page.locator('.tool-card .tool-body').count()) === 0,
+    'and copying needs no expanding first',
+  );
+  console.log(`     saved ${await shot('23b-native-tool-copy')}`);
+
+  await card.locator('.copy-btn').click();
+  await page.waitForSelector('.tool-card .copy-btn.copied', { timeout: 5_000 });
+
+  // Read it back through a real paste, the way copy-ui-demo does: over plain
+  // HTTP `navigator.clipboard` does not exist, so the tick alone only proves
+  // `agent/clipboard.ts`'s execCommand fallback returned true.
+  await page.locator('.promptbar textarea').click();
+  await page.keyboard.press('Control+V');
+  const pasted = await page.locator('.promptbar textarea').inputValue();
+  check(/Read/.test(pasted), 'clipboard holds the summary', pasted.split('\n')[0]);
+  check(/^Input:/m.test(pasted), 'clipboard holds the tool input');
+  check(/^Result:/m.test(pasted), 'clipboard holds the tool result');
+  await page.fill('.promptbar textarea', '');
 }
 
 heading('An edit raises a native approval sheet with a diff');

@@ -1527,18 +1527,44 @@ input[type='number']::-webkit-outer-spin-button {
 .tool-card.error { border-color: var(--danger); }
 .tool-card.denied { opacity: 0.65; }
 
+/*
+ * The bar holds three controls (toggle, copy, chevron — see ToolCard.tsx), so
+ * it is a plain row and the padding lives on the children: the toggle and the
+ * chevron each need to be tappable across the full height of the bar.
+ */
 .tool-head {
   display: flex;
   align-items: center;
-  gap: 8px;
   width: 100%;
+}
+.tool-head-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
   background: none;
   border: none;
   border-radius: 0;
-  padding: 10px 12px;
+  padding: 10px 4px 10px 12px;
   text-align: left;
   font-size: 13.5px;
 }
+/* Sits between the two toggles; keeps its icon off the summary's ellipsis.
+   Its default hover fill is `--bg-elev`, which *is* the card's own background,
+   so hovering would give no feedback at all here. */
+.tool-head .copy-btn { flex: none; padding: 8px 4px; }
+.tool-head .copy-btn:hover:not(:disabled) { background: var(--bg); }
+.tool-chev {
+  display: flex;
+  align-items: center;
+  flex: none;
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 10px 12px 10px 4px;
+}
+.tool-chev:hover .chev { color: var(--text); }
 .tool-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); flex: 0 0 auto; }
 .tool-dot.ok { background: var(--ok); }
 .tool-dot.error { background: var(--danger); }
