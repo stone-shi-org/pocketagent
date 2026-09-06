@@ -1430,6 +1430,57 @@ describe('webhook delivery: the directory queue (PA-11)', () => {
     }, 10_000);
   });
 
+  it('queues rather than skips when the overlap policy says queue', async () => {
+    // `queue` keeps the second event instead of dropping it, and the directory
+    // gate then decides when it runs — which for two deliveries into the same
+    // project folder means it waits.
+    const hook = await createWebhook({ overlapPolicy: 'queue', maxConcurrent: 5 });
+    expect((await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret })).json().status).toBe('running');
+    expect((await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret })).json().status).toBe('queued');
+  });
+
+  it('persists a reorder, so it survives a restart', async () => {
+    // `queued_at` *is* the order — it is what the boot-time adoption re-sorts
+    // by — so a "run next" that only moved the in-memory copy would silently
+    // revert on the next restart.
+    const hook = await createWebhook({ overlapPolicy: 'allow', maxConcurrent: 5 });
+    await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret });
+    const first = await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret });
+    const second = await deliver(SLUG, payloadForIssue('ENG-3'), { secret: hook.secret });
+
+    const before = rowFor(hook.id, 'ENG-3')?.queued_at;
+    await post(`/api/webhooks/${hook.id}/deliveries/${second.json().deliveryId}/queue`, {
+      action: 'front',
+    });
+    const after = rowFor(hook.id, 'ENG-3')?.queued_at;
+    expect(after).not.toBe(before);
+    expect(after).toBeLessThan(rowFor(hook.id, 'ENG-2')?.queued_at ?? 0);
+    expect(first.json().deliveryId).toBeTruthy();
+  });
+
+  it('frees the tree when a waiting delivery\'s history is cleared', async () => {
+    // Clearing history deletes the queued row. Without dequeuing first, the
+    // queue keeps a grant for work whose row is gone and that tree stays
+    // blocked — for every later delivery *and* every human prompt — until the
+    // server restarts.
+    const hook = await createWebhook({ overlapPolicy: 'allow', maxConcurrent: 5 });
+    await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret });
+    await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret });
+    expect(ctx.context.webhooks.queuedByTree().get(ctx.projectDir)).toHaveLength(1);
+
+    await ctx.app.inject({
+      method: 'DELETE',
+      url: `/api/webhooks/${hook.id}/deliveries`,
+      headers: authHeaders(ctx.cookie),
+    });
+
+    // No waiter left, and nothing holding the tree on its behalf.
+    expect(ctx.context.webhooks.queuedByTree().get(ctx.projectDir)).toBeUndefined();
+    for (const info of ctx.context.sessions.list()) ctx.context.sessions.terminate(info.id);
+    const third = await deliver(SLUG, payloadForIssue('ENG-4'), { secret: hook.secret });
+    expect(third.json().status).toBe('running');
+  });
+
   it('never prunes a queued delivery', () => {
     // Pruning a waiter would silently discard work already answered with a 202.
     // A queued row is in neither the "open" nor the "noise" partition, and this

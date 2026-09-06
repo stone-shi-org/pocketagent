@@ -372,10 +372,16 @@ export class SessionManager {
    * signal, only the classifier's advisory idle hint, so counting one would
    * mean a queue that never drains — the same judgement `terminal/classifier.ts`
    * is forbidden from making.
+   *
+   * `exceptSessionId` answers the *other* question one caller has — "is anyone
+   * **else** working here" — and exists so that caller cannot answer it with a
+   * different rule than this one. A second prompt into a session already
+   * mid-turn is the agent's business, not the queue's.
    */
-  busyTreeRoots(): string[] {
+  busyTreeRoots(exceptSessionId?: string): string[] {
     const roots: string[] = [];
     for (const session of this.live.values()) {
+      if (exceptSessionId !== undefined && session.id === exceptSessionId) continue;
       if (session.transport !== 'structured') continue;
       if (session.busySince === null) continue;
       if (session.status !== 'running' && session.status !== 'starting') continue;

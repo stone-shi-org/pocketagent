@@ -399,7 +399,7 @@ export class WebhookService {
           id: row.id,
           key: row.queue_key,
           enqueuedAt: row.queued_at ?? row.received_at,
-          run: () => this.runQueued(row.id),
+          run: () => this.runQueued(row.id, row.queue_key as string),
         });
       }
       return items;
@@ -680,6 +680,14 @@ export class WebhookService {
 
     const subjectKey = subjectKeyOf(type, facts);
     const conversationKey = hook.conversation_mode === 'per-issue' ? subjectKey : `hook:${hook.id}`;
+    // `skip` drops it here. `allow` and `queue` both fall through to the
+    // directory gate below, and that is the whole difference between them: a
+    // second delivery that would land in the *same working tree* waits there
+    // (which for `per-issue` is always, since the conversation's tree is
+    // reused), while two runs that each mint their own directory share nothing
+    // and genuinely can proceed at once. There is deliberately no
+    // conversation-scoped queue: `RunQueue` orders directories, and ordering a
+    // pair of runs that contend for nothing would be ceremony.
     if (hook.overlap_policy === 'skip' && this.hasActiveRunFor(hook, conversationKey, deliveryId)) {
       const reason =
         hook.conversation_mode === 'per-issue'
@@ -808,7 +816,12 @@ export class WebhookService {
       reason: `Waiting for another agent to finish in ${queueKey}.`,
     });
     const enqueued = this.queue.enqueue(
-      { id: deliveryId, key: queueKey, enqueuedAt: queuedAt, run: () => this.runQueued(deliveryId) },
+      {
+        id: deliveryId,
+        key: queueKey,
+        enqueuedAt: queuedAt,
+        run: () => this.runQueued(deliveryId, queueKey),
+      },
       this.queueStore,
     );
     if (!enqueued) {
@@ -838,16 +851,22 @@ export class WebhookService {
    * Never throws: the queue has nobody to report an exception to, and a run
    * that dies here must still release the tree it was handed.
    */
-  private async runQueued(deliveryId: string): Promise<void> {
-    const row = readWebhookDelivery(this.db, deliveryId);
-    if (row === null) return;
-    const key = row.queue_key;
-    if (key !== null) this.heldKeys.set(deliveryId, key);
-
+  private async runQueued(deliveryId: string, key: string): Promise<void> {
+    // `key` is passed in rather than re-read from the row, because the row may
+    // be gone: `DELETE /api/webhooks/:id/deliveries` can remove a waiter, and a
+    // grant with nothing left to hand it back would block that tree — for every
+    // later delivery *and* every human prompt — until the server restarted.
     const release = (): void => {
-      if (key !== null) this.queue.release(key, deliveryId);
+      this.queue.release(key, deliveryId);
       this.heldKeys.delete(deliveryId);
     };
+
+    const row = readWebhookDelivery(this.db, deliveryId);
+    if (row === null) {
+      release();
+      return;
+    }
+    this.heldKeys.set(deliveryId, key);
 
     const hook = row.webhook_id !== null ? readWebhook(this.db, row.webhook_id) : null;
     // A webhook deleted or switched off while this waited. The delivery is
@@ -1161,7 +1180,12 @@ export class WebhookService {
    */
   resolveQueued(deliveryId: string, action: 'cancel' | 'front'): boolean {
     if (action === 'cancel') return this.queue.cancel(deliveryId);
-    return this.queue.moveToFront(deliveryId);
+    const reordered = this.queue.moveToFront(deliveryId);
+    // `queued_at` *is* the order — it is what `pending()` re-sorts by at boot —
+    // so a reorder that only moved the in-memory copy would silently revert on
+    // the next restart.
+    if (reordered !== null) updateWebhookDelivery(this.db, deliveryId, { queued_at: reordered });
+    return reordered !== null;
   }
 
   /**
@@ -1827,6 +1851,11 @@ export class WebhookService {
 
   clearDeliveries(id: string): { removed: number } {
     this.get(id);
+    // Take any waiters out of the queue *before* their rows go, or the queue
+    // keeps a grant for work whose row no longer exists, and the tree stays
+    // blocked. `cancel` reports through the store, which closes the row out —
+    // harmless here, since the row is about to be deleted anyway.
+    for (const row of readQueuedWebhookDeliveries(this.db, id)) this.queue.cancel(row.id);
     return { removed: deleteWebhookDeliveriesFor(this.db, id) };
   }
 

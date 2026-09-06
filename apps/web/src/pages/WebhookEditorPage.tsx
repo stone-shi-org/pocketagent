@@ -1609,8 +1609,8 @@ export function WebhookEditorPage({
               overlapPolicy === 'skip'
                 ? `A second event for the same ${conversationMode === 'per-issue' ? (type === 'bamboo' ? 'plan' : 'issue') : 'webhook'} is dropped while the first is still working.`
                 : overlapPolicy === 'queue'
-                  ? 'The second event waits for the first to finish instead of being dropped.'
-                  : 'Both run at once. Only sane with a separate working copy per run — otherwise use the directory rule below.'
+                  ? 'The second event is kept rather than dropped, and the directory rule below decides when it runs — so it waits whenever the two would share a working copy.'
+                  : 'The second event is kept, and the directory rule below still applies. Identical to “Queue it” unless you have also set that to “Start anyway”.'
             }
             onChange={(v) => setOverlapPolicy(v as WebhookOverlapPolicy)}
           />

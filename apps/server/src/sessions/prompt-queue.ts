@@ -143,11 +143,8 @@ export class PromptQueueService {
    * session's own turn is a holder. Excluding it is the whole point.
    */
   private isBlockedByOther(key: string, sessionId: string): boolean {
-    for (const info of this.opts.sessions.list()) {
-      if (info.id === sessionId) continue;
-      if (info.busySince === null) continue;
-      if (info.status !== 'running' && info.status !== 'starting') continue;
-      if (treeRootOf(info.cwd) === key) return true;
+    for (const busy of this.opts.sessions.busyTreeRoots(sessionId)) {
+      if (busy === key) return true;
     }
     // A tree granted to a run that has not started its turn yet reads as free
     // above, so ask the queue too. `grantedTo`, not `holderOf`: the latter

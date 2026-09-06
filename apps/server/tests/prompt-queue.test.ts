@@ -133,6 +133,23 @@ describe('PromptQueueService', () => {
     expect(ctx.context.sessions.find(other.id)?.status).toBe('running');
   });
 
+  it('is not blocked by a busy terminal session in the same tree', async () => {
+    // `busyTreeRoots` deliberately excludes terminal sessions — a PTY has no
+    // end-of-turn signal, so counting one would mean a queue that never drains.
+    // This check has to use the same rule, or a prompt would park behind a
+    // holder the queue itself does not believe in and only the sweep would
+    // release it.
+    const shell = await ctx.context.sessions.create({
+      agent: 'shell',
+      cwd: ctx.projectDir,
+      cols: 80,
+      rows: 24,
+    });
+    expect(shell.transport).toBe('terminal');
+    const mine = await session(ctx.projectDir);
+    expect(ctx.context.promptQueue.submit(mine, 'hello')).toEqual({ queued: false });
+  });
+
   it('sends rather than drops when the queue is full', async () => {
     // The depth cap exists to bound a machine-generated burst. A person
     // pressing send is not that, and refusing their message would be worse

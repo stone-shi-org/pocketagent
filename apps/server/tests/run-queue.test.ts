@@ -155,7 +155,12 @@ describe('RunQueue: order and independence', () => {
     q.enqueue(item('a', '/repo', 1), store);
     q.enqueue(item('b', '/repo', 2), store);
 
-    expect(q.moveToFront('b')).toBe(true);
+    // Returns the new stamp so the producer can persist it: `enqueuedAt` *is*
+    // the order, and a reorder that lived only in memory would revert on the
+    // next restart.
+    const stamp = q.moveToFront('b');
+    expect(stamp).not.toBeNull();
+    expect(stamp).toBeLessThan(1);
     expect(q.positionOf('b')).toBe(1);
     // Still waiting: reordering waiters must never start one while the tree is
     // held, which is the corruption the queue exists to prevent.
@@ -291,5 +296,46 @@ describe('RunQueue: surviving a restart', () => {
       q.pump();
       expect(started).toEqual(['next']);
     });
+  });
+});
+
+describe('RunQueue: releases that arrive mid-pump', () => {
+  it('starts the next waiter when one settles synchronously inside the pump', () => {
+    // A webhook deleted while it waited fails immediately, so its `run()`
+    // releases the tree *during* the pump that started it. The `pumping` guard
+    // drops that nested pump, so without the retry the tree would sit free with
+    // a ready waiter until the next 30s sweep.
+    const q = makeQueue();
+    const order: string[] = [];
+    const failFast: QueuedItem = {
+      id: 'doomed',
+      key: '/repo',
+      enqueuedAt: 1,
+      run: () => {
+        order.push('doomed');
+        q.release('/repo', 'doomed');
+        return Promise.resolve();
+      },
+    };
+    const store = makeStore([failFast, item('next', '/repo', 2)]);
+    q.register(store);
+    q.init();
+
+    expect(order).toEqual(['doomed']);
+    expect(started).toEqual(['next']);
+    expect(q.depth('/repo')).toBe(0);
+  });
+
+  it('hands a granted tree back even when the work no longer exists', () => {
+    // The producer's own row can be deleted while it waits. The key travels
+    // with the closure precisely so the grant can still be returned — a grant
+    // with nothing left to release it blocks that tree until a restart.
+    const q = makeQueue();
+    const store = makeStore([
+      { id: 'gone', key: '/repo', enqueuedAt: 1, run: () => { q.release('/repo', 'gone'); return Promise.resolve(); } },
+    ]);
+    q.register(store);
+    q.init();
+    expect(q.tryAcquire('/repo', 'later').granted).toBe(true);
   });
 });

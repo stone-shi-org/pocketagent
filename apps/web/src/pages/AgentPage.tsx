@@ -60,16 +60,19 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
       replay frame replaces the live one wholesale and would otherwise wipe it. */
   const [history, setHistory] = useState<TranscriptItem[]>([]);
   /**
-   * A prompt of ours parked on a busy working tree (PA-11), or null.
+   * Prompts of ours parked on a busy working tree (PA-11), oldest first.
+   *
+   * A list rather than one slot: nothing stops someone sending twice while the
+   * tree is busy, and a single slot would hide the first message behind the
+   * second — leaving it undeliverable *and* uncancellable, since the only place
+   * a queued prompt can be cancelled is here.
    *
    * Replayed on attach as well as pushed live, so reconnecting mid-wait shows
    * the same thing rather than an apparently empty composer.
    */
-  const [queuedPrompt, setQueuedPrompt] = useState<{
-    promptId: string;
-    position: number;
-    treeRoot: string;
-  } | null>(null);
+  const [queuedPrompts, setQueuedPrompts] = useState<
+    { promptId: string; position: number; treeRoot: string }[]
+  >([]);
 
   useEffect(() => {
     // Plain closure variable, not a ref: every handler below is recreated
@@ -137,10 +140,14 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         // `setNotice`, because it is not a notice — it is a state with two
         // actions, and it must not be dismissible into invisibility.
         onPromptQueued: (promptId, position, treeRoot) => {
-          setQueuedPrompt({ promptId, position, treeRoot });
+          setQueuedPrompts((prev) => [
+            // Replayed on every attach, so the same id can arrive twice.
+            ...prev.filter((p) => p.promptId !== promptId),
+            { promptId, position, treeRoot },
+          ]);
         },
         onPromptReleased: (promptId) => {
-          setQueuedPrompt((prev) => (prev?.promptId === promptId ? null : prev));
+          setQueuedPrompts((prev) => prev.filter((p) => p.promptId !== promptId));
         },
         onExit: () => {
           setStatus((prev) => (isTerminalStatus(prev) ? prev : 'exited'));
@@ -384,36 +391,31 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           override of the directory queue in the app — offered because a human
           who knows the other run is harmless must be able to say so, and an
           override they can see beats one they cannot. */}
-      {queuedPrompt && (
-        <div className="notice notice--queued" role="status">
+      {queuedPrompts.map((parked) => (
+        <div key={parked.promptId} className="notice notice--queued" role="status">
           <span>
-            Waiting for another agent working in{' '}
-            <code>{queuedPrompt.treeRoot}</code>
-            {queuedPrompt.position > 1 ? ` · position ${queuedPrompt.position}` : ''}. Your
-            message will be sent as soon as it finishes.
+            Waiting for another agent working in <code>{parked.treeRoot}</code>
+            {parked.position > 1 ? ` · position ${parked.position}` : ''}. Your message will be
+            sent as soon as it finishes.
           </span>
           <span className="notice-actions">
             <button
               type="button"
               className="link-btn"
-              onClick={() =>
-                connRef.current?.sendQueuedPromptAction(queuedPrompt.promptId, 'force')
-              }
+              onClick={() => connRef.current?.sendQueuedPromptAction(parked.promptId, 'force')}
             >
               Send anyway
             </button>
             <button
               type="button"
               className="link-btn"
-              onClick={() =>
-                connRef.current?.sendQueuedPromptAction(queuedPrompt.promptId, 'cancel')
-              }
+              onClick={() => connRef.current?.sendQueuedPromptAction(parked.promptId, 'cancel')}
             >
               Cancel
             </button>
           </span>
         </div>
-      )}
+      ))}
 
       <Transcript state={transcript} history={history} />
 

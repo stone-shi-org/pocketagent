@@ -110,6 +110,15 @@ export class RunQueue {
   private readonly granted = new Map<string, string>();
   private readonly stores = new Set<QueueStore>();
   private pumping = false;
+  /**
+   * A `release` that arrived while a pump was already running.
+   *
+   * Work can settle synchronously inside `pump` — a webhook deleted while it
+   * waited fails immediately — and that release re-enters here, where the
+   * `pumping` guard drops it. Without this flag the tree it freed would wait
+   * for the next 30s sweep even though a waiter was ready to go.
+   */
+  private pumpAgain = false;
 
   constructor(private readonly opts: RunQueueOptions) {}
 
@@ -213,6 +222,10 @@ export class RunQueue {
    */
   release(key: string, itemId: string): void {
     if (this.granted.get(key) === itemId) this.granted.delete(key);
+    if (this.pumping) {
+      this.pumpAgain = true;
+      return;
+    }
     this.pump();
   }
 
@@ -258,52 +271,61 @@ export class RunQueue {
    * exists to prevent, so this only reorders waiters and still waits for the
    * directory to come free.
    */
-  moveToFront(itemId: string): boolean {
+  moveToFront(itemId: string): number | null {
     for (const [, list] of this.waiting) {
       const idx = list.findIndex((i) => i.id === itemId);
       if (idx === -1) continue;
       const [item] = list.splice(idx, 1);
-      if (item === undefined) return false;
+      if (item === undefined) return null;
       // `enqueuedAt` is the sort key everywhere else, so reordering has to move
-      // the stamp too or the next `enqueue`'s sort would undo this.
+      // the stamp too or the next `enqueue`'s sort would undo this. Returned so
+      // the producer can persist it: the in-memory queue does not survive a
+      // restart, and a reorder that lived only here would silently revert.
       const head = list[0];
       item.enqueuedAt = head !== undefined ? head.enqueuedAt - 1 : item.enqueuedAt;
       list.unshift(item);
-      return true;
+      return item.enqueuedAt;
     }
-    return false;
+    return null;
   }
 
   /** Start whatever can start. Safe to call at any time, from anywhere. */
   pump(): void {
     // A `run()` that settles synchronously would re-enter through `release`,
-    // and a nested pump could hand out the same tree twice.
+    // and a nested pump could hand out the same tree twice. Such a release sets
+    // `pumpAgain` instead, and the loop below runs again rather than leaving a
+    // freed tree for the sweep to notice.
     if (this.pumping) return;
     this.pumping = true;
     try {
-      for (const [key, list] of [...this.waiting]) {
-        while (list.length > 0) {
-          if (this.holderOf(key) !== null) break;
-          const item = list[0];
-          if (item === undefined) break;
-          list.shift();
-          if (list.length === 0) this.waiting.delete(key);
-          this.granted.set(key, item.id);
-          const store = this.owner.get(item.id);
-          this.owner.delete(item.id);
-          store?.onDequeued(item, 'granted');
-          void item.run().catch((err) => {
-            // A producer reports its own failures; reaching here means one
-            // threw anyway, and the tree must not stay claimed by it.
-            this.opts.logger?.warn({ err, itemId: item.id }, 'queued run threw');
-            this.release(key, item.id);
-          });
-          // Only one item per tree per pass: the run just started now holds it.
-          break;
-        }
-      }
+      do {
+        this.pumpAgain = false;
+        this.pumpOnce();
+      } while (this.pumpAgain);
     } finally {
       this.pumping = false;
+    }
+  }
+
+  /** One pass over every key. At most one item per tree starts per pass. */
+  private pumpOnce(): void {
+    for (const [key, list] of [...this.waiting]) {
+      if (list.length === 0) continue;
+      if (this.holderOf(key) !== null) continue;
+      const item = list[0];
+      if (item === undefined) continue;
+      list.shift();
+      if (list.length === 0) this.waiting.delete(key);
+      this.granted.set(key, item.id);
+      const store = this.owner.get(item.id);
+      this.owner.delete(item.id);
+      store?.onDequeued(item, 'granted');
+      void item.run().catch((err) => {
+        // A producer reports its own failures; reaching here means one threw
+        // anyway, and the tree must not stay claimed by it.
+        this.opts.logger?.warn({ err, itemId: item.id }, 'queued run threw');
+        this.release(key, item.id);
+      });
     }
   }
 
