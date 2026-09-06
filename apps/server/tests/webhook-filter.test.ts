@@ -4,6 +4,7 @@ import {
   describeJiraFilter,
   evaluateJiraFilter,
   parseJiraEvent,
+  resolveLabelOverrides,
   resolveProjectRoute,
   resolvePromptTemplate,
 } from '../src/webhooks/jira.js';
@@ -340,5 +341,47 @@ describe('resolvePromptTemplate', () => {
   it('falls back to default template when neither specific type nor "All type" is mapped', () => {
     const map = [{ issueType: 'Bug', promptTemplate: 'Bug Template' }];
     expect(resolvePromptTemplate(map, 'Default Template', 'Task')).toBe('Default Template');
+  });
+});
+
+describe('resolveLabelOverrides', () => {
+  it('extracts agent and model from labels using colon and hyphen formats', () => {
+    const available = ['claude', 'agy', 'codex', 'opencode', 'pi'];
+    expect(
+      resolveLabelOverrides(['agent:claude', 'model:Sonnet'], available),
+    ).toEqual({ agent: 'claude', model: 'Sonnet' });
+
+    expect(
+      resolveLabelOverrides(['agent-agy', 'model-opus'], available),
+    ).toEqual({ agent: 'agy', model: 'opus' });
+
+    expect(
+      resolveLabelOverrides(['agent:CODEX', 'model:gpt-4o'], available),
+    ).toEqual({ agent: 'codex', model: 'gpt-4o' });
+  });
+
+  it('ignores unrecognized agents when availableAgentIds is provided', () => {
+    const available = ['claude', 'agy'];
+    expect(
+      resolveLabelOverrides(['agent:unknown-agent', 'model:flash'], available),
+    ).toEqual({ model: 'flash' });
+  });
+
+  it('allows any agent when availableAgentIds is omitted', () => {
+    expect(
+      resolveLabelOverrides(['agent:custom-agent', 'model:pro']),
+    ).toEqual({ agent: 'custom-agent', model: 'pro' });
+  });
+
+  it('takes the last matching label when multiple agent/model labels are present', () => {
+    const available = ['claude', 'agy', 'codex'];
+    expect(
+      resolveLabelOverrides(['agent:claude', 'agent:agy', 'model:haiku', 'model:sonnet-3.7'], available),
+    ).toEqual({ agent: 'agy', model: 'sonnet-3.7' });
+  });
+
+  it('returns empty object when no matching labels exist', () => {
+    expect(resolveLabelOverrides(['bug', 'frontend', 'urgent'])).toEqual({});
+    expect(resolveLabelOverrides([])).toEqual({});
   });
 });

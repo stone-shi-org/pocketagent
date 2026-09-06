@@ -298,6 +298,43 @@ export function resolvePromptTemplate(
   );
 }
 
+/**
+ * Extract agent and model overrides from Jira issue labels.
+ *
+ * Supported label formats:
+ * - Agent: `agent:<agent-id>` or `agent-<agent-id>` (e.g. `agent:claude`, `agent:agy`, `agent-codex`)
+ * - Model: `model:<model-name>` or `model-<model-name>` (e.g. `model:Sonnet`, `model:opus`, `model:pro`, `model-flash`)
+ *
+ * If multiple matching labels are present, the last non-empty one takes precedence.
+ */
+export function resolveLabelOverrides(
+  labels: string[],
+  availableAgentIds?: string[],
+): { agent?: string; model?: string } {
+  const result: { agent?: string; model?: string } = {};
+
+  for (const raw of labels) {
+    const label = raw.trim();
+    const agentMatch = /^agent[:\-]([a-zA-Z0-9_\-]+)$/i.exec(label);
+    if (agentMatch && agentMatch[1]) {
+      const candidate = agentMatch[1].trim().toLowerCase();
+      if (!availableAgentIds || availableAgentIds.includes(candidate)) {
+        result.agent = candidate;
+      }
+    }
+
+    const modelMatch = /^model[:\-](.+)$/i.exec(label);
+    if (modelMatch && modelMatch[1]) {
+      const candidate = modelMatch[1].trim();
+      if (candidate !== '') {
+        result.model = candidate;
+      }
+    }
+  }
+
+  return result;
+}
+
 /** A one-line description of what a filter accepts, for the home-screen row. */
 export function describeJiraFilter(filter: JiraWebhookFilter): string {
   const parts: string[] = [];

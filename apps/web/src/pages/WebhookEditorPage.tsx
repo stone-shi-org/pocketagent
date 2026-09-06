@@ -148,6 +148,7 @@ export function WebhookEditorPage({
   const [model, setModel] = useState('');
   const [effort, setEffort] = useState('');
   const [skipPermissions, setSkipPermissions] = useState(false);
+  const [autoSelectAgentModel, setAutoSelectAgentModel] = useState(false);
   const [conversationMode, setConversationMode] = useState<WebhookConversationMode>('per-delivery');
   const [overlapPolicy, setOverlapPolicy] = useState<'skip' | 'allow'>('skip');
   const [maxConcurrent, setMaxConcurrent] = useState(2);
@@ -263,6 +264,7 @@ export function WebhookEditorPage({
       setModel(hook.model ?? '');
       setEffort(hook.effort ?? '');
       setSkipPermissions(hook.skipPermissionsEnabled);
+      setAutoSelectAgentModel(hook.autoSelectAgentModel ?? false);
       setConversationMode(hook.conversationMode);
       setOverlapPolicy(hook.overlapPolicy);
       setMaxConcurrent(hook.maxConcurrent);
@@ -651,6 +653,7 @@ export function WebhookEditorPage({
       debounceSeconds,
       storePayloads,
       skipPermissions,
+      autoSelectAgentModel,
     };
 
     try {
@@ -1780,6 +1783,35 @@ export function WebhookEditorPage({
             placeholder={selectedAgent?.defaultEffort ?? "the model's default"}
             onChange={setEffort}
           />
+          {type === 'jira' && (
+            <div className="settings-row">
+              <div className="settings-row-main">
+                <div className="settings-row-info">
+                  <label className="settings-row-label">Enable agent / model auto-select</label>
+                  <p className="transport-hint">
+                    When enabled, inspects Jira issue labels for <code>agent:&lt;id&gt;</code> (e.g.{' '}
+                    <code>agent:claude</code>, <code>agent:agy</code>, <code>agent:codex</code>,{' '}
+                    <code>agent:opencode</code>, <code>agent:pi</code>) and{' '}
+                    <code>model:&lt;name&gt;</code> (e.g. <code>model:Sonnet</code>,{' '}
+                    <code>model:opus</code>, <code>model:pro</code>, <code>model:flash</code>) to
+                    dynamically override the default agent and model for this delivery.
+                  </p>
+                </div>
+                <div className="settings-row-control">
+                  <label className="switch">
+                    <input
+                      type="checkbox"
+                      checked={autoSelectAgentModel}
+                      disabled={busy}
+                      onChange={(e) => setAutoSelectAgentModel(e.target.checked)}
+                      aria-label="Enable agent / model auto-select"
+                    />
+                    <span className="switch-track" />
+                  </label>
+                </div>
+              </div>
+            </div>
+          )}
         </SectionCard>
       </div>
 

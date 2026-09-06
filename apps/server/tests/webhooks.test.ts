@@ -1097,3 +1097,63 @@ describe('webhook call history', () => {
     expect(entries.some((e: { kind: string }) => e.kind === 'delivery')).toBe(true);
   });
 });
+
+describe('webhook autoSelectAgentModel', () => {
+  it('overrides agent and model when autoSelectAgentModel is enabled and matching labels exist', async () => {
+    const hook = await createWebhook({
+      agent: 'claude',
+      model: 'claude-3-5-sonnet',
+      autoSelectAgentModel: true,
+    });
+
+    const payload = JSON.stringify({
+      ...(JIRA_SAMPLE_PAYLOAD as object),
+      timestamp: Date.now(),
+      issue: {
+        ...((JIRA_SAMPLE_PAYLOAD as { issue: Record<string, unknown> }).issue),
+        fields: {
+          ...((JIRA_SAMPLE_PAYLOAD as { issue: { fields: Record<string, unknown> } }).issue.fields),
+          labels: ['agent:agy', 'model:gemini-2.5-pro'],
+        },
+      },
+    });
+
+    const res = await deliver(SLUG, payload, { secret: hook.secret });
+    expect(res.statusCode).toBe(202);
+    const outcome = res.json();
+    expect(outcome.sessionId).toBeTruthy();
+
+    const session = ctx.context.sessions.get(outcome.sessionId);
+    expect(session).toBeDefined();
+    expect(session?.spec.agent).toBe('agy');
+  });
+
+  it('keeps webhook default agent and model when autoSelectAgentModel is disabled', async () => {
+    const hook = await createWebhook({
+      agent: 'claude',
+      model: 'claude-3-5-sonnet',
+      autoSelectAgentModel: false,
+    });
+
+    const payload = JSON.stringify({
+      ...(JIRA_SAMPLE_PAYLOAD as object),
+      timestamp: Date.now(),
+      issue: {
+        ...((JIRA_SAMPLE_PAYLOAD as { issue: Record<string, unknown> }).issue),
+        fields: {
+          ...((JIRA_SAMPLE_PAYLOAD as { issue: { fields: Record<string, unknown> } }).issue.fields),
+          labels: ['agent:agy', 'model:gemini-2.5-pro'],
+        },
+      },
+    });
+
+    const res = await deliver(SLUG, payload, { secret: hook.secret });
+    expect(res.statusCode).toBe(202);
+    const outcome = res.json();
+    expect(outcome.sessionId).toBeTruthy();
+
+    const session = ctx.context.sessions.get(outcome.sessionId);
+    expect(session).toBeDefined();
+    expect(session?.spec.agent).toBe('claude');
+  });
+});
