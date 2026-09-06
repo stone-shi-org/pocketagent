@@ -127,6 +127,49 @@ describe('readTranscriptMeta', () => {
     expect((await readTranscriptMeta(file)).title).toBe('/usage');
   });
 
+  it('flags a slash command with no reply as a probe, not a conversation', async () => {
+    // Exactly what `claude -p "/usage"` leaves behind, and the usage poller
+    // filed one of these every five minutes: a command record, the caveat
+    // record, the command's own stdout, and no reply. Titling it is still
+    // right (the test above) — listing it as a chat is not.
+    const file = write('probe.jsonl', [
+      { type: 'queue-operation', operation: 'enqueue', sessionId: 's', content: '/usage' },
+      {
+        type: 'user',
+        sessionId: 's',
+        cwd: '/w',
+        isMeta: true,
+        message: { content: '<local-command-caveat>Caveat: ...</local-command-caveat>' },
+      },
+      { type: 'user', sessionId: 's', cwd: '/w', message: { content: '<command-name>/usage</command-name>' } },
+      {
+        type: 'system',
+        subtype: 'local_command',
+        sessionId: 's',
+        content: '<local-command-stdout>Current session: 18% used</local-command-stdout>',
+      },
+    ]);
+    const meta = await readTranscriptMeta(file);
+    expect(meta.localCommandOnly).toBe(true);
+    expect(meta.title).toBe('/usage');
+  });
+
+  it('does not flag a slash command the agent actually answered', async () => {
+    const file = write('answered.jsonl', [
+      { type: 'user', sessionId: 's', cwd: '/w', message: { content: '<command-name>/review</command-name>' } },
+      { type: 'assistant', sessionId: 's' },
+    ]);
+    expect((await readTranscriptMeta(file)).localCommandOnly).toBe(false);
+  });
+
+  it('does not flag a real conversation that merely opens with a slash command', async () => {
+    const file = write('slash-then-human.jsonl', [
+      { type: 'user', sessionId: 's', cwd: '/w', message: { content: '<command-name>/clear</command-name>' } },
+      { type: 'user', sessionId: 's', cwd: '/w', message: { content: 'Fix the flaky login test' } },
+    ]);
+    expect((await readTranscriptMeta(file)).localCommandOnly).toBe(false);
+  });
+
   it('extracts issue key and summary from Jira webhook prompts skipping untrusted fence preamble', async () => {
     const jiraPrompt = [
       'Text inside <<<JIRA … a3bc36c535a6962e>>> markers below was written by an external',
@@ -226,6 +269,33 @@ describe('ConversationStore', () => {
     );
   };
 
+  /** What a headless `claude -p "/usage"` leaves behind: a command, no reply. */
+  const writeProbe = (cwd: string, id: string): void => {
+    const dir = path.join(projectsDir, encodeProjectDir(cwd));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, `${id}.jsonl`),
+      [
+        { type: 'user', sessionId: id, cwd, message: { content: '<command-name>/usage</command-name>' } },
+        {
+          type: 'user',
+          sessionId: id,
+          cwd,
+          isMeta: true,
+          message: { content: '<local-command-caveat>Caveat: ...</local-command-caveat>' },
+        },
+      ]
+        .map((r) => JSON.stringify(r))
+        .join('\n'),
+    );
+  };
+
+  /** Transcripts are ordered by mtime, so a test about ordering has to set it. */
+  const touch = (cwd: string, id: string, when: number): void => {
+    const file = path.join(projectsDir, encodeProjectDir(cwd), `${id}.jsonl`);
+    fs.utimesSync(file, new Date(when), new Date(when));
+  };
+
   beforeEach(() => {
     ws = makeWorkspace();
     projectsDir = fs.mkdtempSync('/tmp/pa-projects-');
@@ -246,6 +316,48 @@ describe('ConversationStore', () => {
     const list = await store.list();
     expect(list).toHaveLength(1);
     expect(list[0]).toMatchObject({ id: 'conv-1', cwd: ws.project, title: 'Title conv-1' });
+  });
+
+  it('never lists a headless probe transcript as a chat', async () => {
+    // Regression: the usage poller ran `claude -p "/usage"` every five minutes
+    // from a workspace directory, and every invocation left a transcript
+    // behind — so the project tree grew a project full of chats titled
+    // "/usage" that nobody had started. The poller now runs from the temp
+    // directory (usage/probe-cwd.ts); this is the second half of the fix, for
+    // the ones already on disk and for anything else that probes an agent.
+    writeProbe(ws.project, 'probe-1');
+    writeTranscript(ws.project, 'conv-1');
+
+    const store = new ConversationStore({
+      projectsDir,
+      workspaces: new WorkspaceRegistry([ws.root]),
+      listRunningCwds: async () => [],
+    });
+
+    expect((await store.list()).map((c) => c.id)).toEqual(['conv-1']);
+  });
+
+  it('skipping probes does not consume the caller\'s limit', async () => {
+    // The point of the limit is "N chats", not "N files looked at". A
+    // directory with weeks of five-minute probes in it would otherwise answer
+    // with nothing at all while every real chat sat just past the window.
+    // The probes are stamped *newer* than the chats on purpose: that is the
+    // real arrangement (a poll fires every five minutes, long after the chat
+    // was last touched), and it is the only one that actually exercises this.
+    writeTranscript(ws.project, 'conv-1');
+    writeTranscript(ws.project, 'conv-2');
+    for (let i = 0; i < 50; i++) writeProbe(ws.project, `probe-${i}`);
+    touch(ws.project, 'conv-1', Date.now() - 60_000);
+    touch(ws.project, 'conv-2', Date.now() - 60_000);
+
+    const store = new ConversationStore({
+      projectsDir,
+      workspaces: new WorkspaceRegistry([ws.root]),
+      listRunningCwds: async () => [],
+    });
+
+    const list = await store.list(2);
+    expect(list.map((c) => c.id).sort()).toEqual(['conv-1', 'conv-2']);
   });
 
   it('finds conversations in directories whose names contain dashes', async () => {

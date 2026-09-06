@@ -4,6 +4,7 @@ import type { AgentUsageInfo, UsageWindowInfo } from '@pocketagent/protocol';
 import { buildChildEnv } from '../sessions/env.js';
 import { formatResetLabel } from './format.js';
 import { createPolled, type Polled } from './poll.js';
+import { usageProbeCwd } from './probe-cwd.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -36,21 +37,22 @@ function unavailable(error: string | null = null): AgentUsageInfo {
 export interface ClaudeUsageSourceOptions {
   /** Same binary sessions use, e.g. `claude` or an absolute path. */
   claudeBin: string;
-  /** Directory the CLI is invoked from. Irrelevant to /usage but required by execFile. */
-  cwd: string;
   logger?: { warn: (o: object, m?: string) => void };
   refreshMs?: number;
 }
 
 export function createClaudeUsageSource(opts: ClaudeUsageSourceOptions): Polled<AgentUsageInfo> {
   return createPolled(unavailable(), opts.refreshMs ?? DEFAULT_REFRESH_MS, async () => {
+    // Never a workspace directory: every invocation leaves a transcript behind
+    // in the agent's own history, keyed by this path. See probe-cwd.ts.
+    const cwd = usageProbeCwd();
     try {
       const { stdout } = await execFileAsync(
         opts.claudeBin,
         ['-p', '/usage', '--output-format', 'json'],
         {
-          cwd: opts.cwd,
-          env: buildChildEnv({ cwd: opts.cwd }),
+          cwd,
+          env: buildChildEnv({ cwd }),
           timeout: TIMEOUT_MS,
           maxBuffer: 1024 * 1024,
         },

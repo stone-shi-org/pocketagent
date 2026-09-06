@@ -299,7 +299,6 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const usage = new UsageService([
     createClaudeUsageSource({
       claudeBin: config.claudeBin,
-      cwd: config.workspaceRoots[0] ?? process.cwd(),
       logger: app.log,
     }),
     // Reuses the same shared `codex app-server` process a real Codex session
@@ -311,7 +310,6 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     }),
     createAgyUsageSource({
       agyBin: config.agyBin,
-      cwd: config.workspaceRoots[0] ?? process.cwd(),
       logger: app.log,
     }),
   ]);
