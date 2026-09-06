@@ -696,6 +696,24 @@ describe('ProjectService', () => {
       expect(orphan).toMatchObject({ cwd: worktreePath, gitBranch: 'orphan', worktrees: [] });
     });
 
+    it('rolls up chats in a worktree subdirectory to the worktree root instead of creating phantom worktrees', async () => {
+      const worktreePath = path.join(ws.project, '.worktrees', 'feat-x');
+      addWorktree(worktreePath, 'feat-x');
+      const subDir = path.join(worktreePath, 'apps', 'server');
+      fs.mkdirSync(subDir, { recursive: true });
+
+      const projects = await service.list([
+        makeSession({ id: 'sub-sess', cwd: subDir, title: 'Server chat in worktree' }),
+      ]);
+      const main = projects.find((p) => p.cwd === ws.project);
+      expect(main?.worktrees).toHaveLength(1);
+      expect(main?.worktrees[0]?.name).toBe('feat-x');
+      expect(main?.worktrees[0]?.cwd).toBe(worktreePath);
+      expect(main?.worktrees[0]?.chats).toHaveLength(1);
+      expect(main?.worktrees[0]?.chats[0]?.title).toBe('Server chat in worktree');
+      expect(projects.some((p) => p.name === 'server')).toBe(false);
+    });
+
     it('sorts a project above idle ones while a folded worktree is mid-turn', async () => {
       const worktreePath = path.join(ws.project, '.worktrees', 'busy-branch');
       addWorktree(worktreePath, 'busy-branch');

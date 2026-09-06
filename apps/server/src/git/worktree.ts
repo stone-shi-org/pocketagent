@@ -175,6 +175,18 @@ export class WorktreeService {
     if (!mainCwd) {
       throw new WorktreeError(`${worktreeCwd} is not a linked git worktree.`, 'not_a_worktree');
     }
+    const exists = await pathExists(worktreeCwd);
+    if (!exists) {
+      const branchName = path.basename(worktreeCwd);
+      if (await branchExists(mainCwd, branchName)) {
+        try {
+          await execFileAsync('git', ['branch', '-D', branchName], { cwd: mainCwd });
+        } catch {
+          /* ignore if branch cannot be deleted */
+        }
+      }
+      return { branch: branchName, mainCwd, remote: null };
+    }
 
     const branch = await readGitBranch(worktreeCwd);
     if (!branch) {

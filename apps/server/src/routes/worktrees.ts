@@ -1,10 +1,13 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { CreateWorktreeRequest, DeleteRemoteBranchRequest, DeleteWorktreeRequest } from '@pocketagent/protocol';
+import { hideChat } from '../db/index.js';
 import { WorktreeError } from '../git/worktree.js';
+import { findMainRepoCwd } from '../projects/index.js';
+import { WorkspaceError } from '../workspaces/index.js';
 import { resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const worktreeRoutes: FastifyPluginAsync = async (app) => {
-  const { workspaces, worktrees, sessions } = app.pocket;
+  const { workspaces, worktrees, sessions, projects, db } = app.pocket;
 
   /**
    * Create a git worktree for an existing project, on its own branch.
@@ -65,8 +68,29 @@ export const worktreeRoutes: FastifyPluginAsync = async (app) => {
       });
     }
 
-    const worktreeCwd = await resolveWorkspaceCwdOrReply(workspaces, parsed.data.cwd, reply);
-    if (worktreeCwd === null) return reply;
+    let worktreeCwd: string | null = null;
+    try {
+      worktreeCwd = await workspaces.resolveWorkspacePath(parsed.data.cwd);
+    } catch (err) {
+      if (err instanceof WorkspaceError && err.code === 'not_found') {
+        const mainCwd = await findMainRepoCwd(parsed.data.cwd);
+        if (mainCwd) {
+          try {
+            await workspaces.resolveWorkspacePath(mainCwd);
+            worktreeCwd = parsed.data.cwd;
+          } catch {
+            worktreeCwd = null;
+          }
+        }
+      }
+      if (worktreeCwd === null) {
+        if (err instanceof WorkspaceError) {
+          const status = err.code === 'forbidden' ? 403 : err.code === 'not_found' ? 404 : 400;
+          return reply.code(status).send({ error: { code: err.code, message: err.message } });
+        }
+        throw err;
+      }
+    }
 
     if (sessions.hasAliveSessionIn(worktreeCwd)) {
       return reply.code(409).send({
@@ -76,6 +100,15 @@ export const worktreeRoutes: FastifyPluginAsync = async (app) => {
 
     try {
       const result = await worktrees.remove({ worktreeCwd });
+      sessions.forgetFinishedIn(worktreeCwd);
+      for (const project of await projects.list(sessions.list(), true)) {
+        const matching = [project, ...project.worktrees].find((p) => p.cwd === worktreeCwd);
+        if (matching) {
+          for (const chat of matching.chats) {
+            if (chat.conversationId) hideChat(db, chat.conversationId);
+          }
+        }
+      }
       return reply.code(200).send({ ok: true, ...result });
     } catch (err) {
       if (err instanceof WorktreeError) {

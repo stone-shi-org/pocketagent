@@ -316,6 +316,21 @@ export class ProjectService {
       }
     }
 
+    // Re-map any chat cwd that lives inside a worktree subdirectory (e.g.
+    // `<main>/.worktrees/<slug>/apps/server`) to the actual worktree root so
+    // it doesn't spawn phantom worktrees named after subdirectories.
+    for (const cwd of Array.from(byCwd.keys())) {
+      if (cwd === VIRTUAL_SHELL_CWD || cwd === VIRTUAL_WEBHOOKS_CWD) continue;
+      const wtRoot = findWorktreeRoot(cwd);
+      if (wtRoot && wtRoot !== cwd) {
+        const list = byCwd.get(cwd) ?? [];
+        const targetList = byCwd.get(wtRoot) ?? [];
+        targetList.push(...list);
+        byCwd.set(wtRoot, targetList);
+        byCwd.delete(cwd);
+      }
+    }
+
     // Ensure that if any worktree (live or deleted) has chats, its main checkout
     // directory is also considered for drafts so the worktree can fold into it.
     for (const cwd of Array.from(byCwd.keys())) {
@@ -632,6 +647,21 @@ export async function readGitBranch(dir: string): Promise<string | null> {
 }
 
 /**
+ * If `dir` is inside a worktree (`<main>/.worktrees/<slug>/...`), returns the
+ * worktree root `<main>/.worktrees/<slug>`.
+ */
+export function findWorktreeRoot(dir: string): string | null {
+  const marker = `${path.sep}.worktrees${path.sep}`;
+  const idx = dir.indexOf(marker);
+  if (idx === -1) return null;
+  const mainPart = dir.slice(0, idx);
+  const after = dir.slice(idx + marker.length);
+  const slug = after.split(path.sep)[0];
+  if (!slug) return null;
+  return path.join(mainPart, '.worktrees', slug);
+}
+
+/**
  * The main checkout's working directory, when `dir` is a linked git worktree
  * of it. Null for a main checkout, a bare/absent repo, or a submodule — see
  * `resolveGitDir` for how a worktree is told apart from a submodule.
@@ -641,7 +671,8 @@ export async function findMainRepoCwd(dir: string): Promise<string | null> {
   if (info?.mainRepoCwd) return info.mainRepoCwd;
   // Fallback for worktrees that no longer exist on disk (e.g. deleted worktree
   // whose chats are still retained). Standard worktrees are nested at `<main>/.worktrees/<slug>`.
-  const idx = dir.lastIndexOf(`${path.sep}.worktrees${path.sep}`);
+  const marker = `${path.sep}.worktrees${path.sep}`;
+  const idx = dir.indexOf(marker);
   if (idx !== -1) {
     const candidateMain = dir.slice(0, idx);
     if (await isGitRepo(candidateMain)) {

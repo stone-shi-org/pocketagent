@@ -121,11 +121,19 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       cwd = resolved;
     }
 
-    const removedSessions = isShell ? sessions.forgetFinishedAdopted() : sessions.forgetFinishedIn(cwd);
+    let removedSessions = isShell ? sessions.forgetFinishedAdopted() : sessions.forgetFinishedIn(cwd);
     let removedConversations = 0;
-    for (const project of await projects.list(sessions.list(), true)) {
-      if (project.cwd !== cwd) continue;
-      for (const chat of project.chats) {
+    const projectList = await projects.list(sessions.list(), true);
+    const targetProject = projectList.find((p) => p.cwd === cwd);
+    const projectsToClear = targetProject
+      ? [targetProject, ...targetProject.worktrees.filter((w) => w.isDeleted)]
+      : projectList.flatMap((p) => [p, ...p.worktrees]).filter((p) => p.cwd === cwd);
+
+    for (const p of projectsToClear) {
+      if (p.cwd !== cwd) {
+        removedSessions += sessions.forgetFinishedIn(p.cwd);
+      }
+      for (const chat of p.chats) {
         if (chat.live || !chat.conversationId) continue;
         hideChat(app.pocket.db, chat.conversationId);
         removedConversations++;

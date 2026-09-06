@@ -383,6 +383,7 @@ export async function readTranscriptMeta(file: string): Promise<TranscriptMeta> 
   };
   let aiTitle: string | null = null;
   let firstPrompt: string | null = null;
+  let slashPrompt: string | null = null;
 
   let text: string;
   try {
@@ -426,6 +427,11 @@ export async function readTranscriptMeta(file: string): Promise<TranscriptMeta> 
       case 'ai-title':
         if (typeof r.aiTitle === 'string' && r.aiTitle.trim()) aiTitle = r.aiTitle.trim();
         break;
+      case 'custom-title':
+        if (typeof r.title === 'string' && r.title.trim()) {
+          aiTitle = r.title.trim();
+        }
+        break;
       case 'last-prompt':
         if (typeof r.lastPrompt === 'string' && r.lastPrompt.trim()) {
           meta.lastPrompt = truncate(r.lastPrompt.trim(), 200);
@@ -435,11 +441,13 @@ export async function readTranscriptMeta(file: string): Promise<TranscriptMeta> 
         meta.messageCount++;
         if (firstPrompt === null) {
           const candidate = userText(r.message);
-          // Same rule as transcriptRecordToEvents: a slash command or other
-          // tool plumbing is echoed into the transcript as a user message
-          // wrapped in a tag (`<command-name>`, `<local-command-caveat>`,
-          // ...). It is noise in a chat view, and doubly so as a title.
-          if (candidate && !candidate.startsWith('<')) firstPrompt = candidate;
+          if (candidate) {
+            if (!candidate.startsWith('<')) {
+              firstPrompt = candidate;
+            } else if (slashPrompt === null) {
+              slashPrompt = extractSlashCommandPrompt(candidate);
+            }
+          }
         }
         break;
       }
@@ -450,10 +458,20 @@ export async function readTranscriptMeta(file: string): Promise<TranscriptMeta> 
   }
 
   // A conversation started headlessly never gets an `ai-title`; the opening
-  // prompt is a far better label than "Untitled".
-  meta.title = aiTitle ?? (firstPrompt ? fallbackTitle(firstPrompt) : null);
+  // prompt (or slash command) is a far better label than "Untitled".
+  const promptForTitle = firstPrompt ?? slashPrompt;
+  meta.title = aiTitle ?? (promptForTitle ? fallbackTitle(promptForTitle) : null);
 
   return meta;
+}
+
+function extractSlashCommandPrompt(candidate: string): string | null {
+  const nameMatch = /<command-name>([^<]+)<\/command-name>/.exec(candidate);
+  if (!nameMatch?.[1]) return null;
+  const cmd = nameMatch[1].trim();
+  const argsMatch = /<command-args>([^<]*)<\/command-args>/.exec(candidate);
+  const args = argsMatch?.[1]?.trim();
+  return args ? `${cmd} ${args}` : cmd;
 }
 
 /**

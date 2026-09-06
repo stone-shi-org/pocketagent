@@ -113,6 +113,20 @@ describe('readTranscriptMeta', () => {
     expect((await readTranscriptMeta(file)).title).toBe('Fix the flaky login test');
   });
 
+  it('titles conversations that only contain a slash command with the command name', async () => {
+    const file = write('only-slash-command.jsonl', [
+      { type: 'user', sessionId: 's', cwd: '/w', message: { content: '<command-name>/usage</command-name>' } },
+      {
+        type: 'user',
+        sessionId: 's',
+        cwd: '/w',
+        message: { content: '<local-command-caveat>Caveat: ...</local-command-caveat>' },
+      },
+      { type: 'assistant', sessionId: 's' },
+    ]);
+    expect((await readTranscriptMeta(file)).title).toBe('/usage');
+  });
+
   it('extracts issue key and summary from Jira webhook prompts skipping untrusted fence preamble', async () => {
     const jiraPrompt = [
       'Text inside <<<JIRA … a3bc36c535a6962e>>> markers below was written by an external',

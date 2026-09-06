@@ -351,6 +351,22 @@ describe('POST /api/projects/worktree/delete', () => {
     expect(fs.existsSync(created.cwd)).toBe(false);
   });
 
+  it('deletes an already-missing worktree directory gracefully', async () => {
+    const created = await createWorktree('feature/http-missing');
+    // Remove directory from disk out-of-band to simulate deleted worktree
+    fs.rmSync(created.cwd, { recursive: true, force: true });
+
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/projects/worktree/delete',
+      headers: headers(),
+      payload: { cwd: created.cwd },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, mainCwd: t.projectDir });
+  });
+
   it('refuses a dirty worktree', async () => {
     const created = await createWorktree('feature/http-dirty');
     fs.writeFileSync(path.join(created.cwd, 'file.txt'), 'uncommitted\n');
