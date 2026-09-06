@@ -348,6 +348,23 @@ describe('transcript: effort', () => {
   });
 });
 
+describe('transcript: rate_limit', () => {
+  it('stores rateLimit on rate_limit event and clears it on user_prompt', () => {
+    const rateLimitEvent: AgentEvent = {
+      kind: 'rate_limit',
+      provider: 'agy',
+      resetsAt: null,
+      resetsAtLabel: 'in 2 hours',
+      limitType: null,
+    };
+    let state = applyEvent(emptyTranscript(), rateLimitEvent);
+    expect(state.rateLimit).toEqual(rateLimitEvent);
+
+    state = applyEvent(state, { kind: 'user_prompt', id: 'p2', text: 'continue' });
+    expect(state.rateLimit).toBeNull();
+  });
+});
+
 describe('transcript: conversation_reset', () => {
   it('drops prior history but keeps session-level facts (model, commands, effort)', () => {
     const state = applyEvents(emptyTranscript(), [

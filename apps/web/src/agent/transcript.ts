@@ -153,6 +153,7 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
       return {
         ...state,
         busy: true,
+        rateLimit: null,
         items: [
           ...state.items,
           {

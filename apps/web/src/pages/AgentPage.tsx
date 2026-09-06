@@ -105,12 +105,16 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
             void api.getUsage().then(({ usage }) => {
               const agentUsage = usage.find((entry) => entry.agent === event.provider);
               const windows = agentUsage?.windows ?? [];
-              const exhausted = windows.find((window) => window.percentUsed >= 100) ?? windows[0];
-              const resetLabel = exhausted?.resetsAtLabel ?? agentUsage?.resetsAtLabel ?? null;
-              if (!resetLabel) return;
-              setTranscript((prev) =>
-                applyEvent(prev, { ...event, resetsAtLabel: resetLabel }),
-              );
+              const exhausted = windows.find((window) => window.percentUsed >= 100);
+              const resetLabel = exhausted?.resetsAtLabel ?? null;
+              if (exhausted && resetLabel) {
+                setTranscript((prev) =>
+                  applyEvent(prev, { ...event, resetsAtLabel: resetLabel }),
+                );
+              } else if (windows.length > 0 && windows.every((w) => w.percentUsed < 100)) {
+                // If usage data confirms no window is exhausted, clear the transient limit state.
+                setTranscript((prev) => (prev.rateLimit ? { ...prev, rateLimit: null } : prev));
+              }
             }).catch(() => {
               // The initial limit signal is still useful even if usage cannot
               // be refreshed (e.g. the agent binary disappeared mid-session).
