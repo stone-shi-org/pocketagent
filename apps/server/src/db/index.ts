@@ -854,6 +854,23 @@ export function openDatabase(databasePath: string): Db {
   if (!cronColumns.has('delete_after_run')) {
     db.exec('ALTER TABLE cron_jobs ADD COLUMN delete_after_run INTEGER NOT NULL DEFAULT 0');
   }
+  // Same positional-migration hazard as above, but for `webhooks`: the
+  // `auto_select_agent_model` migration was inserted mid-array (between the
+  // prompt-template-map migration and the PA-6 planner migrations) rather
+  // than appended, so a database whose checkpoint had already passed that
+  // index before the migration landed skips it forever — the loop above only
+  // checks a count, not which specific migrations ran. PA-21 (Jira): this is
+  // exactly what made every webhook save 500 on a database in that state
+  // (create/update always write this column; the raw "no such column" error
+  // fell through as an unhandled 500). Probed the same idempotent way.
+  const webhookColumns = new Set(
+    (db.prepare('PRAGMA table_info(webhooks)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (webhookColumns.size > 0 && !webhookColumns.has('auto_select_agent_model')) {
+    db.exec('ALTER TABLE webhooks ADD COLUMN auto_select_agent_model INTEGER NOT NULL DEFAULT 0');
+  }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
   return db;
