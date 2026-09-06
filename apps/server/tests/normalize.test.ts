@@ -384,6 +384,21 @@ describe('normalizeSdkMessage: rate limits', () => {
     ]);
   });
 
+  it('recognizes the exhausted-account payload emitted by Claude Code', () => {
+    const events = normalizeSdkMessage({
+      type: 'rate_limit_event',
+      rate_limit_info: {
+        status: 'rejected',
+        resetsAt: 1_788_673_800,
+        rateLimitType: 'five_hour',
+        overageStatus: 'rejected',
+      },
+    });
+    expect(events).toEqual([
+      { kind: 'rate_limit', provider: 'claude', resetsAt: 1_788_673_800_000, limitType: 'five_hour', resetsAtLabel: null },
+    ]);
+  });
+
   it('does not turn a near-limit warning into a blocking limit event', () => {
     expect(normalizeSdkMessage({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed_warning' } })).toEqual([]);
   });
@@ -866,6 +881,18 @@ describe('normalizeAgyMessage: result', () => {
       },
       expect.objectContaining({ kind: 'turn_complete', isError: true, stopReason: 'ERROR' }),
     ]);
+  });
+
+  it('recognizes agy\'s current individual-quota failure wording', () => {
+    const events = normalizeAgyMessage({
+      event: 'result',
+      result: {
+        status: 'ERROR',
+        error: 'Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 28m33s.',
+        usage: {},
+      },
+    });
+    expect(events[0]).toMatchObject({ kind: 'rate_limit', provider: 'agy' });
   });
 
   it('does not add a notice for a non-SUCCESS status with no error text', () => {

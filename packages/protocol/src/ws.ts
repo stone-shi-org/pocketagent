@@ -34,8 +34,11 @@ import { LIMITS } from './limits.js';
  * v9 added the `resized` server message, so a size change the browser did not
  * ask for (an adopted pane following tmux's live shared window) reaches the
  * client instead of silently desynchronising its grid.
+ * v10 added the `rate_limit` agent event. Older bundles do not know that
+ * discriminant and would otherwise silently discard the session overlay
+ * signal while continuing on the same socket.
  */
-export const PROTOCOL_VERSION = 9;
+export const PROTOCOL_VERSION = 10;
 
 /**
  * WebSocket close codes the server uses for conditions the client must not
