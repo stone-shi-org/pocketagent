@@ -116,6 +116,26 @@ describe('AgySession', () => {
     expect(text).toMatchObject({ text: 'echo: hello model=claude-sonnet-4-6' });
   });
 
+  it('emits model_changed at start and populates session_started when initial model is specified', async () => {
+    session = new AgySession(makeSpec({ model: 'claude-sonnet-4-6' }));
+    const events = collect(session);
+    await session.start();
+
+    expect(events.some((e) => e.kind === 'model_changed' && e.model === 'claude-sonnet-4-6')).toBe(true);
+
+    session.prompt('hello');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    const sessionStarted = events.find((e) => e.kind === 'session_started');
+    expect(sessionStarted).toMatchObject({
+      kind: 'session_started',
+      model: 'claude-sonnet-4-6',
+    });
+
+    const text = events.find((e) => e.kind === 'text');
+    expect(text).toMatchObject({ text: 'echo: hello model=claude-sonnet-4-6' });
+  });
+
   it('always reports skipPermissions, matching the always-bypassed contract', async () => {
     session = new AgySession(makeSpec());
     expect(session.spec.skipPermissions).toBe(true);

@@ -145,7 +145,7 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
     case 'session_started':
       return {
         ...state,
-        model: event.model,
+        model: event.model ?? state.model,
         agentSessionId: event.agentSessionId,
       };
 

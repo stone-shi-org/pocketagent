@@ -224,6 +224,9 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this.setStatus('running');
     this.fetchInitialCommands();
     this.fetchInitialModels();
+    if (this._desiredModel) {
+      this.emitEvent({ kind: 'model_changed', model: this._desiredModel });
+    }
     return Promise.resolve();
   }
 
@@ -614,8 +617,13 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
         // error the retry may well erase a moment later.
         if (!pendingRetryText) {
           for (const event of normalizeAgyMessageSafe(parsed)) {
-            if (event.kind === 'session_started' && event.agentSessionId) {
-              this._agentSessionId = event.agentSessionId;
+            if (event.kind === 'session_started') {
+              if (event.agentSessionId) {
+                this._agentSessionId = event.agentSessionId;
+              }
+              if (this._desiredModel && !event.model) {
+                event.model = this._desiredModel;
+              }
             }
             if (event.kind === 'tool_use' && event.name === 'invoke_subagent') {
               this.pendingSubagents.add(event.id);

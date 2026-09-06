@@ -327,6 +327,21 @@ describe('transcript: models', () => {
     ]);
     expect(state.model).toBe('claude-opus-4-8');
   });
+
+  it('preserves existing model if session_started carries null model', () => {
+    const state = applyEvents(emptyTranscript(), [
+      { kind: 'model_changed', model: 'gpt-oss-120b-medium' },
+      {
+        kind: 'session_started',
+        agentSessionId: 's1',
+        model: null,
+        cwd: '/tmp',
+        tools: [],
+        permissionMode: 'default',
+      },
+    ]);
+    expect(state.model).toBe('gpt-oss-120b-medium');
+  });
 });
 
 describe('transcript: effort', () => {
