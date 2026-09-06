@@ -9,6 +9,8 @@ interface Props {
   activeChatId?: string | null;
 }
 
+const REFRESH_MS = 5000;
+
 /**
  * PA-6: "Pocket Agents" — parallel to "Projects", one section per named
  * agent (a planner workspace) with its chats nested underneath, exactly the
@@ -41,6 +43,8 @@ export function PocketAgentsSection({ onOpenChat, onApiError, activeChatId }: Pr
 
   useEffect(() => {
     void load();
+    const timer = setInterval(() => void load(), REFRESH_MS);
+    return () => clearInterval(timer);
   }, [load]);
 
   const toggle = (id: string): void =>
