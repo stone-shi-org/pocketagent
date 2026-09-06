@@ -51,6 +51,15 @@ export function structuredAgentProblem(
   if (!adapter.transports.includes('structured')) {
     return `${adapter.displayName} cannot be ${noun}: it has no structured mode, and an unattended run has nobody to type at a terminal.`;
   }
+  // A structured transport is necessary but not sufficient. The Claude Code
+  // third-party variants have one and would run here perfectly well, which is
+  // precisely why this check exists: sending a repository to a third-party
+  // provider on a timer, or on a stranger's Jira edit, is its own decision and
+  // was deliberately left out of PA-19's scope. Rejecting at the route means
+  // the boundary cannot be crossed by a hand-written API call either.
+  if (adapter.requiresAttendedUse === true) {
+    return `${adapter.displayName} cannot be ${noun}: it runs against a third-party provider and is only available for sessions you start yourself.`;
+  }
   return null;
 }
 

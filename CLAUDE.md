@@ -38,7 +38,7 @@ and `adopt.test.ts` skip themselves when `tmux` is not installed.
 ### Live demos
 
 The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
-decision. Twelve demo scripts do, against a *running* server:
+decision. Fourteen demo scripts do, against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -53,6 +53,8 @@ PA_TOKEN=... pnpm demo:desktop-ui        # two-pane shell, and the width/pointer
 PA_TOKEN=... pnpm demo:copy-ui           # copy-to-clipboard fallback over plain HTTP
 PA_TOKEN=... pnpm demo:cron-ui           # scheduled jobs: picker, preview, tree badge
 PA_TOKEN=... pnpm demo:webhook-ui        # webhooks: secret panel, signed delivery, filtered row
+PA_BASE=... pnpm demo:deepseek-variant   # cross-provider resume: one transcript, two providers
+PA_TOKEN=... pnpm demo:provider-ui       # variant in the picker, disclosure banner, "Continue as…"
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -88,6 +90,23 @@ Chosen per session; both live behind one session abstraction in `sessions/manage
 
 `normalize.ts` is a pure function and returns `[]` for unknown message types; that is where
 SDK upgrades should land first.
+
+**A transport is not a provider.** `claude-deepseek` / `claude-omniroute`
+(`agents/claude-provider.ts`, PA-19) are the *same* `claude` binary on the *same* SDK path,
+with `ANTHROPIC_BASE_URL` and friends set by `buildCommand`'s `env` — the swap happens below
+the CLI. That is what lets a conversation rate-limited on Anthropic be continued on a third
+party: Claude Code derives its transcript path from the cwd rather than from which API it
+talked to, so `resumeAgentSessionId` + `forkSession: false` appends the new turns to the same
+`.jsonl`. It is the only cross-provider continuation the architecture can offer, because
+`resumeAgentSessionId` is agent-namespaced everywhere else — hence
+`usesClaudeTranscripts` in `packages/protocol/src/session.ts`, the single list both sides read
+(the server to decide who may resume a conversation, the browser to decide who to offer in the
+"Continue as…" picker and which finished chats have a transcript to preview). A variant must
+never gain a `structuredKind`: routing it to another engine silently breaks the shared
+transcript, which is the only reason the feature exists. `AgentAdapter.staticModels` exists for
+the same reason in reverse — the CLI reports *Anthropic's* catalog whatever the base URL is, so
+for a variant its answer is actively wrong, and the declared list replaces it rather than
+merging with it.
 
 ### Process backends — where the process lives
 
@@ -827,6 +846,27 @@ These are load-bearing. Several were bugs first.
   server's user can; that is a deliberate widening and the cost of picking any folder.
 - **The browser never supplies an executable or argv.** Adoption and resume both take their
   `cwd` from the server-validated target.
+- **A third-party provider variant is disclosed, and is never unattended** (PA-19). The
+  `claude-*` variants are the same binary with a different `ANTHROPIC_BASE_URL`, so nothing
+  about *how* they run is visible from the agent id alone — which makes two things load-bearing.
+  `AgentAdapter.providerDisclosure` is surfaced through `SessionInfo.providerDisclosure` and
+  rendered on **every visit**, following `skipPermissionsEnabled`'s "not just at the moment it
+  was created" rule, and it names the provider *and* says the cost figures are wrong (they are
+  computed with Anthropic pricing; a trivial DeepSeek turn reports ~$0.26). And
+  `AgentAdapter.requiresAttendedUse` makes `structuredAgentProblem` reject them for scheduled
+  jobs and inbound webhooks — a structured transport is necessary but no longer sufficient
+  there. They would run on those paths perfectly well, and that is exactly the problem: sending
+  a repository to a third party on a timer, or on a stranger's Jira edit, is its own decision
+  with its own disclosure work, deliberately left out of the ticket that added the variants.
+  What that flag does **not** cover, and deliberately: the planner's `send_instruction`
+  resuming a session that is *already* a variant (it passes `info.agent` through, so it
+  continues a choice a human made attended, rather than selecting a provider on its own).
+  Refusing there would strand a legitimately created variant session with no way to be
+  continued by a tool that can continue every other kind.
+  The API key is read as `POCKETAGENT_*` and re-emitted as `ANTHROPIC_AUTH_TOKEN` precisely
+  because `buildChildEnv` strips that whole prefix, so the raw key never reaches an agent under
+  the name it is configured with; `ANTHROPIC_API_KEY` is blanked rather than left alone, so an
+  operator's own exported key cannot change how the variant behaves.
 - **A project is an added folder, or a directory inside one.** Chats in a directory outside
   every folder are not listed, so removing a folder actually removes it. Nothing is deleted;
   re-adding brings its chats back.
@@ -876,6 +916,12 @@ These are load-bearing. Several were bugs first.
   new browser-driving scripts to that list.
 
 ## Environment
+
+A third-party provider variant is the one setting here that changes *where your data goes*:
+`POCKETAGENT_DEEPSEEK_API_KEY` / `POCKETAGENT_OMNIROUTE_*` route prompts and repository
+contents to a gateway the `claude` adapter has never talked to. Both are off until a key is
+set, and the README's security section says so out loud rather than leaving it to the variable
+name.
 
 `.env` (gitignored) is required: `POCKETAGENT_AUTH_TOKEN` (min 24 chars, never
 auto-generated) and `POCKETAGENT_WORKSPACE_ROOTS` (no default — unset must never mean the

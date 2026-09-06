@@ -1,4 +1,4 @@
-import type { SessionTransport } from '@pocketagent/protocol';
+import type { ModelInfo, SessionTransport } from '@pocketagent/protocol';
 
 /**
  * An agent adapter turns a validated start request into an argv vector.
@@ -69,6 +69,48 @@ export interface AgentAdapter {
    * engine ran.
    */
   structuredKind?: 'agy-cli' | 'opencode-server' | 'codex-app-server' | 'pi-rpc';
+
+  /**
+   * A model catalog declared by the adapter itself, preferred over whatever
+   * the running agent reports.
+   *
+   * Absent for every adapter that can enumerate its own models honestly, which
+   * is the normal case: `StructuredSession.fetchInitialModels` asks the SDK's
+   * `supportedModels()` and that answer is correct. It stops being correct for
+   * a Claude Code variant pointed at a third-party endpoint — the CLI reports
+   * *Anthropic's* catalog regardless of `ANTHROPIC_BASE_URL`, so the picker
+   * would offer models the provider rejects. Present means "do not ask the
+   * agent, it does not know"; the SDK call is skipped entirely rather than
+   * merged with, since a merge would put the wrong ids back in the list.
+   */
+  staticModels?: ModelInfo[];
+
+  /**
+   * A standing disclosure shown for every session this adapter starts.
+   *
+   * Absent for anything whose behaviour is fully described by its name. Set it
+   * when a session does something a user could reasonably not expect from the
+   * agent they picked — today, routing a repository's contents to a third
+   * party. Surfaced through `SessionInfo.providerDisclosure` and rendered on
+   * every visit rather than once at creation, the same treatment
+   * `skipPermissionsEnabled` gets and for the same reason: the fact stays true
+   * for the whole life of the session, so a one-time notice is the wrong shape.
+   */
+  providerDisclosure?: string;
+
+  /**
+   * True when this adapter may only be driven by a human who is present.
+   *
+   * Blocks it from the unattended entry points — scheduled jobs and inbound
+   * webhooks — at the route, not by convention. The Claude Code third-party
+   * variants (PA-19) set it because they would work there *mechanically*, and
+   * that is exactly the problem: a cron job or a Jira webhook silently
+   * shipping a repository to a third-party gateway is a decision that deserves
+   * to be made on purpose, with its own disclosure, rather than inherited for
+   * free by an adapter that happens to declare `structured`. Widening this
+   * later is a deliberate act; the ticket that adds it should say so.
+   */
+  requiresAttendedUse?: boolean;
 
   buildCommand(options: StartSessionOptions): AgentCommand;
 

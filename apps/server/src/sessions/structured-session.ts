@@ -15,6 +15,7 @@ import {
   type AgentEvent,
   type AskUserQuestionAnswer,
   type EffortLevel,
+  type ModelInfo,
   type PermissionDecision,
   type PermissionRequestEvent,
   type PromptImage,
@@ -75,6 +76,13 @@ export interface StructuredSessionSpec {
   maxBudgetUsd?: number;
   /** Absolute path to the agent executable, when not on PATH. */
   executablePath?: string;
+  /**
+   * A model catalog supplied by the adapter, used instead of asking the SDK.
+   * See `AgentAdapter.staticModels`: the CLI reports Anthropic's catalog even
+   * when `ANTHROPIC_BASE_URL` points somewhere else, so for a third-party
+   * variant its answer is actively wrong rather than merely incomplete.
+   */
+  staticModels?: ModelInfo[];
   /**
    * Explicit, off-by-default opt-in to the SDK's `bypassPermissions` mode.
    * Undefined/false preserves the invariant below: every tool call is routed
@@ -336,6 +344,15 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
    * choices.
    */
   private async fetchInitialModels(): Promise<void> {
+    // An adapter-declared catalog replaces the SDK call rather than being
+    // merged with it. Merging would put Anthropic's ids back into a picker for
+    // an endpoint that rejects them, which is the exact failure this exists to
+    // prevent.
+    const declared = this.spec.staticModels;
+    if (declared && declared.length > 0) {
+      this.emitEvent({ kind: 'models_available', models: declared });
+      return;
+    }
     const handle = this.queryHandle;
     if (!handle) return;
     try {

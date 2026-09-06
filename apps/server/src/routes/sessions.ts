@@ -44,7 +44,15 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         ...agent,
         defaultModel: cached?.model ?? null,
         defaultEffort: cached?.effort ?? null,
-        cachedModels,
+        // An adapter-declared catalog replaces the observed cache rather than
+        // being merged into it. A Claude Code variant pointed at a third-party
+        // endpoint still writes `models_available` into `agent_defaults` like
+        // any other agent, but for the *variant* that cached list is whatever
+        // the adapter declared anyway — and if it ever were the CLI's own
+        // Anthropic catalog, merging would put ids the provider rejects back
+        // into the picker. Empty `staticModels` (every stock adapter) leaves
+        // this exactly as it was.
+        cachedModels: agent.staticModels.length > 0 ? agent.staticModels : cachedModels,
       };
     }),
   }));

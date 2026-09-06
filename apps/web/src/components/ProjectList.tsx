@@ -7,7 +7,7 @@ import type {
   ProjectInfo,
   QueuedRunSummary,
 } from '@pocketagent/protocol';
-import { describeCron } from '@pocketagent/protocol';
+import { describeCron, usesClaudeTranscripts } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { filterProjects } from '../agent/search.js';
@@ -183,7 +183,9 @@ export function useProjects(
    * nothing to preview or continue. It still opens by session id, so its
    * final state is reachable.
    *
-   * The preview route only ever works for Claude: `onOpenChat` leads to
+   * The preview route only ever works for the Claude family — stock `claude`
+   * plus the third-party variants, which are the same binary writing the same
+   * transcripts (`usesClaudeTranscripts`): `onOpenChat` leads to
    * `ChatPreviewPage`, which reads `GET /api/conversations/:id/history` —
    * and that endpoint only discovers Claude Code's on-disk `.jsonl`
    * transcripts (`conversations/index.ts`). A finished chat from any other
@@ -196,7 +198,8 @@ export function useProjects(
    */
   const open = useCallback(
     (chat: ChatSummary, opts?: OpenChatOptions) => {
-      if (chat.sessionId && (chat.live || chat.agent !== 'claude' || !chat.conversationId)) {
+      const claudeFamily = chat.agent !== null && usesClaudeTranscripts(chat.agent);
+      if (chat.sessionId && (chat.live || !claudeFamily || !chat.conversationId)) {
         onOpen(chat.sessionId, opts);
         return;
       }

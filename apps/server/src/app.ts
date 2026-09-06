@@ -215,6 +215,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     opencodeBin: config.opencodeBin,
     codexBin: config.codexBin,
     piBin: config.piBin,
+    claudeProviders: config.claudeProviders,
   });
 
   const backend = createBackend({

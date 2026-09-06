@@ -77,6 +77,31 @@ const RawEnv = z.object({
   POCKETAGENT_WEB_DIST: z.string().optional(),
 
   /**
+   * Claude Code variants pointed at a third-party Anthropic-compatible
+   * endpoint (PA-19). All optional, and the API key is the switch: unset means
+   * the variant is greyed out in the agent list rather than offered and then
+   * failing at spawn. Nothing here has a guessed default beyond DeepSeek's own
+   * published base URL, for the reason `POCKETAGENT_CODE_SERVER_URL` states —
+   * a wrong guess points at nothing.
+   *
+   * `_MODELS` is a comma-separated catalog for the picker. It must come from
+   * the gateway's own `/models`: a gateway's ids are installation-specific
+   * (the omniroute instance this was built against rejects DeepSeek's own
+   * `deepseek-chat` as ambiguous and wants `deepseek-v4-flash`), so a
+   * hardcoded table would offer models the endpoint refuses.
+   */
+  POCKETAGENT_DEEPSEEK_API_KEY: z.string().optional(),
+  POCKETAGENT_DEEPSEEK_BASE_URL: z.string().optional(),
+  POCKETAGENT_DEEPSEEK_MODEL: z.string().optional(),
+  POCKETAGENT_DEEPSEEK_SMALL_MODEL: z.string().optional(),
+  POCKETAGENT_DEEPSEEK_MODELS: z.string().optional(),
+  POCKETAGENT_OMNIROUTE_API_KEY: z.string().optional(),
+  POCKETAGENT_OMNIROUTE_BASE_URL: z.string().optional(),
+  POCKETAGENT_OMNIROUTE_MODEL: z.string().optional(),
+  POCKETAGENT_OMNIROUTE_SMALL_MODEL: z.string().optional(),
+  POCKETAGENT_OMNIROUTE_MODELS: z.string().optional(),
+
+  /**
    * Boot-time seed for the global "skip all approvals" switch. See `Config.globalSkipPermissionsDefault`.
    * Off by default; once the switch has been toggled at runtime via `PATCH
    * /api/settings`, the persisted value wins and this is ignored on later boots.
@@ -97,6 +122,24 @@ const RawEnv = z.object({
    */
   POCKETAGENT_TMUX_SESSION_SCOPE_SLICE: z.string().default(''),
 });
+
+/**
+ * One Claude Code third-party provider variant, as configured. Kept in the
+ * config layer (rather than built inside the registry) so the adapter factory
+ * stays a pure function of its options and is trivially testable.
+ */
+export interface ClaudeProviderConfig {
+  id: string;
+  displayName: string;
+  description: string;
+  providerLabel: string;
+  baseUrl: string | null;
+  apiKey: string | null;
+  model: string | null;
+  smallModel: string | null;
+  /** Comma-separated model ids for the picker. */
+  models: string | null;
+}
 
 export interface Config {
   nodeEnv: 'development' | 'production' | 'test';
@@ -140,6 +183,12 @@ export interface Config {
   opencodeBin: string;
   codexBin: string;
   piBin: string;
+  /**
+   * Third-party provider settings for the Claude Code variants. See
+   * `createClaudeProviderAdapter`. `apiKey === null` means the variant is
+   * unavailable.
+   */
+  claudeProviders: ClaudeProviderConfig[];
   webDistPath: string;
   /** Where agent processes live. `tmux` lets them survive a server restart. */
   backend: 'direct' | 'tmux';
@@ -297,6 +346,34 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     opencodeBin: e.POCKETAGENT_OPENCODE_BIN.trim(),
     codexBin: e.POCKETAGENT_CODEX_BIN.trim(),
     piBin: e.POCKETAGENT_PI_BIN.trim(),
+    claudeProviders: [
+      {
+        id: 'claude-deepseek',
+        displayName: 'Claude Code (DeepSeek)',
+        description: 'Claude Code running against DeepSeek',
+        providerLabel: 'DeepSeek',
+        // DeepSeek publishes this Anthropic-compatible route specifically for
+        // Claude Code, so it is the one base URL worth defaulting.
+        baseUrl: e.POCKETAGENT_DEEPSEEK_BASE_URL?.trim() || 'https://api.deepseek.com/anthropic',
+        apiKey: e.POCKETAGENT_DEEPSEEK_API_KEY?.trim() || null,
+        model: e.POCKETAGENT_DEEPSEEK_MODEL?.trim() || 'deepseek-chat',
+        smallModel: e.POCKETAGENT_DEEPSEEK_SMALL_MODEL?.trim() || null,
+        models: e.POCKETAGENT_DEEPSEEK_MODELS?.trim() || 'deepseek-chat,deepseek-reasoner',
+      },
+      {
+        id: 'claude-omniroute',
+        displayName: 'Claude Code (Omniroute)',
+        description: 'Claude Code running against an Omniroute gateway',
+        providerLabel: 'the Omniroute gateway',
+        // No default: a gateway URL is per-installation, and guessing one
+        // points at nothing.
+        baseUrl: e.POCKETAGENT_OMNIROUTE_BASE_URL?.trim() || null,
+        apiKey: e.POCKETAGENT_OMNIROUTE_API_KEY?.trim() || null,
+        model: e.POCKETAGENT_OMNIROUTE_MODEL?.trim() || null,
+        smallModel: e.POCKETAGENT_OMNIROUTE_SMALL_MODEL?.trim() || null,
+        models: e.POCKETAGENT_OMNIROUTE_MODELS?.trim() || null,
+      },
+    ],
     webDistPath,
     backend: e.POCKETAGENT_BACKEND,
     tmuxBin: e.POCKETAGENT_TMUX_BIN.trim(),

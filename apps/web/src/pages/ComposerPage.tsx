@@ -8,6 +8,7 @@ import type {
   PromptImage,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
+import { usesClaudeTranscripts } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { SelectorRow, type SelectorOption } from '../components/SelectorRow.js';
 import { AddProject } from '../components/AddProject.js';
@@ -266,10 +267,15 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   // only one `SessionManager.create` actually threads a cached/explicit
   // model+effort into at spawn today (see its doc comment). Showing this
   // picker for another backend would look like a real choice and silently do
-  // nothing on submit, so it stays gated on the one backend that honours it
-  // until the others grow the same spawn-time wiring.
+  // nothing on submit, so it stays gated on the backends that honour it until
+  // the others grow the same spawn-time wiring. The Claude Code third-party
+  // variants qualify for exactly the same reason stock `claude` does — same
+  // SDK path, same spawn-time threading — and they need it more, since their
+  // catalog is the adapter's own `staticModels` rather than Anthropic's.
   const selectedAgent =
-    !picked && agentId === 'claude' ? (agents.find((a) => a.id === agentId) ?? null) : null;
+    !picked && usesClaudeTranscripts(agentId)
+      ? (agents.find((a) => a.id === agentId) ?? null)
+      : null;
   // `model` holds a picker `value` (e.g. `'sonnet'`), but `AgentInfo.defaultModel`
   // is the *resolved* wire id Claude's `session_started` actually reports (e.g.
   // `'claude-sonnet-5'`) — same mismatch `resolveCurrentModel`'s doc comment

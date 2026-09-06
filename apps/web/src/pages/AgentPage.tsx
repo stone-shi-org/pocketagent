@@ -5,10 +5,11 @@ import type {
   PermissionDecision,
   PermissionRequestEvent,
   PromptImage,
+  AgentInfo,
   SessionInfo,
   SessionStatus,
 } from '@pocketagent/protocol';
-import { isTerminalStatus } from '@pocketagent/protocol';
+import { isTerminalStatus, usesClaudeTranscripts } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { TerminalConnection, type ConnectionState } from '../api/ws-client.js';
 import {
@@ -23,6 +24,7 @@ import { Transcript } from '../components/Transcript.js';
 import { ApprovalSheet } from '../components/ApprovalSheet.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { PromptBox } from '../components/PromptBox.js';
+import { PickerSheet, type SelectorOption } from '../components/SelectorRow.js';
 import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
 import { Icon } from '../components/Icon.js';
 import { notifyApproval, notifyTurnComplete, ensureNotificationPermission } from '../agent/notifications.js';
@@ -54,6 +56,14 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   const [deciding, setDeciding] = useState(false);
   const [showFiles, setShowFiles] = useState(false);
   const [resuming, setResuming] = useState(false);
+  /**
+   * Agent to resume this conversation *as*, when the user picked one that is
+   * not the agent it ran on before (PA-19). Null means "keep whatever it was",
+   * which is the behaviour that existed before this control did.
+   */
+  const [resumeAgent, setResumeAgent] = useState<string | null>(null);
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [pickingAgent, setPickingAgent] = useState(false);
   const [confirmingStop, setConfirmingStop] = useState(false);
   const [stopping, setStopping] = useState(false);
   /** Prior conversation, kept apart from the live transcript on purpose: a
@@ -271,7 +281,12 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
       setResuming(true);
       void api
         .createSession({
-          agent: session.agent,
+          // The whole server contract for "continue this conversation on a
+          // different provider" is this one field. `resumeAgentSessionId` is
+          // agent-namespaced, so the picker only ever offers agents in the
+          // same namespace (see `resumeAgentOptions`) — anything else would
+          // hand an id to an agent that cannot read it.
+          agent: resumeAgent ?? session.agent,
           cwd: session.cwd,
           cols: 80,
           rows: 24,
@@ -291,7 +306,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         });
       return true;
     },
-    [session, resuming, onApiError, onResumed],
+    [session, resuming, resumeAgent, onApiError, onResumed],
   );
 
   const handleSend = useCallback(
@@ -299,6 +314,58 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
       alive ? sendPrompt(text, image) : resumeAndSend(text, image),
     [alive, sendPrompt, resumeAndSend],
   );
+
+  /**
+   * The agent roster, fetched only once this chat can actually be resumed.
+   *
+   * Deliberately not fetched on mount: for a live session there is nothing to
+   * choose — the process is already running as some agent — so this would be a
+   * request per chat opened, for a control that is not on screen.
+   */
+  useEffect(() => {
+    if (!canResume || agents.length > 0) return;
+    let cancelled = false;
+    void api
+      .listAgents()
+      .then((res) => {
+        if (!cancelled) setAgents(res.agents);
+      })
+      .catch(() => {
+        // Non-fatal by design: without the roster the "Continue with…" control
+        // simply does not render and resuming keeps its original agent, which
+        // is exactly the pre-PA-19 behaviour. Not worth a notice for a control
+        // the user has not tried to use yet.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [canResume, agents.length]);
+
+  /**
+   * Agents that could continue *this* conversation.
+   *
+   * Restricted to the Claude-transcript family, and only when the session
+   * itself is in it. `resumeAgentSessionId` is agent-namespaced — offering
+   * `opencode` here would create a session handing a Claude transcript id to
+   * an agent that has never heard of it, which fails at best and silently
+   * starts an empty chat at worst.
+   */
+  const resumeAgentOptions = useMemo<SelectorOption[]>(() => {
+    if (!session || !usesClaudeTranscripts(session.agent)) return [];
+    return agents
+      .filter((a) => usesClaudeTranscripts(a.id) && a.transports.includes('structured'))
+      .map((a) => ({
+        value: a.id,
+        label: a.displayName,
+        detail: a.id === session.agent ? 'the agent this chat already ran on' : a.description,
+        disabled: !a.available,
+      }));
+  }, [agents, session]);
+
+  const resumeAgentLabel =
+    agents.find((a) => a.id === (resumeAgent ?? session?.agent))?.displayName ??
+    session?.agentDisplayName ??
+    null;
 
   const inputDisabled = alive ? connection !== 'connected' : !canResume || resuming;
   const pending = transcript.pending[0] ?? null;
@@ -353,6 +420,16 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
       {session?.skipPermissionsEnabled && (
         <div className="skip-permissions-banner" role="status">
           Approvals are bypassed for this session — tool calls run unattended.
+        </div>
+      )}
+
+      {/* Shown on every visit, not once at creation: whoever opens this chat
+          later did not see the moment it was started, and "which company is
+          reading this repository" does not stop being true. Same doctrine as
+          the bypass banner immediately above. */}
+      {session?.providerDisclosure && (
+        <div className="provider-banner" role="status">
+          {session.providerDisclosure}
         </div>
       )}
 
@@ -430,6 +507,44 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           queued={transcript.pending.length - 1}
           onDecide={decide}
           disabled={deciding || connection !== 'connected'}
+        />
+      )}
+
+      {/* An explicit action, deliberately not a hidden gesture: switching the
+          provider a conversation continues on is a real decision (it sends the
+          repository to a third party), so it gets a visible row stating what
+          the next message will run as. Only rendered when there is genuinely a
+          choice — one option means the alternatives are not configured, and a
+          picker with a single entry is noise. */}
+      {canResume && resumeAgentOptions.length > 1 && (
+        <div className="resume-as-row">
+          <span className="resume-as-label">
+            Continue as <strong>{resumeAgentLabel}</strong>
+          </span>
+          <button
+            type="button"
+            className="link-btn"
+            onClick={() => setPickingAgent(true)}
+            disabled={resuming}
+          >
+            Change
+          </button>
+        </div>
+      )}
+
+      {pickingAgent && (
+        <PickerSheet
+          title="Continue this chat with"
+          value={resumeAgent ?? session?.agent ?? null}
+          options={resumeAgentOptions}
+          onPick={(value) => {
+            // Only records the choice. Nothing starts until a prompt is
+            // actually sent, matching every other resume path in the app —
+            // picking an agent must not spawn a process on its own.
+            setResumeAgent(value);
+            setPickingAgent(false);
+          }}
+          onCancel={() => setPickingAgent(false)}
         />
       )}
 

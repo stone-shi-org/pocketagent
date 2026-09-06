@@ -9,6 +9,8 @@ import { createAgyAdapter } from './agy.js';
 import { createOpencodeAdapter } from './opencode.js';
 import { createCodexAdapter } from './codex.js';
 import { createPiAdapter } from './pi.js';
+import { createClaudeProviderAdapter, parseModelList } from './claude-provider.js';
+import type { ClaudeProviderConfig } from '../config/index.js';
 
 export class AgentRegistry {
   private readonly adapters = new Map<string, AgentAdapter>();
@@ -38,6 +40,8 @@ export class AgentRegistry {
       defaultTransport: a.defaultTransport,
       supportsSkipPermissions: a.supportsSkipPermissions ?? false,
       forcesSkipPermissions: a.forcesSkipPermissions ?? false,
+      staticModels: a.staticModels ?? [],
+      providerDisclosure: a.providerDisclosure ?? null,
     }));
   }
 }
@@ -49,11 +53,37 @@ export interface RegistryOptions {
   opencodeBin: string;
   codexBin: string;
   piBin: string;
+  /**
+   * Claude Code variants pointed at a third-party endpoint. Optional so every
+   * existing caller (and every test) keeps working unchanged; an empty list
+   * means the agent roster is exactly what it was before PA-19.
+   */
+  claudeProviders?: ClaudeProviderConfig[];
 }
 
 export function createDefaultRegistry(options: RegistryOptions): AgentRegistry {
   const registry = new AgentRegistry();
   registry.register(createClaudeAdapter(options.claudeBin));
+  // Registered immediately after stock `claude` so the family reads together
+  // in the picker, but never *before* it: `ComposerPage` defaults to the first
+  // available agent, and a variant must not become the default flavour just by
+  // existing. The stock adapter is not modified in any way.
+  for (const provider of options.claudeProviders ?? []) {
+    registry.register(
+      createClaudeProviderAdapter({
+        id: provider.id,
+        displayName: provider.displayName,
+        description: provider.description,
+        providerLabel: provider.providerLabel,
+        bin: options.claudeBin,
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        model: provider.model,
+        smallModel: provider.smallModel,
+        staticModels: parseModelList(provider.models),
+      }),
+    );
+  }
   registry.register(createAgyAdapter(options.agyBin));
   registry.register(createOpencodeAdapter(options.opencodeBin));
   registry.register(createCodexAdapter(options.codexBin));

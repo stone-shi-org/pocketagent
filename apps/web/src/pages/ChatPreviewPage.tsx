@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { ConversationInfo, PromptImage } from '@pocketagent/protocol';
+import type { AgentInfo, ConversationInfo, PromptImage } from '@pocketagent/protocol';
+import { usesClaudeTranscripts } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { applyEvents, emptyTranscript, type TranscriptItem } from '../agent/transcript.js';
 import { Transcript } from '../components/Transcript.js';
 import { PromptBox } from '../components/PromptBox.js';
+import { PickerSheet, type SelectorOption } from '../components/SelectorRow.js';
 import { Icon } from '../components/Icon.js';
 import { setPendingPrompt } from '../agent/pending-prompt.js';
 
@@ -34,6 +36,17 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
   const [missing, setMissing] = useState(false);
   const [starting, setStarting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  /**
+   * Which agent the first prompt should start this conversation as (PA-19).
+   *
+   * Defaults to stock `claude` for the reason `start` records below; a user can
+   * point it at a third-party variant to keep working when Anthropic is rate
+   * limiting them. Every option writes to the same transcript, so this changes
+   * the provider, not the conversation.
+   */
+  const [agent, setAgent] = useState('claude');
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [pickingAgent, setPickingAgent] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,9 +81,12 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
       void api
         .createSession({
           // Every conversation this page can open came from `ConversationStore`,
-          // which only discovers Claude Code transcripts — same default
-          // `ProjectList.open` used for this exact case.
-          agent: 'claude',
+          // which only discovers Claude Code transcripts — so this defaults to
+          // `claude`, the same default `ProjectList.open` used for this exact
+          // case. It is no longer *hardcoded* to it: the third-party variants
+          // are the same binary writing the same transcripts, so any of them
+          // can continue this conversation, which is the whole point of PA-19.
+          agent,
           cwd: conversation.cwd,
           cols: 80,
           rows: 24,
@@ -90,8 +106,41 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
         });
       return true;
     },
-    [conversation, conversationId, starting, onApiError, onStarted],
+    [agent, conversation, conversationId, starting, onApiError, onStarted],
   );
+
+  // Fetched unconditionally here, unlike `AgentPage`: this page exists only to
+  // continue a finished conversation, so the control is always relevant.
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .listAgents()
+      .then((res) => {
+        if (!cancelled) setAgents(res.agents);
+      })
+      .catch(() => {
+        // Non-fatal: without the roster the row does not render and the first
+        // prompt starts stock `claude`, exactly as it did before PA-19.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const agentOptions = useMemo<SelectorOption[]>(
+    () =>
+      agents
+        .filter((a) => usesClaudeTranscripts(a.id) && a.transports.includes('structured'))
+        .map((a) => ({
+          value: a.id,
+          label: a.displayName,
+          detail: a.description,
+          disabled: !a.available,
+        })),
+    [agents],
+  );
+  const agentLabel = agents.find((a) => a.id === agent)?.displayName ?? 'Claude Code';
+  const chosen = agents.find((a) => a.id === agent) ?? null;
 
   return (
     <div className="terminal-page agent-page">
@@ -117,6 +166,45 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
       )}
 
       <Transcript state={liveState} history={history} />
+
+      {/* The variant's standing disclosure, shown *before* the first prompt
+          rather than only once a session exists — this is the moment the
+          choice is actually being made, so it is the moment it has to be
+          stated. `AgentPage` then repeats it for the life of the session. */}
+      {chosen?.providerDisclosure && (
+        <div className="provider-banner" role="status">
+          {chosen.providerDisclosure}
+        </div>
+      )}
+
+      {!missing && agentOptions.length > 1 && (
+        <div className="resume-as-row">
+          <span className="resume-as-label">
+            Continue as <strong>{agentLabel}</strong>
+          </span>
+          <button
+            type="button"
+            className="link-btn"
+            onClick={() => setPickingAgent(true)}
+            disabled={starting}
+          >
+            Change
+          </button>
+        </div>
+      )}
+
+      {pickingAgent && (
+        <PickerSheet
+          title="Continue this chat with"
+          value={agent}
+          options={agentOptions}
+          onPick={(value) => {
+            setAgent(value);
+            setPickingAgent(false);
+          }}
+          onCancel={() => setPickingAgent(false)}
+        />
+      )}
 
       {!missing && (
         <PromptBox

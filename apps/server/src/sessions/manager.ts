@@ -1,6 +1,13 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import type { AgentEvent, EffortLevel, SessionInfo, SessionStatus, SessionTransport } from '@pocketagent/protocol';
+import type {
+  AgentEvent,
+  EffortLevel,
+  ModelInfo,
+  SessionInfo,
+  SessionStatus,
+  SessionTransport,
+} from '@pocketagent/protocol';
 import type { Db, SessionRow } from '../db/index.js';
 import {
   GLOBAL_SKIP_PERMISSIONS_KEY,
@@ -791,7 +798,7 @@ export class SessionManager {
   private async startStructured(args: {
     id: string;
     title: string;
-    adapter: { id: string; displayName: string };
+    adapter: { id: string; displayName: string; staticModels?: ModelInfo[] };
     cwd: string;
     workspaceLabel: string;
     createdAt: number;
@@ -813,6 +820,11 @@ export class SessionManager {
       eventBufferBytes: this.opts.outputBufferBytes,
       createdAt: args.createdAt,
       executablePath: args.executable,
+      // Only forwarded when the adapter actually declares one; absent leaves
+      // `StructuredSession` asking the SDK exactly as it always has.
+      ...(args.adapter.staticModels && args.adapter.staticModels.length > 0
+        ? { staticModels: args.adapter.staticModels }
+        : {}),
       ...(args.resumeAgentSessionId
         ? { resumeAgentSessionId: args.resumeAgentSessionId }
         : {}),
@@ -1531,6 +1543,12 @@ export class SessionManager {
       skipPermissionsEnabled:
         session.spec.skipPermissions === true ||
         (session.transport === 'structured' && session.globalBypassActive),
+      // Read off the adapter rather than persisted with the session: it is a
+      // property of *how this agent runs*, not of a choice made at creation,
+      // so it must follow the adapter's current configuration. Nothing is
+      // stored, which also means a variant that is later reconfigured or
+      // removed cannot leave a stale claim on an old row.
+      providerDisclosure: this.opts.agents.get(session.spec.agent)?.providerDisclosure ?? null,
     };
   }
 
@@ -1574,6 +1592,7 @@ export class SessionManager {
       adopted: row.adopt_target_id !== null,
       adoptTargetId: row.adopt_target_id,
       skipPermissionsEnabled: row.skip_permissions === 1,
+      providerDisclosure: this.opts.agents.get(row.agent)?.providerDisclosure ?? null,
     };
   }
 

@@ -40,6 +40,7 @@ or use private remote-control APIs. It launches `claude` exactly the way you wou
 - [Tidying the list](#tidying-the-list)
 - [Layouts](#layouts)
 - [Security model](#security-model)
+  - [Continuing a chat on another provider](#continuing-a-chat-on-another-provider)
 - [How it works](#how-it-works)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
@@ -147,6 +148,16 @@ running keeps running.
 | `POCKETAGENT_TMUX_SOCKET` | `pocketagent` | Private tmux socket name. |
 | `POCKETAGENT_SHELL` | `$SHELL` | Shell for the `shell` agent. |
 | `POCKETAGENT_CLAUDE_BIN` | `claude` | Claude Code executable, resolved on `PATH`. |
+| `POCKETAGENT_DEEPSEEK_API_KEY` | — | Enables "Claude Code (DeepSeek)". Unset hides the entry. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
+| `POCKETAGENT_DEEPSEEK_BASE_URL` | `https://api.deepseek.com/anthropic` | Anthropic-compatible endpoint. |
+| `POCKETAGENT_DEEPSEEK_MODEL` | `deepseek-chat` | Model sent as `ANTHROPIC_MODEL`. |
+| `POCKETAGENT_DEEPSEEK_SMALL_MODEL` | main model | Model for titles and compaction summaries. |
+| `POCKETAGENT_DEEPSEEK_MODELS` | `deepseek-chat,deepseek-reasoner` | Comma-separated catalog for the model picker. |
+| `POCKETAGENT_OMNIROUTE_API_KEY` | — | Enables "Claude Code (Omniroute)". |
+| `POCKETAGENT_OMNIROUTE_BASE_URL` | — | Gateway base URL. No default: a gateway address is per-installation. |
+| `POCKETAGENT_OMNIROUTE_MODEL` | — | Model sent as `ANTHROPIC_MODEL`. |
+| `POCKETAGENT_OMNIROUTE_SMALL_MODEL` | main model | Model for titles and compaction summaries. |
+| `POCKETAGENT_OMNIROUTE_MODELS` | — | Comma-separated catalog, from the gateway's own `/models`. |
 | `LOG_LEVEL` | `info` | |
 | `NODE_ENV` | `development` | |
 
@@ -488,6 +499,33 @@ The optional terminal classifier emits advisory hints (`working`, `waiting_for_i
 `possible_approval_prompt`, `idle`) that drive a best-effort push notification when a
 terminal session goes quiet (see below). These hints **never** cause input to be sent and
 can never approve anything.
+
+### Continuing a chat on another provider
+
+Optional, off unless you configure a key, and the second feature that changes where your data
+goes. **"Claude Code (DeepSeek)"** and **"Claude Code (Omniroute)"** run the same `claude`
+binary against a third-party Anthropic-compatible endpoint, so a conversation that has hit an
+Anthropic rate limit can be *continued* rather than abandoned: Claude Code derives its
+transcript path from the working directory rather than from which API it talked to, so the new
+turns append to the same conversation the Anthropic turns are in.
+
+This is the one thing in PocketAgent that sends repository contents somewhere other than
+Anthropic, so:
+
+- Both entries are hidden until their API key is set, and greyed out rather than failing at spawn.
+- A session using one **says so persistently** in the UI, on every visit — not just at creation
+  — naming the provider. Cost figures in that session are computed with Anthropic's price list
+  and are therefore wrong; the same banner says that too.
+- Stock `claude` is unaffected. No global environment change is needed, and every other session,
+  scheduled job and webhook delivery keeps talking to Anthropic.
+- **Scheduled jobs and inbound webhooks refuse these agents**, at the route. They would work
+  mechanically, but shipping a repository to a third party on a timer or on a stranger's Jira
+  edit is a decision that deserves to be made on purpose rather than inherited.
+
+To use it: stop the chat, then pick the agent from the **"Continue as … / Change"** row above the
+composer and send your next message. One caveat worth knowing — this feature gets reached for
+*because* a conversation grew long, and a long transcript may exceed the third-party model's
+context window on the very first resumed turn. `/compact` before switching if that happens.
 
 ### Inbound webhooks, and what they change
 

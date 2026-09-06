@@ -94,6 +94,18 @@ export const SessionInfo = z.object({
    */
   skipPermissionsEnabled: z.boolean(),
   /**
+   * A standing disclosure about how this session actually runs, or null for
+   * the ordinary case where the agent's name says everything.
+   *
+   * Today this is set only by the Claude Code third-party variants (PA-19),
+   * where the session sends this directory's contents to a provider that is
+   * not Anthropic and reports costs computed with the wrong price list.
+   * Surfaced persistently rather than once at creation, for the same reason
+   * `skipPermissionsEnabled` is: the fact is true for the session's whole
+   * life, and someone opening a chat later did not see the creation notice.
+   */
+  providerDisclosure: z.string().nullable(),
+  /**
    * True while the agent is mid-turn (structured backends) or the terminal
    * classifier's last hint included `working` (raw PTY). Advisory only, same
    * spirit as `TerminalHintKind` — a heuristic for a status dot, never a
@@ -112,6 +124,42 @@ export const SessionInfo = z.object({
   rateLimit: RateLimitEvent.nullable(),
 });
 export type SessionInfo = z.infer<typeof SessionInfo>;
+
+/**
+ * Agent ids that drive the `claude` CLI and therefore share one conversation
+ * namespace and one set of on-disk transcripts.
+ *
+ * `resumeAgentSessionId` is agent-namespaced and nothing converts between
+ * namespaces: for `claude` it is an id under
+ * `~/.claude/projects/<encoded-cwd>/<id>.jsonl`, while opencode's is a session
+ * id inside `opencode serve`, codex's a thread id, and pi's its own file. The
+ * third-party variants (PA-19) are the one exception — they are the same
+ * binary with a different `ANTHROPIC_BASE_URL`, and Claude Code derives the
+ * transcript path from the cwd rather than from which API it talked to, so a
+ * conversation started on Anthropic can be continued on DeepSeek and lands in
+ * the same file.
+ *
+ * This lives in the protocol, not in either app, for the same reason
+ * `cron-expr.ts` and `webhook-template.ts` do: the server decides which agents
+ * may resume a given conversation, and the browser decides which ones to offer
+ * in the "Continue with…" picker and which finished chats have a transcript to
+ * preview. Two copies of the list would eventually disagree, and the visible
+ * symptom would be a picker offering a resume that cannot work.
+ *
+ * Adding a variant means adding it here — deliberately explicit rather than a
+ * `claude-` prefix test, which would silently capture an unrelated future
+ * agent that merely happened to be named that way.
+ */
+export const CLAUDE_TRANSCRIPT_AGENT_IDS = [
+  'claude',
+  'claude-deepseek',
+  'claude-omniroute',
+] as const;
+
+/** Whether this agent reads and writes Claude Code's own on-disk transcripts. */
+export function usesClaudeTranscripts(agentId: string): boolean {
+  return (CLAUDE_TRANSCRIPT_AGENT_IDS as readonly string[]).includes(agentId);
+}
 
 export const AgentInfo = z.object({
   id: z.string(),
@@ -157,6 +205,20 @@ export const AgentInfo = z.object({
    * way to enumerate an agent's models without one.
    */
   cachedModels: z.array(ModelInfo),
+  /**
+   * A catalog the adapter declares for itself, which wins over `cachedModels`
+   * when non-empty. Only set for an agent that cannot enumerate its own models
+   * honestly — a Claude Code variant pointed at a third-party endpoint reports
+   * Anthropic's catalog no matter what `ANTHROPIC_BASE_URL` says, so asking it
+   * yields models the provider would reject. Empty for everything else, which
+   * keeps `cachedModels` the sole source exactly as before.
+   */
+  staticModels: z.array(ModelInfo),
+  /**
+   * A standing disclosure to show for every session of this agent, or null.
+   * See `SessionInfo.providerDisclosure`.
+   */
+  providerDisclosure: z.string().nullable(),
 });
 export type AgentInfo = z.infer<typeof AgentInfo>;
 
