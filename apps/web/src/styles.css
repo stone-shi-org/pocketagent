@@ -1140,6 +1140,13 @@ input[type='number']::-webkit-outer-spin-button {
 .rate-limit-icon:focus-visible .rate-limit-tooltip,
 .rate-limit-icon.open .rate-limit-tooltip { opacity: 1; transform: translateY(0); }
 
+.rate-limit-overlay .limit-continuation-menu {
+  top: auto;
+  bottom: calc(100% + 8px);
+  left: auto;
+  right: 0;
+}
+
 @media (min-width: 720px) {
   .workspace .rate-limit-overlay { right: 28px; bottom: 30px; }
 }

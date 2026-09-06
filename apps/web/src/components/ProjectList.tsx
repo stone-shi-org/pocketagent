@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ChatSummary,
   DeleteRemoteBranchRequest,
@@ -588,6 +588,7 @@ function ProjectSection({
   const [limitMenuFor, setLimitMenuFor] = useState<string | null>(null);
   const [continuationFor, setContinuationFor] = useState<string | null>(null);
   const [continuationError, setContinuationError] = useState<string | null>(null);
+  const limitMenuRef = useRef<HTMLSpanElement>(null);
   // A search that hid a folder's other chats should not also hide the ones it
   // matched, so collapsing is ignored while searching.
   const isCollapsed = !searching && collapsed.has(project.cwd);
@@ -603,6 +604,21 @@ function ProjectSection({
     codeServerBase && !isVirtual && !project.isDeleted
       ? codeServerLink(codeServerBase, project.cwd)
       : null;
+
+  useEffect(() => {
+    const dismiss = (event: PointerEvent): void => {
+      if (!limitMenuRef.current?.contains(event.target as Node)) setLimitMenuFor(null);
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setLimitMenuFor(null);
+    };
+    document.addEventListener('pointerdown', dismiss);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', dismiss);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, []);
 
   const scheduleContinuation = async (chat: ChatSummary): Promise<void> => {
     if (!chat.sessionId) return;
@@ -912,7 +928,7 @@ function ProjectSection({
                     </span>
                   </button>
                   {rateLimitLabel(chat) && chat.sessionId && (
-                    <span className="chat-rate-limit-wrap">
+                    <span className="chat-rate-limit-wrap" ref={limitMenuFor === chat.id ? limitMenuRef : null}>
                       <button
                         type="button"
                         className="chat-rate-limit-badge"

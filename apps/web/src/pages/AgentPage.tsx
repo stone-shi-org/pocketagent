@@ -333,7 +333,9 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         {costLabel && <span className="chip muted">{costLabel}</span>}
       </div>
 
-      {transcript.rateLimit && <RateLimitOverlay limit={transcript.rateLimit} />}
+      {transcript.rateLimit && (
+        <RateLimitOverlay limit={transcript.rateLimit} sessionId={sessionId} onApiError={onApiError} />
+      )}
 
       {showFiles && transcript.files.length > 0 && (
         <ul className="file-list">
@@ -398,14 +400,53 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   );
 }
 
-function RateLimitOverlay({ limit }: { limit: NonNullable<TranscriptState['rateLimit']> }): JSX.Element {
+function RateLimitOverlay({
+  limit,
+  sessionId,
+  onApiError,
+}: {
+  limit: NonNullable<TranscriptState['rateLimit']>;
+  sessionId: string;
+  onApiError: (error: unknown) => void;
+}): JSX.Element {
   const [open, setOpen] = useState(false);
+  const [scheduling, setScheduling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
   const reset = limit.resetsAt
     ? new Date(limit.resetsAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
     : limit.resetsAtLabel;
   const detail = reset ? `Usage limit reached. Resets ${reset}.` : 'Usage limit reached. Reset time is unavailable.';
+  useEffect(() => {
+    const dismiss = (event: PointerEvent): void => {
+      if (!ref.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('pointerdown', dismiss);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', dismiss);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, []);
+
+  const schedule = async (): Promise<void> => {
+    setScheduling(true);
+    setError(null);
+    try {
+      await api.scheduleContinueAfterLimit(sessionId);
+      setOpen(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not schedule continuation.');
+      onApiError(err);
+    } finally {
+      setScheduling(false);
+    }
+  };
   return (
-    <div className="rate-limit-overlay" role="status">
+    <div className="rate-limit-overlay" role="status" ref={ref}>
       <button
         type="button"
         className={open ? 'rate-limit-icon open' : 'rate-limit-icon'}
@@ -416,6 +457,14 @@ function RateLimitOverlay({ limit }: { limit: NonNullable<TranscriptState['rateL
         <Icon name="clock" size={18} />
         <span className="rate-limit-tooltip" role="tooltip">{detail}</span>
       </button>
+      {open && (
+        <span className="limit-continuation-menu" role="menu">
+          <button type="button" role="menuitem" disabled={scheduling} onClick={() => void schedule()}>
+            {scheduling ? 'Scheduling…' : 'Continue after limit reset'}
+          </button>
+          {error && <span role="alert">{error}</span>}
+        </span>
+      )}
     </div>
   );
 }
