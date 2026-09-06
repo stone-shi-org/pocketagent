@@ -2,6 +2,8 @@ import type { JiraWebhookFilter } from '@pocketagent/protocol';
 import {
   JIRA_ISSUE_KEY_RE,
   POCKET_AGENT_LABEL_PREFIX,
+  modelLabelSlug,
+  modelLabelTokens,
   pocketAgentId,
   pocketAgentLabelSlug,
 } from '@pocketagent/protocol';
@@ -373,6 +375,112 @@ export function resolveComponentBranchName(component: string | null | undefined)
  * behaviour for coding agents and it is the right one here too: a typo'd label
  * on a ticket should not silently stop work the operator did configure.
  */
+export interface AvailableModel {
+  value: string;
+  displayName?: string;
+  resolvedModel?: string;
+}
+
+/**
+ * Extract a numeric version score for sorting / preference in fuzzy model matches.
+ * E.g. "gemini-3.8-flash" -> 3800, "gemini-2.5-flash" -> 2500, "claude-sonnet-5" -> 5000.
+ */
+function extractModelVersion(model: AvailableModel): number {
+  const text = `${model.value} ${model.displayName ?? ''} ${model.resolvedModel ?? ''}`;
+  const match = /(\d+(?:\.\d+)*)/.exec(text);
+  if (match && match[1]) {
+    const parts = match[1].split('.').map((p) => parseFloat(p) || 0);
+    let score = 0;
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i] ?? 0;
+      score += part * Math.pow(1000, 3 - i);
+    }
+    return score;
+  }
+  return 0;
+}
+
+/**
+ * Resolve a model candidate string from a Jira label (e.g. "Sonnet", "gemini-flash",
+ * "gpt-oss-120b-medium", "model-gpt-oss") against a list of available models using a 4-tier match:
+ *
+ * 1. Exact wire ID (`value`) or `resolvedModel` match (case-insensitive)
+ * 2. Exact slug match against `modelLabelSlug(value)`, `displayName`, or `resolvedModel`
+ * 3. Fuzzy / "main part" token match: all candidate tokens must be present in the model's tokens.
+ *    Ties broken by:
+ *    - Matching the agent's current `defaultModel` (if present and matches)
+ *    - Highest version number extracted from model string
+ *    - First in catalog order
+ * 4. Fallback: candidate string verbatim
+ */
+export function resolveModelOverride(
+  candidate: string,
+  availableModels?: readonly AvailableModel[],
+  defaultModel?: string | null,
+): string {
+  const trimmed = candidate.trim();
+  if (!trimmed) return trimmed;
+  if (!availableModels || availableModels.length === 0) return trimmed;
+
+  const candidateLower = trimmed.toLowerCase();
+
+  // Tier 1: Exact wire ID / resolvedModel match (case-insensitive)
+  const tier1 = availableModels.find(
+    (m) =>
+      m.value.toLowerCase() === candidateLower ||
+      (m.resolvedModel !== undefined && m.resolvedModel.toLowerCase() === candidateLower),
+  );
+  if (tier1) return tier1.value;
+
+  // Tier 2: Exact slug match
+  const candidateSlug = modelLabelSlug(trimmed);
+  if (candidateSlug) {
+    const tier2 = availableModels.find(
+      (m) =>
+        modelLabelSlug(m.value) === candidateSlug ||
+        (m.resolvedModel !== undefined && modelLabelSlug(m.resolvedModel) === candidateSlug) ||
+        (m.displayName !== undefined && modelLabelSlug(m.displayName) === candidateSlug),
+    );
+    if (tier2) return tier2.value;
+  }
+
+  // Tier 3: Fuzzy / main part token match
+  const candidateTokens = modelLabelTokens(trimmed);
+  if (candidateTokens.length > 0) {
+    const matches: AvailableModel[] = [];
+    for (const model of availableModels) {
+      const modelTokens = new Set([
+        ...modelLabelTokens(model.value),
+        ...(model.displayName ? modelLabelTokens(model.displayName) : []),
+        ...(model.resolvedModel ? modelLabelTokens(model.resolvedModel) : []),
+      ]);
+      const allTokensMatch = candidateTokens.every((token) =>
+        modelTokens.has(token) || Array.from(modelTokens).some((mt) => mt.includes(token)),
+      );
+      if (allTokensMatch) {
+        matches.push(model);
+      }
+    }
+
+    if (matches.length > 0) {
+      // 1. If defaultModel matches, prefer it
+      if (defaultModel) {
+        const defMatch = matches.find(
+          (m) => m.value.toLowerCase() === defaultModel.toLowerCase(),
+        );
+        if (defMatch) return defMatch.value;
+      }
+      // 2. Highest version preference (stable sort fallback)
+      matches.sort((a, b) => extractModelVersion(b) - extractModelVersion(a));
+      const first = matches[0];
+      if (first) return first.value;
+    }
+  }
+
+  // Tier 4: Fallback passthrough
+  return trimmed;
+}
+
 export function resolveLabelOverrides(
   labels: string[],
   availableAgentIds?: string[],
@@ -382,6 +490,13 @@ export function resolveLabelOverrides(
    * PA-10 keeps behaving exactly as before.
    */
   pocketAgents?: readonly { id: string; name: string }[],
+  /**
+   * Available models for the effective agent (coding agent cached catalog or
+   * planner models). When provided, `model:<name>` labels resolve via exact wire ID,
+   * slug matching, and fuzzy ("main part") token matching.
+   */
+  availableModels?: readonly AvailableModel[],
+  defaultModel?: string | null,
 ): { agent?: string; model?: string } {
   const result: { agent?: string; model?: string } = {};
 
@@ -409,7 +524,7 @@ export function resolveLabelOverrides(
     if (modelMatch && modelMatch[1]) {
       const candidate = modelMatch[1].trim();
       if (candidate !== '') {
-        result.model = candidate;
+        result.model = resolveModelOverride(candidate, availableModels, defaultModel);
       }
     }
   }

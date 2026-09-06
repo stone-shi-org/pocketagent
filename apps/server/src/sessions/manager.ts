@@ -647,6 +647,7 @@ export class SessionManager {
           ...(input.resumeAgentSessionId
             ? { resumeAgentSessionId: input.resumeAgentSessionId }
             : {}),
+          ...(input.model !== undefined ? { model: input.model } : {}),
         });
       }
 
@@ -870,6 +871,7 @@ export class SessionManager {
     executable: string;
     env: Record<string, string>;
     resumeAgentSessionId?: string;
+    model?: string;
   }): Promise<AgySession> {
     const session = new AgySession({
       id: args.id,
@@ -885,6 +887,7 @@ export class SessionManager {
       ...(args.resumeAgentSessionId
         ? { resumeAgentSessionId: args.resumeAgentSessionId }
         : {}),
+      ...(args.model !== undefined ? { model: args.model } : {}),
       skipPermissions: true,
     });
 

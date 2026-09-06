@@ -280,6 +280,29 @@ export const ModelInfo = z.object({
 export type ModelInfo = z.infer<typeof ModelInfo>;
 
 /**
+ * Normalise a model name or alias for use in a Jira issue label (e.g. `model:<slug>`).
+ *
+ * Jira labels forbid spaces and special characters. This mirrors `pocketAgentLabelSlug`'s
+ * lowercase-and-hyphen rule so `GPT-OSS 120B (Medium)` becomes `gpt-oss-120b-medium`.
+ */
+export function modelLabelSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/**
+ * Split a model label candidate or model name into lowercase alphanumeric tokens.
+ */
+export function modelLabelTokens(name: string): string[] {
+  return name
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length > 0);
+}
+
+/**
  * The full set of models usable right now. REPLACE semantics, matching
  * `CommandsAvailableEvent` — fetched once at startup today, but nothing rules
  * out a future push if a backend ever reports a mid-session change.

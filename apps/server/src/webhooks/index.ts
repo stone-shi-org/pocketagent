@@ -48,6 +48,7 @@ import {
   pruneOldWebhookHits,
   pruneOldWebhookIssueSessions,
   readActiveWebhookDeliveries,
+  readAgentDefaults,
   readQueuedWebhookDeliveries,
   readWebhook,
   readWebhookBySlug,
@@ -60,6 +61,7 @@ import {
   updateWebhookDelivery,
   upsertWebhookIssueSession,
 } from '../db/index.js';
+import { readPlannerModels } from '../planner/store.js';
 import type { SessionManager, StructuredLikeSession } from '../sessions/manager.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 import { isContained } from '../workspaces/index.js';
@@ -1294,10 +1296,39 @@ export class WebhookService {
     if (hook.auto_select_agent_model === 1 && type === 'jira') {
       const jFacts = facts as JiraEventFacts;
       if (Array.isArray(jFacts.labels) && jFacts.labels.length > 0) {
+        const availableAgents = this.opts.agents.list().map((a) => a.id);
+        const pocketAgents = this.opts.plannerWorkspaces.list().map((w) => ({ id: w.id, name: w.name }));
+
+        // First pass: resolve agent override to determine which model catalog to query
+        const agentOverrides = resolveLabelOverrides(jFacts.labels, availableAgents, pocketAgents);
+        const effectiveAgent = agentOverrides.agent ?? agent;
+        const pocketId = parsePocketAgentId(effectiveAgent);
+
+        let availableModels: { value: string; displayName?: string; resolvedModel?: string }[] = [];
+        let defaultModel: string | null = null;
+
+        if (pocketId) {
+          const pModels = readPlannerModels(this.db);
+          availableModels = pModels.map((m) => ({ value: m.modelId, displayName: m.label }));
+          defaultModel = this.opts.plannerWorkspaces.list().find((w) => w.id === pocketId)?.defaultModelId ?? null;
+        } else {
+          const defaults = readAgentDefaults(this.db, effectiveAgent);
+          if (defaults?.models_json) {
+            try {
+              availableModels = JSON.parse(defaults.models_json);
+            } catch {
+              /* ignore parse errors */
+            }
+          }
+          defaultModel = defaults?.model ?? null;
+        }
+
         const overrides = resolveLabelOverrides(
           jFacts.labels,
-          this.opts.agents.list().map((a) => a.id),
-          this.opts.plannerWorkspaces.list().map((w) => ({ id: w.id, name: w.name })),
+          availableAgents,
+          pocketAgents,
+          availableModels,
+          defaultModel,
         );
         if (overrides.agent) agent = overrides.agent;
         if (overrides.model) model = overrides.model;

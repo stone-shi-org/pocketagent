@@ -21,6 +21,8 @@ export interface AgySessionSpec {
   resumeAgentSessionId?: string;
   /** Absolute path to the `agy` executable, when not on PATH. */
   executablePath?: string;
+  /** Initial model to use on the first turn, or null/absent for default. */
+  model?: string;
   /**
    * Always `true`. Unlike `StructuredSessionSpec.skipPermissions` this is not
    * a per-session choice — see `agents/agy.ts` for why headless agy has no
@@ -141,6 +143,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this.buffer = new EventBuffer(spec.eventBufferBytes);
     this.epoch = epoch ?? crypto.randomBytes(8).toString('base64url');
     this._agentSessionId = spec.resumeAgentSessionId ?? null;
+    this._desiredModel = spec.model ?? null;
   }
 
   // ---- Shared session surface ---------------------------------------------

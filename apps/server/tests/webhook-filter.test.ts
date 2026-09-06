@@ -6,6 +6,7 @@ import {
   parseJiraEvent,
   resolveComponentBranchName,
   resolveLabelOverrides,
+  resolveModelOverride,
   resolveProjectRoute,
   resolvePromptTemplate,
   sanitizeBranchSegment,
@@ -390,6 +391,90 @@ describe('resolveLabelOverrides', () => {
   it('returns empty object when no matching labels exist', () => {
     expect(resolveLabelOverrides(['bug', 'frontend', 'urgent'])).toEqual({});
     expect(resolveLabelOverrides([])).toEqual({});
+  });
+
+  it('resolves model overrides against availableModels using wire ID, slug, and fuzzy matching', () => {
+    const available = ['agy', 'claude'];
+    const models = [
+      { value: 'gpt-oss-120b-medium', displayName: 'GPT-OSS 120B (Medium)' },
+      { value: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash (High)' },
+      { value: 'gemini-2.5-flash', displayName: 'Gemini 2.5 Flash' },
+      { value: 'claude-sonnet-5', displayName: 'Claude Sonnet 5', resolvedModel: 'claude-sonnet-5-wire' },
+      { value: 'claude-3-5-haiku', displayName: 'Claude 3.5 Haiku' },
+    ];
+
+    // Exact slug matching for models with spaces in display name
+    expect(
+      resolveLabelOverrides(['agent:agy', 'model:gpt-oss-120b-medium'], available, undefined, models),
+    ).toEqual({ agent: 'agy', model: 'gpt-oss-120b-medium' });
+
+    expect(
+      resolveLabelOverrides(['agent:agy', 'model-gpt-oss-120b-medium'], available, undefined, models),
+    ).toEqual({ agent: 'agy', model: 'gpt-oss-120b-medium' });
+
+    // Fuzzy "main part" matching
+    expect(
+      resolveLabelOverrides(['agent:agy', 'model:Sonnet'], available, undefined, models),
+    ).toEqual({ agent: 'agy', model: 'claude-sonnet-5' });
+
+    expect(
+      resolveLabelOverrides(['agent:agy', 'model:gemini-flash'], available, undefined, models),
+    ).toEqual({ agent: 'agy', model: 'gemini-3.8-flash' });
+
+    expect(
+      resolveLabelOverrides(['agent:agy', 'model:gpt-oss'], available, undefined, models),
+    ).toEqual({ agent: 'agy', model: 'gpt-oss-120b-medium' });
+
+    expect(
+      resolveLabelOverrides(['agent:agy', 'model:haiku'], available, undefined, models),
+    ).toEqual({ agent: 'agy', model: 'claude-3-5-haiku' });
+
+    // Preference for defaultModel in fuzzy tie-breaking
+    expect(
+      resolveLabelOverrides(['agent:agy', 'model:gemini-flash'], available, undefined, models, 'gemini-2.5-flash'),
+    ).toEqual({ agent: 'agy', model: 'gemini-2.5-flash' });
+
+    // Fallback when model is unlisted
+    expect(
+      resolveLabelOverrides(['agent:agy', 'model:unknown-custom-model'], available, undefined, models),
+    ).toEqual({ agent: 'agy', model: 'unknown-custom-model' });
+  });
+});
+
+describe('resolveModelOverride', () => {
+  const models = [
+    { value: 'gpt-oss-120b-medium', displayName: 'GPT-OSS 120B (Medium)' },
+    { value: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash' },
+    { value: 'gemini-2.5-flash', displayName: 'Gemini 2.5 Flash' },
+    { value: 'claude-sonnet-5', displayName: 'Claude Sonnet 5' },
+    { value: 'gpt-4o', displayName: 'GPT-4o' },
+  ];
+
+  it('matches exact wire value (case-insensitive)', () => {
+    expect(resolveModelOverride('gpt-4o', models)).toBe('gpt-4o');
+    expect(resolveModelOverride('GPT-4O', models)).toBe('gpt-4o');
+  });
+
+  it('matches exact slug of display name', () => {
+    expect(resolveModelOverride('gpt-oss-120b-medium', models)).toBe('gpt-oss-120b-medium');
+    expect(resolveModelOverride('gemini-3-8-flash', models)).toBe('gemini-3.8-flash');
+  });
+
+  it('fuzzy matches main part tokens', () => {
+    expect(resolveModelOverride('Sonnet', models)).toBe('claude-sonnet-5');
+    expect(resolveModelOverride('sonnet-5', models)).toBe('claude-sonnet-5');
+    expect(resolveModelOverride('gemini-flash', models)).toBe('gemini-3.8-flash');
+    expect(resolveModelOverride('gpt-oss', models)).toBe('gpt-oss-120b-medium');
+  });
+
+  it('disambiguates by defaultModel if specified', () => {
+    expect(resolveModelOverride('gemini-flash', models, 'gemini-2.5-flash')).toBe('gemini-2.5-flash');
+  });
+
+  it('falls back to candidate string if no match found or models empty', () => {
+    expect(resolveModelOverride('custom-xyz', models)).toBe('custom-xyz');
+    expect(resolveModelOverride('gpt-4o', [])).toBe('gpt-4o');
+    expect(resolveModelOverride('   ', models)).toBe('');
   });
 });
 

@@ -11,6 +11,7 @@ import {
   pruneOldWebhookHits,
   readWebhookDeliveries,
   readWebhookHits,
+  writeAgentDefaults,
   type Db,
 } from '../src/db/index.js';
 import { authHeaders, createTestApp, type TestApp } from './helpers.js';
@@ -1166,6 +1167,42 @@ describe('webhook autoSelectAgentModel', () => {
     const session = ctx.context.sessions.get(outcome.sessionId);
     expect(session).toBeDefined();
     expect(session?.spec.agent).toBe('claude');
+  });
+
+  it('resolves model labels using slug and fuzzy matching against agent catalog', async () => {
+    writeAgentDefaults(ctx.db, 'agy', {
+      modelsJson: JSON.stringify([
+        { value: 'gpt-oss-120b-medium', displayName: 'GPT-OSS 120B (Medium)' },
+        { value: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash' },
+      ]),
+    });
+
+    const hook = await createWebhook({
+      agent: 'claude',
+      autoSelectAgentModel: true,
+    });
+
+    const payload = JSON.stringify({
+      ...(JIRA_SAMPLE_PAYLOAD as object),
+      timestamp: Date.now(),
+      issue: {
+        ...((JIRA_SAMPLE_PAYLOAD as { issue: Record<string, unknown> }).issue),
+        fields: {
+          ...((JIRA_SAMPLE_PAYLOAD as { issue: { fields: Record<string, unknown> } }).issue.fields),
+          labels: ['agent:agy', 'model:gpt-oss-120b-medium'],
+        },
+      },
+    });
+
+    const res = await deliver(SLUG, payload, { secret: hook.secret });
+    expect(res.statusCode).toBe(202);
+    const outcome = res.json();
+    expect(outcome.sessionId).toBeTruthy();
+
+    const session = ctx.context.sessions.get(outcome.sessionId);
+    expect(session).toBeDefined();
+    expect(session?.spec.agent).toBe('agy');
+    expect(session?.spec.model).toBe('gpt-oss-120b-medium');
   });
 });
 
