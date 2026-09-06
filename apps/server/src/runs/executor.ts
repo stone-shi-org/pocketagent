@@ -408,6 +408,13 @@ export class RunExecutor {
     let settled = false;
     const settle = (status: 'succeeded' | 'failed', error: string | null): void => {
       if (settled) return;
+      // Also guarded on still being in flight, not only on the local latch:
+      // `abandonAll` settles this run's sink directly and clears the map, and
+      // the background drain below can outlive that call by a microtask (it is
+      // pumping a generator nobody is waiting on). Without this, a shutdown
+      // during a pocket turn would report the delivery settled twice, breaking
+      // `RunSink`'s documented "exactly once" contract.
+      if (!this.inFlight.has(runId)) return;
       settled = true;
       this.inFlight.delete(runId);
       this.pocketDisposers.get(runId)?.();

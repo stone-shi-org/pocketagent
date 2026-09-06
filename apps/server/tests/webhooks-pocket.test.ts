@@ -446,6 +446,29 @@ describe('the approval gate on a Pocket Agent webhook run', () => {
     expect((await get(t, '/api/planner/tool-approvals')).json().approvals).toEqual([]);
   });
 
+  it('settles a parked pocket run exactly once when the server shuts down', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce(() => toolCallReply('mkdir', { path: '/tmp/pa10-shutdown' }))
+      .mockImplementation(() => textReply('never reached'));
+
+    const { slug, secret, hookId } = await setupPocketWebhook(fetchImpl);
+    await deliver(t, slug, secret, payloadFor());
+    const parked = await deliveryFor(t, hookId, (d) => d.status === 'running');
+    await eventOfKind(t, String(parked.plannerChatId), 'permission_request');
+
+    // `abandonAll` settles the sink directly and clears the executor's
+    // in-flight map, while the background drain pumping the generator can
+    // outlive that call by a microtask — `settle`'s in-flight guard is what
+    // keeps that from reporting the same delivery settled twice.
+    t.context.webhooks.stop();
+
+    const settled = (await get(t, `/api/webhooks/${hookId}/deliveries`)).json().deliveries[0];
+    expect(settled.status).toBe('failed');
+    expect(settled.error).toMatch(/shut down/i);
+    expect(settled.finishedAt).toEqual(expect.any(Number));
+  });
+
   it('never sets the bypass on a chat a human created over HTTP', async () => {
     const fetchImpl = vi.fn().mockImplementation(() => textReply('ok'));
     await setupPocketWebhook(fetchImpl);
