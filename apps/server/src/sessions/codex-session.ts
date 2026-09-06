@@ -292,7 +292,39 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
         this._lastUsage = null;
         continue;
       }
+      if (event.kind === 'rate_limit') {
+        this.emitEvent(event);
+        void this.enrichRateLimit();
+        continue;
+      }
       this.emitEvent(event);
+    }
+  }
+
+  /** Codex's error notification has no reset timestamp; its account RPC does. */
+  private async enrichRateLimit(): Promise<void> {
+    try {
+      const result = await this.server.sendRequest<{
+        rateLimits?: {
+          primary?: { usedPercent?: number; resetsAt?: number; windowDurationMins?: number } | null;
+          secondary?: { usedPercent?: number; resetsAt?: number; windowDurationMins?: number } | null;
+        };
+      }>('account/rateLimits/read', {});
+      const windows = [result.rateLimits?.primary, result.rateLimits?.secondary].filter(
+        (window): window is { usedPercent?: number; resetsAt?: number; windowDurationMins?: number } => window != null,
+      );
+      const window = windows.find((candidate) => candidate.usedPercent !== undefined && candidate.usedPercent >= 100) ?? windows[0];
+      if (!window || typeof window.resetsAt !== 'number') return;
+      this.emitEvent({
+        kind: 'rate_limit',
+        provider: 'codex',
+        resetsAt: Math.round(window.resetsAt * 1000),
+        limitType: typeof window.windowDurationMins === 'number' ? `${window.windowDurationMins}_minute` : null,
+        resetsAtLabel: null,
+      });
+    } catch {
+      // The initial limit event remains useful even if the account usage RPC
+      // is unavailable or changes shape.
     }
   }
 

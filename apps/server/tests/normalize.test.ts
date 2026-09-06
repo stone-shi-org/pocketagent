@@ -1461,10 +1461,34 @@ describe('normalizeCodexEvent: turn lifecycle', () => {
     ).toMatchObject([{ isError: true, stopReason: 'error' }]);
   });
 
+  it('detects a Codex rate-limit turn failure', () => {
+    expect(
+      normalizeCodexEvent({
+        method: 'turn/completed',
+        params: {
+          threadId: 't',
+          turn: { id: 'tu', items: [], status: 'failed', error: { message: 'Rate limit reached (429)' }, durationMs: 1 },
+        },
+      }),
+    ).toMatchObject([
+      { kind: 'rate_limit', provider: 'codex', resetsAt: null },
+      { kind: 'turn_complete', isError: true },
+    ]);
+  });
+
   it('maps a thread-level error notification to a notice', () => {
     expect(
       normalizeCodexEvent({ method: 'error', params: { threadId: 't', error: { message: 'boom' } } }),
     ).toEqual([{ kind: 'notice', level: 'error', text: 'boom' }]);
+  });
+
+  it('detects a Codex rate-limit error notification while preserving the notice', () => {
+    expect(
+      normalizeCodexEvent({ method: 'error', params: { threadId: 't', error: { message: 'Too many requests' } } }),
+    ).toEqual([
+      { kind: 'rate_limit', provider: 'codex', resetsAt: null, limitType: null, resetsAtLabel: null },
+      { kind: 'notice', level: 'error', text: 'Too many requests' },
+    ]);
   });
 });
 

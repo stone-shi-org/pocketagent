@@ -1253,8 +1253,7 @@ export function normalizeCodexEvent(message: CodexIncoming): AgentEvent[] {
     case 'turn/completed': {
       const turn = isRecord(params.turn) ? params.turn : {};
       const hasError = turn.error !== null && turn.error !== undefined;
-      return [
-        {
+      const complete: AgentEvent = {
           kind: 'turn_complete',
           stopReason: hasError ? 'error' : null,
           isError: hasError,
@@ -1267,21 +1266,41 @@ export function normalizeCodexEvent(message: CodexIncoming): AgentEvent[] {
           costUsd: null,
           inputTokens: null,
           outputTokens: null,
-        },
-      ];
+        };
+      return hasError && isCodexRateLimit(turn.error)
+        ? [{ kind: 'rate_limit', provider: 'codex', resetsAt: null, limitType: null, resetsAtLabel: null }, complete]
+        : [complete];
     }
     case 'item/commandExecution/requestApproval':
     case 'item/fileChange/requestApproval':
       if (id === undefined) return [];
       return [normalizeCodexPermission(method, params, id)];
     case 'error':
-      return [{ kind: 'notice', level: 'error', text: extractCodexErrorMessage(params) }];
+      return normalizeCodexError(params.error ?? params.message, extractCodexErrorMessage(params));
     default:
       // Every other item type (todoList, webSearch, mcpToolCall, ...) and
       // every other notification (rate limits, mcp startup, thread renames,
       // ...) has nothing to render in this union yet.
       return [];
   }
+}
+
+function normalizeCodexError(error: unknown, text: string): AgentEvent[] {
+  const notice: AgentEvent = { kind: 'notice', level: 'error', text };
+  if (!isCodexRateLimit(error)) return [notice];
+  return [
+    { kind: 'rate_limit', provider: 'codex', resetsAt: null, limitType: null, resetsAtLabel: null },
+    notice,
+  ];
+}
+
+function isCodexRateLimit(error: unknown): boolean {
+  const text = isString(error)
+    ? error
+    : isRecord(error)
+      ? `${str(error.message) ?? ''} ${str(error.code) ?? ''} ${str(error.type) ?? ''}`
+      : '';
+  return /\b429\b|rate.?limit|too many requests|quota|usage limit/i.test(text);
 }
 
 function normalizeCodexItem(itemRaw: unknown, phase: 'started' | 'completed'): AgentEvent[] {

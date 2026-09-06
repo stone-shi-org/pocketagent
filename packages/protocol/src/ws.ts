@@ -41,8 +41,9 @@ import { LIMITS } from './limits.js';
  * older bundle would otherwise keep its old project-list shape after deploy.
  * v12 added OpenCode as a rate-limit provider. Older bundles reject the new
  * enum value, so they must reconnect rather than drop the overlay event.
+ * v13 added Codex as a rate-limit provider for the same reason.
  */
-export const PROTOCOL_VERSION = 12;
+export const PROTOCOL_VERSION = 13;
 
 /**
  * WebSocket close codes the server uses for conditions the client must not
