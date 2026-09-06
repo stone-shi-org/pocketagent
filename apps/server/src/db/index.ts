@@ -268,13 +268,6 @@ const MIGRATIONS: readonly string[] = [
   CREATE INDEX IF NOT EXISTS idx_cron_runs_started ON cron_runs (started_at DESC);
   CREATE INDEX IF NOT EXISTS idx_cron_runs_conversation ON cron_runs (agent_session_id);
   `,
-  // A one-shot continuation is still a real cron job — visible and durable
-  // until it fires — but it resumes the refused conversation and removes its
-  // own job row immediately after handing the run to the executor.
-  `
-  ALTER TABLE cron_jobs ADD COLUMN resume_agent_session_id TEXT;
-  ALTER TABLE cron_jobs ADD COLUMN delete_after_run INTEGER NOT NULL DEFAULT 0;
-  `,
   // Inbound webhooks, the deliveries they received, and the per-issue
   // conversations they keep.
   //
@@ -653,6 +646,15 @@ const MIGRATIONS: readonly string[] = [
     tool_name  TEXT PRIMARY KEY,
     created_at INTEGER NOT NULL
   );
+  `,
+  // A one-shot continuation is still a real cron job — visible and durable
+  // until it fires — but it resumes the refused conversation and removes its
+  // own job row immediately after handing the run to the executor. This must
+  // stay appended: existing databases have already recorded every migration
+  // above it in `schema_version`.
+  `
+  ALTER TABLE cron_jobs ADD COLUMN resume_agent_session_id TEXT;
+  ALTER TABLE cron_jobs ADD COLUMN delete_after_run INTEGER NOT NULL DEFAULT 0;
   `,
 ];
 
