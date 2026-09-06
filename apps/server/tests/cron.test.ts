@@ -631,4 +631,29 @@ describe('cron migration', () => {
     db.close();
     fs.rmSync(file, { force: true });
   });
+
+  it('upgrades an already-current pre-continuation database', () => {
+    const file = `${fs.mkdtempSync('/tmp/pa-cron-')}/db.sqlite`;
+    // Production had reached migration 20 before limit continuations existed.
+    // Seed that exact checkpoint so this proves the new migration is appended
+    // rather than silently skipped as an old migration.
+    const legacy = openDatabase(file);
+    legacy.exec('CREATE TABLE legacy_cron_jobs (id TEXT)');
+    legacy.close();
+
+    // Use a second small database only to prepare the historical cron table;
+    // its `schema_version` is then rewritten to the pre-feature checkpoint.
+    const db = openDatabase(file);
+    db.prepare('UPDATE schema_version SET version = 20').run();
+    db.exec('DROP TABLE cron_jobs');
+    db.exec('CREATE TABLE cron_jobs (id TEXT PRIMARY KEY)');
+    db.close();
+
+    const upgraded = openDatabase(file);
+    const columns = upgraded.prepare('PRAGMA table_info(cron_jobs)').all() as { name: string }[];
+    expect(columns.map((column) => column.name)).toContain('resume_agent_session_id');
+    expect(columns.map((column) => column.name)).toContain('delete_after_run');
+    upgraded.close();
+    fs.rmSync(file, { force: true });
+  });
 });

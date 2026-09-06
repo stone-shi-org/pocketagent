@@ -729,6 +729,20 @@ export function openDatabase(databasePath: string): Db {
     db.exec(migration);
     current = i + 1;
   }
+  // Schema-version migrations are positional. An already-deployed branch
+  // recorded version 20 before the continuation columns were appended, so its
+  // old checkpoint can equal this branch's current migration count. Probe the
+  // two additive columns as a compatibility repair: this is idempotent and
+  // makes that historical database upgrade on its next normal restart.
+  const cronColumns = new Set(
+    (db.prepare('PRAGMA table_info(cron_jobs)').all() as { name: string }[]).map((column) => column.name),
+  );
+  if (!cronColumns.has('resume_agent_session_id')) {
+    db.exec('ALTER TABLE cron_jobs ADD COLUMN resume_agent_session_id TEXT');
+  }
+  if (!cronColumns.has('delete_after_run')) {
+    db.exec('ALTER TABLE cron_jobs ADD COLUMN delete_after_run INTEGER NOT NULL DEFAULT 0');
+  }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
   return db;
