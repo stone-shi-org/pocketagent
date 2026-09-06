@@ -1,7 +1,9 @@
 import fs from 'node:fs';
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CronService } from '../src/cron/index.js';
 import {
+  MIGRATIONS,
   insertCronJob,
   openDatabase,
   readCronJob,
@@ -634,25 +636,46 @@ describe('cron migration', () => {
 
   it('upgrades an already-current pre-continuation database', () => {
     const file = `${fs.mkdtempSync('/tmp/pa-cron-')}/db.sqlite`;
-    // Production had reached migration 20 before limit continuations existed.
-    // Seed that exact checkpoint so this proves the new migration is appended
-    // rather than silently skipped as an old migration.
-    const legacy = openDatabase(file);
-    legacy.exec('CREATE TABLE legacy_cron_jobs (id TEXT)');
-    legacy.close();
 
-    // Use a second small database only to prepare the historical cron table;
-    // its `schema_version` is then rewritten to the pre-feature checkpoint.
-    const db = openDatabase(file);
-    db.prepare('UPDATE schema_version SET version = 20').run();
-    db.exec('DROP TABLE cron_jobs');
-    db.exec('CREATE TABLE cron_jobs (id TEXT PRIMARY KEY)');
-    db.close();
+    // The checkpoint is found rather than hardcoded, so appending a migration
+    // cannot silently move it.
+    const continuationIndex = MIGRATIONS.findIndex((m) =>
+      m.includes('resume_agent_session_id'),
+    );
+    expect(continuationIndex).toBeGreaterThan(0);
+
+    // Seed a *genuine* pre-continuation database by replaying exactly the
+    // migrations that preceded it. The earlier version of this test faked the
+    // checkpoint by fully migrating and then rewriting `schema_version` to it
+    // — which re-runs every migration appended *after* the checkpoint too, so
+    // it passed only while the continuation migration happened to be last in
+    // the array. PA-10 appended one after it and that shortcut started failing
+    // with `duplicate column name`, which was the fixture's bug rather than
+    // either migration's.
+    const seed = new Database(file);
+    seed.exec('CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)');
+    seed.prepare('INSERT INTO schema_version (version) VALUES (?)').run(continuationIndex);
+    for (const migration of MIGRATIONS.slice(0, continuationIndex)) seed.exec(migration);
+    seed.close();
+
+    // Pre-condition: the columns genuinely are absent, or the assertion below
+    // would pass without the migration having run at all.
+    const before = new Database(file);
+    const beforeColumns = (before.prepare('PRAGMA table_info(cron_jobs)').all() as {
+      name: string;
+    }[]).map((column) => column.name);
+    expect(beforeColumns).not.toContain('resume_agent_session_id');
+    before.close();
 
     const upgraded = openDatabase(file);
     const columns = upgraded.prepare('PRAGMA table_info(cron_jobs)').all() as { name: string }[];
     expect(columns.map((column) => column.name)).toContain('resume_agent_session_id');
     expect(columns.map((column) => column.name)).toContain('delete_after_run');
+    // Every later migration replayed cleanly on top, which is the property the
+    // old fixture accidentally stopped checking.
+    expect(
+      (upgraded.prepare('SELECT version FROM schema_version').get() as { version: number }).version,
+    ).toBe(MIGRATIONS.length);
     upgraded.close();
     fs.rmSync(file, { force: true });
   });

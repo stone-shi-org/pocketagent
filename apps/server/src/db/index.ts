@@ -53,7 +53,15 @@ export interface AuthSessionRow {
   user_agent: string | null;
 }
 
-const MIGRATIONS: readonly string[] = [
+/**
+ * Exported for one test only: `cron.test.ts` builds a *genuine* historical
+ * database by replaying a prefix of this array, rather than by fully migrating
+ * and then rewriting `schema_version`. Rewinding a fully-migrated database
+ * re-runs every migration appended after the checkpoint, so that shortcut
+ * silently depended on the migration under test being the last one in the
+ * array — and broke the moment another was appended (PA-10).
+ */
+export const MIGRATIONS: readonly string[] = [
   `
   CREATE TABLE IF NOT EXISTS sessions (
     id               TEXT PRIMARY KEY,
