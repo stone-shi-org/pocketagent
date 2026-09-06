@@ -268,6 +268,13 @@ const MIGRATIONS: readonly string[] = [
   CREATE INDEX IF NOT EXISTS idx_cron_runs_started ON cron_runs (started_at DESC);
   CREATE INDEX IF NOT EXISTS idx_cron_runs_conversation ON cron_runs (agent_session_id);
   `,
+  // A one-shot continuation is still a real cron job — visible and durable
+  // until it fires — but it resumes the refused conversation and removes its
+  // own job row immediately after handing the run to the executor.
+  `
+  ALTER TABLE cron_jobs ADD COLUMN resume_agent_session_id TEXT;
+  ALTER TABLE cron_jobs ADD COLUMN delete_after_run INTEGER NOT NULL DEFAULT 0;
+  `,
   // Inbound webhooks, the deliveries they received, and the per-issue
   // conversations they keep.
   //
@@ -871,6 +878,8 @@ export interface CronJobRow {
   prompt: string;
   /** `'skip' | 'allow'`. */
   overlap_policy: string;
+  resume_agent_session_id: string | null;
+  delete_after_run: number;
   created_at: number;
   updated_at: number;
   next_run_at: number | null;
@@ -911,14 +920,18 @@ export function insertCronJob(db: Db, row: CronJobRow): void {
        id, name, enabled, cron_expr, time_zone, schedule_kind, preset_json,
        cwd, agent, worktree_mode, model, effort, effort_set, skip_permissions,
        prompt, overlap_policy, created_at, updated_at, next_run_at, last_run_at,
-       last_run_status, last_error
+       last_run_status, last_error, resume_agent_session_id, delete_after_run
      ) VALUES (
        @id, @name, @enabled, @cron_expr, @time_zone, @schedule_kind, @preset_json,
        @cwd, @agent, @worktree_mode, @model, @effort, @effort_set, @skip_permissions,
        @prompt, @overlap_policy, @created_at, @updated_at, @next_run_at, @last_run_at,
-       @last_run_status, @last_error
+       @last_run_status, @last_error, @resume_agent_session_id, @delete_after_run
      )`,
-  ).run(row);
+  ).run({
+    ...row,
+    resume_agent_session_id: row.resume_agent_session_id ?? null,
+    delete_after_run: row.delete_after_run ?? 0,
+  });
 }
 
 /** Columns `updateCronJob` is allowed to write. `id`/`created_at` are immutable. */

@@ -1778,6 +1778,56 @@ button.primary-danger { background: var(--danger); border-color: var(--danger); 
   vertical-align: -1px;
 }
 
+button.chat-rate-limit-badge {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.chat-rate-limit-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.limit-continuation-menu {
+  position: absolute;
+  z-index: 3;
+  top: calc(100% + 6px);
+  left: 0;
+  width: max-content;
+  max-width: min(260px, calc(100vw - 32px));
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 18%);
+  white-space: normal;
+}
+
+.limit-continuation-menu button {
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.limit-continuation-menu button:hover:not(:disabled),
+.limit-continuation-menu button:focus-visible {
+  background: var(--bg);
+}
+
+.limit-continuation-menu [role='alert'] {
+  display: block;
+  padding: 4px 9px;
+  color: var(--danger);
+  font-size: 12px;
+}
+
 .confirm-body { font-size: 14px; line-height: 1.5; margin: 0 0 12px; }
 .confirm-body.dim { color: var(--text-dim); font-size: 13px; }
 .confirm-list { font-size: 13px; line-height: 1.55; color: var(--text-dim); padding-left: 20px; margin: 0 0 8px; }

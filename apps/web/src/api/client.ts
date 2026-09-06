@@ -221,6 +221,12 @@ export const api = {
 
   getSession: (id: string) => request<SessionInfo>(`/api/sessions/${encodeURIComponent(id)}`),
 
+  scheduleContinueAfterLimit: (id: string) =>
+    request<{ scheduledFor: number }>(
+      `/api/sessions/${encodeURIComponent(id)}/continue-after-limit`,
+      { method: 'POST' },
+    ),
+
   createSession: (input: {
     agent: string;
     cwd: string;

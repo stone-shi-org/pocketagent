@@ -585,6 +585,9 @@ function ProjectSection({
   onOpenWebhook,
   onApiError,
 }: ProjectSectionProps): JSX.Element {
+  const [limitMenuFor, setLimitMenuFor] = useState<string | null>(null);
+  const [continuationFor, setContinuationFor] = useState<string | null>(null);
+  const [continuationError, setContinuationError] = useState<string | null>(null);
   // A search that hid a folder's other chats should not also hide the ones it
   // matched, so collapsing is ignored while searching.
   const isCollapsed = !searching && collapsed.has(project.cwd);
@@ -600,6 +603,21 @@ function ProjectSection({
     codeServerBase && !isVirtual && !project.isDeleted
       ? codeServerLink(codeServerBase, project.cwd)
       : null;
+
+  const scheduleContinuation = async (chat: ChatSummary): Promise<void> => {
+    if (!chat.sessionId) return;
+    setContinuationFor(chat.id);
+    setContinuationError(null);
+    try {
+      await api.scheduleContinueAfterLimit(chat.sessionId);
+      setLimitMenuFor(null);
+    } catch (error) {
+      setContinuationError(error instanceof ApiError ? error.message : 'Could not schedule continuation.');
+      onApiError(error);
+    } finally {
+      setContinuationFor(null);
+    }
+  };
 
   return (
     <section
@@ -890,19 +908,40 @@ function ProjectSection({
                           aria-label="Started by a webhook"
                         />
                       )}
-                      {rateLimitLabel(chat) && (
-                        <span
-                          className="chat-rate-limit-badge"
-                          role="img"
-                          aria-label={rateLimitLabel(chat) ?? undefined}
-                          title={rateLimitLabel(chat) ?? undefined}
-                        >
-                          <Icon name="clock" size={13} />
-                        </span>
-                      )}
                       {chat.title}
                     </span>
                   </button>
+                  {rateLimitLabel(chat) && chat.sessionId && (
+                    <span className="chat-rate-limit-wrap">
+                      <button
+                        type="button"
+                        className="chat-rate-limit-badge"
+                        aria-label={`${rateLimitLabel(chat)} Open continuation menu.`}
+                        title={rateLimitLabel(chat) ?? undefined}
+                        aria-haspopup="menu"
+                        aria-expanded={limitMenuFor === chat.id}
+                        onClick={() => {
+                          setContinuationError(null);
+                          setLimitMenuFor((current) => (current === chat.id ? null : chat.id));
+                        }}
+                      >
+                        <Icon name="clock" size={13} />
+                      </button>
+                      {limitMenuFor === chat.id && (
+                        <span className="limit-continuation-menu" role="menu">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            disabled={continuationFor === chat.id}
+                            onClick={() => void scheduleContinuation(chat)}
+                          >
+                            {continuationFor === chat.id ? 'Scheduling…' : 'Continue after limit reset'}
+                          </button>
+                          {continuationError && <span role="alert">{continuationError}</span>}
+                        </span>
+                      )}
+                    </span>
+                  )}
                   {chat.live && project.cwd === 'virtual:shell' && (
                     <button
                       type="button"

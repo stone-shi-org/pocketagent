@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { browseDirectory, discoverFolders } from '../discover/index.js';
 import { SessionError } from '../sessions/manager.js';
+import { CronServiceError } from '../cron/index.js';
 import { readSessionHistory } from '../sessions/history.js';
 import { WorkspaceError } from '../workspaces/index.js';
 import { hideChat, readAgentDefaults } from '../db/index.js';
@@ -18,7 +19,7 @@ import { VIRTUAL_SHELL_CWD } from '../projects/index.js';
 import { resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
-  const { sessions, workspaces, agents, conversations, agyTranscripts, piTranscripts, adoption, projects, db } =
+  const { sessions, workspaces, agents, conversations, agyTranscripts, piTranscripts, adoption, projects, db, cron } =
     app.pocket;
 
   // Merges in the per-agent "last observed live" cache (see `agent_defaults`
@@ -469,6 +470,33 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(404).send({ error: { code: 'not_found', message: 'No such session.' } });
     }
     return reply.send(info);
+  });
+
+  app.post<{ Params: { id: string } }>('/api/sessions/:id/continue-after-limit', async (request, reply) => {
+    const session = sessions.get(request.params.id);
+    if (!session || session.transport !== 'structured' || !session.agentSessionId) {
+      return reply.code(404).send({ error: { code: 'not_found', message: 'No resumable live session.' } });
+    }
+    const limit = session.buffer.findByKind('rate_limit').at(-1);
+    if (!limit || limit.resetsAt === null) {
+      return reply.code(400).send({ error: { code: 'bad_request', message: 'This provider did not report a reset time.' } });
+    }
+    try {
+      return reply.code(201).send(
+        cron.scheduleLimitContinuation({
+          sessionId: session.id,
+          cwd: session.spec.cwd,
+          agent: session.spec.agent,
+          agentSessionId: session.agentSessionId,
+          resetsAt: limit.resetsAt,
+        }),
+      );
+    } catch (err) {
+      if (err instanceof CronServiceError) {
+        return reply.code(err.statusCode).send({ error: { code: err.code, message: err.message } });
+      }
+      throw err;
+    }
   });
 
   app.post('/api/sessions', async (request, reply) => {

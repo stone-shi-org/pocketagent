@@ -102,6 +102,14 @@ export interface CronJobSpec {
   overlapPolicy: 'skip' | 'allow';
 }
 
+export interface LimitContinuationSpec {
+  sessionId: string;
+  cwd: string;
+  agent: string;
+  agentSessionId: string;
+  resetsAt: number;
+}
+
 /**
  * Runs saved jobs on a schedule.
  *
@@ -352,6 +360,12 @@ export class CronService {
       return;
     }
     await this.startRun(job, scheduledFor, 'schedule');
+    if (job.delete_after_run === 1) {
+      // The run row survives through ON DELETE SET NULL; only this temporary
+      // schedule disappears, so a failed continuation remains auditable.
+      deleteCronJob(this.db, job.id);
+      return;
+    }
     this.writeNextRun(job, this.now());
   }
 
@@ -450,6 +464,9 @@ export class CronService {
       // `effort_set` distinguishes "omitted" from "explicitly null"; only pass
       // the key at all when it was set.
       ...(job.effort_set === 1 ? { effort: job.effort } : {}),
+      ...(job.resume_agent_session_id
+        ? { resume: { agentSessionId: job.resume_agent_session_id } }
+        : {}),
       worktree,
       notStructuredMessage:
         'A scheduled job needs a structured session, but a terminal one was created.',
@@ -503,6 +520,8 @@ export class CronService {
       skip_permissions: spec.skipPermissions ? 1 : 0,
       prompt: spec.prompt,
       overlap_policy: spec.overlapPolicy,
+      resume_agent_session_id: null,
+      delete_after_run: 0,
       created_at: now,
       updated_at: now,
       next_run_at: null,
@@ -513,6 +532,56 @@ export class CronService {
     insertCronJob(this.db, row);
     this.jobChanged(id);
     return readCronJob(this.db, id) as CronJobRow;
+  }
+
+  /** Schedule one automatic "continue" for a just-refused structured chat. */
+  scheduleLimitContinuation(spec: LimitContinuationSpec): { scheduledFor: number } {
+    const scheduledFor = spec.resetsAt + 3 * 60_000;
+    if (scheduledFor <= this.now()) {
+      throw new CronServiceError('That limit reset time has already passed.', 'invalid_schedule');
+    }
+    const parts = Object.fromEntries(
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: serverTimeZone(),
+        hourCycle: 'h23',
+        month: 'numeric',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: 'numeric',
+      })
+        .formatToParts(new Date(scheduledFor))
+        .filter((part) => part.type !== 'literal')
+        .map((part) => [part.type, Number(part.value)]),
+    ) as Record<string, number>;
+    const now = this.now();
+    const id = crypto.randomUUID();
+    insertCronJob(this.db, {
+      id,
+      name: `Continue ${spec.sessionId.slice(0, 8)} after limit reset`,
+      enabled: 1,
+      cron_expr: `${parts.minute} ${parts.hour} ${parts.day} ${parts.month} *`,
+      time_zone: serverTimeZone(),
+      schedule_kind: 'expression',
+      preset_json: null,
+      cwd: spec.cwd,
+      agent: spec.agent,
+      worktree_mode: 'none',
+      model: null,
+      effort: null,
+      effort_set: 0,
+      skip_permissions: 1,
+      prompt: 'continue',
+      overlap_policy: 'skip',
+      resume_agent_session_id: spec.agentSessionId,
+      delete_after_run: 1,
+      created_at: now,
+      updated_at: now,
+      next_run_at: scheduledFor,
+      last_run_at: null,
+      last_run_status: null,
+      last_error: null,
+    });
+    return { scheduledFor };
   }
 
   update(id: string, patch: Partial<CronJobSpec>): CronJobRow {
