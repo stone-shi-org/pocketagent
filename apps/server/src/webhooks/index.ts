@@ -69,6 +69,7 @@ import {
   describeJiraFilter,
   evaluateJiraFilter,
   parseJiraEvent,
+  resolveComponentBranchName,
   resolveLabelOverrides,
   resolveProjectRoute,
   resolvePromptTemplate,
@@ -731,15 +732,21 @@ export class WebhookService {
   private specFor(hook: WebhookRow, facts: AnyEventFacts, cwd: string): Omit<RunSpec, 'prompt'> {
     const type = hook.type as WebhookType;
     const subjectKey = subjectKeyOf(type, facts);
+    let worktreeBranchName = mintBranchName(`${hook.name}-${subjectKey}`, 'UTC', this.now(), 'webhook');
+
+    if (type === 'jira') {
+      const jFacts = facts as JiraEventFacts;
+      const componentBranch = resolveComponentBranchName(jFacts.component);
+      if (componentBranch !== null) {
+        worktreeBranchName = componentBranch;
+      }
+    }
+
     const worktree: RunSpec['worktree'] =
       hook.worktree_mode === 'new-branch'
         ? {
             mode: 'new-branch',
-            // Minted from the *subject key* (issue/plan key), not from
-            // untrusted text: a branch name reaches git and the filesystem,
-            // and the key is the one untrusted value validated against a
-            // pattern rather than escaped.
-            branchName: mintBranchName(`${hook.name}-${subjectKey}`, 'UTC', this.now(), 'webhook'),
+            branchName: worktreeBranchName,
           }
         : hook.worktree_mode === 'current-branch'
           ? { mode: 'current-branch' }

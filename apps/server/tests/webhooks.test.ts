@@ -1,5 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { JIRA_SAMPLE_PAYLOAD } from '@pocketagent/protocol';
 import { REDACT_PATHS } from '../src/app.js';
@@ -1155,5 +1157,71 @@ describe('webhook autoSelectAgentModel', () => {
     const session = ctx.context.sessions.get(outcome.sessionId);
     expect(session).toBeDefined();
     expect(session?.spec.agent).toBe('claude');
+  });
+});
+
+describe('webhook Jira component worktrees', () => {
+  it('creates and shares worktree for Jira tickets with same component', async () => {
+    // Initialize git repo in projectDir
+    execFileSync('git', ['init', '-q'], { cwd: ctx.projectDir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: ctx.projectDir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: ctx.projectDir });
+    fs.writeFileSync(path.join(ctx.projectDir, 'file.txt'), 'initial\n');
+    execFileSync('git', ['add', 'file.txt'], { cwd: ctx.projectDir });
+    execFileSync('git', ['commit', '-q', '-m', 'initial'], { cwd: ctx.projectDir });
+
+    const hook = await createWebhook({
+      worktreeMode: 'new-branch',
+      conversationMode: 'per-delivery',
+      overlapPolicy: 'allow',
+      maxConcurrent: 5,
+    });
+
+    const payload1 = JSON.stringify({
+      ...(JIRA_SAMPLE_PAYLOAD as object),
+      timestamp: Date.now(),
+      issue: {
+        ...((JIRA_SAMPLE_PAYLOAD as { issue: Record<string, unknown> }).issue),
+        key: 'PA-101',
+        fields: {
+          ...((JIRA_SAMPLE_PAYLOAD as { issue: { fields: Record<string, unknown> } }).issue.fields),
+          components: [{ name: 'Auth' }],
+        },
+      },
+    });
+
+    const res1 = await deliver(SLUG, payload1, { secret: hook.secret });
+    expect(res1.statusCode).toBe(202);
+    const outcome1 = res1.json();
+    expect(outcome1.sessionId).toBeTruthy();
+
+    const session1 = ctx.context.sessions.get(outcome1.sessionId);
+    expect(session1).toBeDefined();
+    expect(session1?.spec.cwd).toContain('.worktrees');
+    expect(session1?.spec.cwd).toMatch(/feature-Auth$/);
+
+    // Second delivery for another ticket with the same component 'Auth'
+    const payload2 = JSON.stringify({
+      ...(JIRA_SAMPLE_PAYLOAD as object),
+      timestamp: Date.now(),
+      issue: {
+        ...((JIRA_SAMPLE_PAYLOAD as { issue: Record<string, unknown> }).issue),
+        key: 'PA-102',
+        fields: {
+          ...((JIRA_SAMPLE_PAYLOAD as { issue: { fields: Record<string, unknown> } }).issue.fields),
+          components: [{ name: 'Auth' }],
+        },
+      },
+    });
+
+    const res2 = await deliver(SLUG, payload2, { secret: hook.secret });
+    expect(res2.statusCode).toBe(202);
+    const outcome2 = res2.json();
+    expect(outcome2.sessionId).toBeTruthy();
+
+    const session2 = ctx.context.sessions.get(outcome2.sessionId);
+    expect(session2).toBeDefined();
+    // Both sessions for component 'Auth' use the exact same worktree directory
+    expect(session2?.spec.cwd).toBe(session1?.spec.cwd);
   });
 });
