@@ -4,6 +4,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
+import { parseSettingsEncKey } from '../crypto/secret-box.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 /** Repo root, whether running from `src/` (tsx/strip-types) or `dist/`. */
@@ -77,32 +78,23 @@ const RawEnv = z.object({
   POCKETAGENT_WEB_DIST: z.string().optional(),
 
   /**
-   * Claude Code variants pointed at a third-party Anthropic-compatible
-   * endpoint (PA-19). All optional, and the API key is the switch: unset means
-   * the variant is greyed out in the agent list rather than offered and then
-   * failing at spawn. Nothing here has a guessed default beyond DeepSeek's own
-   * published base URL, for the reason `POCKETAGENT_CODE_SERVER_URL` states —
-   * a wrong guess points at nothing.
+   * Base64 of 32 raw bytes, encrypting the API key of every custom Claude
+   * provider at rest (PA-28). See `crypto/secret-box.ts`.
    *
-   * `_MODELS` is a comma-separated catalog for the picker, and it must come
-   * from the provider's own `/models` rather than from documentation or memory.
-   * Both live endpoints punish guessing, in opposite ways: the omniroute
-   * instance this was built against *rejects* an unknown id outright (a bare
-   * `deepseek-chat` comes back "ambiguous"), while DeepSeek *silently accepts*
-   * its retired `deepseek-chat`/`deepseek-reasoner` aliases and serves
-   * `deepseek-v4-flash` for both — so a stale list there does not fail, it just
-   * quietly offers one model twice under two names.
+   * Optional, and unset does **not** fail the boot — it disables the
+   * custom-provider feature instead, because an existing deployment must not
+   * stop starting because it has never generated a key. Set-but-invalid *does*
+   * throw: a typo would otherwise silently disable a feature the operator
+   * believes they just turned on.
+   *
+   * The Claude Code variants that used to be configured here as
+   * `POCKETAGENT_DEEPSEEK_*` / `POCKETAGENT_OMNIROUTE_*` (PA-19) are gone from
+   * this schema. Those variables are now read exactly once, from raw
+   * `process.env`, by `CustomClaudeProviderStore.migrateLegacyEnvProviders` —
+   * they seed a database row on first boot and are ignored forever after, so
+   * they are no longer *configuration* and do not belong in the config type.
    */
-  POCKETAGENT_DEEPSEEK_API_KEY: z.string().optional(),
-  POCKETAGENT_DEEPSEEK_BASE_URL: z.string().optional(),
-  POCKETAGENT_DEEPSEEK_MODEL: z.string().optional(),
-  POCKETAGENT_DEEPSEEK_SMALL_MODEL: z.string().optional(),
-  POCKETAGENT_DEEPSEEK_MODELS: z.string().optional(),
-  POCKETAGENT_OMNIROUTE_API_KEY: z.string().optional(),
-  POCKETAGENT_OMNIROUTE_BASE_URL: z.string().optional(),
-  POCKETAGENT_OMNIROUTE_MODEL: z.string().optional(),
-  POCKETAGENT_OMNIROUTE_SMALL_MODEL: z.string().optional(),
-  POCKETAGENT_OMNIROUTE_MODELS: z.string().optional(),
+  POCKETAGENT_SETTINGS_ENC_KEY: z.string().optional(),
 
   /**
    * Boot-time seed for the global "skip all approvals" switch. See `Config.globalSkipPermissionsDefault`.
@@ -125,24 +117,6 @@ const RawEnv = z.object({
    */
   POCKETAGENT_TMUX_SESSION_SCOPE_SLICE: z.string().default(''),
 });
-
-/**
- * One Claude Code third-party provider variant, as configured. Kept in the
- * config layer (rather than built inside the registry) so the adapter factory
- * stays a pure function of its options and is trivially testable.
- */
-export interface ClaudeProviderConfig {
-  id: string;
-  displayName: string;
-  description: string;
-  providerLabel: string;
-  baseUrl: string | null;
-  apiKey: string | null;
-  model: string | null;
-  smallModel: string | null;
-  /** Comma-separated model ids for the picker. */
-  models: string | null;
-}
 
 export interface Config {
   nodeEnv: 'development' | 'production' | 'test';
@@ -187,11 +161,14 @@ export interface Config {
   codexBin: string;
   piBin: string;
   /**
-   * Third-party provider settings for the Claude Code variants. See
-   * `createClaudeProviderAdapter`. `apiKey === null` means the variant is
-   * unavailable.
+   * Key encrypting every custom Claude provider's API key at rest, or
+   * `undefined` when `POCKETAGENT_SETTINGS_ENC_KEY` is unset — in which case
+   * the feature is disabled (existing rows list and delete, nothing can be
+   * created or edited) rather than the server refusing to start. A `Buffer`
+   * rather than the raw base64 string so it is parsed and validated exactly
+   * once, at boot, instead of on every encrypt.
    */
-  claudeProviders: ClaudeProviderConfig[];
+  settingsEncKey: Buffer | undefined;
   webDistPath: string;
   /** Where agent processes live. `tmux` lets them survive a server restart. */
   backend: 'direct' | 'tmux';
@@ -323,6 +300,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ? path.resolve(e.POCKETAGENT_WEB_DIST)
     : path.join(REPO_ROOT, 'apps/web/dist');
 
+  // Unset is fine (the feature turns itself off); a bad value is not, and is
+  // re-thrown as a `ConfigError` so it reads like every other boot-time
+  // configuration complaint rather than an unhandled crypto error.
+  let settingsEncKey: Buffer | undefined;
+  try {
+    settingsEncKey = parseSettingsEncKey(e.POCKETAGENT_SETTINGS_ENC_KEY);
+  } catch (err) {
+    throw new ConfigError(err instanceof Error ? err.message : String(err));
+  }
+
   return {
     nodeEnv: e.NODE_ENV,
     isProduction,
@@ -349,43 +336,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     opencodeBin: e.POCKETAGENT_OPENCODE_BIN.trim(),
     codexBin: e.POCKETAGENT_CODEX_BIN.trim(),
     piBin: e.POCKETAGENT_PI_BIN.trim(),
-    claudeProviders: [
-      {
-        id: 'claude-deepseek',
-        displayName: 'Claude Code (DeepSeek)',
-        description: 'Claude Code running against DeepSeek',
-        providerLabel: 'DeepSeek',
-        // DeepSeek publishes this Anthropic-compatible route specifically for
-        // Claude Code, so it is the one base URL worth defaulting.
-        baseUrl: e.POCKETAGENT_DEEPSEEK_BASE_URL?.trim() || 'https://api.deepseek.com/anthropic',
-        apiKey: e.POCKETAGENT_DEEPSEEK_API_KEY?.trim() || null,
-        // Ids taken from DeepSeek's own `GET /models`, which advertises
-        // `deepseek-v4-pro`, `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp`.
-        // The older `deepseek-chat`/`deepseek-reasoner` aliases still resolve, but
-        // both of them serve `deepseek-v4-flash` — so offering the pair in a picker
-        // shows two entries that are the same model, one of them named as though it
-        // reasons. Verified against the live API, 2026-09-06.
-        model: e.POCKETAGENT_DEEPSEEK_MODEL?.trim() || 'deepseek-v4-pro',
-        // Explicit rather than falling back to the main model: the small slot drives
-        // conversation titles and compaction summaries, which run often and do not
-        // need the expensive model. Leaving it null would put compaction on `pro`.
-        smallModel: e.POCKETAGENT_DEEPSEEK_SMALL_MODEL?.trim() || 'deepseek-v4-flash',
-        models: e.POCKETAGENT_DEEPSEEK_MODELS?.trim() || 'deepseek-v4-pro,deepseek-v4-flash',
-      },
-      {
-        id: 'claude-omniroute',
-        displayName: 'Claude Code (Omniroute)',
-        description: 'Claude Code running against an Omniroute gateway',
-        providerLabel: 'the Omniroute gateway',
-        // No default: a gateway URL is per-installation, and guessing one
-        // points at nothing.
-        baseUrl: e.POCKETAGENT_OMNIROUTE_BASE_URL?.trim() || null,
-        apiKey: e.POCKETAGENT_OMNIROUTE_API_KEY?.trim() || null,
-        model: e.POCKETAGENT_OMNIROUTE_MODEL?.trim() || null,
-        smallModel: e.POCKETAGENT_OMNIROUTE_SMALL_MODEL?.trim() || null,
-        models: e.POCKETAGENT_OMNIROUTE_MODELS?.trim() || null,
-      },
-    ],
+    settingsEncKey,
     webDistPath,
     backend: e.POCKETAGENT_BACKEND,
     tmuxBin: e.POCKETAGENT_TMUX_BIN.trim(),

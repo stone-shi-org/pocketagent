@@ -22,6 +22,7 @@ import { WorkspaceRegistry, createWorkspaceStore } from './workspaces/index.js';
 import { applyRuntimeSettings } from './settings/index.js';
 import { createDefaultRegistry } from './agents/registry.js';
 import type { AgentAdapter } from './agents/types.js';
+import { CustomClaudeProviderStore } from './agents/custom-providers-store.js';
 import { createBackend, DirectPtyBackend } from './backends/index.js';
 import { SessionManager } from './sessions/manager.js';
 import { buildChildEnv } from './sessions/env.js';
@@ -41,6 +42,7 @@ import {
 import { CronService } from './cron/index.js';
 import { authRoutes } from './routes/auth.js';
 import { cronRoutes } from './routes/cron.js';
+import { customClaudeProviderRoutes } from './routes/custom-claude-providers.js';
 import { pushRoutes } from './routes/push.js';
 import { sessionRoutes } from './routes/sessions.js';
 import { settingsRoutes } from './routes/settings.js';
@@ -139,6 +141,18 @@ export interface BuildAppOptions {
    * a shell even though the process behind it still is `/bin/bash`.
    */
   extraAgents?: AgentAdapter[];
+  /**
+   * Environment the PA-28 one-time legacy-provider import reads, defaulting to
+   * `process.env`.
+   *
+   * Injected as `{}` by the test helper for the same reason
+   * `plannerWorkspacesRoot` is overridden there: `config/index.ts` calls
+   * `dotenv.config()` at module load, so this checkout's real `.env` is in
+   * `process.env` by the time any test runs — and a developer who happens to
+   * have `POCKETAGENT_DEEPSEEK_API_KEY` set would otherwise find a provider
+   * imported into every test app's roster.
+   */
+  legacyProviderEnv?: NodeJS.ProcessEnv;
   serveStatic?: boolean;
 }
 
@@ -227,9 +241,24 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     opencodeBin: config.opencodeBin,
     codexBin: config.codexBin,
     piBin: config.piBin,
-    claudeProviders: config.claudeProviders,
   });
   for (const adapter of options.extraAgents ?? []) agents.register(adapter);
+
+  // PA-28: user-managed Claude Code provider variants, replacing the two that
+  // used to be built here from `config.claudeProviders`. Constructing the store
+  // hydrates every stored row into `agents` above, so the roster is complete
+  // before anything else in this function reads it; each later mutation
+  // re-registers synchronously inside its own request.
+  const customClaudeProviders = new CustomClaudeProviderStore({
+    db,
+    registry: agents,
+    encKey: config.settingsEncKey,
+    logger: app.log,
+  });
+  // Reads `POCKETAGENT_DEEPSEEK_*` / `POCKETAGENT_OMNIROUTE_*` from raw
+  // `process.env` exactly once, ever — deliberately not through `Config`, since
+  // they are no longer configuration. See the method's own doc comment.
+  customClaudeProviders.migrateLegacyEnvProviders(options.legacyProviderEnv ?? process.env);
 
   const backend = createBackend({
     id: config.backend,
@@ -401,6 +430,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     plannerWorkspacesRoot,
     plannerChats,
     agents,
+    customClaudeProviders,
     db,
     backend,
     push,
@@ -515,6 +545,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(sessionRoutes);
   await app.register(worktreeRoutes);
   await app.register(cronRoutes);
+  await app.register(customClaudeProviderRoutes);
   await app.register(webhookRoutes);
   await app.register(plannerRoutes);
   await app.register(settingsRoutes);

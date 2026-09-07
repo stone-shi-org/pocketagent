@@ -54,6 +54,31 @@ export interface AuthSessionRow {
 }
 
 /**
+ * The `custom_claude_providers` table (PA-28).
+ *
+ * A named constant rather than an inline migration string because it is used
+ * twice: once as a migration, and once as an idempotent repair in
+ * `openDatabase` for the positional-migration hazard the two `PRAGMA
+ * table_info` probes there already document. Referencing one definition is
+ * what keeps the repair from drifting from the migration it repairs.
+ */
+export const CUSTOM_CLAUDE_PROVIDERS_DDL = `
+  CREATE TABLE IF NOT EXISTS custom_claude_providers (
+    id                 TEXT PRIMARY KEY,
+    name               TEXT NOT NULL,
+    provider_kind      TEXT NOT NULL,
+    base_url           TEXT NOT NULL,
+    api_key_ciphertext TEXT NOT NULL,
+    models_json        TEXT NOT NULL,
+    default_model      TEXT NOT NULL,
+    small_model        TEXT,
+    allow_unattended   INTEGER NOT NULL DEFAULT 0,
+    created_at         INTEGER NOT NULL,
+    updated_at         INTEGER NOT NULL
+  );
+`;
+
+/**
  * Exported for one test only: `cron.test.ts` builds a *genuine* historical
  * database by replaying a prefix of this array, rather than by fully migrating
  * and then rewriting `schema_version`. Rewinding a fully-migrated database
@@ -785,6 +810,31 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE webhook_issue_sessions ADD COLUMN agent TEXT;
   `,
+  // PA-28: user-managed Claude Code provider variants, replacing the two
+  // compiled-in ones that came from `POCKETAGENT_DEEPSEEK_*` /
+  // `POCKETAGENT_OMNIROUTE_*` (PA-19).
+  //
+  // `id` is the full agent id (`custom-claude:<slug>-<hex>`), not a bare uuid,
+  // because that string is what a session row, a cron job and a webhook all
+  // store in their own `agent` column. Keying on the same value those rows
+  // carry means a provider can be looked up straight from one of them with no
+  // translation step to get wrong.
+  //
+  // `api_key_ciphertext` is AES-256-GCM, base64 of `iv || tag || ciphertext`
+  // (`crypto/secret-box.ts`), and is the first encrypted-at-rest column in this
+  // database. NOT NULL: a provider with no credential is an agent that greys
+  // out and can do nothing, so there is no state worth representing. Deliberately
+  // *no* `api_key` plaintext column ever existed, so there is no migration path
+  // by which one could be left behind.
+  //
+  // `models_json` is a JSON array of model ids rather than a child table: it is
+  // read and written whole, only ever by this one provider's own adapter, and a
+  // table would add a join to produce a list nothing else joins against.
+  //
+  // `allow_unattended` defaults to 0 — see the "never unattended" invariant in
+  // CLAUDE.md. It drives `AgentAdapter.requiresAttendedUse` directly, so the
+  // existing route checks in `routes/shared.ts` need no branch for it.
+  CUSTOM_CLAUDE_PROVIDERS_DDL,
 ];
 
 /**
@@ -797,6 +847,18 @@ export const MIGRATIONS: readonly string[] = [
  * only seeds, the database wins after that" rule `workspaces` already uses.
  */
 export const GLOBAL_SKIP_PERMISSIONS_KEY = 'global_skip_permissions';
+
+/**
+ * Key in `settings` recording that the one-time import of the PA-19 env-var
+ * provider variants into `custom_claude_providers` has already happened.
+ *
+ * A flag rather than "the table is empty", the same discipline
+ * `workspaces_seeded` and the planner's own seed flag use: an operator who
+ * migrates and then *deletes* the imported provider must not have it silently
+ * resurrected on the next boot just because `POCKETAGENT_DEEPSEEK_API_KEY` is
+ * still sitting in their `.env`.
+ */
+export const LEGACY_CLAUDE_PROVIDERS_MIGRATED_KEY = 'legacy_claude_providers_migrated';
 
 export function readSetting(db: Db, key: string): string | null {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as
@@ -903,6 +965,14 @@ export function openDatabase(databasePath: string): Db {
   if (issueSessionColumns.size > 0 && !issueSessionColumns.has('agent')) {
     db.exec('ALTER TABLE webhook_issue_sessions ADD COLUMN agent TEXT');
   }
+  // PA-28, same positional-migration hazard once more: a database whose
+  // checkpoint already sat at or past this migration's index (see the two
+  // repairs above for how that happens on a branch where a migration was
+  // inserted rather than appended) would never create this table, and every
+  // custom-provider query would then throw "no such table". Re-running the
+  // *same* DDL constant the migration uses is idempotent (`IF NOT EXISTS`) and
+  // cannot drift from it.
+  db.exec(CUSTOM_CLAUDE_PROVIDERS_DDL);
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
   return db;

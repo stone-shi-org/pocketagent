@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { SettingsResponse, UpdateSettingsRequest } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { Icon, type IconName } from '../components/Icon.js';
+import { CustomClaudeProvidersSection } from '../components/CustomClaudeProvidersSection.js';
 import { getTerminalFontOverride, setTerminalFontOverride } from '../agent/terminal-font-pref.js';
 import { formatBuildInfo } from '../version.js';
 
@@ -339,6 +340,14 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
           busy={busy('piBin')}
           onChange={(v) => saveDebounced('piBin', v)}
         />
+      </SectionCard>
+
+      <SectionCard
+        title="Custom Claude Providers"
+        icon="code"
+        desc="Claude Code driven against a third-party Anthropic-compatible endpoint."
+      >
+        <CustomClaudeProvidersSection onApiError={onApiError} />
       </SectionCard>
 
       <SectionCard title="Process Backend" icon="agents" desc="Changing options while sessions run applies to new sessions after restart.">

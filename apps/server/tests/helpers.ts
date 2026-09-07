@@ -101,6 +101,11 @@ export async function createTestApp(
     plannerWorkspacesRoot,
     ...(plannerLlmFetch ? { plannerLlmFetch } : {}),
     extraAgents: [makeTestAgent(config.shell)],
+    // Empty rather than `process.env`: this checkout's own `.env` is already
+    // loaded by the time a test runs, so a developer with a legacy
+    // `POCKETAGENT_DEEPSEEK_API_KEY` would otherwise get a custom Claude
+    // provider imported into every test app. See `BuildAppOptions`.
+    legacyProviderEnv: {},
     serveStatic: false,
   });
   await app.ready();

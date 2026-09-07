@@ -148,16 +148,8 @@ running keeps running.
 | `POCKETAGENT_TMUX_SOCKET` | `pocketagent` | Private tmux socket name. |
 | `POCKETAGENT_SHELL` | `$SHELL` | Shell for the `shell` agent. |
 | `POCKETAGENT_CLAUDE_BIN` | `claude` | Claude Code executable, resolved on `PATH`. |
-| `POCKETAGENT_DEEPSEEK_API_KEY` | — | Enables "Claude Code (DeepSeek)". Unset hides the entry. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
-| `POCKETAGENT_DEEPSEEK_BASE_URL` | `https://api.deepseek.com/anthropic` | Anthropic-compatible endpoint. |
-| `POCKETAGENT_DEEPSEEK_MODEL` | `deepseek-v4-pro` | Model sent as `ANTHROPIC_MODEL`. |
-| `POCKETAGENT_DEEPSEEK_SMALL_MODEL` | `deepseek-v4-flash` | Model for titles and compaction summaries. Defaulted to the cheap model explicitly, since it runs often. |
-| `POCKETAGENT_DEEPSEEK_MODELS` | `deepseek-v4-pro,deepseek-v4-flash` | Comma-separated catalog for the model picker. Take ids from the provider's own `/models`: DeepSeek's retired `deepseek-chat`/`deepseek-reasoner` aliases still resolve but both serve `deepseek-v4-flash`. |
-| `POCKETAGENT_OMNIROUTE_API_KEY` | — | Enables "Claude Code (Omniroute)". |
-| `POCKETAGENT_OMNIROUTE_BASE_URL` | — | Gateway base URL. No default: a gateway address is per-installation. |
-| `POCKETAGENT_OMNIROUTE_MODEL` | — | Model sent as `ANTHROPIC_MODEL`. |
-| `POCKETAGENT_OMNIROUTE_SMALL_MODEL` | main model | Model for titles and compaction summaries. |
-| `POCKETAGENT_OMNIROUTE_MODELS` | — | Comma-separated catalog, from the gateway's own `/models`. |
+| `POCKETAGENT_SETTINGS_ENC_KEY` | — | Base64 of 32 random bytes, encrypting each custom Claude provider's API key at rest. Unset disables that feature (it is not a boot error); set-but-invalid is. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
+| `POCKETAGENT_DEEPSEEK_*`, `POCKETAGENT_OMNIROUTE_*` | — | **Deprecated.** Read once on the first boot after upgrading, to import the old built-in variants as custom Claude providers, then never again. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
 | `LOG_LEVEL` | `info` | |
 | `NODE_ENV` | `development` | |
 
@@ -502,30 +494,67 @@ can never approve anything.
 
 ### Continuing a chat on another provider
 
-Optional, off unless you configure a key, and the second feature that changes where your data
-goes. **"Claude Code (DeepSeek)"** and **"Claude Code (Omniroute)"** run the same `claude`
-binary against a third-party Anthropic-compatible endpoint, so a conversation that has hit an
-Anthropic rate limit can be *continued* rather than abandoned: Claude Code derives its
-transcript path from the working directory rather than from which API it talked to, so the new
-turns append to the same conversation the Anthropic turns are in.
+Optional, off until you create one, and the second feature that changes where your data goes. A
+**custom Claude provider** runs the same `claude` binary against a third-party
+Anthropic-compatible endpoint, so a conversation that has hit an Anthropic rate limit can be
+*continued* rather than abandoned: Claude Code derives its transcript path from the working
+directory rather than from which API it talked to, so the new turns append to the same
+conversation the Anthropic turns are in.
+
+**Setting one up.** Generate an encryption key once, since the API key is stored encrypted in
+`data/pocketagent.db`:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+# add the output to .env as POCKETAGENT_SETTINGS_ENC_KEY=..., then restart
+```
+
+Then open **Settings → Custom Claude Providers → Add provider** and fill in a name, the base URL
+(a bare origin — Claude Code appends its own path), the API key, and the model ids the endpoint
+actually serves. Take those from the provider's own `GET /models`: the CLI reports *Anthropic's*
+catalog whatever the base URL says, so this list replaces it, and a guessed id yields a picker
+entry the endpoint rejects. Adding, editing or deleting a provider takes effect immediately —
+there is no restart, and no environment variable involved.
 
 This is the one thing in PocketAgent that sends repository contents somewhere other than
 Anthropic, so:
 
-- Both entries are hidden until their API key is set, and greyed out rather than failing at spawn.
+- Nothing exists until you create it, and a provider whose key cannot be decrypted is greyed out
+  rather than failing at spawn.
 - A session using one **says so persistently** in the UI, on every visit — not just at creation
-  — naming the provider. Cost figures in that session are computed with Anthropic's price list
-  and are therefore wrong; the same banner says that too.
+  — naming the provider and its base URL. Cost figures in that session are computed with
+  Anthropic's price list and are therefore wrong; the same banner says that too.
 - Stock `claude` is unaffected. No global environment change is needed, and every other session,
   scheduled job and webhook delivery keeps talking to Anthropic.
-- **Scheduled jobs and inbound webhooks refuse these agents**, at the route. They would work
-  mechanically, but shipping a repository to a third party on a timer or on a stranger's Jira
-  edit is a decision that deserves to be made on purpose rather than inherited.
+- **Scheduled jobs and inbound webhooks refuse a provider by default**, at the route. They would
+  work mechanically, but shipping a repository to a third party on a timer or on a stranger's
+  Jira edit is a decision that deserves to be made on purpose. Each provider has its own
+  **"allow unattended use"** toggle — off by default, per provider, and warned about in the
+  editor — which is the only thing that lifts it.
+- The API key is write-only. It is never returned by any route and there is no reveal action:
+  editing a provider re-enters the key, or leaves the field blank to keep the stored one.
+- Do not rotate `POCKETAGENT_SETTINGS_ENC_KEY` without re-entering every provider's key. A row
+  encrypted with the old key cannot be decrypted with a new one; the provider stays listed but
+  greys out, and the server logs which one.
 
 To use it: stop the chat, then pick the agent from the **"Continue as … / Change"** row above the
 composer and send your next message. One caveat worth knowing — this feature gets reached for
 *because* a conversation grew long, and a long transcript may exceed the third-party model's
 context window on the very first resumed turn. `/compact` before switching if that happens.
+
+**Upgrading from the old environment variables.** Before PA-28 there were exactly two variants,
+`claude-deepseek` and `claude-omniroute`, configured through `POCKETAGENT_DEEPSEEK_*` and
+`POCKETAGENT_OMNIROUTE_*`. Those variables are no longer configuration, but they are not
+ignored either: on the first boot after upgrading, if any of them is still set *and*
+`POCKETAGENT_SETTINGS_ENC_KEY` is set, the server imports one provider row per configured
+variant, logs a deprecation warning, and records that it has done so — after which they are
+never read again and can be deleted from `.env`. If the encryption key is not set the import is
+*deferred* rather than skipped, so generating a key and restarting still picks it up. Two things
+to know: the imported provider has "allow unattended use" **off**, exactly as the old variants
+did, and its agent id changes (`claude-deepseek` becomes `custom-claude:deepseek`), so an old
+chat's row keeps naming the old id and can no longer be continued on it — continue that
+conversation on the imported provider from the "Continue as…" picker instead. Deleting the
+imported provider in Settings is permanent; the still-present variables will not resurrect it.
 
 ### Inbound webhooks, and what they change
 

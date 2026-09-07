@@ -1,16 +1,32 @@
 import { describe, expect, it } from 'vitest';
-import { usesClaudeTranscripts } from '@pocketagent/protocol';
-import { loadConfig } from '../src/config/index.js';
-import { makeWorkspace, TEST_TOKEN } from './helpers.js';
+import {
+  customClaudeProviderId,
+  isCustomClaudeProviderId,
+  parseCustomClaudeProviderId,
+  usesClaudeTranscripts,
+} from '@pocketagent/protocol';
 import {
   createClaudeProviderAdapter,
+  modelListFrom,
   parseModelList,
   type ClaudeProviderOptions,
 } from '../src/agents/claude-provider.js';
 import { createClaudeAdapter } from '../src/agents/claude.js';
-import { createDefaultRegistry } from '../src/agents/registry.js';
+import { AgentRegistry, createDefaultRegistry } from '../src/agents/registry.js';
 import { buildChildEnv } from '../src/sessions/env.js';
 import { structuredAgentProblem } from '../src/routes/shared.js';
+
+const REGISTRY_BINS = {
+  shell: '/bin/bash',
+  claudeBin: 'claude',
+  agyBin: 'agy',
+  opencodeBin: 'opencode',
+  codexBin: 'codex',
+  piBin: 'pi',
+};
+
+/** A provider id in the PA-28 reserved namespace, for the registry tests. */
+const CUSTOM_ID = customClaudeProviderId('deepseek-abcd1234');
 
 /**
  * PA-19: Claude Code driven against a third-party Anthropic-compatible
@@ -25,7 +41,7 @@ import { structuredAgentProblem } from '../src/routes/shared.js';
  */
 
 const OPTS: ClaudeProviderOptions = {
-  id: 'claude-deepseek',
+  id: CUSTOM_ID,
   displayName: 'Claude Code (DeepSeek)',
   description: 'Claude Code running against DeepSeek',
   providerLabel: 'DeepSeek',
@@ -131,39 +147,54 @@ describe('claude provider variants', () => {
     expect(disclosure).toMatch(/cost/i);
   });
 
-  it('is refused by the unattended entry points', () => {
-    // Explicitly out of scope for PA-19: a variant would run on a timer or a
-    // Jira webhook perfectly well, and that is the problem.
-    const registry = createDefaultRegistry({
-      shell: '/bin/bash',
-      claudeBin: 'claude',
-      agyBin: 'agy',
-      opencodeBin: 'opencode',
-      codexBin: 'codex',
-      piBin: 'pi',
-      claudeProviders: [
-        {
-          id: 'claude-deepseek',
-          displayName: 'Claude Code (DeepSeek)',
-          description: 'd',
-          providerLabel: 'DeepSeek',
-          baseUrl: 'https://api.deepseek.com/anthropic',
-          apiKey: 'sk-test-key',
-          model: 'deepseek-v4-pro',
-          smallModel: null,
-          models: 'deepseek-v4-pro',
-        },
-      ],
+  it('is refused by the unattended entry points unless it opts in', () => {
+    // PA-19 made this unconditional. PA-28 keeps the *default* exactly as it
+    // was and adds one per-provider opt-in, so both directions are asserted:
+    // the block still exists, and lifting it is a deliberate act.
+    const registry = createDefaultRegistry(REGISTRY_BINS);
+    registry.registerCustomProvider({
+      id: CUSTOM_ID,
+      name: 'Claude Code (DeepSeek)',
+      baseUrl: 'https://api.deepseek.com/anthropic',
+      apiKey: 'sk-test-key',
+      models: ['deepseek-v4-pro'],
+      defaultModel: 'deepseek-v4-pro',
+      smallModel: null,
+      allowUnattended: false,
     });
 
-    expect(structuredAgentProblem(registry, 'claude-deepseek', 'scheduled')).toMatch(
+    expect(structuredAgentProblem(registry, CUSTOM_ID, 'scheduled')).toMatch(
       /third-party provider/,
     );
-    expect(structuredAgentProblem(registry, 'claude-deepseek', 'triggered by a webhook')).toMatch(
+    expect(structuredAgentProblem(registry, CUSTOM_ID, 'triggered by a webhook')).toMatch(
       /third-party provider/,
     );
     // …while the agent it is a variant of stays perfectly eligible.
     expect(structuredAgentProblem(registry, 'claude', 'scheduled')).toBeNull();
+
+    // Re-registering the same id with the flag on replaces the adapter live,
+    // and the existing route check needs no branch to notice.
+    registry.registerCustomProvider({
+      id: CUSTOM_ID,
+      name: 'Claude Code (DeepSeek)',
+      baseUrl: 'https://api.deepseek.com/anthropic',
+      apiKey: 'sk-test-key',
+      models: ['deepseek-v4-pro'],
+      defaultModel: 'deepseek-v4-pro',
+      smallModel: null,
+      allowUnattended: true,
+    });
+    expect(structuredAgentProblem(registry, CUSTOM_ID, 'scheduled')).toBeNull();
+    expect(structuredAgentProblem(registry, CUSTOM_ID, 'triggered by a webhook')).toBeNull();
+  });
+
+  it('defaults to attended-only when nothing says otherwise', () => {
+    // The safe direction has to be the default: any future caller that builds
+    // a variant without thinking about this gets the restriction.
+    expect(createClaudeProviderAdapter(OPTS).requiresAttendedUse).toBe(true);
+    expect(
+      createClaudeProviderAdapter({ ...OPTS, requiresAttendedUse: false }).requiresAttendedUse,
+    ).toBe(false);
   });
 
   it('leaves stock claude completely untouched', () => {
@@ -177,15 +208,10 @@ describe('claude provider variants', () => {
     expect(claude.requiresAttendedUse).toBeUndefined();
   });
 
-  it('registers no variants when none are configured', () => {
-    const registry = createDefaultRegistry({
-      shell: '/bin/bash',
-      claudeBin: 'claude',
-      agyBin: 'agy',
-      opencodeBin: 'opencode',
-      codexBin: 'codex',
-      piBin: 'pi',
-    });
+  it('registers no variants until one is created', () => {
+    // PA-28: the default registry has no provider variants at all any more —
+    // there is no env var left that could put one here.
+    const registry = createDefaultRegistry(REGISTRY_BINS);
     expect(registry.list().map((a) => a.id)).toEqual([
       'claude',
       'agy',
@@ -199,145 +225,150 @@ describe('claude provider variants', () => {
   it('registers a variant after claude, never before it', () => {
     // `ComposerPage` defaults to the first *available* agent, so a variant
     // appearing earlier in the list could become the default flavour for new
-    // chats just by being configured.
-    const registry = createDefaultRegistry({
-      shell: '/bin/bash',
-      claudeBin: 'claude',
-      agyBin: 'agy',
-      opencodeBin: 'opencode',
-      codexBin: 'codex',
-      piBin: 'pi',
-      claudeProviders: [
-        {
-          id: 'claude-deepseek',
-          displayName: 'Claude Code (DeepSeek)',
-          description: 'd',
-          providerLabel: 'DeepSeek',
-          baseUrl: 'https://api.deepseek.com/anthropic',
-          apiKey: 'sk-test-key',
-          model: 'deepseek-v4-pro',
-          smallModel: null,
-          models: 'deepseek-v4-pro',
-        },
-      ],
+    // chats just by existing. Now that a provider can be created long after
+    // boot, this is `AgentRegistry.list`'s own ordering rule rather than a
+    // property of the order `createDefaultRegistry` happened to register in.
+    const registry = createDefaultRegistry(REGISTRY_BINS);
+    registry.registerCustomProvider({
+      id: CUSTOM_ID,
+      name: 'Claude Code (DeepSeek)',
+      baseUrl: 'https://api.deepseek.com/anthropic',
+      apiKey: 'sk-test-key',
+      models: ['deepseek-v4-pro'],
+      defaultModel: 'deepseek-v4-pro',
+      smallModel: null,
+      allowUnattended: false,
     });
     const ids = registry.list().map((a) => a.id);
     expect(ids.indexOf('claude')).toBe(0);
-    expect(ids.indexOf('claude-deepseek')).toBe(1);
+    expect(ids.indexOf(CUSTOM_ID)).toBe(1);
+    // And every built-in still follows, in its original order.
+    expect(ids.slice(2)).toEqual(['agy', 'opencode', 'codex', 'pi', 'shell']);
+  });
+
+  it('unregisters a variant, and refuses to unregister anything else', () => {
+    const registry = createDefaultRegistry(REGISTRY_BINS);
+    registry.registerCustomProvider({
+      id: CUSTOM_ID,
+      name: 'p',
+      baseUrl: 'https://example.test',
+      apiKey: 'k',
+      models: ['m'],
+      defaultModel: 'm',
+      smallModel: null,
+      allowUnattended: false,
+    });
+    registry.unregisterCustomProvider(CUSTOM_ID);
+    expect(registry.get(CUSTOM_ID)).toBeUndefined();
+
+    // A built-in id passed here by mistake must not delete a real agent out of
+    // the roster for the rest of the process's life.
+    registry.unregisterCustomProvider('claude');
+    expect(registry.get('claude')).toBeDefined();
+  });
+
+  it('builds the variant against the registry\'s own claude binary', () => {
+    // The provider row carries no executable — a browser never supplies one —
+    // so the registry has to remember which binary a variant is a variant of.
+    const registry = new AgentRegistry('/opt/claude/bin/claude');
+    registry.registerCustomProvider({
+      id: CUSTOM_ID,
+      name: 'p',
+      baseUrl: 'https://example.test',
+      apiKey: 'k',
+      models: ['m'],
+      defaultModel: 'm',
+      smallModel: null,
+      allowUnattended: false,
+    });
+    expect(registry.get(CUSTOM_ID)?.buildCommand(START).command).toBe('/opt/claude/bin/claude');
+  });
+
+  it('discloses the provider name and base URL, since the id says neither', () => {
+    const registry = createDefaultRegistry(REGISTRY_BINS);
+    registry.registerCustomProvider({
+      id: CUSTOM_ID,
+      name: 'House Gateway',
+      baseUrl: 'https://gw.internal/anthropic',
+      apiKey: 'k',
+      models: ['m'],
+      defaultModel: 'm',
+      smallModel: null,
+      allowUnattended: false,
+    });
+    const disclosure = registry.get(CUSTOM_ID)?.providerDisclosure ?? '';
+    expect(disclosure).toContain('House Gateway');
+    expect(disclosure).toContain('https://gw.internal/anthropic');
+    expect(disclosure).toMatch(/cost/i);
   });
 });
 
-describe('parseModelList', () => {
+describe('parseModelList / modelListFrom', () => {
   it('is empty for an unconfigured catalog, so the SDK is asked as before', () => {
     expect(parseModelList(null)).toEqual([]);
     expect(parseModelList('')).toEqual([]);
     expect(parseModelList('  ,  ,')).toEqual([]);
+    expect(modelListFrom([])).toEqual([]);
   });
 
   it('trims, drops blanks, and keeps first-seen order without duplicates', () => {
     expect(parseModelList(' a , b ,a,, c ').map((m) => m.value)).toEqual(['a', 'b', 'c']);
+    // PA-28 stores models as an array rather than a comma string, and both
+    // halves go through one implementation so a picker cannot get two answers.
+    expect(modelListFrom([' a ', 'b', 'a', '', ' c ']).map((m) => m.value)).toEqual([
+      'a',
+      'b',
+      'c',
+    ]);
   });
 });
 
-describe('the configured variant ids and the protocol list cannot drift', () => {
-  it('every variant config declares an id the protocol recognises', () => {
-    // `usesClaudeTranscripts` is deliberately an explicit list rather than a
-    // `claude-` prefix test, which means adding a variant means editing two
-    // files. This is the guard for forgetting the second one: a variant the
-    // protocol does not recognise would be startable but would silently drop
-    // out of the "Continue as…" picker and route its finished chats away from
-    // the transcript preview — a confusing half-working state rather than a
-    // clean failure.
-    const ws = makeWorkspace();
-    try {
-      const config = loadConfig({
-        NODE_ENV: 'test',
-        LOG_LEVEL: 'silent',
-        POCKETAGENT_AUTH_TOKEN: TEST_TOKEN,
-        POCKETAGENT_WORKSPACE_ROOTS: ws.root,
-      } as NodeJS.ProcessEnv);
-
-      expect(config.claudeProviders.length).toBeGreaterThan(0);
-      for (const provider of config.claudeProviders) {
-        expect(
-          usesClaudeTranscripts(provider.id),
-          `${provider.id} is missing from CLAUDE_TRANSCRIPT_AGENT_IDS`,
-        ).toBe(true);
-      }
-    } finally {
-      ws.cleanup();
+describe('the custom-provider id namespace', () => {
+  it('round-trips, and rejects everything outside it', () => {
+    expect(parseCustomClaudeProviderId(customClaudeProviderId('x-1'))).toBe('x-1');
+    for (const id of ['claude', 'agy', 'codex', 'pocket:abc', 'custom-claude', '']) {
+      expect(isCustomClaudeProviderId(id)).toBe(false);
     }
   });
 
-  it('ships DeepSeek defaults that are real catalog ids, not retired aliases', () => {
-    // Regression guard for a real mistake: the first cut of this feature took
-    // `deepseek-chat`/`deepseek-reasoner` from a ticket description instead of
-    // from `GET https://api.deepseek.com/models`, which actually advertises
-    // `deepseek-v4-pro` / `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`.
-    //
-    // The aliases do still resolve, so nothing failed — they just BOTH serve
-    // `deepseek-v4-flash`, which put two entries in the picker that were the
-    // same model, one of them named as though it reasons. A provider that
-    // silently accepts a stale id is worse than one that rejects it, which is
-    // why this is asserted rather than left to the next person to notice.
-    const ws = makeWorkspace();
-    try {
-      const config = loadConfig({
-        NODE_ENV: 'test',
-        LOG_LEVEL: 'silent',
-        POCKETAGENT_AUTH_TOKEN: TEST_TOKEN,
-        POCKETAGENT_WORKSPACE_ROOTS: ws.root,
-      } as NodeJS.ProcessEnv);
-      const deepseek = config.claudeProviders.find((p) => p.id === 'claude-deepseek');
-
-      const retired = ['deepseek-chat', 'deepseek-reasoner'];
-      const listed = (deepseek?.models ?? '').split(',').map((m) => m.trim());
-      expect(listed).not.toEqual(expect.arrayContaining(retired));
-      expect(retired).not.toContain(deepseek?.model);
-      expect(retired).not.toContain(deepseek?.smallModel);
-
-      // Every advertised entry must be distinct, or the picker shows one model
-      // under two names — the actual symptom the aliases produced.
-      expect(new Set(listed).size).toBe(listed.length);
-
-      // And the small slot must not silently inherit the expensive main model:
-      // it drives conversation titles and compaction, which run constantly.
-      expect(deepseek?.smallModel).not.toBeNull();
-      expect(deepseek?.smallModel).not.toBe(deepseek?.model);
-    } finally {
-      ws.cleanup();
-    }
+  it('treats a truncated id as not-a-provider rather than as some provider', () => {
+    // Degrades to "unknown agent", which is a clean refusal, instead of
+    // resolving to whatever the empty string happens to match.
+    expect(parseCustomClaudeProviderId('custom-claude:')).toBeNull();
   });
 
-  it('leaves the variants unavailable when no key is configured', () => {
-    // The providers are always *declared*; the key is what makes one usable.
-    const ws = makeWorkspace();
-    try {
-      const config = loadConfig({
-        NODE_ENV: 'test',
-        LOG_LEVEL: 'silent',
-        POCKETAGENT_AUTH_TOKEN: TEST_TOKEN,
-        POCKETAGENT_WORKSPACE_ROOTS: ws.root,
-      } as NodeJS.ProcessEnv);
-      expect(config.claudeProviders.every((p) => p.apiKey === null)).toBe(true);
-    } finally {
-      ws.cleanup();
+  it('cannot collide with a registry id, which is what makes one value space safe', () => {
+    // Registry ids are bare lowercase words; the prefix carries a `:` precisely
+    // so a row written before PA-28 can never parse as a custom provider.
+    const registry = createDefaultRegistry(REGISTRY_BINS);
+    for (const agent of registry.list()) {
+      expect(isCustomClaudeProviderId(agent.id)).toBe(false);
     }
   });
 });
 
 describe('usesClaudeTranscripts', () => {
-  it('covers the variants as well as stock claude', () => {
+  it('covers every custom provider as well as stock claude', () => {
     // The single source of truth both sides read: the server decides who may
-    // resume a conversation, the browser decides who to offer.
+    // resume a conversation, the browser decides who to offer. PA-28 replaced
+    // the hardcoded `['claude', 'claude-deepseek', 'claude-omniroute']` array
+    // with a prefix test, because a user-created provider's id is minted at
+    // runtime and is not enumerable at compile time.
     expect(usesClaudeTranscripts('claude')).toBe(true);
-    expect(usesClaudeTranscripts('claude-deepseek')).toBe(true);
-    expect(usesClaudeTranscripts('claude-omniroute')).toBe(true);
+    expect(usesClaudeTranscripts(customClaudeProviderId('deepseek-abcd1234'))).toBe(true);
+    expect(usesClaudeTranscripts(customClaudeProviderId('anything-at-all'))).toBe(true);
   });
 
   it('excludes every agent with its own conversation namespace', () => {
     for (const id of ['agy', 'opencode', 'codex', 'pi', 'shell']) {
       expect(usesClaudeTranscripts(id)).toBe(false);
     }
+    // And the two retired hardcoded ids are no longer special. An old session
+    // row still naming one keeps its transcript on disk, but the id itself
+    // resolves to no agent, so nothing offers to continue it — which is the
+    // honest state, not a regression: the provider it named is gone from the
+    // registry until it is recreated in Settings.
+    expect(usesClaudeTranscripts('claude-deepseek')).toBe(false);
+    expect(usesClaudeTranscripts('claude-omniroute')).toBe(false);
   });
 });

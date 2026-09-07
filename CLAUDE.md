@@ -53,8 +53,8 @@ PA_TOKEN=... pnpm demo:desktop-ui        # two-pane shell, and the width/pointer
 PA_TOKEN=... pnpm demo:copy-ui           # copy-to-clipboard fallback over plain HTTP
 PA_TOKEN=... pnpm demo:cron-ui           # scheduled jobs: picker, preview, tree badge
 PA_TOKEN=... pnpm demo:webhook-ui        # webhooks: secret panel, signed delivery, filtered row
-PA_BASE=... pnpm demo:deepseek-variant   # cross-provider resume: one transcript, two providers
-PA_TOKEN=... pnpm demo:provider-ui       # variant in the picker, disclosure banner, "Continue as…"
+PA_DEEPSEEK_KEY=... pnpm demo:deepseek-variant   # cross-provider resume: one transcript, two providers
+PA_DEEPSEEK_KEY=... pnpm demo:provider-ui        # provider CRUD, picker, disclosure banner, "Continue as…"
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -91,15 +91,15 @@ Chosen per session; both live behind one session abstraction in `sessions/manage
 `normalize.ts` is a pure function and returns `[]` for unknown message types; that is where
 SDK upgrades should land first.
 
-**A transport is not a provider.** `claude-deepseek` / `claude-omniroute`
-(`agents/claude-provider.ts`, PA-19) are the *same* `claude` binary on the *same* SDK path,
-with `ANTHROPIC_BASE_URL` and friends set by `buildCommand`'s `env` — the swap happens below
-the CLI. That is what lets a conversation rate-limited on Anthropic be continued on a third
-party: Claude Code derives its transcript path from the cwd rather than from which API it
-talked to, so `resumeAgentSessionId` + `forkSession: false` appends the new turns to the same
-`.jsonl`. It is the only cross-provider continuation the architecture can offer, because
-`resumeAgentSessionId` is agent-namespaced everywhere else — hence
-`usesClaudeTranscripts` in `packages/protocol/src/session.ts`, the single list both sides read
+**A transport is not a provider.** A *custom Claude provider*
+(`agents/claude-provider.ts`, PA-19; user-managed since PA-28) is the *same* `claude` binary on
+the *same* SDK path, with `ANTHROPIC_BASE_URL` and friends set by `buildCommand`'s `env` — the
+swap happens below the CLI. That is what lets a conversation rate-limited on Anthropic be
+continued on a third party: Claude Code derives its transcript path from the cwd rather than
+from which API it talked to, so `resumeAgentSessionId` + `forkSession: false` appends the new
+turns to the same `.jsonl`. It is the only cross-provider continuation the architecture can
+offer, because `resumeAgentSessionId` is agent-namespaced everywhere else — hence
+`usesClaudeTranscripts` in `packages/protocol/src/session.ts`, the single rule both sides read
 (the server to decide who may resume a conversation, the browser to decide who to offer in the
 "Continue as…" picker and which finished chats have a transcript to preview). A variant must
 never gain a `structuredKind`: routing it to another engine silently breaks the shared
@@ -107,6 +107,47 @@ transcript, which is the only reason the feature exists. `AgentAdapter.staticMod
 the same reason in reverse — the CLI reports *Anthropic's* catalog whatever the base URL is, so
 for a variant its answer is actively wrong, and the declared list replaces it rather than
 merging with it.
+
+**Providers are rows, not env vars, and the registry is dynamic for exactly one thing** (PA-28).
+There were two compiled-in variants (`claude-deepseek` / `claude-omniroute`) built from
+`POCKETAGENT_DEEPSEEK_*` / `POCKETAGENT_OMNIROUTE_*` into a fully static `AgentRegistry`. They
+are now rows in `custom_claude_providers`, created from Settings, and
+`agents/custom-providers-store.ts` is what keeps the live registry in step: it hydrates every
+row at construction and each mutation writes the row *and* calls
+`AgentRegistry.registerCustomProvider` synchronously in the same request, so the very next
+`GET /api/agents` reflects it — no restart, no cache-invalidation window. That is the whole
+payoff of keeping the change inside `AgentAdapter`/`AgentRegistry` rather than inventing a
+parallel UI path: the composer's model row, the "Continue as…" picker and the cron/webhook agent
+selectors all pick a new provider up unmodified.
+
+A provider occupies the reserved `custom-claude:` prefix in the *existing* agent id value space
+(`CUSTOM_CLAUDE_PROVIDER_ID_PREFIX` and friends in `packages/protocol/src/session.ts`, the exact
+`pocket:` pattern PA-10 established and for the same reason). That is what let
+`usesClaudeTranscripts` stop being a hardcoded array — a user-created id is minted at runtime and
+is not enumerable at compile time — while keeping every existing reader of `agent` unchanged.
+`AgentRegistry.list` splices custom providers in immediately *after* `claude`, so PA-19's "read
+together in the picker, never before stock claude" ordering survives a provider that arrives
+long after boot.
+
+The API key is the first encrypted-at-rest secret here (`crypto/secret-box.ts`, AES-256-GCM,
+`base64(iv || tag || ciphertext)`). `POCKETAGENT_SETTINGS_ENC_KEY` unset **disables the feature
+rather than failing the boot** — an existing deployment must not stop starting because it has
+never generated a key — but set-but-invalid throws, since a typo would silently turn off a
+feature the operator thinks they just enabled. There is no reveal route and no reveal action:
+unlike a webhook's HMAC secret, which the *sender* must also hold, nothing outside this server
+needs to read this key back, so editing a provider re-enters it or leaves the field blank to keep
+the stored one. A row that cannot be decrypted is registered with a null key — listed, greyed
+out, and logged — rather than skipped, so a rotated key is visible instead of looking like a
+provider that vanished.
+
+The old env vars are read exactly once, from raw `process.env` (deliberately *not* through the
+`Config` schema — they are no longer configuration), by
+`CustomClaudeProviderStore.migrateLegacyEnvProviders`: one row per configured legacy variant, then
+a `legacy_claude_providers_migrated` settings flag so it never runs again. Flag-gated rather than
+"the table is empty", the same discipline `workspaces_seeded` uses, so deleting the imported
+provider does not resurrect it. With no encryption key the import is *deferred* and the flag is
+**not** written — consuming the one-shot with nothing to encrypt with would mean it silently never
+happens.
 
 ### Process backends — where the process lives
 
@@ -894,27 +935,37 @@ These are load-bearing. Several were bugs first.
   server's user can; that is a deliberate widening and the cost of picking any folder.
 - **The browser never supplies an executable or argv.** Adoption and resume both take their
   `cwd` from the server-validated target.
-- **A third-party provider variant is disclosed, and is never unattended** (PA-19). The
-  `claude-*` variants are the same binary with a different `ANTHROPIC_BASE_URL`, so nothing
-  about *how* they run is visible from the agent id alone — which makes two things load-bearing.
-  `AgentAdapter.providerDisclosure` is surfaced through `SessionInfo.providerDisclosure` and
-  rendered on **every visit**, following `skipPermissionsEnabled`'s "not just at the moment it
-  was created" rule, and it names the provider *and* says the cost figures are wrong (they are
-  computed with Anthropic pricing; a trivial DeepSeek turn reports ~$0.26). And
-  `AgentAdapter.requiresAttendedUse` makes `structuredAgentProblem` reject them for scheduled
-  jobs and inbound webhooks — a structured transport is necessary but no longer sufficient
-  there. They would run on those paths perfectly well, and that is exactly the problem: sending
-  a repository to a third party on a timer, or on a stranger's Jira edit, is its own decision
-  with its own disclosure work, deliberately left out of the ticket that added the variants.
+- **A third-party provider variant is disclosed, and is unattended only by explicit
+  per-provider opt-in** (PA-19; the opt-in is PA-28). This is an override of the *attended-use*
+  rule, not of the approval rule — `skipPermissions` is untouched by it, and a provider running
+  a cron job still obeys whatever that job's own toggle says. A `custom-claude:` variant is the same binary with a different
+  `ANTHROPIC_BASE_URL`, so nothing about *how* it runs is visible from the agent id alone —
+  which makes two things load-bearing. `AgentAdapter.providerDisclosure` is surfaced through
+  `SessionInfo.providerDisclosure` and rendered on **every visit**, following
+  `skipPermissionsEnabled`'s "not just at the moment it was created" rule, and it names the
+  provider *and its base URL* and says the cost figures are wrong (they are computed with
+  Anthropic pricing; a trivial DeepSeek turn reports ~$0.26). And
+  `AgentAdapter.requiresAttendedUse` makes `structuredAgentProblem` reject it for scheduled jobs
+  and inbound webhooks — a structured transport is necessary but no longer sufficient there.
+  PA-28 lifts that block for one provider at a time, through
+  `custom_claude_providers.allow_unattended`, which flows straight into that same field: **off by
+  default in the column, in the create request and in the editor**, warned about inline, and
+  surfaced on the provider row rather than only at creation. So `routes/shared.ts` and
+  `routes/cron.ts` need no branch for it — the per-provider decision arrives through the field
+  they already check, which is the whole reason the toggle was shaped this way rather than as a
+  global switch or a route exemption. A provider with it *off* is refused exactly as PA-19
+  refused both variants; turning it on is a deliberate act with its own disclosure, and turning
+  it back off re-tightens immediately with no restart.
   What that flag does **not** cover, and deliberately: the planner's `send_instruction`
   resuming a session that is *already* a variant (it passes `info.agent` through, so it
   continues a choice a human made attended, rather than selecting a provider on its own).
   Refusing there would strand a legitimately created variant session with no way to be
   continued by a tool that can continue every other kind.
-  The API key is read as `POCKETAGENT_*` and re-emitted as `ANTHROPIC_AUTH_TOKEN` precisely
-  because `buildChildEnv` strips that whole prefix, so the raw key never reaches an agent under
-  the name it is configured with; `ANTHROPIC_API_KEY` is blanked rather than left alone, so an
-  operator's own exported key cannot change how the variant behaves.
+  The API key is decrypted from the row and emitted as `ANTHROPIC_AUTH_TOKEN`; it is never
+  returned by any route, in plaintext or ciphertext, and there is no reveal endpoint.
+  `ANTHROPIC_API_KEY` is blanked rather than left alone, so an operator's own exported key
+  cannot change how the variant behaves. Nothing that logs a provider mutation includes the key
+  or the ciphertext — an audit line must not be one step away from recovering a credential.
 - **A project is an added folder, or a directory inside one.** Chats in a directory outside
   every folder are not listed, so removing a folder actually removes it. Nothing is deleted;
   re-adding brings its chats back.
@@ -968,11 +1019,15 @@ These are load-bearing. Several were bugs first.
 
 ## Environment
 
-A third-party provider variant is the one setting here that changes *where your data goes*:
-`POCKETAGENT_DEEPSEEK_API_KEY` / `POCKETAGENT_OMNIROUTE_*` route prompts and repository
-contents to a gateway the `claude` adapter has never talked to. Both are off until a key is
-set, and the README's security section says so out loud rather than leaving it to the variable
-name.
+A custom Claude provider is the one thing here that changes *where your data goes*: it routes
+prompts and repository contents to a gateway the `claude` adapter has never talked to. Since
+PA-28 it is not an env var at all — it is created in Settings and stored (key encrypted) in the
+database, so `POCKETAGENT_SETTINGS_ENC_KEY` is the only related setting left in `.env`. Unset
+disables the feature rather than failing the boot; the old `POCKETAGENT_DEEPSEEK_*` /
+`POCKETAGENT_OMNIROUTE_*` variables are read exactly once to import an existing setup and then
+ignored forever. Rotating the encryption key without re-entering every provider's key greys them
+out — the README's security section says all of this out loud rather than leaving it to a
+variable name.
 
 `.env` (gitignored) is required: `POCKETAGENT_AUTH_TOKEN` (min 24 chars, never
 auto-generated) and `POCKETAGENT_WORKSPACE_ROOTS` (no default — unset must never mean the

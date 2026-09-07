@@ -126,39 +126,75 @@ export const SessionInfo = z.object({
 export type SessionInfo = z.infer<typeof SessionInfo>;
 
 /**
- * Agent ids that drive the `claude` CLI and therefore share one conversation
- * namespace and one set of on-disk transcripts.
+ * PA-28: the namespace for a user-created Claude Code provider variant — the
+ * same `claude` binary with an `ANTHROPIC_BASE_URL` and key the user configured
+ * from Settings, stored in `custom_claude_providers` rather than compiled in.
+ *
+ * A reserved prefix in the *existing* agent id value space, for exactly the
+ * reason `POCKET_AGENT_ID_PREFIX` (PA-10) gives for Pocket Agents: every reader
+ * of `agent`/`AgentInfo.id` only has to learn one more string shape, not a new
+ * discriminator field with an either/or invariant no type can express. The
+ * prefix carries a `:` precisely *because* no `AgentRegistry` id can — registry
+ * ids are bare lowercase words — so a collision is impossible rather than
+ * merely unlikely, and a row written before this feature existed can never
+ * accidentally parse as a custom provider.
+ *
+ * This replaced a hardcoded `CLAUDE_TRANSCRIPT_AGENT_IDS = ['claude',
+ * 'claude-deepseek', 'claude-omniroute']` array. That array could not survive
+ * the change: a custom provider's id is minted at runtime, so the set is not
+ * enumerable at compile time. The prefix test is *not* the "silently capture an
+ * unrelated future agent named `claude-something`" hazard that array's comment
+ * warned about, because `custom-claude:` is a namespace nothing else may write
+ * into — only `customClaudeProviderId` mints one.
+ */
+export const CUSTOM_CLAUDE_PROVIDER_ID_PREFIX = 'custom-claude:';
+
+/** Build the agent id for a user-configured custom Claude provider. */
+export function customClaudeProviderId(providerId: string): string {
+  return `${CUSTOM_CLAUDE_PROVIDER_ID_PREFIX}${providerId}`;
+}
+
+/**
+ * The provider row id inside a custom-provider agent id, or `null` when this is
+ * an ordinary coding-agent id.
+ *
+ * Returns `null` for a bare `'custom-claude:'` with nothing after it too, so a
+ * truncated or hand-edited value degrades to "not a custom provider" (and is
+ * then rejected as an unknown agent) rather than to "some custom provider".
+ */
+export function parseCustomClaudeProviderId(agent: string): string | null {
+  if (!agent.startsWith(CUSTOM_CLAUDE_PROVIDER_ID_PREFIX)) return null;
+  const id = agent.slice(CUSTOM_CLAUDE_PROVIDER_ID_PREFIX.length);
+  return id.length > 0 ? id : null;
+}
+
+/** Whether this agent id names a user-configured custom Claude provider. */
+export function isCustomClaudeProviderId(agent: string): boolean {
+  return parseCustomClaudeProviderId(agent) !== null;
+}
+
+/**
+ * Whether this agent reads and writes Claude Code's own on-disk transcripts,
+ * and therefore shares one conversation namespace with every other such agent.
  *
  * `resumeAgentSessionId` is agent-namespaced and nothing converts between
  * namespaces: for `claude` it is an id under
  * `~/.claude/projects/<encoded-cwd>/<id>.jsonl`, while opencode's is a session
- * id inside `opencode serve`, codex's a thread id, and pi's its own file. The
- * third-party variants (PA-19) are the one exception — they are the same
- * binary with a different `ANTHROPIC_BASE_URL`, and Claude Code derives the
- * transcript path from the cwd rather than from which API it talked to, so a
- * conversation started on Anthropic can be continued on DeepSeek and lands in
- * the same file.
+ * id inside `opencode serve`, codex's a thread id, and pi's its own file. A
+ * provider variant is the one exception — it is the same binary with a
+ * different `ANTHROPIC_BASE_URL`, and Claude Code derives the transcript path
+ * from the cwd rather than from which API it talked to, so a conversation
+ * started on Anthropic can be continued on DeepSeek and lands in the same file.
  *
  * This lives in the protocol, not in either app, for the same reason
  * `cron-expr.ts` and `webhook-template.ts` do: the server decides which agents
  * may resume a given conversation, and the browser decides which ones to offer
  * in the "Continue with…" picker and which finished chats have a transcript to
- * preview. Two copies of the list would eventually disagree, and the visible
+ * preview. Two copies of the rule would eventually disagree, and the visible
  * symptom would be a picker offering a resume that cannot work.
- *
- * Adding a variant means adding it here — deliberately explicit rather than a
- * `claude-` prefix test, which would silently capture an unrelated future
- * agent that merely happened to be named that way.
  */
-export const CLAUDE_TRANSCRIPT_AGENT_IDS = [
-  'claude',
-  'claude-deepseek',
-  'claude-omniroute',
-] as const;
-
-/** Whether this agent reads and writes Claude Code's own on-disk transcripts. */
 export function usesClaudeTranscripts(agentId: string): boolean {
-  return (CLAUDE_TRANSCRIPT_AGENT_IDS as readonly string[]).includes(agentId);
+  return agentId === 'claude' || isCustomClaudeProviderId(agentId);
 }
 
 export const AgentInfo = z.object({

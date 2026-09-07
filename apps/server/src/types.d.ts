@@ -3,6 +3,7 @@ import type { AuthService } from './auth/index.js';
 import type { SessionManager } from './sessions/manager.js';
 import type { WorkspaceRegistry } from './workspaces/index.js';
 import type { AgentRegistry } from './agents/registry.js';
+import type { CustomClaudeProviderStore } from './agents/custom-providers-store.js';
 import type { ProcessBackend } from './backends/index.js';
 import type { Db } from './db/index.js';
 import type { PushService } from './push/index.js';
@@ -35,6 +36,8 @@ export interface PocketContext {
   /** PA-6 phase 2: planner chat CRUD and the turn loop. */
   plannerChats: PlannerChatService;
   agents: AgentRegistry;
+  /** PA-28: user-managed Claude Code provider variants, kept in sync with `agents`. */
+  customClaudeProviders: CustomClaudeProviderStore;
   db: Db;
   backend: ProcessBackend;
   push: PushService;

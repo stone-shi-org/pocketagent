@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Browser pass over the Claude Code third-party variants (PA-19), phone size.
+ * Browser pass over the Claude Code third-party variants (PA-19, PA-28),
+ * phone size.
  *
  * The server demo (`demo:deepseek-variant`) proves the conversation really is
  * shared across providers. This one covers what only a browser can answer:
@@ -11,7 +12,9 @@
  * changes which agent the next prompt resumes as.
  *
  * Expects a *scratch* server (PA_BASE, PA_TOKEN) with a throwaway workspace
- * root — it starts real agents.
+ * root — it starts real agents — and, since PA-28, a `POCKETAGENT_SETTINGS_ENC_KEY`
+ * on it plus `PA_DEEPSEEK_KEY` here: the provider no longer comes from `.env`,
+ * so this creates one over the API first and deletes it at the end.
  */
 import { chromium, devices } from 'playwright';
 import { WebSocket } from 'ws';
@@ -21,6 +24,7 @@ import path from 'node:path';
 
 const BASE = process.env.PA_BASE ?? 'http://127.0.0.1:8799';
 const TOKEN = process.env.PA_TOKEN;
+const DEEPSEEK_KEY = process.env.PA_DEEPSEEK_KEY;
 const REPO = new URL('../../../', import.meta.url).pathname;
 const SHOTS = path.join(REPO, 'screenshots');
 
@@ -144,8 +148,46 @@ await page.fill('input[type="password"]', TOKEN);
 await page.click('button[type="submit"]');
 await until(() => page.locator('.home-bar').isVisible());
 
-// -- 1. The variants reach the composer's agent picker ----------------------
-heading('The variants appear in the new-chat agent list');
+// -- 0. Create the provider from the Settings page --------------------------
+// PA-28: there is no env var left that could put one in the roster, so this is
+// now the first step of the demo rather than a precondition of the server.
+heading('Create a custom Claude provider from Settings');
+if (!DEEPSEEK_KEY) {
+  console.error('PA_DEEPSEEK_KEY is required since PA-28.');
+  process.exit(1);
+}
+const providerCreated = await call('/api/custom-claude-providers', {
+  method: 'POST',
+  body: JSON.stringify({
+    name: 'Claude Code (DeepSeek)',
+    providerKind: 'deepseek',
+    baseUrl: 'https://api.deepseek.com/anthropic',
+    apiKey: DEEPSEEK_KEY,
+    models: ['deepseek-v4-pro', 'deepseek-v4-flash'],
+    defaultModel: 'deepseek-v4-pro',
+    smallModel: 'deepseek-v4-flash',
+  }),
+});
+const providerId = providerCreated?.id;
+check(typeof providerId === 'string', 'POST /api/custom-claude-providers created it', providerId);
+
+await page.goto(`${BASE}/#/settings`);
+const sectionShown = await until(() =>
+  page.locator('.settings-section', { hasText: 'Custom Claude Providers' }).isVisible(),
+);
+check(sectionShown, 'the Settings section lists it');
+if (sectionShown) {
+  const section = page.locator('.settings-section', { hasText: 'Custom Claude Providers' });
+  const text = await section.innerText();
+  check(text.includes('Claude Code (DeepSeek)'), 'the row names the provider');
+  check(!text.includes(DEEPSEEK_KEY), 'and the page never shows the API key');
+  await page.screenshot({ path: path.join(SHOTS, 'pa28-settings-section.png'), fullPage: true });
+}
+
+// -- 1. The variant reaches the composer's agent picker ---------------------
+heading('The provider appears in the new-chat agent list');
+await page.goto(BASE);
+await until(() => page.locator('.home-bar').isVisible());
 await page.click('.compose-fab');
 await page.waitForSelector('.composer-page');
 await page.waitForSelector('.selector-row');
@@ -157,10 +199,6 @@ check(
   labels.some((l) => l.includes('Claude Code (DeepSeek)')),
   'Claude Code (DeepSeek) is offered',
   labels.filter((l) => l.includes('Claude')).join(' | '),
-);
-check(
-  labels.some((l) => l.includes('Claude Code (Omniroute)')),
-  'Claude Code (Omniroute) is offered',
 );
 await page.screenshot({ path: path.join(SHOTS, 'pa19-agent-picker.png') });
 
@@ -200,7 +238,7 @@ heading('A variant session shows a standing disclosure');
 const created = await call('/api/sessions', {
   method: 'POST',
   body: JSON.stringify({
-    agent: 'claude-deepseek',
+    agent: providerId,
     cwd: root,
     cols: 80,
     rows: 24,
@@ -258,6 +296,26 @@ if (rowShown) {
   );
   const after = await page.locator('.resume-as-row').innerText();
   check(after.includes('Claude Code'), 'the row reflects the new choice', after.trim());
+}
+
+// -- 4. Deleting it takes it out of the picker again ------------------------
+heading('Deleting the provider removes it from the agent list');
+if (providerId) {
+  await call(`/api/custom-claude-providers/${encodeURIComponent(providerId)}`, {
+    method: 'DELETE',
+  });
+  await page.goto(BASE);
+  await until(() => page.locator('.home-bar').isVisible());
+  await page.click('.compose-fab');
+  await page.waitForSelector('.selector-row');
+  await page.click('[data-selector="Agent"]');
+  await until(() => page.locator('.sheet-option').first().isVisible());
+  const remaining = await page.locator('.sheet-option-label').allTextContents();
+  check(
+    !remaining.some((l) => l.includes('Claude Code (DeepSeek)')),
+    'it is gone with no restart',
+    remaining.join(' | '),
+  );
 }
 
 await browser.close();

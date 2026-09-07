@@ -213,6 +213,18 @@ export function CronJobEditorPage({
   }, [structuredAgents]);
 
   const selectedAgent = agents.find((a) => a.id === agent) ?? null;
+  /**
+   * `staticModels` wins over `cachedModels` when non-empty, which is the rule
+   * `AgentInfo.staticModels` itself states. It matters here for exactly one
+   * kind of agent: a custom Claude provider (PA-28) has never reported a
+   * catalog through a live session, so `cachedModels` is empty and this
+   * datalist was blank — while the adapter's declared list is precisely the
+   * set of ids the provider will accept.
+   */
+  const agentModels =
+    (selectedAgent?.staticModels ?? []).length > 0
+      ? (selectedAgent?.staticModels ?? [])
+      : (selectedAgent?.cachedModels ?? []);
 
   const flatProjects = useMemo(() => flattenProjects(projects), [projects]);
   const dirOptions = useMemo(() => {
@@ -590,7 +602,7 @@ export function CronJobEditorPage({
                     {m.label} ({m.modelId})
                   </option>
                 ))
-              : (selectedAgent?.cachedModels ?? []).map((m) => (
+              : agentModels.map((m) => (
                   <option key={m.value} value={m.value}>
                     {m.displayName}
                   </option>

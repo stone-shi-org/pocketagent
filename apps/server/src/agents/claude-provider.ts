@@ -53,6 +53,16 @@ export interface ClaudeProviderOptions {
   staticModels: ModelInfo[];
   /** Human-readable name of the third party, for the disclosure banner. */
   providerLabel: string;
+  /**
+   * Whether a human has to be present — see `AgentAdapter.requiresAttendedUse`.
+   *
+   * Defaults to `true`, which is the PA-19 behaviour and the safe direction:
+   * anything that builds a variant without saying otherwise is refused by the
+   * unattended entry points. PA-28's per-provider `allowUnattended` toggle is
+   * the only caller that ever passes `false`, and it is off by default in the
+   * database, in the create request and in the editor.
+   */
+  requiresAttendedUse?: boolean;
 }
 
 export function createClaudeProviderAdapter(opts: ClaudeProviderOptions): AgentAdapter {
@@ -72,9 +82,10 @@ export function createClaudeProviderAdapter(opts: ClaudeProviderOptions): AgentA
     transports: ['structured', 'terminal'],
     defaultTransport: 'structured',
     supportsSkipPermissions: true,
-    // Out of scope for PA-19, and enforced rather than merely documented: see
-    // `AgentAdapter.requiresAttendedUse`.
-    requiresAttendedUse: true,
+    // Enforced rather than merely documented: see
+    // `AgentAdapter.requiresAttendedUse`. `true` unless a PA-28 custom
+    // provider explicitly opted out of it.
+    requiresAttendedUse: opts.requiresAttendedUse ?? true,
     staticModels: opts.staticModels,
     providerDisclosure:
       `This session runs Claude Code against ${opts.providerLabel}, not Anthropic. ` +
@@ -132,10 +143,22 @@ export function createClaudeProviderAdapter(opts: ClaudeProviderOptions): AgentA
  * model would be a switch that silently does nothing.
  */
 export function parseModelList(raw: string | null): ModelInfo[] {
-  if (!raw) return [];
+  return modelListFrom(raw ? raw.split(',') : []);
+}
+
+/**
+ * The same catalog builder, from an already-split list of ids.
+ *
+ * PA-28 stores a provider's models as a JSON array rather than a comma string,
+ * so it needs this half; `parseModelList` keeps its comma-string signature for
+ * the legacy-env migration path that still has one. Deliberately one
+ * implementation and not two — trimming, de-duplication and first-seen ordering
+ * are exactly the properties a picker depends on, and two copies would drift.
+ */
+export function modelListFrom(ids: readonly string[]): ModelInfo[] {
   const seen = new Set<string>();
   const models: ModelInfo[] = [];
-  for (const entry of raw.split(',')) {
+  for (const entry of ids) {
     const value = entry.trim();
     if (!value || seen.has(value)) continue;
     seen.add(value);

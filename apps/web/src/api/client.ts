@@ -22,6 +22,10 @@ import type {
   SettingsResponse,
   ShellSessionSummary,
   UpdateSettingsRequest,
+  CreateCustomClaudeProviderRequest,
+  CustomClaudeProviderListResponse,
+  CustomClaudeProviderSummary,
+  UpdateCustomClaudeProviderRequest,
   CreateWebhookRequest,
   UpdateWebhookRequest,
   Webhook,
@@ -327,6 +331,31 @@ export const api = {
     }),
 
   listAgents: () => request<{ agents: AgentInfo[] }>('/api/agents'),
+
+  // ---- Custom Claude providers (PA-28) ---------------------------------------
+  //
+  // No `reveal` method, deliberately: there is no such route. The API key is
+  // write-only — an edit re-enters it, or leaves it blank to keep the stored
+  // one — so nothing here can ever put a third-party credential into the
+  // browser.
+
+  listCustomClaudeProviders: () =>
+    request<CustomClaudeProviderListResponse>('/api/custom-claude-providers'),
+
+  createCustomClaudeProvider: (body: CreateCustomClaudeProviderRequest) =>
+    request<CustomClaudeProviderSummary>('/api/custom-claude-providers', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  updateCustomClaudeProvider: (id: string, body: UpdateCustomClaudeProviderRequest) =>
+    request<CustomClaudeProviderSummary>(`/api/custom-claude-providers/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  deleteCustomClaudeProvider: (id: string) =>
+    request<void>(`/api/custom-claude-providers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   listConversations: () =>
     request<{ conversations: ConversationInfo[] }>('/api/conversations'),
