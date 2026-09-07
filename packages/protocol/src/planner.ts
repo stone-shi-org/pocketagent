@@ -43,10 +43,10 @@ export const PlannerWorkspace = z.object({
    * split).
    */
   memoryEnabled: z.boolean(),
-  /** PA-29 phase 3 (consolidation, not implemented yet): when a background
-      pass last folded this agent's short-term memories into long-term ones.
-      `null` until that phase ever runs for this agent — the column exists
-      now so that later phase needs no migration of its own. */
+  /** PA-29 phase 3: when `MemoryConsolidationService` last folded this
+      agent's short-term memories into long-term ones. `null` until that
+      service's ticker has run at least once for this agent (a freshly
+      created agent, or one whose memory was just turned back on). */
   lastConsolidatedAt: z.number().int().nullable(),
 });
 export type PlannerWorkspace = z.infer<typeof PlannerWorkspace>;
@@ -87,12 +87,15 @@ export type CreatePlannerWorkspaceRequest = z.infer<typeof CreatePlannerWorkspac
  * consequence this has for existing chats' transcripts, which the editor
  * must disclose before sending this; `createPath` mirrors
  * `CreatePlannerWorkspaceRequest`'s own flag for a not-yet-existing one.
+ * `memoryEnabled` (PA-29 phase 4) toggles this agent's memory system on/off
+ * — trivially reversible, unlike `path`, so it needs no confirmation step.
  */
 export const UpdatePlannerWorkspaceRequest = z.object({
   name: z.string().min(1).max(128).optional(),
   defaultModelId: z.string().max(200).nullable().optional(),
   path: z.string().min(1).max(4096).optional(),
   createPath: z.boolean().optional(),
+  memoryEnabled: z.boolean().optional(),
 });
 export type UpdatePlannerWorkspaceRequest = z.infer<typeof UpdatePlannerWorkspaceRequest>;
 

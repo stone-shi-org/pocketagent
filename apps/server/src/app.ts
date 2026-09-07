@@ -57,6 +57,7 @@ import { createPlannerWorkspaceStore } from './planner/store.js';
 import { PlannerChatService } from './planner/chats.js';
 import type { QueuedRunSummary } from '@pocketagent/protocol';
 import { PlannerMemoryService } from './planner/memory.js';
+import { MemoryConsolidationService } from './planner/memory-consolidation.js';
 import type { PocketContext } from './types.js';
 import { PromptQueueService } from './sessions/prompt-queue.js';
 
@@ -387,6 +388,19 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     logger: app.log,
   });
 
+  // PA-29 phase 3: the "dream" pass. Constructed after `plannerMemory` (which
+  // it drives) and `plannerWorkspaces` (which it reads), started explicitly
+  // below alongside `cron.init()`/`webhooks.init()` rather than folded into
+  // either — it has its own workspace-scoped due-check and no run history of
+  // its own for a route to read, so nothing in `PocketContext` needs it yet.
+  const memoryConsolidation = new MemoryConsolidationService({
+    db,
+    plannerWorkspaces,
+    memory: plannerMemory,
+    logger: app.log,
+    ...(options.plannerLlmFetch ? { llmFetch: options.plannerLlmFetch } : {}),
+  });
+
   const webhooks = new WebhookService({
     db,
     sessions,
@@ -468,6 +482,10 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // prompts, since `PromptQueueService` has already registered itself with the
   // shared queue above.
   webhooks.init();
+
+  // No reconciliation needed at boot — a due workspace is simply discovered
+  // on the first tick, whenever the server last shut down.
+  memoryConsolidation.start();
 
   await app.register(cookie);
   await app.register(rateLimit, {
@@ -604,6 +622,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     // that is already tearing down.
     cron.stop();
     webhooks.stop();
+    memoryConsolidation.stop();
     await sessions.shutdown();
     if (ownsDb) db.close();
   });

@@ -27,8 +27,8 @@ export interface PlannerWorkspaceRow {
   /** PA-29: whether this agent's memory system is on — see
       `PlannerMemory`'s (protocol package) doc comment for what this gates. */
   memoryEnabled: boolean;
-  /** PA-29 phase 3 (not implemented yet): when a consolidation pass last ran
-      for this agent. `null` until that phase exists. */
+  /** PA-29 phase 3: when `MemoryConsolidationService` last ran for this
+      agent. `null` until its ticker has processed this agent at least once. */
   lastConsolidatedAt: number | null;
 }
 
@@ -45,6 +45,13 @@ export interface PlannerWorkspaceStore {
   /** Re-points an existing row at a different (already realpath-resolved)
       directory — see `PlannerWorkspaceRegistry.setPath`'s doc comment. */
   setPath(id: string, newPath: string): void;
+  /** PA-29 phase 4: the memory system's own on/off switch for one agent. */
+  setMemoryEnabled(id: string, enabled: boolean): void;
+  /** PA-29 phase 3: written by `MemoryConsolidationService` after it
+      finishes processing this agent (including a cycle with nothing new to
+      fold — see that service's own doc comment for why the marker still
+      advances then). */
+  setLastConsolidatedAt(id: string, at: number): void;
   /** Whether `ensureDefaultWorkspace` has already run, ever — see its doc comment. */
   isSeeded(): boolean;
   markSeeded(): void;
@@ -231,6 +238,37 @@ export class PlannerWorkspaceRegistry {
     if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
     this.store.setDefaultModelId(id, modelId);
     const updated = { ...row, defaultModelId: modelId };
+    this.rows = this.rows.map((r) => (r.id === id ? updated : r));
+    return updated;
+  }
+
+  /**
+   * PA-29 phase 4: turn this agent's memory system on or off — trivially
+   * reversible (unlike `setPath`), so the editor needs no confirmation step,
+   * only the standing disclosure text CLAUDE.md's PA-6-round-5 invariant
+   * already requires for every persistent toggle in this feature.
+   */
+  setMemoryEnabled(id: string, enabled: boolean): PlannerWorkspaceRow {
+    const row = this.get(id);
+    if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
+    this.store.setMemoryEnabled(id, enabled);
+    const updated = { ...row, memoryEnabled: enabled };
+    this.rows = this.rows.map((r) => (r.id === id ? updated : r));
+    return updated;
+  }
+
+  /**
+   * PA-29 phase 3: record that `MemoryConsolidationService` just finished a
+   * pass over this agent — called whether or not that pass actually wrote
+   * any long-term memories, so "nothing new since last time" still advances
+   * the marker instead of re-scanning the same growing window forever (see
+   * that service's own doc comment).
+   */
+  setLastConsolidatedAt(id: string, at: number): PlannerWorkspaceRow {
+    const row = this.get(id);
+    if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
+    this.store.setLastConsolidatedAt(id, at);
+    const updated = { ...row, lastConsolidatedAt: at };
     this.rows = this.rows.map((r) => (r.id === id ? updated : r));
     return updated;
   }

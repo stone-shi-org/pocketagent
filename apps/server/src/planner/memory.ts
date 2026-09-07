@@ -91,8 +91,8 @@ export class PlannerMemoryService {
    * Insert a new memory, then enforce that tier's per-workspace budget by
    * evicting the lowest-scoring row(s) if this pushed it over the cap.
    * `tier` defaults to `'short'` — the rolling-window fold and `memory_save`
-   * both write short-term rows; only a future consolidation pass (phase 3)
-   * writes `'long'` directly.
+   * both write short-term rows; only `MemoryConsolidationService` (phase 3,
+   * `planner/memory-consolidation.ts`) writes `'long'` directly.
    */
   save(
     workspaceId: string,

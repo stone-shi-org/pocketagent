@@ -63,6 +63,10 @@ import type {
   SetPlannerAgentToolRequest,
   SetPlannerToolEnabledRequest,
   UpdatePlannerWorkspaceRequest,
+  PlannerMemory,
+  PlannerMemoryListResponse,
+  PlannerMemoryTier,
+  UpdatePlannerMemoryRequest,
 } from '@pocketagent/protocol';
 
 export class ApiError extends Error {
@@ -686,4 +690,19 @@ export const api = {
 
   deletePlannerToolApproval: (id: string) =>
     request<void>(`/api/planner/tool-approvals/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /** PA-29 phase 4: one agent's own memories, optionally narrowed to a tier. */
+  listPlannerMemories: (workspaceId: string, tier?: PlannerMemoryTier) =>
+    request<PlannerMemoryListResponse>(
+      `/api/planner/workspaces/${encodeURIComponent(workspaceId)}/memories${tier ? `?tier=${encodeURIComponent(tier)}` : ''}`,
+    ),
+
+  updatePlannerMemory: (id: string, patch: UpdatePlannerMemoryRequest) =>
+    request<PlannerMemory>(`/api/planner/memories/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  deletePlannerMemory: (id: string) =>
+    request<void>(`/api/planner/memories/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 };

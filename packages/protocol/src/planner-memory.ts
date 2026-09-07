@@ -12,10 +12,12 @@ import { z } from 'zod';
  * A memory row's two tiers: `'short'` is folded automatically out of a
  * chat's own rolling window as old turns are evicted from what the LLM sees
  * (`PlannerChatService`'s `eventsToLlmMessages`), tagged with the chat it
- * came from. `'long'` is written directly by a later consolidation pass
- * (PA-29 phase 3 — not implemented yet; `PlannerWorkspace.lastConsolidatedAt`
- * exists already so that phase has a column to read/write without another
- * migration). Both tiers share one table and one scoring function
+ * came from. `'long'` is written directly by `MemoryConsolidationService`
+ * (PA-29 phase 3, `apps/server/src/planner/memory-consolidation.ts`) — a
+ * background pass that periodically folds a workspace's short-term memories
+ * (plus its chats' own recent transcript content) into durable facts.
+ * `PlannerWorkspace.lastConsolidatedAt` records when that pass last ran for
+ * a given agent. Both tiers share one table and one scoring function
  * (`score()` in `apps/server/src/planner/memory.ts`) — "one function, two
  * call sites" per the approved design, so eviction and search relevance can
  * never silently diverge on what "worth keeping" means.

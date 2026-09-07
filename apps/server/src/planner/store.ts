@@ -70,6 +70,12 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
     setPath: (id, newPath) => {
       db.prepare('UPDATE planner_workspaces SET path = ? WHERE id = ?').run(newPath, id);
     },
+    setMemoryEnabled: (id, enabled) => {
+      db.prepare('UPDATE planner_workspaces SET memory_enabled = ? WHERE id = ?').run(enabled ? 1 : 0, id);
+    },
+    setLastConsolidatedAt: (id, at) => {
+      db.prepare('UPDATE planner_workspaces SET last_consolidated_at = ? WHERE id = ?').run(at, id);
+    },
     isSeeded: () => readSetting(db, PLANNER_DEFAULT_WORKSPACE_SEEDED_KEY) !== null,
     markSeeded: () => writeSetting(db, PLANNER_DEFAULT_WORKSPACE_SEEDED_KEY, new Date().toISOString()),
   };

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { PlannerAgentToolInfo, PlannerModel, PlannerWorkspace } from '@pocketagent/protocol';
+import type { PlannerAgentToolInfo, PlannerMemory, PlannerMemoryTier, PlannerModel, PlannerWorkspace } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
+import { formatRelative } from '../components/StatusBadge.js';
 
 interface Props {
   /** Always an existing agent's id — creating a new one is still
@@ -38,6 +39,11 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
   const [nameInput, setNameInput] = useState('');
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
   const [pendingDirectory, setPendingDirectory] = useState<{ path: string; create: boolean } | null>(null);
+  const [memoryTier, setMemoryTier] = useState<PlannerMemoryTier>('short');
+  const [memories, setMemories] = useState<PlannerMemory[] | null>(null);
+  const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null);
+  const [editContent, setEditContent] = useState('');
+  const [editImportance, setEditImportance] = useState(3);
 
   const load = useCallback(async () => {
     try {
@@ -63,6 +69,27 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
   useEffect(() => {
     void load();
   }, [load]);
+
+  /** PA-29 phase 4: this agent's own memories, one tier at a time — kept
+      separate from `load` above so switching tiers doesn't re-fetch the
+      model/tool catalogs, and so a memory edit/delete can refresh just this
+      list without re-fetching everything else on the page. */
+  const loadMemories = useCallback(
+    async (tier: PlannerMemoryTier) => {
+      try {
+        const { memories: list } = await api.listPlannerMemories(agentId, tier);
+        setMemories(list);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not load memories.');
+      }
+    },
+    [agentId, onApiError],
+  );
+
+  useEffect(() => {
+    void loadMemories(memoryTier);
+  }, [loadMemories, memoryTier]);
 
   const withBusy = useCallback(
     async (action: () => Promise<unknown>) => {
@@ -105,6 +132,58 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
       api.updatePlannerWorkspace(agentId, { path: pendingDirectory.path, createPath: pendingDirectory.create }),
     );
     setPendingDirectory(null);
+  };
+
+  // Trivially reversible (unlike the directory change above), so this is a
+  // plain toggle with no `ConfirmDialog` — the standing disclosure text
+  // rendered below whenever it's off is what CLAUDE.md's own "disclosed
+  // persistently, not just at creation" invariant asks for instead.
+  const toggleMemoryEnabled = (enabled: boolean): void => {
+    void withBusy(() => api.updatePlannerWorkspace(agentId, { memoryEnabled: enabled }));
+  };
+
+  const startEditMemory = (memory: PlannerMemory): void => {
+    setEditingMemoryId(memory.id);
+    setEditContent(memory.content);
+    setEditImportance(memory.importance);
+  };
+
+  const cancelEditMemory = (): void => {
+    setEditingMemoryId(null);
+  };
+
+  const saveEditMemory = (): void => {
+    const id = editingMemoryId;
+    if (!id) return;
+    void (async () => {
+      setBusy(true);
+      try {
+        await api.updatePlannerMemory(id, { content: editContent, importance: editImportance });
+        setEditingMemoryId(null);
+        await loadMemories(memoryTier);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not save that memory.');
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
+
+  const deleteMemory = (id: string): void => {
+    void (async () => {
+      setBusy(true);
+      try {
+        await api.deletePlannerMemory(id);
+        if (editingMemoryId === id) setEditingMemoryId(null);
+        await loadMemories(memoryTier);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not delete that memory.');
+      } finally {
+        setBusy(false);
+      }
+    })();
   };
 
   if (!loaded) {
@@ -229,6 +308,117 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
                 <span className="planner-row-meta">{t.description}</span>
               </span>
             </label>
+          ))
+        )}
+      </div>
+
+      <div className="planner-section">
+        <h3>Memory</h3>
+        <label className="planner-checkbox-row" style={{ marginBottom: 8 }}>
+          <input
+            type="checkbox"
+            checked={agent.memoryEnabled}
+            disabled={busy}
+            onChange={(e) => toggleMemoryEnabled(e.target.checked)}
+          />
+          <span>Remember things across turns and chats</span>
+        </label>
+        {!agent.memoryEnabled && (
+          <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+            Off: this agent will not fold anything into memory, rank memories into a turn, or run
+            consolidation. Nothing already saved is deleted — turning this back on picks up right
+            where it left off.
+          </p>
+        )}
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          Last consolidated:{' '}
+          {agent.lastConsolidatedAt ? formatRelative(agent.lastConsolidatedAt) : 'never yet'}
+        </p>
+
+        <div className="segmented" style={{ maxWidth: 220 }}>
+          <button
+            type="button"
+            className={memoryTier === 'short' ? 'active' : ''}
+            onClick={() => setMemoryTier('short')}
+          >
+            Short-term
+          </button>
+          <button
+            type="button"
+            className={memoryTier === 'long' ? 'active' : ''}
+            onClick={() => setMemoryTier('long')}
+          >
+            Long-term
+          </button>
+        </div>
+
+        {memories === null ? (
+          <div className="spinner">Loading…</div>
+        ) : memories.length === 0 ? (
+          <p className="planner-row-meta">No {memoryTier === 'short' ? 'short-term' : 'long-term'} memories yet.</p>
+        ) : (
+          memories.map((memory) => (
+            <div key={memory.id} className="planner-model-row" style={{ alignItems: 'flex-start' }}>
+              {editingMemoryId === memory.id ? (
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <textarea
+                    value={editContent}
+                    disabled={busy}
+                    onChange={(e) => setEditContent(e.target.value)}
+                    rows={3}
+                    style={{ width: '100%', resize: 'vertical' }}
+                  />
+                  <div className="planner-inline">
+                    <label className="planner-row-meta" htmlFor={`memory-importance-${memory.id}`}>
+                      Importance
+                    </label>
+                    <select
+                      id={`memory-importance-${memory.id}`}
+                      value={editImportance}
+                      disabled={busy}
+                      onChange={(e) => setEditImportance(Number(e.target.value))}
+                    >
+                      {[1, 2, 3, 4, 5].map((n) => (
+                        <option key={n} value={n}>
+                          {n}
+                        </option>
+                      ))}
+                    </select>
+                    <button type="button" className="planner-btn" disabled={busy} onClick={saveEditMemory}>
+                      Save
+                    </button>
+                    <button type="button" className="planner-btn" disabled={busy} onClick={cancelEditMemory}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ overflowWrap: 'anywhere' }}>
+                      {memory.content.length > 240 ? `${memory.content.slice(0, 240)}…` : memory.content}
+                    </div>
+                    <p className="planner-row-meta" style={{ margin: '4px 0 0' }}>
+                      Importance {memory.importance} · created {formatRelative(memory.createdAt)} · last
+                      accessed {formatRelative(memory.lastAccessedAt)}
+                    </p>
+                  </div>
+                  <div className="planner-row-actions">
+                    <button type="button" className="planner-btn" disabled={busy} onClick={() => startEditMemory(memory)}>
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      className="planner-btn danger"
+                      disabled={busy}
+                      onClick={() => deleteMemory(memory.id)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
           ))
         )}
       </div>

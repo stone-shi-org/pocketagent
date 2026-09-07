@@ -4,8 +4,10 @@ import {
   CreatePlannerChatRequest,
   CreatePlannerModelRequest,
   CreatePlannerWorkspaceRequest,
+  PlannerMemoryTier,
   SetPlannerAgentToolRequest,
   SetPlannerToolEnabledRequest,
+  UpdatePlannerMemoryRequest,
   UpdatePlannerWorkspaceRequest,
   PlannerSendMessageRequest,
   ResolvePlannerApprovalRequest,
@@ -19,6 +21,7 @@ import {
   type PlannerChatHistoryResponse,
   type PlannerChatListResponse,
   type PlannerContextPreviewResponse,
+  type PlannerMemoryListResponse,
   type PlannerModelListResponse,
   type PlannerSettingsDto,
   type PlannerToolApprovalListResponse,
@@ -209,6 +212,12 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
           { id, path: row.path, created: !!parsed.data.createPath },
           'planner agent re-pointed at a different directory; its existing chats\' transcripts stay under the old one',
         );
+      }
+      // PA-29 phase 4: trivially reversible (unlike `path` above), so no log
+      // line and no confirmation step — just the standing disclosure text
+      // the editor renders whenever this is off.
+      if (parsed.data.memoryEnabled !== undefined) {
+        row = app.pocket.plannerWorkspaces.setMemoryEnabled(id, parsed.data.memoryEnabled);
       }
       return reply.send(row);
     } catch (err) {
@@ -451,6 +460,44 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const { id } = request.params as { id: string };
     const removed = deletePlannerToolApproval(app.pocket.db, id);
     if (!removed) return notFound(reply, 'No such remembered decision.');
+    return reply.code(204).send();
+  });
+
+  /**
+   * PA-29 phase 4: browse one agent's own memories directly — the "user can
+   * observe or modify" half of the memory system, alongside the automatic
+   * fold/inject/consolidate machinery. `?tier=` narrows to one tier; omitted
+   * lists both, most-recent-first (`PlannerMemoryService.list`'s own
+   * ordering — no relevance scoring here, unlike a real turn's injection).
+   */
+  app.get('/api/planner/workspaces/:id/memories', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!app.pocket.plannerWorkspaces.get(id)) return notFound(reply, 'Workspace not found.');
+    const { tier } = request.query as { tier?: string };
+    if (tier !== undefined && !PlannerMemoryTier.safeParse(tier).success) {
+      return badRequest(reply, 'tier must be "short" or "long".');
+    }
+    const response: PlannerMemoryListResponse = {
+      memories: app.pocket.plannerMemory.list(id, tier as 'short' | 'long' | undefined),
+    };
+    return noStore(reply).send(response);
+  });
+
+  app.patch('/api/planner/memories/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = UpdatePlannerMemoryRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    if (!app.pocket.plannerMemory.get(id)) return notFound(reply, 'Memory not found.');
+    const updated = app.pocket.plannerMemory.update(id, parsed.data);
+    return reply.send(updated);
+  });
+
+  app.delete('/api/planner/memories/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const removed = app.pocket.plannerMemory.remove(id);
+    if (!removed) return notFound(reply, 'Memory not found.');
     return reply.code(204).send();
   });
 
