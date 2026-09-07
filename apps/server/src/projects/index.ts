@@ -452,7 +452,16 @@ export class ProjectService {
         chats,
         cronJobs: cronByCwd.get(cwd) ?? [],
         webhooks: webhookByCwd.get(cwd) ?? [],
-        queued: queuedByTree.get(cwd) ?? [],
+        // PA-27: the same "one chat, not two" rule `resumedFrom` applies above
+        // for a resumed session — a `per-issue` waiter that names a
+        // conversation already sitting in `chats` is that conversation's next
+        // turn, not a second one, so the placeholder is dropped in favour of
+        // the chat row it will resume.
+        queued: (queuedByTree.get(cwd) ?? []).filter(
+          (item) =>
+            item.resumesConversationId === null ||
+            !chats.some((c) => c.conversationId === item.resumesConversationId),
+        ),
         worktrees: [],
         mainRepoCwd,
         ...(!exists ? { isDeleted: true } : {}),

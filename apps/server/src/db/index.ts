@@ -1758,7 +1758,25 @@ export function readWebhookDeliveryConversationIds(db: Db): Map<string, string> 
         WHERE agent_session_id IS NOT NULL AND webhook_id IS NOT NULL`,
     )
     .all() as { agent_session_id: string; webhook_id: string }[];
-  return new Map(rows.map((r) => [r.agent_session_id, r.webhook_id]));
+  const map = new Map(rows.map((r) => [r.agent_session_id, r.webhook_id]));
+  // PA-27: `webhook_deliveries` is pruned to the newest rows per webhook
+  // (`pruneOldWebhookDeliveries`), so a long-lived `per-issue` conversation
+  // whose *originating* delivery has aged out would otherwise lose its badge
+  // even though the conversation is still very much the webhook's.
+  // `webhook_issue_sessions` is never pruned by delivery retention — only by a
+  // real agent change (PA-26) or the webhook's own deletion — so it is the
+  // durable source of this link. Only fills a gap left by the map above,
+  // never overrides it.
+  const cached = db
+    .prepare(
+      `SELECT agent_session_id, webhook_id FROM webhook_issue_sessions
+        WHERE agent_session_id IS NOT NULL`,
+    )
+    .all() as { agent_session_id: string; webhook_id: string }[];
+  for (const r of cached) {
+    if (!map.has(r.agent_session_id)) map.set(r.agent_session_id, r.webhook_id);
+  }
+  return map;
 }
 
 export function readWebhookIssueSession(

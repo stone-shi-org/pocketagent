@@ -1338,6 +1338,16 @@ export class WebhookService {
       // adopted-and-failed); the row will settle on its own.
       if (position === null) continue;
       const list = byTree.get(row.queue_key) ?? [];
+      const hook = row.webhook_id !== null ? readWebhook(this.db, row.webhook_id) : null;
+      // PA-27: a `per-issue` waiter with a cached conversation for this issue
+      // is not a second run — it is that same conversation's next turn,
+      // delayed by the tree. Without this, `ProjectService` had no way to
+      // learn the two rows (the existing chat, and this "Queued" placeholder)
+      // name one conversation, and rendered the issue twice.
+      const resumesConversationId =
+        hook !== null && hook.conversation_mode === 'per-issue' && row.issue_key !== null
+          ? (this.issueConversationFor(hook, row.issue_key, row.agent)?.agent_session_id ?? null)
+          : null;
       list.push({
         id: row.id,
         kind: 'webhook',
@@ -1352,6 +1362,7 @@ export class WebhookService {
         position,
         queuedAt: row.queued_at ?? row.received_at,
         skipPermissionsEnabled: row.skip_permissions_enabled === 1,
+        resumesConversationId,
       });
       byTree.set(row.queue_key, list);
     }

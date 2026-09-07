@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { SessionInfo } from '@pocketagent/protocol';
+import type { QueuedRunSummary, SessionInfo } from '@pocketagent/protocol';
 import { ProjectService, findMainRepoCwd, readGitBranch } from '../src/projects/index.js';
 import { ConversationStore, encodeProjectDir } from '../src/conversations/index.js';
 import { AgyTranscriptStore } from '../src/conversations/agy.js';
@@ -263,6 +263,85 @@ describe('ProjectService', () => {
       conversationId: 'conv-1',
       live: true,
     });
+  });
+
+  it('does not show a per-issue waiter as a second row for a conversation already listed (PA-27)', async () => {
+    // The same "one chat, not two" rule as above, for a `per-issue` webhook
+    // waiter instead of a resumed session: a waiter that names a conversation
+    // already listed is that conversation's next turn, delayed by the working
+    // tree, not a second run. Reported as "TWO TES-4" showing in the tree —
+    // one placeholder row in "Queued", one for the chat it will resume.
+    const queuedItem: QueuedRunSummary = {
+      id: 'delivery-2',
+      kind: 'webhook',
+      title: 'TES-4',
+      webhookId: 'hook-1',
+      webhookName: 'Jira Intake',
+      sessionId: null,
+      agent: 'claude',
+      agentDisplayName: 'Claude Code',
+      position: 1,
+      queuedAt: 1000,
+      skipPermissionsEnabled: false,
+      resumesConversationId: 'conv-tes-4',
+    };
+    const svc = new ProjectService({
+      workspaces: new WorkspaceRegistry([ws.root]),
+      conversations: new ConversationStore({
+        projectsDir,
+        workspaces: new WorkspaceRegistry([ws.root]),
+        listRunningCwds: async () => [],
+      }),
+      db,
+      version: '9.9.9',
+      hostname: 'h',
+      getQueuedWork: () => new Map([[ws.project, [queuedItem]]]),
+    });
+
+    const [project] = await svc.list([
+      makeSession({ id: 'live', cwd: ws.project, agentSessionId: 'conv-tes-4' }),
+    ]);
+
+    expect(project?.chats.map((c) => c.conversationId)).toContain('conv-tes-4');
+    expect(project?.queued).toHaveLength(0);
+  });
+
+  it('still shows a per-issue waiter with no existing conversation to resume (PA-27)', async () => {
+    // The filter must be precise, not a blanket drop of every webhook waiter:
+    // a brand-new issue has no chat to duplicate against, so it still shows.
+    const queuedItem: QueuedRunSummary = {
+      id: 'delivery-3',
+      kind: 'webhook',
+      title: 'TES-9',
+      webhookId: 'hook-1',
+      webhookName: 'Jira Intake',
+      sessionId: null,
+      agent: 'claude',
+      agentDisplayName: 'Claude Code',
+      position: 1,
+      queuedAt: 1000,
+      skipPermissionsEnabled: false,
+      resumesConversationId: null,
+    };
+    const svc = new ProjectService({
+      workspaces: new WorkspaceRegistry([ws.root]),
+      conversations: new ConversationStore({
+        projectsDir,
+        workspaces: new WorkspaceRegistry([ws.root]),
+        listRunningCwds: async () => [],
+      }),
+      db,
+      version: '9.9.9',
+      hostname: 'h',
+      getQueuedWork: () => new Map([[ws.project, [queuedItem]]]),
+    });
+
+    const [project] = await svc.list([
+      makeSession({ id: 'live', cwd: ws.project, agentSessionId: 'unrelated' }),
+    ]);
+
+    expect(project?.queued).toHaveLength(1);
+    expect(project?.queued[0]?.title).toBe('TES-9');
   });
 
   it('collapses repeated resumes of the same chat into one row', async () => {

@@ -10,6 +10,7 @@ import {
   pruneOldWebhookDeliveries,
   pruneOldWebhookHits,
   readWebhookDeliveries,
+  readWebhookDeliveryConversationIds,
   readWebhookHits,
   readWebhookIssueSession,
   upsertWebhookIssueSession,
@@ -1771,6 +1772,63 @@ describe('webhook delivery: the directory queue (PA-11)', () => {
 
     const ids = readWebhookDeliveries(ctx.db, { webhookId: 'w1', limit: 50 }).map((r) => r.id);
     expect(ids).toContain('queued-1');
+  });
+
+  it('keeps a webhook badge on a conversation after its originating delivery is pruned (PA-27)', () => {
+    // `webhook_deliveries` is pruned to the newest rows per webhook, but a
+    // long-lived `per-issue` conversation must not lose its "started by a
+    // webhook" badge just because the delivery that originally created it
+    // aged out of that window. `webhook_issue_sessions` is never pruned by
+    // delivery retention (only by a real agent change or the webhook's own
+    // deletion), so it is read as the durable fallback for this link.
+    const now = Date.now();
+    ctx.db
+      .prepare(
+        `INSERT INTO webhooks (id, name, slug, enabled, type, auth_mode, secret, auth_token_hash,
+          secret_set_at, filter_json, project_map_json, prompt_template_map_json, cwd, agent,
+          worktree_mode, model, effort, effort_set, skip_permissions, auto_select_agent_model,
+          prompt_template, conversation_mode, overlap_policy, directory_policy, max_concurrent,
+          store_payloads, created_at, updated_at, last_delivery_at, last_delivery_status, last_error)
+         VALUES ('w2','w','w2',1,'jira','hmac','s',NULL,?,'{}','[]','[]','/tmp','claude','none',NULL,
+          NULL,0,0,0,'p','per-issue','allow','queue',2,1,?,?,NULL,NULL,NULL)`,
+      )
+      .run(now, now, now);
+
+    // The durable, never-pruned link: this issue's conversation.
+    upsertWebhookIssueSession(ctx.db, {
+      webhook_id: 'w2',
+      issue_key: 'ENG-9',
+      agent_session_id: 'claude-conv-9',
+      session_id: null,
+      planner_chat_id: null,
+      agent: 'claude',
+      cwd: '/tmp',
+      created_at: now,
+      updated_at: now,
+    });
+
+    const insert = (id: string, receivedAt: number): void => {
+      ctx.db
+        .prepare(
+          `INSERT INTO webhook_deliveries (id, webhook_id, webhook_name, agent, status, trigger,
+            signature_state, skip_permissions_enabled, payload_bytes, payload_truncated,
+            received_at, agent_session_id)
+           VALUES (?, 'w2', 'w', 'claude', 'succeeded', 'delivery', 'valid', 0, 0, 0, ?, 'claude-conv-9')`,
+        )
+        .run(id, receivedAt);
+    };
+    // The delivery that originally stamped `agent_session_id` for this
+    // conversation, plus enough newer noise to push it out of the keep-window.
+    insert('originating', 1);
+    for (let i = 0; i < 5; i += 1) insert(`newer-${i}`, 100 + i);
+
+    pruneOldWebhookDeliveries(ctx.db, { keepRunsPerWebhook: 2, keepNoisePerWebhook: 2 });
+    expect(
+      readWebhookDeliveries(ctx.db, { webhookId: 'w2', limit: 50 }).some((r) => r.id === 'originating'),
+    ).toBe(false);
+
+    // The badge survives anyway, via `webhook_issue_sessions`.
+    expect(readWebhookDeliveryConversationIds(ctx.db).get('claude-conv-9')).toBe('w2');
   });
 });
 

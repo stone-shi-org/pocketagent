@@ -238,6 +238,10 @@ export class PromptQueueService {
         position,
         queuedAt: row.created_at,
         skipPermissionsEnabled: info?.skipPermissionsEnabled ?? false,
+        // A queued human prompt already names its own session via `sessionId`;
+        // `resumesConversationId` is the webhook-only field for a `per-issue`
+        // waiter that duplicates a chat already listed elsewhere.
+        resumesConversationId: null,
       });
       byTree.set(row.tree_root, list);
     }

@@ -425,6 +425,17 @@ export const QueuedRunSummary = z.object({
   queuedAt: z.number().int(),
   /** Surfaced on every waiting row, never only at creation. */
   skipPermissionsEnabled: z.boolean(),
+  /**
+   * PA-27: for `kind: 'webhook'` on a `per-issue` conversation that already has
+   * one, the conversation id this waiter will resume or follow up into once
+   * the tree frees. The chat that conversation id names is already visible in
+   * `ProjectInfo.chats`, so the server drops the waiter here rather than
+   * rendering the same conversation twice — one live-looking chat row plus a
+   * placeholder "Queued" row for the very same issue. `null` when the waiter
+   * has no existing conversation to resume (a brand-new issue) or is a queued
+   * human prompt, which already names its own session via `sessionId`.
+   */
+  resumesConversationId: z.string().nullable(),
 });
 export type QueuedRunSummary = z.infer<typeof QueuedRunSummary>;
 
