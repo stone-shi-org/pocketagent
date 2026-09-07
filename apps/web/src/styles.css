@@ -5867,3 +5867,72 @@ button.chat-rate-limit-badge {
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* PA-29: the context-preview toggle and panel — sits in the same slot the
+   approval card occupies (between `Transcript` and `PromptBox`), since both
+   are "extra context docked just above the composer" rather than part of
+   the scrolling transcript itself. */
+.planner-context-preview-toggle {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 16px;
+}
+
+.planner-context-preview {
+  margin: 4px 16px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  background: var(--bg-elev-2);
+  font-size: 12.5px;
+}
+
+.planner-context-preview-window {
+  margin: 0 0 8px;
+  color: var(--text-dim);
+}
+
+.planner-context-preview-empty {
+  margin: 0;
+  color: var(--text-dim);
+}
+
+.planner-context-preview-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.planner-context-preview-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+  opacity: 0.6;
+}
+
+/* The rows that would actually be injected into the next turn's system
+   message — visually distinguished from a near-miss candidate rather than
+   hidden, since seeing what almost made the cut is the point of this panel. */
+.planner-context-preview-item.selected {
+  opacity: 1;
+  background: var(--bg-elev);
+}
+
+.planner-context-preview-score {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  min-width: 32px;
+}
+
+.planner-context-preview-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

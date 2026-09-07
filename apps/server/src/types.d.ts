@@ -19,6 +19,7 @@ import type { WebhookService } from './webhooks/index.js';
 import type { PromptQueueService } from './sessions/prompt-queue.js';
 import type { PlannerWorkspaceRegistry } from './planner/workspaces.js';
 import type { PlannerChatService } from './planner/chats.js';
+import type { PlannerMemoryService } from './planner/memory.js';
 
 export interface PocketContext {
   config: Config;
@@ -35,6 +36,8 @@ export interface PocketContext {
   plannerWorkspacesRoot: string;
   /** PA-6 phase 2: planner chat CRUD and the turn loop. */
   plannerChats: PlannerChatService;
+  /** PA-29: the memory system — see `planner/memory.ts`'s doc comment. */
+  plannerMemory: PlannerMemoryService;
   agents: AgentRegistry;
   /** PA-28: user-managed Claude Code provider variants, kept in sync with `agents`. */
   customClaudeProviders: CustomClaudeProviderStore;

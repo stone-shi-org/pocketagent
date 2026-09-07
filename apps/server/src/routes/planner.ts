@@ -18,6 +18,7 @@ import {
   type PlannerApiKeyRevealResponse,
   type PlannerChatHistoryResponse,
   type PlannerChatListResponse,
+  type PlannerContextPreviewResponse,
   type PlannerModelListResponse,
   type PlannerSettingsDto,
   type PlannerToolApprovalListResponse,
@@ -506,6 +507,24 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
         events: await app.pocket.plannerChats.history(id),
       };
       return response;
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  /**
+   * PA-29: a read-only "as if a turn were about to run" preview of the
+   * memory ranking and rolling-window trimming the next real turn would
+   * apply — see `PlannerChatService.previewContext`'s doc comment for why
+   * this must never call the LLM or mutate anything (no memory writes, no
+   * `last_accessed_at` bumps). `noStore` for the same reason every other
+   * "read something that changes turn to turn" route in this file uses it.
+   */
+  app.get('/api/planner/chats/:id/context-preview', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      const response: PlannerContextPreviewResponse = await app.pocket.plannerChats.previewContext(id);
+      return noStore(reply).send(response);
     } catch (err) {
       return mapChatError(reply, err);
     }

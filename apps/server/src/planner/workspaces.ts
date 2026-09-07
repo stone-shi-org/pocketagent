@@ -24,6 +24,12 @@ export interface PlannerWorkspaceRow {
       `PlannerChatService.create`. No FK: a model removed from the catalog
       just means the fallback kicks in, never a broken reference. */
   defaultModelId: string | null;
+  /** PA-29: whether this agent's memory system is on — see
+      `PlannerMemory`'s (protocol package) doc comment for what this gates. */
+  memoryEnabled: boolean;
+  /** PA-29 phase 3 (not implemented yet): when a consolidation pass last ran
+      for this agent. `null` until that phase exists. */
+  lastConsolidatedAt: number | null;
 }
 
 /** Persistence seam, so the registry stays testable without a database. */
@@ -104,6 +110,8 @@ export class PlannerWorkspaceRegistry {
       isDefault: true,
       createdAt: Date.now(),
       defaultModelId: null,
+      memoryEnabled: true,
+      lastConsolidatedAt: null,
     };
     this.store.insert(row);
     this.rows = [...this.rows, row];
@@ -165,6 +173,8 @@ export class PlannerWorkspaceRegistry {
       isDefault: false,
       createdAt: Date.now(),
       defaultModelId: null,
+      memoryEnabled: true,
+      lastConsolidatedAt: null,
     };
     this.store.insert(row);
     this.rows = [...this.rows, row];

@@ -10,6 +10,7 @@ import type { WorktreeService } from '../git/worktree.js';
 import { WorktreeError } from '../git/worktree.js';
 import { buildChildEnv } from '../sessions/env.js';
 import type { PlannerWorkspaceRegistry } from './workspaces.js';
+import type { PlannerMemoryService } from './memory.js';
 
 /**
  * PA-6: the planner's tool catalog.
@@ -39,6 +40,21 @@ export interface PlannerToolDeps {
   historyDeps: SessionHistoryDeps;
   /** The configured shell binary, for `exec_command`. */
   shell: string;
+  /** PA-29: the memory service, for `memory_save`/`memory_search`. */
+  memory: PlannerMemoryService;
+  /**
+   * PA-29: the workspace the calling chat belongs to right now.
+   *
+   * Added as its own field rather than widening `execute`'s own arity
+   * (`PlannerChatService.executeTool` is the one call site that builds this
+   * object, and it already has `chat.workspaceId` in scope) — every
+   * existing tool ignores it and keeps compiling unchanged. `null` for an
+   * orphaned chat whose workspace was since deleted; the memory tools below
+   * refuse in that case rather than guessing which agent's memory to touch,
+   * the same refusal `send_instruction`/`delete_worktree` already give for
+   * their own "can't resolve what this needs" cases.
+   */
+  workspaceId: string | null;
 }
 
 export interface PlannerToolDefinition {
@@ -254,6 +270,44 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       return truncate(content, MAX_TOOL_RESULT_CHARS);
     },
   },
+  {
+    name: 'memory_search',
+    description:
+      "Search this agent's saved memories (short- and long-term) by relevance to a query, so past " +
+      'facts, decisions, or preferences can be recalled instead of asked for again.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Text to search for.' },
+        limit: { type: 'number', description: 'Maximum number of results to return (default 5).' },
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    async execute(deps, args) {
+      if (deps.workspaceId === null) {
+        return 'This chat has no agent to search memories for (its workspace was removed).';
+      }
+      const query = String(args.query ?? '').trim();
+      if (!query) return 'No search query provided.';
+      const limit = typeof args.limit === 'number' ? args.limit : 5;
+      const results = deps.memory.search(deps.workspaceId, query, { limit });
+      return truncate(
+        JSON.stringify(
+          results.map((r) => ({
+            id: r.memory.id,
+            content: r.memory.content,
+            importance: r.memory.importance,
+            tier: r.memory.tier,
+            createdAt: r.memory.createdAt,
+            score: r.score,
+          })),
+        ),
+        MAX_TOOL_RESULT_CHARS,
+      );
+    },
+  },
 
   // ---- Mutating (PA-6 phase 4) — each goes through the approval gate --------
   {
@@ -369,6 +423,37 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       } catch (err) {
         return `Could not write ${requested}: ${(err as Error).message}`;
       }
+    },
+  },
+  {
+    name: 'memory_save',
+    description:
+      "Save a fact, decision, or preference to this agent's long-lived memory, so it survives past " +
+      'this conversation. Mutating (it changes what future turns recall), so it goes through the same ' +
+      'approval gate as any other write.',
+    parameters: {
+      type: 'object',
+      properties: {
+        content: { type: 'string', description: 'The memory to save, in a few sentences.' },
+        importance: {
+          type: 'number',
+          description: 'How important this is to remember, 1 (trivial) to 5 (critical). Default 3.',
+        },
+      },
+      required: ['content'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      if (deps.workspaceId === null) {
+        return 'This chat has no agent to save a memory for (its workspace was removed).';
+      }
+      const content = String(args.content ?? '').trim();
+      if (!content) return 'No memory content provided.';
+      const rawImportance = typeof args.importance === 'number' ? Math.round(args.importance) : 3;
+      const importance = Math.min(5, Math.max(1, rawImportance));
+      const memory = deps.memory.save(deps.workspaceId, content, importance, null);
+      return `Saved memory ${memory.id} (importance ${memory.importance}).`;
     },
   },
   {

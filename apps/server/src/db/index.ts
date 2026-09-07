@@ -835,6 +835,102 @@ export const MIGRATIONS: readonly string[] = [
   // CLAUDE.md. It drives `AgentAdapter.requiresAttendedUse` directly, so the
   // existing route checks in `routes/shared.ts` need no branch for it.
   CUSTOM_CLAUDE_PROVIDERS_DDL,
+  // PA-29: a memory system so a Pocket Agent's chats don't forget things
+  // within/between conversations. `planner_memories` holds both tiers — a
+  // 'short' row folded in automatically as the rolling window in
+  // `eventsToLlmMessages` evicts old turns (`PlannerChatService`), and a
+  // 'long' row a later consolidation pass (PA-29 phase 3, not this
+  // migration's concern) writes directly — so `tier` is a plain CHECK'd
+  // column rather than two tables.
+  //
+  // `workspace_id` is `ON DELETE CASCADE`, unlike `planner_chats.workspace_id`
+  // (`SET NULL`) or `planner_agent_disabled_tools.workspace_id` (also
+  // CASCADE) — worth spelling out which side of that split this falls on. A
+  // memory exists to make *this agent* sharper; it has no meaning once the
+  // agent it was recalled for is gone, and there is no orphan-browsing UI for
+  // it the way a cron run or webhook delivery has for its own history. That
+  // is the same "cache vs. history" line this codebase already draws between
+  // `webhook_issue_sessions` (CASCADEs) and `webhook_deliveries` (SET NULL
+  // with fields copied) — a memory row is the cache side of that line, not
+  // the history side.
+  //
+  // `source_chat_id` is deliberately not a foreign key, for the same reason
+  // `cron_runs.session_id` isn't one: a chat can be deleted long after a
+  // memory folded out of it was written, and a CASCADE would delete memories
+  // a still-live agent may depend on while a RESTRICT would block deleting
+  // the chat. An orphaned id simply stops resolving to anything, same as a
+  // pruned session id already does elsewhere.
+  //
+  // `importance` is a 1-5 integer the model (or the rolling-window fold's own
+  // heuristic) assigns at write time; `score()` in `planner/memory.ts` is the
+  // one function that turns `importance` and `last_accessed_at` into a
+  // ranking number, used identically by eviction (phase 1) and search
+  // relevance (also phase 1) — "one function, two call sites" per the
+  // approved design, so the two can never silently diverge on what "worth
+  // keeping" means.
+  //
+  // The FTS5 virtual table mirrors `planner_memories` by rowid
+  // (`content='planner_memories', content_rowid='rowid'`) rather than storing
+  // its own copy of the text, and the three triggers below are the standard
+  // idiom for keeping an external-content FTS5 index in sync with inserts,
+  // deletes, and updates to the table it shadows — nothing here is
+  // PocketAgent-specific. `better-sqlite3`'s bundled SQLite build includes
+  // FTS5 (verified empirically: no separate extension load is needed), so no
+  // new dependency was required to add this.
+  //
+  // `planner_workspaces.last_consolidated_at` and `.memory_enabled` are added
+  // here rather than in a later migration even though nothing yet writes the
+  // former: PA-29 phase 3 (consolidation) and phase 4 (settings UI) are
+  // follow-up work that read these same columns, and splitting one
+  // conceptual "add the memory feature's schema" change across two
+  // migrations just for that would make the history harder to read, not
+  // safer. `memory_enabled` defaults to 1 (on) so every existing agent gets
+  // the feature the moment this migration runs, matching this codebase's
+  // general "additive column, opt-out not opt-in" default for a feature with
+  // no safety reason to start disabled.
+  //
+  // `planner_chats.memory_folded_turns` is what keeps the rolling-window
+  // fold in `PlannerChatService` idempotent. A chat's transcript file is
+  // append-only and re-read in full on every turn, so without a persisted
+  // "how much of the oldest history is already folded" marker, every turn
+  // past the window would re-summarize and re-save the same growing prefix
+  // of old turns into a fresh memory row — this counter is what lets a turn
+  // fold only the span that just fell out of the window since the *last*
+  // turn. Not part of the `PlannerChat` protocol type: it is a pure
+  // implementation detail of the fold, not something any client reads.
+  `
+  CREATE TABLE IF NOT EXISTS planner_memories (
+    id               TEXT PRIMARY KEY,
+    workspace_id     TEXT NOT NULL REFERENCES planner_workspaces (id) ON DELETE CASCADE,
+    tier             TEXT NOT NULL CHECK (tier IN ('short', 'long')),
+    content          TEXT NOT NULL,
+    importance       INTEGER NOT NULL DEFAULT 3,
+    source_chat_id   TEXT,
+    created_at       INTEGER NOT NULL,
+    last_accessed_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_planner_memories_workspace ON planner_memories (workspace_id, tier);
+
+  CREATE VIRTUAL TABLE IF NOT EXISTS planner_memories_fts USING fts5(
+    content, content='planner_memories', content_rowid='rowid'
+  );
+
+  CREATE TRIGGER IF NOT EXISTS planner_memories_ai AFTER INSERT ON planner_memories BEGIN
+    INSERT INTO planner_memories_fts (rowid, content) VALUES (new.rowid, new.content);
+  END;
+  CREATE TRIGGER IF NOT EXISTS planner_memories_ad AFTER DELETE ON planner_memories BEGIN
+    INSERT INTO planner_memories_fts (planner_memories_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+  END;
+  CREATE TRIGGER IF NOT EXISTS planner_memories_au AFTER UPDATE ON planner_memories BEGIN
+    INSERT INTO planner_memories_fts (planner_memories_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+    INSERT INTO planner_memories_fts (rowid, content) VALUES (new.rowid, new.content);
+  END;
+
+  ALTER TABLE planner_workspaces ADD COLUMN last_consolidated_at INTEGER;
+  ALTER TABLE planner_workspaces ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1;
+  ALTER TABLE planner_chats ADD COLUMN memory_folded_turns INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 /**

@@ -3,6 +3,7 @@ import type {
   AgentEvent,
   ModelInfo,
   PlannerChat,
+  PlannerContextPreviewResponse,
   PlannerModel,
   PlannerToolApprovalChoice,
 } from '@pocketagent/protocol';
@@ -74,6 +75,9 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
   const [error, setError] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleInput, setTitleInput] = useState('');
+  const [contextPreview, setContextPreview] = useState<PlannerContextPreviewResponse | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -191,6 +195,35 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
     })();
   };
 
+  /**
+   * PA-29: fetches the read-only "what would the next turn see" preview —
+   * which memories rank highest for this conversation right now and how
+   * much of the transcript is in-window vs. already folded into memory —
+   * without starting a turn or touching anything server-side. Toggles the
+   * panel closed again on a second click without a re-fetch; opening it
+   * again always re-fetches, since the ranking is only ever as fresh as the
+   * conversation was when this was last clicked.
+   */
+  const togglePreview = (): void => {
+    if (previewOpen) {
+      setPreviewOpen(false);
+      return;
+    }
+    setPreviewOpen(true);
+    setPreviewLoading(true);
+    void (async () => {
+      try {
+        const response = await api.plannerContextPreview(chatId);
+        setContextPreview(response);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not load the context preview.');
+      } finally {
+        setPreviewLoading(false);
+      }
+    })();
+  };
+
   const pending = transcript?.pending[0] ?? null;
   const disabled = sending || pending !== null;
 
@@ -269,6 +302,48 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
               Deny
             </button>
           </div>
+        </div>
+      )}
+
+      <div className="planner-context-preview-toggle">
+        <button type="button" className="planner-link-btn" onClick={togglePreview}>
+          {previewOpen ? 'Hide context preview' : 'Preview context'}
+        </button>
+      </div>
+
+      {previewOpen && (
+        <div className="planner-context-preview">
+          {previewLoading ? (
+            <div className="spinner">Loading…</div>
+          ) : contextPreview ? (
+            <>
+              <p className="planner-context-preview-window">
+                {contextPreview.window.inWindowMessages} of{' '}
+                {contextPreview.window.inWindowMessages + contextPreview.window.foldedMessages} transcript
+                messages are in context (window: last {contextPreview.window.windowLimit} turns)
+                {contextPreview.window.foldedMessages > 0 &&
+                  ` — ${contextPreview.window.foldedMessages} older ones were folded into memory`}
+                .
+              </p>
+              {!contextPreview.memoryEnabled ? (
+                <p className="planner-context-preview-empty">Memory is turned off for this agent.</p>
+              ) : contextPreview.candidates.length === 0 ? (
+                <p className="planner-context-preview-empty">No saved memories matched this conversation.</p>
+              ) : (
+                <ul className="planner-context-preview-list">
+                  {contextPreview.candidates.map((c) => (
+                    <li
+                      key={c.memory.id}
+                      className={`planner-context-preview-item${c.selected ? ' selected' : ''}`}
+                    >
+                      <span className="planner-context-preview-score">{c.score.toFixed(2)}</span>
+                      <span className="planner-context-preview-content">{c.memory.content}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          ) : null}
         </div>
       )}
 

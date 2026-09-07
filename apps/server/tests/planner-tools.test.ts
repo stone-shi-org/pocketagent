@@ -20,7 +20,7 @@ import { authHeaders, createTestApp, type TestApp } from './helpers.js';
  * `planner-chats.test.ts` instead.
  */
 
-function depsFor(t: TestApp): PlannerToolDeps {
+function depsFor(t: TestApp, workspaceId?: string | null): PlannerToolDeps {
   const { workspaces, plannerWorkspaces, sessions, worktrees, conversations, agyTranscripts, piTranscripts } =
     t.context;
   return {
@@ -30,6 +30,11 @@ function depsFor(t: TestApp): PlannerToolDeps {
     worktrees,
     historyDeps: { sessions, conversations, agyTranscripts, piTranscripts },
     shell: t.context.config.shell,
+    memory: t.context.plannerMemory,
+    // Defaults to the seeded default planner workspace, like every other
+    // tool call in this file implicitly runs "as" that agent — a caller
+    // that cares about a different (or no) workspace passes it explicitly.
+    workspaceId: workspaceId === undefined ? (t.context.plannerWorkspaces.getDefault()?.id ?? null) : workspaceId,
   };
 }
 
@@ -38,10 +43,18 @@ describe('PLANNER_TOOLS catalog', () => {
     const readOnlyNames = PLANNER_TOOLS.filter((t) => t.readOnly).map((t) => t.name).sort();
     const mutatingNames = PLANNER_TOOLS.filter((t) => !t.readOnly).map((t) => t.name).sort();
     expect(readOnlyNames).toEqual(
-      ['list_sessions', 'list_workspaces', 'read_file', 'read_session_output'].sort(),
+      ['list_sessions', 'list_workspaces', 'memory_search', 'read_file', 'read_session_output'].sort(),
     );
     expect(mutatingNames).toEqual(
-      ['delete_worktree', 'exec_command', 'mkdir', 'rmdir', 'send_instruction', 'write_file'].sort(),
+      [
+        'delete_worktree',
+        'exec_command',
+        'memory_save',
+        'mkdir',
+        'rmdir',
+        'send_instruction',
+        'write_file',
+      ].sort(),
     );
   });
 

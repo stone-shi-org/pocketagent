@@ -1,21 +1,30 @@
 import crypto from 'node:crypto';
-import type { AgentEvent, PlannerChat, PlannerToolApprovalChoice } from '@pocketagent/protocol';
+import type {
+  AgentEvent,
+  PlannerChat,
+  PlannerContextPreviewResponse,
+  PlannerMemory,
+  PlannerToolApprovalChoice,
+} from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 import type { SessionManager } from '../sessions/manager.js';
 import type { SessionHistoryDeps } from '../sessions/history.js';
 import type { WorktreeService } from '../git/worktree.js';
 import type { PlannerWorkspaceRegistry } from './workspaces.js';
+import type { PlannerMemoryService } from './memory.js';
 import {
   deletePlannerChat,
   insertPlannerChat,
   readDisabledToolNames,
   readGlobalDisabledToolNames,
   readPlannerChat,
+  readPlannerChatMemoryFoldedTurns,
   readPlannerChats,
   readPlannerSettings,
   revealPlannerApiKey,
   updatePlannerChat,
+  writePlannerChatMemoryFoldedTurns,
   writePlannerLastModelId,
 } from './store.js';
 import { resolveApprovalStatus, rememberDecisionIfAsked } from './approval.js';
@@ -51,6 +60,37 @@ const GIVE_UP_MESSAGE =
   'I made too many tool calls without reaching an answer — try narrowing your request, ' +
   'or ask me to summarize what I found so far.';
 
+/**
+ * PA-29: how many of a chat's most recent turns (one `user_prompt` and
+ * everything up to the next one) are sent to the LLM as-is. Anything older
+ * is folded into a single short-term memory the first time it falls out of
+ * this window, rather than silently discarded — see
+ * `PlannerChatService.applyRollingWindow`. 20 turns is generous enough that
+ * an ordinary conversation never hits this at all, while still bounding a
+ * long-running chat's request body and the model's own context window
+ * without needing a token counter (a per-turn cap is a much simpler safety
+ * net than tracking token budgets across an arbitrary mix of tool calls and
+ * replies).
+ */
+const ROLLING_WINDOW_TURNS = 20;
+
+/**
+ * How many of a workspace's memories are ranked against the current
+ * conversation and actually injected into the system message before a real
+ * turn. Kept small deliberately: these are meant to be the handful of facts
+ * most relevant right now, not a dump of everything remembered — a longer
+ * list would compete with the conversation itself for the model's attention
+ * and cost tokens on every single turn, not just the ones that need them.
+ */
+const MEMORY_INJECT_TOP_K = 5;
+
+/**
+ * How many candidates `GET .../context-preview` asks for, wider than
+ * `MEMORY_INJECT_TOP_K` on purpose — the preview's whole point is showing a
+ * human *which* memories almost made the cut, not just the ones that did.
+ */
+const MEMORY_PREVIEW_CANDIDATES = 20;
+
 export interface PlannerChatServiceOptions {
   db: Db;
   workspaces: WorkspaceRegistry;
@@ -60,6 +100,10 @@ export interface PlannerChatServiceOptions {
   historyDeps: SessionHistoryDeps;
   /** The configured shell binary, forwarded to `exec_command`. */
   shell: string;
+  /** PA-29: the memory service, threaded to `memory_save`/`memory_search`
+      (via `executeTool`) and to the rolling-window fold and pre-turn
+      ranking below. */
+  memory: PlannerMemoryService;
   logger?: { warn: (obj: unknown, msg?: string) => void };
   /** Injected in tests so no real network call is ever made. */
   llmFetch?: typeof fetch;
@@ -288,6 +332,55 @@ export class PlannerChatService {
   async history(id: string): Promise<AgentEvent[]> {
     const chat = this.requireChat(id);
     return readTranscriptEvents(this.workspacePathFor(chat), chat.id);
+  }
+
+  /**
+   * PA-29: a read-only "as if a turn were about to run" view of the memory
+   * ranking and rolling-window trimming `driveLoop` would apply right now —
+   * for `GET /api/planner/chats/:id/context-preview`. Must never call the
+   * LLM, write a memory, or bump a `last_accessed_at` (`memory.search`'s own
+   * `dryRun: true` is what keeps the last one from happening) — a human
+   * merely looking at this must not itself change what a real turn later
+   * sees.
+   *
+   * Ranks a wider candidate set than a real turn ever asks for
+   * (`MEMORY_PREVIEW_CANDIDATES` vs. `MEMORY_INJECT_TOP_K`), so the panel can
+   * show near-misses too, not just the ones that would actually be
+   * injected — `selected` marks exactly the top `MEMORY_INJECT_TOP_K` of
+   * that wider list, which is the same set `driveLoop`'s own narrower call
+   * would produce as long as the true top-K sits within the wider pool (see
+   * `PlannerMemoryService.search`'s own candidate-widening comment for why
+   * that is true in every case that matters in practice).
+   */
+  async previewContext(id: string): Promise<PlannerContextPreviewResponse> {
+    const chat = this.requireChat(id);
+    const workspacePath = this.workspacePathFor(chat);
+    const events = await readTranscriptEvents(workspacePath, chat.id);
+    const turns = splitIntoTurns(events);
+    const keepFrom = Math.max(0, turns.length - ROLLING_WINDOW_TURNS);
+    const inWindowMessages = turns.slice(keepFrom).flat().length;
+    const foldedMessages = turns.slice(0, keepFrom).flat().length;
+
+    const memoryEnabled = this.memoryEnabledFor(chat.workspaceId);
+    let candidates: PlannerContextPreviewResponse['candidates'] = [];
+    if (memoryEnabled && chat.workspaceId) {
+      const queryText = lastUserPromptText(events);
+      const results = this.opts.memory.search(chat.workspaceId, queryText, {
+        limit: MEMORY_PREVIEW_CANDIDATES,
+        dryRun: true,
+      });
+      candidates = results.map((r, index) => ({
+        memory: r.memory,
+        score: r.score,
+        selected: index < MEMORY_INJECT_TOP_K,
+      }));
+    }
+
+    return {
+      memoryEnabled,
+      candidates,
+      window: { inWindowMessages, foldedMessages, windowLimit: ROLLING_WINDOW_TURNS },
+    };
   }
 
   /** Builds a client against the one configured provider — every caller that
@@ -565,6 +658,16 @@ export class PlannerChatService {
    * (which happens after `sendMessage`'s first `user_prompt` yield), the
    * route can no longer change the HTTP status, so every failure from this
    * point on has to be representable as an event instead.
+   *
+   * PA-29: before building `messages`, the raw transcript is (a) trimmed to
+   * `ROLLING_WINDOW_TURNS` via `applyRollingWindow` — folding anything older
+   * into a memory the first time it falls out, never twice — and (b) if
+   * this workspace has memory enabled, prepended with a system message
+   * carrying the top `MEMORY_INJECT_TOP_K` memories ranked against the
+   * conversation's own recent text. Both steps are skipped (window trimming
+   * excepted — see `applyRollingWindow`'s own doc comment) when this
+   * workspace's `memoryEnabled` is off, or when the chat has no workspace at
+   * all (an orphaned chat has no agent's memory to read from or write into).
    */
   private async *driveLoop(
     chat: PlannerChat,
@@ -581,7 +684,16 @@ export class PlannerChatService {
 
     const settings = readPlannerSettings(this.opts.db);
     const events = await readTranscriptEvents(workspacePath, chat.id);
-    const messages = eventsToLlmMessages(events);
+    const memoryEnabled = this.memoryEnabledFor(chat.workspaceId);
+    const windowedEvents = this.applyRollingWindow(chat, events, memoryEnabled);
+    const messages = eventsToLlmMessages(windowedEvents);
+    if (memoryEnabled && chat.workspaceId) {
+      const queryText = lastUserPromptText(events);
+      const results = this.opts.memory.search(chat.workspaceId, queryText, { limit: MEMORY_INJECT_TOP_K });
+      if (results.length > 0) {
+        messages.unshift({ role: 'system', content: buildMemorySystemMessage(results.map((r) => r.memory)) });
+      }
+    }
     const client = new PlannerLlmClient({
       baseUrl: settings.baseUrl!,
       apiKey: revealPlannerApiKey(this.opts.db),
@@ -754,6 +866,8 @@ export class PlannerChatService {
           worktrees: this.opts.worktrees,
           historyDeps: this.opts.historyDeps,
           shell: this.opts.shell,
+          memory: this.opts.memory,
+          workspaceId: chat.workspaceId,
         },
         args,
       );
@@ -796,6 +910,55 @@ export class PlannerChatService {
       throw new PlannerChatError('No planner workspace is available.', 'not_found');
     }
     return fallback.path;
+  }
+
+  /** `false` for an orphaned chat (`workspaceId === null`) as well as for a
+      real agent with the setting off — both mean "no agent's memory to read
+      from or write into right now". */
+  private memoryEnabledFor(workspaceId: string | null): boolean {
+    if (!workspaceId) return false;
+    return this.opts.plannerWorkspaces.get(workspaceId)?.memoryEnabled ?? false;
+  }
+
+  /**
+   * Caps `events` to the most recent `ROLLING_WINDOW_TURNS` turns for what
+   * the LLM is shown this call, folding any turn that falls out of the
+   * window *for the first time* into one short-term memory before dropping
+   * it — never re-folding a span already folded by an earlier call, tracked
+   * via `planner_chats.memory_folded_turns` (see that column's own doc
+   * comment in `db/index.ts` for why a persisted marker is necessary at
+   * all: the transcript file is append-only and re-read in full every turn,
+   * so without it every turn past the window would re-summarize the same
+   * growing prefix of old turns into a fresh, duplicate memory row).
+   *
+   * The fold-into-memory half is skipped when `memoryEnabled` is false or
+   * the chat has no workspace — there is no agent's memory to write into —
+   * but the truncation itself still runs regardless: a very long chat still
+   * needs its request body and the model's context bounded even with
+   * memory turned off, and turns that scroll out of the window while memory
+   * is off are simply not recoverable later the way a fold would have made
+   * them (the marker still advances past them either way, so re-enabling
+   * memory later does not try to retroactively fold turns nothing kept a
+   * copy of).
+   */
+  private applyRollingWindow(
+    chat: PlannerChat,
+    events: readonly AgentEvent[],
+    memoryEnabled: boolean,
+  ): readonly AgentEvent[] {
+    const turns = splitIntoTurns(events);
+    const keepFrom = turns.length - ROLLING_WINDOW_TURNS;
+    if (keepFrom <= 0) return events;
+
+    const alreadyFolded = readPlannerChatMemoryFoldedTurns(this.opts.db, chat.id);
+    if (keepFrom > alreadyFolded) {
+      const newlyEvicted = turns.slice(alreadyFolded, keepFrom);
+      if (memoryEnabled && chat.workspaceId && newlyEvicted.length > 0) {
+        this.opts.memory.save(chat.workspaceId, summarizeFoldedTurns(newlyEvicted), 3, chat.id);
+      }
+      writePlannerChatMemoryFoldedTurns(this.opts.db, chat.id, keepFrom);
+    }
+    return turns.slice(keepFrom).flat();
   }
 }
 
@@ -907,4 +1070,75 @@ function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatMessage[
   }
   flushPendingCalls();
   return messages;
+}
+
+/**
+ * PA-29: splits a chat's persisted events into turns, each starting at a
+ * `user_prompt` (inclusive) and running up to, but not including, the next
+ * one — the unit `ROLLING_WINDOW_TURNS` counts in. Any events before the
+ * first `user_prompt` (should not normally happen — every turn starts with
+ * one) form a synthetic leading turn so nothing is ever silently dropped
+ * from consideration by this split alone.
+ */
+function splitIntoTurns(events: readonly AgentEvent[]): AgentEvent[][] {
+  const turns: AgentEvent[][] = [];
+  let current: AgentEvent[] = [];
+  for (const event of events) {
+    if (event.kind === 'user_prompt') {
+      if (current.length > 0) turns.push(current);
+      current = [event];
+    } else {
+      current.push(event);
+    }
+  }
+  if (current.length > 0) turns.push(current);
+  return turns;
+}
+
+/**
+ * The cheap, no-LLM-call heuristic the approved design asks for: the first
+ * line of the oldest evicted turn's own prompt, which tool names were used
+ * across the whole folded span, and the last assistant reply in it — three
+ * facts a human skimming this memory later would want, without a second
+ * network round trip on every turn that happens to cross the window.
+ */
+function summarizeFoldedTurns(turns: readonly AgentEvent[][]): string {
+  const flat = turns.flat();
+  const firstPrompt = flat.find((e) => e.kind === 'user_prompt');
+  const toolNames = [...new Set(flat.filter((e) => e.kind === 'tool_use').map((e) => e.name))];
+  const lastReply = [...flat].reverse().find((e) => e.kind === 'text');
+
+  const parts: string[] = [];
+  if (firstPrompt) {
+    const firstLine = firstPrompt.text.split('\n').find((line) => line.trim().length > 0) ?? firstPrompt.text;
+    parts.push(`Discussed: ${firstLine.trim().slice(0, 200)}`);
+  }
+  if (toolNames.length > 0) parts.push(`Tools used: ${toolNames.join(', ')}`);
+  if (lastReply) parts.push(`Outcome: ${lastReply.text.trim().slice(0, 300)}`);
+  return parts.length > 0
+    ? parts.join(' | ')
+    : '(an earlier part of this conversation, with no summarizable content)';
+}
+
+/** The most recent thing the user actually typed — what pre-turn memory
+    ranking searches against, since it is the clearest signal of what this
+    turn is about (clearer than the model's own last reply, which may just
+    be restating or asking a follow-up). `''` if the transcript somehow has
+    no `user_prompt` yet (should not happen once `sendMessage` has appended
+    one), and an empty query simply ranks nothing — see
+    `PlannerMemoryService.search`'s own handling of that. */
+function lastUserPromptText(events: readonly AgentEvent[]): string {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]!;
+    if (event.kind === 'user_prompt') return event.text;
+  }
+  return '';
+}
+
+/** The system message a real turn prepends when memory injection has any
+    hits — plain enough that any OpenAI-compatible model reads it as
+    background context rather than an instruction to follow literally. */
+function buildMemorySystemMessage(memories: readonly PlannerMemory[]): string {
+  const lines = memories.map((m) => `- ${m.content}`);
+  return `Relevant memories from earlier conversations with this agent:\n${lines.join('\n')}`;
 }

@@ -52,6 +52,7 @@ import type {
   CreatePlannerChatRequest,
   UpdatePlannerChatRequest,
   PlannerChatHistoryResponse,
+  PlannerContextPreviewResponse,
   PlannerSendMessageRequest,
   PlannerToolApprovalChoice,
   PlannerToolListResponse,
@@ -659,6 +660,12 @@ export const api = {
       { decision },
       onEvent,
     ),
+
+  /** PA-29: a read-only preview of the memory ranking and rolling-window
+      trimming the *next* turn in this chat would apply — never triggers a
+      turn itself. */
+  plannerContextPreview: (id: string) =>
+    request<PlannerContextPreviewResponse>(`/api/planner/chats/${encodeURIComponent(id)}/context-preview`),
 
   listPlannerTools: () => request<PlannerToolListResponse>('/api/planner/tools'),
 

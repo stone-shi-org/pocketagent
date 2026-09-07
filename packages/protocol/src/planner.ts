@@ -33,6 +33,21 @@ export const PlannerWorkspace = z.object({
       own model". Seeds a new chat created in this workspace; each chat then
       keeps its own choice exactly like today. */
   defaultModelId: z.string().nullable(),
+  /**
+   * PA-29: whether this agent's memory system is on. Defaults to `true` for
+   * every existing agent (see the migration's own doc comment) — turning it
+   * off skips both ranking memories into a turn's system message and
+   * folding evicted rolling-window turns into new ones, but the rolling
+   * window itself still trims what the LLM sees regardless, for basic
+   * context-length safety (see `PlannerChatService`'s doc comment on that
+   * split).
+   */
+  memoryEnabled: z.boolean(),
+  /** PA-29 phase 3 (consolidation, not implemented yet): when a background
+      pass last folded this agent's short-term memories into long-term ones.
+      `null` until that phase ever runs for this agent — the column exists
+      now so that later phase needs no migration of its own. */
+  lastConsolidatedAt: z.number().int().nullable(),
 });
 export type PlannerWorkspace = z.infer<typeof PlannerWorkspace>;
 

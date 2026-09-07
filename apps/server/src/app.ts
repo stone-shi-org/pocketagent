@@ -56,6 +56,7 @@ import { PlannerWorkspaceRegistry } from './planner/workspaces.js';
 import { createPlannerWorkspaceStore } from './planner/store.js';
 import { PlannerChatService } from './planner/chats.js';
 import type { QueuedRunSummary } from '@pocketagent/protocol';
+import { PlannerMemoryService } from './planner/memory.js';
 import type { PocketContext } from './types.js';
 import { PromptQueueService } from './sessions/prompt-queue.js';
 
@@ -339,6 +340,11 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     );
   }
 
+  // PA-29: the memory system. Constructed before `plannerChats` because that
+  // service's turn loop (rolling-window fold, pre-turn ranking) and its
+  // `memory_save`/`memory_search` tools both need it.
+  const plannerMemory = new PlannerMemoryService({ db });
+
   const plannerChats = new PlannerChatService({
     db,
     workspaces,
@@ -347,6 +353,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     worktrees,
     historyDeps: { sessions, conversations, agyTranscripts, piTranscripts },
     shell: config.shell,
+    memory: plannerMemory,
     logger: app.log,
     ...(options.plannerLlmFetch ? { llmFetch: options.plannerLlmFetch } : {}),
   });
@@ -429,6 +436,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     plannerWorkspaces,
     plannerWorkspacesRoot,
     plannerChats,
+    plannerMemory,
     agents,
     customClaudeProviders,
     db,

@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { PlannerChat } from '@pocketagent/protocol';
+import type { PlannerChat, PlannerMemory, PlannerMemoryTier } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import { readSetting, writeSetting } from '../db/index.js';
 import type { PlannerWorkspaceRow, PlannerWorkspaceStore } from './workspaces.js';
@@ -21,6 +21,8 @@ interface PlannerWorkspaceDbRow {
   is_default: number;
   created_at: number;
   default_model_id: string | null;
+  memory_enabled: number;
+  last_consolidated_at: number | null;
 }
 
 function fromDbRow(row: PlannerWorkspaceDbRow): PlannerWorkspaceRow {
@@ -31,6 +33,8 @@ function fromDbRow(row: PlannerWorkspaceDbRow): PlannerWorkspaceRow {
     isDefault: row.is_default === 1,
     createdAt: row.created_at,
     defaultModelId: row.default_model_id,
+    memoryEnabled: row.memory_enabled === 1,
+    lastConsolidatedAt: row.last_consolidated_at,
   };
 }
 
@@ -42,8 +46,9 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
       ).map(fromDbRow),
     insert: (row) => {
       db.prepare(
-        `INSERT INTO planner_workspaces (id, name, path, is_default, created_at, default_model_id)
-         VALUES (@id, @name, @path, @isDefault, @createdAt, @defaultModelId)`,
+        `INSERT INTO planner_workspaces
+           (id, name, path, is_default, created_at, default_model_id, memory_enabled, last_consolidated_at)
+         VALUES (@id, @name, @path, @isDefault, @createdAt, @defaultModelId, @memoryEnabled, @lastConsolidatedAt)`,
       ).run({
         id: row.id,
         name: row.name,
@@ -51,6 +56,8 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
         isDefault: row.isDefault ? 1 : 0,
         createdAt: row.createdAt,
         defaultModelId: row.defaultModelId,
+        memoryEnabled: row.memoryEnabled ? 1 : 0,
+        lastConsolidatedAt: row.lastConsolidatedAt,
       });
     },
     delete: (id) => db.prepare('DELETE FROM planner_workspaces WHERE id = ?').run(id).changes > 0,
@@ -348,6 +355,22 @@ export function deletePlannerChat(db: Db, id: string): boolean {
   return db.prepare('DELETE FROM planner_chats WHERE id = ?').run(id).changes > 0;
 }
 
+/**
+ * PA-29: how many of a chat's oldest turns have already been folded into a
+ * memory by the rolling window — see the migration's own doc comment for why
+ * this exists and why it is not part of the `PlannerChat` protocol type.
+ */
+export function readPlannerChatMemoryFoldedTurns(db: Db, id: string): number {
+  const row = db.prepare('SELECT memory_folded_turns FROM planner_chats WHERE id = ?').get(id) as
+    | { memory_folded_turns: number }
+    | undefined;
+  return row?.memory_folded_turns ?? 0;
+}
+
+export function writePlannerChatMemoryFoldedTurns(db: Db, id: string, foldedTurns: number): void {
+  db.prepare('UPDATE planner_chats SET memory_folded_turns = ? WHERE id = ?').run(foldedTurns, id);
+}
+
 // ---- planner_tool_approvals ---------------------------------------------------
 
 export type PlannerApprovalScope = 'global' | 'workspace';
@@ -436,4 +459,199 @@ export function readPlannerToolApprovals(db: Db): PlannerToolApprovalRow[] {
 
 export function deletePlannerToolApproval(db: Db, id: string): boolean {
   return db.prepare('DELETE FROM planner_tool_approvals WHERE id = ?').run(id).changes > 0;
+}
+
+// ---- planner_memories ---------------------------------------------------------
+//
+// PA-29: raw persistence for the memory system, in the same "prepared
+// statements, plain functions taking `Db` first" style as every other table
+// in this file. `PlannerMemoryService` (`planner/memory.ts`) owns the
+// scoring/eviction/ranking logic on top of these; nothing here decides which
+// row survives a budget cap or which one a search should surface first.
+
+interface PlannerMemoryDbRow {
+  id: string;
+  workspace_id: string;
+  tier: PlannerMemoryTier;
+  content: string;
+  importance: number;
+  source_chat_id: string | null;
+  created_at: number;
+  last_accessed_at: number;
+}
+
+function memoryFromDbRow(row: PlannerMemoryDbRow): PlannerMemory {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    tier: row.tier,
+    content: row.content,
+    importance: row.importance,
+    sourceChatId: row.source_chat_id,
+    createdAt: row.created_at,
+    lastAccessedAt: row.last_accessed_at,
+  };
+}
+
+export function insertPlannerMemory(db: Db, memory: PlannerMemory): void {
+  db.prepare(
+    `INSERT INTO planner_memories
+       (id, workspace_id, tier, content, importance, source_chat_id, created_at, last_accessed_at)
+     VALUES (@id, @workspaceId, @tier, @content, @importance, @sourceChatId, @createdAt, @lastAccessedAt)`,
+  ).run(memory);
+}
+
+export function readPlannerMemory(db: Db, id: string): PlannerMemory | null {
+  const row = db.prepare('SELECT * FROM planner_memories WHERE id = ?').get(id) as
+    | PlannerMemoryDbRow
+    | undefined;
+  return row ? memoryFromDbRow(row) : null;
+}
+
+/** Every row of one tier in one workspace — the eviction-budget scan.
+    Small by construction (bounded by `MAX_SHORT_TERM_MEMORIES`/
+    `MAX_LONG_TERM_MEMORIES` in `planner/memory.ts`), so no `LIMIT` here. */
+export function readPlannerMemoriesForTier(
+  db: Db,
+  workspaceId: string,
+  tier: PlannerMemoryTier,
+): PlannerMemory[] {
+  const rows = db
+    .prepare('SELECT * FROM planner_memories WHERE workspace_id = ? AND tier = ?')
+    .all(workspaceId, tier) as PlannerMemoryDbRow[];
+  return rows.map(memoryFromDbRow);
+}
+
+/** Plain listing for a settings UI (PA-29 phase 4) — most-recent-first, no
+    relevance scoring. `tier` omitted lists every tier for the workspace. */
+export function readPlannerMemories(
+  db: Db,
+  workspaceId: string,
+  tier?: PlannerMemoryTier,
+): PlannerMemory[] {
+  const rows = (
+    tier
+      ? db
+          .prepare(
+            'SELECT * FROM planner_memories WHERE workspace_id = ? AND tier = ? ORDER BY created_at DESC',
+          )
+          .all(workspaceId, tier)
+      : db
+          .prepare('SELECT * FROM planner_memories WHERE workspace_id = ? ORDER BY created_at DESC')
+          .all(workspaceId)
+  ) as PlannerMemoryDbRow[];
+  return rows.map(memoryFromDbRow);
+}
+
+export function deletePlannerMemory(db: Db, id: string): boolean {
+  return db.prepare('DELETE FROM planner_memories WHERE id = ?').run(id).changes > 0;
+}
+
+export function updatePlannerMemory(
+  db: Db,
+  id: string,
+  patch: { content?: string; importance?: number },
+): void {
+  const assignments: string[] = [];
+  const params: Record<string, unknown> = { id };
+  if (patch.content !== undefined) {
+    assignments.push('content = @content');
+    params.content = patch.content;
+  }
+  if (patch.importance !== undefined) {
+    assignments.push('importance = @importance');
+    params.importance = patch.importance;
+  }
+  if (assignments.length === 0) return;
+  db.prepare(`UPDATE planner_memories SET ${assignments.join(', ')} WHERE id = @id`).run(params);
+}
+
+/** Bumps `last_accessed_at` for exactly the rows a search actually returned
+    to the caller — never for a row only *considered* (an eviction scan, a
+    dry-run preview) — see `PlannerMemoryService.search`'s `dryRun` option. */
+export function touchPlannerMemoriesLastAccessed(db: Db, ids: readonly string[], now: number): void {
+  if (ids.length === 0) return;
+  const placeholders = ids.map(() => '?').join(',');
+  db.prepare(`UPDATE planner_memories SET last_accessed_at = ? WHERE id IN (${placeholders})`).run(
+    now,
+    ...ids,
+  );
+}
+
+/**
+ * One FTS5 hit joined back to its full row, plus SQLite's own `bm25()`
+ * relevance for that match (more negative is a better match, SQLite's own
+ * convention) — `PlannerMemoryService.search` combines this with `score()`
+ * rather than using either alone, so a highly important but only loosely
+ * related memory and a perfectly-matched but stale, unimportant one both get
+ * a fair hearing.
+ */
+export interface PlannerMemoryFtsHit {
+  memory: PlannerMemory;
+  bm25: number;
+}
+
+/**
+ * Raw FTS5 MATCH query against `planner_memories_fts`, filtered to one
+ * workspace (and tier, if given), ordered by textual relevance alone —
+ * `PlannerMemoryService.search` re-ranks the top `candidateLimit` of these
+ * against `score()` before applying the caller's real `limit`. Returns `[]`
+ * for a query with no usable tokens (see `buildFtsMatchQuery`) rather than
+ * letting FTS5's query parser throw on an empty or all-punctuation string.
+ */
+export function searchPlannerMemoriesFts(
+  db: Db,
+  workspaceId: string,
+  queryText: string,
+  tier: PlannerMemoryTier | undefined,
+  candidateLimit: number,
+): PlannerMemoryFtsHit[] {
+  const matchQuery = buildFtsMatchQuery(queryText);
+  if (matchQuery === null) return [];
+  const rows = (
+    tier
+      ? db
+          .prepare(
+            `SELECT m.*, bm25(planner_memories_fts) AS rank
+             FROM planner_memories_fts
+             JOIN planner_memories m ON m.rowid = planner_memories_fts.rowid
+             WHERE planner_memories_fts.content MATCH ? AND m.workspace_id = ? AND m.tier = ?
+             ORDER BY rank
+             LIMIT ?`,
+          )
+          .all(matchQuery, workspaceId, tier, candidateLimit)
+      : db
+          .prepare(
+            `SELECT m.*, bm25(planner_memories_fts) AS rank
+             FROM planner_memories_fts
+             JOIN planner_memories m ON m.rowid = planner_memories_fts.rowid
+             WHERE planner_memories_fts.content MATCH ? AND m.workspace_id = ?
+             ORDER BY rank
+             LIMIT ?`,
+          )
+          .all(matchQuery, workspaceId, candidateLimit)
+  ) as (PlannerMemoryDbRow & { rank: number })[];
+  return rows.map((row) => ({ memory: memoryFromDbRow(row), bm25: row.rank }));
+}
+
+/**
+ * Turns arbitrary conversation text into a safe FTS5 `MATCH` argument: split
+ * into word tokens, strip everything but letters/digits from each (dropping
+ * FTS5's own query syntax characters — `"`, `-`, `*`, `:`, parentheses — so
+ * none of them can be smuggled in from a user's own message and change the
+ * query's *meaning*, e.g. a leading `-` turning a token into a NOT clause),
+ * then phrase-quote each token and OR them together. A `MATCH` with zero
+ * tokens throws in SQLite rather than matching nothing, so this returns
+ * `null` for that case and the caller treats it as "no results" instead of
+ * letting the query throw.
+ */
+function buildFtsMatchQuery(text: string): string | null {
+  const tokens = text
+    .split(/\s+/)
+    .map((token) => token.replace(/[^a-zA-Z0-9]/g, ''))
+    .filter((token) => token.length > 0)
+    // Capped so one very long message cannot build an unbounded MATCH query.
+    .slice(0, 32);
+  if (tokens.length === 0) return null;
+  return tokens.map((token) => `"${token}"`).join(' OR ');
 }

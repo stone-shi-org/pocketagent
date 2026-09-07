@@ -10,6 +10,7 @@ export * from './cron.js';
 export * from './webhook-template.js';
 export * from './webhooks.js';
 export * from './planner.js';
+export * from './planner-memory.js';
 
 /** Name of the HttpOnly cookie holding the server-side session id. */
 export const AUTH_COOKIE_NAME = 'pocketagent_sid';
