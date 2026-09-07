@@ -856,6 +856,32 @@ export class WebhookService {
     frozen: FrozenRun,
     position: number,
   ): DeliveryOutcome {
+    // PA-27 ("if new update re-queue agent A, it created a 'copy' of agent A
+    // instead of 'move' agent A to queue directory"): a `per-issue`
+    // conversation is one waiter, not one per delivery. Without this check, a
+    // second update to an issue that is *already* queued behind this tree adds
+    // a second, independent `webhook_deliveries` row and a second `RunQueue`
+    // item for the same subject — `queuedByTree` then renders two lines for
+    // the same issue, which is the "copy" the report describes. The existing
+    // waiter is refreshed with the newest payload's rendered run instead, so
+    // what eventually executes reflects the latest Jira content, and the new
+    // delivery is closed out rather than given a queue slot of its own. Scoped
+    // to `per-issue`: that is the only mode with a stable subject identity to
+    // merge on — every other delivery is independent work by design.
+    if (hook.conversation_mode === 'per-issue') {
+      const existing = readQueuedWebhookDeliveries(this.db, hook.id).find(
+        (d) => d.issue_key === frozen.subjectKey && d.id !== deliveryId,
+      );
+      if (existing !== undefined) {
+        updateWebhookDelivery(this.db, existing.id, {
+          rendered_prompt: frozen.prompt,
+          queued_spec_json: JSON.stringify(frozen),
+        });
+        const reason = `Merged into the delivery already queued for ${frozen.subjectKey}.`;
+        this.closeDelivery(hook, deliveryId, 'skipped', reason);
+        return accepted('skipped', deliveryId, reason);
+      }
+    }
     const queuedAt = this.now();
     // Persisted before the enqueue so the row is never `queued` with no spec to
     // run, which is the one state `pending()` cannot recover from.

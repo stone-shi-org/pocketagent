@@ -1032,6 +1032,21 @@ function ProjectSection({
                   }
                 >
                   <span className="chat-title">
+                    <span className="cron-icon-wrap queued-icon-wrap">
+                      {/* PA-27: every other "special" row in the tree (a
+                          scheduled job, a webhook) leads with a type icon —
+                          the queued row was the one exception, which is what
+                          made it "look off" next to its siblings. `branch` for
+                          a waiting prompt matches the same glyph the composer
+                          uses for "a conversation to resume"; `webhook` for a
+                          waiting delivery matches the badge a webhook-started
+                          chat already wears. */}
+                      <Icon
+                        name={item.kind === 'prompt' ? 'branch' : 'webhook'}
+                        size={15}
+                        className="cron-badge-icon"
+                      />
+                    </span>
                     <span className="queued-position" aria-label={`Position ${item.position}`}>
                       {item.position}
                     </span>

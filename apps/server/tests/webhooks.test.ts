@@ -1549,6 +1549,50 @@ describe('webhook delivery: the directory queue (PA-11)', () => {
     expect(project?.queued[0]?.title).toBe('ENG-2');
   });
 
+  it('merges a second update to an already-queued issue instead of duplicating it (PA-27)', async () => {
+    // `per-issue` is the only mode with a stable subject identity: two
+    // deliveries for the same issue key are the same conversation's work, not
+    // two independent runs. Without the merge below, the second update would
+    // add a second `webhook_deliveries` row and a second `RunQueue` item for
+    // ENG-2 — a "copy" sitting beside the original waiter in the Queued group,
+    // rather than the original being refreshed and moved along.
+    const hook = await createWebhook({
+      conversationMode: 'per-issue',
+      worktreeMode: 'none',
+      overlapPolicy: 'allow',
+      maxConcurrent: 5,
+    });
+    expect((await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret })).json().status).toBe(
+      'running',
+    );
+    const firstQueued = await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret });
+    expect(firstQueued.json().status).toBe('queued');
+    const firstId = firstQueued.json().deliveryId;
+
+    const secondQueued = await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret });
+    expect(secondQueued.json().status).toBe('skipped');
+    expect(secondQueued.json().reason).toMatch(/merged into the delivery already queued/i);
+    const secondId = secondQueued.json().deliveryId;
+
+    // Exactly one waiter for ENG-2 in the live queue, not two.
+    const waiting = ctx.context.webhooks.queuedByTree().get(ctx.projectDir);
+    expect(waiting?.filter((w) => w.title === 'ENG-2')).toHaveLength(1);
+    const projects = await ctx.context.projects.list(ctx.context.sessions.list());
+    expect(
+      projects.find((p) => p.cwd === ctx.projectDir)?.queued.filter((q) => q.title === 'ENG-2'),
+    ).toHaveLength(1);
+
+    // Both delivery rows persist (history is never discarded), but only the
+    // first still holds the queue slot — the second closed out instead of
+    // taking one of its own.
+    const rows = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 20 }).filter(
+      (r) => r.issue_key === 'ENG-2',
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.id === firstId)?.status).toBe('queued');
+    expect(rows.find((r) => r.id === secondId)?.status).toBe('skipped');
+  });
+
   it('keeps a queued delivery through a restart and runs it afterwards', async () => {
     const db = openDatabase(':memory:');
     const first = await createTestApp({}, db);
