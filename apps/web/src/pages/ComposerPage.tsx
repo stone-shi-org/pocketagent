@@ -17,6 +17,7 @@ import { AttachButton } from '../components/AttachButton.js';
 import { Icon } from '../components/Icon.js';
 import { effortLabel } from '../components/PromptBox.js';
 import { readImageFile } from '../agent/image-attachment.js';
+import { type Flavour, makeFlavour, parseFlavour } from '../agent/flavour.js';
 import { flattenProjects } from '../agent/search.js';
 import { resolveCurrentModel } from '../agent/transcript.js';
 import { setPendingPrompt } from '../agent/pending-prompt.js';
@@ -35,9 +36,6 @@ function basename(p: string): string {
   const parts = p.split('/').filter(Boolean);
   return parts[parts.length - 1] ?? p;
 }
-
-/** `claude:structured` — one selector row covers both choices. */
-type Flavour = `${string}:${'terminal' | 'structured'}`;
 
 const NEW_CHAT = '__new__';
 /** Sentinel option in the Workspace picker that opens `AddProject` instead of selecting a value. */
@@ -97,7 +95,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
 
         setCwd((prev) => prev || w.workspaces[0]?.path || '');
         const preferred = a.agents.find((x) => x.available) ?? a.agents[0];
-        if (preferred) setFlavour(`${preferred.id}:${preferred.defaultTransport}` as Flavour);
+        if (preferred) setFlavour(makeFlavour(preferred.id, preferred.defaultTransport));
       })
       .catch((err) => {
         if (cancelled) return;
@@ -146,7 +144,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
     () =>
       agents.flatMap((agent) =>
         agent.transports.map((transport) => ({
-          value: `${agent.id}:${transport}`,
+          value: makeFlavour(agent.id, transport),
           label: `${agent.displayName} · ${transport === 'structured' ? 'native' : 'terminal'}`,
           detail: !agent.available
             ? 'not installed'
@@ -225,7 +223,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
 
   const picked = here.find((h) => h.chat.id === resumeId);
 
-  const [agentId, transport] = flavour ? (flavour.split(':') as [string, 'terminal' | 'structured']) : ['', ''];
+  const { agentId, transport } = parseFlavour(flavour);
   // A picked chat always resumes as whatever agent it already is — the
   // "Agent" row above is only consulted for a brand new chat. Falling back to
   // the row's own selection here used to mean picking a finished, say, `agy`
