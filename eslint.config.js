@@ -4,7 +4,23 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['**/dist/**', '**/node_modules/**', '**/*.d.ts', 'smoke.mts'],
+    // `.worktrees/**` holds nested git checkouts of this same repo — per-run
+    // worktrees a cron job or webhook delivery minted, plus any created by
+    // hand. They are ignored by git (via `.git/info/exclude`, which eslint
+    // does not read) and each one has its own copy of this config, so linting
+    // them from the root both duplicates work and gets it wrong: the `files:`
+    // overrides below are root-relative, so a script under a worktree matches
+    // none of them and is linted without the Node or browser globals it
+    // declares — 1700+ bogus `no-undef` errors. Their count also varies with
+    // whatever runs happened to leave a tree behind, which made `pnpm lint`
+    // nondeterministic on a machine that runs its own jobs.
+    ignores: [
+      '**/dist/**',
+      '**/node_modules/**',
+      '**/.worktrees/**',
+      '**/*.d.ts',
+      'smoke.mts',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
