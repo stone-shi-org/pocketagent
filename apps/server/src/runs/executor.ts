@@ -51,11 +51,10 @@ export interface RunSpec {
   /**
    * Continue an existing agent conversation instead of starting a fresh one.
    *
-   * `forkSession` is pinned to `false` below rather than left to the default.
-   * `CreateSessionInput.forkSession`'s doc comment claims it defaults to true,
-   * but `structured-session.ts` only forks on `=== true` and the HTTP schema
-   * defaults it to `false` — the comment is stale. Being explicit here means a
-   * later correction of that default cannot silently start branching a
+   * `forkSession` is pinned to `false` below rather than left to the default
+   * (which is itself `false` — see `CreateSessionInput.forkSession`). Being
+   * explicit here means an unattended run always appends in place even if
+   * that default ever changes, rather than silently starting to branch a
    * duplicate chat per run.
    */
   resume?: { agentSessionId: string };

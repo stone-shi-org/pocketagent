@@ -85,7 +85,7 @@ export interface CreateSessionInput {
   transport?: SessionTransport;
   /** Resume a prior agent conversation (structured transport only). */
   resumeAgentSessionId?: string;
-  /** Branch rather than append when resuming. Defaults to true. */
+  /** Branch rather than append when resuming. Defaults to false. */
   forkSession?: boolean;
   /**
    * Explicit, off-by-default opt-in to run this session with approvals
@@ -805,6 +805,7 @@ export class SessionManager {
     executable: string;
     env: Record<string, string>;
     resumeAgentSessionId?: string;
+    forkSession?: boolean;
     skipPermissions?: boolean;
     model?: string;
     effort?: EffortLevel | null;
@@ -828,6 +829,7 @@ export class SessionManager {
       ...(args.resumeAgentSessionId
         ? { resumeAgentSessionId: args.resumeAgentSessionId }
         : {}),
+      ...(args.forkSession !== undefined ? { forkSession: args.forkSession } : {}),
       ...(this.opts.maxBudgetUsd !== undefined ? { maxBudgetUsd: this.opts.maxBudgetUsd } : {}),
       skipPermissions: args.skipPermissions === true,
       ...(args.model !== undefined ? { model: args.model } : {}),

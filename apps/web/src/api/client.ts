@@ -252,7 +252,7 @@ export const api = {
     transport?: 'terminal' | 'structured';
     /** Resume a conversation from the agent's own session store. */
     resumeAgentSessionId?: string;
-    /** Branch instead of appending. Defaults to true server-side. */
+    /** Branch instead of appending. Defaults to false server-side. */
     forkSession?: boolean;
     /** Attach to an existing tmux pane, by opaque id from /api/adoptable. */
     adoptTargetId?: string;

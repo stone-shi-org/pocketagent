@@ -517,6 +517,68 @@ describe('resume request validation', () => {
   });
 });
 
+/**
+ * PA-23: `forkSession` was accepted by the protocol and honoured by
+ * `StructuredSession`, but the layer between them — `SessionManager` — dropped
+ * it on its way from `create()` into `startStructured()`. Every other test
+ * above either constructs a `StructuredSession` directly (bypassing the
+ * manager) or only parses the HTTP schema (never reaching the SDK), so neither
+ * exercised the wiring where the bug actually lived. This drives the whole
+ * path: `POST /api/sessions` -> `SessionManager.create` -> the SDK options the
+ * mocked `query()` above records.
+ */
+describe('forkSession reaches the SDK through the full create path (PA-23)', () => {
+  let t: TestApp;
+
+  beforeEach(async () => {
+    captured.length = 0;
+    t = await createTestApp();
+  });
+
+  afterEach(() => t.cleanup());
+
+  it('forwards an explicit forkSession: true from the HTTP request to the SDK options', async () => {
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: {
+        agent: 'claude',
+        cwd: t.projectDir,
+        cols: 80,
+        rows: 24,
+        transport: 'structured',
+        resumeAgentSessionId: 'original-conversation',
+        forkSession: true,
+      },
+    });
+    expect(res.statusCode).toBe(201);
+
+    expect(onlyOptions().resume).toBe('original-conversation');
+    expect(onlyOptions().forkSession).toBe(true);
+  });
+
+  it('continues in place — no forkSession reaches the SDK — when the request omits it', async () => {
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: {
+        agent: 'claude',
+        cwd: t.projectDir,
+        cols: 80,
+        rows: 24,
+        transport: 'structured',
+        resumeAgentSessionId: 'original-conversation',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+
+    expect(onlyOptions().resume).toBe('original-conversation');
+    expect(onlyOptions().forkSession).toBeUndefined();
+  });
+});
+
 describe('conversation listing over HTTP', () => {
   let t: TestApp;
   let projects: string;
