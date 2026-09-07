@@ -1538,6 +1538,116 @@ describe('webhook per-issue conversations honour a changed agent label (PA-26)',
     await ctx.context.sessions.terminate(live.id);
   });
 
+  it('forgets a cached conversation whose session dies right after the failed resume settles (PA-30)', async () => {
+    // Round 2 of the self-heal. The first cut checked `isAlive` at the moment
+    // the delivery settled, but a resume of a dead `agent_session_id` settles
+    // *inside* the dying session's teardown: the structured session emits its
+    // synthetic error `turn_complete` (which reaches the sink) before the same
+    // synchronous stack flips the status to `error`. The liveness check
+    // therefore saw the dying session as still `running` and the poisoned row
+    // survived every re-trigger — the reported recurrence. The fix re-checks
+    // once on the next tick, by which time the status is final. Model that with
+    // a sessions row whose status flips `running` → `error` between the first
+    // check and the deferred one.
+    const hook = await perIssueHook();
+    const now = Date.now();
+    ctx.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
+         VALUES ('dying-session', 'x', 'claude', 'claude', ?, 'running', 'structured', ?, 0, 0)`,
+      )
+      .run(ctx.projectDir, now - 60_000);
+    upsertWebhookIssueSession(ctx.db, {
+      webhook_id: hook.id,
+      issue_key: 'PA-123',
+      agent_session_id: 'dead-session-id',
+      session_id: 'dying-session',
+      planner_chat_id: null,
+      agent: 'claude',
+      cwd: ctx.projectDir,
+      created_at: now - 60_000,
+      updated_at: now - 60_000,
+    });
+    ctx.db
+      .prepare(
+        `INSERT INTO webhook_deliveries (id, webhook_id, webhook_name, agent, status, trigger,
+          signature_state, skip_permissions_enabled, payload_bytes, payload_truncated,
+          received_at, issue_key, session_id, agent_session_id)
+         VALUES ('del-dying', ?, 'Triage', 'claude', 'failed', 'delivery', 'valid', 0, 0, 0,
+          ?, 'PA-123', 'dying-session', 'dead-session-id')`,
+      )
+      .run(hook.id, now - 30_000);
+
+    // First check: the session still reports `running` (mid-teardown), so the
+    // delete is deferred rather than performed or skipped.
+    const webhooks = ctx.context.webhooks as unknown as {
+      forgetDeadCachedConversation(
+        deliveryId: string,
+        webhookId: string | null,
+        status: 'succeeded' | 'failed',
+        deferred?: boolean,
+      ): void;
+    };
+    webhooks.forgetDeadCachedConversation('del-dying', hook.id, 'failed');
+    expect(readWebhookIssueSession(ctx.db, hook.id, 'PA-123')).not.toBeNull();
+
+    // The teardown completes: the session's status becomes final.
+    ctx.db.prepare(`UPDATE sessions SET status = 'error' WHERE id = 'dying-session'`).run();
+
+    // The deferred re-check now sees the session as dead and forgets the row.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(readWebhookIssueSession(ctx.db, hook.id, 'PA-123')).toBeNull();
+  });
+
+  it('keeps a cached conversation when the deferred re-check still finds the session alive (PA-30)', async () => {
+    // The deferral must not become a slow delete: a genuinely live session — a
+    // transient error on a follow-up into a running conversation — is still
+    // alive on the re-check, so the row is kept and nothing is re-scheduled.
+    const hook = await perIssueHook();
+    const now = Date.now();
+    ctx.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
+         VALUES ('healthy-session', 'x', 'claude', 'claude', ?, 'running', 'structured', ?, 0, 0)`,
+      )
+      .run(ctx.projectDir, now - 60_000);
+    upsertWebhookIssueSession(ctx.db, {
+      webhook_id: hook.id,
+      issue_key: 'PA-123',
+      agent_session_id: 'live-conversation',
+      session_id: 'healthy-session',
+      planner_chat_id: null,
+      agent: 'claude',
+      cwd: ctx.projectDir,
+      created_at: now - 60_000,
+      updated_at: now - 60_000,
+    });
+    ctx.db
+      .prepare(
+        `INSERT INTO webhook_deliveries (id, webhook_id, webhook_name, agent, status, trigger,
+          signature_state, skip_permissions_enabled, payload_bytes, payload_truncated,
+          received_at, issue_key, session_id, agent_session_id)
+         VALUES ('del-healthy', ?, 'Triage', 'claude', 'failed', 'delivery', 'valid', 0, 0, 0,
+          ?, 'PA-123', 'healthy-session', 'live-conversation')`,
+      )
+      .run(hook.id, now - 30_000);
+
+    const webhooks = ctx.context.webhooks as unknown as {
+      forgetDeadCachedConversation(
+        deliveryId: string,
+        webhookId: string | null,
+        status: 'succeeded' | 'failed',
+        deferred?: boolean,
+      ): void;
+    };
+    webhooks.forgetDeadCachedConversation('del-healthy', hook.id, 'failed');
+    // Flush twice: the re-check runs, finds the session alive, and stops. A
+    // buggy re-schedule would keep the event loop busy and time the test out.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(readWebhookIssueSession(ctx.db, hook.id, 'PA-123')?.session_id).toBe('healthy-session');
+  });
+
   it('ignores a model-only label change, because the agent is what owns the chat', async () => {
     // A different model of the *same* agent is a mid-conversation switch the
     // session already supports (PA-17 emits `model_changed`). Restarting the

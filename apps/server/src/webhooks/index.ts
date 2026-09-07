@@ -364,6 +364,13 @@ export class WebhookService {
   private readonly queue: RunQueue;
   private readonly heldKeys = new Map<string, string>();
   private unsubscribeTreeIdle: (() => void) | null = null;
+  /**
+   * Set by `stop()`. The one deferred re-check in
+   * `forgetDeadCachedConversation` reads the database on a later tick; after a
+   * shutdown the db handle is closed, so the re-check must recognise a stopped
+   * service rather than throw out of a `setImmediate`.
+   */
+  private stopped = false;
 
   constructor(private readonly opts: WebhookServiceOptions) {
     this.db = opts.db;
@@ -458,6 +465,7 @@ export class WebhookService {
 
   /** Stop sweeping and close out anything in flight. Called before session shutdown. */
   stop(): void {
+    this.stopped = true;
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
@@ -1311,11 +1319,26 @@ export class WebhookService {
    * predates the delivery, so a fresh run that fails keeps its own row — and
    * the conversation's session is no longer alive. A session that is still
    * running is the follow-up case, not a dead end.
+   *
+   * The liveness answer has one timing trap (fixed against the reported
+   * recurrence): a resume that dies during its first turn settles the delivery
+   * *before* the session's status has flipped to `error` — the flip happens in
+   * the same synchronous stack, right after the error `turn_complete` that
+   * carries the settle. `isAlive` therefore reads a dying session as `running`
+   * at exactly the moment this runs. When that happens the check is deferred
+   * one tick (see below) so it sees the session's final status.
    */
   private forgetDeadCachedConversation(
     deliveryId: string,
     webhookId: string | null,
     status: 'succeeded' | 'failed',
+    /**
+     * Set on the one re-check scheduled from the `isAlive` branch below. The
+     * flag (rather than a bare recursive call) is what stops a genuinely live
+     * session — which the re-check still finds alive — from re-scheduling
+     * forever.
+     */
+    deferred = false,
   ): void {
     if (status !== 'failed' || webhookId === null) return;
     const hook = readWebhook(this.db, webhookId);
@@ -1332,7 +1355,32 @@ export class WebhookService {
     // The row predates this delivery? If not, this delivery created it, and a
     // failed first run is not evidence the conversation is unresumable.
     if (cached.created_at >= delivery.received_at) return;
-    if (this.executor.isAlive(cached.session_id)) return;
+    if (this.executor.isAlive(cached.session_id)) {
+      // A resume of a dead `agent_session_id` fails *during the session's
+      // first turn*, and the run settles inside that turn's teardown: the
+      // structured session emits its synthetic error `turn_complete` (which
+      // reaches us here through the sink) and only then, in the same
+      // synchronous stack, flips its status to `error` in `finish()`. So at
+      // this instant `isAlive` reads the dying session as still `running`, and
+      // a plain `return` would strand the poisoned row forever — every later
+      // delivery resumes the same dead id and fails the same way (the exact
+      // PA-30 recurrence reported against the first cut of this fix).
+      //
+      // Re-check once on the next tick, by which time the status flip has
+      // happened: a session that died with the failed resume is now reported
+      // dead and the row is forgotten, while a genuinely live session — a
+      // transient error on a follow-up into a running conversation — is still
+      // alive and the row is kept. Exactly one deferral, and no listener is
+      // left on the session: a session that fails a turn but lives on, and
+      // only *exits* later, must not revisit this decision, or the row for a
+      // perfectly resumable conversation would be dropped on an unrelated exit.
+      if (deferred) return;
+      setImmediate(() => {
+        if (this.stopped) return;
+        this.forgetDeadCachedConversation(deliveryId, webhookId, status, true);
+      });
+      return;
+    }
     deleteWebhookIssueSession(this.db, webhookId, delivery.issue_key);
     this.opts.logger?.info(
       {
