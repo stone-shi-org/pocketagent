@@ -56,6 +56,7 @@ import {
   pruneOldWebhookIssueSessions,
   readActiveWebhookDeliveries,
   readAgentDefaults,
+  readLastRunAgentForIssue,
   readQueuedWebhookDeliveries,
   readWebhook,
   readWebhookBySlug,
@@ -805,6 +806,27 @@ export class WebhookService {
   }
 
   /**
+   * Whether a cached conversation belongs to `agent` — the single authority
+   * `issueConversationFor` (decide whether to continue) and `remember` (decide
+   * whether a run may update the row or must replace it) both read, so the two
+   * cannot disagree about the same row.
+   *
+   * PA-26: a known agent must equal the delivery's. PA-30: a NULL agent — a row
+   * written before the column existed — is decided by whoever actually last ran
+   * the subject, recovered from the delivery history, because the row's
+   * `agent_session_id` belongs to *that* agent and is not portable across
+   * agents (an `agentSessionId` handed to another agent's CLI resumes nothing,
+   * and fails asynchronously). NULL with no recoverable owner is "no match":
+   * there is no reason to believe the cached id belongs to `agent`, and
+   * resuming an unverifiable id is the wedge this feature exists to prevent.
+   */
+  private ownsConversation(cached: WebhookIssueSessionRow, agent: string): boolean {
+    if (cached.agent !== null) return cached.agent === agent;
+    const owner = readLastRunAgentForIssue(this.db, cached.webhook_id, cached.issue_key);
+    return owner !== null && owner === agent;
+  }
+
+  /**
    * The conversation cached for this subject, or null if there is none to
    * continue.
    *
@@ -834,11 +856,7 @@ export class WebhookService {
     if (hook.conversation_mode !== 'per-issue') return null;
     const mapped = readWebhookIssueSession(this.db, hook.id, subjectKey);
     if (mapped === null) return null;
-    // NULL is "unknown", not "no agent": a row cached before this column
-    // existed must keep continuing its conversation rather than be abandoned
-    // for a mismatch that cannot be established.
-    if (mapped.agent !== null && mapped.agent !== agent) return null;
-    return mapped;
+    return this.ownsConversation(mapped, agent) ? mapped : null;
   }
 
   /**
@@ -1020,20 +1038,27 @@ export class WebhookService {
     // agent it was accepted as, not whatever the labels would say now.
     this.recordEffectiveAgent(deliveryId, frozen.agent);
 
-    // PA-26: say so, exactly once, when this subject's cached conversation
-    // belonged to a different agent. "Why did it start a new chat instead of
+    // PA-26: say so, exactly once, when this subject's cached conversation is
+    // not this delivery's to continue. "Why did it start a new chat instead of
     // continuing the old one" is the support question this behaviour generates,
     // and this line is the answer — the same reasoning the filter's
-    // human-readable non-match reasons are recorded for.
+    // human-readable non-match reasons are recorded for. PA-30: a NULL-agent
+    // row that `ownsConversation` declines (its owner was someone else, or is
+    // unrecoverable) restarts just the same, and the log names the recovered
+    // owner when there was one.
     if (hook.conversation_mode === 'per-issue') {
       const cached = readWebhookIssueSession(this.db, hook.id, subjectKey);
-      if (cached !== null && cached.agent !== null && cached.agent !== frozen.agent) {
+      if (cached !== null && !this.ownsConversation(cached, frozen.agent)) {
+        const from =
+          cached.agent ??
+          readLastRunAgentForIssue(this.db, hook.id, subjectKey) ??
+          'unknown-agent';
         this.opts.logger?.info(
           {
             webhook: hook.id,
             delivery: deliveryId,
             subject: subjectKey,
-            from: cached.agent,
+            from,
             to: frozen.agent,
           },
           'webhook per-issue conversation restarted because the agent changed',
@@ -1160,7 +1185,17 @@ export class WebhookService {
       // abandoned agent's ids in the row and the *next* delivery would resume
       // them. Discarding it costs nothing this feature has not already spent:
       // the row is a cache, and the conversation it names is being replaced.
-      const stale = cached !== null && cached.agent !== null && cached.agent !== agent;
+      //
+      // PA-30: the same holds when the row's agent is NULL. The row still
+      // carries an `agent_session_id` that belongs to whoever ran before, and a
+      // run that is not that owner must not preserve it — most importantly the
+      // `onCwd` remember below fires *before* this run has produced an id of
+      // its own, so the COALESCE would otherwise copy the abandoned id forward
+      // under the new agent and poison the next resume. `ownsConversation` is
+      // the same test `issueConversationFor` used to decline the row, so a run
+      // that is genuinely continuing it (a same-owner resume) still updates in
+      // place.
+      const stale = cached !== null && !this.ownsConversation(cached, agent);
       if (stale) deleteWebhookIssueSession(this.db, hook.id, issueKey);
       const existing = stale ? null : cached;
       // `resolvedCwd`, not `hook.cwd`: the routed directory for *this*
@@ -1251,6 +1286,64 @@ export class WebhookService {
         last_error: error,
       });
     }
+    // PA-30: done here rather than only in the sink's `onSettled` so *every*
+    // way a delivery can fail — the async settle, and the sweep closing out a
+    // session that died without a `turn_complete` — gets the same self-heal.
+    this.forgetDeadCachedConversation(deliveryId, webhookId, status);
+  }
+
+  /**
+   * PA-30: forget a per-issue conversation whose cached session can no longer
+   * be resumed, once the delivery that just tried to resume it has failed.
+   *
+   * The wedge this removes: a `webhook_issue_sessions` row whose
+   * `agent_session_id` no longer resolves — it names a transcript that is gone,
+   * a session killed before it became durably resumable, or (the reported
+   * case) an id that never belonged to the agent now matching the row, left
+   * behind by a pre-PA-30 resume failure. The row's agent matches, so every
+   * later delivery for the subject tries the same resume and fails the same
+   * way, forever; nothing else ever rewrites the row, because the failed run
+   * was its only writer.
+   *
+   * Narrow on purpose, so a transient failure never fragments a live
+   * conversation. It fires only when this delivery *resumed* the cached
+   * conversation — its `agent_session_id` is the cached one, and the row
+   * predates the delivery, so a fresh run that fails keeps its own row — and
+   * the conversation's session is no longer alive. A session that is still
+   * running is the follow-up case, not a dead end.
+   */
+  private forgetDeadCachedConversation(
+    deliveryId: string,
+    webhookId: string | null,
+    status: 'succeeded' | 'failed',
+  ): void {
+    if (status !== 'failed' || webhookId === null) return;
+    const hook = readWebhook(this.db, webhookId);
+    if (hook === null || hook.conversation_mode !== 'per-issue') return;
+    const delivery = readWebhookDelivery(this.db, deliveryId);
+    // A pocket run's durable handle is its chat, which a failed run does not
+    // invalidate the same way — this self-heal is for the coding-session wedge.
+    if (delivery === null || delivery.issue_key === null || delivery.agent_session_id === null) {
+      return;
+    }
+    const cached = readWebhookIssueSession(this.db, webhookId, delivery.issue_key);
+    if (cached === null) return;
+    if (cached.agent_session_id !== delivery.agent_session_id) return;
+    // The row predates this delivery? If not, this delivery created it, and a
+    // failed first run is not evidence the conversation is unresumable.
+    if (cached.created_at >= delivery.received_at) return;
+    if (this.executor.isAlive(cached.session_id)) return;
+    deleteWebhookIssueSession(this.db, webhookId, delivery.issue_key);
+    this.opts.logger?.info(
+      {
+        webhook: webhookId,
+        delivery: deliveryId,
+        subject: delivery.issue_key,
+        agent: cached.agent,
+        agentSessionId: cached.agent_session_id,
+      },
+      'webhook per-issue conversation forgotten: its cached session id no longer resumes',
+    );
   }
 
   /**

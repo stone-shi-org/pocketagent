@@ -1359,21 +1359,183 @@ describe('webhook per-issue conversations honour a changed agent label (PA-26)',
   });
 
   it('keeps continuing a conversation cached before the agent was recorded', async () => {
-    // A row written before this column existed says nothing about who was
-    // handling the issue, and NULL must read as "unknown" rather than
-    // "mismatch" — otherwise upgrading the server would abandon every live
-    // per-issue conversation on its next delivery.
+    // A row written before this column existed says nothing about who handled
+    // the issue, but the delivery history does: the same agent (claude) ran it
+    // last. PA-30 recovers the owner from that history, so an upgrade-era
+    // conversation is continued by the agent that actually owns it — not
+    // abandoned for a NULL it never chose, and not handed to a different agent.
     const hook = await perIssueHook();
     cacheConversation(hook.id, 'claude', 'legacy-conversation');
     ctx.db
       .prepare('UPDATE webhook_issue_sessions SET agent = NULL WHERE webhook_id = ?')
       .run(hook.id);
+    ctx.db
+      .prepare(
+        `INSERT INTO webhook_deliveries (id, webhook_id, webhook_name, agent, status, trigger,
+          signature_state, skip_permissions_enabled, payload_bytes, payload_truncated,
+          received_at, issue_key, agent_session_id)
+         VALUES ('prior-claude', ?, 'Triage', 'claude', 'succeeded', 'delivery', 'valid', 0, 0, 0,
+          ?, 'PA-123', 'legacy-conversation')`,
+      )
+      .run(hook.id, Date.now() - 60_000);
 
     const res = await deliver(SLUG, payloadWithLabels(['frontend']), { secret: hook.secret });
     const session = ctx.context.sessions.get(res.json().sessionId);
     expect(session?.spec.resumeAgentSessionId).toBe('legacy-conversation');
     // And it is stamped on the way through, so the next delivery can tell.
     expect(readWebhookIssueSession(ctx.db, hook.id, 'PA-123')?.agent).toBe('claude');
+  });
+
+  it('does not resume a pre-agent-column conversation for a different agent (PA-30)', async () => {
+    // The reported bug: the row predates the agent column, and the delivery
+    // history says the conversation was agy's — its `agent_session_id` is
+    // agy's. PA-26's "NULL is unknown, keep going" let the label's new agent
+    // resume it anyway, which handed agy's id to claude and failed
+    // asynchronously ("No conversation found with session ID: …"), then left
+    // the foreign id cached under claude so every later delivery failed too.
+    const hook = await perIssueHook();
+    cacheConversation(hook.id, 'agy', 'agy-session-1');
+    ctx.db
+      .prepare('UPDATE webhook_issue_sessions SET agent = NULL WHERE webhook_id = ?')
+      .run(hook.id);
+    ctx.db
+      .prepare(
+        `INSERT INTO webhook_deliveries (id, webhook_id, webhook_name, agent, status, trigger,
+          signature_state, skip_permissions_enabled, payload_bytes, payload_truncated,
+          received_at, issue_key, agent_session_id)
+         VALUES ('prior-agy', ?, 'Triage', 'agy', 'succeeded', 'delivery', 'valid', 0, 0, 0,
+          ?, 'PA-123', 'agy-session-1')`,
+      )
+      .run(hook.id, Date.now() - 60_000);
+
+    const res = await deliver(SLUG, payloadWithLabels(['agent:claude']), { secret: hook.secret });
+    const outcome = res.json();
+    expect(outcome.status).toBe('running');
+
+    const session = ctx.context.sessions.get(outcome.sessionId);
+    // The label chose claude — and the conversation follows it. agy's id is not
+    // resumed by claude (it is not portable), so this is a fresh chat.
+    expect(session?.spec.agent).toBe('claude');
+    expect(session?.spec.resumeAgentSessionId).toBeUndefined();
+
+    // The cache now names the new conversation only — the fresh run must not
+    // leave agy's id behind for a later claude delivery to resume.
+    const cached = readWebhookIssueSession(ctx.db, hook.id, 'PA-123');
+    expect(cached?.agent).toBe('claude');
+    expect(cached?.agent_session_id).not.toBe('agy-session-1');
+  });
+
+  it('does not resume a pre-agent-column conversation whose owner is unknown (PA-30)', async () => {
+    // The conservative tail of the same fix: with no delivery history left to
+    // name an owner (retention pruned it), a NULL-agent row must start fresh
+    // rather than be resumed by whatever agent happens to arrive. The old
+    // behaviour chose continuity; PA-30 chooses safety, because resuming an
+    // unverifiable `agent_session_id` under the wrong agent is the hard error
+    // the other test asserts, and a fresh chat always works.
+    const hook = await perIssueHook();
+    cacheConversation(hook.id, 'claude', 'orphaned-conversation');
+    ctx.db
+      .prepare('UPDATE webhook_issue_sessions SET agent = NULL WHERE webhook_id = ?')
+      .run(hook.id);
+
+    const res = await deliver(SLUG, payloadWithLabels(['frontend']), { secret: hook.secret });
+    const outcome = res.json();
+    expect(outcome.status).toBe('running');
+    const session = ctx.context.sessions.get(outcome.sessionId);
+    expect(session?.spec.agent).toBe('claude');
+    expect(session?.spec.resumeAgentSessionId).toBeUndefined();
+  });
+
+  it('forgets a per-issue conversation whose cached session can no longer be resumed (PA-30)', async () => {
+    // The self-heal half. A poisoned row — agent=claude matching the delivery,
+    // but the cached `agent_session_id` no longer resolves (a pre-PA-30 resume
+    // failure stamped a foreign or dead id under this agent) — would otherwise
+    // make every later claude delivery resume it and fail the same way, forever.
+    // When the delivery that tried the resume dies and its session is gone, the
+    // row is forgotten so the next delivery starts fresh. Driven through the
+    // sweep, the guaranteed backstop for a session that died without a
+    // `turn_complete` — the same settle path an async resume failure takes.
+    const hook = await perIssueHook();
+    const now = Date.now();
+    upsertWebhookIssueSession(ctx.db, {
+      webhook_id: hook.id,
+      issue_key: 'PA-123',
+      agent_session_id: 'dead-session-id',
+      session_id: 'dead-session',
+      planner_chat_id: null,
+      agent: 'claude',
+      cwd: ctx.projectDir,
+      created_at: now - 60_000,
+      updated_at: now - 60_000,
+    });
+    ctx.db
+      .prepare(
+        `INSERT INTO webhook_deliveries (id, webhook_id, webhook_name, agent, status, trigger,
+          signature_state, skip_permissions_enabled, payload_bytes, payload_truncated,
+          received_at, issue_key, session_id, agent_session_id)
+         VALUES ('del-dead', ?, 'Triage', 'claude', 'running', 'delivery', 'valid', 0, 0, 0,
+          ?, 'PA-123', 'dead-session', 'dead-session-id')`,
+      )
+      .run(hook.id, now - 30_000);
+
+    ctx.context.webhooks.sweep();
+
+    const row = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 }).find(
+      (r) => r.id === 'del-dead',
+    );
+    expect(row?.status).toBe('failed');
+    expect(readWebhookIssueSession(ctx.db, hook.id, 'PA-123')).toBeNull();
+  });
+
+  it('keeps a cached conversation when a failed follow-up\'s session is still alive (PA-30)', async () => {
+    // The self-heal must not fire on a transient failure: a delivery into a
+    // still-live session that errors is a follow-up, not a dead end, and
+    // forgetting the row would fragment the conversation for no reason.
+    const hook = await perIssueHook();
+    const live = await ctx.context.sessions.create({
+      agent: 'claude',
+      cwd: ctx.projectDir,
+      cols: 0,
+      rows: 0,
+      transport: 'structured',
+      title: 'still handling the issue',
+    });
+    // The precondition the guard leans on: this session is what the sweep means
+    // by "alive", so it must report as such or the test is not testing anything.
+    expect(['starting', 'running']).toContain(ctx.context.sessions.get(live.id)?.status);
+    const now = Date.now();
+    upsertWebhookIssueSession(ctx.db, {
+      webhook_id: hook.id,
+      issue_key: 'PA-123',
+      agent_session_id: null,
+      session_id: live.id,
+      planner_chat_id: null,
+      agent: 'claude',
+      cwd: ctx.projectDir,
+      created_at: now - 60_000,
+      updated_at: now - 60_000,
+    });
+    ctx.db
+      .prepare(
+        `INSERT INTO webhook_deliveries (id, webhook_id, webhook_name, agent, status, trigger,
+          signature_state, skip_permissions_enabled, payload_bytes, payload_truncated,
+          received_at, issue_key, session_id, agent_session_id)
+         VALUES ('del-live', ?, 'Triage', 'claude', 'running', 'delivery', 'valid', 0, 0, 0,
+          ?, 'PA-123', ?, NULL)`,
+      )
+      .run(hook.id, now - 30_000, live.id);
+
+    ctx.context.webhooks.sweep();
+
+    // The sweep leaves the live session alone (it is still running), so nothing
+    // settles and nothing is forgotten.
+    expect(
+      readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 }).find(
+        (r) => r.id === 'del-live',
+      )?.status,
+    ).toBe('running');
+    expect(readWebhookIssueSession(ctx.db, hook.id, 'PA-123')?.session_id).toBe(live.id);
+    await ctx.context.sessions.terminate(live.id);
   });
 
   it('ignores a model-only label change, because the agent is what owns the chat', async () => {

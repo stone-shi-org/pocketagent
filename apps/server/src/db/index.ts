@@ -1468,8 +1468,11 @@ export interface WebhookIssueSessionRow {
    * PA-26: the agent this conversation belongs to — a coding agent id or a
    * `pocket:<id>`.
    *
-   * NULL means *unknown* (a row written before this column existed), which
-   * reads as "no reason to abandon it". A row whose agent differs from the
+   * NULL means *unknown* (a row written before this column existed), and it is
+   * decided by whoever actually last ran the subject — recovered from the
+   * delivery history by `readLastRunAgentForIssue` — never by assuming the next
+   * delivery's agent is the owner, because an `agent_session_id` is not
+   * portable across agents (PA-30). A row whose owner differs from the
    * delivery's effective agent is not this delivery's conversation, and
    * `WebhookService` starts a fresh one rather than resuming it.
    */
@@ -1720,6 +1723,35 @@ export function readQueuedWebhookDeliveries(db: Db, webhookId?: string): Webhook
         ORDER BY queued_at ASC, received_at ASC`,
     )
     .all() as WebhookDeliveryRow[];
+}
+
+/**
+ * The agent that last *ran* for one subject, read from the delivery history.
+ *
+ * PA-30: the per-issue cache's `agent` column is NULL on rows written before
+ * the column existed (PA-26), yet such a row still carries an
+ * `agent_session_id` that belongs to whichever agent handled the issue back
+ * then. Delivery rows are the durable record of that — every run inserts one
+ * carrying its effective `agent` — so they can name an owner the cache row no
+ * longer can. Only rows that actually *finished* running count: noise never
+ * ran, a queued row has not run yet, and a `starting`/`running` row is the
+ * delivery asking the question — the delivery's own row is inserted before it
+ * runs, so counting it would always answer "the current agent".
+ */
+export function readLastRunAgentForIssue(
+  db: Db,
+  webhookId: string,
+  issueKey: string,
+): string | null {
+  const row = db
+    .prepare(
+      `SELECT agent FROM webhook_deliveries
+        WHERE webhook_id = ? AND issue_key = ?
+          AND NOT ${NOISE_DELIVERY} AND NOT ${QUEUED_DELIVERY} AND NOT ${OPEN_DELIVERY}
+        ORDER BY received_at DESC LIMIT 1`,
+    )
+    .get(webhookId, issueKey) as { agent: string } | undefined;
+  return row?.agent ?? null;
 }
 
 /**
