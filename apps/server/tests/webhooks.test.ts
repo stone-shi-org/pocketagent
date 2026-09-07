@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { JIRA_SAMPLE_PAYLOAD } from '@pocketagent/protocol';
 import { REDACT_PATHS } from '../src/app.js';
@@ -18,6 +19,11 @@ import {
   type Db,
 } from '../src/db/index.js';
 import { authHeaders, createTestApp, type TestApp } from './helpers.js';
+
+const OPENCODE_FIXTURE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'fixtures/fake-opencode-server.mjs',
+);
 
 /**
  * The inbound webhook surface.
@@ -1924,5 +1930,68 @@ describe('webhook Jira component worktrees', () => {
       expect(row?.session_id).toBeTruthy();
       expect(row?.cwd).toBe(session1?.spec.cwd);
     }, 10_000);
+  });
+});
+
+describe('webhook delivery: agent_session_id for synchronous backends (PA-27)', () => {
+  it('stamps agent_session_id for an opencode-backed delivery, not just claude/agy', async () => {
+    // `pi`/`opencode` report their `agentSessionId` synchronously, inline,
+    // inside their own awaited `start()` — the `session_started` event has
+    // already fired and is gone by the time `RunExecutor.watch()`'s listener
+    // attaches. `claude`/`agy` discover it later, asynchronously, from a
+    // detached loop `start()` kicks off and returns before, so the listener is
+    // in time for those — which is why this bug only showed up for two of the
+    // five structured backends, and only after `autoSelectAgentModel` happened
+    // to route a Jira label onto one of them. Without `RunExecutor.run()`
+    // reading `session.agentSessionId` directly, this delivery's row — and
+    // with it the chat's "started by a webhook" badge — never learns the id.
+    const t = await createTestApp({ POCKETAGENT_OPENCODE_BIN: OPENCODE_FIXTURE });
+    try {
+      const created = await t.app.inject({
+        method: 'POST',
+        url: '/api/webhooks',
+        headers: authHeaders(t.cookie),
+        payload: {
+          name: 'opencode intake',
+          slug: 'oc',
+          cwd: t.projectDir,
+          agent: 'opencode',
+          config: { type: 'jira', filter: {} },
+        },
+      });
+      expect(created.statusCode, created.body).toBe(201);
+      const hook = created.json();
+
+      const body = JSON.stringify({ ...(JIRA_SAMPLE_PAYLOAD as object), timestamp: Date.now() });
+      const res = await t.app.inject({
+        method: 'POST',
+        url: '/api/hooks/oc',
+        headers: {
+          'content-type': 'application/json',
+          'x-hub-signature': sign(hook.secret, body),
+        },
+        payload: body,
+      });
+      expect(res.json().status).toBe('running');
+      const deliveryId = res.json().deliveryId as string;
+
+      await vi.waitFor(() => {
+        const row = readWebhookDeliveries(t.db, { webhookId: hook.webhook.id, limit: 10 }).find(
+          (r) => r.id === deliveryId,
+        );
+        expect(row?.agent_session_id).toBeTruthy();
+      }, 10_000);
+
+      const row = readWebhookDeliveries(t.db, { webhookId: hook.webhook.id, limit: 10 }).find(
+        (r) => r.id === deliveryId,
+      );
+      // The link `ProjectService` reads to badge the chat: the delivery's
+      // conversation resolves back to this webhook.
+      expect(readWebhookDeliveryConversationIds(t.db).get(row?.agent_session_id ?? '')).toBe(
+        hook.webhook.id,
+      );
+    } finally {
+      await t.cleanup();
+    }
   });
 });

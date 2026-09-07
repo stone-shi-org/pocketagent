@@ -305,6 +305,20 @@ export class RunExecutor {
     //    instantly cannot land before anyone is listening.
     this.watch(runId, session, sink);
 
+    // PA-27: `pi` and `opencode` report their `agentSessionId` synchronously,
+    // inline, inside their own awaited `start()` — so `session_started` has
+    // already fired and is gone by the time `watch()`'s listener attaches
+    // above, and a webhook's `per-issue` conversation (and its "started by a
+    // webhook" badge, which is keyed off `agent_session_id`) never learns the
+    // id. `claude`/`agy` discover it later, asynchronously, from a detached
+    // loop `start()` kicks off and returns before — `watch()` is in time for
+    // those, so this is a no-op for them (`agentSessionId` is still null
+    // here). Reading the property directly catches the synchronous backends
+    // without needing an event that already passed; it is also what already
+    // makes a *resumed* session's id known immediately, on every backend,
+    // since the constructor seeds it from `spec.resumeAgentSessionId`.
+    if (session.agentSessionId !== null) sink.onAgentSessionId(session.agentSessionId);
+
     // 5. Send the prompt. No wait, no poll, no timeout: every structured
     //    backend sets `running` synchronously inside its own awaited
     //    `start()`, so by the time `create()` resolves there is nothing left
