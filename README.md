@@ -1037,6 +1037,33 @@ the upgrade. See the nginx snippet above. Check `/health` still responds.
 process. Systemd user services get a minimal environment — set an absolute path:
 `POCKETAGENT_CLAUDE_BIN=/home/me/.local/bin/claude`.
 
+**A third-party provider variant fails with `502 Stream ended before producing a non-ping
+SSE event`.** The message is the gateway's, not PocketAgent's, and it hides the real cause —
+ask the gateway directly to see it:
+
+```bash
+curl -s -X POST "$BASE_URL/v1/messages" -H 'content-type: application/json' \
+  -H 'anthropic-version: 2023-06-01' -H "x-api-key: $KEY" \
+  -d '{"model":"<model>","max_tokens":16,
+       "messages":[{"role":"user","content":"say OK"},
+                   {"role":"system","content":"Extra context."}]}' | jq .upstream_details
+```
+
+That two-message shape is the one that matters: **Claude Code puts a `role: "system"` message
+*after* a user message**, on top of its own top-level `system` blocks. A gateway that
+translates positionally then hands the backend `system, user, system`, and some chat templates
+refuse it — a local Qwen served through LM Studio answers
+`Jinja Exception: System message must be at the beginning` and returns 500, which the gateway
+reports as the opaque 502 above. Hosted models on the same gateway accept the identical
+request, so this presents as "one model is broken" rather than as a template problem.
+
+If the probe reproduces it, the model is unusable with Claude Code until either the gateway
+normalizes system-message placement (hoisting or merging them to the front, which most
+gateways do) or the model's chat template is relaxed. Nothing in PocketAgent can work around
+it: the payload is the CLI's, and the variants deliberately do not rewrite what the agent
+sends. Note also that the CLI retries hard on 502 — a ~650 ms upstream failure surfaces as a
+three-minute hang, so *slow* here does not mean *timeout*.
+
 **Sessions all say `interrupted` after a restart.** Expected on the default `direct`
 backend. Set `POCKETAGENT_BACKEND=tmux` if you want them to survive.
 
