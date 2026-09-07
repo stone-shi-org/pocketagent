@@ -8,6 +8,7 @@ import { RunningSessions } from '../components/RunningSessions.js';
 import { Icon } from '../components/Icon.js';
 import { HostChip, ProjectList, SearchField, allChats, useProjects } from '../components/ProjectList.js';
 import { PocketAgentsSection } from '../components/PocketAgentsSection.js';
+import { ShellSection } from '../components/ShellSection.js';
 import { TabBar, type Tab } from '../components/TabBar.js';
 import { UsageBar } from '../components/UsageBar.js';
 import { formatBuildInfo } from '../version.js';
@@ -234,12 +235,18 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
   // list the sidebar already renders from — no separate fetch per tab.
   const chatById = useMemo(() => {
     const map = new Map<string, { title: string; live: boolean }>();
-    for (const chat of allChats(state.projects ?? [])) {
+    // Shells are folded in alongside the project tree's own chats. They left
+    // `projects` when they became their own category (PA-25), and a shell is
+    // very much tabbable — without this every open terminal tab decayed to
+    // its raw session id, which is the exact failure `knownTitles` below
+    // exists to soften and has no reason to be hit deliberately.
+    const rows = [...allChats(state.projects ?? []), ...(state.shells ?? [])];
+    for (const chat of rows) {
       if (chat.sessionId) map.set(`t:${chat.sessionId}`, { title: chat.title, live: chat.live });
       if (chat.conversationId) map.set(`c:${chat.conversationId}`, { title: chat.title, live: chat.live });
     }
     return map;
-  }, [state.projects]);
+  }, [state.projects, state.shells]);
 
   // Every title/live pair this tab bar has ever seen for a given id, kept
   // around after `chatById` stops carrying it. `ProjectService.list` only
@@ -277,8 +284,10 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
 
   const activeSessionId = route.name === 'terminal' ? route.sessionId : null;
   const activeConversationId = route.name === 'chat' ? route.conversationId : null;
+  // Shells count too — see the same fix in `ProjectsPage` (PA-25).
   const runningCount =
-    state.projects?.reduce((n, p) => n + p.chats.filter((c) => c.live).length, 0) ?? 0;
+    (state.projects?.reduce((n, p) => n + p.chats.filter((c) => c.live).length, 0) ?? 0) +
+    (state.shells?.filter((s) => s.live).length ?? 0);
 
   const [sidebarWidth, setSidebarWidth] = useState<number>(getSidebarWidthPref);
   const [isResizing, setIsResizing] = useState(false);
@@ -442,6 +451,16 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             onOpenChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
             onApiError={onApiError}
             activeChatId={route.name === 'planner-chat' ? route.chatId : null}
+          />
+          {/* Between the other two categories, same order as the phone page
+              (PA-25) — the two layouts must not disagree about where a
+              category lives. */}
+          <ShellSection
+            state={state}
+            open={state.open}
+            onNewShell={() => setShowShell(true)}
+            activeSessionId={activeSessionId}
+            search={search}
           />
           <ProjectList
             state={state}

@@ -21,6 +21,7 @@ import {
 import { WorkspaceRegistry, createWorkspaceStore } from './workspaces/index.js';
 import { applyRuntimeSettings } from './settings/index.js';
 import { createDefaultRegistry } from './agents/registry.js';
+import type { AgentAdapter } from './agents/types.js';
 import { createBackend, DirectPtyBackend } from './backends/index.js';
 import { SessionManager } from './sessions/manager.js';
 import { buildChildEnv } from './sessions/env.js';
@@ -127,6 +128,17 @@ export interface BuildAppOptions {
   plannerWorkspacesRoot?: string;
   /** Injected in tests so a planner chat turn never makes a real network call. */
   plannerLlmFetch?: typeof fetch;
+  /**
+   * Extra agent adapters, registered after the defaults.
+   *
+   * Injected in tests, which otherwise have exactly one adapter whose binary
+   * is reliably present on a CI box — `shell`. That was serviceable until
+   * PA-25 gave shell sessions their own home-screen category: a `shell`
+   * session is no longer a chat in a project folder, so a test that needs one
+   * (project grouping, hide, clear-finished) has to name an agent that is not
+   * a shell even though the process behind it still is `/bin/bash`.
+   */
+  extraAgents?: AgentAdapter[];
   serveStatic?: boolean;
 }
 
@@ -217,6 +229,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     piBin: config.piBin,
     claudeProviders: config.claudeProviders,
   });
+  for (const adapter of options.extraAgents ?? []) agents.register(adapter);
 
   const backend = createBackend({
     id: config.backend,

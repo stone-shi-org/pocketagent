@@ -6,6 +6,7 @@ import type {
   HostInfo,
   ProjectInfo,
   QueuedRunSummary,
+  ShellSessionSummary,
 } from '@pocketagent/protocol';
 import { describeCron, usesClaudeTranscripts } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
@@ -19,6 +20,20 @@ const REFRESH_MS = 5000;
 
 /** Chats shown per project before a "show more" row appears. */
 const CHAT_PAGE_SIZE = 5;
+
+/**
+ * The `cwd` sent alongside an `adoptTargetId`, which the server discards.
+ * `POST /api/sessions` takes an adopted session's directory from the resolved
+ * pane (`body.cwd = target.cwd`) before it validates anything, so this value
+ * is never read — but `CreateSessionRequest` requires the field.
+ *
+ * A named constant rather than the literal `'virtual:shell'` these call sites
+ * used to pass: that string was the *other* meaning of the same sentinel, the
+ * synthetic project id the "Shell" category replaced (PA-25), and leaving it
+ * here would keep a grep for the retired design alive in code that has
+ * nothing to do with it.
+ */
+const ADOPTED_CWD_PLACEHOLDER = 'adopt:resolved-server-side';
 
 /**
  * Labels for the two `GitStatus` values that actually render a dot — `clean`
@@ -92,6 +107,13 @@ export interface OpenChatOptions {
 
 export interface ProjectsState {
   projects: ProjectInfo[] | null;
+  /**
+   * The "Shell" category (PA-25) — every shell session, flat and already
+   * sorted, from the same `/api/projects` round trip `projects` comes from.
+   * `null` while nothing has loaded yet, exactly as `projects` is, so a
+   * consumer can tell "no shells" from "not yet known".
+   */
+  shells: ShellSessionSummary[] | null;
   host: HostInfo | null;
   error: string | null;
   refresh: () => Promise<void>;
@@ -101,6 +123,8 @@ export interface ProjectsState {
   reattachChat: (chat: ChatSummary) => Promise<void>;
   newTmuxSession: (project: ProjectInfo) => Promise<void>;
   clearFinished: (project: ProjectInfo) => Promise<void>;
+  /** The Shell category's counterpart to `clearFinished`. Takes no directory. */
+  clearFinishedShells: () => Promise<void>;
   hideProject: (cwd: string) => Promise<void>;
   removeProject: (cwd: string) => Promise<void>;
   /**
@@ -135,6 +159,7 @@ export function useProjects(
   onApiError: (error: unknown) => void,
 ): ProjectsState {
   const [projects, setProjects] = useState<ProjectInfo[] | null>(null);
+  const [shells, setShells] = useState<ShellSessionSummary[] | null>(null);
   const [host, setHost] = useState<HostInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -142,6 +167,7 @@ export function useProjects(
     try {
       const result = await api.listProjects();
       setProjects(result.projects);
+      setShells(result.shells);
       setHost(result.host);
       setError(null);
     } catch (err) {
@@ -157,6 +183,7 @@ export function useProjects(
       // (gated on `projects === null`) doesn't spin forever when the very
       // first request fails.
       setProjects((prev) => prev ?? []);
+      setShells((prev) => prev ?? []);
     }
   }, [onApiError]);
 
@@ -269,6 +296,18 @@ export function useProjects(
     [onApiError, refresh],
   );
 
+  /** Same action for the Shell category, which has no directory to name. */
+  const clearFinishedShells = useCallback(async () => {
+    try {
+      await api.clearFinishedShells();
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not clear finished shells.');
+    } finally {
+      await refresh();
+    }
+  }, [onApiError, refresh]);
+
   const hideProject = useCallback(
     async (cwd: string) => {
       try {
@@ -347,7 +386,7 @@ export function useProjects(
       try {
         const created = await api.createSession({
           agent: 'shell',
-          cwd: 'virtual:shell',
+          cwd: ADOPTED_CWD_PLACEHOLDER,
           cols: 80,
           rows: 24,
           transport: 'terminal',
@@ -408,7 +447,7 @@ export function useProjects(
 
         const created = await api.createSession({
           agent: 'shell',
-          cwd: 'virtual:shell',
+          cwd: ADOPTED_CWD_PLACEHOLDER,
           cols: 80,
           rows: 24,
           transport: 'terminal',
@@ -427,6 +466,7 @@ export function useProjects(
 
   return {
     projects,
+    shells,
     host,
     error,
     refresh,
@@ -436,6 +476,7 @@ export function useProjects(
     reattachChat,
     newTmuxSession,
     clearFinished,
+    clearFinishedShells,
     hideProject,
     removeProject,
     deleteWorktree,
@@ -649,15 +690,15 @@ function ProjectSection({
   // feature exists to answer.
   const isQueuedExpanded = !collapsedQueued.has(project.cwd);
 
+  // The one synthetic project left (PA-25 moved shell sessions to their own
+  // top-level category, so `'virtual:shell'` no longer reaches this list).
   const isVirtualWebhooks = project.cwd === 'virtual:webhooks';
-  const isVirtualShell = project.cwd === 'virtual:shell';
-  const isVirtual = isVirtualShell || isVirtualWebhooks;
 
-  // Virtual projects and deleted worktrees have no real folder on disk, so there is
-  // nothing for code-server to open.
+  // A synthetic project and a deleted worktree have no real folder on disk, so
+  // there is nothing for code-server to open.
   const codeServerBase = state.host?.codeServerBaseUrl;
   const codeServerHref =
-    codeServerBase && !isVirtual && !project.isDeleted
+    codeServerBase && !isVirtualWebhooks && !project.isDeleted
       ? codeServerLink(codeServerBase, project.cwd)
       : null;
 
@@ -706,15 +747,7 @@ function ProjectSection({
         >
           <span className="project-icon">
             <Icon
-              name={
-                isVirtualWebhooks
-                  ? 'webhook'
-                  : isVirtualShell
-                    ? 'agent-shell'
-                    : nested
-                      ? 'branch'
-                      : 'folder'
-              }
+              name={isVirtualWebhooks ? 'webhook' : nested ? 'branch' : 'folder'}
               className="folder"
             />
             {project.gitStatus && project.gitStatus !== 'clean' && (
@@ -799,7 +832,7 @@ function ProjectSection({
               void state.removeProject(project.cwd);
             }}
             onNewTmuxSession={
-              isVirtualShell || project.isDeleted
+              project.isDeleted
                 ? undefined
                 : () => {
                     setMenuFor(null);
@@ -1134,32 +1167,6 @@ function ProjectSection({
                         </span>
                       )}
                     </span>
-                  )}
-                  {chat.live && project.cwd === 'virtual:shell' && (
-                    <button
-                      type="button"
-                      className="chat-remove"
-                      onClick={() => void state.detachChat(chat)}
-                      aria-label={`Detach ${chat.title}`}
-                      title="Detach from tmux session"
-                    >
-                      <Icon name="close" size={14} />
-                    </button>
-                  )}
-                  {/* A finished Shell chat still points at a real tmux pane
-                      (unless it was actually killed) — offer to rejoin it
-                      directly, in place, rather than sending the user back
-                      through the Shell dialog's picker. */}
-                  {!chat.live && project.cwd === 'virtual:shell' && chat.adoptTargetId && (
-                    <button
-                      type="button"
-                      className="chat-remove"
-                      onClick={() => void state.reattachChat(chat)}
-                      aria-label={`Re-attach ${chat.title}`}
-                      title="Re-attach to this tmux pane"
-                    >
-                      <Icon name="terminal" size={14} />
-                    </button>
                   )}
                   {!chat.live && (
                     <button

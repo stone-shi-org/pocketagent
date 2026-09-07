@@ -1358,30 +1358,33 @@ export class SessionManager {
   }
 
   /**
-   * Forget every finished adopted (Shell) session, regardless of which real
-   * directory its pane happened to be in. Running ones are left.
+   * Forget every finished shell session, regardless of which real directory it
+   * ran in. Running ones are left.
    *
-   * The Shell virtual project groups adopted sessions by a synthetic
-   * `'virtual:shell'` cwd that `ProjectService` computes for display and
-   * never persists (see `VIRTUAL_SHELL_CWD` in `projects/index.ts`) — the
-   * row's own `cwd` column is always the pane's *real* directory. Clearing
-   * "finished chats" for that card therefore cannot go through
-   * `forgetFinishedIn`, which matches on the literal `cwd` column and would
-   * either match nothing or (worse, if `'virtual:shell'` were ever resolved
-   * as a real path) match the wrong directory entirely. This matches on
-   * `adopt_target_id` instead, the one column that is actually true of every
-   * adopted session regardless of its real cwd.
+   * Backs the "Shell" category's own clear action (PA-25). It cannot go
+   * through `forgetFinishedIn`: that matches on the literal `cwd` column, and
+   * the whole point of the category is that its rows are *not* grouped by
+   * directory — a shell's `cwd` is wherever it happens to be, and there is no
+   * one path that names all of them.
+   *
+   * The two clauses mirror `isShellSession` in `projects/index.ts`, and must
+   * keep mirroring it: a row the category lists but this cannot delete is a
+   * "Clear finished" that silently leaves rows behind. `adopt_target_id` (not
+   * `adopted`, which is not a column) is what is true of an adopted session
+   * after its process is gone — see `toSessionInfo`'s row fallback.
    */
-  forgetFinishedAdopted(): number {
+  forgetFinishedShells(): number {
     for (const [id, session] of this.live) {
-      if (session.transport === 'terminal' && session.spec.adopted === true && !session.isAlive()) {
-        this.live.delete(id);
-      }
+      // The `transport` check has to come first for `spec.adopted` to narrow —
+      // only a `PtySessionSpec` has that field at all.
+      if (session.transport !== 'terminal' || session.isAlive()) continue;
+      if (session.spec.adopted === true || session.spec.agent === 'shell') this.live.delete(id);
     }
     return this.opts.db
       .prepare(
         `DELETE FROM sessions
-          WHERE adopt_target_id IS NOT NULL AND status NOT IN ('starting', 'running')`,
+          WHERE (adopt_target_id IS NOT NULL OR agent = 'shell')
+            AND status NOT IN ('starting', 'running')`,
       )
       .run().changes;
   }

@@ -10,6 +10,7 @@ import type {
   ProjectInfo,
   QueuedRunSummary,
   SessionInfo,
+  ShellSessionSummary,
   WebhookDeliveryStatus,
   WebhookSummary,
   WebhookType,
@@ -44,8 +45,39 @@ import {
  * phone should not pay three round trips to draw its first screen.
  */
 
-export const VIRTUAL_SHELL_CWD = 'virtual:shell';
 export const VIRTUAL_WEBHOOKS_CWD = 'virtual:webhooks';
+
+/**
+ * The agent id every shell session runs under (`agents/shell.ts`).
+ *
+ * Compared against literally rather than by asking the registry: this module
+ * has no `AgentRegistry` reference, the id is part of the wire protocol
+ * (`ShellDialog` and `NewSessionDialog` both send it), and the reserved
+ * `pocket:` prefix already establishes that agent ids are values this codebase
+ * matches on.
+ */
+const SHELL_AGENT_ID = 'shell';
+
+/**
+ * Whether a session belongs in the home screen's "Shell" category (PA-25)
+ * rather than under the directory it happens to be running in.
+ *
+ * Two kinds qualify, and the reporter asked for both ("put all shell sessions
+ * there"): a session that adopted a foreign tmux pane, and a plain interactive
+ * shell we spawned ourselves. Neither is a conversation *about* a project — it
+ * is a prompt someone types into — so filing it as a chat inside a project
+ * folder put a raw shell in the same list as the agent work it is not.
+ *
+ * `adopted` is kept as an independent clause rather than folded into the agent
+ * check, because an adopted pane is whatever the *user's* tmux was already
+ * running (a vim, a build, another agent) and only ever gets `agent: 'shell'`
+ * by convention of the two call sites that create one. A pane adopted some
+ * other way must still land here: the alternative is a terminal nobody can
+ * find, which is strictly worse than one filed under a slightly wrong heading.
+ */
+export function isShellSession(session: SessionInfo): boolean {
+  return session.adopted || session.agent === SHELL_AGENT_ID;
+}
 
 export interface ProjectServiceOptions {
   workspaces: WorkspaceRegistry;
@@ -120,6 +152,46 @@ export class ProjectService {
   /** Record an explicit decision about a directory, overriding the defaults. */
   setHidden(cwd: string, hidden: boolean): void {
     setProjectVisibility(this.db, cwd, hidden);
+  }
+
+  /**
+   * The home screen's "Shell" category (PA-25): every shell session, in one
+   * flat, most-recent-first list.
+   *
+   * Its own method rather than another `ProjectInfo` in `list()`'s array,
+   * because that is exactly what this replaces. A `'virtual:shell'` project
+   * had to lie about six fields (`isGitRepo`, `gitBranch`, `gitStatus`,
+   * `isWorkspace`, `cronJobs`, `worktrees`) to pretend a category was a
+   * folder, and every consumer of the list then had to learn to skip a cwd
+   * that is not a path — the picker in `CronJobEditorPage`, the containment
+   * filter, the worktree fold, `clear-finished`. A separate field carries no
+   * such tax.
+   *
+   * Deliberately *not* grouped by directory. Two shells in one repo are two
+   * terminals, not a project's worth of history, and the flat list is the
+   * whole point of the category; each row carries its own `cwd`/`cwdLabel`
+   * so the directory is still visible where it matters.
+   *
+   * No disk I/O and no database read: a shell has no transcript to reconcile
+   * (nothing writes one) and nothing here is hideable, so unlike `list()`
+   * this is a pure transform of the session list it is handed.
+   */
+  shells(sessions: SessionInfo[]): ShellSessionSummary[] {
+    const rows: ShellSessionSummary[] = [];
+    // Same collapse `list()` applies, and it earns its keep here rather than
+    // there: detaching and re-attaching a pane leaves several session rows
+    // sharing one `adoptTargetId`, and they are one terminal.
+    for (const session of representativeSessions(sessions)) {
+      if (!isShellSession(session)) continue;
+      rows.push({
+        ...chatFromSession(session),
+        cwd: session.cwd,
+        cwdLabel: this.workspaces.labelFor(session.cwd),
+        adopted: session.adopted,
+      });
+    }
+    rows.sort((a, b) => compareByRecency(chatSortKey(a), chatSortKey(b)));
+    return rows;
   }
 
   /**
@@ -213,13 +285,17 @@ export class ProjectService {
     // one conversation, not several: collapse each group to whichever row is
     // actually "now" for it before turning rows into chats.
     for (const session of representativeSessions(sessions)) {
+      // A shell session is not a chat in a folder — it is a row in the "Shell"
+      // category, composed separately by `shells()` below. Skipping it here is
+      // what stops it appearing twice, and is why a directory whose only
+      // activity was a shell no longer gets a project card of its own.
+      if (isShellSession(session)) continue;
       const liveConversation = session.agentSessionId
         ? conversationById.get(session.agentSessionId)
         : undefined;
-      const targetCwd = session.adopted ? VIRTUAL_SHELL_CWD : session.cwd;
       push(
         byCwd,
-        targetCwd,
+        session.cwd,
         chatFromSession(
           session,
           liveConversation?.title,
@@ -298,32 +374,6 @@ export class ProjectService {
     // where it belongs; it is stripped before anything is returned.
     const drafts: (ProjectInfo & { mainRepoCwd: string | null })[] = [];
 
-    if (byCwd.has(VIRTUAL_SHELL_CWD)) {
-      const shellChats = byCwd.get(VIRTUAL_SHELL_CWD) ?? [];
-      if (shellChats.length > 0) {
-        shellChats.sort((a, b) => compareByRecency(chatSortKey(a), chatSortKey(b)));
-        drafts.push({
-          cwd: VIRTUAL_SHELL_CWD,
-          name: 'Shell',
-          workspaceLabel: 'Shell',
-          isGitRepo: false,
-          gitBranch: null,
-          gitStatus: null,
-          hidden: false,
-          isWorkspace: true,
-          chats: shellChats,
-          // The virtual Shell project is not a real directory, so no job and no
-          // webhook can ever be configured against it — and nothing can be
-          // queued on a tree that does not exist.
-          cronJobs: [],
-          webhooks: [],
-          queued: [],
-          worktrees: [],
-          mainRepoCwd: null,
-        });
-      }
-    }
-
     if (webhookByCwd.has(VIRTUAL_WEBHOOKS_CWD)) {
       const virtualWebhooks = webhookByCwd.get(VIRTUAL_WEBHOOKS_CWD) ?? [];
       if (virtualWebhooks.length > 0) {
@@ -352,7 +402,7 @@ export class ProjectService {
     // `<main>/.worktrees/<slug>/apps/server`) to the actual worktree root so
     // it doesn't spawn phantom worktrees named after subdirectories.
     for (const cwd of Array.from(byCwd.keys())) {
-      if (cwd === VIRTUAL_SHELL_CWD || cwd === VIRTUAL_WEBHOOKS_CWD) continue;
+      if (cwd === VIRTUAL_WEBHOOKS_CWD) continue;
       const wtRoot = findWorktreeRoot(cwd);
       if (wtRoot && wtRoot !== cwd) {
         const list = byCwd.get(cwd) ?? [];
@@ -366,7 +416,7 @@ export class ProjectService {
     // Ensure that if any worktree (live or deleted) has chats, its main checkout
     // directory is also considered for drafts so the worktree can fold into it.
     for (const cwd of Array.from(byCwd.keys())) {
-      if (cwd === VIRTUAL_SHELL_CWD || cwd === VIRTUAL_WEBHOOKS_CWD) continue;
+      if (cwd === VIRTUAL_WEBHOOKS_CWD) continue;
       const mainCwd = await findMainRepoCwd(cwd);
       if (mainCwd && !byCwd.has(mainCwd)) {
         byCwd.set(mainCwd, []);
@@ -374,7 +424,7 @@ export class ProjectService {
     }
 
     for (const [cwd, chats] of byCwd) {
-      if (cwd === VIRTUAL_SHELL_CWD || cwd === VIRTUAL_WEBHOOKS_CWD) continue;
+      if (cwd === VIRTUAL_WEBHOOKS_CWD) continue;
       // A project is a folder you added, or a directory inside one. Chats in a
       // directory that is no longer either are not shown: "remove this folder"
       // has to actually remove it, and a folder with history in it is exactly

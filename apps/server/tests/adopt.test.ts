@@ -490,7 +490,7 @@ describeTmux('adopting a tmux session on a foreign server', () => {
     // stopped being live. `adoptTargetId` is that missing link — it must
     // survive on the row (not just live in memory) so a session read back
     // from disk after a restart is still recognized as the same tmux
-    // session, and still filed under the "Shell" virtual project rather than
+    // session, and still filed under the "Shell" category rather than
     // leaking into whatever real directory it happened to be in.
     const workspaceRoot = t.workspaceRoot;
     const db = t.db;
@@ -538,15 +538,22 @@ describeTmux('adopting a tmux session on a foreign server', () => {
     expect(revived!.adopted).toBe(true);
     expect(revived!.adoptTargetId).toBe(target.id);
 
-    // And the home screen still files it under "Shell", not under the real
-    // project directory the session happened to be in.
+    // And the home screen still files it under "Shell" — now a top-level
+    // category of its own (PA-25) rather than a synthetic project — and not
+    // under the real project directory the session happened to be in.
     const listed = await t.app.inject({
       method: 'GET',
       url: '/api/projects',
       headers: { cookie: t.cookie },
     });
-    const shell = listed.json().projects.find((p: { cwd: string }) => p.cwd === 'virtual:shell');
-    expect(shell?.chats.map((c: { sessionId: string | null }) => c.sessionId)).toContain(id);
+    const body = listed.json();
+    expect(body.shells.map((s: { sessionId: string | null }) => s.sessionId)).toContain(id);
+    expect(body.projects.map((p: { cwd: string }) => p.cwd)).not.toContain('virtual:shell');
+    expect(
+      body.projects.flatMap((p: { chats: { sessionId: string | null }[] }) =>
+        p.chats.map((c) => c.sessionId),
+      ),
+    ).not.toContain(id);
   });
 
   it('creates a brand-new named tmux session and lists it like any other', async () => {
@@ -622,15 +629,13 @@ describeTmux('adopting a tmux session on a foreign server', () => {
     await waitFor(async () => (await sessionAttached('create-and-attach')) >= 1, { timeout: 10_000 });
   });
 
-  it('clears finished chats from the Shell virtual project via /api/projects/clear-finished', async () => {
-    // Regression: the Shell card's "Clear finished chats" button is shown
-    // and enabled the same as any other project's, but `'virtual:shell'` is
-    // a display-only label `ProjectService` computes for adopted sessions
-    // and never persists — the row's own `cwd` column is always the
-    // session's real directory — so resolving it as a real filesystem path
-    // (what every other project's "clear finished" goes through) 404'd and
-    // cleared nothing, even though the button looked identical to a working
-    // one.
+  it('clears finished shell sessions via /api/shells/clear-finished', async () => {
+    // The Shell category clears through a route of its own, with no cwd in
+    // the body (PA-25). It has to: a shell row's `cwd` column is the pane's
+    // real directory, so "every finished shell" was never expressible as a
+    // path — which is why the original Shell card's "Clear finished chats"
+    // shipped 404ing on a `'virtual:shell'` sentinel that no directory
+    // resolve could ever accept.
     await startUserSession('clearable', t.projectDir, ['sleep', '120']);
     const target = (await listTargets()).targets.find((x) => x.sessionName === 'clearable');
 
@@ -654,21 +659,49 @@ describeTmux('adopting a tmux session on a foreign server', () => {
       return found !== null && found.status !== 'running' && found.status !== 'starting';
     });
 
-    const shellChatIds = async (): Promise<(string | null)[]> => {
+    const shellRowIds = async (): Promise<(string | null)[]> => {
       const res = await t.app.inject({ method: 'GET', url: '/api/projects', headers: { cookie: t.cookie } });
-      const shell = res.json().projects.find((p: { cwd: string }) => p.cwd === 'virtual:shell');
-      return (shell?.chats ?? []).map((c: { sessionId: string | null }) => c.sessionId);
+      return res.json().shells.map((s: { sessionId: string | null }) => s.sessionId);
     };
-    expect(await shellChatIds()).toContain(id);
+    expect(await shellRowIds()).toContain(id);
 
     const cleared = await t.app.inject({
       method: 'POST',
-      url: '/api/projects/clear-finished',
+      url: '/api/shells/clear-finished',
       headers: { cookie: t.cookie },
-      payload: { cwd: 'virtual:shell' },
     });
     expect(cleared.statusCode).toBe(200);
     expect(cleared.json().removedSessions).toBeGreaterThanOrEqual(1);
-    expect(await shellChatIds()).not.toContain(id);
+    expect(await shellRowIds()).not.toContain(id);
+  });
+
+  it('clears a finished non-adopted shell too, not just an adopted pane', async () => {
+    // The clear has to mirror `isShellSession` exactly, or the category lists
+    // a row that "Clear finished" silently leaves behind. A plain shell has
+    // no `adopt_target_id`, so the old adopted-only DELETE missed it.
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, transport: 'terminal' },
+    });
+    expect(created.statusCode).toBe(201);
+    const id = created.json().id as string;
+    expect(created.json().adopted).toBe(false);
+
+    await t.app.inject({ method: 'DELETE', url: `/api/sessions/${id}`, headers: { cookie: t.cookie } });
+    await waitFor(() => {
+      const found = t.context.sessions.find(id);
+      return found !== null && found.status !== 'running' && found.status !== 'starting';
+    });
+
+    const cleared = await t.app.inject({
+      method: 'POST',
+      url: '/api/shells/clear-finished',
+      headers: { cookie: t.cookie },
+    });
+    expect(cleared.statusCode).toBe(200);
+    const res = await t.app.inject({ method: 'GET', url: '/api/projects', headers: { cookie: t.cookie } });
+    expect(res.json().shells.map((s: { sessionId: string | null }) => s.sessionId)).not.toContain(id);
   });
 });

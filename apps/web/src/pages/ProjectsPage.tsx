@@ -14,6 +14,7 @@ import {
 } from '../components/ProjectList.js';
 import { UsageBar } from '../components/UsageBar.js';
 import { PocketAgentsSection } from '../components/PocketAgentsSection.js';
+import { ShellSection } from '../components/ShellSection.js';
 
 interface Props {
   onOpen: (sessionId: string) => void;
@@ -70,8 +71,12 @@ export function ProjectsPage({
   const [showRunning, setShowRunning] = useState(false);
   const [showShell, setShowShell] = useState(false);
 
+  // Counts shells too: they left `projects` when they became their own
+  // category (PA-25), and a badge that stopped counting live terminals would
+  // read as "nothing running" with three of them open.
   const runningCount =
-    state.projects?.reduce((n, p) => n + p.chats.filter((c) => c.live).length, 0) ?? 0;
+    (state.projects?.reduce((n, p) => n + p.chats.filter((c) => c.live).length, 0) ?? 0) +
+    (state.shells?.filter((s) => s.live).length ?? 0);
 
   return (
     <div className="app projects-page">
@@ -146,6 +151,15 @@ export function ProjectsPage({
           </div>
         )}
         <PocketAgentsSection onOpenChat={onOpenPlannerChat} onApiError={onApiError} />
+        {/* "Shell" sits between the other two categories (PA-25): a terminal is
+            more likely to be what you came back for than a project folder, but
+            Pocket Agents keeps the top spot it already had. */}
+        <ShellSection
+          state={state}
+          open={state.open}
+          onNewShell={() => setShowShell(true)}
+          search={search}
+        />
         <ProjectList
           state={state}
           search={search}

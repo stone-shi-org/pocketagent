@@ -20,6 +20,7 @@ import type {
   ProjectInfo,
   SessionInfo,
   SettingsResponse,
+  ShellSessionSummary,
   UpdateSettingsRequest,
   CreateWebhookRequest,
   UpdateWebhookRequest,
@@ -188,8 +189,19 @@ export const api = {
 
   /** Everything the home screen draws, in one round trip. */
   listProjects: (includeHidden = false) =>
-    request<{ host: HostInfo; projects: ProjectInfo[] }>(
+    request<{ host: HostInfo; projects: ProjectInfo[]; shells: ShellSessionSummary[] }>(
       `/api/projects${includeHidden ? '?includeHidden=1' : ''}`,
+    ),
+
+  /**
+   * Forget every finished shell session (PA-25). No body: the "Shell"
+   * category is not a directory, so there is no cwd to name — see
+   * `ProjectService.shells`.
+   */
+  clearFinishedShells: () =>
+    request<{ ok: true; removedSessions: number; removedConversations: number }>(
+      '/api/shells/clear-finished',
+      { method: 'POST' },
     ),
 
   /** Drops a chat from the list. Never deletes a transcript. */

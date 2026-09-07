@@ -4,13 +4,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { SessionInfo } from '@pocketagent/protocol';
-import { ProjectService, VIRTUAL_SHELL_CWD, findMainRepoCwd, readGitBranch } from '../src/projects/index.js';
+import { ProjectService, findMainRepoCwd, readGitBranch } from '../src/projects/index.js';
 import { ConversationStore, encodeProjectDir } from '../src/conversations/index.js';
 import { AgyTranscriptStore } from '../src/conversations/agy.js';
 import { PiTranscriptStore } from '../src/conversations/pi.js';
 import { hideChat, openDatabase } from '../src/db/index.js';
 import { WorkspaceRegistry } from '../src/workspaces/index.js';
-import { createTestApp, makeWorkspace, waitFor, type TestApp } from './helpers.js';
+import { createTestApp, makeWorkspace, waitFor, TEST_AGENT_ID, type TestApp } from './helpers.js';
 
 const OPENCODE_FIXTURE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -25,8 +25,12 @@ function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
   return {
     id: 'sess-1',
     title: 'A session',
-    agent: 'shell',
-    agentDisplayName: 'Shell',
+    // Deliberately *not* `shell`: a shell session belongs to the "Shell"
+    // category, not to a project folder (PA-25), so the generic fixture for
+    // "some chat in a directory" has to be some other agent. Tests that want
+    // a shell say so explicitly.
+    agent: 'claude',
+    agentDisplayName: 'Claude Code',
     cwd: '/w',
     workspaceLabel: 'w',
     status: 'running',
@@ -311,16 +315,17 @@ describe('ProjectService', () => {
     expect(project?.chats[0]).toMatchObject({ sessionId: 'newer-resume', live: false });
   });
 
-  it('collapses repeated attach/reattach of the same tmux pane into one Shell chat', async () => {
+  it('collapses repeated attach/reattach of the same tmux pane into one Shell row', async () => {
     // Regression: detaching and reattaching to the same pane from the Shell
     // dialog mints a brand-new session row each time (same as a resumed
     // conversation does), but it is still the same pane. Grouped by
     // `adoptTargetId` the same way a resumed conversation is grouped by
     // `agentSessionId`, so the home screen doesn't grow one "Shell" entry
     // per attach — see `representativeSessions`/`groupKey`.
-    const projects = await service.list([
+    const shells = service.shells([
       makeSession({
         id: 'first-attach',
+        agent: 'shell',
         cwd: '/somewhere',
         adopted: true,
         adoptTargetId: 'pane-1',
@@ -329,6 +334,7 @@ describe('ProjectService', () => {
       }),
       makeSession({
         id: 'second-attach',
+        agent: 'shell',
         cwd: '/somewhere',
         adopted: true,
         adoptTargetId: 'pane-1',
@@ -337,18 +343,67 @@ describe('ProjectService', () => {
       }),
     ]);
 
-    const shell = projects.find((p) => p.cwd === VIRTUAL_SHELL_CWD);
-    expect(shell?.chats).toHaveLength(1);
-    expect(shell?.chats[0]).toMatchObject({ sessionId: 'second-attach', live: true });
+    expect(shells).toHaveLength(1);
+    expect(shells[0]).toMatchObject({ sessionId: 'second-attach', live: true, adopted: true });
   });
 
-  it('does not group two different tmux panes into the same Shell chat', async () => {
-    const projects = await service.list([
-      makeSession({ id: 'pane-a-sess', adopted: true, adoptTargetId: 'pane-a' }),
-      makeSession({ id: 'pane-b-sess', adopted: true, adoptTargetId: 'pane-b' }),
+  it('does not group two different tmux panes into the same Shell row', async () => {
+    const shells = service.shells([
+      makeSession({ id: 'pane-a-sess', agent: 'shell', adopted: true, adoptTargetId: 'pane-a' }),
+      makeSession({ id: 'pane-b-sess', agent: 'shell', adopted: true, adoptTargetId: 'pane-b' }),
     ]);
-    const shell = projects.find((p) => p.cwd === VIRTUAL_SHELL_CWD);
-    expect(shell?.chats.map((c) => c.sessionId).sort()).toEqual(['pane-a-sess', 'pane-b-sess']);
+    expect(shells.map((c) => c.sessionId).sort()).toEqual(['pane-a-sess', 'pane-b-sess']);
+  });
+
+  // ---- The "Shell" category (PA-25) --------------------------------------
+
+  it('files a non-adopted shell session under Shell, not under its directory', async () => {
+    // The half of PA-25 that changed behaviour rather than just presentation:
+    // a plain interactive shell started in a project folder used to sit in
+    // that folder's chat list, beside the agent work it is not.
+    const sessions = [
+      makeSession({ id: 'plain-shell', agent: 'shell', agentDisplayName: 'Shell', cwd: ws.project }),
+    ];
+
+    expect(service.shells(sessions).map((s) => s.sessionId)).toEqual(['plain-shell']);
+    const projects = await service.list(sessions);
+    expect(projects.flatMap((p) => p.chats)).toHaveLength(0);
+  });
+
+  it('no longer emits a virtual:shell project for an adopted session', async () => {
+    const sessions = [
+      makeSession({ id: 'adopted', agent: 'shell', adopted: true, adoptTargetId: 'pane-1' }),
+    ];
+    const projects = await service.list(sessions);
+    expect(projects.map((p) => p.cwd)).not.toContain('virtual:shell');
+    expect(projects.flatMap((p) => p.chats)).toHaveLength(0);
+    expect(service.shells(sessions)).toHaveLength(1);
+  });
+
+  it('carries each shell row\'s own directory, since nothing groups them by folder', async () => {
+    const [shell] = service.shells([
+      makeSession({ id: 'sh', agent: 'shell', cwd: ws.project }),
+    ]);
+    expect(shell?.cwd).toBe(ws.project);
+    // `labelFor` abbreviates $HOME; a temp dir outside it comes back verbatim.
+    expect(shell?.cwdLabel).toBeTruthy();
+  });
+
+  it('leaves a non-shell agent alone', async () => {
+    // The category must not swallow ordinary chats: `isShellSession` is the
+    // only thing standing between "Shell" and every terminal-transport agent.
+    const sessions = [makeSession({ id: 'coding', agent: 'claude', cwd: ws.project })];
+    expect(service.shells(sessions)).toHaveLength(0);
+    expect((await service.list(sessions)).flatMap((p) => p.chats)).toHaveLength(1);
+  });
+
+  it('sorts shell rows by recency, busy first, like every other list', async () => {
+    const shells = service.shells([
+      makeSession({ id: 'old', agent: 'shell', lastActivityAt: 1000 }),
+      makeSession({ id: 'busy', agent: 'shell', lastActivityAt: 1500, busySince: 1200 }),
+      makeSession({ id: 'recent', agent: 'shell', lastActivityAt: 3000 }),
+    ]);
+    expect(shells.map((s) => s.sessionId)).toEqual(['busy', 'recent', 'old']);
   });
 
   it('shows the transcript-derived title for a live session, not its fixed creation-time name', async () => {
@@ -863,7 +918,7 @@ describe('GET /api/projects', () => {
       method: 'POST',
       url: '/api/sessions',
       headers: { cookie: t.cookie },
-      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24 },
+      payload: { agent: TEST_AGENT_ID, cwd: t.projectDir, cols: 80, rows: 24 },
     });
     expect(created.statusCode).toBe(201);
 
@@ -908,7 +963,7 @@ describe('GET /api/sessions/:id/history', () => {
       method: 'POST',
       url: '/api/sessions',
       headers: { cookie: t.cookie },
-      payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24 },
+      payload: { agent: TEST_AGENT_ID, cwd: t.projectDir, cols: 80, rows: 24 },
     });
     const res = await t.app.inject({
       method: 'GET',
@@ -1123,7 +1178,7 @@ describe('removing and hiding over HTTP', () => {
       method: 'POST',
       url: '/api/sessions',
       headers: headers(),
-      payload: { agent: 'shell', cwd, cols: 80, rows: 24 },
+      payload: { agent: TEST_AGENT_ID, cwd, cols: 80, rows: 24 },
     });
     expect(res.statusCode).toBe(201);
     return res.json().id as string;

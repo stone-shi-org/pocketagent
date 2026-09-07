@@ -572,6 +572,25 @@ transcript hides that transcript's row (they are one chat, and the session is th
 of it), and a chat's timestamp falls back through `lastActivityAt → startedAt → createdAt`
 so a brand new one does not sort last.
 
+**The home screen has three top-level categories, not one list**: "Pocket Agents"
+(`PocketAgentsSection`), "Shell" (`ShellSection`), then "Projects" (`ProjectList`), in that
+order in both layouts. **Shell is a category, not a project** (PA-25): `isShellSession`
+(adopted, or `agent === 'shell'`) diverts a session out of `byCwd` entirely and
+`ProjectService.shells` returns it as `ProjectsResponse.shells` — a flat,
+`ShellSessionSummary[]` sibling of `projects`. This replaced a synthetic `ProjectInfo` with
+`cwd: 'virtual:shell'` that had to lie about six fields to look like a folder and forced
+every consumer of the project list to learn to skip a cwd that is not a path (the two
+editor pickers, the containment filter, the worktree fold, `clear-finished`). Two
+consequences worth knowing: a directory whose only activity was a shell no longer gets a
+project card at all, and a shell row carries its own `cwd`/`cwdLabel`/`adopted` because
+there is no card above it to inherit them from. Clearing is `POST
+/api/shells/clear-finished` — no body, because the category has no directory to name — and
+`SessionManager.forgetFinishedShells`'s two SQL clauses must keep mirroring
+`isShellSession`, or the category lists rows that "Clear finished" silently leaves behind.
+`virtual:webhooks` is still a synthetic project and is untouched by this. Known limitation:
+the category is flat and unpaginated — no `CHAT_PAGE_SIZE` "show more" row — so "Clear
+finished" is the answer to a long list rather than a page size.
+
 Inbound webhooks surface the same way, as `ProjectInfo.webhooks`, and the argument for it is a
 sharper version of the one below: a cron job will fire tonight whether or not anyone looks,
 whereas "configured but never fired" is a webhook's *most likely* steady state — a wrong URL, a
@@ -896,7 +915,10 @@ These are load-bearing. Several were bugs first.
   sniffing.** `(min-width: 900px) and (pointer: fine)` gets `DesktopShell` (sidebar plus
   session pane); everything else gets the single-column phone pages. The list itself lives
   in `components/ProjectList.tsx` and is shared, so the two layouts cannot drift on rules
-  like "tapping a finished chat resumes it as a branch".
+  like "tapping a finished chat resumes it as a branch". The same goes for the other two
+  home-screen categories (`PocketAgentsSection`, `ShellSection`) and their order — both
+  layouts render the same three components in the same sequence, and a category added to
+  one but not the other is a bug.
 - **The theme is light, and `color-scheme` is pinned to it.** Everything reads from the
   token block at the top of `styles.css`; adding a raw hex outside it is how the palette
   rots. The one dark surface is the terminal (`--console`), because ANSI palettes are drawn

@@ -230,7 +230,10 @@ export function CronJobEditorPage({
       out.push({ value: w.path, label: w.path });
     }
     for (const p of flatProjects) {
-      if (seen.has(p.cwd) || p.cwd === 'virtual:shell') continue;
+      // `'virtual:shell'` used to need excluding here; PA-25 moved shell
+      // sessions out of the project list entirely, so every `p.cwd` reaching
+      // this picker is a real directory again.
+      if (seen.has(p.cwd)) continue;
       seen.add(p.cwd);
       out.push({ value: p.cwd, label: p.workspaceLabel || p.name });
     }

@@ -362,6 +362,41 @@ export const ChatSummary = z.object({
 export type ChatSummary = z.infer<typeof ChatSummary>;
 
 /**
+ * One shell session in the home screen's own "Shell" category (PA-25).
+ *
+ * A `ChatSummary` plus the two facts a chat row normally inherits from the
+ * project card above it, and which a shell row has nowhere left to read.
+ * Shell sessions used to be grouped under a synthetic `'virtual:shell'`
+ * `ProjectInfo` — a folder-shaped row for something that is not a folder —
+ * so the directory came for free from the card and the tmux-ness came for
+ * free from "every chat in this card is adopted". Neither is true of a
+ * top-level category holding *every* shell session, so both travel with the
+ * row instead.
+ *
+ * The base is `ChatSummary` rather than a parallel shape so the client's
+ * existing chat row — title, live dot, remove, re-attach — renders one of
+ * these unchanged.
+ */
+export const ShellSessionSummary = ChatSummary.extend({
+  /** The session's real working directory. Never a `virtual:` sentinel. */
+  cwd: z.string(),
+  /** `WorkspaceRegistry.labelFor(cwd)`: `~/src/project`, for the row's detail line. */
+  cwdLabel: z.string(),
+  /**
+   * True when this session attached to a tmux pane someone else started, so
+   * the row can say "adopted" and offer *detach* rather than *stop* — killing
+   * an adopted session only ever ends our own tmux client.
+   *
+   * `adoptTargetId` is inherited from `ChatSummary` and is *not* the same
+   * question: it survives detaching (it is what makes a re-attach collapse
+   * into the same chat), so a finished adopted row has an id but is no longer
+   * adopting anything.
+   */
+  adopted: z.boolean(),
+});
+export type ShellSessionSummary = z.infer<typeof ShellSessionSummary>;
+
+/**
  * One piece of agent work waiting for a working tree to come free (PA-11).
  *
  * Listed on `ProjectInfo` beside `cronJobs` and `webhooks` rather than folded

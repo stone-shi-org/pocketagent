@@ -5388,6 +5388,105 @@ button.chat-rate-limit-badge {
   margin-top: 8px;
 }
 
+/* "Shell" (PA-25) — the third top-level category, between "Pocket Agents" and
+   "Projects". Borrows `.agents-section`'s separator so all three read as peers,
+   and `.chat-line`/`.chat-row`/`.chat-remove` for the rows themselves; only the
+   header layout and the per-row metadata are new. */
+
+.shell-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The heading itself is the collapse control, so it has to shed every default
+   button affordance and inherit `.section-heading`'s type exactly — anything
+   less and "Shell" renders visibly lighter than "Projects" right below it. */
+.shell-head-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  /* Explicit, not inherited: form controls get `text-transform: none` from the
+     UA stylesheet, which silently dropped the sidebar heading's uppercase and
+     left "Shell" in mixed case beside "PROJECTS". */
+  text-transform: inherit;
+  text-align: left;
+}
+
+.shell-head-toggle .project-caret {
+  /* The caret is a 24px-grid icon next to 26px text; without this it sits
+     visually high and drags the baseline with it. */
+  width: 20px;
+  height: 20px;
+}
+
+/* The desktop sidebar's `.section-heading` is a 12px uppercase label rather
+   than the phone's 26px title, so the caret and the text action beside it have
+   to come down with it — at phone sizes they are correct and this does not
+   apply. */
+.sidebar .shell-head-toggle .project-caret {
+  width: 15px;
+  height: 15px;
+}
+
+.sidebar .shell-head-action {
+  font-size: 11.5px;
+}
+
+/* A text action rather than another round icon button: "Clear finished" has no
+   glyph that says it, and the two icon buttons it would sit between (compose,
+   and a row's own close) already both mean something else. */
+.shell-head-action {
+  flex: none;
+  background: none;
+  border: none;
+  padding: 4px 2px;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 13px;
+}
+
+.shell-head-action:hover:not(:disabled) {
+  color: var(--text);
+  border-color: transparent;
+}
+
+/* `.chat-row` is `display: block`, so the row's second line is a block of its
+   own under the title rather than a flex sibling of it. */
+.shell-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.shell-cwd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Reads as a fact about the row, not a status: that pane belongs to someone
+   else's tmux, which is why closing it only ever detaches. */
+.shell-tag {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 5px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-dim);
+}
+
 /* ---- Planner (PA-6) ----------------------------------------------------
    Phase 2's frontend is deliberately minimal — a functional list/chat pair,
    not yet the full `Transcript`/`ToolCard`/`ApprovalSheet` reuse the plan
