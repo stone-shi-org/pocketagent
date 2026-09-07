@@ -11,6 +11,8 @@ import {
   pruneOldWebhookHits,
   readWebhookDeliveries,
   readWebhookHits,
+  readWebhookIssueSession,
+  upsertWebhookIssueSession,
   writeAgentDefaults,
   type Db,
 } from '../src/db/index.js';
@@ -1220,6 +1222,163 @@ describe('webhook autoSelectAgentModel', () => {
     expect(session).toBeDefined();
     expect(session?.spec.agent).toBe('agy');
     expect(session?.spec.model).toBe('gpt-oss-120b-medium');
+  });
+});
+
+describe('webhook per-issue conversations honour a changed agent label (PA-26)', () => {
+  /** The sample payload, with the labels a ticket carries right now. */
+  const payloadWithLabels = (labels: string[]): string =>
+    JSON.stringify({
+      ...(JIRA_SAMPLE_PAYLOAD as object),
+      timestamp: Date.now(),
+      issue: {
+        ...((JIRA_SAMPLE_PAYLOAD as { issue: Record<string, unknown> }).issue),
+        fields: {
+          ...((JIRA_SAMPLE_PAYLOAD as { issue: { fields: Record<string, unknown> } }).issue.fields),
+          labels,
+        },
+      },
+    });
+
+  /**
+   * A webhook whose deliveries continue one chat per issue, with the label
+   * override on — the only configuration in which this can happen at all.
+   *
+   * `directoryPolicy: 'allow'` because every delivery here runs in the project
+   * folder itself: the directory queue would otherwise park the second one
+   * behind the first, which is correct behaviour and not what these tests are
+   * about.
+   */
+  const perIssueHook = () =>
+    createWebhook({
+      conversationMode: 'per-issue',
+      autoSelectAgentModel: true,
+      worktreeMode: 'none',
+      overlapPolicy: 'allow',
+      directoryPolicy: 'allow',
+      maxConcurrent: 5,
+    });
+
+  /**
+   * The conversation the first delivery would have cached, with its session
+   * already gone — the reported scenario is "turn ended (or agy ran out of
+   * quota)", which is exactly the resume case rather than the follow-up one.
+   */
+  const cacheConversation = (webhookId: string, agent: string, agentSessionId: string): void => {
+    upsertWebhookIssueSession(ctx.db, {
+      webhook_id: webhookId,
+      issue_key: 'PA-123',
+      agent_session_id: agentSessionId,
+      session_id: null,
+      planner_chat_id: null,
+      agent,
+      cwd: ctx.projectDir,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+    });
+  };
+
+  it('resumes the cached conversation when the agent has not changed', async () => {
+    // The control case, and the behaviour PA-26 must not break: `per-issue`
+    // exists to keep the issue's history, so an unchanged agent still continues
+    // it rather than starting over.
+    const hook = await perIssueHook();
+    cacheConversation(hook.id, 'claude', 'claude-conversation-1');
+
+    const res = await deliver(SLUG, payloadWithLabels(['frontend']), { secret: hook.secret });
+    const outcome = res.json();
+    expect(outcome.status).toBe('running');
+
+    const session = ctx.context.sessions.get(outcome.sessionId);
+    expect(session?.spec.agent).toBe('claude');
+    expect(session?.spec.resumeAgentSessionId).toBe('claude-conversation-1');
+  });
+
+  it('starts a fresh conversation with the new agent when a label changed it', async () => {
+    const hook = await perIssueHook();
+    cacheConversation(hook.id, 'agy', 'agy-conversation-1');
+
+    const res = await deliver(SLUG, payloadWithLabels(['agent:codex']), { secret: hook.secret });
+    const outcome = res.json();
+    expect(outcome.status).toBe('running');
+
+    const session = ctx.context.sessions.get(outcome.sessionId);
+    // The label chose the agent — already true before PA-26 — and now the
+    // conversation follows it. Handing agy's `agentSessionId` to codex resumes
+    // nothing: it is not a portable identifier, so the old behaviour was both
+    // the reported bug and a broken resume.
+    expect(session?.spec.agent).toBe('codex');
+    expect(session?.spec.resumeAgentSessionId).toBeUndefined();
+
+    // The cache now names the new conversation only. Left as an update it would
+    // keep agy's id (the upsert COALESCEs it), and the *next* delivery would
+    // resume the abandoned transcript after all.
+    const cached = readWebhookIssueSession(ctx.db, hook.id, 'PA-123');
+    expect(cached?.agent).toBe('codex');
+    expect(cached?.agent_session_id).not.toBe('agy-conversation-1');
+  });
+
+  it('does not follow up into a live session belonging to the previous agent', async () => {
+    // The other half of `per-issue`: a conversation that is still live is
+    // continued with a follow-up prompt rather than a resume. That path must
+    // check the agent too, or the changed label would be answered by exactly
+    // the agent the reporter was trying to move off.
+    const hook = await perIssueHook();
+    const live = await ctx.context.sessions.create({
+      agent: 'claude',
+      cwd: ctx.projectDir,
+      cols: 0,
+      rows: 0,
+      transport: 'structured',
+      title: 'the previous agent',
+    });
+    upsertWebhookIssueSession(ctx.db, {
+      webhook_id: hook.id,
+      issue_key: 'PA-123',
+      agent_session_id: null,
+      session_id: live.id,
+      planner_chat_id: null,
+      agent: 'claude',
+      cwd: ctx.projectDir,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+    });
+
+    const res = await deliver(SLUG, payloadWithLabels(['agent:codex']), { secret: hook.secret });
+    const outcome = res.json();
+    expect(outcome.status).toBe('running');
+    expect(outcome.sessionId).not.toBe(live.id);
+    expect(ctx.context.sessions.get(outcome.sessionId)?.spec.agent).toBe('codex');
+  });
+
+  it('keeps continuing a conversation cached before the agent was recorded', async () => {
+    // A row written before this column existed says nothing about who was
+    // handling the issue, and NULL must read as "unknown" rather than
+    // "mismatch" — otherwise upgrading the server would abandon every live
+    // per-issue conversation on its next delivery.
+    const hook = await perIssueHook();
+    cacheConversation(hook.id, 'claude', 'legacy-conversation');
+    ctx.db
+      .prepare('UPDATE webhook_issue_sessions SET agent = NULL WHERE webhook_id = ?')
+      .run(hook.id);
+
+    const res = await deliver(SLUG, payloadWithLabels(['frontend']), { secret: hook.secret });
+    const session = ctx.context.sessions.get(res.json().sessionId);
+    expect(session?.spec.resumeAgentSessionId).toBe('legacy-conversation');
+    // And it is stamped on the way through, so the next delivery can tell.
+    expect(readWebhookIssueSession(ctx.db, hook.id, 'PA-123')?.agent).toBe('claude');
+  });
+
+  it('ignores a model-only label change, because the agent is what owns the chat', async () => {
+    // A different model of the *same* agent is a mid-conversation switch the
+    // session already supports (PA-17 emits `model_changed`). Restarting the
+    // chat for it would throw away history nobody asked to lose.
+    const hook = await perIssueHook();
+    cacheConversation(hook.id, 'claude', 'claude-conversation-2');
+
+    const res = await deliver(SLUG, payloadWithLabels(['model:opus']), { secret: hook.secret });
+    const session = ctx.context.sessions.get(res.json().sessionId);
+    expect(session?.spec.resumeAgentSessionId).toBe('claude-conversation-2');
   });
 });
 

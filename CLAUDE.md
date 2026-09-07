@@ -280,6 +280,28 @@ pocket counterpart of `session_id` (the delivery links to `#/planner/<chatId>`),
 `webhook_issue_sessions.planner_chat_id` is what makes `per-issue` mode work for a chat rather
 than a session.
 
+**A `per-issue` conversation belongs to the agent that has been having it** (PA-26, reporter:
+"If jira ticket changed tag for agent, webhook should horner that"). `webhook_issue_sessions`
+answers "what is this issue already being handled in", and `per-issue` resumes it — but it never
+recorded *who* was handling it, so an `agent:<other>` label added after the first delivery was
+honoured for the run's spec and then ignored for its conversation: the new agent resumed the old
+agent's transcript. That is not merely surprising, it cannot work — an `agentSessionId` is one
+agent's own identifier, so handing agy's to codex resumes nothing. The row now carries an
+`agent` column and `issueConversationFor` is the single place that decides whether there is a
+conversation to continue, used by `startRun` *and* `queueKeyFor` so the directory the run waits
+for cannot disagree with the directory it enters. Three details are load-bearing. `NULL` means
+*unknown*, not "no agent", so upgrading the server does not abandon every live per-issue
+conversation on its next delivery. The comparison is on the **agent only** — a `model:` label is
+a mid-conversation model switch sessions already support (PA-17's `model_changed`), and
+restarting the chat for it would discard history nobody asked to lose. And a stale row is
+*deleted* rather than updated (`deleteWebhookIssueSession`), because `upsertWebhookIssueSession`
+COALESCEs `agent_session_id`/`planner_chat_id` and an update would leave the abandoned agent's
+ids in the row for the next delivery to resume. The overlap gate is deliberately untouched: it
+asks whether work for this subject is *in progress*, which is true regardless of who is doing
+it. Both directions are covered — coding→coding in `webhooks.test.ts`, pocket→pocket in
+`webhooks-pocket.test.ts`, where the label names a whole other Pocket Agent's tools and
+workspace.
+
 One pre-existing bug had to be fixed to make this correct: `blankRow` copies the webhook's
 *configured* agent, because the row must exist (it is the idempotency claim) before the filter
 has matched — so with `autoSelectAgentModel` on, a label-overridden delivery used to keep
@@ -290,7 +312,9 @@ far more once the override can cross between a coding agent and a Pocket Agent, 
 Known limitations, both inherited and made worse: per-delivery worktrees are not
 garbage-collected either, and a busy Jira project creates them far faster than a nightly job
 does — the editor says so. And `webhook_issue_sessions` is a cache, so a pruned row means the
-next event on that issue starts a fresh conversation rather than continuing one. A pocket run
+next event on that issue starts a fresh conversation rather than continuing one — as does an
+agent change (PA-26), which drops the row: it holds one conversation per subject, so switching
+the label back later starts a third rather than rejoining the first. A pocket run
 inherits none of the worktree problem (a planner workspace is app-owned scratch space, reused
 rather than multiplied) but does inherit the cache one: a pruned row starts a fresh chat.
 
@@ -732,7 +756,12 @@ These are load-bearing. Several were bugs first.
   a *branch*, not a relaxation: the structured-transport requirement is meaningless for a planner
   chat, so what replaces it is "this planner workspace still exists". Cron is deliberately **not**
   widened; `CreateCronJobRequest` still accepts a coding agent only, and doing otherwise is its
-  own decision with its own disclosure work.
+  own decision with its own disclosure work. PA-26 adds the downstream half of this: a
+  `per-issue` conversation is **owned by the agent that has been having it**, recorded in
+  `webhook_issue_sessions.agent`, and a delivery whose effective agent differs starts a fresh one
+  rather than resuming — an `agentSessionId` (or a Pocket Agent chat) is not portable across
+  agents, so the old behaviour ignored the label exactly where it mattered most. `NULL` there
+  means *unknown* and continues as before, never "mismatch".
 - **A webhook delivery is authenticated over the raw request bytes, in constant time.**
   HMAC-SHA256 of the body exactly as received — never of a re-serialized parse, which validates
   cleanly in a unit test with canonical JSON and then fails on every real Jira payload, because

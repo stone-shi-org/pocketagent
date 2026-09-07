@@ -35,11 +35,18 @@ import {
   renderBambooTemplate,
   renderJiraTemplate,
 } from '@pocketagent/protocol';
-import type { Db, WebhookDeliveryRow, WebhookHitLogRow, WebhookRow } from '../db/index.js';
+import type {
+  Db,
+  WebhookDeliveryRow,
+  WebhookHitLogRow,
+  WebhookIssueSessionRow,
+  WebhookRow,
+} from '../db/index.js';
 import {
   countActiveWebhookDeliveries,
   deleteWebhook,
   deleteWebhookDeliveriesFor,
+  deleteWebhookIssueSession,
   insertWebhook,
   insertWebhookDelivery,
   insertWebhookHit,
@@ -784,12 +791,54 @@ export class WebhookService {
     // in-flight pocket runs rather than sessions, which is a separate change.
     if (frozen.spec.kind === 'pocket') return null;
     if (hook.conversation_mode === 'per-issue') {
-      const mapped = readWebhookIssueSession(this.db, hook.id, frozen.subjectKey);
+      // PA-26: the *agent-aware* lookup, so this stays consistent with what
+      // `startRun` will actually do. A delivery whose label moved it to another
+      // agent abandons that conversation, and with it that conversation's
+      // worktree — keying it there would park the new run behind a tree it is
+      // never going to enter.
+      const mapped = this.issueConversationFor(hook, frozen.subjectKey, frozen.agent);
       if (mapped !== null && (mapped.cwd === frozen.cwd || isContained(frozen.cwd, mapped.cwd))) {
         return treeRootOf(mapped.cwd);
       }
     }
     return sharedTree;
+  }
+
+  /**
+   * The conversation cached for this subject, or null if there is none to
+   * continue.
+   *
+   * PA-26 (reporter: "if agent not same, it should create new session with new
+   * agent instead of deliver to existing chat session"): a `per-issue`
+   * conversation belongs to the agent that has been having it. A Jira
+   * `agent:<id>` label can change which agent a delivery runs — that is the
+   * whole point of `autoSelectAgentModel`, and the reported reason for using it
+   * is the previous agent running out of quota — so continuing the old
+   * conversation would honour the label for the spec and then ignore it for the
+   * transcript. Worse, `resume` hands one agent's `agentSessionId` to another
+   * agent's CLI, which is not a portable identifier at all.
+   *
+   * Deliberately compares the *agent* only. A `model:` label naming a different
+   * model of the same agent is a mid-conversation model switch, which sessions
+   * already support (PA-17 emits `model_changed`), and starting a fresh chat for
+   * it would throw away history nobody asked to lose.
+   *
+   * Pure: the abandonment is logged once by `startRun`, which is where the
+   * decision is acted on, rather than here, which two callers reach.
+   */
+  private issueConversationFor(
+    hook: WebhookRow,
+    subjectKey: string,
+    agent: string,
+  ): WebhookIssueSessionRow | null {
+    if (hook.conversation_mode !== 'per-issue') return null;
+    const mapped = readWebhookIssueSession(this.db, hook.id, subjectKey);
+    if (mapped === null) return null;
+    // NULL is "unknown", not "no agent": a row cached before this column
+    // existed must keep continuing its conversation rather than be abandoned
+    // for a mismatch that cannot be established.
+    if (mapped.agent !== null && mapped.agent !== agent) return null;
+    return mapped;
   }
 
   /**
@@ -932,7 +981,11 @@ export class WebhookService {
     const { subjectKey, prompt, cwd } = frozen;
     const startedAt = this.now();
     updateWebhookDelivery(this.db, deliveryId, { started_at: startedAt });
-    const sink = this.sinkFor(hook, deliveryId, subjectKey, startedAt, cwd);
+    // PA-26: the sink stamps the conversation cache with the agent that is
+    // actually running, which is what makes the mismatch below detectable at
+    // all — `frozen.agent`, never `hook.agent`, or a label-overridden delivery
+    // would cache the configured agent it did not use.
+    const sink = this.sinkFor(hook, deliveryId, subjectKey, startedAt, cwd, frozen.agent);
 
     // The saved agent may have been a coding agent that a Jira label moved to a
     // Pocket Agent (or the reverse), so the row's own `agent` is corrected to
@@ -941,16 +994,38 @@ export class WebhookService {
     // agent it was accepted as, not whatever the labels would say now.
     this.recordEffectiveAgent(deliveryId, frozen.agent);
 
+    // PA-26: say so, exactly once, when this subject's cached conversation
+    // belonged to a different agent. "Why did it start a new chat instead of
+    // continuing the old one" is the support question this behaviour generates,
+    // and this line is the answer — the same reasoning the filter's
+    // human-readable non-match reasons are recorded for.
+    if (hook.conversation_mode === 'per-issue') {
+      const cached = readWebhookIssueSession(this.db, hook.id, subjectKey);
+      if (cached !== null && cached.agent !== null && cached.agent !== frozen.agent) {
+        this.opts.logger?.info(
+          {
+            webhook: hook.id,
+            delivery: deliveryId,
+            subject: subjectKey,
+            from: cached.agent,
+            to: frozen.agent,
+          },
+          'webhook per-issue conversation restarted because the agent changed',
+        );
+      }
+    }
+
     // PA-10: a Pocket Agent run. Checked before everything below because none
     // of it applies — the three `per-issue` session cases are about resuming a
     // *session*, and a pocket conversation is a chat that `startPocketAgent`
     // resumes itself from the mapping row.
     if (frozen.spec.kind === 'pocket') {
       const pocketSpec = frozen.spec.run;
-      const mapped =
-        hook.conversation_mode === 'per-issue'
-          ? readWebhookIssueSession(this.db, hook.id, subjectKey)
-          : null;
+      // PA-26: a chat belongs to the Pocket Agent that has been having it, and
+      // a `pocket:<id>` label can name a *different* one — whose tools, model
+      // and workspace are genuinely another agent's. Resuming across that
+      // would be the same bug as resuming across two coding agents.
+      const mapped = this.issueConversationFor(hook, subjectKey, frozen.agent);
       const outcome = await this.executor.startPocketAgent(
         deliveryId,
         {
@@ -970,7 +1045,7 @@ export class WebhookService {
     const codingSpec = frozen.spec.run;
 
     if (hook.conversation_mode === 'per-issue') {
-      const mapped = readWebhookIssueSession(this.db, hook.id, subjectKey);
+      const mapped = this.issueConversationFor(hook, subjectKey, frozen.agent);
       const sameProject = mapped !== null && (mapped.cwd === cwd || isContained(cwd, mapped.cwd));
 
       // Case 1: the conversation is still live in the same project directory.
@@ -1041,6 +1116,8 @@ export class WebhookService {
     issueKey: string,
     startedAt: number,
     resolvedCwd: string,
+    /** PA-26: the agent actually running, stamped on the conversation cache. */
+    agent: string,
   ): RunSink {
     const remember = (patch: {
       sessionId?: string;
@@ -1049,7 +1126,17 @@ export class WebhookService {
       cwd?: string;
     }): void => {
       if (hook.conversation_mode !== 'per-issue') return;
-      const existing = readWebhookIssueSession(this.db, hook.id, issueKey);
+      const cached = readWebhookIssueSession(this.db, hook.id, issueKey);
+      // PA-26: a row describing another agent's conversation is not this run's
+      // history. `startRun` has already declined to continue it, so it is
+      // dropped rather than updated — `upsertWebhookIssueSession` COALESCEs
+      // `agent_session_id` and `planner_chat_id`, so an update would leave the
+      // abandoned agent's ids in the row and the *next* delivery would resume
+      // them. Discarding it costs nothing this feature has not already spent:
+      // the row is a cache, and the conversation it names is being replaced.
+      const stale = cached !== null && cached.agent !== null && cached.agent !== agent;
+      if (stale) deleteWebhookIssueSession(this.db, hook.id, issueKey);
+      const existing = stale ? null : cached;
       // `resolvedCwd`, not `hook.cwd`: the routed directory for *this*
       // delivery's project is the right fallback before `onCwd` has fired.
       const cwd = patch.cwd ?? existing?.cwd ?? resolvedCwd;
@@ -1059,6 +1146,7 @@ export class WebhookService {
         agent_session_id: patch.agentSessionId ?? existing?.agent_session_id ?? null,
         session_id: patch.sessionId ?? existing?.session_id ?? null,
         planner_chat_id: patch.plannerChatId ?? existing?.planner_chat_id ?? null,
+        agent,
         cwd,
         created_at: existing?.created_at ?? startedAt,
         updated_at: startedAt,

@@ -767,6 +767,24 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX IF NOT EXISTS idx_session_prompt_queue_session
     ON session_prompt_queue (session_id);
   `,
+  // PA-26 (reporter: "If jira ticket changed tag for agent, webhook should
+  // horner that"): which agent the conversation cached for an issue belongs to.
+  //
+  // `webhook_issue_sessions` answers "what conversation is this issue already
+  // being handled in", and `per-issue` mode resumes it. It never recorded *who*
+  // was handling it, so a `agent:<other>` label added to a ticket after the
+  // first delivery resumed the previous agent's transcript with the new agent's
+  // CLI — the label was honoured for the spec and then ignored for the
+  // conversation, which is both the reported bug and a cross-agent transcript
+  // resume that could not have worked.
+  //
+  // Nullable, and NULL deliberately means *unknown* rather than "no agent": a
+  // row written before this column existed must keep continuing its
+  // conversation, not be abandoned on the next delivery for a mismatch nobody
+  // can prove. It is stamped on the next write either way.
+  `
+  ALTER TABLE webhook_issue_sessions ADD COLUMN agent TEXT;
+  `,
 ];
 
 /**
@@ -870,6 +888,20 @@ export function openDatabase(databasePath: string): Db {
   );
   if (webhookColumns.size > 0 && !webhookColumns.has('auto_select_agent_model')) {
     db.exec('ALTER TABLE webhooks ADD COLUMN auto_select_agent_model INTEGER NOT NULL DEFAULT 0');
+  }
+  // PA-26, same hazard once more: two feature branches that each *append* a
+  // migration produce the same version count for different schemas, so a
+  // database checkpointed by the other one skips this column forever. Every
+  // `per-issue` delivery writes it (the upsert names it unconditionally), so a
+  // miss would 500 the whole delivery path rather than degrade quietly —
+  // exactly PA-21's failure. Probed idempotently for that reason.
+  const issueSessionColumns = new Set(
+    (db.prepare('PRAGMA table_info(webhook_issue_sessions)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (issueSessionColumns.size > 0 && !issueSessionColumns.has('agent')) {
+    db.exec('ALTER TABLE webhook_issue_sessions ADD COLUMN agent TEXT');
   }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
@@ -1362,6 +1394,16 @@ export interface WebhookIssueSessionRow {
   session_id: string | null;
   /** PA-10: the Pocket Agent chat handling this issue, for a pocket-agent webhook. */
   planner_chat_id: string | null;
+  /**
+   * PA-26: the agent this conversation belongs to — a coding agent id or a
+   * `pocket:<id>`.
+   *
+   * NULL means *unknown* (a row written before this column existed), which
+   * reads as "no reason to abandon it". A row whose agent differs from the
+   * delivery's effective agent is not this delivery's conversation, and
+   * `WebhookService` starts a fresh one rather than resuming it.
+   */
+  agent: string | null;
   cwd: string;
   created_at: number;
   updated_at: number;
@@ -1741,13 +1783,18 @@ export function readWebhookIssueSession(
 export function upsertWebhookIssueSession(db: Db, row: WebhookIssueSessionRow): void {
   db.prepare(
     `INSERT INTO webhook_issue_sessions (
-       webhook_id, issue_key, agent_session_id, session_id, planner_chat_id, cwd, created_at, updated_at
+       webhook_id, issue_key, agent_session_id, session_id, planner_chat_id, agent, cwd, created_at, updated_at
      ) VALUES (
-       @webhook_id, @issue_key, @agent_session_id, @session_id, @planner_chat_id, @cwd, @created_at, @updated_at
+       @webhook_id, @issue_key, @agent_session_id, @session_id, @planner_chat_id, @agent, @cwd, @created_at, @updated_at
      )
      ON CONFLICT (webhook_id, issue_key) DO UPDATE SET
        agent_session_id = COALESCE(excluded.agent_session_id, agent_session_id),
        session_id       = excluded.session_id,
+       -- COALESCE so a caller that does not know the agent cannot erase a known
+       -- one; the only writer that leaves it NULL would be a pre-PA-26 row's own
+       -- read-modify-write, and forgetting the agent would silently re-enable
+       -- resuming across an agent change.
+       agent            = COALESCE(excluded.agent, agent),
        -- COALESCE, like \`agent_session_id\`: a pocket chat, once known, is the
        -- issue's conversation until the row is pruned. \`session_id\` is the one
        -- column that must be overwritable with NULL, because it is the *live*
@@ -1756,6 +1803,21 @@ export function upsertWebhookIssueSession(db: Db, row: WebhookIssueSessionRow): 
        cwd              = excluded.cwd,
        updated_at       = excluded.updated_at`,
   ).run(row);
+}
+
+/**
+ * Forget the conversation cached for one issue.
+ *
+ * PA-26: called when a delivery's agent no longer matches the cached
+ * conversation's. Dropping the row rather than patching it is what keeps
+ * `upsertWebhookIssueSession`'s COALESCEd `agent_session_id`/`planner_chat_id`
+ * from carrying the abandoned agent's ids forward into the new conversation's
+ * row.
+ */
+export function deleteWebhookIssueSession(db: Db, webhookId: string, issueKey: string): number {
+  return db
+    .prepare('DELETE FROM webhook_issue_sessions WHERE webhook_id = ? AND issue_key = ?')
+    .run(webhookId, issueKey).changes;
 }
 
 /** Bound the per-issue cache. Dropping a row only costs a fresh conversation. */

@@ -545,6 +545,66 @@ describe('the Jira label can name a Pocket Agent', () => {
     expect(chats).toHaveLength(1);
   });
 
+  it('starts a new chat when a label names a different Pocket Agent (PA-26)', async () => {
+    // The pocket half of PA-26. A chat belongs to the Pocket Agent that has
+    // been having it — its own tools, model and workspace — so continuing it
+    // under a *different* agent would honour the label for the run and ignore
+    // it for the conversation.
+    const fetchImpl = vi.fn().mockImplementation(() => textReply('ok'));
+    const { slug, secret, hookId, workspaceId } = await setupPocketWebhook(fetchImpl, {
+      conversationMode: 'per-issue',
+      autoSelectAgentModel: true,
+      overlapPolicy: 'allow',
+    });
+    // A second Pocket Agent for the label to name.
+    const other = (await post(t, '/api/planner/workspaces', { name: 'Docs Bot' })).json();
+
+    await deliver(t, slug, secret, payloadFor({ timestamp: Date.now() }));
+    const first = await deliveryFor(t, hookId, (d) => d.status === 'succeeded');
+
+    const relabelled = payloadFor({
+      timestamp: Date.now() + 1,
+      issue: {
+        ...(JIRA_SAMPLE_PAYLOAD as { issue: Record<string, unknown> }).issue,
+        fields: {
+          ...((JIRA_SAMPLE_PAYLOAD as { issue: { fields: Record<string, unknown> } }).issue.fields),
+          labels: ['agent:pocket-docs-bot'],
+        },
+      },
+    });
+    await deliver(t, slug, secret, relabelled);
+    const second = await deliveryFor(
+      t,
+      hookId,
+      (d) => d.status === 'succeeded' && d.id !== first.id,
+    );
+
+    // Not the first chat, and in the agent the label named.
+    expect(second.plannerChatId).not.toBe(first.plannerChatId);
+    expect(second.agent).toBe(pocketAgentId(other.id));
+    const mine = (await get(t, `/api/planner/chats?workspaceId=${workspaceId}`)).json().chats;
+    const theirs = (await get(t, `/api/planner/chats?workspaceId=${other.id}`)).json().chats;
+    expect(mine.map((c: { id: string }) => c.id)).toEqual([first.plannerChatId]);
+    expect(theirs.map((c: { id: string }) => c.id)).toEqual([second.plannerChatId]);
+
+    // And a third delivery back on the configured agent does not land in the
+    // chat the label detoured to — the mismatch check works in both
+    // directions. It starts a fresh chat rather than rejoining the *first*
+    // one: the cache holds a single conversation per issue, so the abandoned
+    // chat is no longer reachable through this webhook. That is the same
+    // documented limitation a pruned cache row already has, and it is still
+    // strictly better than continuing another agent's transcript.
+    await deliver(t, slug, secret, payloadFor({ timestamp: Date.now() + 2 }));
+    const third = await deliveryFor(
+      t,
+      hookId,
+      (d) => d.status === 'succeeded' && d.id !== first.id && d.id !== second.id,
+    );
+    expect(third.plannerChatId).not.toBe(second.plannerChatId);
+    expect(third.plannerChatId).not.toBe(first.plannerChatId);
+    expect(third.agent).toBe(pocketAgentId(workspaceId));
+  });
+
   it('never queues on a directory, because it occupies none (PA-11)', async () => {
     // The directory queue serializes deliveries that would share a *working
     // tree*. A Pocket Agent run has no cwd, no worktree and no session — its

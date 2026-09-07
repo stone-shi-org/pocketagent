@@ -1914,6 +1914,14 @@ export function WebhookEditorPage({
                     )}
                     . An unrecognised label is ignored, leaving the agent chosen above.
                   </p>
+                  {conversationMode === 'per-issue' && (
+                    <p className="transport-hint">
+                      Because each delivery continues one chat per{' '}
+                      {type === 'bamboo' ? 'plan' : 'issue'}: changing the label to a different
+                      agent starts a fresh chat with that agent rather than continuing the
+                      previous one’s — a transcript belongs to the agent that wrote it.
+                    </p>
+                  )}
                 </div>
                 <div className="settings-row-control">
                   <label className="switch">
