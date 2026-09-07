@@ -44,7 +44,9 @@ import type {
   CreatePlannerModelRequest,
   DiscoverPlannerModelsResponse,
   TestPlannerModelResponse,
+  PlannerEmbeddingApiKeyRevealResponse,
   PlannerSettingsDto,
+  TestPlannerEmbeddingResponse,
   UpdatePlannerSettingsRequest,
   PlannerApiKeyRevealResponse,
   PlannerChat,
@@ -620,6 +622,15 @@ export const api = {
     request<PlannerApiKeyRevealResponse>('/api/planner/settings/api-key/reveal', {
       method: 'POST',
     }),
+
+  /** The embedding provider's own key reveal — see `PlannerSettingsDto.embeddingBaseUrl`'s doc comment. */
+  revealPlannerEmbeddingApiKey: () =>
+    request<PlannerEmbeddingApiKeyRevealResponse>('/api/planner/settings/embedding-api-key/reveal', {
+      method: 'POST',
+    }),
+
+  testPlannerEmbeddings: () =>
+    request<TestPlannerEmbeddingResponse>('/api/planner/settings/embeddings/test', { method: 'POST' }),
 
   listPlannerChats: (workspaceId?: string) =>
     request<PlannerChatListResponse>(

@@ -931,6 +931,40 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE planner_workspaces ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1;
   ALTER TABLE planner_chats ADD COLUMN memory_folded_turns INTEGER NOT NULL DEFAULT 0;
   `,
+  // PA-29 (reporter: "Go ahead do it. Embedding need own setting with url,
+  // api key, model (in case I deploy service on other place)"): semantic
+  // ranking on top of the lexical (FTS5) ranking the previous migration
+  // already added — a memory's embedding, computed at write time against
+  // whichever embedding provider is configured then.
+  //
+  // `embedding_model` is what makes this safe to add without a backfill:
+  // a memory's vector is only meaningful compared against another vector
+  // from the *same* embedding model (different models place semantically
+  // identical text at unrelated points in unrelated vector spaces, so a
+  // cosine similarity between two vectors from different models is not
+  // merely noisy, it is meaningless). Recording provenance per-row, rather
+  // than assuming "whatever is configured now", is what lets
+  // `PlannerMemoryService.search` skip (fall back to lexical-only ranking
+  // for) any row whose `embedding_model` doesn't match the one configured
+  // right now — a row saved before embeddings were configured, or under a
+  // since-changed provider, degrades gracefully instead of corrupting the
+  // ranking silently.
+  //
+  // Both columns are nullable with no default beyond SQLite's own implicit
+  // `NULL`: `embedding` stays `NULL` for every row until this feature is
+  // configured and used, and stays `NULL` forever for a row saved while it
+  // was unconfigured — that row simply never participates in the semantic
+  // half of ranking, the same "an unconfigured feature is a common, expected
+  // steady state, never an error" posture the chat LLM endpoint itself
+  // already has elsewhere in this file.
+  //
+  // The vector itself is a packed `Float32Array` `BLOB` (`encodeEmbedding`/
+  // `decodeEmbedding` in `planner/store.ts`), not a JSON array of floats —
+  // see those functions' own doc comments for why.
+  `
+  ALTER TABLE planner_memories ADD COLUMN embedding BLOB;
+  ALTER TABLE planner_memories ADD COLUMN embedding_model TEXT;
+  `,
 ];
 
 /**

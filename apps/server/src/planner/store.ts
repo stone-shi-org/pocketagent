@@ -238,11 +238,29 @@ export const PLANNER_YOLO_ENABLED_KEY = 'planner_yolo_enabled';
 /** Seeds a new chat's model picker; each existing chat keeps its own choice. */
 export const PLANNER_LAST_MODEL_ID_KEY = 'planner_last_model_id';
 
+/**
+ * PA-29: the embedding provider's own settings — a separate base URL, API
+ * key and model from the `PLANNER_LLM_*` ones above, per the approved
+ * design ("Embedding need own setting with url, api key, model (in case I
+ * deploy service on other place)"). Mirrors the chat-settings keys/functions
+ * exactly, one layer down; see `PlannerSettingsDto.embeddingBaseUrl`'s own
+ * doc comment (protocol package) for why the two are never folded together.
+ */
+export const PLANNER_EMBEDDING_BASE_URL_KEY = 'planner_embedding_base_url';
+
+/** Same plaintext-storage reasoning as `PLANNER_LLM_API_KEY_KEY`. */
+export const PLANNER_EMBEDDING_API_KEY_KEY = 'planner_embedding_api_key';
+
+export const PLANNER_EMBEDDING_MODEL_ID_KEY = 'planner_embedding_model_id';
+
 export interface PlannerSettingsSnapshot {
   baseUrl: string | null;
   hasApiKey: boolean;
   yoloEnabled: boolean;
   lastModelId: string | null;
+  embeddingBaseUrl: string | null;
+  embeddingHasApiKey: boolean;
+  embeddingModelId: string | null;
 }
 
 export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
@@ -251,6 +269,9 @@ export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
     hasApiKey: (readSetting(db, PLANNER_LLM_API_KEY_KEY) ?? '').length > 0,
     yoloEnabled: readSetting(db, PLANNER_YOLO_ENABLED_KEY) === '1',
     lastModelId: readSetting(db, PLANNER_LAST_MODEL_ID_KEY) || null,
+    embeddingBaseUrl: readSetting(db, PLANNER_EMBEDDING_BASE_URL_KEY) || null,
+    embeddingHasApiKey: (readSetting(db, PLANNER_EMBEDDING_API_KEY_KEY) ?? '').length > 0,
+    embeddingModelId: readSetting(db, PLANNER_EMBEDDING_MODEL_ID_KEY) || null,
   };
 }
 
@@ -270,12 +291,31 @@ export function writePlannerLastModelId(db: Db, modelId: string | null): void {
   writeSetting(db, PLANNER_LAST_MODEL_ID_KEY, modelId ?? '');
 }
 
+export function writePlannerEmbeddingBaseUrl(db: Db, baseUrl: string | null): void {
+  writeSetting(db, PLANNER_EMBEDDING_BASE_URL_KEY, baseUrl ?? '');
+}
+
+export function writePlannerEmbeddingApiKey(db: Db, apiKey: string | null): void {
+  writeSetting(db, PLANNER_EMBEDDING_API_KEY_KEY, apiKey ?? '');
+}
+
+export function writePlannerEmbeddingModelId(db: Db, modelId: string | null): void {
+  writeSetting(db, PLANNER_EMBEDDING_MODEL_ID_KEY, modelId ?? '');
+}
+
 /**
  * The one read that carries the key. Rate-limited and logged at the route
  * (`routes/planner.ts`), mirroring `WebhookService.revealSecret` exactly.
  */
 export function revealPlannerApiKey(db: Db): string | null {
   const value = readSetting(db, PLANNER_LLM_API_KEY_KEY);
+  return value && value.length > 0 ? value : null;
+}
+
+/** The embedding provider's own reveal — same rate-limit/logging posture,
+    at its own route. */
+export function revealPlannerEmbeddingApiKey(db: Db): string | null {
+  const value = readSetting(db, PLANNER_EMBEDDING_API_KEY_KEY);
   return value && value.length > 0 ? value : null;
 }
 
@@ -484,6 +524,12 @@ interface PlannerMemoryDbRow {
   source_chat_id: string | null;
   created_at: number;
   last_accessed_at: number;
+  /** PA-29: `NULL` until an embedding provider is configured and this row's
+      content has been embedded — see the migration's own doc comment for why
+      a mismatched `embedding_model` (or a `NULL` one) must never be compared
+      against another row's vector. */
+  embedding: Buffer | null;
+  embedding_model: string | null;
 }
 
 function memoryFromDbRow(row: PlannerMemoryDbRow): PlannerMemory {
@@ -553,6 +599,16 @@ export function deletePlannerMemory(db: Db, id: string): boolean {
   return db.prepare('DELETE FROM planner_memories WHERE id = ?').run(id).changes > 0;
 }
 
+/**
+ * `content`/`importance` only — deliberately does not touch `embedding`/
+ * `embedding_model`. An edit through this path (the memories settings-page
+ * editor) leaves whatever embedding this row already had, now describing
+ * text that has changed underneath it; re-embedding on every edit was judged
+ * out of scope for this pass (nothing else in this feature re-embeds on
+ * edit either), so a hand-edited memory's semantic ranking is stale until a
+ * future write path recomputes it. Its lexical (FTS5) ranking is unaffected,
+ * since that index is kept in sync by the triggers on every UPDATE.
+ */
 export function updatePlannerMemory(
   db: Db,
   id: string,
@@ -570,6 +626,54 @@ export function updatePlannerMemory(
   }
   if (assignments.length === 0) return;
   db.prepare(`UPDATE planner_memories SET ${assignments.join(', ')} WHERE id = @id`).run(params);
+}
+
+/** Sets a memory's embedding vector and the model it came from, once
+    `PlannerMemoryService.save` has successfully embedded its content — see
+    that method's own doc comment for why this is a separate write from the
+    initial insert (the row must exist, with its real `content`, before it
+    can be embedded) and why a failure here must never fail the save. */
+export function updatePlannerMemoryEmbedding(
+  db: Db,
+  id: string,
+  embedding: Buffer,
+  embeddingModel: string,
+): void {
+  db.prepare('UPDATE planner_memories SET embedding = ?, embedding_model = ? WHERE id = ?').run(
+    embedding,
+    embeddingModel,
+    id,
+  );
+}
+
+/**
+ * PA-29: a memory's embedding is stored as a packed `Float32Array` `BLOB`
+ * rather than a JSON array of floats — a vector of even a few hundred
+ * dimensions as JSON text is several times larger on disk and slower to
+ * parse back out, for no benefit, since nothing but this feature's own code
+ * ever reads the column directly (it never round-trips through the wire
+ * protocol — see `PlannerMemory`'s own schema, which has no `embedding`
+ * field at all).
+ */
+export function encodeEmbedding(vector: readonly number[]): Buffer {
+  return Buffer.from(new Float32Array(vector).buffer);
+}
+
+/**
+ * The inverse of `encodeEmbedding`. Reads via `Buffer.readFloatLE` at each
+ * 4-byte offset rather than reinterpreting the blob as a `Float32Array`
+ * directly — a `Buffer` handed back by better-sqlite3 is a view into a
+ * shared, pooled `ArrayBuffer` whose `byteOffset` is not guaranteed to be a
+ * multiple of 4, and `Float32Array`'s constructor throws on a misaligned
+ * offset; `readFloatLE` has no such alignment requirement.
+ */
+export function decodeEmbedding(blob: Buffer): number[] {
+  const floatCount = Math.floor(blob.length / 4);
+  const vector: number[] = new Array(floatCount);
+  for (let i = 0; i < floatCount; i++) {
+    vector[i] = blob.readFloatLE(i * 4);
+  }
+  return vector;
 }
 
 /** Bumps `last_accessed_at` for exactly the rows a search actually returned
@@ -595,6 +699,12 @@ export function touchPlannerMemoriesLastAccessed(db: Db, ids: readonly string[],
 export interface PlannerMemoryFtsHit {
   memory: PlannerMemory;
   bm25: number;
+  /** PA-29: this row's own embedding/model, straight off the row — `null`
+      either way when it has never been embedded. `PlannerMemoryService.search`
+      decides whether it is usable (matches the *currently configured* model)
+      before ever decoding it; this hit type just carries what's on disk. */
+  embedding: Buffer | null;
+  embeddingModel: string | null;
 }
 
 /**
@@ -637,7 +747,12 @@ export function searchPlannerMemoriesFts(
           )
           .all(matchQuery, workspaceId, candidateLimit)
   ) as (PlannerMemoryDbRow & { rank: number })[];
-  return rows.map((row) => ({ memory: memoryFromDbRow(row), bm25: row.rank }));
+  return rows.map((row) => ({
+    memory: memoryFromDbRow(row),
+    bm25: row.rank,
+    embedding: row.embedding,
+    embeddingModel: row.embedding_model,
+  }));
 }
 
 /**

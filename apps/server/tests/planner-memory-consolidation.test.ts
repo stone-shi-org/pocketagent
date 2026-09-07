@@ -79,7 +79,7 @@ describe('MemoryConsolidationService', () => {
 
     const clock = Date.parse('2026-09-01T00:00:00Z');
     t.context.plannerWorkspaces.setLastConsolidatedAt(ws.id, clock - 500); // well inside the 1s interval
-    t.context.plannerMemory.save(ws.id, 'a short-term note', 3, null);
+    await t.context.plannerMemory.save(ws.id, 'a short-term note', 3, null);
 
     const svc = new MemoryConsolidationService({
       db: t.db,
@@ -112,7 +112,7 @@ describe('MemoryConsolidationService', () => {
 
     const clock = Date.parse('2026-09-01T00:00:00Z');
     t.context.plannerWorkspaces.setLastConsolidatedAt(ws.id, clock - CONSOLIDATION_INTERVAL_MS - 1);
-    const shortTerm = t.context.plannerMemory.save(ws.id, 'earlier note: user likes dark mode', 3, null);
+    const shortTerm = await t.context.plannerMemory.save(ws.id, 'earlier note: user likes dark mode', 3, null);
     await seedChatWithTranscript(ws.id, ws.path, {
       lastActivityAt: clock,
       userText: 'Please always use dark mode in the dashboard from now on.',
@@ -143,6 +143,95 @@ describe('MemoryConsolidationService', () => {
 
     expect(t.context.plannerMemory.get(shortTerm.id)).toBeNull();
     expect(t.context.plannerWorkspaces.get(ws.id)!.lastConsolidatedAt).toBe(clock);
+  });
+
+  /**
+   * PA-29: `buildTranscriptExcerpt` narrowly widens beyond `user_prompt`/
+   * `text` to also include a `tool_result` for a call to
+   * `read_session_output`, `list_sessions`, or `send_instruction` — the
+   * three tools through which a turn can already have pulled coding-agent-
+   * session content into the conversation — matched to its tool name via
+   * the preceding `tool_use` event's id. Every other tool's result (here,
+   * `write_file`) must stay excluded, unchanged.
+   */
+  it("folds a read_session_output/list_sessions/send_instruction tool result into the consolidation prompt, but excludes a write_file result", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse(JSON.stringify([])));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch('/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const ws = t.context.plannerWorkspaces.getDefault()!;
+    t.context.plannerWorkspaces.setDefaultModelId(ws.id, 'gpt-4o');
+
+    const clock = Date.parse('2026-09-01T00:00:00Z');
+    t.context.plannerWorkspaces.setLastConsolidatedAt(ws.id, clock - CONSOLIDATION_INTERVAL_MS - 1);
+
+    const chatId = randomUUID();
+    insertPlannerChat(t.db, {
+      id: chatId,
+      workspaceId: ws.id,
+      workspaceName: 'Test agent',
+      title: 'Test chat',
+      lastModelId: null,
+      createdAt: clock,
+      lastActivityAt: clock,
+      skipToolApprovalsEnabled: false,
+    });
+    await appendTranscriptEvent(ws.path, chatId, {
+      kind: 'user_prompt',
+      id: randomUUID(),
+      text: 'Check on the deploy session and clean up its scratch file.',
+    });
+    const readSessionCallId = randomUUID();
+    await appendTranscriptEvent(ws.path, chatId, {
+      kind: 'tool_use',
+      id: readSessionCallId,
+      name: 'read_session_output',
+      input: { sessionId: 'abc' },
+      summary: 'read_session_output(sessionId: "abc")',
+      filePath: null,
+    });
+    await appendTranscriptEvent(ws.path, chatId, {
+      kind: 'tool_result',
+      id: randomUUID(),
+      toolUseId: readSessionCallId,
+      content: 'the deploy session finished successfully and printed DEPLOY_OK',
+      truncated: false,
+      isError: false,
+    });
+    const writeFileCallId = randomUUID();
+    await appendTranscriptEvent(ws.path, chatId, {
+      kind: 'tool_use',
+      id: writeFileCallId,
+      name: 'write_file',
+      input: { path: '/scratch/notes.txt', content: 'x' },
+      summary: 'write_file(path: "/scratch/notes.txt")',
+      filePath: '/scratch/notes.txt',
+    });
+    await appendTranscriptEvent(ws.path, chatId, {
+      kind: 'tool_result',
+      id: randomUUID(),
+      toolUseId: writeFileCallId,
+      content: 'Wrote 1 characters to /scratch/notes.txt.',
+      truncated: false,
+      isError: false,
+    });
+
+    const svc = new MemoryConsolidationService({
+      db: t.db,
+      plannerWorkspaces: t.context.plannerWorkspaces,
+      memory: t.context.plannerMemory,
+      now: () => clock,
+      llmFetch: fetchImpl as unknown as typeof fetch,
+      consolidationIntervalMs: CONSOLIDATION_INTERVAL_MS,
+    });
+    await svc.tick();
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const body = JSON.parse((fetchImpl.mock.calls[0]![1] as RequestInit).body as string);
+    const userMessage = body.messages.find((m: { role: string }) => m.role === 'user').content as string;
+    expect(userMessage).toContain('read_session_output');
+    expect(userMessage).toContain('DEPLOY_OK');
+    expect(userMessage).not.toContain('write_file');
+    expect(userMessage).not.toContain('/scratch/notes.txt');
   });
 
   it('advances the marker without calling the LLM when there is nothing to fold', async () => {
@@ -178,7 +267,7 @@ describe('MemoryConsolidationService', () => {
     const clock = Date.parse('2026-09-01T00:00:00Z');
     const stalePast = clock - CONSOLIDATION_INTERVAL_MS - 1;
     t.context.plannerWorkspaces.setLastConsolidatedAt(ws.id, stalePast);
-    t.context.plannerMemory.save(ws.id, 'a short-term note', 3, null);
+    await t.context.plannerMemory.save(ws.id, 'a short-term note', 3, null);
 
     const svc = new MemoryConsolidationService({
       db: t.db,
@@ -216,8 +305,8 @@ describe('MemoryConsolidationService', () => {
     const stalePast = clock - CONSOLIDATION_INTERVAL_MS - 1;
     t.context.plannerWorkspaces.setLastConsolidatedAt(wsBad.id, stalePast);
     t.context.plannerWorkspaces.setLastConsolidatedAt(wsGood.id, stalePast);
-    const badShortTerm = t.context.plannerMemory.save(wsBad.id, 'bad workspace note', 3, null);
-    const goodShortTerm = t.context.plannerMemory.save(wsGood.id, 'good workspace note', 3, null);
+    const badShortTerm = await t.context.plannerMemory.save(wsBad.id, 'bad workspace note', 3, null);
+    const goodShortTerm = await t.context.plannerMemory.save(wsGood.id, 'good workspace note', 3, null);
 
     const logger = { warn: vi.fn() };
     const svc = new MemoryConsolidationService({

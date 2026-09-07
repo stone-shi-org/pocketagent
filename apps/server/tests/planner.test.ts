@@ -267,8 +267,30 @@ describe('PlannerWorkspaceRegistry', () => {
 describe('planner routes over HTTP', () => {
   let t: TestApp;
 
+  /**
+   * PA-29: stands in for a real embedding endpoint for
+   * `POST /api/planner/settings/embeddings/test` — the only route in this
+   * describe block that ever calls out. No other test here reaches a
+   * `/chat/completions` or `/embeddings` URL, so one fetch mock scoped to the
+   * whole block is enough; a request to anything unexpected throws loudly
+   * rather than silently hitting the real network.
+   */
+  const fetchImpl = (async (input: string | URL | Request) => {
+    const href = typeof input === 'string' ? input : input.toString();
+    if (href.startsWith('https://embeddings-down.example.com/')) {
+      throw new Error('simulated network failure: embeddings-down.example.com is unreachable');
+    }
+    if (href.includes('/embeddings')) {
+      return new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    throw new Error(`unexpected fetch to ${href} in planner.test.ts`);
+  }) as unknown as typeof fetch;
+
   beforeEach(async () => {
-    t = await createTestApp();
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl);
   });
 
   afterEach(async () => {
@@ -594,7 +616,99 @@ describe('planner routes over HTTP', () => {
       hasApiKey: false,
       yoloEnabled: false,
       lastModelId: null,
+      embeddingBaseUrl: null,
+      embeddingHasApiKey: false,
+      embeddingModelId: null,
     });
+  });
+
+  // ---- PA-29: the embedding provider's own settings ----------------------
+
+  it('PATCH updates embedding settings independently of the chat settings, without ever echoing the embedding key back', async () => {
+    await patch('/api/planner/settings', { baseUrl: 'https://chat.example.com/v1', apiKey: 'sk-chat-secret' });
+    const res = await patch('/api/planner/settings', {
+      embeddingBaseUrl: 'https://embeddings.example.com/v1',
+      embeddingApiKey: 'sk-embed-secret',
+      embeddingModelId: 'text-embedding-3-small',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // The chat settings, set in the PATCH above, are untouched by this one.
+    expect(body.baseUrl).toBe('https://chat.example.com/v1');
+    expect(body.hasApiKey).toBe(true);
+    expect(body.embeddingBaseUrl).toBe('https://embeddings.example.com/v1');
+    expect(body.embeddingHasApiKey).toBe(true);
+    expect(body.embeddingModelId).toBe('text-embedding-3-small');
+    expect(body).not.toHaveProperty('embeddingApiKey');
+    expect(JSON.stringify(body)).not.toContain('sk-embed-secret');
+    expect(JSON.stringify(body)).not.toContain('sk-chat-secret');
+  });
+
+  it('an omitted embeddingApiKey on PATCH leaves the stored embedding key untouched', async () => {
+    await patch('/api/planner/settings', { embeddingApiKey: 'sk-embed-first' });
+    await patch('/api/planner/settings', { embeddingModelId: 'text-embedding-3-small' });
+    const revealed = await post('/api/planner/settings/embedding-api-key/reveal');
+    expect(revealed.json().apiKey).toBe('sk-embed-first');
+  });
+
+  it('an empty-string embeddingApiKey on PATCH clears it', async () => {
+    await patch('/api/planner/settings', { embeddingApiKey: 'sk-embed-first' });
+    await patch('/api/planner/settings', { embeddingApiKey: '' });
+    expect((await get('/api/planner/settings')).json().embeddingHasApiKey).toBe(false);
+    const revealed = await post('/api/planner/settings/embedding-api-key/reveal');
+    expect(revealed.statusCode).toBe(404);
+  });
+
+  it('reveals the exact configured embedding API key', async () => {
+    await patch('/api/planner/settings', { embeddingApiKey: 'sk-embed-reveal-me' });
+    const res = await post('/api/planner/settings/embedding-api-key/reveal');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().apiKey).toBe('sk-embed-reveal-me');
+    expect(res.headers['cache-control']).toBe('no-store');
+  });
+
+  it('404s revealing the embedding key when none is configured', async () => {
+    const res = await post('/api/planner/settings/embedding-api-key/reveal');
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('embeddingModelId: null clears a previously configured model id', async () => {
+    await patch('/api/planner/settings', { embeddingModelId: 'text-embedding-3-small' });
+    const res = await patch('/api/planner/settings', { embeddingModelId: null });
+    expect(res.json().embeddingModelId).toBeNull();
+  });
+
+  it('POST .../embeddings/test reports ok: false without configuration, rather than erroring', async () => {
+    const res = await post('/api/planner/settings/embeddings/test');
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.dims).toBe(0);
+  });
+
+  it('POST .../embeddings/test reports ok: true with dims and latency on a successful round trip', async () => {
+    await patch('/api/planner/settings', {
+      embeddingBaseUrl: 'https://embeddings.example.com/v1',
+      embeddingModelId: 'text-embedding-3-small',
+    });
+    const res = await post('/api/planner/settings/embeddings/test');
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.dims).toBeGreaterThan(0);
+    expect(typeof body.latencyMs).toBe('number');
+  });
+
+  it('POST .../embeddings/test surfaces a transport/response failure as ok: false, never a 5xx', async () => {
+    await patch('/api/planner/settings', {
+      embeddingBaseUrl: 'https://embeddings-down.example.com/v1',
+      embeddingModelId: 'text-embedding-3-small',
+    });
+    const res = await post('/api/planner/settings/embeddings/test');
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.message.length).toBeGreaterThan(0);
   });
 
   it('PATCH updates settings without ever echoing the API key back', async () => {

@@ -365,7 +365,7 @@ export class PlannerChatService {
     let candidates: PlannerContextPreviewResponse['candidates'] = [];
     if (memoryEnabled && chat.workspaceId) {
       const queryText = lastUserPromptText(events);
-      const results = this.opts.memory.search(chat.workspaceId, queryText, {
+      const results = await this.opts.memory.search(chat.workspaceId, queryText, {
         limit: MEMORY_PREVIEW_CANDIDATES,
         dryRun: true,
       });
@@ -685,11 +685,11 @@ export class PlannerChatService {
     const settings = readPlannerSettings(this.opts.db);
     const events = await readTranscriptEvents(workspacePath, chat.id);
     const memoryEnabled = this.memoryEnabledFor(chat.workspaceId);
-    const windowedEvents = this.applyRollingWindow(chat, events, memoryEnabled);
+    const windowedEvents = await this.applyRollingWindow(chat, events, memoryEnabled);
     const messages = eventsToLlmMessages(windowedEvents);
     if (memoryEnabled && chat.workspaceId) {
       const queryText = lastUserPromptText(events);
-      const results = this.opts.memory.search(chat.workspaceId, queryText, { limit: MEMORY_INJECT_TOP_K });
+      const results = await this.opts.memory.search(chat.workspaceId, queryText, { limit: MEMORY_INJECT_TOP_K });
       if (results.length > 0) {
         messages.unshift({ role: 'system', content: buildMemorySystemMessage(results.map((r) => r.memory)) });
       }
@@ -941,11 +941,11 @@ export class PlannerChatService {
    * memory later does not try to retroactively fold turns nothing kept a
    * copy of).
    */
-  private applyRollingWindow(
+  private async applyRollingWindow(
     chat: PlannerChat,
     events: readonly AgentEvent[],
     memoryEnabled: boolean,
-  ): readonly AgentEvent[] {
+  ): Promise<readonly AgentEvent[]> {
     const turns = splitIntoTurns(events);
     const keepFrom = turns.length - ROLLING_WINDOW_TURNS;
     if (keepFrom <= 0) return events;
@@ -954,7 +954,7 @@ export class PlannerChatService {
     if (keepFrom > alreadyFolded) {
       const newlyEvicted = turns.slice(alreadyFolded, keepFrom);
       if (memoryEnabled && chat.workspaceId && newlyEvicted.length > 0) {
-        this.opts.memory.save(chat.workspaceId, summarizeFoldedTurns(newlyEvicted), 3, chat.id);
+        await this.opts.memory.save(chat.workspaceId, summarizeFoldedTurns(newlyEvicted), 3, chat.id);
       }
       writePlannerChatMemoryFoldedTurns(this.opts.db, chat.id, keepFrom);
     }

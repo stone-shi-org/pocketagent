@@ -53,10 +53,11 @@ import { plannerRoutes } from './routes/planner.js';
 import { websocketRoutes } from './ws/index.js';
 import { WebhookService } from './webhooks/index.js';
 import { PlannerWorkspaceRegistry } from './planner/workspaces.js';
-import { createPlannerWorkspaceStore } from './planner/store.js';
+import { createPlannerWorkspaceStore, readPlannerSettings, revealPlannerEmbeddingApiKey } from './planner/store.js';
 import { PlannerChatService } from './planner/chats.js';
 import type { QueuedRunSummary } from '@pocketagent/protocol';
-import { PlannerMemoryService } from './planner/memory.js';
+import { PlannerMemoryService, type PlannerMemoryEmbedConfig } from './planner/memory.js';
+import { PlannerLlmClient } from './planner/llm-client.js';
 import { MemoryConsolidationService } from './planner/memory-consolidation.js';
 import type { PocketContext } from './types.js';
 import { PromptQueueService } from './sessions/prompt-queue.js';
@@ -344,7 +345,28 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // PA-29: the memory system. Constructed before `plannerChats` because that
   // service's turn loop (rolling-window fold, pre-turn ranking) and its
   // `memory_save`/`memory_search` tools both need it.
-  const plannerMemory = new PlannerMemoryService({ db });
+  //
+  // The embedding provider is resolved once, here, from whatever is
+  // configured at boot — see `PlannerMemoryServiceOptions.embed`'s own doc
+  // comment for why this is a construction-time snapshot rather than a live
+  // read like the chat LLM endpoint's own settings, and for the restart
+  // caveat that trade-off implies. `null` (both settings unconfigured, or
+  // only one of the two) leaves every embedding-touching path a no-op, the
+  // same "unconfigured is a normal steady state" posture the chat LLM
+  // endpoint itself already has when nothing has been set yet.
+  const plannerSettingsAtBoot = readPlannerSettings(db);
+  const embeddingConfig: PlannerMemoryEmbedConfig | null =
+    plannerSettingsAtBoot.embeddingBaseUrl && plannerSettingsAtBoot.embeddingModelId
+      ? {
+          client: new PlannerLlmClient({
+            baseUrl: plannerSettingsAtBoot.embeddingBaseUrl,
+            apiKey: revealPlannerEmbeddingApiKey(db),
+            ...(options.plannerLlmFetch ? { fetchImpl: options.plannerLlmFetch } : {}),
+          }),
+          modelId: plannerSettingsAtBoot.embeddingModelId,
+        }
+      : null;
+  const plannerMemory = new PlannerMemoryService({ db, embed: embeddingConfig, logger: app.log });
 
   const plannerChats = new PlannerChatService({
     db,
@@ -451,6 +473,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     plannerWorkspacesRoot,
     plannerChats,
     plannerMemory,
+    ...(options.plannerLlmFetch ? { plannerLlmFetch: options.plannerLlmFetch } : {}),
     agents,
     customClaudeProviders,
     db,

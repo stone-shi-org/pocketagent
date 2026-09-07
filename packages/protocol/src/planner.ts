@@ -177,6 +177,19 @@ export const PlannerSettingsDto = z.object({
   yoloEnabled: z.boolean(),
   /** Seeds a new chat's model picker; each existing chat keeps its own choice. */
   lastModelId: z.string().nullable(),
+  /**
+   * PA-29: the embedding provider — deliberately its own base URL, API key
+   * and model, never assumed to be the same provider (or even the same
+   * deployment) as the chat-completion endpoint above. The reporter's own
+   * words: "Embedding need own setting with url, api key, model (in case I
+   * deploy service on other place)." Mirrors `baseUrl`/`hasApiKey` exactly,
+   * one layer down.
+   */
+  embeddingBaseUrl: z.string().nullable(),
+  embeddingHasApiKey: z.boolean(),
+  /** No discovery endpoint for this one (unlike the chat model catalog) — a
+      plain text field is enough for v1; see `UpdatePlannerSettingsRequest`. */
+  embeddingModelId: z.string().nullable(),
 });
 export type PlannerSettingsDto = z.infer<typeof PlannerSettingsDto>;
 
@@ -185,12 +198,19 @@ export type PlannerSettingsDto = z.infer<typeof PlannerSettingsDto>;
  * leaves the stored key untouched, since the editor is never shown the
  * current value to round-trip. `apiKey: ''` clears it — the same "empty
  * string on the wire means unset" convention `nullableStr` uses elsewhere in
- * this codebase's settings.
+ * this codebase's settings. `embeddingApiKey`/`embeddingBaseUrl`/
+ * `embeddingModelId` follow the identical convention, one layer down, for
+ * the separate embedding provider (see `PlannerSettingsDto.embeddingBaseUrl`'s
+ * doc comment for why it is never folded into the chat provider's own
+ * fields).
  */
 export const UpdatePlannerSettingsRequest = z.object({
   baseUrl: z.string().max(2048).nullable().optional(),
   apiKey: z.string().max(2048).optional(),
   yoloEnabled: z.boolean().optional(),
+  embeddingBaseUrl: z.string().max(2048).nullable().optional(),
+  embeddingApiKey: z.string().max(2048).optional(),
+  embeddingModelId: z.string().max(200).nullable().optional(),
 });
 export type UpdatePlannerSettingsRequest = z.infer<typeof UpdatePlannerSettingsRequest>;
 
@@ -199,6 +219,33 @@ export const PlannerApiKeyRevealResponse = z.object({
   apiKey: z.string(),
 });
 export type PlannerApiKeyRevealResponse = z.infer<typeof PlannerApiKeyRevealResponse>;
+
+/** The embedding provider's own reveal response — same shape, same
+    "explicit, rate-limited, logged" reveal-only rule as the chat key's,
+    exported distinctly so a caller can never confuse which key it asked
+    for. See `POST /api/planner/settings/embedding-api-key/reveal`. */
+export const PlannerEmbeddingApiKeyRevealResponse = z.object({
+  apiKey: z.string(),
+});
+export type PlannerEmbeddingApiKeyRevealResponse = z.infer<typeof PlannerEmbeddingApiKeyRevealResponse>;
+
+/**
+ * `POST /api/planner/settings/embeddings/test` round-trips one minimal piece
+ * of text through the configured embedding endpoint/model to confirm it
+ * actually works — a distinct DTO from `TestPlannerModelResponse` rather
+ * than a reuse, because it is testing a different capability (embeddings,
+ * not chat completion) at a different endpoint. `dims` is the length of the
+ * returned vector, shown so a mismatch between what the editor expects and
+ * what the endpoint actually returns is visible at a glance rather than
+ * only failing later inside a cosine comparison.
+ */
+export const TestPlannerEmbeddingResponse = z.object({
+  ok: z.boolean(),
+  message: z.string(),
+  dims: z.number().int(),
+  latencyMs: z.number().int(),
+});
+export type TestPlannerEmbeddingResponse = z.infer<typeof TestPlannerEmbeddingResponse>;
 
 export const PlannerChat = z.object({
   id: z.string(),

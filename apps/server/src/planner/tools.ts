@@ -292,7 +292,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       const query = String(args.query ?? '').trim();
       if (!query) return 'No search query provided.';
       const limit = typeof args.limit === 'number' ? args.limit : 5;
-      const results = deps.memory.search(deps.workspaceId, query, { limit });
+      const results = await deps.memory.search(deps.workspaceId, query, { limit });
       return truncate(
         JSON.stringify(
           results.map((r) => ({
@@ -452,7 +452,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       if (!content) return 'No memory content provided.';
       const rawImportance = typeof args.importance === 'number' ? Math.round(args.importance) : 3;
       const importance = Math.min(5, Math.max(1, rawImportance));
-      const memory = deps.memory.save(deps.workspaceId, content, importance, null);
+      const memory = await deps.memory.save(deps.workspaceId, content, importance, null);
       return `Saved memory ${memory.id} (importance ${memory.importance}).`;
     },
   },

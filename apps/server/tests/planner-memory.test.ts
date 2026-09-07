@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
-import { MAX_SHORT_TERM_MEMORIES, MEMORY_RECENCY_HALF_LIFE_MS, score } from '../src/planner/memory.js';
-import { insertPlannerMemory } from '../src/planner/store.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MAX_SHORT_TERM_MEMORIES, MEMORY_RECENCY_HALF_LIFE_MS, PlannerMemoryService, score } from '../src/planner/memory.js';
+import { decodeEmbedding, insertPlannerMemory } from '../src/planner/store.js';
 import { findPlannerTool, type PlannerToolDeps } from '../src/planner/tools.js';
 import { createTestApp, type TestApp } from './helpers.js';
 
@@ -27,6 +27,12 @@ function depsFor(t: TestApp, workspaceId: string | null): PlannerToolDeps {
     memory: t.context.plannerMemory,
     workspaceId,
   };
+}
+
+function embeddingRowFor(t: TestApp, id: string): { embedding: Buffer | null; embedding_model: string | null } {
+  return t.db
+    .prepare('SELECT embedding, embedding_model FROM planner_memories WHERE id = ?')
+    .get(id) as { embedding: Buffer | null; embedding_model: string | null };
 }
 
 describe('score', () => {
@@ -83,7 +89,7 @@ describe('PlannerMemoryService budget eviction', () => {
     expect(t.context.plannerMemory.list(workspaceId, 'short')).toHaveLength(MAX_SHORT_TERM_MEMORIES);
 
     // One more save pushes the tier one row over its cap.
-    t.context.plannerMemory.save(workspaceId, 'the newest note', 5, null);
+    await t.context.plannerMemory.save(workspaceId, 'the newest note', 5, null);
 
     const after = t.context.plannerMemory.list(workspaceId, 'short');
     expect(after).toHaveLength(MAX_SHORT_TERM_MEMORIES);
@@ -94,8 +100,8 @@ describe('PlannerMemoryService budget eviction', () => {
   it('does not evict anything below the cap', async () => {
     t = await createTestApp();
     const workspaceId = t.context.plannerWorkspaces.getDefault()!.id;
-    t.context.plannerMemory.save(workspaceId, 'first note', 1, null);
-    t.context.plannerMemory.save(workspaceId, 'second note', 1, null);
+    await t.context.plannerMemory.save(workspaceId, 'first note', 1, null);
+    await t.context.plannerMemory.save(workspaceId, 'second note', 1, null);
     expect(t.context.plannerMemory.list(workspaceId, 'short')).toHaveLength(2);
   });
 
@@ -105,9 +111,9 @@ describe('PlannerMemoryService budget eviction', () => {
     const otherWs = await t.context.plannerWorkspaces.create(t.context.plannerWorkspacesRoot, 'Other Agent');
 
     for (let i = 0; i < MAX_SHORT_TERM_MEMORIES; i++) {
-      t.context.plannerMemory.save(defaultWs, `default agent note ${i}`, 3, null);
+      await t.context.plannerMemory.save(defaultWs, `default agent note ${i}`, 3, null);
     }
-    t.context.plannerMemory.save(otherWs.id, 'other agent note', 3, null);
+    await t.context.plannerMemory.save(otherWs.id, 'other agent note', 3, null);
 
     expect(t.context.plannerMemory.list(defaultWs, 'short')).toHaveLength(MAX_SHORT_TERM_MEMORIES);
     expect(t.context.plannerMemory.list(otherWs.id, 'short')).toHaveLength(1);
@@ -123,10 +129,10 @@ describe('PlannerMemoryService.search', () => {
   it('ranks a textual match above an unrelated memory', async () => {
     t = await createTestApp();
     const workspaceId = t.context.plannerWorkspaces.getDefault()!.id;
-    t.context.plannerMemory.save(workspaceId, 'The user prefers dark mode in the dashboard', 3, null);
-    t.context.plannerMemory.save(workspaceId, 'The user is allergic to peanuts', 3, null);
+    await t.context.plannerMemory.save(workspaceId, 'The user prefers dark mode in the dashboard', 3, null);
+    await t.context.plannerMemory.save(workspaceId, 'The user is allergic to peanuts', 3, null);
 
-    const results = t.context.plannerMemory.search(workspaceId, 'dashboard dark mode preference', { limit: 5 });
+    const results = await t.context.plannerMemory.search(workspaceId, 'dashboard dark mode preference', { limit: 5 });
     expect(results.length).toBeGreaterThan(0);
     expect(results[0]!.memory.content).toContain('dark mode');
   });
@@ -158,7 +164,7 @@ describe('PlannerMemoryService.search', () => {
       lastAccessedAt: now - 30 * DAY_MS,
     });
 
-    const results = t.context.plannerMemory.search(workspaceId, 'deployment process blue-green', { limit: 5 });
+    const results = await t.context.plannerMemory.search(workspaceId, 'deployment process blue-green', { limit: 5 });
     expect(results).toHaveLength(2);
     expect(results[0]!.memory.importance).toBe(5);
   });
@@ -166,10 +172,10 @@ describe('PlannerMemoryService.search', () => {
   it('filters by tier when asked', async () => {
     t = await createTestApp();
     const workspaceId = t.context.plannerWorkspaces.getDefault()!.id;
-    t.context.plannerMemory.save(workspaceId, 'short-term rollout note', 3, null, 'short');
-    t.context.plannerMemory.save(workspaceId, 'long-term rollout policy', 3, null, 'long');
+    await t.context.plannerMemory.save(workspaceId, 'short-term rollout note', 3, null, 'short');
+    await t.context.plannerMemory.save(workspaceId, 'long-term rollout policy', 3, null, 'long');
 
-    const shortOnly = t.context.plannerMemory.search(workspaceId, 'rollout', { tier: 'short', limit: 5 });
+    const shortOnly = await t.context.plannerMemory.search(workspaceId, 'rollout', { tier: 'short', limit: 5 });
     expect(shortOnly).toHaveLength(1);
     expect(shortOnly[0]!.memory.tier).toBe('short');
   });
@@ -177,21 +183,21 @@ describe('PlannerMemoryService.search', () => {
   it('returns no results for a query with no usable tokens, rather than throwing', async () => {
     t = await createTestApp();
     const workspaceId = t.context.plannerWorkspaces.getDefault()!.id;
-    t.context.plannerMemory.save(workspaceId, 'a memory', 3, null);
-    expect(t.context.plannerMemory.search(workspaceId, '   ---   ', { limit: 5 })).toEqual([]);
+    await t.context.plannerMemory.save(workspaceId, 'a memory', 3, null);
+    expect(await t.context.plannerMemory.search(workspaceId, '   ---   ', { limit: 5 })).toEqual([]);
   });
 
   it('bumps last_accessed_at on a real search, but never on a dry run', async () => {
     t = await createTestApp();
     const workspaceId = t.context.plannerWorkspaces.getDefault()!.id;
-    const saved = t.context.plannerMemory.save(workspaceId, 'remember the staging URL', 3, null);
+    const saved = await t.context.plannerMemory.save(workspaceId, 'remember the staging URL', 3, null);
     const before = saved.lastAccessedAt;
     await new Promise((resolve) => setTimeout(resolve, 5));
 
-    t.context.plannerMemory.search(workspaceId, 'staging URL', { limit: 5, dryRun: true });
+    await t.context.plannerMemory.search(workspaceId, 'staging URL', { limit: 5, dryRun: true });
     expect(t.context.plannerMemory.get(saved.id)!.lastAccessedAt).toBe(before);
 
-    t.context.plannerMemory.search(workspaceId, 'staging URL', { limit: 5 });
+    await t.context.plannerMemory.search(workspaceId, 'staging URL', { limit: 5 });
     expect(t.context.plannerMemory.get(saved.id)!.lastAccessedAt).toBeGreaterThan(before);
   });
 });
@@ -261,5 +267,139 @@ describe('memory_save and memory_search tools', () => {
     const searchTool = findPlannerTool('memory_search')!;
     const parsed = JSON.parse(await searchTool.execute(depsFor(t, workspaceId), { query: 'nonexistentword' }));
     expect(parsed).toEqual([]);
+  });
+});
+
+/**
+ * PA-29: embedding at write time and hybrid (lexical + semantic) ranking at
+ * read time. A fresh `PlannerMemoryService` is constructed directly against
+ * the same `t.db` for each of these (rather than using `t.context.plannerMemory`,
+ * which `createTestApp()` always wires up with no embedding provider
+ * configured) — the same "construct the service under test directly" posture
+ * `planner-memory-consolidation.test.ts` already takes for its own service.
+ * The embed "client" is always a plain fake object, never a real
+ * `PlannerLlmClient`/`fetch` — see `PlannerMemoryEmbedClient`'s own doc
+ * comment for why that structural interface is what makes this possible.
+ */
+describe('PlannerMemoryService embeddings', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('stores an embedding and its model at save time when an embedding provider is configured', async () => {
+    t = await createTestApp();
+    const workspaceId = t.context.plannerWorkspaces.getDefault()!.id;
+    const svc = new PlannerMemoryService({
+      db: t.db,
+      embed: { client: { embed: async () => ({ embeddings: [[1, 0, 0]] }) }, modelId: 'fake-embed-v1' },
+    });
+
+    const saved = await svc.save(workspaceId, 'a memory to embed', 3, null);
+
+    const row = embeddingRowFor(t, saved.id);
+    expect(row.embedding_model).toBe('fake-embed-v1');
+    expect(row.embedding).not.toBeNull();
+    expect(decodeEmbedding(row.embedding!)).toEqual([1, 0, 0]);
+  });
+
+  it('still saves the memory (with no embedding) when the embed call fails', async () => {
+    t = await createTestApp();
+    const workspaceId = t.context.plannerWorkspaces.getDefault()!.id;
+    const logger = { warn: vi.fn() };
+    const svc = new PlannerMemoryService({
+      db: t.db,
+      embed: {
+        client: {
+          embed: async () => {
+            throw new Error('embedding endpoint is down');
+          },
+        },
+        modelId: 'fake-embed-v1',
+      },
+      logger,
+    });
+
+    const saved = await svc.save(workspaceId, 'a memory whose embed call fails', 3, null);
+
+    expect(svc.get(saved.id)).not.toBeNull();
+    expect(svc.get(saved.id)!.content).toBe('a memory whose embed call fails');
+    const row = embeddingRowFor(t, saved.id);
+    expect(row.embedding).toBeNull();
+    expect(row.embedding_model).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ memoryId: saved.id }),
+      expect.any(String),
+    );
+  });
+
+  it('blends cosine similarity with bm25 when both an embedding config and matching-model embeddings exist', async () => {
+    t = await createTestApp();
+    const workspaceId = t.context.plannerWorkspaces.getDefault()!.id;
+    // Two memories with near-identical lexical overlap against the query
+    // (same four words, one differing trailing word each) — bm25 alone
+    // should barely distinguish them. Their embedding vectors point in
+    // opposite directions, so only the semantic half of the blend can
+    // explain a clear winner.
+    const vectors: Record<string, number[]> = {
+      'blue-green deployment rollout notes': [1, 0],
+      'blue-green deployment rollout memo': [-1, 0],
+      'blue-green deployment rollout': [1, 0],
+    };
+    const svc = new PlannerMemoryService({
+      db: t.db,
+      embed: {
+        client: {
+          embed: async (_model: string, input: string[]) => ({
+            embeddings: input.map((text) => vectors[text] ?? [0, 0]),
+          }),
+        },
+        modelId: 'fake-embed-v1',
+      },
+    });
+
+    await svc.save(workspaceId, 'blue-green deployment rollout notes', 3, null);
+    await svc.save(workspaceId, 'blue-green deployment rollout memo', 3, null);
+
+    const results = await svc.search(workspaceId, 'blue-green deployment rollout', { limit: 5 });
+    expect(results).toHaveLength(2);
+    expect(results[0]!.memory.content).toBe('blue-green deployment rollout notes');
+  });
+
+  it('excludes a row whose embedding_model does not match the currently configured model from the semantic half of ranking', async () => {
+    t = await createTestApp();
+    const workspaceId = t.context.plannerWorkspaces.getDefault()!.id;
+    const svcOld = new PlannerMemoryService({
+      db: t.db,
+      embed: { client: { embed: async () => ({ embeddings: [[1, 0]] }) }, modelId: 'old-model' },
+    });
+    const saved = await svcOld.save(workspaceId, 'a note embedded under an old model', 3, null);
+    expect(embeddingRowFor(t, saved.id).embedding_model).toBe('old-model');
+
+    // A different service, standing in for "the operator changed the
+    // embedding model" — this row's own `embedding_model` no longer matches,
+    // so it must fall back to the pre-existing lexical-only formula rather
+    // than comparing vectors from two unrelated models. It should still be
+    // found (lexically) and must not throw.
+    const svcNew = new PlannerMemoryService({
+      db: t.db,
+      embed: { client: { embed: async () => ({ embeddings: [[0, 1]] }) }, modelId: 'new-model' },
+    });
+    const results = await svcNew.search(workspaceId, 'a note embedded under an old model', { limit: 5 });
+    expect(results).toHaveLength(1);
+    expect(results[0]!.memory.content).toBe('a note embedded under an old model');
+  });
+
+  it('falls back to the unchanged lexical-only formula when no embedding provider is configured at all', async () => {
+    t = await createTestApp();
+    const workspaceId = t.context.plannerWorkspaces.getDefault()!.id;
+    // `t.context.plannerMemory` is the one `createTestApp()` always wires
+    // with no embedding settings configured — this is the regression
+    // coverage for every pre-existing `search` behaviour above.
+    await t.context.plannerMemory.save(workspaceId, 'a plain lexical memory about deployments', 3, null);
+    const results = await t.context.plannerMemory.search(workspaceId, 'plain lexical memory deployments', {
+      limit: 5,
+    });
+    expect(results).toHaveLength(1);
   });
 });

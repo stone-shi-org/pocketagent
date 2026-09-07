@@ -221,7 +221,7 @@ export class MemoryConsolidationService {
 
     const facts = parseConsolidationFacts(completion.content);
     for (const fact of facts) {
-      this.opts.memory.save(workspace.id, fact.content, fact.importance, null, 'long');
+      await this.opts.memory.save(workspace.id, fact.content, fact.importance, null, 'long');
     }
     // Prune exactly the short-term rows this pass considered — not a fresh
     // re-read of the tier — so a memory saved by a live turn *during* this
@@ -239,12 +239,44 @@ interface ConsolidationFact {
   importance: number;
 }
 
-/** Builds the transcript half of the consolidation prompt: each active
-    chat's `user_prompt`/`text` events flattened into a plain back-and-forth,
-    truncated per chat by `MAX_TRANSCRIPT_CHARS_PER_CHAT`. Tool calls are
-    omitted — a consolidation pass cares what was discussed and decided, not
-    which tool produced it, the same lean treatment `summarizeFoldedTurns`
-    (`chats.ts`) already gives the rolling-window fold. */
+/**
+ * PA-29: the three tools through which a Pocket Agent turn can already have
+ * pulled coding-agent-session content into its own conversation — a
+ * consolidation pass folding that content in too means a fact "learned"
+ * from a sub-agent's own output gets a chance to become durable, the same
+ * as a fact stated directly by the user. Deliberately narrow: every other
+ * tool's result (file/exec traffic, `write_file`, `mkdir`, `exec_command`,
+ * …) stays excluded, because that traffic is *this* agent's own
+ * housekeeping, not something read *from* another agent worth
+ * remembering.
+ */
+const CONSOLIDATION_INCLUDED_TOOL_RESULTS: ReadonlySet<string> = new Set([
+  'read_session_output',
+  'list_sessions',
+  'send_instruction',
+]);
+
+/** How much of one included tool result's own content is folded in, before
+    the whole chat's text is truncated again by `MAX_TRANSCRIPT_CHARS_PER_CHAT`
+    — a single `read_session_output` call can return up to that tool's own
+    20,000-character cap, which would let one call dominate an entire
+    consolidation prompt on its own. */
+const MAX_TOOL_RESULT_EXCERPT_CHARS = 300;
+
+/**
+ * Builds the transcript half of the consolidation prompt: each active
+ * chat's `user_prompt`/`text` events flattened into a plain back-and-forth,
+ * plus a truncated one-line summary of a `tool_result` for a call to
+ * `read_session_output`, `list_sessions`, or `send_instruction` (see
+ * `CONSOLIDATION_INCLUDED_TOOL_RESULTS`'s own doc comment for why only
+ * these three) — matched to its tool name via the preceding `tool_use`
+ * event's `id`, the same `toolUseId` correlation `chats.ts`'s own
+ * `eventsToLlmMessages` uses to pair a call with its result. Every other
+ * tool's result stays omitted, the same lean treatment `summarizeFoldedTurns`
+ * (`chats.ts`) already gives the rolling-window fold. The whole thing is
+ * truncated per chat by `MAX_TRANSCRIPT_CHARS_PER_CHAT`, combined text
+ * included.
+ */
 async function buildTranscriptExcerpt(
   workspacePath: string,
   chats: readonly PlannerChat[],
@@ -252,10 +284,28 @@ async function buildTranscriptExcerpt(
   const sections: string[] = [];
   for (const chat of chats) {
     const events = await readTranscriptEvents(workspacePath, chat.id);
+    const includedToolNameById = new Map<string, string>();
     const lines: string[] = [];
     for (const event of events) {
-      if (event.kind === 'user_prompt') lines.push(`User: ${event.text}`);
-      else if (event.kind === 'text') lines.push(`Assistant: ${event.text}`);
+      if (event.kind === 'user_prompt') {
+        lines.push(`User: ${event.text}`);
+      } else if (event.kind === 'text') {
+        lines.push(`Assistant: ${event.text}`);
+      } else if (event.kind === 'tool_use') {
+        if (CONSOLIDATION_INCLUDED_TOOL_RESULTS.has(event.name)) {
+          includedToolNameById.set(event.id, event.name);
+        }
+      } else if (event.kind === 'tool_result') {
+        const toolName = includedToolNameById.get(event.toolUseId);
+        if (!toolName) continue;
+        const oneLine = event.content.replace(/\s+/g, ' ').trim();
+        if (oneLine.length === 0) continue;
+        const excerpt =
+          oneLine.length > MAX_TOOL_RESULT_EXCERPT_CHARS
+            ? `${oneLine.slice(0, MAX_TOOL_RESULT_EXCERPT_CHARS)}…`
+            : oneLine;
+        lines.push(`Tool result (${toolName}): ${excerpt}`);
+      }
     }
     if (lines.length === 0) continue;
     let text = lines.join('\n');

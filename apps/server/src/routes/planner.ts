@@ -21,6 +21,7 @@ import {
   type PlannerChatHistoryResponse,
   type PlannerChatListResponse,
   type PlannerContextPreviewResponse,
+  type PlannerEmbeddingApiKeyRevealResponse,
   type PlannerMemoryListResponse,
   type PlannerModelListResponse,
   type PlannerSettingsDto,
@@ -28,12 +29,13 @@ import {
   type PlannerToolApprovalRow,
   type PlannerToolListResponse,
   type PlannerWorkspaceListResponse,
+  type TestPlannerEmbeddingResponse,
   type TestPlannerModelResponse,
 } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import { PlannerWorkspaceError } from '../planner/workspaces.js';
 import { PlannerChatError } from '../planner/chats.js';
-import { PlannerLlmError } from '../planner/llm-client.js';
+import { PlannerLlmClient, PlannerLlmError } from '../planner/llm-client.js';
 import { PLANNER_TOOLS } from '../planner/tools.js';
 import {
   deleteAllPlannerModels,
@@ -47,10 +49,14 @@ import {
   readPlannerSettings,
   readPlannerToolApprovals,
   revealPlannerApiKey,
+  revealPlannerEmbeddingApiKey,
   setToolEnabledForWorkspace,
   setToolEnabledGlobally,
   writePlannerApiKey,
   writePlannerBaseUrl,
+  writePlannerEmbeddingApiKey,
+  writePlannerEmbeddingBaseUrl,
+  writePlannerEmbeddingModelId,
   writePlannerToolApproval,
   writePlannerYoloEnabled,
 } from '../planner/store.js';
@@ -317,10 +323,17 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
     const { db } = app.pocket;
-    const { baseUrl, apiKey, yoloEnabled } = parsed.data;
+    const { baseUrl, apiKey, yoloEnabled, embeddingBaseUrl, embeddingApiKey, embeddingModelId } = parsed.data;
     if (baseUrl !== undefined) writePlannerBaseUrl(db, baseUrl);
     if (apiKey !== undefined) writePlannerApiKey(db, apiKey.length > 0 ? apiKey : null);
     if (yoloEnabled !== undefined) writePlannerYoloEnabled(db, yoloEnabled);
+    // PA-29: the embedding provider's own settings, same "only touch what's
+    // sent" idiom as the chat-settings fields above.
+    if (embeddingBaseUrl !== undefined) writePlannerEmbeddingBaseUrl(db, embeddingBaseUrl);
+    if (embeddingApiKey !== undefined) {
+      writePlannerEmbeddingApiKey(db, embeddingApiKey.length > 0 ? embeddingApiKey : null);
+    }
+    if (embeddingModelId !== undefined) writePlannerEmbeddingModelId(db, embeddingModelId);
     const dto: PlannerSettingsDto = readPlannerSettings(db);
     return reply.send(dto);
   });
@@ -342,6 +355,73 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       return noStore(reply).send(response);
     },
   );
+
+  /** The embedding provider's own key reveal — same rate-limit/logging
+      posture as the chat key's, at its own route/key. */
+  app.post(
+    '/api/planner/settings/embedding-api-key/reveal',
+    { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
+    async (_request, reply) => {
+      const apiKey = revealPlannerEmbeddingApiKey(app.pocket.db);
+      if (apiKey === null) return notFound(reply, 'No embedding API key configured.');
+      app.log.info('planner embedding API key revealed');
+      const response: PlannerEmbeddingApiKeyRevealResponse = { apiKey };
+      return noStore(reply).send(response);
+    },
+  );
+
+  /**
+   * Round-trips one trivial embedding request through the configured
+   * embedding endpoint/model to confirm it actually works — mirrors
+   * `POST /api/planner/models/:id/test` closely, but built inline (rather
+   * than through `PlannerChatService`, which has no notion of embeddings)
+   * since a fresh, throwaway `PlannerLlmClient` is all this needs. Reads
+   * settings live (not through `plannerMemory`'s own, construction-time
+   * embedding config — see that service's doc comment for why the two can
+   * differ), so testing a just-changed setting never waits on a restart.
+   * Swallows a failure into `ok: false` for the same reason `testModel`
+   * does: a failed test (bad url, wrong model id) is this button's expected,
+   * common outcome, not a server error.
+   */
+  app.post('/api/planner/settings/embeddings/test', async (_request, reply) => {
+    const { db } = app.pocket;
+    const settings = readPlannerSettings(db);
+    const startedAt = Date.now();
+    if (!settings.embeddingBaseUrl || !settings.embeddingModelId) {
+      const response: TestPlannerEmbeddingResponse = {
+        ok: false,
+        message: 'Embeddings are not configured yet — set a base URL and a model id first.',
+        dims: 0,
+        latencyMs: 0,
+      };
+      return noStore(reply).send(response);
+    }
+    const client = new PlannerLlmClient({
+      baseUrl: settings.embeddingBaseUrl,
+      apiKey: revealPlannerEmbeddingApiKey(db),
+      ...(app.pocket.plannerLlmFetch ? { fetchImpl: app.pocket.plannerLlmFetch } : {}),
+    });
+    try {
+      const { embeddings } = await client.embed(settings.embeddingModelId, ['ok']);
+      const dims = embeddings[0]?.length ?? 0;
+      const response: TestPlannerEmbeddingResponse = {
+        ok: true,
+        message: `Received a ${dims}-dimension embedding.`,
+        dims,
+        latencyMs: Date.now() - startedAt,
+      };
+      return noStore(reply).send(response);
+    } catch (err) {
+      const message = err instanceof PlannerLlmError ? err.message : (err as Error).message;
+      const response: TestPlannerEmbeddingResponse = {
+        ok: false,
+        message,
+        dims: 0,
+        latencyMs: Date.now() - startedAt,
+      };
+      return noStore(reply).send(response);
+    }
+  });
 
   /** The global catalog for a settings page — see `PlannerToolInfo`'s doc
       comment. `enabled` here is the global switch (PA-6 round 5); an

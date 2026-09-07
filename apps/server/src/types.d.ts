@@ -38,6 +38,13 @@ export interface PocketContext {
   plannerChats: PlannerChatService;
   /** PA-29: the memory system — see `planner/memory.ts`'s doc comment. */
   plannerMemory: PlannerMemoryService;
+  /** PA-29: injected in tests so a route that builds its own ad hoc
+      `PlannerLlmClient` (`POST /api/planner/settings/embeddings/test`) never
+      makes a real network call either — the same fetch override
+      `PlannerChatService`/`MemoryConsolidationService` already accept via
+      their own constructors, just decorated here too since this one route
+      builds a client directly rather than through either service. */
+  plannerLlmFetch?: typeof fetch;
   agents: AgentRegistry;
   /** PA-28: user-managed Claude Code provider variants, kept in sync with `agents`. */
   customClaudeProviders: CustomClaudeProviderStore;

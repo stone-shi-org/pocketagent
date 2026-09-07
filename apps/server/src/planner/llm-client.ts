@@ -55,6 +55,15 @@ export interface PlannerLlmClientOptions {
   fetchImpl?: typeof fetch;
 }
 
+/** PA-29: bounds `embed()`'s round trip. Unlike `streamComplete` (which may
+    legitimately run for as long as a model takes to generate a reply),
+    `embed()` can sit on `PlannerChatService`'s hot path — every turn's
+    pre-turn memory ranking and every `memory_save` call — so a hung or
+    slow embedding endpoint must not hang a turn indefinitely. 5s is
+    generous for what should be one of the cheapest calls an OpenAI-
+    compatible endpoint offers. */
+const EMBEDDING_TIMEOUT_MS = 5_000;
+
 /**
  * A thin client for any OpenAI-compatible `/chat/completions` endpoint.
  *
@@ -134,6 +143,77 @@ export class PlannerLlmClient {
     return data
       .map((entry) => (entry && typeof entry === 'object' ? String((entry as { id?: unknown }).id ?? '') : ''))
       .filter((id) => id.length > 0);
+  }
+
+  /**
+   * `POST /embeddings`, the standard OpenAI-compatible embedding endpoint —
+   * one request embeds every string in `input`, in order, and the response's
+   * `data[]` is expected to line up with it positionally (the documented
+   * OpenAI contract; every entry also carries its own `index`, but this
+   * follows callers elsewhere in this file that trust response order rather
+   * than re-sorting by an echoed index).
+   *
+   * Bounded by `EMBEDDING_TIMEOUT_MS` — see that constant's doc comment.
+   * Throws `PlannerLlmError` on a non-2xx response, a malformed body, or a
+   * `data[]` whose length doesn't match `input`'s; the caller (memory
+   * ranking/save, `PlannerMemoryService`) is responsible for catching and
+   * degrading gracefully, not this method swallowing the error itself — a
+   * genuine misconfiguration must stay visible in logs rather than silently
+   * behaving like "no embedding available".
+   */
+  async embed(model: string, input: string[]): Promise<{ embeddings: number[][] }> {
+    const fetchImpl = this.opts.fetchImpl ?? fetch;
+    const url = joinUrl(this.opts.baseUrl, '/embeddings');
+
+    let res: Response;
+    try {
+      res = await fetchImpl(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(this.opts.apiKey ? { authorization: `Bearer ${this.opts.apiKey}` } : {}),
+        },
+        body: JSON.stringify({ model, input }),
+        signal: AbortSignal.timeout(EMBEDDING_TIMEOUT_MS),
+      });
+    } catch (err) {
+      throw new PlannerLlmError(`Could not reach the planner embedding endpoint: ${(err as Error).message}`);
+    }
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new PlannerLlmError(
+        `Planner embedding endpoint returned ${res.status}: ${body.slice(0, 500)}`,
+        res.status,
+      );
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = await res.json();
+    } catch (err) {
+      throw new PlannerLlmError(
+        `Planner embedding endpoint's response was not valid JSON: ${(err as Error).message}`,
+      );
+    }
+
+    const data = (parsed as { data?: unknown }).data;
+    if (!Array.isArray(data)) {
+      throw new PlannerLlmError('Planner embedding endpoint response had no "data" array.');
+    }
+    const embeddings = data.map((entry) => {
+      const embedding = (entry as { embedding?: unknown } | null)?.embedding;
+      if (!Array.isArray(embedding) || !embedding.every((value) => typeof value === 'number')) {
+        throw new PlannerLlmError('Planner embedding endpoint returned a malformed embedding.');
+      }
+      return embedding as number[];
+    });
+    if (embeddings.length !== input.length) {
+      throw new PlannerLlmError(
+        `Planner embedding endpoint returned ${embeddings.length} embeddings for ${input.length} inputs.`,
+      );
+    }
+    return { embeddings };
   }
 
   async *streamComplete(
