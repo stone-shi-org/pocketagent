@@ -1057,11 +1057,19 @@ refuse it — a local Qwen served through LM Studio answers
 reports as the opaque 502 above. Hosted models on the same gateway accept the identical
 request, so this presents as "one model is broken" rather than as a template problem.
 
-If the probe reproduces it, the model is unusable with Claude Code until either the gateway
-normalizes system-message placement (hoisting or merging them to the front, which most
-gateways do) or the model's chat template is relaxed. Nothing in PocketAgent can work around
-it: the payload is the CLI's, and the variants deliberately do not rewrite what the agent
-sends. Note also that the CLI retries hard on 502 — a ~650 ms upstream failure surfaces as a
+Nothing in PocketAgent can work around it: the payload is the CLI's, and the variants
+deliberately do not rewrite what the agent sends. Two fixes work, both outside this repo:
+
+1. **The gateway normalizes system-message placement** — hoisting or merging system messages
+   to the front during translation, which is what most gateways do. Fixes every strict-template
+   model at once.
+2. **Relax the model's chat template.** For the Qwen case above, the guard is a single
+   `raise_exception` inside the template's message loop; rendering the message as a user turn
+   instead (`'<|im_start|>user\n' + content + '<|im_end|>' + '\n'`) clears it. Verified end to
+   end — a real `Read` tool call completes afterwards. It is per-model and a model update
+   reverts it.
+
+Note also that the CLI retries hard on 502 — a ~650 ms upstream failure surfaces as a
 three-minute hang, so *slow* here does not mean *timeout*.
 
 **Sessions all say `interrupted` after a restart.** Expected on the default `direct`
