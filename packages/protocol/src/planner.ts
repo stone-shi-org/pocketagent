@@ -344,6 +344,18 @@ export type PlannerChat = z.infer<typeof PlannerChat>;
 export const PlannerChatListResponse = z.object({ chats: z.array(PlannerChat) });
 export type PlannerChatListResponse = z.infer<typeof PlannerChatListResponse>;
 
+/**
+ * PA-35: `DELETE /api/planner/workspaces/:id/chats`, the bulk counterpart to
+ * `DELETE /api/planner/chats/:id` — mirrors `ProjectMenu`'s "Clear N finished
+ * chats" for the project-chat tree. Unlike that action, there is no `live`
+ * concept to exclude (see `PlannerChat`'s own doc comment: a planner turn runs
+ * over a one-way SSE response, not a process anything can observe as "still
+ * running"), so this removes every chat in the workspace and reports how many
+ * so the UI can confirm it.
+ */
+export const DeleteAllPlannerChatsResponse = z.object({ removed: z.number().int() });
+export type DeleteAllPlannerChatsResponse = z.infer<typeof DeleteAllPlannerChatsResponse>;
+
 /** Omitted `workspaceId` defaults to the default planner workspace. */
 export const CreatePlannerChatRequest = z.object({
   workspaceId: z.string().optional(),

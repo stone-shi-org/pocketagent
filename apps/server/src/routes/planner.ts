@@ -15,6 +15,7 @@ import {
   UpdatePlannerChatRequest,
   UpdatePlannerSettingsRequest,
   type AgentEvent,
+  type DeleteAllPlannerChatsResponse,
   type DiscoverPlannerModelsResponse,
   type PlannerAgentToolsResponse,
   type PlannerApiKeyRevealResponse,
@@ -728,6 +729,21 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const removed = app.pocket.plannerChats.remove(id);
     if (!removed) return notFound(reply, 'Chat not found.');
     return reply.code(204).send();
+  });
+
+  /**
+   * PA-35: "delete all finished chats" for one Pocket Agent, from the home
+   * screen's "..." menu. A distinct path under `/workspaces/:id/`, not a
+   * query param on `DELETE /api/planner/chats/:id`, for the same reason
+   * `DELETE /api/planner/models` is its own path rather than a magic `:id` —
+   * no stray/mistyped id can be misread as "delete everything".
+   */
+  app.delete('/api/planner/workspaces/:id/chats', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!app.pocket.plannerWorkspaces.get(id)) return notFound(reply, 'Workspace not found.');
+    const removed = app.pocket.plannerChats.removeAllForWorkspace(id);
+    const response: DeleteAllPlannerChatsResponse = { removed };
+    return reply.send(response);
   });
 
   app.get('/api/planner/chats/:id/history', async (request, reply) => {

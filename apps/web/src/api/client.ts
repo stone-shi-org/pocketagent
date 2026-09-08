@@ -55,6 +55,7 @@ import type {
   PlannerChatListResponse,
   CreatePlannerChatRequest,
   UpdatePlannerChatRequest,
+  DeleteAllPlannerChatsResponse,
   PlannerChatHistoryResponse,
   PlannerContextPreviewResponse,
   PlannerSendMessageRequest,
@@ -659,6 +660,13 @@ export const api = {
 
   deletePlannerChat: (id: string) =>
     request<void>(`/api/planner/chats/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /** PA-35: bulk counterpart, for the "..." menu's "Clear N finished chats". */
+  deleteAllPlannerChats: (workspaceId: string) =>
+    request<DeleteAllPlannerChatsResponse>(
+      `/api/planner/workspaces/${encodeURIComponent(workspaceId)}/chats`,
+      { method: 'DELETE' },
+    ),
 
   plannerChatHistory: (id: string) =>
     request<PlannerChatHistoryResponse>(`/api/planner/chats/${encodeURIComponent(id)}/history`),

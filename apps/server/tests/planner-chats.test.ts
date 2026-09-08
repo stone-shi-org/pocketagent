@@ -375,6 +375,39 @@ describe('planner chat routes over HTTP', () => {
     expect((await get(t, '/api/planner/chats')).json().chats).toHaveLength(0);
   });
 
+  // ---- PA-35: bulk-delete a workspace's chats, from the "..." menu --------
+
+  it("deletes every chat in one workspace, leaving another agent's chats alone", async () => {
+    t = await createTestApp();
+    const ws = (await post(t, '/api/planner/workspaces', { name: 'Research' })).json();
+    const inWs1 = (await post(t, '/api/planner/chats', { workspaceId: ws.id })).json();
+    const inWs2 = (await post(t, '/api/planner/chats', { workspaceId: ws.id })).json();
+    const elsewhere = (await post(t, '/api/planner/chats', {})).json();
+
+    const res = await del(t, `/api/planner/workspaces/${ws.id}/chats`);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ removed: 2 });
+
+    const remaining = (await get(t, '/api/planner/chats')).json().chats;
+    expect(remaining.map((c: { id: string }) => c.id)).toEqual([elsewhere.id]);
+    expect(remaining.map((c: { id: string }) => c.id)).not.toContain(inWs1.id);
+    expect(remaining.map((c: { id: string }) => c.id)).not.toContain(inWs2.id);
+  });
+
+  it('bulk-delete on a workspace with no chats reports zero removed', async () => {
+    t = await createTestApp();
+    const ws = (await post(t, '/api/planner/workspaces', { name: 'Research' })).json();
+    const res = await del(t, `/api/planner/workspaces/${ws.id}/chats`);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ removed: 0 });
+  });
+
+  it('404s bulk-deleting chats for an unknown workspace', async () => {
+    t = await createTestApp();
+    const res = await del(t, '/api/planner/workspaces/does-not-exist/chats');
+    expect(res.statusCode).toBe(404);
+  });
+
   it('history is empty for a chat with no messages yet', async () => {
     t = await createTestApp();
     const chat = (await post(t, '/api/planner/chats', {})).json();

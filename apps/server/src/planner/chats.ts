@@ -335,6 +335,24 @@ export class PlannerChatService {
     return deletePlannerChat(this.opts.db, id);
   }
 
+  /**
+   * PA-35: bulk counterpart to `remove`, for the Pocket Agents section's
+   * "..." menu — mirrors `ProjectMenu`'s "Clear N finished chats". A planner
+   * chat has no `live` field anywhere (its turn streams over a one-way SSE
+   * response rather than a long-lived process `SessionManager` could report
+   * as busy), so unlike the project side's clear-finished, which excludes
+   * live rows, "finished" and "every chat in this workspace" are the same set
+   * here — this removes all of them and returns the count for the caller to
+   * report back.
+   */
+  removeAllForWorkspace(workspaceId: string): number {
+    let removed = 0;
+    for (const chat of this.list(workspaceId)) {
+      if (this.remove(chat.id)) removed += 1;
+    }
+    return removed;
+  }
+
   async history(id: string): Promise<AgentEvent[]> {
     const chat = this.requireChat(id);
     return readTranscriptEvents(this.workspacePathFor(chat), chat.id);

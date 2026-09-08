@@ -30,6 +30,9 @@ export function PocketAgentsSection({ onOpenChat, onApiError, activeChatId }: Pr
   const [chats, setChats] = useState<PlannerChat[]>([]);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState<Set<string>>(() => new Set());
+  // Which workspace's "..." menu is open, keyed by workspace id — same
+  // one-at-a-time, keyed-by-owner pattern `ProjectList`'s `menuFor` uses.
+  const [menuFor, setMenuFor] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -46,6 +49,18 @@ export function PocketAgentsSection({ onOpenChat, onApiError, activeChatId }: Pr
     const timer = setInterval(() => void load(), REFRESH_MS);
     return () => clearInterval(timer);
   }, [load]);
+
+  // Same dismiss-on-Escape as `ProjectMenu` — only wired while a menu is
+  // actually open, so this section doesn't eat every Escape keypress on the
+  // page.
+  useEffect(() => {
+    if (menuFor === null) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setMenuFor(null);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [menuFor]);
 
   const toggle = (id: string): void =>
     setCollapsed((prev) => {
@@ -70,6 +85,46 @@ export function PocketAgentsSection({ onOpenChat, onApiError, activeChatId }: Pr
           next.delete(workspaceId);
           return next;
         });
+      }
+    })();
+  };
+
+  /** Drop one chat from the list — the "X" on a chat row. Hard-deletes the
+   * DB row; the transcript file on disk is left alone (see
+   * `PlannerChatService.remove`'s doc comment), same "removing a chat never
+   * deletes a transcript" discipline the project-chat tree's own "Remove"
+   * follows. */
+  const removeChat = (chatId: string): void => {
+    void (async () => {
+      try {
+        await api.deletePlannerChat(chatId);
+      } catch (err) {
+        onApiError(err);
+      } finally {
+        await load();
+      }
+    })();
+  };
+
+  /** PA-35: "Delete N finished chats" from a workspace's "..." menu. A
+   * planner chat has no `live` field to exclude (see
+   * `DeleteAllPlannerChatsResponse`'s doc comment), so this clears every chat
+   * in the workspace. */
+  const deleteAllChats = (workspaceId: string): void => {
+    setMenuFor(null);
+    setBusy((prev) => new Set(prev).add(workspaceId));
+    void (async () => {
+      try {
+        await api.deleteAllPlannerChats(workspaceId);
+      } catch (err) {
+        onApiError(err);
+      } finally {
+        setBusy((prev) => {
+          const next = new Set(prev);
+          next.delete(workspaceId);
+          return next;
+        });
+        await load();
       }
     })();
   };
@@ -113,6 +168,32 @@ export function PocketAgentsSection({ onOpenChat, onApiError, activeChatId }: Pr
               >
                 <Icon name="compose" size={19} />
               </button>
+              <button
+                type="button"
+                className="round-btn plain"
+                onClick={() => setMenuFor(menuFor === ws.id ? null : ws.id)}
+                aria-label={`Options for ${ws.name}`}
+                aria-expanded={menuFor === ws.id}
+              >
+                <Icon name="ellipsis" size={18} />
+              </button>
+              {menuFor === ws.id && (
+                <>
+                  <div className="menu-backdrop" onClick={() => setMenuFor(null)} role="presentation" />
+                  <div className="menu project-menu" role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={wsChats.length === 0 || busy.has(ws.id)}
+                      onClick={() => deleteAllChats(ws.id)}
+                    >
+                      {wsChats.length === 0
+                        ? 'Nothing finished to clear'
+                        : `Clear ${wsChats.length} finished chat${wsChats.length === 1 ? '' : 's'}`}
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
             {!isCollapsed && wsChats.length === 0 && (
               <div className="project-empty">No chats yet</div>
@@ -127,6 +208,15 @@ export function PocketAgentsSection({ onOpenChat, onApiError, activeChatId }: Pr
                     title={chat.title ?? 'Untitled chat'}
                   >
                     <span className="chat-title">{chat.title ?? 'Untitled chat'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="chat-remove"
+                    onClick={() => removeChat(chat.id)}
+                    aria-label={`Delete ${chat.title ?? 'Untitled chat'}`}
+                    title="Delete chat"
+                  >
+                    <Icon name="close" size={14} />
                   </button>
                 </div>
               ))}
