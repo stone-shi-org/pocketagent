@@ -8,7 +8,7 @@
   },
   "packageManager": "pnpm@10.34.5",
   "scripts": {
-    "dev": "concurrently -n server,web -c cyan,magenta \"pnpm -F @pocketagent/server dev\" \"pnpm -F @pocketagent/web dev\"",
+    "dev": "pnpm protocol && concurrently -n server,web -c cyan,magenta \"pnpm -F @pocketagent/server dev\" \"pnpm -F @pocketagent/web dev\"",
     "build": "pnpm -F @pocketagent/protocol build && pnpm -F @pocketagent/server build && pnpm -F @pocketagent/web build",
     "start": "pnpm -F @pocketagent/server start",
     "test": "pnpm protocol && vitest run",
@@ -16,7 +16,7 @@
     "lint": "pnpm protocol && eslint .",
     "lint:fix": "pnpm protocol && eslint . --fix",
     "typecheck": "pnpm protocol && pnpm -r typecheck",
-    "//protocol": "The shared package is consumed as built output, so it must exist before anything typechecks, lints, or runs.",
+    "//protocol": "The shared package is consumed as built output, not source, so it must be freshly built before anything typechecks, lints, tests, or runs against it. `dev` rebuilds it too (PA-31): without this, a protocol schema change (e.g. a new PATCH field) silently vanishes at runtime instead of erroring — zod strips an unrecognized key from a request body rather than rejecting it, so a stale dist/ here reads as a 200 that quietly did nothing.",
     "protocol": "pnpm -F @pocketagent/protocol build",
     "generate-token": "node apps/server/scripts/generate-token.mjs",
     "demo:protocol": "pnpm -F @pocketagent/server exec node scripts/e2e-demo.mjs",
