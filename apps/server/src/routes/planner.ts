@@ -58,6 +58,12 @@ import {
   writePlannerEmbeddingBaseUrl,
   writePlannerEmbeddingModelId,
   writePlannerToolApproval,
+  writePlannerUrlFetchApiKey,
+  writePlannerUrlFetchBaseUrl,
+  writePlannerUrlFetchEnabled,
+  writePlannerWebSearchApiKey,
+  writePlannerWebSearchBaseUrl,
+  writePlannerWebSearchEnabled,
   writePlannerYoloEnabled,
 } from '../planner/store.js';
 
@@ -323,7 +329,20 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
     const { db } = app.pocket;
-    const { baseUrl, apiKey, yoloEnabled, embeddingBaseUrl, embeddingApiKey, embeddingModelId } = parsed.data;
+    const {
+      baseUrl,
+      apiKey,
+      yoloEnabled,
+      embeddingBaseUrl,
+      embeddingApiKey,
+      embeddingModelId,
+      webSearchEnabled,
+      webSearchBaseUrl,
+      webSearchApiKey,
+      urlFetchEnabled,
+      urlFetchBaseUrl,
+      urlFetchApiKey,
+    } = parsed.data;
     if (baseUrl !== undefined) writePlannerBaseUrl(db, baseUrl);
     if (apiKey !== undefined) writePlannerApiKey(db, apiKey.length > 0 ? apiKey : null);
     if (yoloEnabled !== undefined) writePlannerYoloEnabled(db, yoloEnabled);
@@ -334,6 +353,17 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       writePlannerEmbeddingApiKey(db, embeddingApiKey.length > 0 ? embeddingApiKey : null);
     }
     if (embeddingModelId !== undefined) writePlannerEmbeddingModelId(db, embeddingModelId);
+    // PA-31: the web_search/url_fetch tool providers, same idiom again.
+    if (webSearchEnabled !== undefined) writePlannerWebSearchEnabled(db, webSearchEnabled);
+    if (webSearchBaseUrl !== undefined) writePlannerWebSearchBaseUrl(db, webSearchBaseUrl);
+    if (webSearchApiKey !== undefined) {
+      writePlannerWebSearchApiKey(db, webSearchApiKey.length > 0 ? webSearchApiKey : null);
+    }
+    if (urlFetchEnabled !== undefined) writePlannerUrlFetchEnabled(db, urlFetchEnabled);
+    if (urlFetchBaseUrl !== undefined) writePlannerUrlFetchBaseUrl(db, urlFetchBaseUrl);
+    if (urlFetchApiKey !== undefined) {
+      writePlannerUrlFetchApiKey(db, urlFetchApiKey.length > 0 ? urlFetchApiKey : null);
+    }
     const dto: PlannerSettingsDto = readPlannerSettings(db);
     return reply.send(dto);
   });

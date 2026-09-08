@@ -190,6 +190,31 @@ export const PlannerSettingsDto = z.object({
   /** No discovery endpoint for this one (unlike the chat model catalog) — a
       plain text field is enough for v1; see `UpdatePlannerSettingsRequest`. */
   embeddingModelId: z.string().nullable(),
+  /**
+   * PA-31: the `web_search` tool's own provider — off by default, and
+   * inert (`web_search`'s own `execute` refuses) until both a base URL is
+   * set and `webSearchEnabled` is turned on. Two knobs rather than one
+   * ("configured" vs "on") because an operator entering a URL mid-edit must
+   * not have the tool start firing before the key is saved too — the same
+   * reasoning `CreateCronJobRequest.skipPermissions` documents for keeping
+   * a dangerous default an explicit, separate act.
+   */
+  webSearchEnabled: z.boolean(),
+  webSearchBaseUrl: z.string().nullable(),
+  /** No reveal route for this key, unlike `hasApiKey`/`embeddingHasApiKey`
+      above — nothing outside this server ever needs to read it back, the
+      same reasoning `CustomClaudeProviderStore`'s API key has no reveal
+      endpoint either. */
+  webSearchHasApiKey: z.boolean(),
+  /** PA-31: the `url_fetch` tool's own provider — same on/off/base-url/key
+      shape as `webSearch*` above, and deliberately a *separate* provider
+      rather than a shared one: a search index and a page-fetch/scrape
+      service are different products (the reporter's own example pairs an
+      Omniroute-style search endpoint with a Firecrawl-style fetch one), and
+      folding them into one config would force them onto the same base URL. */
+  urlFetchEnabled: z.boolean(),
+  urlFetchBaseUrl: z.string().nullable(),
+  urlFetchHasApiKey: z.boolean(),
 });
 export type PlannerSettingsDto = z.infer<typeof PlannerSettingsDto>;
 
@@ -211,6 +236,14 @@ export const UpdatePlannerSettingsRequest = z.object({
   embeddingBaseUrl: z.string().max(2048).nullable().optional(),
   embeddingApiKey: z.string().max(2048).optional(),
   embeddingModelId: z.string().max(200).nullable().optional(),
+  /** PA-31: `web_search`/`url_fetch` provider config — same "omitted keeps
+      it, empty string clears it" convention as every field above. */
+  webSearchEnabled: z.boolean().optional(),
+  webSearchBaseUrl: z.string().max(2048).nullable().optional(),
+  webSearchApiKey: z.string().max(2048).optional(),
+  urlFetchEnabled: z.boolean().optional(),
+  urlFetchBaseUrl: z.string().max(2048).nullable().optional(),
+  urlFetchApiKey: z.string().max(2048).optional(),
 });
 export type UpdatePlannerSettingsRequest = z.infer<typeof UpdatePlannerSettingsRequest>;
 

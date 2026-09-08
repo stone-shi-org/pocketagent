@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MAX_SHORT_TERM_MEMORIES, MEMORY_RECENCY_HALF_LIFE_MS, PlannerMemoryService, score } from '../src/planner/memory.js';
 import { decodeEmbedding, insertPlannerMemory } from '../src/planner/store.js';
-import { findPlannerTool, type PlannerToolDeps } from '../src/planner/tools.js';
+import { findPlannerTool, TOOL_INTEGRATION_DISABLED, type PlannerToolDeps } from '../src/planner/tools.js';
 import { createTestApp, type TestApp } from './helpers.js';
 
 /**
@@ -26,6 +26,8 @@ function depsFor(t: TestApp, workspaceId: string | null): PlannerToolDeps {
     shell: t.context.config.shell,
     memory: t.context.plannerMemory,
     workspaceId,
+    webSearch: TOOL_INTEGRATION_DISABLED,
+    urlFetch: TOOL_INTEGRATION_DISABLED,
   };
 }
 

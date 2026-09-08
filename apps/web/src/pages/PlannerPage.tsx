@@ -49,6 +49,11 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   const [embeddingModelIdInput, setEmbeddingModelIdInput] = useState('');
   const [testingEmbeddings, setTestingEmbeddings] = useState(false);
   const [embeddingTestResult, setEmbeddingTestResult] = useState<TestPlannerEmbeddingResponse | null>(null);
+  // PA-31: the web_search/url_fetch tools' own providers.
+  const [webSearchBaseUrlInput, setWebSearchBaseUrlInput] = useState('');
+  const [webSearchApiKeyInput, setWebSearchApiKeyInput] = useState('');
+  const [urlFetchBaseUrlInput, setUrlFetchBaseUrlInput] = useState('');
+  const [urlFetchApiKeyInput, setUrlFetchApiKeyInput] = useState('');
   const [newModelId, setNewModelId] = useState('');
   const [newModelLabel, setNewModelLabel] = useState('');
   const [newApprovalScope, setNewApprovalScope] = useState<'global' | 'workspace'>('global');
@@ -84,6 +89,8 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       setBaseUrlInput(se.baseUrl ?? '');
       setEmbeddingBaseUrlInput(se.embeddingBaseUrl ?? '');
       setEmbeddingModelIdInput(se.embeddingModelId ?? '');
+      setWebSearchBaseUrlInput(se.webSearchBaseUrl ?? '');
+      setUrlFetchBaseUrlInput(se.urlFetchBaseUrl ?? '');
       setTools(to.tools);
       setApprovals(ap.approvals);
       setError(null);
@@ -184,6 +191,47 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
         setTestingEmbeddings(false);
       }
     })();
+  };
+
+  /**
+   * PA-31: `web_search`'s own provider — off by default and inert until
+   * both a base URL is saved and the switch is on, mirroring
+   * `CreateCronJobRequest.skipPermissions`'s "consequential default is an
+   * explicit, separate act" reasoning. No reveal button, unlike the chat/
+   * embedding keys above: this key is never shown back once saved, the
+   * same posture `CustomClaudeProvidersSection` takes for its own key.
+   */
+  const saveWebSearchEndpoint = (): void => {
+    void withBusy(() => api.updatePlannerSettings({ webSearchBaseUrl: webSearchBaseUrlInput.trim() || null }));
+  };
+
+  const saveWebSearchApiKey = (): void => {
+    void withBusy(async () => {
+      await api.updatePlannerSettings({ webSearchApiKey: webSearchApiKeyInput });
+      setWebSearchApiKeyInput('');
+    });
+  };
+
+  const setWebSearchEnabled = (enabled: boolean): void => {
+    void withBusy(() => api.updatePlannerSettings({ webSearchEnabled: enabled }));
+  };
+
+  /** `url_fetch`'s own provider — same shape, one layer down; deliberately
+      a separate provider from `web_search`'s (a search index and a
+      page-fetch/scrape service are different products). */
+  const saveUrlFetchEndpoint = (): void => {
+    void withBusy(() => api.updatePlannerSettings({ urlFetchBaseUrl: urlFetchBaseUrlInput.trim() || null }));
+  };
+
+  const saveUrlFetchApiKey = (): void => {
+    void withBusy(async () => {
+      await api.updatePlannerSettings({ urlFetchApiKey: urlFetchApiKeyInput });
+      setUrlFetchApiKeyInput('');
+    });
+  };
+
+  const setUrlFetchEnabled = (enabled: boolean): void => {
+    void withBusy(() => api.updatePlannerSettings({ urlFetchEnabled: enabled }));
   };
 
   const addModel = (): void => {
@@ -523,6 +571,112 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
               : `Failed: ${embeddingTestResult.message}`}
           </p>
         )}
+      </div>
+
+      <div className="planner-section">
+        <h3>Web search</h3>
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          Powers the <code>web_search</code> tool, via a <code>v1/search</code>-style endpoint. Off by
+          default and inert until a base URL is saved <em>and</em> this switch is on.
+        </p>
+        <label className="planner-checkbox-row" style={{ marginBottom: 10 }}>
+          <input
+            type="checkbox"
+            checked={settings?.webSearchEnabled ?? false}
+            onChange={(e) => setWebSearchEnabled(e.target.checked)}
+          />
+          <span>Enable the web_search tool</span>
+        </label>
+        <div className="planner-field">
+          <label htmlFor="planner-web-search-base-url">Base URL</label>
+          <input
+            id="planner-web-search-base-url"
+            type="text"
+            placeholder="https://omniroute.example.com"
+            value={webSearchBaseUrlInput}
+            onChange={(e) => setWebSearchBaseUrlInput(e.target.value)}
+          />
+        </div>
+        <div className="planner-inline">
+          <button type="button" className="planner-btn" disabled={busy} onClick={saveWebSearchEndpoint}>
+            Save endpoint
+          </button>
+          <span className="planner-row-meta">
+            {settings?.webSearchBaseUrl ? 'Configured' : 'Not configured'}
+          </span>
+        </div>
+        <div className="planner-field" style={{ marginTop: 12 }}>
+          <label htmlFor="planner-web-search-api-key">API key</label>
+          <input
+            id="planner-web-search-api-key"
+            type="password"
+            placeholder={settings?.webSearchHasApiKey ? '••••••••  (leave blank to keep)' : 'sk-…'}
+            value={webSearchApiKeyInput}
+            onChange={(e) => setWebSearchApiKeyInput(e.target.value)}
+          />
+        </div>
+        <div className="planner-inline">
+          <button type="button" className="planner-btn" disabled={busy} onClick={saveWebSearchApiKey}>
+            Save key
+          </button>
+          <span className="planner-row-meta">
+            {settings?.webSearchHasApiKey ? 'A key is configured' : 'No key configured'}
+          </span>
+        </div>
+      </div>
+
+      <div className="planner-section">
+        <h3>URL fetch</h3>
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          Powers the <code>url_fetch</code> tool, via a Firecrawl-style <code>v1/scrape</code> endpoint.
+          Deliberately a separate provider from web search above — a search index and a
+          page-fetch/scrape service are different products. A key is optional: some deployments (e.g.
+          a self-hosted Firecrawl instance) need none.
+        </p>
+        <label className="planner-checkbox-row" style={{ marginBottom: 10 }}>
+          <input
+            type="checkbox"
+            checked={settings?.urlFetchEnabled ?? false}
+            onChange={(e) => setUrlFetchEnabled(e.target.checked)}
+          />
+          <span>Enable the url_fetch tool</span>
+        </label>
+        <div className="planner-field">
+          <label htmlFor="planner-url-fetch-base-url">Base URL</label>
+          <input
+            id="planner-url-fetch-base-url"
+            type="text"
+            placeholder="https://firecrawl.example.com"
+            value={urlFetchBaseUrlInput}
+            onChange={(e) => setUrlFetchBaseUrlInput(e.target.value)}
+          />
+        </div>
+        <div className="planner-inline">
+          <button type="button" className="planner-btn" disabled={busy} onClick={saveUrlFetchEndpoint}>
+            Save endpoint
+          </button>
+          <span className="planner-row-meta">
+            {settings?.urlFetchBaseUrl ? 'Configured' : 'Not configured'}
+          </span>
+        </div>
+        <div className="planner-field" style={{ marginTop: 12 }}>
+          <label htmlFor="planner-url-fetch-api-key">API key (optional)</label>
+          <input
+            id="planner-url-fetch-api-key"
+            type="password"
+            placeholder={settings?.urlFetchHasApiKey ? '••••••••  (leave blank to keep)' : 'leave blank if none'}
+            value={urlFetchApiKeyInput}
+            onChange={(e) => setUrlFetchApiKeyInput(e.target.value)}
+          />
+        </div>
+        <div className="planner-inline">
+          <button type="button" className="planner-btn" disabled={busy} onClick={saveUrlFetchApiKey}>
+            Save key
+          </button>
+          <span className="planner-row-meta">
+            {settings?.urlFetchHasApiKey ? 'A key is configured' : 'No key configured'}
+          </span>
+        </div>
       </div>
 
       <div className="planner-section">
