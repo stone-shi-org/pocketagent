@@ -1,10 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '@pocketagent/protocol';
 import {
   PLANNER_TOOLS,
+  TOOL_INTEGRATION_DISABLED,
   findPlannerTool,
   summarizeEvents,
   toOpenAiToolSpecs,
@@ -20,7 +21,11 @@ import { authHeaders, createTestApp, type TestApp } from './helpers.js';
  * `planner-chats.test.ts` instead.
  */
 
-function depsFor(t: TestApp, workspaceId?: string | null): PlannerToolDeps {
+function depsFor(
+  t: TestApp,
+  workspaceId?: string | null,
+  overrides?: Partial<Pick<PlannerToolDeps, 'webSearch' | 'urlFetch' | 'fetchImpl'>>,
+): PlannerToolDeps {
   const { workspaces, plannerWorkspaces, sessions, worktrees, conversations, agyTranscripts, piTranscripts } =
     t.context;
   return {
@@ -35,6 +40,9 @@ function depsFor(t: TestApp, workspaceId?: string | null): PlannerToolDeps {
     // tool call in this file implicitly runs "as" that agent — a caller
     // that cares about a different (or no) workspace passes it explicitly.
     workspaceId: workspaceId === undefined ? (t.context.plannerWorkspaces.getDefault()?.id ?? null) : workspaceId,
+    webSearch: TOOL_INTEGRATION_DISABLED,
+    urlFetch: TOOL_INTEGRATION_DISABLED,
+    ...overrides,
   };
 }
 
@@ -43,7 +51,15 @@ describe('PLANNER_TOOLS catalog', () => {
     const readOnlyNames = PLANNER_TOOLS.filter((t) => t.readOnly).map((t) => t.name).sort();
     const mutatingNames = PLANNER_TOOLS.filter((t) => !t.readOnly).map((t) => t.name).sort();
     expect(readOnlyNames).toEqual(
-      ['list_sessions', 'list_workspaces', 'memory_search', 'read_file', 'read_session_output'].sort(),
+      [
+        'list_sessions',
+        'list_workspaces',
+        'memory_search',
+        'read_file',
+        'read_session_output',
+        'url_fetch',
+        'web_search',
+      ].sort(),
     );
     expect(mutatingNames).toEqual(
       [
@@ -661,5 +677,198 @@ describe('exec_command', () => {
     const tool = findPlannerTool('exec_command')!;
     const result = await tool.execute(depsFor(t), { cwd: target, command: 'echo hi' });
     expect(result).toMatch(/is not a directory/);
+  });
+});
+
+// ---- PA-31: web_search and url_fetch ----------------------------------------
+
+describe('web_search', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('refuses without throwing when not configured', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('web_search')!;
+    const result = await tool.execute(depsFor(t), { query: 'pocketagent' });
+    expect(result).toMatch(/not configured/);
+  });
+
+  it('reports empty query without calling out', async () => {
+    t = await createTestApp();
+    let called = false;
+    const fetchImpl = (async () => {
+      called = true;
+      throw new Error('should not be called');
+    }) as unknown as typeof fetch;
+    const tool = findPlannerTool('web_search')!;
+    const result = await tool.execute(
+      depsFor(t, undefined, {
+        webSearch: { enabled: true, baseUrl: 'https://omniroute.example', apiKey: 'sk-test' },
+        fetchImpl,
+      }),
+      { query: '   ' },
+    );
+    expect(result).toMatch(/No search query/);
+    expect(called).toBe(false);
+  });
+
+  it('POSTs to <baseUrl>/v1/search with a bearer token and returns the JSON body', async () => {
+    t = await createTestApp();
+    let requestUrl = '';
+    let requestInit: RequestInit | undefined;
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      requestUrl = String(url);
+      requestInit = init;
+      return new Response(JSON.stringify({ results: [{ title: 'PocketAgent' }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const tool = findPlannerTool('web_search')!;
+    const result = await tool.execute(
+      depsFor(t, undefined, {
+        webSearch: { enabled: true, baseUrl: 'https://omniroute.example/', apiKey: 'sk-test' },
+        fetchImpl,
+      }),
+      { query: 'pocketagent', limit: 3 },
+    );
+
+    expect(requestUrl).toBe('https://omniroute.example/v1/search');
+    expect((requestInit?.headers as Record<string, string>).authorization).toBe('Bearer sk-test');
+    expect(JSON.parse(String(requestInit?.body))).toEqual({ query: 'pocketagent', limit: 3 });
+    expect(result).toBe(JSON.stringify({ results: [{ title: 'PocketAgent' }] }));
+  });
+
+  it('omits the Authorization header when no API key is configured', async () => {
+    t = await createTestApp();
+    let requestInit: RequestInit | undefined;
+    const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+      requestInit = init;
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const tool = findPlannerTool('web_search')!;
+    await tool.execute(
+      depsFor(t, undefined, {
+        webSearch: { enabled: true, baseUrl: 'https://omniroute.example', apiKey: null },
+        fetchImpl,
+      }),
+      { query: 'pocketagent' },
+    );
+    expect((requestInit?.headers as Record<string, string>).authorization).toBeUndefined();
+  });
+
+  it('reports a non-2xx response as a tool result rather than throwing', async () => {
+    t = await createTestApp();
+    const fetchImpl = (async () => new Response('bad gateway', { status: 502 })) as unknown as typeof fetch;
+    const tool = findPlannerTool('web_search')!;
+    const result = await tool.execute(
+      depsFor(t, undefined, {
+        webSearch: { enabled: true, baseUrl: 'https://omniroute.example', apiKey: null },
+        fetchImpl,
+      }),
+      { query: 'pocketagent' },
+    );
+    expect(result).toMatch(/Web search failed: HTTP 502/);
+  });
+});
+
+describe('url_fetch', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('refuses without throwing when not configured', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('url_fetch')!;
+    const result = await tool.execute(depsFor(t), { url: 'https://example.com' });
+    expect(result).toMatch(/not configured/);
+  });
+
+  it('refuses an invalid URL without calling out', async () => {
+    t = await createTestApp();
+    const fetchImpl = (async () => {
+      throw new Error('should not be called');
+    }) as unknown as typeof fetch;
+    const tool = findPlannerTool('url_fetch')!;
+    const result = await tool.execute(
+      depsFor(t, undefined, {
+        urlFetch: { enabled: true, baseUrl: 'https://firecrawl.example', apiKey: null },
+        fetchImpl,
+      }),
+      { url: 'not a url' },
+    );
+    expect(result).toMatch(/not a valid URL/);
+  });
+
+  it('refuses a non-http(s) URL scheme without calling out', async () => {
+    t = await createTestApp();
+    const fetchImpl = (async () => {
+      throw new Error('should not be called');
+    }) as unknown as typeof fetch;
+    const tool = findPlannerTool('url_fetch')!;
+    const result = await tool.execute(
+      depsFor(t, undefined, {
+        urlFetch: { enabled: true, baseUrl: 'https://firecrawl.example', apiKey: null },
+        fetchImpl,
+      }),
+      { url: 'file:///etc/hosts' },
+    );
+    expect(result).toMatch(/Refusing to fetch/);
+  });
+
+  it('POSTs to <baseUrl>/v1/scrape with no Authorization header when no key is configured', async () => {
+    t = await createTestApp();
+    let requestUrl = '';
+    let requestInit: RequestInit | undefined;
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      requestUrl = String(url);
+      requestInit = init;
+      return new Response(JSON.stringify({ markdown: '# Example' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const tool = findPlannerTool('url_fetch')!;
+    const result = await tool.execute(
+      depsFor(t, undefined, {
+        urlFetch: { enabled: true, baseUrl: 'https://firecrawl.example/', apiKey: null },
+        fetchImpl,
+      }),
+      { url: 'https://example.com/page' },
+    );
+
+    expect(requestUrl).toBe('https://firecrawl.example/v1/scrape');
+    expect((requestInit?.headers as Record<string, string>).authorization).toBeUndefined();
+    expect(JSON.parse(String(requestInit?.body))).toEqual({ url: 'https://example.com/page' });
+    expect(result).toBe(JSON.stringify({ markdown: '# Example' }));
+  });
+
+  it('reports a timeout as a tool result rather than hanging the turn', async () => {
+    // `createTestApp()` itself relies on real timers (real I/O, a real
+    // tmux/sqlite boot) — fake timers only wrap the tool call below, so this
+    // doesn't burn `TOOL_HTTP_TIMEOUT_MS` of wall-clock time on every run:
+    // the abort fires the moment the timer is advanced, not after a real wait.
+    t = await createTestApp();
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = ((_url: string | URL, init?: RequestInit) => {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        });
+      }) as unknown as typeof fetch;
+
+      const tool = findPlannerTool('url_fetch')!;
+      const resultPromise = tool.execute(
+        depsFor(t, undefined, {
+          urlFetch: { enabled: true, baseUrl: 'https://firecrawl.example', apiKey: null },
+          fetchImpl,
+        }),
+        { url: 'https://example.com' },
+      );
+      await vi.runAllTimersAsync();
+      expect(await resultPromise).toMatch(/URL fetch failed: Request timed out/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

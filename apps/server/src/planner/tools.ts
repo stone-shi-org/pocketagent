@@ -30,6 +30,16 @@ import type { PlannerMemoryService } from './memory.js';
  * parallel notion of "workspace" or "session" for them. File tools
  * additionally accept a planner workspace path, since the planner's own
  * scratch space is just as legitimate a target.
+ *
+ * PA-31 adds `web_search` and `url_fetch` — the first tools here that call
+ * *outside* this machine rather than against another PocketAgent subsystem.
+ * Both are read-only (an outbound HTTP read changes nothing this system
+ * tracks) and both refuse rather than call anywhere until an operator has
+ * configured and enabled their own provider in Settings -> Pocket Agent
+ * (`PlannerToolDeps.webSearch`/`.urlFetch`, backed by `planner/store.ts`'s
+ * `PLANNER_WEB_SEARCH_*`/`PLANNER_URL_FETCH_*` settings) — there is no
+ * built-in default endpoint, so a fresh deployment cannot silently exfiltrate
+ * anything on a model's say-so.
  */
 
 export interface PlannerToolDeps {
@@ -55,7 +65,39 @@ export interface PlannerToolDeps {
    * their own "can't resolve what this needs" cases.
    */
   workspaceId: string | null;
+  /**
+   * PA-31: the `web_search`/`url_fetch` tools' own provider config, read
+   * fresh per call by `PlannerChatService.executeTool` (like
+   * `workspaceId` above, this is rebuilt every call rather than cached on
+   * the deps object across calls) — a toggle or key flipped in Settings
+   * must take effect on the very next call. `baseUrl: null` or
+   * `enabled: false` means "not configured"; each tool's own `execute`
+   * refuses rather than throwing.
+   */
+  webSearch: ToolIntegrationConfig;
+  urlFetch: ToolIntegrationConfig;
+  /** Injected in tests so no real network call is ever made; defaults to
+      the global `fetch`. */
+  fetchImpl?: typeof fetch;
 }
+
+/** PA-31: one third-party HTTP integration's live config — see
+    `PlannerToolDeps.webSearch`/`.urlFetch`. */
+export interface ToolIntegrationConfig {
+  enabled: boolean;
+  baseUrl: string | null;
+  apiKey: string | null;
+}
+
+/** The "not configured" value of `ToolIntegrationConfig` — exported so a
+    test building a `PlannerToolDeps` for a tool that doesn't care about
+    `web_search`/`url_fetch` (most of the catalog) can fill the two required
+    fields with one shared constant rather than repeating this shape. */
+export const TOOL_INTEGRATION_DISABLED: ToolIntegrationConfig = {
+  enabled: false,
+  baseUrl: null,
+  apiKey: null,
+};
 
 export interface PlannerToolDefinition {
   name: string;
@@ -74,6 +116,10 @@ const MAX_FILE_WRITE_CHARS = 200_000;
 /** A chat turn is a synchronous HTTP request/response — a runaway command
     must not hang it forever. */
 const EXEC_TIMEOUT_MS = 60_000;
+/** PA-31: same reasoning as `EXEC_TIMEOUT_MS`, shorter — a third-party
+    search/fetch call has no reason to run anywhere near a minute, and a
+    tighter cap keeps one slow provider from stalling a whole chat turn. */
+const TOOL_HTTP_TIMEOUT_MS = 20_000;
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -167,6 +213,62 @@ async function resolveCreatablePath(deps: PlannerToolDeps, requested: string): P
   }
   const suffix = path.relative(probe, absolute);
   return suffix ? path.join(real, suffix) : real;
+}
+
+/**
+ * PA-31: one POST-JSON round trip to a third-party integration
+ * (`web_search`'s search endpoint, `url_fetch`'s scrape endpoint) — both
+ * tools share this rather than each rolling their own fetch/timeout/error
+ * handling. The API key, when present, is sent as a bearer token
+ * (`v1/search`-/Firecrawl-style endpoints both expect that), and its
+ * absence just omits the header rather than sending an empty one — the
+ * reporter's own example configures `url_fetch` against a Firecrawl
+ * instance that needs no key at all.
+ *
+ * Never throws: every failure mode (bad URL, non-2xx, non-JSON body,
+ * timeout, network error) resolves to `{ ok: false, message }`, so a
+ * misconfigured or unreachable provider becomes a tool result the model
+ * can see and explain, not an uncaught exception `executeTool`'s own
+ * catch-all would otherwise have to paper over identically anyway.
+ */
+async function postJsonToIntegration(
+  fetchImpl: typeof fetch,
+  url: string,
+  apiKey: string | null,
+  body: Record<string, unknown>,
+): Promise<{ ok: true; json: unknown } | { ok: false; message: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TOOL_HTTP_TIMEOUT_MS);
+  try {
+    const res = await fetchImpl(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      return { ok: false, message: `HTTP ${res.status}: ${truncate(text, 500)}` };
+    }
+    try {
+      return { ok: true, json: JSON.parse(text) };
+    } catch {
+      return { ok: false, message: `Response was not valid JSON: ${truncate(text, 500)}` };
+    }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'AbortError';
+    return {
+      ok: false,
+      message: timedOut
+        ? `Request timed out after ${TOOL_HTTP_TIMEOUT_MS / 1000}s.`
+        : `Request failed: ${(err as Error).message}`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
@@ -306,6 +408,81 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         ),
         MAX_TOOL_RESULT_CHARS,
       );
+    },
+  },
+
+  {
+    name: 'web_search',
+    description:
+      'Search the web for up-to-date information, via the operator-configured search provider. ' +
+      'Returns raw provider results as JSON; refuses if search is not enabled and configured in ' +
+      'Settings -> Pocket Agent.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The search query.' },
+        limit: { type: 'number', description: 'Maximum number of results to return (default 5).' },
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+    // PA-31: an outbound read against a third-party index — like `read_file`/
+    // `list_sessions` above, nothing about *this* system's own state changes,
+    // so it is exempt from the approval gate for the same reason those are.
+    readOnly: true,
+    async execute(deps, args) {
+      if (!deps.webSearch.enabled || !deps.webSearch.baseUrl) {
+        return 'Web search is not configured. An operator can enable it under Settings -> Pocket Agent.';
+      }
+      const query = String(args.query ?? '').trim();
+      if (!query) return 'No search query provided.';
+      const rawLimit = typeof args.limit === 'number' ? Math.round(args.limit) : 5;
+      const limit = Math.min(20, Math.max(1, rawLimit));
+      const url = `${deps.webSearch.baseUrl.replace(/\/+$/, '')}/v1/search`;
+      const result = await postJsonToIntegration(deps.fetchImpl ?? fetch, url, deps.webSearch.apiKey, {
+        query,
+        limit,
+      });
+      if (!result.ok) return `Web search failed: ${result.message}`;
+      return truncate(JSON.stringify(result.json), MAX_TOOL_RESULT_CHARS);
+    },
+  },
+  {
+    name: 'url_fetch',
+    description:
+      "Fetch a URL and return its readable content, via the operator-configured fetch provider " +
+      '(e.g. a Firecrawl-style scrape endpoint). Refuses if not enabled and configured in ' +
+      'Settings -> Pocket Agent.',
+    parameters: {
+      type: 'object',
+      properties: { url: { type: 'string', description: 'The URL to fetch.' } },
+      required: ['url'],
+      additionalProperties: false,
+    },
+    // Same reasoning as `web_search`: a read against a third-party service,
+    // not a change to anything this system tracks.
+    readOnly: true,
+    async execute(deps, args) {
+      if (!deps.urlFetch.enabled || !deps.urlFetch.baseUrl) {
+        return 'URL fetch is not configured. An operator can enable it under Settings -> Pocket Agent.';
+      }
+      const target = String(args.url ?? '').trim();
+      if (!target) return 'No URL provided.';
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(target);
+      } catch {
+        return `${target} is not a valid URL.`;
+      }
+      if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+        return `Refusing to fetch a ${parsedUrl.protocol} URL.`;
+      }
+      const url = `${deps.urlFetch.baseUrl.replace(/\/+$/, '')}/v1/scrape`;
+      const result = await postJsonToIntegration(deps.fetchImpl ?? fetch, url, deps.urlFetch.apiKey, {
+        url: target,
+      });
+      if (!result.ok) return `URL fetch failed: ${result.message}`;
+      return truncate(JSON.stringify(result.json), MAX_TOOL_RESULT_CHARS);
     },
   },
 

@@ -253,6 +253,28 @@ export const PLANNER_EMBEDDING_API_KEY_KEY = 'planner_embedding_api_key';
 
 export const PLANNER_EMBEDDING_MODEL_ID_KEY = 'planner_embedding_model_id';
 
+/**
+ * PA-31: the `web_search` tool's own provider settings. Same plaintext
+ * storage rationale as `PLANNER_LLM_API_KEY_KEY` above — this key is
+ * replayed verbatim as a bearer token to the configured search endpoint,
+ * so there is no hashed-verification alternative. `_ENABLED` is a separate
+ * on/off switch from "a base URL is set" for the same reason
+ * `CreateCronJobRequest.skipPermissions` documents keeping a
+ * consequential default an explicit, separate act: an operator mid-typing
+ * a URL must not have the tool start firing before they mean it to.
+ */
+export const PLANNER_WEB_SEARCH_ENABLED_KEY = 'planner_web_search_enabled';
+export const PLANNER_WEB_SEARCH_BASE_URL_KEY = 'planner_web_search_base_url';
+export const PLANNER_WEB_SEARCH_API_KEY_KEY = 'planner_web_search_api_key';
+
+/** PA-31: the `url_fetch` tool's own provider settings — deliberately a
+    separate provider from `web_search`'s (a search index and a
+    page-fetch/scrape service are different products), same shape and
+    plaintext-storage rationale one layer down. */
+export const PLANNER_URL_FETCH_ENABLED_KEY = 'planner_url_fetch_enabled';
+export const PLANNER_URL_FETCH_BASE_URL_KEY = 'planner_url_fetch_base_url';
+export const PLANNER_URL_FETCH_API_KEY_KEY = 'planner_url_fetch_api_key';
+
 export interface PlannerSettingsSnapshot {
   baseUrl: string | null;
   hasApiKey: boolean;
@@ -261,6 +283,12 @@ export interface PlannerSettingsSnapshot {
   embeddingBaseUrl: string | null;
   embeddingHasApiKey: boolean;
   embeddingModelId: string | null;
+  webSearchEnabled: boolean;
+  webSearchBaseUrl: string | null;
+  webSearchHasApiKey: boolean;
+  urlFetchEnabled: boolean;
+  urlFetchBaseUrl: string | null;
+  urlFetchHasApiKey: boolean;
 }
 
 export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
@@ -272,6 +300,12 @@ export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
     embeddingBaseUrl: readSetting(db, PLANNER_EMBEDDING_BASE_URL_KEY) || null,
     embeddingHasApiKey: (readSetting(db, PLANNER_EMBEDDING_API_KEY_KEY) ?? '').length > 0,
     embeddingModelId: readSetting(db, PLANNER_EMBEDDING_MODEL_ID_KEY) || null,
+    webSearchEnabled: readSetting(db, PLANNER_WEB_SEARCH_ENABLED_KEY) === '1',
+    webSearchBaseUrl: readSetting(db, PLANNER_WEB_SEARCH_BASE_URL_KEY) || null,
+    webSearchHasApiKey: (readSetting(db, PLANNER_WEB_SEARCH_API_KEY_KEY) ?? '').length > 0,
+    urlFetchEnabled: readSetting(db, PLANNER_URL_FETCH_ENABLED_KEY) === '1',
+    urlFetchBaseUrl: readSetting(db, PLANNER_URL_FETCH_BASE_URL_KEY) || null,
+    urlFetchHasApiKey: (readSetting(db, PLANNER_URL_FETCH_API_KEY_KEY) ?? '').length > 0,
   };
 }
 
@@ -303,6 +337,30 @@ export function writePlannerEmbeddingModelId(db: Db, modelId: string | null): vo
   writeSetting(db, PLANNER_EMBEDDING_MODEL_ID_KEY, modelId ?? '');
 }
 
+export function writePlannerWebSearchEnabled(db: Db, enabled: boolean): void {
+  writeSetting(db, PLANNER_WEB_SEARCH_ENABLED_KEY, enabled ? '1' : '0');
+}
+
+export function writePlannerWebSearchBaseUrl(db: Db, baseUrl: string | null): void {
+  writeSetting(db, PLANNER_WEB_SEARCH_BASE_URL_KEY, baseUrl ?? '');
+}
+
+export function writePlannerWebSearchApiKey(db: Db, apiKey: string | null): void {
+  writeSetting(db, PLANNER_WEB_SEARCH_API_KEY_KEY, apiKey ?? '');
+}
+
+export function writePlannerUrlFetchEnabled(db: Db, enabled: boolean): void {
+  writeSetting(db, PLANNER_URL_FETCH_ENABLED_KEY, enabled ? '1' : '0');
+}
+
+export function writePlannerUrlFetchBaseUrl(db: Db, baseUrl: string | null): void {
+  writeSetting(db, PLANNER_URL_FETCH_BASE_URL_KEY, baseUrl ?? '');
+}
+
+export function writePlannerUrlFetchApiKey(db: Db, apiKey: string | null): void {
+  writeSetting(db, PLANNER_URL_FETCH_API_KEY_KEY, apiKey ?? '');
+}
+
 /**
  * The one read that carries the key. Rate-limited and logged at the route
  * (`routes/planner.ts`), mirroring `WebhookService.revealSecret` exactly.
@@ -316,6 +374,26 @@ export function revealPlannerApiKey(db: Db): string | null {
     at its own route. */
 export function revealPlannerEmbeddingApiKey(db: Db): string | null {
   const value = readSetting(db, PLANNER_EMBEDDING_API_KEY_KEY);
+  return value && value.length > 0 ? value : null;
+}
+
+/**
+ * PA-31: the `web_search`/`url_fetch` tools' own keys, read fresh on every
+ * tool call (`PlannerChatService.executeTool`) — like `plannerYoloEnabled`,
+ * a key rotated in Settings must take effect on the very next call, not
+ * wait for a restart or a cached snapshot. Unlike `revealPlannerApiKey`/
+ * `revealPlannerEmbeddingApiKey` above, these are never reachable over
+ * HTTP: nothing outside this server needs to read them back, the same
+ * reasoning `CustomClaudeProviderStore`'s API key has no reveal endpoint
+ * either.
+ */
+export function resolvePlannerWebSearchApiKey(db: Db): string | null {
+  const value = readSetting(db, PLANNER_WEB_SEARCH_API_KEY_KEY);
+  return value && value.length > 0 ? value : null;
+}
+
+export function resolvePlannerUrlFetchApiKey(db: Db): string | null {
+  const value = readSetting(db, PLANNER_URL_FETCH_API_KEY_KEY);
   return value && value.length > 0 ? value : null;
 }
 

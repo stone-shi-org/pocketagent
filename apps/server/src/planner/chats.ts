@@ -22,6 +22,8 @@ import {
   readPlannerChatMemoryFoldedTurns,
   readPlannerChats,
   readPlannerSettings,
+  resolvePlannerUrlFetchApiKey,
+  resolvePlannerWebSearchApiKey,
   revealPlannerApiKey,
   updatePlannerChat,
   writePlannerChatMemoryFoldedTurns,
@@ -107,6 +109,10 @@ export interface PlannerChatServiceOptions {
   logger?: { warn: (obj: unknown, msg?: string) => void };
   /** Injected in tests so no real network call is ever made. */
   llmFetch?: typeof fetch;
+  /** PA-31: injected in tests so `web_search`/`url_fetch` never make a real
+      network call either — distinct from `llmFetch` above, which is only
+      ever handed to `PlannerLlmClient`, not to `PlannerToolDeps`. */
+  toolFetch?: typeof fetch;
   /** Injected in tests to control exactly which tools are offered. Defaults to `PLANNER_TOOLS`. */
   tools?: readonly PlannerToolDefinition[];
 }
@@ -857,6 +863,10 @@ export class PlannerChatService {
 
   private async executeTool(tool: PlannerToolDefinition, rawArguments: string, chat: PlannerChat): Promise<string> {
     const args = safeParseArgs(rawArguments);
+    // PA-31: read fresh on every call, like `resolveModelId`'s own
+    // `readPlannerSettings` above — a provider toggled or rekeyed in
+    // Settings must take effect on the very next tool call.
+    const settings = readPlannerSettings(this.opts.db);
     try {
       return await tool.execute(
         {
@@ -868,6 +878,17 @@ export class PlannerChatService {
           shell: this.opts.shell,
           memory: this.opts.memory,
           workspaceId: chat.workspaceId,
+          webSearch: {
+            enabled: settings.webSearchEnabled,
+            baseUrl: settings.webSearchBaseUrl,
+            apiKey: resolvePlannerWebSearchApiKey(this.opts.db),
+          },
+          urlFetch: {
+            enabled: settings.urlFetchEnabled,
+            baseUrl: settings.urlFetchBaseUrl,
+            apiKey: resolvePlannerUrlFetchApiKey(this.opts.db),
+          },
+          ...(this.opts.toolFetch ? { fetchImpl: this.opts.toolFetch } : {}),
         },
         args,
       );

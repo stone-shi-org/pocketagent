@@ -619,7 +619,58 @@ describe('planner routes over HTTP', () => {
       embeddingBaseUrl: null,
       embeddingHasApiKey: false,
       embeddingModelId: null,
+      webSearchEnabled: false,
+      webSearchBaseUrl: null,
+      webSearchHasApiKey: false,
+      urlFetchEnabled: false,
+      urlFetchBaseUrl: null,
+      urlFetchHasApiKey: false,
     });
+  });
+
+  // ---- PA-31: the web_search/url_fetch tool providers' own settings ------
+
+  it('PATCH updates the web_search and url_fetch provider settings independently of each other and of chat/embedding settings, without ever echoing a key back', async () => {
+    await patch('/api/planner/settings', { baseUrl: 'https://chat.example.com/v1', apiKey: 'sk-chat-secret' });
+    const res = await patch('/api/planner/settings', {
+      webSearchEnabled: true,
+      webSearchBaseUrl: 'https://omniroute.example.com',
+      webSearchApiKey: 'sk-web-search-secret',
+      urlFetchEnabled: true,
+      urlFetchBaseUrl: 'https://firecrawl.example.com',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.baseUrl).toBe('https://chat.example.com/v1');
+    expect(body.webSearchEnabled).toBe(true);
+    expect(body.webSearchBaseUrl).toBe('https://omniroute.example.com');
+    expect(body.webSearchHasApiKey).toBe(true);
+    expect(body.urlFetchEnabled).toBe(true);
+    expect(body.urlFetchBaseUrl).toBe('https://firecrawl.example.com');
+    // Firecrawl-style: no key configured for this one at all.
+    expect(body.urlFetchHasApiKey).toBe(false);
+    expect(body).not.toHaveProperty('webSearchApiKey');
+    expect(body).not.toHaveProperty('urlFetchApiKey');
+    expect(JSON.stringify(body)).not.toContain('sk-web-search-secret');
+    expect(JSON.stringify(body)).not.toContain('sk-chat-secret');
+  });
+
+  it('an omitted webSearchApiKey/urlFetchApiKey on PATCH leaves the stored keys untouched', async () => {
+    await patch('/api/planner/settings', { webSearchApiKey: 'sk-web-search-first' });
+    await patch('/api/planner/settings', { webSearchEnabled: true });
+    expect((await get('/api/planner/settings')).json().webSearchHasApiKey).toBe(true);
+  });
+
+  it('webSearchApiKey/urlFetchApiKey: "" clears a stored key', async () => {
+    await patch('/api/planner/settings', { webSearchApiKey: 'sk-web-search-first' });
+    await patch('/api/planner/settings', { webSearchApiKey: '' });
+    expect((await get('/api/planner/settings')).json().webSearchHasApiKey).toBe(false);
+  });
+
+  it('there is no reveal route for the web_search/url_fetch keys, unlike the chat/embedding keys', async () => {
+    await patch('/api/planner/settings', { webSearchApiKey: 'sk-web-search-secret' });
+    expect((await post('/api/planner/settings/web-search-api-key/reveal')).statusCode).toBe(404);
+    expect((await post('/api/planner/settings/url-fetch-api-key/reveal')).statusCode).toBe(404);
   });
 
   // ---- PA-29: the embedding provider's own settings ----------------------
