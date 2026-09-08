@@ -181,3 +181,40 @@ export function parseMcpQualifiedToolName(qualified: string): { registryId: stri
  */
 export const LIST_MCP_TOOLS_NAME = 'list_mcp_tools';
 export const CALL_MCP_TOOL_NAME = 'call_mcp_tool';
+
+/**
+ * PA-37 follow-up round two (reporter: "In additional to enable/disable for
+ * mcp all. Need add individual enable/disable. For example, we can globally
+ * disable bamboo mcp but allow Jira mcp. Same concept for per agent base -
+ * enable/disable all AND separate enable/disable for each mcp"): one agent's
+ * own view of the registry catalog, `PlannerAgentToolInfo`/
+ * `PlannerAgentSkillInfo`'s exact shape one layer up — a whole registry
+ * instead of a tool or skill within one. `enabled` is the *effective* state
+ * for this agent (this registry's own global `enabled` AND not individually
+ * disabled for this agent); `disabledGlobally` greys out a checkbox the
+ * agent can't override, mirroring both of those exactly.
+ *
+ * Deliberately does **not** carry `url`/`transport`/`authKind` or anything
+ * else from `McpRegistrySummary` — the agent editor's own "MCP" section
+ * cannot change what a registry *is*, only whether this one agent may reach
+ * it, so there is nothing here for it to render beyond a name and a
+ * checkbox.
+ */
+export const PlannerAgentMcpRegistryInfo = z.object({
+  id: z.string(),
+  name: z.string(),
+  enabled: z.boolean(),
+  disabledGlobally: z.boolean(),
+});
+export type PlannerAgentMcpRegistryInfo = z.infer<typeof PlannerAgentMcpRegistryInfo>;
+
+export const PlannerAgentMcpRegistriesResponse = z.object({
+  registries: z.array(PlannerAgentMcpRegistryInfo),
+});
+export type PlannerAgentMcpRegistriesResponse = z.infer<typeof PlannerAgentMcpRegistriesResponse>;
+
+export const SetPlannerAgentMcpRegistryRequest = z.object({
+  registryId: z.string().min(1),
+  enabled: z.boolean(),
+});
+export type SetPlannerAgentMcpRegistryRequest = z.infer<typeof SetPlannerAgentMcpRegistryRequest>;

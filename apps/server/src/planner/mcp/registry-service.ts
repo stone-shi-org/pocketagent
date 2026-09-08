@@ -12,7 +12,7 @@ import {
 } from '@pocketagent/protocol';
 import type { Db } from '../../db/index.js';
 import { SETTINGS_ENC_KEY_VAR, decryptSecret, encryptSecret } from '../../crypto/secret-box.js';
-import { readPlannerSettings } from '../store.js';
+import { readAgentDisabledMcpRegistries, readPlannerSettings } from '../store.js';
 import { McpClient, McpClientError, type McpConnectionConfig, type McpToolDescriptor } from './client.js';
 
 export class McpRegistryError extends Error {
@@ -61,6 +61,10 @@ interface LiveRegistry {
     handing out the raw `McpToolDescriptor`/registry internals. */
 export interface McpKnownTool {
   qualifiedName: string;
+  /** The owning registry's id — so per-agent, per-registry filtering
+      (`listEnabledTools`) doesn't have to re-parse `qualifiedName` back
+      apart via `parseMcpQualifiedToolName` for every tool on every call. */
+  registryId: string;
   description: string;
   /** `true` only when the underlying MCP tool declared
       `annotations.readOnlyHint === true` — absent/unknown defaults to
@@ -219,7 +223,10 @@ export class McpRegistryService {
    * deliberately kept after the thing that created it is gone. There is
    * nothing to clean up in `planner_global_disabled_tools`/
    * `planner_agent_disabled_tools` — MCP tool names are never written there
-   * (PA-37 follow-up: enablement is whole-MCP, not per-tool).
+   * (PA-37 follow-up: enablement is whole-MCP/per-registry, not per-tool).
+   * `planner_agent_disabled_mcp_registries` needs no manual cleanup either:
+   * its `registry_id` is a real foreign key with `ON DELETE CASCADE`, so
+   * this one `DELETE` below already takes those rows with it.
    */
   remove(id: string): boolean {
     const changes = this.db.prepare('DELETE FROM mcp_registries WHERE id = ?').run(id).changes;
@@ -280,6 +287,7 @@ export class McpRegistryService {
       for (const tool of live.tools) {
         out.push({
           qualifiedName: mcpQualifiedToolName(live.row.id, tool.name),
+          registryId: live.row.id,
           description: `[${live.row.name}] ${tool.description}`,
           readOnly: tool.readOnlyHint === true,
         });
@@ -289,40 +297,74 @@ export class McpRegistryService {
   }
 
   /**
-   * `listKnownTools()`, gated by the whole-MCP on/off switch for one agent —
-   * this is what `list_mcp_tools`/`call_mcp_tool`'s own `execute()` and
+   * `listKnownTools()`, gated by every enablement layer for one agent — this
+   * is what `list_mcp_tools`/`call_mcp_tool`'s own `execute()` and
    * `PlannerChatService.toolsFor`/`effectiveMcpToolIdentity` all call.
    *
-   * PA-37 follow-up (reporter: "Let's not list the mcp tool as separate
-   * tools to allow/disallow. Let's just enable/disable mcp as whole for
-   * global or each agent."): deliberately **not** per-tool or per-registry
-   * filtering — either every enabled registry's tools are available to this
-   * agent, or none are. Two layers, both must be true: the global switch
-   * (`readPlannerSettings(db).mcpEnabled`, defaulting to on) and, when this
-   * chat has a real agent, that agent's own `planner_workspaces.mcp_enabled`
-   * (also defaulting to on — a fresh migration must not silently take MCP
-   * away from an agent that never touched the setting). `workspaceId: null`
-   * (an orphaned chat) skips the per-agent read entirely and defers to the
-   * global layer alone, the same fallback the native tool catalog's own
-   * `PlannerChatService.toolsFor` already uses.
+   * Three layers, all must be true, from broadest to narrowest:
+   *
+   * 1. The whole-MCP global switch (`readPlannerSettings(db).mcpEnabled`,
+   *    defaulting to on) — PA-37 follow-up: "Let's just enable/disable mcp
+   *    as whole for global or each agent."
+   * 2. This agent's own whole-MCP switch (`planner_workspaces.mcp_enabled`,
+   *    also defaulting to on), skipped entirely for `workspaceId: null` (an
+   *    orphaned chat has no per-agent switch to read, the same fallback the
+   *    native tool catalog's own `PlannerChatService.toolsFor` already
+   *    uses) — the other half of the same follow-up.
+   * 3. Per-registry: each registry's own global `enabled` (already applied
+   *    inside `listKnownTools()`) *and*, for a real agent, whether that
+   *    agent has individually disabled this specific registry
+   *    (`planner_agent_disabled_mcp_registries`) — PA-37 follow-up round
+   *    two: "we can globally disable bamboo mcp but allow Jira mcp. Same
+   *    concept for per agent base... enable/disable all AND separate
+   *    enable/disable for each mcp." Deliberately still not *tool*
+   *    granularity within one registry — that was the very first cut of
+   *    this ticket, reverted by the first follow-up above.
    */
   listEnabledTools(workspaceId: string | null): McpKnownTool[] {
     if (!readPlannerSettings(this.db).mcpEnabled) return [];
-    if (workspaceId && !this.isMcpEnabledForWorkspace(workspaceId)) return [];
-    return this.listKnownTools();
+    if (!workspaceId) return this.listKnownTools();
+    if (!this.isMcpEnabledForWorkspace(workspaceId)) return [];
+    const disabledRegistries = readAgentDisabledMcpRegistries(this.db, workspaceId);
+    if (disabledRegistries.size === 0) return this.listKnownTools();
+    return this.listKnownTools().filter((t) => !disabledRegistries.has(t.registryId));
   }
 
-  /** Raw read of one agent's own MCP switch, straight off `planner_workspaces`
-      — a direct query rather than a `PlannerWorkspaceRegistry` dependency,
-      since this is the only field this service ever needs from that table
-      and a missing row (should not normally happen) defaults to enabled,
-      the same "fail open at the per-agent layer, the global layer is the
-      real kill switch" reasoning `workspaceId: null` above already uses. */
+  /** Raw read of one agent's own whole-MCP switch, straight off
+      `planner_workspaces` — a direct query rather than a
+      `PlannerWorkspaceRegistry` dependency, since this is the only field
+      this service ever needs from that table and a missing row (should not
+      normally happen) defaults to enabled, the same "fail open at the
+      per-agent layer, the global layer is the real kill switch" reasoning
+      `listEnabledTools` already applies at every layer. */
   private isMcpEnabledForWorkspace(workspaceId: string): boolean {
     const row = this.db.prepare('SELECT mcp_enabled FROM planner_workspaces WHERE id = ?').get(workspaceId) as
       | { mcp_enabled: number }
       | undefined;
     return row ? row.mcp_enabled === 1 : true;
+  }
+
+  /**
+   * One agent's own view of the registry catalog, for the agent editor's
+   * "MCP" section (PA-37 follow-up round two) — every registry, `enabled`
+   * effective for this agent (this registry's own global `enabled` AND not
+   * individually disabled for this agent) and `disabledGlobally` when the
+   * registry itself is off, mirroring `PlannerAgentToolInfo`/
+   * `PlannerAgentSkillInfo` exactly. Lists **every** registry regardless of
+   * whether it has ever connected — unlike `listKnownTools()`, this is a
+   * configuration surface, not a live tool catalog, so an uncached registry
+   * still needs a row to toggle.
+   */
+  listForWorkspace(workspaceId: string): { id: string; name: string; enabled: boolean; disabledGlobally: boolean }[] {
+    const disabled = readAgentDisabledMcpRegistries(this.db, workspaceId);
+    return [...this.live.values()]
+      .map((l) => ({
+        id: l.row.id,
+        name: l.row.name,
+        enabled: l.row.enabled === 1 && !disabled.has(l.row.id),
+        disabledGlobally: l.row.enabled !== 1,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
   }
 
   /**

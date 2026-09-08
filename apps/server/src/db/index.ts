@@ -1057,6 +1057,37 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE planner_workspaces ADD COLUMN mcp_enabled INTEGER NOT NULL DEFAULT 1;
   `,
+  // PA-37 follow-up round two (reporter: "In additional to enable/disable
+  // for mcp all. Need add individual enable/disable. For example, we can
+  // globally disable bamboo mcp but allow Jira mcp. Same concept for per
+  // agent base - enable/disable all AND separate enable/disable for each
+  // mcp"): a third layer, at *registry* granularity — deliberately not tool
+  // granularity again (that was the first cut, reverted by this same
+  // ticket's earlier follow-up). The global half of this layer is not a new
+  // table at all: `mcp_registries.enabled` already is a per-registry global
+  // switch (it existed from the first version, for the connect/cache gate —
+  // it turns out to be exactly the "disable Bamboo globally" control too).
+  // What's missing is the per-*agent* half, so `planner_agent_disabled_mcp_registries`
+  // mirrors `planner_agent_disabled_tools`/`planner_agent_disabled_skills`
+  // exactly, one layer to the left (rows name a whole registry, not a tool
+  // or skill within one) — including the same deny-list-defaults-to-enabled
+  // convention. Unlike those two tables, `registry_id` is also a real
+  // foreign key with `ON DELETE CASCADE`: a tool or skill name is just a
+  // string with no row of its own to cascade from, but a registry is a real
+  // row here, so deleting it can clean up its per-agent rows the ordinary
+  // relational way instead of needing `McpRegistryService`'s own manual
+  // sweep (which still exists for `planner_tool_approvals`, an unrelated
+  // table with no such foreign key to lean on).
+  `
+  CREATE TABLE IF NOT EXISTS planner_agent_disabled_mcp_registries (
+    id           TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES planner_workspaces (id) ON DELETE CASCADE,
+    registry_id  TEXT NOT NULL REFERENCES mcp_registries (id) ON DELETE CASCADE,
+    created_at   INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_planner_agent_disabled_mcp_registries_unique
+    ON planner_agent_disabled_mcp_registries (workspace_id, registry_id);
+  `,
 ];
 
 /**

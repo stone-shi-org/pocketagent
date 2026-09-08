@@ -6,6 +6,7 @@ import {
   CreatePlannerWorkspaceRequest,
   PlannerMemoryTier,
   RegisterPlannerSkillRequest,
+  SetPlannerAgentMcpRegistryRequest,
   SetPlannerAgentSkillRequest,
   SetPlannerAgentToolRequest,
   SetPlannerSkillEnabledRequest,
@@ -20,6 +21,7 @@ import {
   type AgentEvent,
   type DeleteAllPlannerChatsResponse,
   type DiscoverPlannerModelsResponse,
+  type PlannerAgentMcpRegistriesResponse,
   type PlannerAgentSkillsResponse,
   type PlannerAgentToolsResponse,
   type PlannerApiKeyRevealResponse,
@@ -63,6 +65,7 @@ import {
   resolvePlannerWebSearchApiKey,
   revealPlannerApiKey,
   revealPlannerEmbeddingApiKey,
+  setMcpRegistryEnabledForWorkspace,
   setSkillEnabledForWorkspace,
   setSkillEnabledGlobally,
   setToolEnabledForWorkspace,
@@ -743,6 +746,37 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     }
     setSkillEnabledForWorkspace(app.pocket.db, id, parsed.data.skillId, parsed.data.enabled);
     return buildAgentSkillsResponse(app.pocket.db, id);
+  });
+
+  /**
+   * One agent's own MCP registry subset (PA-37 follow-up round two) — see
+   * `PlannerAgentMcpRegistryInfo`'s doc comment (protocol package). Unlike
+   * tools/skills, there is no separate "global disabled registry names"
+   * read here: a registry's own `enabled` column *is* the global layer
+   * (`McpRegistryService.listForWorkspace` already folds it into
+   * `disabledGlobally`), so this route is a thin pass-through rather than a
+   * second `buildAgent*Response` merging two deny-lists.
+   */
+  app.get('/api/planner/workspaces/:id/mcp-registries', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!app.pocket.plannerWorkspaces.get(id)) return notFound(reply, 'Workspace not found.');
+    const response: PlannerAgentMcpRegistriesResponse = { registries: app.pocket.mcpRegistry.listForWorkspace(id) };
+    return noStore(reply).send(response);
+  });
+
+  app.post('/api/planner/workspaces/:id/mcp-registries', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!app.pocket.plannerWorkspaces.get(id)) return notFound(reply, 'Workspace not found.');
+    const parsed = SetPlannerAgentMcpRegistryRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    if (!app.pocket.mcpRegistry.listForWorkspace(id).some((r) => r.id === parsed.data.registryId)) {
+      return notFound(reply, `Unknown MCP registry: ${parsed.data.registryId}`);
+    }
+    setMcpRegistryEnabledForWorkspace(app.pocket.db, id, parsed.data.registryId, parsed.data.enabled);
+    const response: PlannerAgentMcpRegistriesResponse = { registries: app.pocket.mcpRegistry.listForWorkspace(id) };
+    return response;
   });
 
   app.get('/api/planner/tool-approvals', async () => {

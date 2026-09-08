@@ -215,6 +215,45 @@ export function setSkillEnabledGlobally(db: Db, skillId: string, enabled: boolea
   }
 }
 
+// ---- planner_agent_disabled_mcp_registries -----------------------------------
+
+/**
+ * PA-37 follow-up round two: the per-agent half of registry-level MCP
+ * enablement — the same `readDisabledToolNames`/`setToolEnabledForWorkspace`
+ * shape, one layer to the left (a whole registry, not a tool within one).
+ * There is deliberately no `readGlobalDisabledMcpRegistries` counterpart:
+ * the global half of this layer is `mcp_registries.enabled`, a column on
+ * the registry's own row (`McpRegistryService`), not a separate deny-list —
+ * a registry is a real row that already has a natural place for its own
+ * global on/off state, unlike a bare tool or skill name.
+ */
+export function readAgentDisabledMcpRegistries(db: Db, workspaceId: string): Set<string> {
+  const rows = db
+    .prepare('SELECT registry_id FROM planner_agent_disabled_mcp_registries WHERE workspace_id = ?')
+    .all(workspaceId) as { registry_id: string }[];
+  return new Set(rows.map((r) => r.registry_id));
+}
+
+/** Idempotent either way, same as `setToolEnabledForWorkspace`. */
+export function setMcpRegistryEnabledForWorkspace(
+  db: Db,
+  workspaceId: string,
+  registryId: string,
+  enabled: boolean,
+): void {
+  if (enabled) {
+    db.prepare(
+      'DELETE FROM planner_agent_disabled_mcp_registries WHERE workspace_id = ? AND registry_id = ?',
+    ).run(workspaceId, registryId);
+  } else {
+    db.prepare(
+      `INSERT INTO planner_agent_disabled_mcp_registries (id, workspace_id, registry_id, created_at)
+       VALUES (@id, @workspaceId, @registryId, @createdAt)
+       ON CONFLICT (workspace_id, registry_id) DO NOTHING`,
+    ).run({ id: crypto.randomUUID(), workspaceId, registryId, createdAt: Date.now() });
+  }
+}
+
 // ---- planner_models ---------------------------------------------------------
 
 export interface PlannerModelRow {

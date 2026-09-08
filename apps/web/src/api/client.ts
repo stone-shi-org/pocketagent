@@ -29,6 +29,8 @@ import type {
   CreateMcpRegistryRequest,
   McpRegistryListResponse,
   McpRegistrySummary,
+  PlannerAgentMcpRegistriesResponse,
+  SetPlannerAgentMcpRegistryRequest,
   TestMcpRegistryResponse,
   UpdateMcpRegistryRequest,
   CreateWebhookRequest,
@@ -404,6 +406,19 @@ export const api = {
     request<TestMcpRegistryResponse>(`/api/mcp-registries/${encodeURIComponent(id)}/refresh-tools`, {
       method: 'POST',
     }),
+
+  // PA-37 follow-up round two: one agent's own per-registry MCP subset —
+  // same shape as listPlannerAgentSkills/setPlannerAgentSkill below.
+  listPlannerAgentMcpRegistries: (workspaceId: string) =>
+    request<PlannerAgentMcpRegistriesResponse>(
+      `/api/planner/workspaces/${encodeURIComponent(workspaceId)}/mcp-registries`,
+    ),
+
+  setPlannerAgentMcpRegistry: (workspaceId: string, body: SetPlannerAgentMcpRegistryRequest) =>
+    request<PlannerAgentMcpRegistriesResponse>(
+      `/api/planner/workspaces/${encodeURIComponent(workspaceId)}/mcp-registries`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
 
   listConversations: () =>
     request<{ conversations: ConversationInfo[] }>('/api/conversations'),

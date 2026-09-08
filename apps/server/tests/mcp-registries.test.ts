@@ -320,4 +320,89 @@ describe('MCP registry routes', () => {
       expect(listed.lastError).not.toBeNull();
     });
   });
+
+  // PA-37 follow-up round two (reporter: "we can globally disable bamboo
+  // mcp but allow Jira mcp. Same concept for per agent base - enable/disable
+  // all AND separate enable/disable for each mcp"): per-registry enablement,
+  // both layers — mirrors `planner-skills.test.ts`'s own
+  // "GET/POST .../skills reflect the per-agent view" test almost exactly,
+  // one level up (a whole registry rather than one skill).
+  describe('per-registry enablement (global via registry.enabled, per-agent via workspaces/:id/mcp-registries)', () => {
+    beforeEach(async () => {
+      t = await createTestApp();
+    });
+
+    async function createRegistry(name: string): Promise<string> {
+      const res = await post('/api/mcp-registries', { name, transport: 'streamable_http', url: 'https://example.com/mcp', authKind: 'none' });
+      return res.json().id as string;
+    }
+
+    it('GET/POST /api/planner/workspaces/:id/mcp-registries reflect the per-agent view, greying out a globally disabled one', async () => {
+      const id = await createRegistry('Jira MCP');
+      const wsId = t.context.plannerWorkspaces.getDefault()!.id;
+
+      const before = (await get(`/api/planner/workspaces/${wsId}/mcp-registries`)).json();
+      expect(before.registries).toEqual([
+        expect.objectContaining({ id, name: 'Jira MCP', enabled: true, disabledGlobally: false }),
+      ]);
+
+      // Global off (the registry's own `enabled`, not a new deny-list table).
+      await patch(`/api/mcp-registries/${encodeURIComponent(id)}`, { enabled: false });
+      const globallyOff = (await get(`/api/planner/workspaces/${wsId}/mcp-registries`)).json();
+      expect(globallyOff.registries).toEqual([
+        expect.objectContaining({ id, enabled: false, disabledGlobally: true }),
+      ]);
+
+      // Back on globally, then disabled for just this agent.
+      await patch(`/api/mcp-registries/${encodeURIComponent(id)}`, { enabled: true });
+      const setDisabled = await post(`/api/planner/workspaces/${wsId}/mcp-registries`, { registryId: id, enabled: false });
+      expect(setDisabled.json().registries).toEqual([
+        expect.objectContaining({ id, enabled: false, disabledGlobally: false }),
+      ]);
+
+      // Re-enabling for the agent restores it.
+      const setEnabled = await post(`/api/planner/workspaces/${wsId}/mcp-registries`, { registryId: id, enabled: true });
+      expect(setEnabled.json().registries).toEqual([expect.objectContaining({ id, enabled: true })]);
+    });
+
+    it('404s an unknown registry id or workspace id', async () => {
+      const wsId = t.context.plannerWorkspaces.getDefault()!.id;
+      expect(
+        (await post(`/api/planner/workspaces/${wsId}/mcp-registries`, { registryId: 'does-not-exist', enabled: false }))
+          .statusCode,
+      ).toBe(404);
+      expect((await get('/api/planner/workspaces/does-not-exist/mcp-registries')).statusCode).toBe(404);
+    });
+
+    it('disabling one registry for an agent leaves a second registry, and every other agent, unaffected', async () => {
+      const jiraId = await createRegistry('Jira MCP');
+      const bambooId = await createRegistry('Bamboo MCP');
+      const wsId = t.context.plannerWorkspaces.getDefault()!.id;
+      const otherWs = (await post('/api/planner/workspaces', { name: 'Other agent' })).json();
+
+      await post(`/api/planner/workspaces/${wsId}/mcp-registries`, { registryId: bambooId, enabled: false });
+
+      const mine = (await get(`/api/planner/workspaces/${wsId}/mcp-registries`)).json().registries;
+      expect(mine.find((r: { id: string }) => r.id === jiraId)).toMatchObject({ enabled: true });
+      expect(mine.find((r: { id: string }) => r.id === bambooId)).toMatchObject({ enabled: false });
+
+      const others = (await get(`/api/planner/workspaces/${otherWs.id}/mcp-registries`)).json().registries;
+      expect(others.find((r: { id: string }) => r.id === bambooId)).toMatchObject({ enabled: true });
+    });
+
+    it('deleting a registry cascades away its per-agent disabled rows (no orphaned config)', async () => {
+      const id = await createRegistry('Temp MCP');
+      const wsId = t.context.plannerWorkspaces.getDefault()!.id;
+      await post(`/api/planner/workspaces/${wsId}/mcp-registries`, { registryId: id, enabled: false });
+      expect(
+        (t.db.prepare('SELECT COUNT(*) AS n FROM planner_agent_disabled_mcp_registries').get() as { n: number }).n,
+      ).toBe(1);
+
+      expect((await del(`/api/mcp-registries/${encodeURIComponent(id)}`)).statusCode).toBe(204);
+
+      expect(
+        (t.db.prepare('SELECT COUNT(*) AS n FROM planner_agent_disabled_mcp_registries').get() as { n: number }).n,
+      ).toBe(0);
+    });
+  });
 });

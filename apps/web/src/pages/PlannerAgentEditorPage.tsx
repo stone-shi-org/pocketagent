@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type {
+  PlannerAgentMcpRegistryInfo,
   PlannerAgentSkillInfo,
   PlannerAgentToolInfo,
   PlannerMemory,
@@ -41,6 +42,7 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
   const [models, setModels] = useState<PlannerModel[]>([]);
   const [tools, setTools] = useState<PlannerAgentToolInfo[] | null>(null);
   const [skills, setSkills] = useState<PlannerAgentSkillInfo[] | null>(null);
+  const [mcpRegistries, setMcpRegistries] = useState<PlannerAgentMcpRegistryInfo[] | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -55,18 +57,21 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
 
   const load = useCallback(async () => {
     try {
-      const [{ workspaces }, { models: modelList }, agentTools, agentSkills] = await Promise.all([
-        api.listPlannerWorkspaces(),
-        api.listPlannerModels(),
-        api.listPlannerAgentTools(agentId),
-        api.listPlannerAgentSkills(agentId),
-      ]);
+      const [{ workspaces }, { models: modelList }, agentTools, agentSkills, agentMcpRegistries] =
+        await Promise.all([
+          api.listPlannerWorkspaces(),
+          api.listPlannerModels(),
+          api.listPlannerAgentTools(agentId),
+          api.listPlannerAgentSkills(agentId),
+          api.listPlannerAgentMcpRegistries(agentId),
+        ]);
       const found = workspaces.find((w) => w.id === agentId) ?? null;
       setAgent(found);
       setNameInput(found?.name ?? '');
       setModels(modelList);
       setTools(agentTools.tools);
       setSkills(agentSkills.skills);
+      setMcpRegistries(agentMcpRegistries.registries);
       setError(null);
     } catch (err) {
       onApiError(err);
@@ -164,6 +169,14 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
   // page's own "MCP servers" section.
   const toggleMcpEnabled = (enabled: boolean): void => {
     void withBusy(() => api.updatePlannerWorkspace(agentId, { mcpEnabled: enabled }));
+  };
+
+  // PA-37 follow-up round two: per-registry, still per agent — "we can
+  // globally disable bamboo mcp but allow Jira mcp. Same concept for per
+  // agent base... enable/disable all AND separate enable/disable for each
+  // mcp." Same `withBusy` posture as every other toggle on this page.
+  const toggleMcpRegistry = (registryId: string, enabled: boolean): void => {
+    void withBusy(() => api.setPlannerAgentMcpRegistry(agentId, { registryId, enabled }));
   };
 
   const startEditMemory = (memory: PlannerMemory): void => {
@@ -372,12 +385,12 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
       <div className="planner-section">
         <h3>MCP</h3>
         <p className="planner-row-meta" style={{ marginBottom: 10 }}>
-          Whether this agent may use any MCP registry's tools at all. This is the only MCP control
-          here — a registry's own settings (url, auth, which servers exist) are managed globally
-          from the Pocket Agent settings page's "MCP servers" section, not per agent. Off here even
-          while the global switch is on.
+          Whether this agent may use MCP registries, as a whole and one at a time. A registry's own
+          settings (url, auth, which servers exist) are managed globally from the Pocket Agent
+          settings page's "MCP servers" section, not here — this section only ever enables or
+          disables, never configures.
         </p>
-        <label className="planner-checkbox-row" style={{ marginBottom: 6 }}>
+        <label className="planner-checkbox-row" style={{ marginBottom: 10 }}>
           <input
             type="checkbox"
             checked={agent.mcpEnabled}
@@ -386,6 +399,35 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
           />
           <span>Enable MCP for this agent</span>
         </label>
+        {agent.mcpEnabled && (
+          <>
+            <p className="planner-row-meta" style={{ marginBottom: 8 }}>
+              Restrict which MCP registries this agent alone can reach. A registry turned off
+              globally on the settings page is unavailable here too, same as a globally disabled
+              tool or skill.
+            </p>
+            {mcpRegistries === null ? (
+              <div className="spinner">Loading…</div>
+            ) : mcpRegistries.length === 0 ? (
+              <p className="planner-row-meta">No MCP registries configured yet.</p>
+            ) : (
+              mcpRegistries.map((r) => (
+                <label key={r.id} className="planner-checkbox-row" style={{ marginBottom: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={r.enabled}
+                    disabled={busy || r.disabledGlobally}
+                    onChange={(e) => toggleMcpRegistry(r.id, e.target.checked)}
+                  />
+                  <span>
+                    <strong>{r.name}</strong>
+                    {r.disabledGlobally && <span className="planner-row-meta"> — disabled globally</span>}
+                  </span>
+                </label>
+              ))
+            )}
+          </>
+        )}
       </div>
 
       <div className="planner-section">

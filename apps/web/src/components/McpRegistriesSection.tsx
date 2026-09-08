@@ -200,6 +200,24 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
     }
   }
 
+  // PA-37 follow-up round two: a quick inline toggle for the registry's own
+  // *global* switch — "we can globally disable bamboo mcp but allow Jira
+  // mcp" — right on the row, rather than requiring Edit -> uncheck Enabled
+  // -> Save for what is otherwise a one-field, no-secret-touching change.
+  async function toggleRegistryEnabled(registry: McpRegistrySummary, enabled: boolean): Promise<void> {
+    setBusy(true);
+    try {
+      await api.updateMcpRegistry(registry.id, { enabled });
+      await load();
+      onChanged();
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not update the registry.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function test(registry: McpRegistrySummary, refresh: boolean): Promise<void> {
     setTestResults((prev) => ({ ...prev, [registry.id]: 'testing' }));
     try {
@@ -265,6 +283,15 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
           return (
             <div key={r.id} className="planner-model-row">
               <span>
+                <label className="planner-checkbox-row" style={{ display: 'inline-flex', marginRight: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={r.enabled}
+                    disabled={busy}
+                    aria-label={`Enable ${r.name} globally`}
+                    onChange={(e) => void toggleRegistryEnabled(r, e.target.checked)}
+                  />
+                </label>
                 <strong>{r.name}</strong>{' '}
                 <span className="planner-row-meta">
                   ({r.transport === 'streamable_http' ? 'Streamable HTTP' : 'HTTP+SSE'})
