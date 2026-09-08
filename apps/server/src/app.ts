@@ -50,6 +50,7 @@ import { usageRoutes } from './routes/usage.js';
 import { worktreeRoutes } from './routes/worktrees.js';
 import { webhookRoutes } from './routes/webhooks.js';
 import { plannerRoutes } from './routes/planner.js';
+import { mcpRegistryRoutes } from './routes/mcp-registries.js';
 import { websocketRoutes } from './ws/index.js';
 import { WebhookService } from './webhooks/index.js';
 import { PlannerWorkspaceRegistry } from './planner/workspaces.js';
@@ -57,6 +58,7 @@ import { createPlannerWorkspaceStore, readPlannerSettings, revealPlannerEmbeddin
 import { PlannerChatService } from './planner/chats.js';
 import type { QueuedRunSummary } from '@pocketagent/protocol';
 import { PlannerMemoryService, type PlannerMemoryEmbedConfig } from './planner/memory.js';
+import { McpRegistryService } from './planner/mcp/registry-service.js';
 import { PlannerLlmClient } from './planner/llm-client.js';
 import { MemoryConsolidationService } from './planner/memory-consolidation.js';
 import type { PocketContext } from './types.js';
@@ -368,6 +370,11 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
       : null;
   const plannerMemory = new PlannerMemoryService({ db, embed: embeddingConfig, logger: app.log });
 
+  // PA-37: MCP registries. Constructed before `plannerChats` for the same
+  // reason `plannerMemory` is — the turn loop's tool catalog
+  // (`list_mcp_tools`/`call_mcp_tool`) needs it.
+  const mcpRegistry = new McpRegistryService({ db, encKey: config.settingsEncKey, logger: app.log });
+
   const plannerChats = new PlannerChatService({
     db,
     workspaces,
@@ -377,6 +384,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     historyDeps: { sessions, conversations, agyTranscripts, piTranscripts },
     shell: config.shell,
     memory: plannerMemory,
+    mcpRegistry,
     logger: app.log,
     ...(options.plannerLlmFetch ? { llmFetch: options.plannerLlmFetch } : {}),
   });
@@ -476,6 +484,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     plannerWorkspacesRoot,
     plannerChats,
     plannerMemory,
+    mcpRegistry,
     ...(options.plannerLlmFetch ? { plannerLlmFetch: options.plannerLlmFetch } : {}),
     agents,
     customClaudeProviders,
@@ -600,6 +609,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(customClaudeProviderRoutes);
   await app.register(webhookRoutes);
   await app.register(plannerRoutes);
+  await app.register(mcpRegistryRoutes);
   await app.register(settingsRoutes);
   await app.register(pushRoutes);
   await app.register(usageRoutes);

@@ -36,6 +36,7 @@ function depsFor(
     historyDeps: { sessions, conversations, agyTranscripts, piTranscripts },
     shell: t.context.config.shell,
     memory: t.context.plannerMemory,
+    mcpRegistry: t.context.mcpRegistry,
     // Defaults to the seeded default planner workspace, like every other
     // tool call in this file implicitly runs "as" that agent — a caller
     // that cares about a different (or no) workspace passes it explicitly.
@@ -53,6 +54,7 @@ describe('PLANNER_TOOLS catalog', () => {
     expect(readOnlyNames).toEqual(
       [
         'get_current_time',
+        'list_mcp_tools',
         'list_sessions',
         'list_workspaces',
         'memory_search',
@@ -64,6 +66,7 @@ describe('PLANNER_TOOLS catalog', () => {
     );
     expect(mutatingNames).toEqual(
       [
+        'call_mcp_tool',
         'delete_worktree',
         'exec_command',
         'memory_save',

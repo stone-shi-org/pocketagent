@@ -26,6 +26,11 @@ import type {
   CustomClaudeProviderListResponse,
   CustomClaudeProviderSummary,
   UpdateCustomClaudeProviderRequest,
+  CreateMcpRegistryRequest,
+  McpRegistryListResponse,
+  McpRegistrySummary,
+  TestMcpRegistryResponse,
+  UpdateMcpRegistryRequest,
   CreateWebhookRequest,
   UpdateWebhookRequest,
   Webhook,
@@ -366,6 +371,33 @@ export const api = {
 
   deleteCustomClaudeProvider: (id: string) =>
     request<void>(`/api/custom-claude-providers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // ---- MCP registries (PA-37) -------------------------------------------
+  //
+  // No `reveal` method either, same reasoning as a custom Claude provider's
+  // API key — a bearer token or header value is write-only.
+
+  listMcpRegistries: () => request<McpRegistryListResponse>('/api/mcp-registries'),
+
+  createMcpRegistry: (body: CreateMcpRegistryRequest) =>
+    request<McpRegistrySummary>('/api/mcp-registries', { method: 'POST', body: JSON.stringify(body) }),
+
+  updateMcpRegistry: (id: string, body: UpdateMcpRegistryRequest) =>
+    request<McpRegistrySummary>(`/api/mcp-registries/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  deleteMcpRegistry: (id: string) =>
+    request<void>(`/api/mcp-registries/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  testMcpRegistry: (id: string) =>
+    request<TestMcpRegistryResponse>(`/api/mcp-registries/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+
+  refreshMcpRegistryTools: (id: string) =>
+    request<TestMcpRegistryResponse>(`/api/mcp-registries/${encodeURIComponent(id)}/refresh-tools`, {
+      method: 'POST',
+    }),
 
   listConversations: () =>
     request<{ conversations: ConversationInfo[] }>('/api/conversations'),

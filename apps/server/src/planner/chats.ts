@@ -29,6 +29,7 @@ import {
   writePlannerChatMemoryFoldedTurns,
   writePlannerLastModelId,
 } from './store.js';
+import { CALL_MCP_TOOL_NAME, LIST_MCP_TOOLS_NAME } from '@pocketagent/protocol';
 import { resolveApprovalStatus, rememberDecisionIfAsked } from './approval.js';
 import { appendTranscriptEvent, readTranscriptEvents } from './transcript.js';
 import {
@@ -40,6 +41,7 @@ import {
   type PlannerLlmUsage,
 } from './llm-client.js';
 import { PLANNER_TOOLS, findPlannerTool, toOpenAiToolSpecs, type PlannerToolDefinition } from './tools.js';
+import type { McpRegistryService } from './mcp/registry-service.js';
 
 export class PlannerChatError extends Error {
   override readonly name = 'PlannerChatError';
@@ -106,6 +108,10 @@ export interface PlannerChatServiceOptions {
       (via `executeTool`) and to the rolling-window fold and pre-turn
       ranking below. */
   memory: PlannerMemoryService;
+  /** PA-37: the MCP registry catalog/dispatcher `list_mcp_tools`/
+      `call_mcp_tool` are built on, and what `toolsFor`/the dynamic
+      approval-gating special case (`effectiveMcpToolIdentity`) both read. */
+  mcpRegistry: McpRegistryService;
   logger?: { warn: (obj: unknown, msg?: string) => void };
   /** Injected in tests so no real network call is ever made. */
   llmFetch?: typeof fetch;
@@ -446,8 +452,57 @@ export class PlannerChatService {
   private toolsFor(workspaceId: string | null): readonly PlannerToolDefinition[] {
     const globalDisabled = readGlobalDisabledToolNames(this.opts.db);
     const agentDisabled = workspaceId ? readDisabledToolNames(this.opts.db, workspaceId) : EMPTY_DISABLED_SET;
-    if (globalDisabled.size === 0 && agentDisabled.size === 0) return this.tools;
-    return this.tools.filter((t) => !globalDisabled.has(t.name) && !agentDisabled.has(t.name));
+    let tools =
+      globalDisabled.size === 0 && agentDisabled.size === 0
+        ? this.tools
+        : this.tools.filter((t) => !globalDisabled.has(t.name) && !agentDisabled.has(t.name));
+
+    // PA-37: `list_mcp_tools`/`call_mcp_tool` stand in for every MCP
+    // registry's tools (see `tools.ts`'s own "MCP" section doc comment) —
+    // omitted entirely, on top of whatever the deny-lists above already
+    // decided, when this agent has nothing enabled behind them. An agent
+    // with no MCP registries configured must see no difference at all from
+    // before this feature existed.
+    if (this.opts.mcpRegistry.listEnabledTools(workspaceId).length === 0) {
+      tools = tools.filter((t) => t.name !== LIST_MCP_TOOLS_NAME && t.name !== CALL_MCP_TOOL_NAME);
+    }
+    return tools;
+  }
+
+  /**
+   * PA-37: for a `call_mcp_tool` invocation, resolves the *real* underlying
+   * MCP tool identity from its own (LLM-authored, not yet trusted)
+   * arguments — this is what approval gating, "remember" persistence, and
+   * the permission card must key off, never the wrapper's own static
+   * `readOnly`/name. Returns `null` for every other tool call, in which case
+   * the caller falls back to the tool's own static `readOnly` exactly as
+   * before this feature existed.
+   *
+   * Fails closed: an unparsable/missing `tool` argument, or one that does not
+   * resolve to a currently-enabled MCP tool, comes back `readOnly: false`
+   * (gated) rather than `true` — the same posture an unresolvable safety hint
+   * gets everywhere else in this codebase. `enabled` is re-checked here
+   * (not just "does this tool exist at all") so a call naming a tool that is
+   * individually disabled still pauses for a human rather than silently
+   * running once approved elsewhere.
+   */
+  private effectiveMcpToolIdentity(
+    workspaceId: string | null,
+    call: PlannerLlmToolCall,
+  ): { name: string; displayName: string; readOnly: boolean } | null {
+    if (call.function.name !== CALL_MCP_TOOL_NAME) return null;
+    const args = safeParseArgs(call.function.arguments);
+    const requested = typeof args.tool === 'string' ? args.tool.trim() : '';
+    if (!requested) {
+      return { name: CALL_MCP_TOOL_NAME, displayName: 'an MCP tool (not yet named)', readOnly: false };
+    }
+    const enabled = this.opts.mcpRegistry.listEnabledTools(workspaceId).some((t) => t.qualifiedName === requested);
+    const resolved = this.opts.mcpRegistry.resolveTool(requested);
+    return {
+      name: requested,
+      displayName: resolved ? `"${resolved.tool.name}" on "${resolved.registryName}"` : requested,
+      readOnly: enabled && resolved ? resolved.tool.readOnlyHint === true : false,
+    };
   }
 
   /**
@@ -572,9 +627,16 @@ export class PlannerChatService {
     const workspacePath = this.workspacePathFor(chat);
     const call = pending.toolCalls[pending.index]!;
     const tool = this.resolveEnabledTool(pending.workspaceId, call.function.name);
+    // PA-37: same real-identity resolution `processToolCalls` used to decide
+    // to pause in the first place — recomputed here (deterministically, from
+    // the same unchanged `call`) rather than threaded through
+    // `PendingPlannerTurn`, so "remember" persists against the underlying MCP
+    // tool, never the wrapper's own name.
+    const mcpIdentity = this.effectiveMcpToolIdentity(pending.workspaceId, call);
+    const gateName = mcpIdentity?.name ?? call.function.name;
 
     if (choice !== 'allow_once') {
-      rememberDecisionIfAsked(this.opts.db, choice, call.function.name, pending.workspaceId);
+      rememberDecisionIfAsked(this.opts.db, choice, gateName, pending.workspaceId);
     }
 
     if (choice === 'deny' || !tool) {
@@ -817,10 +879,17 @@ export class PlannerChatService {
         continue;
       }
 
-      if (!tool.readOnly) {
+      // PA-37: a `call_mcp_tool` invocation's real risk lives in *which*
+      // underlying MCP tool it names, never in the wrapper's own static
+      // `readOnly` — see `effectiveMcpToolIdentity`'s own doc comment.
+      const mcpIdentity = this.effectiveMcpToolIdentity(chat.workspaceId, call);
+      const gateName = mcpIdentity?.name ?? tool.name;
+      const gateReadOnly = mcpIdentity?.readOnly ?? tool.readOnly;
+
+      if (!gateReadOnly) {
         const decision = resolveApprovalStatus(
           this.opts.db,
-          tool.name,
+          gateName,
           chat.workspaceId,
           chat.skipToolApprovalsEnabled,
         );
@@ -839,10 +908,10 @@ export class PlannerChatService {
           yield* this.emit(workspacePath, chat.id, {
             kind: 'permission_request',
             id: approvalId,
-            toolName: tool.name,
+            toolName: gateName,
             input: args,
-            title: `Run ${tool.name}`,
-            displayName: null,
+            title: mcpIdentity ? `Run MCP tool ${mcpIdentity.displayName}` : `Run ${tool.name}`,
+            displayName: mcpIdentity?.displayName ?? null,
             filePath: extractFilePath(args),
             reason: null,
             canAllowForSession: false,
@@ -895,6 +964,7 @@ export class PlannerChatService {
           historyDeps: this.opts.historyDeps,
           shell: this.opts.shell,
           memory: this.opts.memory,
+          mcpRegistry: this.opts.mcpRegistry,
           workspaceId: chat.workspaceId,
           webSearch: {
             enabled: settings.webSearchEnabled,

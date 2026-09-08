@@ -25,6 +25,7 @@ function depsFor(t: TestApp, workspaceId: string | null): PlannerToolDeps {
     historyDeps: { sessions, conversations, agyTranscripts, piTranscripts },
     shell: t.context.config.shell,
     memory: t.context.plannerMemory,
+    mcpRegistry: t.context.mcpRegistry,
     workspaceId,
     webSearch: TOOL_INTEGRATION_DISABLED,
     urlFetch: TOOL_INTEGRATION_DISABLED,

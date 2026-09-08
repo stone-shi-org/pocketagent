@@ -56,6 +56,9 @@ importers:
       '@fastify/websocket':
         specifier: ^11.0.2
         version: 11.3.0
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.30.0
+        version: 1.30.0(zod@3.25.76)
       '@pocketagent/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol

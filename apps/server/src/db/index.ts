@@ -79,6 +79,42 @@ export const CUSTOM_CLAUDE_PROVIDERS_DDL = `
 `;
 
 /**
+ * The `mcp_registries` table (PA-37).
+ *
+ * A named constant for the same reason `CUSTOM_CLAUDE_PROVIDERS_DDL` is one:
+ * used both as this migration and as an idempotent repair in `openDatabase`,
+ * so a database whose `schema_version` checkpoint lands at or past this
+ * migration's index on some other branch's history (the positional-migration
+ * hazard documented at the other repairs below) still ends up with this
+ * table rather than throwing "no such table" on the first registry query.
+ *
+ * No new disabled-tool tables ride along with this one — an MCP tool is
+ * addressed by `mcpQualifiedToolName(registryId, toolName)` and that string
+ * is stored directly in the *existing* `planner_global_disabled_tools`/
+ * `planner_agent_disabled_tools`/`planner_tool_approvals` tables. See PA-37's
+ * posted plan for why that is the literal reading of "MCP tools treat same
+ * as tools," not a parallel system that merely looks similar.
+ */
+export const MCP_REGISTRIES_DDL = `
+  CREATE TABLE IF NOT EXISTS mcp_registries (
+    id                       TEXT PRIMARY KEY,
+    name                     TEXT NOT NULL,
+    transport                TEXT NOT NULL,
+    url                      TEXT NOT NULL,
+    auth_kind                TEXT NOT NULL DEFAULT 'none',
+    bearer_token_ciphertext  TEXT,
+    header_name              TEXT,
+    header_value_ciphertext  TEXT,
+    enabled                  INTEGER NOT NULL DEFAULT 1,
+    tool_count               INTEGER NOT NULL DEFAULT 0,
+    last_connected_at        INTEGER,
+    last_error               TEXT,
+    created_at               INTEGER NOT NULL,
+    updated_at               INTEGER NOT NULL
+  );
+`;
+
+/**
  * Exported for one test only: `cron.test.ts` builds a *genuine* historical
  * database by replaying a prefix of this array, rather than by fully migrating
  * and then rewriting `schema_version`. Rewinding a fully-migrated database
@@ -965,6 +1001,9 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE planner_memories ADD COLUMN embedding BLOB;
   ALTER TABLE planner_memories ADD COLUMN embedding_model TEXT;
   `,
+  // PA-37: MCP registries — see `MCP_REGISTRIES_DDL`'s own doc comment for why
+  // the DDL lives in a named constant rather than inline here.
+  MCP_REGISTRIES_DDL,
 ];
 
 /**
@@ -1103,6 +1142,9 @@ export function openDatabase(databasePath: string): Db {
   // *same* DDL constant the migration uses is idempotent (`IF NOT EXISTS`) and
   // cannot drift from it.
   db.exec(CUSTOM_CLAUDE_PROVIDERS_DDL);
+  // PA-37, same positional-migration hazard once more: see `MCP_REGISTRIES_DDL`'s
+  // own doc comment.
+  db.exec(MCP_REGISTRIES_DDL);
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
   return db;

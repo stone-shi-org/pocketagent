@@ -527,6 +527,26 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     return noStore(reply).send(response);
   });
 
+  /**
+   * The full tool catalog, native and MCP-derived alike (PA-37: "MCP treat
+   * same as tools") — every reader below (both listing routes, and the two
+   * `PATCH`/`POST` handlers' "is this a real tool name" checks) goes through
+   * this instead of `PLANNER_TOOLS` directly, so an MCP tool is
+   * indistinguishable from a native one anywhere a name is validated or
+   * listed. An MCP tool's `name` is already namespaced
+   * (`mcpQualifiedToolName`), so it cannot collide with a native one.
+   */
+  function fullToolCatalog(): { name: string; description: string; readOnly: boolean }[] {
+    return [
+      ...PLANNER_TOOLS.map((t) => ({ name: t.name, description: t.description, readOnly: t.readOnly })),
+      ...app.pocket.mcpRegistry.listKnownTools().map((t) => ({
+        name: t.qualifiedName,
+        description: t.description,
+        readOnly: t.readOnly,
+      })),
+    ];
+  }
+
   /** The global catalog for a settings page — see `PlannerToolInfo`'s doc
       comment. `enabled` here is the global switch (PA-6 round 5); an
       agent's own, further-restricted view is `GET .../workspaces/:id/tools`
@@ -534,19 +554,14 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
   app.get('/api/planner/tools', async () => {
     const disabled = readGlobalDisabledToolNames(app.pocket.db);
     const response: PlannerToolListResponse = {
-      tools: PLANNER_TOOLS.map((t) => ({
-        name: t.name,
-        description: t.description,
-        readOnly: t.readOnly,
-        enabled: !disabled.has(t.name),
-      })),
+      tools: fullToolCatalog().map((t) => ({ ...t, enabled: !disabled.has(t.name) })),
     };
     return response;
   });
 
   app.patch('/api/planner/tools/:name', async (request, reply) => {
     const { name } = request.params as { name: string };
-    if (!PLANNER_TOOLS.some((t) => t.name === name)) {
+    if (!fullToolCatalog().some((t) => t.name === name)) {
       return notFound(reply, `Unknown tool: ${name}`);
     }
     const parsed = SetPlannerToolEnabledRequest.safeParse(request.body);
@@ -556,12 +571,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     setToolEnabledGlobally(app.pocket.db, name, parsed.data.enabled);
     const disabled = readGlobalDisabledToolNames(app.pocket.db);
     const response: PlannerToolListResponse = {
-      tools: PLANNER_TOOLS.map((t) => ({
-        name: t.name,
-        description: t.description,
-        readOnly: t.readOnly,
-        enabled: !disabled.has(t.name),
-      })),
+      tools: fullToolCatalog().map((t) => ({ ...t, enabled: !disabled.has(t.name) })),
     };
     return response;
   });
@@ -573,10 +583,8 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const globalDisabled = readGlobalDisabledToolNames(db);
     const agentDisabled = readDisabledToolNames(db, workspaceId);
     return {
-      tools: PLANNER_TOOLS.map((t) => ({
-        name: t.name,
-        description: t.description,
-        readOnly: t.readOnly,
+      tools: fullToolCatalog().map((t) => ({
+        ...t,
         enabled: !globalDisabled.has(t.name) && !agentDisabled.has(t.name),
         disabledGlobally: globalDisabled.has(t.name),
       })),
@@ -596,7 +604,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     if (!parsed.success) {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
-    if (!PLANNER_TOOLS.some((t) => t.name === parsed.data.toolName)) {
+    if (!fullToolCatalog().some((t) => t.name === parsed.data.toolName)) {
       return notFound(reply, `Unknown tool: ${parsed.data.toolName}`);
     }
     setToolEnabledForWorkspace(app.pocket.db, id, parsed.data.toolName, parsed.data.enabled);

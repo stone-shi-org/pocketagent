@@ -20,6 +20,7 @@ import type { PromptQueueService } from './sessions/prompt-queue.js';
 import type { PlannerWorkspaceRegistry } from './planner/workspaces.js';
 import type { PlannerChatService } from './planner/chats.js';
 import type { PlannerMemoryService } from './planner/memory.js';
+import type { McpRegistryService } from './planner/mcp/registry-service.js';
 
 export interface PocketContext {
   config: Config;
@@ -38,6 +39,8 @@ export interface PocketContext {
   plannerChats: PlannerChatService;
   /** PA-29: the memory system — see `planner/memory.ts`'s doc comment. */
   plannerMemory: PlannerMemoryService;
+  /** PA-37: MCP registries — see `planner/mcp/registry-service.ts`'s doc comment. */
+  mcpRegistry: McpRegistryService;
   /** PA-29: injected in tests so a route that builds its own ad hoc
       `PlannerLlmClient` (`POST /api/planner/settings/embeddings/test`) never
       makes a real network call either — the same fetch override

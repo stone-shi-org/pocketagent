@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { AgentEvent, SessionInfo } from '@pocketagent/protocol';
+import { CALL_MCP_TOOL_NAME, LIST_MCP_TOOLS_NAME, type AgentEvent, type SessionInfo } from '@pocketagent/protocol';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
 import type { SessionManager, StructuredLikeSession } from '../sessions/manager.js';
 import { readSessionHistory, type SessionHistoryDeps } from '../sessions/history.js';
@@ -11,6 +11,7 @@ import { WorktreeError } from '../git/worktree.js';
 import { buildChildEnv } from '../sessions/env.js';
 import type { PlannerWorkspaceRegistry } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
+import type { McpRegistryService } from './mcp/registry-service.js';
 
 /**
  * PA-6: the planner's tool catalog.
@@ -90,6 +91,14 @@ export interface PlannerToolDeps {
    * defaults to `() => new Date()`, i.e. the host's real wall clock.
    */
   now?: () => Date;
+  /**
+   * PA-37: the MCP registry catalog/dispatcher `list_mcp_tools`/
+   * `call_mcp_tool` are built on. Threaded through the same way `memory`/
+   * `worktrees` are — one shared instance, read fresh on every call so a
+   * registry created, disabled, or reconnected mid-conversation takes effect
+   * on the very next turn.
+   */
+  mcpRegistry: McpRegistryService;
 }
 
 /** PA-31: one third-party HTTP integration's live config — see
@@ -813,6 +822,107 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       if (!stat.isDirectory()) return `${requestedCwd} is not a directory.`;
 
       return runShellCommand(deps.shell, command, cwd);
+    },
+  },
+
+  // ---- MCP (PA-37) -----------------------------------------------------
+  //
+  // Exactly two tools represent *every* MCP registry's *every* tool, no
+  // matter how many are configured — the goal the reporter stated directly
+  // ("NOT to have full tools on each turn"). A per-tool JSON Schema is only
+  // ever returned in `list_mcp_tools`'s own *result* text, on a call the
+  // model chose to make, never as a standing entry in the turn's own `tools`
+  // array the way a native tool's schema is. `driveLoop`/`toolsFor`
+  // (`planner/chats.ts`) additionally omit both of these two whenever no
+  // enabled MCP tool exists for the calling agent, so an agent with no
+  // registries sees no change at all.
+  //
+  // `call_mcp_tool`'s approval gating cannot come from its own `readOnly`
+  // below — its risk depends entirely on which underlying tool `arguments.tool`
+  // names. `PlannerChatService.effectiveMcpToolIdentity` resolves that
+  // dynamically before `processToolCalls`/`resolveApproval` ever consult
+  // `readOnly`; the `false` here is only the fail-closed static fallback for
+  // if that resolution ever comes back empty (an unparsable call, an unknown
+  // tool name) — see that method's own doc comment.
+  {
+    name: LIST_MCP_TOOLS_NAME,
+    description:
+      'Discover MCP (Model Context Protocol) tools available to this agent right now, by name or ' +
+      'keyword. Returns each match\'s full description and parameter schema, so this is the way to ' +
+      'learn how to call one — never assume a schema; always call this first. Omit `query` to see ' +
+      'everything currently enabled (capped at 50).',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Text to match against MCP tool names and descriptions. Omit to list everything.',
+        },
+      },
+      additionalProperties: false,
+    },
+    readOnly: true,
+    async execute(deps, args) {
+      const query = typeof args.query === 'string' ? args.query.trim().toLowerCase() : '';
+      const enabled = deps.mcpRegistry.listEnabledTools(deps.workspaceId);
+      if (enabled.length === 0) {
+        return 'No MCP tools are currently enabled for this agent.';
+      }
+      const matches = query
+        ? enabled.filter(
+            (t) => t.qualifiedName.toLowerCase().includes(query) || t.description.toLowerCase().includes(query),
+          )
+        : enabled.slice(0, 50);
+      if (matches.length === 0) {
+        return `No enabled MCP tool matched "${query}". ${enabled.length} tool(s) are enabled in total; call again with no query to list them.`;
+      }
+      const detailed = matches.map((t) => {
+        const resolved = deps.mcpRegistry.resolveTool(t.qualifiedName);
+        return {
+          tool: t.qualifiedName,
+          description: t.description,
+          parameters: resolved?.tool.inputSchema ?? { type: 'object', properties: {} },
+        };
+      });
+      return truncate(JSON.stringify(detailed), MAX_TOOL_RESULT_CHARS);
+    },
+  },
+  {
+    name: CALL_MCP_TOOL_NAME,
+    description:
+      'Call one MCP tool by the exact name returned from list_mcp_tools, with arguments matching ' +
+      'its parameter schema. Always call list_mcp_tools first if you have not already learned this ' +
+      "tool's schema in this conversation.",
+    parameters: {
+      type: 'object',
+      properties: {
+        tool: { type: 'string', description: 'The exact tool name from list_mcp_tools.' },
+        arguments: { type: 'object', description: "The tool's arguments, matching its parameter schema." },
+      },
+      required: ['tool'],
+      additionalProperties: false,
+    },
+    // Static fallback only — see this section's own doc comment above.
+    readOnly: false,
+    async execute(deps, args) {
+      const toolName = String(args.tool ?? '').trim();
+      if (!toolName) return 'No MCP tool name provided. Call list_mcp_tools first to find one.';
+      const callArgs =
+        args.arguments && typeof args.arguments === 'object' ? (args.arguments as Record<string, unknown>) : {};
+
+      const enabled = deps.mcpRegistry.listEnabledTools(deps.workspaceId);
+      if (!enabled.some((t) => t.qualifiedName === toolName)) {
+        return deps.mcpRegistry.resolveTool(toolName)
+          ? `MCP tool "${toolName}" is disabled.`
+          : `Unknown MCP tool: ${toolName}. Call list_mcp_tools to see what's available.`;
+      }
+      try {
+        const result = await deps.mcpRegistry.callTool(toolName, callArgs);
+        const text = result.text.length > 0 ? result.text : '(empty result)';
+        return truncate(result.isError ? `Error from ${toolName}: ${text}` : text, MAX_TOOL_RESULT_CHARS);
+      } catch (err) {
+        return `Error calling MCP tool "${toolName}": ${(err as Error).message}`;
+      }
     },
   },
 ];
