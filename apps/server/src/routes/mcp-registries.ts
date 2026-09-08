@@ -44,11 +44,23 @@ export const mcpRegistryRoutes: FastifyPluginAsync = async (app) => {
         error: { code: 'bad_request', message: parsed.error.issues[0]?.message ?? 'Invalid body.' },
       });
     }
+    let created;
     try {
-      return reply.code(201).send(service.create(parsed.data));
+      created = service.create(parsed.data);
     } catch (err) {
       return mapError(reply, err);
     }
+    // PA-37 follow-up: a registry created via this route is tested once,
+    // immediately — otherwise its tools stay uncached (and so invisible to
+    // every agent) until an operator separately remembers to click "Test
+    // connection", which surfaced in practice as "I added MCP, Pocket Agent
+    // is not aware of it." A failed test does not undo the create (a typo'd
+    // URL is fixable by editing the row, not a reason to lose the name/auth
+    // already entered) — `checkConnection` never throws, and its outcome is
+    // just folded into the row this response reflects, the same
+    // `lastError`/`toolCount` fields "Test connection" itself would set.
+    await service.checkConnection(created.id);
+    return reply.code(201).send(service.get(created.id));
   });
 
   app.patch<{ Params: { id: string } }>('/api/mcp-registries/:id', async (request, reply) => {

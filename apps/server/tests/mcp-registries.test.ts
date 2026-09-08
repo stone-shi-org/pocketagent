@@ -149,6 +149,42 @@ describe('MCP registry routes', () => {
       t = await createTestApp();
     });
 
+    it('connects and caches tools automatically on create, with no separate Test click required', async () => {
+      mcpServer = await startStreamableHttpTestServer();
+      const created = (
+        await post('/api/mcp-registries', {
+          name: 'Auto-tested server',
+          transport: 'streamable_http',
+          url: mcpServer.url,
+          authKind: 'none',
+        })
+      ).json();
+
+      // The create response itself already reflects a successful connection —
+      // this is what fixes "I added MCP, Pocket Agent is not aware of it."
+      expect(created.toolCount).toBe(2);
+      expect(created.lastConnectedAt).not.toBeNull();
+      expect(created.lastError).toBeNull();
+
+      const listed = (await get('/api/mcp-registries')).json().registries[0];
+      expect(listed.toolCount).toBe(2);
+    });
+
+    it('still creates the row when the automatic first connection fails, recording lastError rather than blocking the save', async () => {
+      const created = (
+        await post('/api/mcp-registries', {
+          name: 'Unreachable server',
+          transport: 'streamable_http',
+          url: 'http://127.0.0.1:1/mcp',
+          authKind: 'none',
+        })
+      ).json();
+
+      expect(created.name).toBe('Unreachable server');
+      expect(created.toolCount).toBe(0);
+      expect(created.lastError).not.toBeNull();
+    });
+
     it('tests and caches tools over Streamable HTTP', async () => {
       mcpServer = await startStreamableHttpTestServer();
       const created = (

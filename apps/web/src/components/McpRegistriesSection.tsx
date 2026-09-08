@@ -197,8 +197,9 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
         Remote MCP (Model Context Protocol) servers. An enabled registry's tools join the catalog in
         the "Tools" section below automatically — namespaced as{' '}
         <code>mcp__&lt;registry&gt;__&lt;tool&gt;</code> — with no separate enable/disable surface of
-        their own. A registry must be tested at least once (or refreshed) before its tools are known;
-        an untested one contributes nothing yet.
+        their own. A new registry is connected to once immediately on save; if that fails (a wrong
+        URL, an unreachable host), it's still saved so you can fix it and use "Test connection" to
+        retry — until a connection succeeds at least once, it contributes no tools.
       </p>
 
       {!encryptionAvailable && (
