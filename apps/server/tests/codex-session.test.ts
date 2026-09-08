@@ -223,6 +223,25 @@ describe('CodexSession', () => {
     expect(events.some((e) => e.kind === 'turn_complete')).toBe(false);
   });
 
+  it('interrupt() with no live turn says so instead of sending a stale id', async () => {
+    server = makeServer();
+    session = new CodexSession(makeSpec(), server);
+    await session.start();
+    const events = collect(session);
+
+    // Let a full turn run to completion, then interrupt: the captured turn id is
+    // cleared on `turn_complete`, so there is no live turn left to target. The
+    // fixture rejects any `turn/interrupt` missing its `turnId`, so if this test
+    // regressed to sending a stale/absent id it would surface as "Interrupt
+    // failed" rather than the clean notice below.
+    session.prompt('hello');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    await session.interrupt();
+    expect(events.some((e) => e.kind === 'notice' && e.text === 'Nothing to interrupt.')).toBe(true);
+    expect(events.some((e) => e.kind === 'notice' && /Interrupt failed/.test(e.text))).toBe(false);
+  });
+
   it('surfaces a thread error as a notice instead of crashing the session', async () => {
     server = makeServer();
     session = new CodexSession(makeSpec(), server);

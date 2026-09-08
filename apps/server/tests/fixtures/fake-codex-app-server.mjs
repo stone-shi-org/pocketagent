@@ -195,6 +195,14 @@ rl.on('line', (line) => {
       return;
     }
     if (method === 'turn/interrupt') {
+      // The real app-server's `TurnInterruptParams` requires BOTH `threadId` and
+      // `turnId` — a request with only `{ threadId }` is rejected at the protocol
+      // level before any turn is touched. Mirror that exactly so a regression in
+      // `CodexSession.interrupt()` (which used to send just the thread id) fails
+      // here instead of silently no-op'ing.
+      if (!params.threadId || !params.turnId) {
+        return write({ jsonrpc: '2.0', id, error: { code: -32602, message: "missing field `turnId`" } });
+      }
       const flag = pendingAborts.get(params.threadId);
       if (flag) flag.aborted = true;
       return respond(id, {});

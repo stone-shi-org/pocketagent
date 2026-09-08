@@ -73,6 +73,15 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
 
   private _status: SessionStatus = 'starting';
   private _threadId: string | null = null;
+  /**
+   * The id of the turn currently in flight, from `turn/start`'s response
+   * (`{ turn: { id } }`). `turn/interrupt` requires it — sending only
+   * `{ threadId }` is rejected with "missing field `turnId`" (PA-32) — so an
+   * interrupt can only target the most recently started turn. Cleared on
+   * `terminate()`; a session whose turn already completed has no live turn to
+   * interrupt, which is exactly what a null here expresses.
+   */
+  private _currentTurnId: string | null = null;
   private _startedAt: number | null = null;
   private _endedAt: number | null = null;
   private _lastActivityAt: number | null = null;
@@ -288,6 +297,11 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
       }
       if (event.kind === 'turn_complete') {
         this.setBusy(false);
+        // The turn is over, so there is no live turn left for `interrupt()` to
+        // target — drop the id we captured at start. A turn parked on an
+        // approval has not emitted `turn_complete`, so its id survives until a
+        // human answers (or interrupts) it.
+        this._currentTurnId = null;
         this.emitEvent(this._lastUsage ? { ...event, ...usageFields(this._lastUsage) } : event);
         this._lastUsage = null;
         continue;
@@ -385,6 +399,9 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
     this.setBusy(true);
     void this.server
       .sendRequest('turn/start', { threadId: this._threadId, input: [{ type: 'text', text }] })
+      .then((res) => {
+        this._currentTurnId = turnIdFromStartResponse(res);
+      })
       .catch((err: unknown) => {
         this.setBusy(false);
         this.emitEvent({
@@ -408,14 +425,22 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
     if (!this._threadId) return;
     this.setBusy(true);
     const target = args.trim() ? { type: 'baseBranch' as const, branch: args.trim() } : { type: 'uncommittedChanges' as const };
-    void this.server.sendRequest('review/start', { threadId: this._threadId, target }).catch((err: unknown) => {
-      this.setBusy(false);
-      this.emitEvent({
-        kind: 'notice',
-        level: 'error',
-        text: `Failed to start the review: ${err instanceof Error ? err.message : String(err)}`,
+    void this.server
+      .sendRequest('review/start', { threadId: this._threadId, target })
+      .then((res) => {
+        // A review runs as a real turn on this thread and is interruptible the
+        // same way — `review/start`'s response carries `{ turn: { id } }`, so
+        // capture it for `interrupt()` exactly like `prompt()` does.
+        this._currentTurnId = turnIdFromStartResponse(res);
+      })
+      .catch((err: unknown) => {
+        this.setBusy(false);
+        this.emitEvent({
+          kind: 'notice',
+          level: 'error',
+          text: `Failed to start the review: ${err instanceof Error ? err.message : String(err)}`,
+        });
       });
-    });
   }
 
   /**
@@ -678,8 +703,17 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
 
   async interrupt(): Promise<void> {
     if (!this._threadId) return;
+    // `turn/interrupt` requires the turn's own id, not just the thread's — a
+    // request with only `{ threadId }` is rejected with "missing field
+    // `turnId`" (PA-32). We learn that id from the `turn/start`/`review/start`
+    // response; if none is in flight there is nothing to interrupt, so say so
+    // rather than send a request codex would reject anyway.
+    if (!this._currentTurnId) {
+      this.emitEvent({ kind: 'notice', level: 'info', text: 'Nothing to interrupt.' });
+      return;
+    }
     try {
-      await this.server.sendRequest('turn/interrupt', { threadId: this._threadId });
+      await this.server.sendRequest('turn/interrupt', { threadId: this._threadId, turnId: this._currentTurnId });
       this.emitEvent({ kind: 'notice', level: 'info', text: 'Interrupted.' });
     } catch (err) {
       this.emitEvent({
@@ -780,9 +814,18 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
     this._endedAt = Date.now();
     this.setStatus('killed');
 
+    // Read the in-flight turn id before clearing it, so teardown can still
+    // interrupt a live turn. `turn/interrupt` needs that id (see `interrupt()`),
+    // and the error is swallowed either way — teardown must not fail on an
+    // interrupt that races the thread going away.
+    const inFlightTurnId = this._currentTurnId;
+    this._currentTurnId = null;
+
     if (this._threadId) {
       this.server.unregister(this._threadId);
-      this.server.sendRequest('turn/interrupt', { threadId: this._threadId }).catch(() => undefined);
+      if (inFlightTurnId) {
+        this.server.sendRequest('turn/interrupt', { threadId: this._threadId, turnId: inFlightTurnId }).catch(() => undefined);
+      }
     }
   }
 
@@ -831,6 +874,19 @@ function str(value: unknown): string | undefined {
 
 function num(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Pulls the turn id out of a `turn/start` or `review/start` response — both
+ * carry `{ turn: { id } }`, and that id is what `turn/interrupt` requires (see
+ * `_currentTurnId`). Read defensively rather than widening the request type,
+ * since neither response's exact shape was separately confirmed to be stable;
+ * a missing or non-string id yields null, which makes an interrupt a no-op
+ * notice instead of a protocol error.
+ */
+function turnIdFromStartResponse(res: unknown): string | null {
+  const turn = isRecord(res) && isRecord(res.turn) ? res.turn : {};
+  return typeof turn.id === 'string' ? turn.id : null;
 }
 
 /** See `dispatchSlashCommand`'s doc comment for what is and is not in this table, and why. */
