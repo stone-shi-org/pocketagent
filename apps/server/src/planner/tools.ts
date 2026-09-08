@@ -40,6 +40,11 @@ import type { PlannerMemoryService } from './memory.js';
  * `PLANNER_WEB_SEARCH_*`/`PLANNER_URL_FETCH_*` settings) — there is no
  * built-in default endpoint, so a fresh deployment cannot silently exfiltrate
  * anything on a model's say-so.
+ *
+ * PA-34 adds `get_current_time`, read-only and side-effect-free (it touches
+ * no PocketAgent subsystem, just the host clock and `Intl`), so a chat can
+ * ground "today"/"now"/a relative date against the host's actual wall clock
+ * and timezone instead of the model guessing from its training cutoff.
  */
 
 export interface PlannerToolDeps {
@@ -79,6 +84,12 @@ export interface PlannerToolDeps {
   /** Injected in tests so no real network call is ever made; defaults to
       the global `fetch`. */
   fetchImpl?: typeof fetch;
+  /**
+   * PA-34: `get_current_time`'s clock. Injected in tests so an assertion
+   * doesn't race the real clock (same reasoning as `fetchImpl` above);
+   * defaults to `() => new Date()`, i.e. the host's real wall clock.
+   */
+  now?: () => Date;
 }
 
 /** PA-31: one third-party HTTP integration's live config — see
@@ -379,6 +390,36 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       }
       const content = await fs.readFile(real, 'utf8');
       return truncate(content, MAX_TOOL_RESULT_CHARS);
+    },
+  },
+  {
+    name: 'get_current_time',
+    description:
+      "Get the current date and time on this PocketAgent server's host, and the host's local " +
+      'timezone (IANA name and UTC offset). Call this before reasoning about "today", "now", or ' +
+      'any relative date/time — the model has no other way to know the current moment or which ' +
+      "timezone the host observes it in; the host's timezone, not the caller's, is what governs " +
+      'every other tool here (session timestamps, file mtimes).',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    readOnly: true,
+    async execute(deps) {
+      const now = deps.now ? deps.now() : new Date();
+      // Intl (not process.env.TZ, which is frequently unset) is the one
+      // source of the host's configured zone that works the same whether
+      // this process was started from a login shell, systemd, or a
+      // container with no TZ env var at all.
+      const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const offsetMinutes = -now.getTimezoneOffset();
+      const offsetSign = offsetMinutes >= 0 ? '+' : '-';
+      const offsetAbs = Math.abs(offsetMinutes);
+      const utcOffset = `${offsetSign}${String(Math.floor(offsetAbs / 60)).padStart(2, '0')}:${String(offsetAbs % 60).padStart(2, '0')}`;
+      return JSON.stringify({
+        iso: now.toISOString(),
+        epochMs: now.getTime(),
+        timeZone,
+        utcOffset,
+        local: now.toLocaleString('en-US', { timeZone }),
+      });
     },
   },
   {

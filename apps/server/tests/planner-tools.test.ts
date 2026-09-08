@@ -24,7 +24,7 @@ import { authHeaders, createTestApp, type TestApp } from './helpers.js';
 function depsFor(
   t: TestApp,
   workspaceId?: string | null,
-  overrides?: Partial<Pick<PlannerToolDeps, 'webSearch' | 'urlFetch' | 'fetchImpl'>>,
+  overrides?: Partial<Pick<PlannerToolDeps, 'webSearch' | 'urlFetch' | 'fetchImpl' | 'now'>>,
 ): PlannerToolDeps {
   const { workspaces, plannerWorkspaces, sessions, worktrees, conversations, agyTranscripts, piTranscripts } =
     t.context;
@@ -52,6 +52,7 @@ describe('PLANNER_TOOLS catalog', () => {
     const mutatingNames = PLANNER_TOOLS.filter((t) => !t.readOnly).map((t) => t.name).sort();
     expect(readOnlyNames).toEqual(
       [
+        'get_current_time',
         'list_sessions',
         'list_workspaces',
         'memory_search',
@@ -142,6 +143,35 @@ describe('planner tools against a real app context', () => {
     expect(result).toEqual([
       { path: t.workspaceRoot, name: path.basename(t.workspaceRoot), isGitRepo: false },
     ]);
+  });
+
+  it('get_current_time reports the injected clock, host timezone, and a matching offset/local string', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('get_current_time')!;
+    const fixedNow = new Date('2026-09-07T12:34:56.000Z');
+    const result = JSON.parse(
+      await tool.execute(depsFor(t, undefined, { now: () => fixedNow }), {}),
+    ) as { iso: string; epochMs: number; timeZone: string; utcOffset: string; local: string };
+
+    expect(result.iso).toBe(fixedNow.toISOString());
+    expect(result.epochMs).toBe(fixedNow.getTime());
+    // The host's real configured zone, not a fixed value — asserted against
+    // Intl directly so this test passes under any TZ the CI host happens to
+    // run with.
+    expect(result.timeZone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    expect(result.utcOffset).toMatch(/^[+-]\d{2}:\d{2}$/);
+    expect(typeof result.local).toBe('string');
+    expect(result.local.length).toBeGreaterThan(0);
+  });
+
+  it('get_current_time defaults to the real wall clock when no now() is injected', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('get_current_time')!;
+    const before = Date.now();
+    const result = JSON.parse(await tool.execute(depsFor(t), {})) as { epochMs: number };
+    const after = Date.now();
+    expect(result.epochMs).toBeGreaterThanOrEqual(before);
+    expect(result.epochMs).toBeLessThanOrEqual(after);
   });
 
   it('list_sessions lists a real running session', async () => {
