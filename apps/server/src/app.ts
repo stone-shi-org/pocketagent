@@ -58,6 +58,7 @@ import { createPlannerWorkspaceStore, readPlannerSettings, revealPlannerEmbeddin
 import { PlannerChatService } from './planner/chats.js';
 import type { QueuedRunSummary } from '@pocketagent/protocol';
 import { PlannerMemoryService, type PlannerMemoryEmbedConfig } from './planner/memory.js';
+import { SkillRegistryService, resolvePlannerSkillsRoot } from './planner/skills.js';
 import { McpRegistryService } from './planner/mcp/registry-service.js';
 import { PlannerLlmClient } from './planner/llm-client.js';
 import { MemoryConsolidationService } from './planner/memory-consolidation.js';
@@ -133,6 +134,10 @@ export interface BuildAppOptions {
    * the host next to the real database.
    */
   plannerWorkspacesRoot?: string;
+  /** Same reasoning as `plannerWorkspacesRoot`, one layer up: the global
+      skills root defaults to a real `<REPO_ROOT>/data/planner-skills`, so a
+      test that registers or deletes a skill needs an isolated directory too. */
+  plannerSkillsRoot?: string;
   /** Injected in tests so a planner chat turn never makes a real network call. */
   plannerLlmFetch?: typeof fetch;
   /**
@@ -375,6 +380,14 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // (`list_mcp_tools`/`call_mcp_tool`) needs it.
   const mcpRegistry = new McpRegistryService({ db, encKey: config.settingsEncKey, logger: app.log });
 
+  // PA-38: skills. Same construction-order reason as `mcpRegistry` — the
+  // turn loop's tool catalog (`list_skills`/`use_skill`) needs it. The root
+  // is a sibling of `data/planner-workspaces`, derived from
+  // `config.databasePath`'s directory for the same reason
+  // `plannerWorkspacesRoot` is, just above.
+  const plannerSkillsRoot = options.plannerSkillsRoot ?? resolvePlannerSkillsRoot(config.databasePath);
+  const skills = new SkillRegistryService({ db, plannerWorkspaces, workspaces, skillsRoot: plannerSkillsRoot, logger: app.log });
+
   const plannerChats = new PlannerChatService({
     db,
     workspaces,
@@ -385,6 +398,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     shell: config.shell,
     memory: plannerMemory,
     mcpRegistry,
+    skills,
     logger: app.log,
     ...(options.plannerLlmFetch ? { llmFetch: options.plannerLlmFetch } : {}),
   });
@@ -485,6 +499,8 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     plannerChats,
     plannerMemory,
     mcpRegistry,
+    skills,
+    plannerSkillsRoot,
     ...(options.plannerLlmFetch ? { plannerLlmFetch: options.plannerLlmFetch } : {}),
     agents,
     customClaudeProviders,

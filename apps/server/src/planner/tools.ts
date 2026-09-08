@@ -1,7 +1,14 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { CALL_MCP_TOOL_NAME, LIST_MCP_TOOLS_NAME, type AgentEvent, type SessionInfo } from '@pocketagent/protocol';
+import {
+  CALL_MCP_TOOL_NAME,
+  LIST_MCP_TOOLS_NAME,
+  LIST_SKILLS_NAME,
+  USE_SKILL_NAME,
+  type AgentEvent,
+  type SessionInfo,
+} from '@pocketagent/protocol';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
 import type { SessionManager, StructuredLikeSession } from '../sessions/manager.js';
 import { readSessionHistory, type SessionHistoryDeps } from '../sessions/history.js';
@@ -12,6 +19,7 @@ import { buildChildEnv } from '../sessions/env.js';
 import type { PlannerWorkspaceRegistry } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
 import type { McpRegistryService } from './mcp/registry-service.js';
+import { SkillRegistryError, type SkillRegistryService } from './skills.js';
 
 /**
  * PA-6: the planner's tool catalog.
@@ -99,6 +107,13 @@ export interface PlannerToolDeps {
    * on the very next turn.
    */
   mcpRegistry: McpRegistryService;
+  /**
+   * PA-38: the skills catalog `list_skills`/`use_skill` are built on.
+   * Threaded through the same way `mcpRegistry` is — one shared instance,
+   * read fresh on every call so a skill registered, disabled, or edited on
+   * disk mid-conversation takes effect on the very next turn.
+   */
+  skills: SkillRegistryService;
 }
 
 /** PA-31: one third-party HTTP integration's live config — see
@@ -131,7 +146,10 @@ export interface PlannerToolDefinition {
 /** Caps how much of a tool's result is fed back to the LLM — a runaway
     transcript or a large file must not blow out the next request's body. */
 const MAX_TOOL_RESULT_CHARS = 20_000;
-const MAX_FILE_READ_BYTES = 200_000;
+/** Exported so `planner/skills.ts`'s `loadSkillBody` caps a skill's body at
+    the same limit `read_file` caps a file at, rather than inventing a second
+    number that would drift from it. */
+export const MAX_FILE_READ_BYTES = 200_000;
 const MAX_FILE_WRITE_CHARS = 200_000;
 /** A chat turn is a synchronous HTTP request/response — a runaway command
     must not hang it forever. */
@@ -922,6 +940,69 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         return truncate(result.isError ? `Error from ${toolName}: ${text}` : text, MAX_TOOL_RESULT_CHARS);
       } catch (err) {
         return `Error calling MCP tool "${toolName}": ${(err as Error).message}`;
+      }
+    },
+  },
+
+  // ---- Skills (PA-38) ---------------------------------------------------
+  //
+  // A skill is inert content — loading one only adds text to the
+  // conversation, so both tools here are read-only, unlike `call_mcp_tool`
+  // (which stands in for arbitrary, individually risky MCP tools). The model
+  // then acts using its own, already-gated tools; no new approval mechanism
+  // was needed for skills themselves. `PlannerChatService.toolsFor` omits
+  // both whenever no enabled skill exists for the calling agent, the same
+  // "an agent with none configured sees no difference at all" rule
+  // `list_mcp_tools`/`call_mcp_tool` already follow.
+  {
+    name: LIST_SKILLS_NAME,
+    description:
+      'List the skills currently enabled for this agent — reusable instructions to load with ' +
+      'use_skill before attempting a task one of them covers.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    readOnly: true,
+    async execute(deps) {
+      const known = deps.skills.listKnownSkills(deps.workspaceId);
+      if (known.length === 0) return '(no skills available)';
+      return known.map((s) => `${s.name} — ${s.description}`).join('\n');
+    },
+  },
+  {
+    name: USE_SKILL_NAME,
+    description:
+      'Load one enabled skill by name (from list_skills) into this conversation — its instructions ' +
+      'are returned as text; nothing else happens. Act on them using your other tools.',
+    parameters: {
+      type: 'object',
+      properties: { name: { type: 'string', description: 'A skill name from list_skills.' } },
+      required: ['name'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    async execute(deps, args) {
+      const requested = String(args.name ?? '').trim();
+      if (!requested) return 'No skill name provided. Call list_skills first to find one.';
+      const known = deps.skills.listKnownSkills(deps.workspaceId);
+      const match = known.find((s) => s.name.toLowerCase() === requested.toLowerCase() || s.slug === requested);
+      if (!match) {
+        // Distinguish unknown / disabled globally / disabled for this
+        // agent, mirroring `PlannerChatService.toolUnavailableMessage`'s own
+        // three-way wording for a native tool exactly.
+        const visible = deps.skills
+          .listVisibleTo(deps.workspaceId)
+          .find((s) => s.name.toLowerCase() === requested.toLowerCase() || s.slug === requested);
+        if (!visible) {
+          return `Unknown skill: ${requested}. Call list_skills to see what's available.`;
+        }
+        return deps.skills.disabledGlobally(visible.id)
+          ? `Skill "${visible.name}" is disabled globally.`
+          : `Skill "${visible.name}" is disabled for this agent.`;
+      }
+      try {
+        return await deps.skills.loadSkillBody(match.id);
+      } catch (err) {
+        if (err instanceof SkillRegistryError) return err.message;
+        throw err;
       }
     },
   },

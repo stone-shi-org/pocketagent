@@ -77,6 +77,12 @@ import type {
   PlannerMemoryListResponse,
   PlannerMemoryTier,
   UpdatePlannerMemoryRequest,
+  PlannerSkillListResponse,
+  PlannerSkillInfo,
+  RegisterPlannerSkillRequest,
+  SetPlannerSkillEnabledRequest,
+  PlannerAgentSkillsResponse,
+  SetPlannerAgentSkillRequest,
 } from '@pocketagent/protocol';
 
 export class ApiError extends Error {
@@ -629,6 +635,17 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // ---- Skills (PA-38) ----------------------------------------------------
+
+  listPlannerAgentSkills: (workspaceId: string) =>
+    request<PlannerAgentSkillsResponse>(`/api/planner/workspaces/${encodeURIComponent(workspaceId)}/skills`),
+
+  setPlannerAgentSkill: (workspaceId: string, body: SetPlannerAgentSkillRequest) =>
+    request<PlannerAgentSkillsResponse>(`/api/planner/workspaces/${encodeURIComponent(workspaceId)}/skills`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   listPlannerModels: () => request<PlannerModelListResponse>('/api/planner/models'),
 
   createPlannerModel: (body: CreatePlannerModelRequest) =>
@@ -737,6 +754,22 @@ export const api = {
 
   setPlannerToolEnabled: (name: string, body: SetPlannerToolEnabledRequest) =>
     request<PlannerToolListResponse>(`/api/planner/tools/${encodeURIComponent(name)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  listPlannerSkills: () => request<PlannerSkillListResponse>('/api/planner/skills'),
+
+  registerPlannerSkill: (body: RegisterPlannerSkillRequest) =>
+    request<PlannerSkillInfo>('/api/planner/skills', { method: 'POST', body: JSON.stringify(body) }),
+
+  deletePlannerSkill: (id: string) =>
+    request<void>(`/api/planner/skills/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  refreshPlannerSkills: () => request<PlannerSkillListResponse>('/api/planner/skills/refresh', { method: 'POST' }),
+
+  setPlannerSkillEnabledGlobally: (id: string, body: SetPlannerSkillEnabledRequest) =>
+    request<PlannerSkillListResponse>(`/api/planner/skills/${encodeURIComponent(id)}/global-enabled`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),

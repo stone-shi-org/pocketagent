@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { PlannerAgentToolInfo, PlannerMemory, PlannerMemoryTier, PlannerModel, PlannerWorkspace } from '@pocketagent/protocol';
+import type {
+  PlannerAgentSkillInfo,
+  PlannerAgentToolInfo,
+  PlannerMemory,
+  PlannerMemoryTier,
+  PlannerModel,
+  PlannerWorkspace,
+} from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
@@ -33,6 +40,7 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
   const [agent, setAgent] = useState<PlannerWorkspace | null>(null);
   const [models, setModels] = useState<PlannerModel[]>([]);
   const [tools, setTools] = useState<PlannerAgentToolInfo[] | null>(null);
+  const [skills, setSkills] = useState<PlannerAgentSkillInfo[] | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -47,16 +55,18 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
 
   const load = useCallback(async () => {
     try {
-      const [{ workspaces }, { models: modelList }, agentTools] = await Promise.all([
+      const [{ workspaces }, { models: modelList }, agentTools, agentSkills] = await Promise.all([
         api.listPlannerWorkspaces(),
         api.listPlannerModels(),
         api.listPlannerAgentTools(agentId),
+        api.listPlannerAgentSkills(agentId),
       ]);
       const found = workspaces.find((w) => w.id === agentId) ?? null;
       setAgent(found);
       setNameInput(found?.name ?? '');
       setModels(modelList);
       setTools(agentTools.tools);
+      setSkills(agentSkills.skills);
       setError(null);
     } catch (err) {
       onApiError(err);
@@ -119,6 +129,10 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
 
   const toggleTool = (toolName: string, enabled: boolean): void => {
     void withBusy(() => api.setPlannerAgentTool(agentId, { toolName, enabled }));
+  };
+
+  const toggleSkill = (skillId: string, enabled: boolean): void => {
+    void withBusy(() => api.setPlannerAgentSkill(agentId, { skillId, enabled }));
   };
 
   const pickDirectory = (path: string, opts?: { create?: boolean }): void => {
@@ -306,6 +320,39 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
                 {t.disabledGlobally && <span className="planner-row-meta"> — disabled globally</span>}
                 <br />
                 <span className="planner-row-meta">{t.description}</span>
+              </span>
+            </label>
+          ))
+        )}
+      </div>
+
+      <div className="planner-section">
+        <h3>Skills</h3>
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          Restrict which skills this agent alone can load with <code>use_skill</code> — includes
+          every global skill plus this agent's own <code>.skills/</code> directory. A skill
+          turned off in the global "Skills" settings section is unavailable here too, same as a
+          globally disabled tool.
+        </p>
+        {skills === null ? (
+          <div className="spinner">Loading…</div>
+        ) : skills.length === 0 ? (
+          <p className="planner-row-meta">No skills available yet.</p>
+        ) : (
+          skills.map((s) => (
+            <label key={s.id} className="planner-checkbox-row" style={{ marginBottom: 6 }}>
+              <input
+                type="checkbox"
+                checked={s.enabled}
+                disabled={busy || s.disabledGlobally}
+                onChange={(e) => toggleSkill(s.id, e.target.checked)}
+              />
+              <span>
+                <strong>{s.name}</strong>{' '}
+                <span className="planner-row-meta">({s.sourceLabel})</span>
+                {s.disabledGlobally && <span className="planner-row-meta"> — disabled globally</span>}
+                <br />
+                <span className="planner-row-meta">{s.description}</span>
               </span>
             </label>
           ))

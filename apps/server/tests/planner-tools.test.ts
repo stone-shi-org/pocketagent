@@ -37,6 +37,7 @@ function depsFor(
     shell: t.context.config.shell,
     memory: t.context.plannerMemory,
     mcpRegistry: t.context.mcpRegistry,
+    skills: t.context.skills,
     // Defaults to the seeded default planner workspace, like every other
     // tool call in this file implicitly runs "as" that agent — a caller
     // that cares about a different (or no) workspace passes it explicitly.
@@ -56,11 +57,13 @@ describe('PLANNER_TOOLS catalog', () => {
         'get_current_time',
         'list_mcp_tools',
         'list_sessions',
+        'list_skills',
         'list_workspaces',
         'memory_search',
         'read_file',
         'read_session_output',
         'url_fetch',
+        'use_skill',
         'web_search',
       ].sort(),
     );

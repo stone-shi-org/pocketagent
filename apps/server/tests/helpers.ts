@@ -93,12 +93,17 @@ export async function createTestApp(
   // override every test that boots an app would create real planner-workspace
   // directories on the host next to the real database.
   const plannerWorkspacesRoot = path.join(ws.root, 'planner-workspaces');
+  // Same reasoning as `plannerWorkspacesRoot`, one layer up: without this
+  // override every test that boots an app would create real
+  // `data/planner-skills/` directories on the host.
+  const plannerSkillsRoot = path.join(ws.root, 'planner-skills');
   const { app, context } = await buildApp({
     config,
     db,
     agyTranscripts,
     piTranscripts,
     plannerWorkspacesRoot,
+    plannerSkillsRoot,
     ...(plannerLlmFetch ? { plannerLlmFetch } : {}),
     extraAgents: [makeTestAgent(config.shell)],
     // Empty rather than `process.env`: this checkout's own `.env` is already

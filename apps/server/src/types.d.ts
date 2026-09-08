@@ -21,6 +21,7 @@ import type { PlannerWorkspaceRegistry } from './planner/workspaces.js';
 import type { PlannerChatService } from './planner/chats.js';
 import type { PlannerMemoryService } from './planner/memory.js';
 import type { McpRegistryService } from './planner/mcp/registry-service.js';
+import type { SkillRegistryService } from './planner/skills.js';
 
 export interface PocketContext {
   config: Config;
@@ -41,6 +42,10 @@ export interface PocketContext {
   plannerMemory: PlannerMemoryService;
   /** PA-37: MCP registries — see `planner/mcp/registry-service.ts`'s doc comment. */
   mcpRegistry: McpRegistryService;
+  /** PA-38: skills — see `planner/skills.ts`'s doc comment. */
+  skills: SkillRegistryService;
+  /** Where the global skills catalog lives on disk. */
+  plannerSkillsRoot: string;
   /** PA-29: injected in tests so a route that builds its own ad hoc
       `PlannerLlmClient` (`POST /api/planner/settings/embeddings/test`) never
       makes a real network call either — the same fetch override

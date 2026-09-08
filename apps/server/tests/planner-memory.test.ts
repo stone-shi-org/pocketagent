@@ -26,6 +26,7 @@ function depsFor(t: TestApp, workspaceId: string | null): PlannerToolDeps {
     shell: t.context.config.shell,
     memory: t.context.plannerMemory,
     mcpRegistry: t.context.mcpRegistry,
+    skills: t.context.skills,
     workspaceId,
     webSearch: TOOL_INTEGRATION_DISABLED,
     urlFetch: TOOL_INTEGRATION_DISABLED,

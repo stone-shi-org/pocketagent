@@ -29,7 +29,7 @@ import {
   writePlannerChatMemoryFoldedTurns,
   writePlannerLastModelId,
 } from './store.js';
-import { CALL_MCP_TOOL_NAME, LIST_MCP_TOOLS_NAME } from '@pocketagent/protocol';
+import { CALL_MCP_TOOL_NAME, LIST_MCP_TOOLS_NAME, LIST_SKILLS_NAME, USE_SKILL_NAME } from '@pocketagent/protocol';
 import { resolveApprovalStatus, rememberDecisionIfAsked } from './approval.js';
 import { appendTranscriptEvent, readTranscriptEvents } from './transcript.js';
 import {
@@ -42,6 +42,7 @@ import {
 } from './llm-client.js';
 import { PLANNER_TOOLS, findPlannerTool, toOpenAiToolSpecs, type PlannerToolDefinition } from './tools.js';
 import type { McpRegistryService } from './mcp/registry-service.js';
+import type { SkillRegistryService } from './skills.js';
 
 export class PlannerChatError extends Error {
   override readonly name = 'PlannerChatError';
@@ -112,6 +113,10 @@ export interface PlannerChatServiceOptions {
       `call_mcp_tool` are built on, and what `toolsFor`/the dynamic
       approval-gating special case (`effectiveMcpToolIdentity`) both read. */
   mcpRegistry: McpRegistryService;
+  /** PA-38: the skills catalog `list_skills`/`use_skill` are built on, and
+      what `toolsFor`'s own omission rule reads — mirrors `mcpRegistry`
+      exactly, one layer up. */
+  skills: SkillRegistryService;
   logger?: { warn: (obj: unknown, msg?: string) => void };
   /** Injected in tests so no real network call is ever made. */
   llmFetch?: typeof fetch;
@@ -465,6 +470,14 @@ export class PlannerChatService {
     // before this feature existed.
     if (this.opts.mcpRegistry.listEnabledTools(workspaceId).length === 0) {
       tools = tools.filter((t) => t.name !== LIST_MCP_TOOLS_NAME && t.name !== CALL_MCP_TOOL_NAME);
+    }
+
+    // PA-38: same rule, one layer up — `list_skills`/`use_skill` stand in for
+    // every enabled skill, and are omitted entirely when this agent has none.
+    // An agent with no skills configured must see no difference at all from
+    // before this feature existed.
+    if (this.opts.skills.listKnownSkills(workspaceId).length === 0) {
+      tools = tools.filter((t) => t.name !== LIST_SKILLS_NAME && t.name !== USE_SKILL_NAME);
     }
     return tools;
   }
@@ -965,6 +978,7 @@ export class PlannerChatService {
           shell: this.opts.shell,
           memory: this.opts.memory,
           mcpRegistry: this.opts.mcpRegistry,
+          skills: this.opts.skills,
           workspaceId: chat.workspaceId,
           webSearch: {
             enabled: settings.webSearchEnabled,

@@ -5,7 +5,10 @@ import {
   CreatePlannerModelRequest,
   CreatePlannerWorkspaceRequest,
   PlannerMemoryTier,
+  RegisterPlannerSkillRequest,
+  SetPlannerAgentSkillRequest,
   SetPlannerAgentToolRequest,
+  SetPlannerSkillEnabledRequest,
   SetPlannerToolEnabledRequest,
   UpdatePlannerMemoryRequest,
   UpdatePlannerWorkspaceRequest,
@@ -17,6 +20,7 @@ import {
   type AgentEvent,
   type DeleteAllPlannerChatsResponse,
   type DiscoverPlannerModelsResponse,
+  type PlannerAgentSkillsResponse,
   type PlannerAgentToolsResponse,
   type PlannerApiKeyRevealResponse,
   type PlannerChatHistoryResponse,
@@ -26,6 +30,7 @@ import {
   type PlannerMemoryListResponse,
   type PlannerModelListResponse,
   type PlannerSettingsDto,
+  type PlannerSkillListResponse,
   type PlannerToolApprovalListResponse,
   type PlannerToolApprovalRow,
   type PlannerToolListResponse,
@@ -40,13 +45,16 @@ import { PlannerWorkspaceError } from '../planner/workspaces.js';
 import { PlannerChatError } from '../planner/chats.js';
 import { PlannerLlmClient, PlannerLlmError } from '../planner/llm-client.js';
 import { PLANNER_TOOLS, postJsonToIntegration } from '../planner/tools.js';
+import { SkillRegistryError, type SkillSummary } from '../planner/skills.js';
 import {
   deleteAllPlannerModels,
   deletePlannerModel,
   deletePlannerToolApproval,
   insertPlannerModel,
   nextPlannerModelSortOrder,
+  readDisabledSkillNames,
   readDisabledToolNames,
+  readGlobalDisabledSkillNames,
   readGlobalDisabledToolNames,
   readPlannerModels,
   readPlannerSettings,
@@ -55,6 +63,8 @@ import {
   resolvePlannerWebSearchApiKey,
   revealPlannerApiKey,
   revealPlannerEmbeddingApiKey,
+  setSkillEnabledForWorkspace,
+  setSkillEnabledGlobally,
   setToolEnabledForWorkspace,
   setToolEnabledGlobally,
   writePlannerApiKey,
@@ -609,6 +619,125 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     }
     setToolEnabledForWorkspace(app.pocket.db, id, parsed.data.toolName, parsed.data.enabled);
     return buildAgentToolsResponse(app.pocket.db, id);
+  });
+
+  // ---- Skills (PA-38) ---------------------------------------------------
+  //
+  // Mirrors the tool routes just above exactly — a global catalog with its
+  // own on/off switch, and a per-agent view layering a second, narrower
+  // switch on top — plus registration/deletion, which the tool catalog has
+  // no equivalent of (a tool is code shipped with this server; a skill is a
+  // directory an operator points this server at). `service.get(id)` is the
+  // one place both listing routes and the mutating ones below resolve an id
+  // through, so "unknown skill" is answered identically everywhere.
+
+  function mapSkillError(reply: FastifyReply, err: unknown): FastifyReply | never {
+    if (err instanceof SkillRegistryError) {
+      return reply.code(err.statusCode).send({ error: { code: err.code, message: err.message } });
+    }
+    throw err;
+  }
+
+  function toGlobalSkillInfo(s: SkillSummary, globalDisabled: ReadonlySet<string>): PlannerSkillListResponse['skills'][number] {
+    return { ...s, enabled: !globalDisabled.has(s.id) };
+  }
+
+  /** The global catalog for a settings page — see `GET /api/planner/tools`'s
+      own doc comment for the parallel reasoning; `enabled` here is the
+      global switch (PA-6 round 5's tools pattern, one layer up). */
+  app.get('/api/planner/skills', async () => {
+    const { db, skills } = app.pocket;
+    const globalDisabled = readGlobalDisabledSkillNames(db);
+    const response: PlannerSkillListResponse = {
+      skills: skills.listGlobalSkills().map((s) => toGlobalSkillInfo(s, globalDisabled)),
+    };
+    return response;
+  });
+
+  app.post('/api/planner/skills', async (request, reply) => {
+    const parsed = RegisterPlannerSkillRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    try {
+      const summary = await app.pocket.skills.registerGlobalSkill(parsed.data.path);
+      const globalDisabled = readGlobalDisabledSkillNames(app.pocket.db);
+      return reply.code(201).send(toGlobalSkillInfo(summary, globalDisabled));
+    } catch (err) {
+      return mapSkillError(reply, err);
+    }
+  });
+
+  app.delete('/api/planner/skills/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      await app.pocket.skills.removeGlobalSkill(id);
+      return reply.code(204).send();
+    } catch (err) {
+      return mapSkillError(reply, err);
+    }
+  });
+
+  app.post('/api/planner/skills/refresh', async () => {
+    const { db, skills } = app.pocket;
+    skills.refresh();
+    const globalDisabled = readGlobalDisabledSkillNames(db);
+    const response: PlannerSkillListResponse = {
+      skills: skills.listGlobalSkills().map((s) => toGlobalSkillInfo(s, globalDisabled)),
+    };
+    return response;
+  });
+
+  app.patch('/api/planner/skills/:id/global-enabled', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { db, skills } = app.pocket;
+    if (!skills.get(id)) return notFound(reply, `Unknown skill: ${id}`);
+    const parsed = SetPlannerSkillEnabledRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    setSkillEnabledGlobally(db, id, parsed.data.enabled);
+    const globalDisabled = readGlobalDisabledSkillNames(db);
+    const response: PlannerSkillListResponse = {
+      skills: skills.listGlobalSkills().map((s) => toGlobalSkillInfo(s, globalDisabled)),
+    };
+    return response;
+  });
+
+  /** One agent's own skill subset — see `PlannerAgentSkillInfo`'s doc
+      comment (protocol package). `enabled` is *effective* (global AND
+      per-agent); `disabledGlobally` lets the editor grey out a checkbox the
+      agent can't override. */
+  function buildAgentSkillsResponse(db: Db, workspaceId: string): PlannerAgentSkillsResponse {
+    const globalDisabled = readGlobalDisabledSkillNames(db);
+    const agentDisabled = readDisabledSkillNames(db, workspaceId);
+    return {
+      skills: app.pocket.skills.listVisibleTo(workspaceId).map((s) => ({
+        ...s,
+        enabled: !globalDisabled.has(s.id) && !agentDisabled.has(s.id),
+        disabledGlobally: globalDisabled.has(s.id),
+      })),
+    };
+  }
+
+  app.get('/api/planner/workspaces/:id/skills', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!app.pocket.plannerWorkspaces.get(id)) return notFound(reply, 'Workspace not found.');
+    return noStore(reply).send(buildAgentSkillsResponse(app.pocket.db, id));
+  });
+
+  app.post('/api/planner/workspaces/:id/skills', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!app.pocket.plannerWorkspaces.get(id)) return notFound(reply, 'Workspace not found.');
+    const parsed = SetPlannerAgentSkillRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    if (!app.pocket.skills.get(parsed.data.skillId)) {
+      return notFound(reply, `Unknown skill: ${parsed.data.skillId}`);
+    }
+    setSkillEnabledForWorkspace(app.pocket.db, id, parsed.data.skillId, parsed.data.enabled);
+    return buildAgentSkillsResponse(app.pocket.db, id);
   });
 
   app.get('/api/planner/tool-approvals', async () => {

@@ -146,6 +146,69 @@ export function setToolEnabledGlobally(db: Db, toolName: string, enabled: boolea
   }
 }
 
+// ---- planner_agent_disabled_skills --------------------------------------------
+
+/**
+ * PA-38: the skills equivalent of `readDisabledToolNames`/
+ * `setToolEnabledForWorkspace` — see the migration's own doc comment in
+ * `db/index.ts` for why `skillId` is namespaced (`global:<slug>` or
+ * `<workspaceId>:<slug>`) rather than a bare slug.
+ */
+export function readDisabledSkillNames(db: Db, workspaceId: string): Set<string> {
+  const rows = db
+    .prepare('SELECT skill_id FROM planner_agent_disabled_skills WHERE workspace_id = ?')
+    .all(workspaceId) as { skill_id: string }[];
+  return new Set(rows.map((r) => r.skill_id));
+}
+
+/** Idempotent either way, same as `setToolEnabledForWorkspace`. */
+export function setSkillEnabledForWorkspace(
+  db: Db,
+  workspaceId: string,
+  skillId: string,
+  enabled: boolean,
+): void {
+  if (enabled) {
+    db.prepare(
+      'DELETE FROM planner_agent_disabled_skills WHERE workspace_id = ? AND skill_id = ?',
+    ).run(workspaceId, skillId);
+  } else {
+    db.prepare(
+      `INSERT INTO planner_agent_disabled_skills (id, workspace_id, skill_id, created_at)
+       VALUES (@id, @workspaceId, @skillId, @createdAt)
+       ON CONFLICT (workspace_id, skill_id) DO NOTHING`,
+    ).run({ id: crypto.randomUUID(), workspaceId, skillId, createdAt: Date.now() });
+  }
+}
+
+// ---- planner_global_disabled_skills -------------------------------------------
+
+/**
+ * The coarser layer above `readDisabledSkillNames`: a skill disabled here is
+ * off for every agent, full stop — see the migration's own doc comment for
+ * why this is a separate flat table rather than folded into the per-agent
+ * one with a nullable `workspace_id`. Mirrors `readGlobalDisabledToolNames`.
+ */
+export function readGlobalDisabledSkillNames(db: Db): Set<string> {
+  const rows = db.prepare('SELECT skill_id FROM planner_global_disabled_skills').all() as {
+    skill_id: string;
+  }[];
+  return new Set(rows.map((r) => r.skill_id));
+}
+
+/** Idempotent either way, same as `setToolEnabledGlobally`. */
+export function setSkillEnabledGlobally(db: Db, skillId: string, enabled: boolean): void {
+  if (enabled) {
+    db.prepare('DELETE FROM planner_global_disabled_skills WHERE skill_id = ?').run(skillId);
+  } else {
+    db.prepare(
+      `INSERT INTO planner_global_disabled_skills (skill_id, created_at)
+       VALUES (?, ?)
+       ON CONFLICT (skill_id) DO NOTHING`,
+    ).run(skillId, Date.now());
+  }
+}
+
 // ---- planner_models ---------------------------------------------------------
 
 export interface PlannerModelRow {

@@ -15,6 +15,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { Icon } from '../components/Icon.js';
 import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
 import { McpRegistriesSection } from '../components/McpRegistriesSection.js';
+import { SkillsSection } from '../components/SkillsSection.js';
 
 interface Props {
   onApiError: (error: unknown) => void;
@@ -883,6 +884,11 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       <div className="planner-section">
         <h3>MCP servers</h3>
         <McpRegistriesSection onApiError={onApiError} onChanged={() => void load()} />
+      </div>
+
+      <div className="planner-section">
+        <h3>Skills</h3>
+        <SkillsSection onApiError={onApiError} onChanged={() => void load()} />
       </div>
 
       <div className="planner-section">

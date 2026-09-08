@@ -517,6 +517,93 @@ export const SetPlannerAgentToolRequest = z.object({
 });
 export type SetPlannerAgentToolRequest = z.infer<typeof SetPlannerAgentToolRequest>;
 
+// ---- Skills (PA-38) ----------------------------------------------------------
+//
+// A skill is a directory containing a `SKILL.md` (YAML frontmatter naming it,
+// then a Markdown body of instructions) that the `use_skill` tool loads
+// verbatim into the conversation — inert content, not a capability, so there
+// is deliberately no `readOnly` field here the way `PlannerToolInfo` has one:
+// loading a skill never touches anything the tool-safety gate cares about,
+// and the model then acts using its own, already-gated tools. Every other
+// shape below mirrors the tools types one layer up (`PlannerToolInfo`/
+// `PlannerAgentToolInfo`/their request types) on purpose — "skills treat same
+// as tools" is the same literal design MCP tools already follow (PA-37).
+
+/**
+ * The two meta-tool names added to the planner's native catalog
+ * (`planner/tools.ts`), named the same way `LIST_MCP_TOOLS_NAME`/
+ * `CALL_MCP_TOOL_NAME` are — exported so `PlannerChatService` can
+ * special-case them (the omission rule in `toolsFor`) without a second,
+ * drifting copy of the literal.
+ */
+export const LIST_SKILLS_NAME = 'list_skills';
+export const USE_SKILL_NAME = 'use_skill';
+
+/**
+ * A skill as a settings page's global catalog sees it. `id` is namespaced
+ * (`global:<slug>` or `<workspaceId>:<slug>`) so a global skill and a
+ * per-workspace skill can reuse the same `slug` without colliding in either
+ * deny-list table — see the migration's own doc comment in `db/index.ts`.
+ * `source`/`sourceLabel` are always `'global'`/`'Global'` here; the per-agent
+ * response below (`PlannerAgentSkillInfo`) is where a workspace-owned skill's
+ * own id/name show up instead. `enabled` is this skill's *global* switch,
+ * mirroring `PlannerToolInfo.enabled` exactly.
+ */
+export const PlannerSkillInfo = z.object({
+  id: z.string(),
+  slug: z.string(),
+  name: z.string(),
+  description: z.string(),
+  source: z.string(),
+  sourceLabel: z.string(),
+  enabled: z.boolean(),
+});
+export type PlannerSkillInfo = z.infer<typeof PlannerSkillInfo>;
+
+export const PlannerSkillListResponse = z.object({ skills: z.array(PlannerSkillInfo) });
+export type PlannerSkillListResponse = z.infer<typeof PlannerSkillListResponse>;
+
+export const SetPlannerSkillEnabledRequest = z.object({ enabled: z.boolean() });
+export type SetPlannerSkillEnabledRequest = z.infer<typeof SetPlannerSkillEnabledRequest>;
+
+/** Registers a new *global* skill from an existing directory containing a
+    parseable `SKILL.md`. A per-workspace skill needs no such route — it is
+    just a `.skills/<slug>/SKILL.md` an operator drops into that agent's own
+    directory, picked up on the next scan. */
+export const RegisterPlannerSkillRequest = z.object({
+  path: z.string().min(1),
+});
+export type RegisterPlannerSkillRequest = z.infer<typeof RegisterPlannerSkillRequest>;
+
+/**
+ * PA-38: one agent's own view of the skill catalog — `PlannerAgentToolInfo`'s
+ * exact shape, one layer up. `enabled` is the *effective* state for this
+ * agent (global AND per-agent); `disabledGlobally` greys out a checkbox the
+ * agent can't override, the same reasoning the tools editor already uses.
+ * Includes both the global catalog and this agent's own `.skills/` skills,
+ * distinguished by `source`/`sourceLabel`.
+ */
+export const PlannerAgentSkillInfo = z.object({
+  id: z.string(),
+  slug: z.string(),
+  name: z.string(),
+  description: z.string(),
+  source: z.string(),
+  sourceLabel: z.string(),
+  enabled: z.boolean(),
+  disabledGlobally: z.boolean(),
+});
+export type PlannerAgentSkillInfo = z.infer<typeof PlannerAgentSkillInfo>;
+
+export const PlannerAgentSkillsResponse = z.object({ skills: z.array(PlannerAgentSkillInfo) });
+export type PlannerAgentSkillsResponse = z.infer<typeof PlannerAgentSkillsResponse>;
+
+export const SetPlannerAgentSkillRequest = z.object({
+  skillId: z.string().min(1),
+  enabled: z.boolean(),
+});
+export type SetPlannerAgentSkillRequest = z.infer<typeof SetPlannerAgentSkillRequest>;
+
 // ---- Pocket Agents as a selectable "agent" ----------------------------------
 
 /**

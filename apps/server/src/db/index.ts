@@ -1004,6 +1004,44 @@ export const MIGRATIONS: readonly string[] = [
   // PA-37: MCP registries — see `MCP_REGISTRIES_DDL`'s own doc comment for why
   // the DDL lives in a named constant rather than inline here.
   MCP_REGISTRIES_DDL,
+  // PA-38: skills. A skill is a directory containing a `SKILL.md` (YAML
+  // frontmatter plus a Markdown body) that `use_skill` loads verbatim into
+  // the conversation — inert content, not a capability, so there is no
+  // approval mechanism of its own; the model then acts using its existing,
+  // already-gated tools. There is deliberately no `planner_skills` content
+  // table: the filesystem is the source of truth (a global root scanned by
+  // `SkillRegistryService`, plus each planner workspace's own `.skills/`
+  // directory), and these two tables store only *enablement decisions* — the
+  // exact split `planner_global_disabled_tools`/`planner_agent_disabled_tools`
+  // already draw for the native tool catalog, one layer up.
+  //
+  // `skill_id` is namespaced (`global:<slug>` or `<workspaceId>:<slug>`,
+  // never a bare slug) in both tables, because a global skill and a
+  // per-workspace skill are allowed to reuse the same slug (they are
+  // authored independently, often by copying an example) — a bare slug would
+  // let disabling one silently disable the other. `planner_global_disabled_skills`
+  // is a flat table keyed on the namespaced id alone (no synthetic id column,
+  // same reasoning `planner_global_disabled_tools` gives: there is at most one
+  // row per skill, globally, and no per-row scope ambiguity to resolve).
+  // `planner_agent_disabled_skills` mirrors `planner_agent_disabled_tools`
+  // exactly, including `ON DELETE CASCADE` on `workspace_id` (this row is
+  // pure current configuration of an agent that, once gone, makes the row
+  // meaningless) and the same `(workspace_id, skill_id)` unique index.
+  `
+  CREATE TABLE IF NOT EXISTS planner_global_disabled_skills (
+    skill_id   TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS planner_agent_disabled_skills (
+    id           TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES planner_workspaces (id) ON DELETE CASCADE,
+    skill_id     TEXT NOT NULL,
+    created_at   INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_planner_agent_disabled_skills_unique
+    ON planner_agent_disabled_skills (workspace_id, skill_id);
+  `,
 ];
 
 /**
