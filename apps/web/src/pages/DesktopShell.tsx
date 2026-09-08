@@ -29,6 +29,7 @@ import { SessionRoute } from './SessionRoute.js';
 import { ChatPreviewPage } from './ChatPreviewPage.js';
 import { loadOpenTabRoutes, saveOpenTabRoutes, type StoredTabRoute } from '../agent/open-tabs-pref.js';
 import { fallbackAfterClose, isTabRoute, tabIdFor, tabListReducer, type TabRoute } from '../agent/tab-list.js';
+import { usePlannerChats } from '../agent/use-planner-chats.js';
 import {
   clampSidebarWidth,
   DEFAULT_SIDEBAR_WIDTH,
@@ -52,15 +53,29 @@ function PageFallback(): JSX.Element {
 }
 
 function storedToRoute(stored: StoredTabRoute): TabRoute {
-  return stored.name === 'terminal'
-    ? { name: 'terminal', sessionId: stored.sessionId }
-    : { name: 'chat', conversationId: stored.conversationId };
+  switch (stored.name) {
+    case 'terminal':
+      return { name: 'terminal', sessionId: stored.sessionId };
+    case 'chat':
+      return { name: 'chat', conversationId: stored.conversationId };
+    case 'planner-chat':
+      return { name: 'planner-chat', chatId: stored.chatId };
+    case 'settings':
+      return { name: 'settings' };
+  }
 }
 
 function routeToStored(route: TabRoute): StoredTabRoute {
-  return route.name === 'terminal'
-    ? { name: 'terminal', sessionId: route.sessionId }
-    : { name: 'chat', conversationId: route.conversationId };
+  switch (route.name) {
+    case 'terminal':
+      return { name: 'terminal', sessionId: route.sessionId };
+    case 'chat':
+      return { name: 'chat', conversationId: route.conversationId };
+    case 'planner-chat':
+      return { name: 'planner-chat', chatId: route.chatId };
+    case 'settings':
+      return { name: 'settings' };
+  }
 }
 
 /**
@@ -213,6 +228,13 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
     [onNavigate],
   );
 
+  // PA-36: the same data `PocketAgentsSection` polls for the sidebar's own
+  // "Pocket Agents" rows, lifted here too so the tab strip's planner-chat
+  // titles (`chatById` below) come from one shared poller rather than a
+  // second one running alongside the section's — see `usePlannerChats`'s
+  // own doc comment.
+  const plannerChats = usePlannerChats(onApiError);
+
   // Single click from the sidebar previews; double click keeps. Anything
   // that opens a chat some other way (compose, resuming from a chat preview,
   // the tab-list dropdown, Agents fleet) calls `onNavigate` directly and
@@ -245,8 +267,19 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
       if (chat.sessionId) map.set(`t:${chat.sessionId}`, { title: chat.title, live: chat.live });
       if (chat.conversationId) map.set(`c:${chat.conversationId}`, { title: chat.title, live: chat.live });
     }
+    // A planner chat has no "live" concept at all — see `PlannerChat`'s own
+    // doc comment: a turn runs over a one-way SSE response, not a process
+    // anything can observe as "still running" — so this is always `false`,
+    // same as `PocketAgentsSection`'s own rows render no live dot either.
+    // Unlike `state.projects` (bounded to the 60 most recently touched
+    // conversations), `listPlannerChats()` returns every chat, so a planner
+    // tab's title never ages out of this map the way an old project chat's
+    // can — see `knownTitles` below for that case.
+    for (const chat of plannerChats.chats) {
+      map.set(`p:${chat.id}`, { title: chat.title ?? 'Untitled chat', live: false });
+    }
     return map;
-  }, [state.projects, state.shells]);
+  }, [state.projects, state.shells, plannerChats.chats]);
 
   // Every title/live pair this tab bar has ever seen for a given id, kept
   // around after `chatById` stops carrying it. `ProjectService.list` only
@@ -266,14 +299,28 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
   }, [chatById]);
 
   const tabsForBar: Tab[] = openTabs.map((tab) => {
+    // Settings is a singleton with a fixed title and no live concept —
+    // never sourced from `chatById`, so it is special-cased before the
+    // lookup rather than needing a fake row injected into that map.
+    if (tab.route.name === 'settings') {
+      return { id: tab.id, title: 'Settings', live: false, preview: tab.preview ?? false };
+    }
     const found = chatById.get(tab.id) ?? knownTitles.current.get(tab.id);
     if (found) return { id: tab.id, title: found.title, live: found.live, preview: tab.preview ?? false };
     // Never seen at all — a tab restored from `open-tabs-pref` whose chat had
-    // already aged out of the poll window before this tab bar ever mounted.
-    // Same fallback `AgentPage`'s own topbar uses (`session?.title ??
-    // sessionId`); the tab closes itself via the "this session no longer
-    // exists" screen if it really is gone rather than just unpolled.
-    const fallback = tab.route.name === 'terminal' ? tab.route.sessionId : tab.route.conversationId;
+    // already aged out of the poll window before this tab bar ever mounted
+    // (or, for a planner chat, whose chat was deleted outright — see the
+    // comment on `chatById` above for why that map can't simply be missing
+    // it any other way). Same fallback `AgentPage`'s own topbar uses
+    // (`session?.title ?? sessionId`); the tab closes itself via the "this
+    // session/chat no longer exists" screen if it really is gone rather than
+    // just unpolled.
+    const fallback =
+      tab.route.name === 'terminal'
+        ? tab.route.sessionId
+        : tab.route.name === 'chat'
+          ? tab.route.conversationId
+          : tab.route.chatId;
     return {
       id: tab.id,
       title: fallback,
@@ -390,7 +437,11 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
               runningCount={runningCount}
               onSettings={() => {
                 setMenuOpen(false);
-                onNavigate({ name: 'settings' });
+                // PA-36: Settings is a singleton tab — `openPermanentTab`
+                // dedups by `tabIdFor`'s fixed `'s:settings'` id, so opening
+                // it again from here just switches to the one already open
+                // rather than adding a second.
+                openPermanentTab({ name: 'settings' });
               }}
               onCron={() => {
                 setMenuOpen(false);
@@ -448,7 +499,15 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             </div>
           )}
           <PocketAgentsSection
-            onOpenChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
+            workspaces={plannerChats.workspaces}
+            chats={plannerChats.chats}
+            refresh={plannerChats.refresh}
+            // PA-36: a Pocket Agent chat row has no click/double-click
+            // distinction of its own today (unlike `ProjectList`'s chat
+            // rows), so this always opens a normal permanent tab rather than
+            // a preview one — nothing in this section currently produces the
+            // second click that would ever "promote" a preview anyway.
+            onOpenChat={(chatId) => openPermanentTab({ name: 'planner-chat', chatId })}
             onApiError={onApiError}
             activeChatId={route.name === 'planner-chat' ? route.chatId : null}
           />
@@ -509,13 +568,29 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                     onApiError={onApiError}
                     onResumed={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
                   />
-                ) : (
+                ) : tab.route.name === 'chat' ? (
                   <ChatPreviewPage
                     conversationId={tab.route.conversationId}
                     onBack={() => closeTab(tab.id)}
                     onApiError={onApiError}
                     onStarted={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
                   />
+                ) : tab.route.name === 'planner-chat' ? (
+                  // PA-36: same "onBack closes this tab" wiring as the other
+                  // two kinds — `PlannerChatPage` auto-fires it once it
+                  // discovers the chat is gone (see its own `missing` effect),
+                  // which is the fix for stale tabs surviving a restart.
+                  <Suspense fallback={<PageFallback />}>
+                    <PlannerChatPage
+                      chatId={tab.route.chatId}
+                      onBack={() => closeTab(tab.id)}
+                      onApiError={onApiError}
+                    />
+                  </Suspense>
+                ) : (
+                  <Suspense fallback={<PageFallback />}>
+                    <SettingsPage onBack={() => closeTab(tab.id)} onApiError={onApiError} />
+                  </Suspense>
                 )}
               </div>
             ))}
@@ -543,10 +618,6 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
               onOpen={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
               onApiError={onApiError}
             />
-          </Suspense>
-        ) : route.name === 'settings' ? (
-          <Suspense fallback={<PageFallback />}>
-            <SettingsPage onBack={() => onNavigate({ name: 'list' })} onApiError={onApiError} />
           </Suspense>
         ) : route.name === 'cron' ? (
           <Suspense fallback={<PageFallback />}>
@@ -617,15 +688,6 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                 void state.refresh();
                 onNavigate({ name: 'planner' });
               }}
-              onApiError={onApiError}
-            />
-          </Suspense>
-        ) : route.name === 'planner-chat' ? (
-          <Suspense fallback={<PageFallback />}>
-            <PlannerChatPage
-              key={route.chatId}
-              chatId={route.chatId}
-              onBack={() => onNavigate({ name: 'planner' })}
               onApiError={onApiError}
             />
           </Suspense>

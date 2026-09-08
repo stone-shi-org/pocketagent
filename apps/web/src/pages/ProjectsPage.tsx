@@ -15,6 +15,7 @@ import {
 import { UsageBar } from '../components/UsageBar.js';
 import { PocketAgentsSection } from '../components/PocketAgentsSection.js';
 import { ShellSection } from '../components/ShellSection.js';
+import { usePlannerChats } from '../agent/use-planner-chats.js';
 
 interface Props {
   onOpen: (sessionId: string) => void;
@@ -63,6 +64,7 @@ export function ProjectsPage({
   onLogout,
 }: Props): JSX.Element {
   const state = useProjects(onOpen, onOpenChat, onApiError);
+  const plannerChats = usePlannerChats(onApiError);
   const [search, setSearch] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -150,7 +152,13 @@ export function ProjectsPage({
             {state.error}
           </div>
         )}
-        <PocketAgentsSection onOpenChat={onOpenPlannerChat} onApiError={onApiError} />
+        <PocketAgentsSection
+          workspaces={plannerChats.workspaces}
+          chats={plannerChats.chats}
+          refresh={plannerChats.refresh}
+          onOpenChat={onOpenPlannerChat}
+          onApiError={onApiError}
+        />
         {/* "Shell" sits between the other two categories (PA-25): a terminal is
             more likely to be what you came back for than a project folder, but
             Pocket Agents keeps the top spot it already had. */}

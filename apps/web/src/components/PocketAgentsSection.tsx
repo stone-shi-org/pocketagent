@@ -1,15 +1,22 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { PlannerChat, PlannerWorkspace } from '@pocketagent/protocol';
 import { api } from '../api/client.js';
 import { Icon } from './Icon.js';
 
 interface Props {
+  /** `null` while the first load is still in flight — see `usePlannerChats`. */
+  workspaces: PlannerWorkspace[] | null;
+  chats: PlannerChat[];
+  /** Re-fetches both lists — called after every mutation this section makes
+      (create/delete a chat), same "write then refresh" shape the section's
+      own former `load` used before the poll was lifted into `usePlannerChats`
+      (PA-36, so `DesktopShell` can share the same poller for its tab titles
+      instead of running a second one alongside this section's). */
+  refresh: () => Promise<void>;
   onOpenChat: (chatId: string) => void;
   onApiError: (error: unknown) => void;
   activeChatId?: string | null;
 }
-
-const REFRESH_MS = 5000;
 
 /**
  * PA-6: "Pocket Agents" — parallel to "Projects", one section per named
@@ -25,30 +32,19 @@ const REFRESH_MS = 5000;
  * section's rows replace the sole purpose of), the same split "Projects"
  * itself draws between browsing chats here and managing folders elsewhere.
  */
-export function PocketAgentsSection({ onOpenChat, onApiError, activeChatId }: Props): JSX.Element | null {
-  const [workspaces, setWorkspaces] = useState<PlannerWorkspace[] | null>(null);
-  const [chats, setChats] = useState<PlannerChat[]>([]);
+export function PocketAgentsSection({
+  workspaces,
+  chats,
+  refresh,
+  onOpenChat,
+  onApiError,
+  activeChatId,
+}: Props): JSX.Element | null {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState<Set<string>>(() => new Set());
   // Which workspace's "..." menu is open, keyed by workspace id — same
   // one-at-a-time, keyed-by-owner pattern `ProjectList`'s `menuFor` uses.
   const [menuFor, setMenuFor] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      const [ws, ch] = await Promise.all([api.listPlannerWorkspaces(), api.listPlannerChats()]);
-      setWorkspaces(ws.workspaces);
-      setChats(ch.chats);
-    } catch (err) {
-      onApiError(err);
-    }
-  }, [onApiError]);
-
-  useEffect(() => {
-    void load();
-    const timer = setInterval(() => void load(), REFRESH_MS);
-    return () => clearInterval(timer);
-  }, [load]);
 
   // Same dismiss-on-Escape as `ProjectMenu` — only wired while a menu is
   // actually open, so this section doesn't eat every Escape keypress on the
@@ -76,7 +72,7 @@ export function PocketAgentsSection({ onOpenChat, onApiError, activeChatId }: Pr
       try {
         const chat = await api.createPlannerChat({ workspaceId });
         onOpenChat(chat.id);
-        await load();
+        await refresh();
       } catch (err) {
         onApiError(err);
       } finally {
@@ -101,7 +97,7 @@ export function PocketAgentsSection({ onOpenChat, onApiError, activeChatId }: Pr
       } catch (err) {
         onApiError(err);
       } finally {
-        await load();
+        await refresh();
       }
     })();
   };
@@ -124,7 +120,7 @@ export function PocketAgentsSection({ onOpenChat, onApiError, activeChatId }: Pr
           next.delete(workspaceId);
           return next;
         });
-        await load();
+        await refresh();
       }
     })();
   };

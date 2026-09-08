@@ -1,7 +1,15 @@
 import type { Route } from '../hooks/useHashRoute.js';
 
-/** A tab is either a live/finished terminal session or a read-only chat preview. */
-export type TabRoute = Extract<Route, { name: 'terminal' } | { name: 'chat' }>;
+/**
+ * A tab is a live/finished terminal session, a read-only chat preview, a
+ * Pocket Agent chat (PA-36), or the singleton Settings page (PA-36) — the
+ * only four route kinds that open beside the sidebar rather than replacing
+ * the whole workspace pane.
+ */
+export type TabRoute = Extract<
+  Route,
+  { name: 'terminal' } | { name: 'chat' } | { name: 'planner-chat' } | { name: 'settings' }
+>;
 
 export interface OpenTab {
   id: string;
@@ -14,11 +22,32 @@ export interface OpenTab {
 }
 
 export function isTabRoute(route: Route): route is TabRoute {
-  return route.name === 'terminal' || route.name === 'chat';
+  return (
+    route.name === 'terminal' ||
+    route.name === 'chat' ||
+    route.name === 'planner-chat' ||
+    route.name === 'settings'
+  );
 }
 
+/**
+ * `settings` has no id field at all — it is a singleton, so every route of
+ * that kind maps to the same fixed sentinel id. That is also what gives it
+ * "only one Settings tab, ever" for free: `openPermanent`/`sync` already
+ * dedup by id, so a second `openPermanentTab({ name: 'settings' })` just
+ * finds the existing tab rather than appending another.
+ */
 export function tabIdFor(route: TabRoute): string {
-  return route.name === 'terminal' ? `t:${route.sessionId}` : `c:${route.conversationId}`;
+  switch (route.name) {
+    case 'terminal':
+      return `t:${route.sessionId}`;
+    case 'chat':
+      return `c:${route.conversationId}`;
+    case 'planner-chat':
+      return `p:${route.chatId}`;
+    case 'settings':
+      return 's:settings';
+  }
 }
 
 export type TabListAction =

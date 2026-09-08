@@ -53,6 +53,9 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
   const [hints, setHints] = useState<TerminalHintKind[]>([]);
   const [ctrlActive, setCtrlActive] = useState(false);
   const [fatal, setFatal] = useState<string | null>(null);
+  // PA-36: narrower than `fatal` on purpose — see `AgentPage`'s identical
+  // state for why a protocol-mismatch fatal must not auto-close the tab.
+  const [missing, setMissing] = useState(false);
   /**
    * An adopted pane shares its grid with whoever else is attached, so we must
    * not push our own dimensions at it — that would resize their terminal.
@@ -173,6 +176,7 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
           setSession(info);
           setStatus(info.status);
           setFatal(null);
+          setMissing(false);
           adoptedRef.current = info.adopted;
           knowsAdoptedRef.current = true;
           setHasAttached(true);
@@ -248,8 +252,10 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
         },
 
         onError: (code, message) => {
-          if (code === 'not_found') setFatal(message);
-          else if (code === 'session_ended') setNotice(message);
+          if (code === 'not_found') {
+            setFatal(message);
+            setMissing(true);
+          } else if (code === 'session_ended') setNotice(message);
         },
 
         onFatal: setFatal,
@@ -321,12 +327,22 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
       .catch((err) => {
         if (cancelled) return;
         onApiError(err);
-        if (err instanceof ApiError && err.status === 404) setFatal('This session no longer exists.');
+        if (err instanceof ApiError && err.status === 404) {
+          setFatal('This session no longer exists.');
+          setMissing(true);
+        }
       });
     return () => {
       cancelled = true;
     };
   }, [sessionId, onApiError]);
+
+  // PA-36: same auto-close as `AgentPage`'s identical effect — closes this
+  // tab (desktop) or navigates back to the list (phone) as soon as the
+  // session is confirmed gone, with no manual click required.
+  useEffect(() => {
+    if (missing) onBack();
+  }, [missing, onBack]);
 
   const takeOverSizeRef = useRef(false);
   takeOverSizeRef.current = takeOverSize;

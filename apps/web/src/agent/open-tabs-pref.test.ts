@@ -26,6 +26,8 @@ describe('open tabs preference', () => {
     const routes = [
       { name: 'terminal', sessionId: 's-1' },
       { name: 'chat', conversationId: 'c-1' },
+      { name: 'planner-chat', chatId: 'p-1' },
+      { name: 'settings' },
     ] as const;
     saveOpenTabRoutes([...routes]);
     expect(loadOpenTabRoutes()).toEqual(routes);
@@ -45,12 +47,17 @@ describe('open tabs preference', () => {
         { name: 'terminal', sessionId: 's-1' },
         { name: 'terminal' }, // missing sessionId
         { name: 'chat', conversationId: '' }, // empty conversationId
+        { name: 'planner-chat' }, // missing chatId
         { name: 'something-else', sessionId: 's-2' },
+        { name: 'settings' },
         'not even an object',
         null,
       ]),
     );
-    expect(loadOpenTabRoutes()).toEqual([{ name: 'terminal', sessionId: 's-1' }]);
+    expect(loadOpenTabRoutes()).toEqual([
+      { name: 'terminal', sessionId: 's-1' },
+      { name: 'settings' },
+    ]);
   });
 
   it('treats invalid JSON as no tabs', () => {

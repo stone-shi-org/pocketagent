@@ -43,6 +43,16 @@ export function SessionRoute({
     };
   }, [sessionId, onApiError]);
 
+  // PA-36: a session found to be gone closes its own tab (desktop) or
+  // navigates back to the list (phone) without waiting for the manual
+  // button below to be clicked — that button stays as a fallback (and as
+  // what actually renders during the one frame before this effect runs),
+  // but the fix for stale, session-id-titled tabs surviving a restart is
+  // that nobody has to click anything for them to go away.
+  useEffect(() => {
+    if (missing) onBack();
+  }, [missing, onBack]);
+
   if (missing) {
     return (
       <div className="app">

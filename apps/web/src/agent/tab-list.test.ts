@@ -4,11 +4,21 @@ import { fallbackAfterClose, tabIdFor, tabListReducer, type OpenTab } from './ta
 const tabA: OpenTab = { id: 't:a', route: { name: 'terminal', sessionId: 'a' } };
 const tabB: OpenTab = { id: 't:b', route: { name: 'terminal', sessionId: 'b' } };
 const tabC: OpenTab = { id: 'c:c', route: { name: 'chat', conversationId: 'c' } };
+const tabP: OpenTab = { id: 'p:p1', route: { name: 'planner-chat', chatId: 'p1' } };
+const tabS: OpenTab = { id: 's:settings', route: { name: 'settings' } };
 
 describe('tabIdFor', () => {
-  it('namespaces terminal and chat ids so they can never collide', () => {
+  it('namespaces every tabbable route kind so they can never collide', () => {
     expect(tabIdFor({ name: 'terminal', sessionId: 'x' })).toBe('t:x');
     expect(tabIdFor({ name: 'chat', conversationId: 'x' })).toBe('c:x');
+    expect(tabIdFor({ name: 'planner-chat', chatId: 'x' })).toBe('p:x');
+  });
+
+  it('maps every settings route to the same fixed sentinel id', () => {
+    // The whole mechanism behind "only one Settings tab, ever" (PA-36):
+    // dedup-by-id in `openPermanent`/`sync` does the rest for free.
+    expect(tabIdFor({ name: 'settings' })).toBe('s:settings');
+    expect(tabIdFor({ name: 'settings' })).toBe(tabIdFor({ name: 'settings' }));
   });
 });
 
@@ -29,6 +39,17 @@ describe('tabListReducer: sync', () => {
     expect(tabListReducer(tabs, { type: 'sync', route: { name: 'list' } })).toBe(tabs);
     expect(tabListReducer(tabs, { type: 'sync', route: { name: 'agents' } })).toBe(tabs);
     expect(tabListReducer(tabs, { type: 'sync', route: { name: 'compose' } })).toBe(tabs);
+  });
+
+  it('appends a Pocket Agent chat opened some other way (e.g. a webhook editor link)', () => {
+    const next = tabListReducer([tabA], { type: 'sync', route: tabP.route });
+    expect(next).toEqual([tabA, tabP]);
+  });
+
+  it('appends the singleton settings tab, and syncing it again is a no-op', () => {
+    const withSettings = tabListReducer([tabA], { type: 'sync', route: tabS.route });
+    expect(withSettings).toEqual([tabA, tabS]);
+    expect(tabListReducer(withSettings, { type: 'sync', route: tabS.route })).toBe(withSettings);
   });
 });
 
@@ -85,11 +106,31 @@ describe('tabListReducer: openPermanent', () => {
     tabs = tabListReducer(tabs, { type: 'openPreview', route: tabC.route });
     expect(tabs).toEqual([tabA, tabB, { ...tabC, preview: true }]);
   });
+
+  it('opens a Pocket Agent chat as a normal permanent tab', () => {
+    expect(tabListReducer([tabA], { type: 'openPermanent', route: tabP.route })).toEqual([tabA, tabP]);
+  });
+
+  it('never opens a second settings tab, no matter how many times it is requested (PA-36)', () => {
+    let tabs: OpenTab[] = [tabA];
+    tabs = tabListReducer(tabs, { type: 'openPermanent', route: tabS.route });
+    tabs = tabListReducer(tabs, { type: 'openPermanent', route: tabS.route });
+    tabs = tabListReducer(tabs, { type: 'openPermanent', route: tabS.route });
+    expect(tabs).toEqual([tabA, tabS]);
+  });
 });
 
 describe('tabListReducer: close', () => {
   it('removes exactly the closed tab', () => {
     expect(tabListReducer([tabA, tabB, tabC], { type: 'close', id: tabB.id })).toEqual([tabA, tabC]);
+  });
+
+  it('closes a Pocket Agent chat tab, e.g. once its `PlannerChatPage` discovers the chat is gone', () => {
+    expect(tabListReducer([tabA, tabP], { type: 'close', id: tabP.id })).toEqual([tabA]);
+  });
+
+  it('closes the settings tab, freeing the singleton slot for a later re-open', () => {
+    expect(tabListReducer([tabA, tabS], { type: 'close', id: tabS.id })).toEqual([tabA]);
   });
 
   it('is a no-op for an id that is not open', () => {
@@ -146,6 +187,12 @@ describe('tabListReducer: reorder', () => {
     expect(
       tabListReducer([tabA, tabB, tabC], { type: 'reorder', orderedIds: [tabC.id, tabA.id, tabB.id] }),
     ).toEqual([tabC, tabA, tabB]);
+  });
+
+  it('reorders a mix of every tabbable route kind, including planner-chat and settings', () => {
+    expect(
+      tabListReducer([tabA, tabP, tabS], { type: 'reorder', orderedIds: [tabS.id, tabP.id, tabA.id] }),
+    ).toEqual([tabS, tabP, tabA]);
   });
 
   it('appends anything missing from the given order rather than dropping it', () => {

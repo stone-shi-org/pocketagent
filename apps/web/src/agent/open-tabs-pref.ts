@@ -9,9 +9,10 @@
  * `adopted-size-prefs.ts`.
  *
  * Deliberately protocol-agnostic (no `Route` import here): this only ever
- * stores the two fields it needs, and every read is validated rather than
- * trusted, so a future shape change or a hand-edited/corrupted value degrades
- * to "no tabs restored" instead of crashing the shell on boot.
+ * stores the fields each tabbable route kind needs, and every read is
+ * validated rather than trusted, so a future shape change or a
+ * hand-edited/corrupted value degrades to "no tabs restored" instead of
+ * crashing the shell on boot.
  *
  * `localStorage` can be unavailable (private browsing, disabled storage) or,
  * outside a real browser, simply not exist as a global at all — every call is
@@ -21,13 +22,17 @@ const KEY = 'pocketagent:open-tabs';
 
 export type StoredTabRoute =
   | { name: 'terminal'; sessionId: string }
-  | { name: 'chat'; conversationId: string };
+  | { name: 'chat'; conversationId: string }
+  | { name: 'planner-chat'; chatId: string }
+  | { name: 'settings' };
 
 function isStoredTabRoute(value: unknown): value is StoredTabRoute {
   if (!value || typeof value !== 'object') return false;
   const entry = value as Record<string, unknown>;
   if (entry.name === 'terminal') return typeof entry.sessionId === 'string' && entry.sessionId.length > 0;
   if (entry.name === 'chat') return typeof entry.conversationId === 'string' && entry.conversationId.length > 0;
+  if (entry.name === 'planner-chat') return typeof entry.chatId === 'string' && entry.chatId.length > 0;
+  if (entry.name === 'settings') return true;
   return false;
 }
 

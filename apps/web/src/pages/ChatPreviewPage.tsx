@@ -70,6 +70,14 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
     };
   }, [conversationId, onApiError]);
 
+  // PA-36: same auto-close as `SessionRoute`'s own effect — a conversation
+  // found to be gone closes its own tab (desktop) or navigates back to the
+  // list (phone) with no manual click needed. The "no longer available"
+  // notice above still renders for the one frame before this effect runs.
+  useEffect(() => {
+    if (missing) onBack();
+  }, [missing, onBack]);
+
   // Stable across renders so `Transcript` doesn't re-group turns on every one —
   // there is no live session here, so this transcript state never changes.
   const liveState = useMemo(() => emptyTranscript(), []);

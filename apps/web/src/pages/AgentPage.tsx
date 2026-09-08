@@ -52,6 +52,13 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   const [status, setStatus] = useState<SessionStatus>('starting');
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [fatal, setFatal] = useState<string | null>(null);
+  // PA-36: narrower than `fatal` on purpose — `fatal` also covers a stale
+  // bundle after a protocol-version mismatch (see `TerminalConnection`'s
+  // `onFatal`), which must *not* auto-close the tab (reloading fixes it;
+  // closing does not, and every other open tab has the same problem). Only
+  // "the session itself is gone" — a 404 or a `not_found` error frame —
+  // should trigger the auto-close below.
+  const [missing, setMissing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [deciding, setDeciding] = useState(false);
   const [showFiles, setShowFiles] = useState(false);
@@ -98,6 +105,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           setSession(info);
           setStatus(info.status);
           setFatal(null);
+          setMissing(false);
         },
         onStatus: (next, info) => {
           setStatus(next);
@@ -167,8 +175,10 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           setStatus((prev) => (isTerminalStatus(prev) ? prev : 'exited'));
         },
         onError: (code, message) => {
-          if (code === 'not_found') setFatal(message);
-          else setNotice(message);
+          if (code === 'not_found') {
+            setFatal(message);
+            setMissing(true);
+          } else setNotice(message);
         },
 
         onFatal: setFatal,
@@ -196,12 +206,24 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
       .catch((err) => {
         if (cancelled) return;
         onApiError(err);
-        if (err instanceof ApiError && err.status === 404) setFatal('This session no longer exists.');
+        if (err instanceof ApiError && err.status === 404) {
+          setFatal('This session no longer exists.');
+          setMissing(true);
+        }
       });
     return () => {
       cancelled = true;
     };
   }, [sessionId, onApiError]);
+
+  // PA-36: closes this tab (desktop) or navigates back to the list (phone)
+  // as soon as the session is confirmed gone — the fix for a tab restored
+  // from `open-tabs-pref` after a restart that names a session id nobody
+  // ever clicks away from. The "no longer exists" notice below still shows
+  // for the one frame before this effect runs.
+  useEffect(() => {
+    if (missing) onBack();
+  }, [missing, onBack]);
 
   /**
    * Backstory for a resumed conversation.

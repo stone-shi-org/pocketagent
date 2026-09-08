@@ -73,6 +73,16 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
   const [transcript, setTranscript] = useState<TranscriptState | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // PA-36: this page had no "gone" detection at all before — a deleted chat
+  // silently rendered as `chat === null` / "Untitled chat" with an empty
+  // transcript, same failure shape `ChatPreviewPage`'s own `missing` state
+  // exists to catch for a coding-agent conversation. `plannerChatHistory`
+  // 404s once the chat's DB row is gone (`PlannerChatService.history` calls
+  // `requireChat`), which is the reliable signal — `listPlannerChats()`
+  // returns every chat with no pagination, so a chat missing from it is
+  // never just "aged out of a poll window" the way a project conversation
+  // can be.
+  const [missing, setMissing] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleInput, setTitleInput] = useState('');
   const [contextPreview, setContextPreview] = useState<PlannerContextPreviewResponse | null>(null);
@@ -86,19 +96,34 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
         api.listPlannerModels(),
         api.plannerChatHistory(chatId),
       ]);
-      setChat(chats.find((c) => c.id === chatId) ?? null);
+      const found = chats.find((c) => c.id === chatId) ?? null;
+      setChat(found);
+      setMissing(found === null);
       setModels(modelList);
       setTranscript(applyEvents(emptyTranscript(), events));
       setError(null);
     } catch (err) {
       onApiError(err);
-      setError(err instanceof ApiError ? err.message : 'Could not load this chat.');
+      if (err instanceof ApiError && err.status === 404) {
+        setMissing(true);
+      } else {
+        setError(err instanceof ApiError ? err.message : 'Could not load this chat.');
+      }
     }
   }, [chatId, onApiError]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // PA-36: closes this tab (desktop) or navigates back to the Pocket Agent
+  // list (phone) as soon as the chat is confirmed gone — same auto-close
+  // `SessionRoute`/`ChatPreviewPage` fire for a deleted session/conversation.
+  // No manual click required, which is the fix for a tab restored from
+  // `open-tabs-pref` after the owning chat was deleted.
+  useEffect(() => {
+    if (missing) onBack();
+  }, [missing, onBack]);
 
   const changeModel = (modelId: string): void => {
     if (!modelId) return;
