@@ -62,6 +62,18 @@ function storedToRoute(stored: StoredTabRoute): TabRoute {
       return { name: 'planner-chat', chatId: stored.chatId };
     case 'settings':
       return { name: 'settings' };
+    case 'cron':
+      return { name: 'cron' };
+    case 'cron-job':
+      return { name: 'cron-job', jobId: stored.jobId };
+    case 'webhooks':
+      return { name: 'webhooks' };
+    case 'webhook':
+      return { name: 'webhook', webhookId: stored.webhookId };
+    case 'planner':
+      return { name: 'planner' };
+    case 'planner-agent':
+      return { name: 'planner-agent', agentId: stored.agentId };
   }
 }
 
@@ -75,6 +87,61 @@ function routeToStored(route: TabRoute): StoredTabRoute {
       return { name: 'planner-chat', chatId: route.chatId };
     case 'settings':
       return { name: 'settings' };
+    case 'cron':
+      return { name: 'cron' };
+    case 'cron-job':
+      return { name: 'cron-job', jobId: route.jobId };
+    case 'webhooks':
+      return { name: 'webhooks' };
+    case 'webhook':
+      return { name: 'webhook', webhookId: route.webhookId };
+    case 'planner':
+      return { name: 'planner' };
+    case 'planner-agent':
+      return { name: 'planner-agent', agentId: route.agentId };
+  }
+}
+
+type UtilityTabRoute = Exclude<TabRoute, { name: 'terminal' } | { name: 'chat' } | { name: 'planner-chat' }>;
+
+/** A type predicate, not a plain boolean check, so narrowing `tab.route` on
+    this survives into the `tabsForBar` branch that handles everything else —
+    that branch reads `tab.route.sessionId`/`conversationId`/`chatId`, none of
+    which exist on a `UtilityTabRoute`, and TypeScript only carries that
+    exclusion forward through a real type guard. */
+function isUtilityTabRoute(route: TabRoute): route is UtilityTabRoute {
+  return (
+    route.name === 'settings' ||
+    route.name === 'cron' ||
+    route.name === 'cron-job' ||
+    route.name === 'webhooks' ||
+    route.name === 'webhook' ||
+    route.name === 'planner' ||
+    route.name === 'planner-agent'
+  );
+}
+
+/**
+ * Display title for the one shared admin-page tab (PA-36 round 2) — plain
+ * per-route-kind labels, deliberately not "Cron Job: <name>" or similar:
+ * getting a job's/webhook's/agent's own name into the tab bar would mean an
+ * extra fetch (or threading one through from a page that doesn't otherwise
+ * report upward) for a label that's only ever visible while that one tab is
+ * frontmost, where the page itself already shows the full detail.
+ */
+function utilityTabTitle(route: UtilityTabRoute): string {
+  switch (route.name) {
+    case 'settings':
+      return 'Settings';
+    case 'cron':
+    case 'cron-job':
+      return 'Cron Jobs';
+    case 'webhooks':
+    case 'webhook':
+      return 'Webhooks';
+    case 'planner':
+    case 'planner-agent':
+      return 'Pocket Agents';
   }
 }
 
@@ -96,6 +163,14 @@ function routeToStored(route: TabRoute): StoredTabRoute {
  * Compose and the Agents fleet view are deliberately *not* tabbable: they are
  * single panes that replace whatever's showing, exactly as before.
  *
+ * Settings, Cron, Webhooks and Pocket Agents (the `planner` route, plus every
+ * one's own detail/editor sub-route) are tabbable, but as one *shared*
+ * singleton tab rather than one each (PA-36 round 2) — see
+ * `isUtilityTabRoute`'s own comment for the mechanics. Mentally, treat that
+ * one tab as its own small stack of admin pages, not seven independent tabs
+ * that happen to collapse.
+ *
+
  * Which layout you get is decided by viewport width and pointer type, never by
  * sniffing the user agent. See `useMediaQuery`.
  */
@@ -299,11 +374,13 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
   }, [chatById]);
 
   const tabsForBar: Tab[] = openTabs.map((tab) => {
-    // Settings is a singleton with a fixed title and no live concept —
-    // never sourced from `chatById`, so it is special-cased before the
-    // lookup rather than needing a fake row injected into that map.
-    if (tab.route.name === 'settings') {
-      return { id: tab.id, title: 'Settings', live: false, preview: tab.preview ?? false };
+    // The shared admin-page tab (settings/cron/webhooks/planner and each
+    // one's own detail route, PA-36 round 2) has a fixed title per
+    // sub-route and no live concept — never sourced from `chatById`, so
+    // it is special-cased before that lookup rather than needing a fake
+    // row injected into that map.
+    if (isUtilityTabRoute(tab.route)) {
+      return { id: tab.id, title: utilityTabTitle(tab.route), live: false, preview: tab.preview ?? false };
     }
     const found = chatById.get(tab.id) ?? knownTitles.current.get(tab.id);
     if (found) return { id: tab.id, title: found.title, live: found.live, preview: tab.preview ?? false };
@@ -587,9 +664,90 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                       onApiError={onApiError}
                     />
                   </Suspense>
-                ) : (
+                ) : tab.route.name === 'settings' ? (
+                  // PA-36 round 2: Settings, Cron, Webhooks and Pocket Agents
+                  // (the `planner` route) all share this one tab now — see
+                  // `isUtilityTabRoute`'s own comment. Each list route's own
+                  // "back" closes the whole tab (there's nothing above it
+                  // within the group, same as Settings' own pre-existing
+                  // behavior); each detail/editor sub-route's "back"/"done"
+                  // instead navigates to its own list route, staying inside
+                  // this same tab exactly as it did when these were their own
+                  // full-pane routes below — only the container changed.
                   <Suspense fallback={<PageFallback />}>
                     <SettingsPage onBack={() => closeTab(tab.id)} onApiError={onApiError} />
+                  </Suspense>
+                ) : tab.route.name === 'cron' ? (
+                  <Suspense fallback={<PageFallback />}>
+                    <CronJobsPage
+                      onBack={() => closeTab(tab.id)}
+                      onOpenJob={(jobId) => onNavigate({ name: 'cron-job', jobId })}
+                      onApiError={onApiError}
+                    />
+                  </Suspense>
+                ) : tab.route.name === 'cron-job' ? (
+                  <Suspense fallback={<PageFallback />}>
+                    <CronJobEditorPage
+                      key={tab.route.jobId}
+                      jobId={tab.route.jobId}
+                      onBack={() => onNavigate({ name: 'cron' })}
+                      onDone={() => {
+                        void state.refresh();
+                        onNavigate({ name: 'cron' });
+                      }}
+                      onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+                      onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
+                      onOpenPlannerChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
+                      onApiError={onApiError}
+                    />
+                  </Suspense>
+                ) : tab.route.name === 'webhooks' ? (
+                  <Suspense fallback={<PageFallback />}>
+                    <WebhooksPage
+                      onBack={() => closeTab(tab.id)}
+                      onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
+                      onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+                      onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
+                      onOpenPlannerChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
+                      onApiError={onApiError}
+                    />
+                  </Suspense>
+                ) : tab.route.name === 'webhook' ? (
+                  <Suspense fallback={<PageFallback />}>
+                    <WebhookEditorPage
+                      key={tab.route.webhookId}
+                      webhookId={tab.route.webhookId}
+                      onBack={() => onNavigate({ name: 'webhooks' })}
+                      onDone={() => {
+                        void state.refresh();
+                        onNavigate({ name: 'webhooks' });
+                      }}
+                      onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+                      onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
+                      onOpenPlannerChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
+                      onApiError={onApiError}
+                    />
+                  </Suspense>
+                ) : tab.route.name === 'planner' ? (
+                  <Suspense fallback={<PageFallback />}>
+                    <PlannerPage
+                      onBack={() => closeTab(tab.id)}
+                      onOpenAgent={(agentId) => onNavigate({ name: 'planner-agent', agentId })}
+                      onApiError={onApiError}
+                    />
+                  </Suspense>
+                ) : (
+                  <Suspense fallback={<PageFallback />}>
+                    <PlannerAgentEditorPage
+                      key={tab.route.agentId}
+                      agentId={tab.route.agentId}
+                      onBack={() => onNavigate({ name: 'planner' })}
+                      onDone={() => {
+                        void state.refresh();
+                        onNavigate({ name: 'planner' });
+                      }}
+                      onApiError={onApiError}
+                    />
                   </Suspense>
                 )}
               </div>
@@ -616,78 +774,6 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
           <Suspense fallback={<PageFallback />}>
             <AgentsFleetPage
               onOpen={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
-              onApiError={onApiError}
-            />
-          </Suspense>
-        ) : route.name === 'cron' ? (
-          <Suspense fallback={<PageFallback />}>
-            <CronJobsPage
-              onBack={() => onNavigate({ name: 'list' })}
-              onOpenJob={(jobId) => onNavigate({ name: 'cron-job', jobId })}
-              onApiError={onApiError}
-            />
-          </Suspense>
-        ) : route.name === 'cron-job' ? (
-          <Suspense fallback={<PageFallback />}>
-            <CronJobEditorPage
-              key={route.jobId}
-              jobId={route.jobId}
-              onBack={() => onNavigate({ name: 'cron' })}
-              onDone={() => {
-                void state.refresh();
-                onNavigate({ name: 'cron' });
-              }}
-              onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
-              onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
-              onOpenPlannerChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
-              onApiError={onApiError}
-            />
-          </Suspense>
-        ) : route.name === 'webhooks' ? (
-          <Suspense fallback={<PageFallback />}>
-            <WebhooksPage
-              onBack={() => onNavigate({ name: 'list' })}
-              onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
-              onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
-              onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
-              onOpenPlannerChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
-              onApiError={onApiError}
-            />
-          </Suspense>
-        ) : route.name === 'webhook' ? (
-          <Suspense fallback={<PageFallback />}>
-            <WebhookEditorPage
-              key={route.webhookId}
-              webhookId={route.webhookId}
-              onBack={() => onNavigate({ name: 'webhooks' })}
-              onDone={() => {
-                void state.refresh();
-                onNavigate({ name: 'webhooks' });
-              }}
-              onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
-              onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
-              onOpenPlannerChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
-              onApiError={onApiError}
-            />
-          </Suspense>
-        ) : route.name === 'planner' ? (
-          <Suspense fallback={<PageFallback />}>
-            <PlannerPage
-              onBack={() => onNavigate({ name: 'list' })}
-              onOpenAgent={(agentId) => onNavigate({ name: 'planner-agent', agentId })}
-              onApiError={onApiError}
-            />
-          </Suspense>
-        ) : route.name === 'planner-agent' ? (
-          <Suspense fallback={<PageFallback />}>
-            <PlannerAgentEditorPage
-              key={route.agentId}
-              agentId={route.agentId}
-              onBack={() => onNavigate({ name: 'planner' })}
-              onDone={() => {
-                void state.refresh();
-                onNavigate({ name: 'planner' });
-              }}
               onApiError={onApiError}
             />
           </Suspense>

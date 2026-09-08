@@ -2,13 +2,26 @@ import type { Route } from '../hooks/useHashRoute.js';
 
 /**
  * A tab is a live/finished terminal session, a read-only chat preview, a
- * Pocket Agent chat (PA-36), or the singleton Settings page (PA-36) — the
- * only four route kinds that open beside the sidebar rather than replacing
- * the whole workspace pane.
+ * Pocket Agent chat (PA-36), or one of the "full screen" admin pages —
+ * Settings, Cron, Webhooks, Pocket Agents (the `planner` route — the agent
+ * *list*, not a `planner-chat`) and each one's own detail/editor sub-route
+ * (PA-36 round 2, reporter: "'Setting' tab concept should also apply to
+ * webhook, pocket agent, cron ... all those share one tab"). These are the
+ * only route kinds that open beside the sidebar rather than replacing the
+ * whole workspace pane.
  */
 export type TabRoute = Extract<
   Route,
-  { name: 'terminal' } | { name: 'chat' } | { name: 'planner-chat' } | { name: 'settings' }
+  | { name: 'terminal' }
+  | { name: 'chat' }
+  | { name: 'planner-chat' }
+  | { name: 'settings' }
+  | { name: 'cron' }
+  | { name: 'cron-job' }
+  | { name: 'webhooks' }
+  | { name: 'webhook' }
+  | { name: 'planner' }
+  | { name: 'planner-agent' }
 >;
 
 export interface OpenTab {
@@ -26,16 +39,27 @@ export function isTabRoute(route: Route): route is TabRoute {
     route.name === 'terminal' ||
     route.name === 'chat' ||
     route.name === 'planner-chat' ||
-    route.name === 'settings'
+    route.name === 'settings' ||
+    route.name === 'cron' ||
+    route.name === 'cron-job' ||
+    route.name === 'webhooks' ||
+    route.name === 'webhook' ||
+    route.name === 'planner' ||
+    route.name === 'planner-agent'
   );
 }
 
 /**
- * `settings` has no id field at all — it is a singleton, so every route of
- * that kind maps to the same fixed sentinel id. That is also what gives it
- * "only one Settings tab, ever" for free: `openPermanent`/`sync` already
- * dedup by id, so a second `openPermanentTab({ name: 'settings' })` just
- * finds the existing tab rather than appending another.
+ * Every admin-page route kind (`settings`/`cron`/`cron-job`/`webhooks`/
+ * `webhook`/`planner`/`planner-agent`) maps to the same fixed sentinel id —
+ * `s:settings`, kept as the literal string from before this generalized
+ * beyond just Settings, so a tab already persisted under that id from an
+ * older build restores into the same slot rather than orphaning it. That is
+ * also what gives the whole group "only one tab, ever, showing whichever of
+ * the seven you're currently on" for free: `openPermanent`/`sync` already
+ * dedup by id, so navigating from Cron to Webhooks just updates the one
+ * existing tab's route (see `sync`'s own comment on why it has to, unlike
+ * every other tab kind) rather than opening a second tab.
  */
 export function tabIdFor(route: TabRoute): string {
   switch (route.name) {
@@ -46,6 +70,12 @@ export function tabIdFor(route: TabRoute): string {
     case 'planner-chat':
       return `p:${route.chatId}`;
     case 'settings':
+    case 'cron':
+    case 'cron-job':
+    case 'webhooks':
+    case 'webhook':
+    case 'planner':
+    case 'planner-agent':
       return 's:settings';
   }
 }
@@ -82,8 +112,27 @@ export function tabListReducer(tabs: OpenTab[], action: TabListAction): OpenTab[
     case 'sync': {
       if (!isTabRoute(action.route)) return tabs;
       const id = tabIdFor(action.route);
-      if (tabs.some((t) => t.id === id)) return tabs;
-      return [...tabs, { id, route: action.route }];
+      const index = tabs.findIndex((t) => t.id === id);
+      const existing = tabs[index];
+      if (index === -1 || !existing) return [...tabs, { id, route: action.route }];
+      // A terminal/chat/planner-chat tab's own id already encodes the only
+      // field its route carries, so re-syncing the same session/chat is
+      // always a true no-op. The shared admin-page tab (PA-36 round 2) is
+      // the one place that isn't true: `settings`, `cron`, `webhook`, ... all
+      // collapse to the fixed `s:settings` id, so navigating from Cron to
+      // Webhooks re-syncs *the same* tab id with a genuinely different
+      // route, and that has to overwrite what's stored or the tab would
+      // freeze on whichever of the seven pages it was first opened to. The
+      // reference check (rather than a deep-equal) is enough: every real
+      // navigation — a hash change, a click — constructs a fresh route
+      // object, so this only ever short-circuits the truly-unchanged case
+      // (e.g. re-selecting a tab that's already active), which is what keeps
+      // this returning the exact same array reference for that case, same as
+      // before this route ever needed updating.
+      if (existing.route === action.route) return tabs;
+      const next = tabs.slice();
+      next[index] = { ...existing, route: action.route };
+      return next;
     }
     case 'openPreview': {
       // A single click on a project-tree row: same chat twice in a row (or

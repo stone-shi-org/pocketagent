@@ -6,6 +6,10 @@ const tabB: OpenTab = { id: 't:b', route: { name: 'terminal', sessionId: 'b' } }
 const tabC: OpenTab = { id: 'c:c', route: { name: 'chat', conversationId: 'c' } };
 const tabP: OpenTab = { id: 'p:p1', route: { name: 'planner-chat', chatId: 'p1' } };
 const tabS: OpenTab = { id: 's:settings', route: { name: 'settings' } };
+const tabCron: OpenTab = { id: 's:settings', route: { name: 'cron' } };
+const tabWebhooks: OpenTab = { id: 's:settings', route: { name: 'webhooks' } };
+const tabWebhook: OpenTab = { id: 's:settings', route: { name: 'webhook', webhookId: 'w1' } };
+const tabPlanner: OpenTab = { id: 's:settings', route: { name: 'planner' } };
 
 describe('tabIdFor', () => {
   it('namespaces every tabbable route kind so they can never collide', () => {
@@ -14,11 +18,17 @@ describe('tabIdFor', () => {
     expect(tabIdFor({ name: 'planner-chat', chatId: 'x' })).toBe('p:x');
   });
 
-  it('maps every settings route to the same fixed sentinel id', () => {
-    // The whole mechanism behind "only one Settings tab, ever" (PA-36):
-    // dedup-by-id in `openPermanent`/`sync` does the rest for free.
+  it('maps every admin-page route to the same fixed sentinel id (PA-36 round 2)', () => {
+    // The whole mechanism behind "Settings, Cron, Webhooks and Pocket Agents
+    // all share one tab": dedup-by-id in `openPermanent`/`sync` does the
+    // rest for free, exactly as it already did for Settings alone.
     expect(tabIdFor({ name: 'settings' })).toBe('s:settings');
-    expect(tabIdFor({ name: 'settings' })).toBe(tabIdFor({ name: 'settings' }));
+    expect(tabIdFor({ name: 'cron' })).toBe('s:settings');
+    expect(tabIdFor({ name: 'cron-job', jobId: 'j1' })).toBe('s:settings');
+    expect(tabIdFor({ name: 'webhooks' })).toBe('s:settings');
+    expect(tabIdFor({ name: 'webhook', webhookId: 'w1' })).toBe('s:settings');
+    expect(tabIdFor({ name: 'planner' })).toBe('s:settings');
+    expect(tabIdFor({ name: 'planner-agent', agentId: 'a1' })).toBe('s:settings');
   });
 });
 
@@ -50,6 +60,36 @@ describe('tabListReducer: sync', () => {
     const withSettings = tabListReducer([tabA], { type: 'sync', route: tabS.route });
     expect(withSettings).toEqual([tabA, tabS]);
     expect(tabListReducer(withSettings, { type: 'sync', route: tabS.route })).toBe(withSettings);
+  });
+
+  it('navigating from one admin page to another updates the one shared tab in place, rather than opening a second one (PA-36 round 2)', () => {
+    // The exact scenario the reporter asked for: Settings, Cron, Webhooks
+    // and Pocket Agents share one tab, and switching between them has to
+    // change what that tab shows — `sync` finding the id already open must
+    // not, unlike every other tab kind, treat that as a no-op.
+    let tabs: OpenTab[] = [tabA];
+    tabs = tabListReducer(tabs, { type: 'sync', route: tabS.route });
+    expect(tabs).toEqual([tabA, tabS]);
+
+    tabs = tabListReducer(tabs, { type: 'sync', route: tabCron.route });
+    expect(tabs).toEqual([tabA, tabCron]);
+    expect(tabs.filter((t) => t.id === 's:settings')).toHaveLength(1);
+
+    tabs = tabListReducer(tabs, { type: 'sync', route: tabWebhook.route });
+    expect(tabs).toEqual([tabA, tabWebhook]);
+
+    tabs = tabListReducer(tabs, { type: 'sync', route: tabPlanner.route });
+    expect(tabs).toEqual([tabA, tabPlanner]);
+  });
+
+  it('re-syncing the exact same route object for the shared admin tab is still a true no-op', () => {
+    // Selecting an already-active tab from the tab bar re-dispatches `sync`
+    // with that tab's own stored route (same object, not a fresh one built
+    // from a navigation) — this must not spuriously "update" anything, which
+    // is what keeps `DesktopShell`'s reconcile effect from firing on every
+    // render once the tab settles.
+    const tabs: OpenTab[] = [tabA, tabWebhooks];
+    expect(tabListReducer(tabs, { type: 'sync', route: tabWebhooks.route })).toBe(tabs);
   });
 });
 
@@ -118,6 +158,16 @@ describe('tabListReducer: openPermanent', () => {
     tabs = tabListReducer(tabs, { type: 'openPermanent', route: tabS.route });
     expect(tabs).toEqual([tabA, tabS]);
   });
+
+  it('requesting a different admin page while the shared tab is already open under a different sub-route is a no-op here too — sync (not openPermanent) is what updates it', () => {
+    // `openPermanent`'s own "already open and not preview: nothing to do"
+    // rule is unchanged by PA-36 round 2 — `DesktopShell`'s menu actions
+    // still resolve correctly because the `route` prop change that follows
+    // is picked up by the very next `sync`, not because this action itself
+    // switched the content. See the `sync` tests above for that half.
+    const tabs: OpenTab[] = [tabA, tabCron];
+    expect(tabListReducer(tabs, { type: 'openPermanent', route: tabS.route })).toBe(tabs);
+  });
 });
 
 describe('tabListReducer: close', () => {
@@ -131,6 +181,10 @@ describe('tabListReducer: close', () => {
 
   it('closes the settings tab, freeing the singleton slot for a later re-open', () => {
     expect(tabListReducer([tabA, tabS], { type: 'close', id: tabS.id })).toEqual([tabA]);
+  });
+
+  it('closing the shared admin tab closes whichever of the seven sub-pages it currently shows (PA-36 round 2)', () => {
+    expect(tabListReducer([tabA, tabWebhooks], { type: 'close', id: tabWebhooks.id })).toEqual([tabA]);
   });
 
   it('is a no-op for an id that is not open', () => {

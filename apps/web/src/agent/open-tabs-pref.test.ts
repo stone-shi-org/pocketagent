@@ -28,6 +28,12 @@ describe('open tabs preference', () => {
       { name: 'chat', conversationId: 'c-1' },
       { name: 'planner-chat', chatId: 'p-1' },
       { name: 'settings' },
+      { name: 'cron' },
+      { name: 'cron-job', jobId: 'j-1' },
+      { name: 'webhooks' },
+      { name: 'webhook', webhookId: 'w-1' },
+      { name: 'planner' },
+      { name: 'planner-agent', agentId: 'a-1' },
     ] as const;
     saveOpenTabRoutes([...routes]);
     expect(loadOpenTabRoutes()).toEqual(routes);
@@ -50,6 +56,9 @@ describe('open tabs preference', () => {
         { name: 'planner-chat' }, // missing chatId
         { name: 'something-else', sessionId: 's-2' },
         { name: 'settings' },
+        { name: 'cron-job' }, // missing jobId
+        { name: 'webhook', webhookId: '' }, // empty webhookId
+        { name: 'planner-agent', agentId: 'a-1' },
         'not even an object',
         null,
       ]),
@@ -57,6 +66,7 @@ describe('open tabs preference', () => {
     expect(loadOpenTabRoutes()).toEqual([
       { name: 'terminal', sessionId: 's-1' },
       { name: 'settings' },
+      { name: 'planner-agent', agentId: 'a-1' },
     ]);
   });
 

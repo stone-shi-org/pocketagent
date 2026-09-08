@@ -24,7 +24,13 @@ export type StoredTabRoute =
   | { name: 'terminal'; sessionId: string }
   | { name: 'chat'; conversationId: string }
   | { name: 'planner-chat'; chatId: string }
-  | { name: 'settings' };
+  | { name: 'settings' }
+  | { name: 'cron' }
+  | { name: 'cron-job'; jobId: string }
+  | { name: 'webhooks' }
+  | { name: 'webhook'; webhookId: string }
+  | { name: 'planner' }
+  | { name: 'planner-agent'; agentId: string };
 
 function isStoredTabRoute(value: unknown): value is StoredTabRoute {
   if (!value || typeof value !== 'object') return false;
@@ -33,6 +39,12 @@ function isStoredTabRoute(value: unknown): value is StoredTabRoute {
   if (entry.name === 'chat') return typeof entry.conversationId === 'string' && entry.conversationId.length > 0;
   if (entry.name === 'planner-chat') return typeof entry.chatId === 'string' && entry.chatId.length > 0;
   if (entry.name === 'settings') return true;
+  if (entry.name === 'cron') return true;
+  if (entry.name === 'cron-job') return typeof entry.jobId === 'string' && entry.jobId.length > 0;
+  if (entry.name === 'webhooks') return true;
+  if (entry.name === 'webhook') return typeof entry.webhookId === 'string' && entry.webhookId.length > 0;
+  if (entry.name === 'planner') return true;
+  if (entry.name === 'planner-agent') return typeof entry.agentId === 'string' && entry.agentId.length > 0;
   return false;
 }
 
