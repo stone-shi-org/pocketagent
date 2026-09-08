@@ -5,7 +5,6 @@ import type {
   EffortLevel,
   HostInfo,
   ProjectInfo,
-  PromptImage,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
 import { usesClaudeTranscripts } from '@pocketagent/protocol';
@@ -13,14 +12,11 @@ import { api, ApiError } from '../api/client.js';
 import { SelectorRow, type SelectorOption } from '../components/SelectorRow.js';
 import { AddProject } from '../components/AddProject.js';
 import { WorktreeDialog, type WorktreeChoice } from '../components/WorktreeDialog.js';
-import { AttachButton } from '../components/AttachButton.js';
 import { Icon } from '../components/Icon.js';
 import { effortLabel } from '../components/PromptBox.js';
-import { readImageFile } from '../agent/image-attachment.js';
 import { type Flavour, makeFlavour, parseFlavour } from '../agent/flavour.js';
 import { flattenProjects } from '../agent/search.js';
 import { resolveCurrentModel } from '../agent/transcript.js';
-import { setPendingPrompt } from '../agent/pending-prompt.js';
 import { formatRelative } from '../components/StatusBadge.js';
 
 interface Props {
@@ -42,11 +38,12 @@ const NEW_CHAT = '__new__';
 const ADD_WORKSPACE = '__add_workspace__';
 
 /**
- * Start a chat: pick where it runs and what it runs, type the first prompt.
+ * Start a chat: pick where it runs and what it runs, then create it.
  *
  * Everything is chosen before anything is created, so nothing is left behind if
- * you back out. The prompt is handed to the session page rather than sent from
- * here, because the socket that will carry it does not exist yet.
+ * you back out. There is no first-prompt box here — creating (or opening a
+ * picked chat) hands off to the session page with nothing queued to send, the
+ * same state any other chat is in the moment it goes idle waiting on you.
  */
 export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Props): JSX.Element {
   const [host, setHost] = useState<HostInfo | null>(null);
@@ -66,9 +63,6 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   const [branchMode, setBranchMode] = useState<'new' | 'current'>('new');
   const [branchName, setBranchName] = useState('');
   const [worktreeDialogOpen, setWorktreeDialogOpen] = useState(false);
-  const [prompt, setPrompt] = useState('');
-  const [attachedImage, setAttachedImage] = useState<PromptImage | null>(null);
-  const [attachError, setAttachError] = useState<string | null>(null);
   const [showAddWorkspace, setShowAddWorkspace] = useState(false);
   /**
    * Model/effort for a brand-new chat, pre-filled from `AgentInfo.defaultModel`/
@@ -237,23 +231,21 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
     !busy &&
     !!cwd &&
     !!effectiveAgentId &&
-    (prompt.trim().length > 0 || !!attachedImage) &&
     !(startingWorktree && branchMode === 'new' && !branchName.trim());
 
-  // Only the Claude Agent SDK backend's structured transport understands an
-  // image content block (see `ws/index.ts`'s `instanceof StructuredSession`
-  // check) — the attach button has to know what this composer is *actually*
-  // about to create, which is one of three different things depending on
-  // what's picked in the "Chat" row above:
+  // Whether the chat about to be opened runs the structured transport — one
+  // of three different things depending on what's picked in the "Chat" row
+  // above:
   //  - joining an already-live chat: whatever transport it is already running as
   //  - resuming a finished one: always forced to `structured` (see below)
   //  - starting fresh: whatever the "Agent" row's flavour says
+  // Only used to gate the model/effort pickers below, which only apply to a
+  // brand-new structured chat.
   const willBeStructured = picked?.chat.live
     ? picked.chat.transport === 'structured'
     : picked?.chat.conversationId
       ? true
       : transport === 'structured';
-  const supportsImageAttachment = willBeStructured;
 
   // Model/effort only matter for a brand-new chat — a picked chat (live or
   // resumed) always keeps whatever it was already using, same reasoning as
@@ -301,11 +293,9 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
     setBusy(true);
     setError(null);
     try {
-      // Already running: join it and hand it the prompt. Starting a second
-      // process against the same conversation is the one thing resuming exists
-      // to avoid.
+      // Already running: just open it. Starting a second process against the
+      // same conversation is the one thing resuming exists to avoid.
       if (picked?.chat.live && picked.chat.sessionId) {
-        setPendingPrompt(picked.chat.sessionId, prompt, attachedImage ?? undefined);
         onCreated(picked.chat.sessionId);
         return;
       }
@@ -349,7 +339,6 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
         ...(!picked && model ? { model } : {}),
         ...(!picked && showEffortPicker ? { effort } : {}),
       });
-      setPendingPrompt(session.id, prompt, attachedImage ?? undefined);
       onCreated(session.id);
     } catch (err) {
       onApiError(err);
@@ -365,23 +354,12 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
     startingWorktree,
     branchMode,
     branchName,
-    prompt,
-    attachedImage,
     model,
     effort,
     showEffortPicker,
     onCreated,
     onApiError,
   ]);
-
-  async function attach(file: File): Promise<void> {
-    setAttachError(null);
-    try {
-      setAttachedImage(await readImageFile(file));
-    } catch (err) {
-      setAttachError(err instanceof Error ? err.message : 'Could not attach that image.');
-    }
-  }
 
   return (
     <div className="app composer-page">
@@ -553,66 +531,23 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
       {picked && (
         <p className="composer-note">
           {picked.chat.live
-            ? 'Already running — your prompt goes to that session.'
+            ? 'Already running — this opens the live session.'
             : `Resuming as ${picked.chat.agentDisplayName} — a new branch; the original transcript is left untouched.`}
         </p>
       )}
 
       <div className="composer-dock">
-        {supportsImageAttachment && (attachedImage || attachError) && (
-          <div className="attach-preview">
-            {attachedImage ? (
-              <>
-                <img
-                  src={`data:${attachedImage.mediaType};base64,${attachedImage.data}`}
-                  alt="Attached"
-                />
-                <button
-                  type="button"
-                  className="attach-remove"
-                  onClick={() => setAttachedImage(null)}
-                  aria-label="Remove attached image"
-                >
-                  <Icon name="close" size={13} />
-                </button>
-              </>
-            ) : (
-              <span className="attach-error">{attachError}</span>
-            )}
-          </div>
-        )}
-        <textarea
-          className="composer-input"
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          onKeyDown={(e) => {
-            // Enter sends; Shift+Enter is a newline. Phones show a Return key
-            // either way, so the modifier is the only signal available.
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              void submit();
-            }
-          }}
-          placeholder={host ? `Work on ${host.name}` : 'Work on…'}
-          rows={2}
-          aria-label="First prompt"
-        />
-        <div className="composer-actions">
-          {supportsImageAttachment && <AttachButton onFile={(file) => void attach(file)} />}
-          {/* Flexible spacer: with nothing to attach, this is the whole row
-              (the rows above already say what will run); with the attach
-              button present, it's what still pushes send to the right. */}
-          <span className="composer-hint" />
-          <button
-            type="button"
-            className="send-btn"
-            onClick={() => void submit()}
-            disabled={!canSend}
-            aria-label="Start chat"
-          >
-            {busy ? '…' : <Icon name="arrow-up" size={19} />}
-          </button>
-        </div>
+        {/* No first-prompt box: the session is created (or joined) empty and
+            ready for input, same as tapping into any other chat. */}
+        <button
+          type="button"
+          className="primary composer-submit"
+          onClick={() => void submit()}
+          disabled={!canSend}
+          aria-label={picked ? 'Open chat' : 'Create chat'}
+        >
+          {busy ? '…' : picked ? 'Open' : 'Create chat'}
+        </button>
       </div>
     </div>
   );

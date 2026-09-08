@@ -741,8 +741,7 @@ input[type='number']::-webkit-outer-spin-button {
   font-weight: 700;
 }
 
-/* A floating pill, not a flush toolbar — the same shape as the first-prompt
-   composer (.composer-dock) so the two don't read as two different apps. */
+/* A floating pill, not a flush toolbar. */
 .promptbar {
   position: relative;
   display: flex;
@@ -918,11 +917,11 @@ input[type='number']::-webkit-outer-spin-button {
   opacity: 0.6;
 }
 
-/* The image-attach button — shared between `.promptbar` (a live/resumed
-   chat) and `.composer-dock`'s `.composer-actions` (starting a new one), so
-   one rule covers both rather than duplicating it per context. A plain round
-   icon button, same footprint as `.send-btn`/`button.primary` but never
-   filled — this is a secondary action next to the one that actually submits. */
+/* The image-attach button, used in `.promptbar` for a live/resumed chat —
+   there is no attach affordance on the composer's own "create chat" step,
+   since nothing is sent from there. A plain round icon button, same footprint
+   as `button.primary` but never filled — this is a secondary action next to
+   the one that actually submits. */
 .attach-btn {
   flex: none;
   align-self: flex-end;
@@ -2648,92 +2647,19 @@ button.chat-rate-limit-badge {
 }
 
 .composer-dock {
-  /* Anchors `.attach-preview`, which floats above this pill the same way
-     `.slash-picker`/`.model-picker` float above `.promptbar`. */
-  position: relative;
+  /* No longer a text-input pill (see `.composer-submit` below) — just the
+     footer that docks the one action button, keeping the same margins so the
+     desktop-shell centering rules below don't need their own case for it. */
   flex: none;
   margin: 0 calc(14px + var(--safe-right)) calc(12px + var(--safe-bottom))
     calc(14px + var(--safe-left));
-  padding: 14px 16px 10px;
-  border: 1px solid var(--border);
-  border-radius: 26px;
-  background: var(--bg-elev-2);
-  box-shadow: var(--shadow-sm);
 }
 
-/* Same border/shadow lift as .promptbar:focus-within, not a colour ring. */
-.composer-dock:focus-within {
-  border-color: var(--border-strong);
-  box-shadow: var(--shadow-md);
-}
-
-.composer-input {
+.composer-submit {
   width: 100%;
-  border: none;
-  background: none;
-  color: var(--text);
-  font: inherit;
-  font-size: 17px;
-  line-height: 1.4;
-  resize: none;
-  outline: none;
-  padding: 0;
-}
-
-/* The plain `.composer-input { outline: none }` above loses to the global
-   `textarea:focus` rule on focus — a type+pseudo-class selector outranks a
-   lone class one — so the accent-colour outline was still winning. */
-.composer-input:focus {
-  outline: none;
-}
-
-.composer-input::placeholder {
-  color: var(--text-dim);
-}
-
-.composer-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 8px;
-}
-
-.composer-hint {
-  flex: 1;
-  min-width: 0;
-  font-size: 12.5px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.send-btn {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 36px;
-  height: 36px;
-  padding: 0;
-  border-radius: 50%;
-  border: none;
-  background: var(--ink);
-  color: var(--on-ink);
-  transition: transform 120ms ease;
-}
-
-.send-btn:hover:not(:disabled) {
-  border-color: transparent;
-}
-
-.send-btn:active:not(:disabled) {
-  transform: scale(0.94);
-}
-
-.send-btn:disabled {
-  background: var(--bg-elev);
-  color: var(--text-dim);
-  opacity: 1;
+  padding: 14px 16px;
+  border-radius: 26px;
+  font-size: 16px;
 }
 
 /* Picker sheet ------------------------------------------------------------ */
