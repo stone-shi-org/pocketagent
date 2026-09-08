@@ -47,6 +47,8 @@ import type {
   PlannerEmbeddingApiKeyRevealResponse,
   PlannerSettingsDto,
   TestPlannerEmbeddingResponse,
+  TestPlannerUrlFetchResponse,
+  TestPlannerWebSearchResponse,
   UpdatePlannerSettingsRequest,
   PlannerApiKeyRevealResponse,
   PlannerChat,
@@ -631,6 +633,15 @@ export const api = {
 
   testPlannerEmbeddings: () =>
     request<TestPlannerEmbeddingResponse>('/api/planner/settings/embeddings/test', { method: 'POST' }),
+
+  /** PA-31: runs one canned search through the configured `web_search` provider. */
+  testPlannerWebSearch: () =>
+    request<TestPlannerWebSearchResponse>('/api/planner/settings/web-search/test', { method: 'POST' }),
+
+  /** `url_fetch`'s own connection test — fetches a fixed, stable target
+      server-side; see the route's own doc comment for why. */
+  testPlannerUrlFetch: () =>
+    request<TestPlannerUrlFetchResponse>('/api/planner/settings/url-fetch/test', { method: 'POST' }),
 
   listPlannerChats: (workspaceId?: string) =>
     request<PlannerChatListResponse>(

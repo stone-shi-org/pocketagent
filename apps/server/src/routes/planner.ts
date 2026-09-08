@@ -31,12 +31,14 @@ import {
   type PlannerWorkspaceListResponse,
   type TestPlannerEmbeddingResponse,
   type TestPlannerModelResponse,
+  type TestPlannerUrlFetchResponse,
+  type TestPlannerWebSearchResponse,
 } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import { PlannerWorkspaceError } from '../planner/workspaces.js';
 import { PlannerChatError } from '../planner/chats.js';
 import { PlannerLlmClient, PlannerLlmError } from '../planner/llm-client.js';
-import { PLANNER_TOOLS } from '../planner/tools.js';
+import { PLANNER_TOOLS, postJsonToIntegration } from '../planner/tools.js';
 import {
   deleteAllPlannerModels,
   deletePlannerModel,
@@ -48,6 +50,8 @@ import {
   readPlannerModels,
   readPlannerSettings,
   readPlannerToolApprovals,
+  resolvePlannerUrlFetchApiKey,
+  resolvePlannerWebSearchApiKey,
   revealPlannerApiKey,
   revealPlannerEmbeddingApiKey,
   setToolEnabledForWorkspace,
@@ -451,6 +455,75 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       };
       return noStore(reply).send(response);
     }
+  });
+
+  /**
+   * PA-31 (reporter: "Saved, let's add test button to run a test search and
+   * test fetch"): round-trips one canned search query through the
+   * configured `web_search` provider, via the exact same
+   * `postJsonToIntegration` helper the tool itself calls during a real
+   * turn — so a green result here is a genuine guarantee the tool will work,
+   * not a separately-implemented check that could drift from it. Mirrors
+   * `POST /api/planner/settings/embeddings/test`'s shape: `ok: false` for
+   * "not configured yet" and for a failed call are both this button's
+   * ordinary, expected outcomes, not a server error.
+   */
+  app.post('/api/planner/settings/web-search/test', async (_request, reply) => {
+    const { db } = app.pocket;
+    const settings = readPlannerSettings(db);
+    const startedAt = Date.now();
+    if (!settings.webSearchEnabled || !settings.webSearchBaseUrl) {
+      const response: TestPlannerWebSearchResponse = {
+        ok: false,
+        message: 'Web search is not configured yet — set a base URL and enable it first.',
+        latencyMs: 0,
+      };
+      return noStore(reply).send(response);
+    }
+    const url = `${settings.webSearchBaseUrl.replace(/\/+$/, '')}/v1/search`;
+    const result = await postJsonToIntegration(
+      app.pocket.plannerLlmFetch ?? fetch,
+      url,
+      resolvePlannerWebSearchApiKey(db),
+      { query: 'PocketAgent connection test', limit: 1 },
+    );
+    const response: TestPlannerWebSearchResponse = result.ok
+      ? { ok: true, message: 'Received a response from the search endpoint.', latencyMs: Date.now() - startedAt }
+      : { ok: false, message: result.message, latencyMs: Date.now() - startedAt };
+    return noStore(reply).send(response);
+  });
+
+  /** `url_fetch`'s own connection test — same reasoning and shape as
+      `POST /api/planner/settings/web-search/test`, one layer down. Fetches
+      a fixed, stable target (`https://example.com`, IANA's reserved
+      documentation domain — RFC 2606) rather than asking the caller for a
+      URL: this button is testing *the configured provider*, not a
+      particular page, and a canned target means a failure always means
+      "the provider is misconfigured or unreachable," never "that page
+      doesn't exist." */
+  app.post('/api/planner/settings/url-fetch/test', async (_request, reply) => {
+    const { db } = app.pocket;
+    const settings = readPlannerSettings(db);
+    const startedAt = Date.now();
+    if (!settings.urlFetchEnabled || !settings.urlFetchBaseUrl) {
+      const response: TestPlannerUrlFetchResponse = {
+        ok: false,
+        message: 'URL fetch is not configured yet — set a base URL and enable it first.',
+        latencyMs: 0,
+      };
+      return noStore(reply).send(response);
+    }
+    const url = `${settings.urlFetchBaseUrl.replace(/\/+$/, '')}/v1/scrape`;
+    const result = await postJsonToIntegration(
+      app.pocket.plannerLlmFetch ?? fetch,
+      url,
+      resolvePlannerUrlFetchApiKey(db),
+      { url: 'https://example.com' },
+    );
+    const response: TestPlannerUrlFetchResponse = result.ok
+      ? { ok: true, message: 'Received a response from the fetch endpoint.', latencyMs: Date.now() - startedAt }
+      : { ok: false, message: result.message, latencyMs: Date.now() - startedAt };
+    return noStore(reply).send(response);
   });
 
   /** The global catalog for a settings page — see `PlannerToolInfo`'s doc

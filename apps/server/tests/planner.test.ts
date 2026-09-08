@@ -269,11 +269,11 @@ describe('planner routes over HTTP', () => {
 
   /**
    * PA-29: stands in for a real embedding endpoint for
-   * `POST /api/planner/settings/embeddings/test` — the only route in this
-   * describe block that ever calls out. No other test here reaches a
-   * `/chat/completions` or `/embeddings` URL, so one fetch mock scoped to the
-   * whole block is enough; a request to anything unexpected throws loudly
-   * rather than silently hitting the real network.
+   * `POST /api/planner/settings/embeddings/test`. PA-31 extends it to also
+   * stand in for `web_search`'s/`url_fetch`'s own connection-test routes —
+   * one fetch mock scoped to the whole block is enough since nothing else
+   * here calls out; a request to anything unexpected throws loudly rather
+   * than silently hitting the real network.
    */
   const fetchImpl = (async (input: string | URL | Request) => {
     const href = typeof input === 'string' ? input : input.toString();
@@ -282,6 +282,24 @@ describe('planner routes over HTTP', () => {
     }
     if (href.includes('/embeddings')) {
       return new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (href.startsWith('https://web-search-down.example.com/')) {
+      throw new Error('simulated network failure: web-search-down.example.com is unreachable');
+    }
+    if (href.includes('/v1/search')) {
+      return new Response(JSON.stringify({ results: [{ title: 'PocketAgent' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (href.startsWith('https://url-fetch-down.example.com/')) {
+      throw new Error('simulated network failure: url-fetch-down.example.com is unreachable');
+    }
+    if (href.includes('/v1/scrape')) {
+      return new Response(JSON.stringify({ markdown: '# Example' }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       });
@@ -756,6 +774,78 @@ describe('planner routes over HTTP', () => {
       embeddingModelId: 'text-embedding-3-small',
     });
     const res = await post('/api/planner/settings/embeddings/test');
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.message.length).toBeGreaterThan(0);
+  });
+
+  // ---- PA-31: web_search/url_fetch's own connection tests -----------------
+
+  it('POST .../web-search/test reports ok: false when not configured, rather than calling out', async () => {
+    const res = await post('/api/planner/settings/web-search/test');
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.message).toMatch(/not configured/);
+  });
+
+  it('POST .../web-search/test reports ok: false when a base URL is set but the tool is not enabled', async () => {
+    await patch('/api/planner/settings', { webSearchBaseUrl: 'https://omniroute.example.com' });
+    const res = await post('/api/planner/settings/web-search/test');
+    expect(res.json().ok).toBe(false);
+  });
+
+  it('POST .../web-search/test reports ok: true with latency on a successful round trip', async () => {
+    await patch('/api/planner/settings', {
+      webSearchEnabled: true,
+      webSearchBaseUrl: 'https://omniroute.example.com',
+    });
+    const res = await post('/api/planner/settings/web-search/test');
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(typeof body.latencyMs).toBe('number');
+  });
+
+  it('POST .../web-search/test surfaces a transport failure as ok: false, never a 5xx', async () => {
+    await patch('/api/planner/settings', {
+      webSearchEnabled: true,
+      webSearchBaseUrl: 'https://web-search-down.example.com',
+    });
+    const res = await post('/api/planner/settings/web-search/test');
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.message.length).toBeGreaterThan(0);
+  });
+
+  it('POST .../url-fetch/test reports ok: false when not configured, rather than calling out', async () => {
+    const res = await post('/api/planner/settings/url-fetch/test');
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.message).toMatch(/not configured/);
+  });
+
+  it('POST .../url-fetch/test reports ok: true with latency on a successful round trip, with no API key required', async () => {
+    await patch('/api/planner/settings', {
+      urlFetchEnabled: true,
+      urlFetchBaseUrl: 'https://firecrawl.example.com',
+    });
+    const res = await post('/api/planner/settings/url-fetch/test');
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(typeof body.latencyMs).toBe('number');
+  });
+
+  it('POST .../url-fetch/test surfaces a transport failure as ok: false, never a 5xx', async () => {
+    await patch('/api/planner/settings', {
+      urlFetchEnabled: true,
+      urlFetchBaseUrl: 'https://url-fetch-down.example.com',
+    });
+    const res = await post('/api/planner/settings/url-fetch/test');
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.ok).toBe(false);

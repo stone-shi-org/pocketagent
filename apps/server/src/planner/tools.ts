@@ -215,14 +215,23 @@ async function resolveCreatablePath(deps: PlannerToolDeps, requested: string): P
   return suffix ? path.join(real, suffix) : real;
 }
 
+/** The result of one `postJsonToIntegration` call — exported alongside it so
+    a caller (a tool's own `execute`, or `routes/planner.ts`'s "Test
+    search"/"Test fetch" buttons) can share the exact same success/failure
+    shape rather than each declaring its own. */
+export type JsonIntegrationResult = { ok: true; json: unknown } | { ok: false; message: string };
+
 /**
  * PA-31: one POST-JSON round trip to a third-party integration
  * (`web_search`'s search endpoint, `url_fetch`'s scrape endpoint) — both
  * tools share this rather than each rolling their own fetch/timeout/error
- * handling. The API key, when present, is sent as a bearer token
- * (`v1/search`-/Firecrawl-style endpoints both expect that), and its
- * absence just omits the header rather than sending an empty one — the
- * reporter's own example configures `url_fetch` against a Firecrawl
+ * handling. Exported so `routes/planner.ts`'s test-connection routes can
+ * reuse it too, rather than re-implementing the same timeout/bearer-token/
+ * error-shape logic a second time for what is, from the provider's point of
+ * view, an identical request. The API key, when present, is sent as a
+ * bearer token (`v1/search`-/Firecrawl-style endpoints both expect that),
+ * and its absence just omits the header rather than sending an empty one —
+ * the reporter's own example configures `url_fetch` against a Firecrawl
  * instance that needs no key at all.
  *
  * Never throws: every failure mode (bad URL, non-2xx, non-JSON body,
@@ -231,12 +240,12 @@ async function resolveCreatablePath(deps: PlannerToolDeps, requested: string): P
  * can see and explain, not an uncaught exception `executeTool`'s own
  * catch-all would otherwise have to paper over identically anyway.
  */
-async function postJsonToIntegration(
+export async function postJsonToIntegration(
   fetchImpl: typeof fetch,
   url: string,
   apiKey: string | null,
   body: Record<string, unknown>,
-): Promise<{ ok: true; json: unknown } | { ok: false; message: string }> {
+): Promise<JsonIntegrationResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TOOL_HTTP_TIMEOUT_MS);
   try {

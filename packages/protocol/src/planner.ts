@@ -280,6 +280,36 @@ export const TestPlannerEmbeddingResponse = z.object({
 });
 export type TestPlannerEmbeddingResponse = z.infer<typeof TestPlannerEmbeddingResponse>;
 
+/**
+ * PA-31: `POST /api/planner/settings/web-search/test` runs one canned query
+ * through the configured `web_search` provider (`GET`/`PATCH
+ * /api/planner/settings`'s `webSearch*` fields) to confirm the endpoint and
+ * key actually work, without needing a chat. Same `ok`/`message`/`latencyMs`
+ * shape as `TestPlannerModelResponse` (there is nothing analogous to
+ * `TestPlannerEmbeddingResponse.dims` for a search result) — but exported as
+ * its own type rather than reused, for the same reason
+ * `TestPlannerEmbeddingResponse` is its own type and not a reuse of
+ * `TestPlannerModelResponse`: it tests a different capability, at a
+ * different endpoint, and a caller must never confuse which one it asked
+ * for.
+ */
+export const TestPlannerWebSearchResponse = z.object({
+  ok: z.boolean(),
+  message: z.string(),
+  latencyMs: z.number().int(),
+});
+export type TestPlannerWebSearchResponse = z.infer<typeof TestPlannerWebSearchResponse>;
+
+/** `url_fetch`'s own connection test — same shape and reasoning as
+    `TestPlannerWebSearchResponse`, one layer down, at
+    `POST /api/planner/settings/url-fetch/test`. */
+export const TestPlannerUrlFetchResponse = z.object({
+  ok: z.boolean(),
+  message: z.string(),
+  latencyMs: z.number().int(),
+});
+export type TestPlannerUrlFetchResponse = z.infer<typeof TestPlannerUrlFetchResponse>;
+
 export const PlannerChat = z.object({
   id: z.string(),
   /** Null when the owning workspace was later deleted — see `workspace_id`'s `ON DELETE SET NULL`. */

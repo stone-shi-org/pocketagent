@@ -7,6 +7,8 @@ import type {
   PlannerWorkspace,
   TestPlannerEmbeddingResponse,
   TestPlannerModelResponse,
+  TestPlannerUrlFetchResponse,
+  TestPlannerWebSearchResponse,
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
@@ -54,6 +56,10 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   const [webSearchApiKeyInput, setWebSearchApiKeyInput] = useState('');
   const [urlFetchBaseUrlInput, setUrlFetchBaseUrlInput] = useState('');
   const [urlFetchApiKeyInput, setUrlFetchApiKeyInput] = useState('');
+  const [testingWebSearch, setTestingWebSearch] = useState(false);
+  const [webSearchTestResult, setWebSearchTestResult] = useState<TestPlannerWebSearchResponse | null>(null);
+  const [testingUrlFetch, setTestingUrlFetch] = useState(false);
+  const [urlFetchTestResult, setUrlFetchTestResult] = useState<TestPlannerUrlFetchResponse | null>(null);
   const [newModelId, setNewModelId] = useState('');
   const [newModelLabel, setNewModelLabel] = useState('');
   const [newApprovalScope, setNewApprovalScope] = useState<'global' | 'workspace'>('global');
@@ -232,6 +238,49 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
 
   const setUrlFetchEnabled = (enabled: boolean): void => {
     void withBusy(() => api.updatePlannerSettings({ urlFetchEnabled: enabled }));
+  };
+
+  /** PA-31 (reporter: "let's add test button to run a test search and test
+      fetch"): mirrors `testEmbeddings` exactly — round-trips one canned
+      request through the server, which reuses the *exact* helper the real
+      tool call goes through, so a green result here is a genuine guarantee
+      the tool itself will work. */
+  const testWebSearch = (): void => {
+    setTestingWebSearch(true);
+    setWebSearchTestResult(null);
+    void (async () => {
+      try {
+        setWebSearchTestResult(await api.testPlannerWebSearch());
+      } catch (err) {
+        onApiError(err);
+        setWebSearchTestResult({
+          ok: false,
+          message: err instanceof ApiError ? err.message : 'Test failed.',
+          latencyMs: 0,
+        });
+      } finally {
+        setTestingWebSearch(false);
+      }
+    })();
+  };
+
+  const testUrlFetch = (): void => {
+    setTestingUrlFetch(true);
+    setUrlFetchTestResult(null);
+    void (async () => {
+      try {
+        setUrlFetchTestResult(await api.testPlannerUrlFetch());
+      } catch (err) {
+        onApiError(err);
+        setUrlFetchTestResult({
+          ok: false,
+          message: err instanceof ApiError ? err.message : 'Test failed.',
+          latencyMs: 0,
+        });
+      } finally {
+        setTestingUrlFetch(false);
+      }
+    })();
   };
 
   const addModel = (): void => {
@@ -623,6 +672,24 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
             {settings?.webSearchHasApiKey ? 'A key is configured' : 'No key configured'}
           </span>
         </div>
+        <div className="planner-inline" style={{ marginTop: 12 }}>
+          <button
+            type="button"
+            className="planner-btn"
+            disabled={testingWebSearch || !settings?.webSearchEnabled || !settings?.webSearchBaseUrl}
+            onClick={testWebSearch}
+            title={settings?.webSearchEnabled && settings?.webSearchBaseUrl ? undefined : 'Enable it and set a base URL first.'}
+          >
+            {testingWebSearch ? 'Testing…' : 'Test search'}
+          </button>
+        </div>
+        {webSearchTestResult && (
+          <p className={webSearchTestResult.ok ? 'planner-test-ok' : 'planner-test-fail'}>
+            {webSearchTestResult.ok
+              ? `OK (${webSearchTestResult.latencyMs}ms): ${webSearchTestResult.message}`
+              : `Failed: ${webSearchTestResult.message}`}
+          </p>
+        )}
       </div>
 
       <div className="planner-section">
@@ -677,6 +744,24 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
             {settings?.urlFetchHasApiKey ? 'A key is configured' : 'No key configured'}
           </span>
         </div>
+        <div className="planner-inline" style={{ marginTop: 12 }}>
+          <button
+            type="button"
+            className="planner-btn"
+            disabled={testingUrlFetch || !settings?.urlFetchEnabled || !settings?.urlFetchBaseUrl}
+            onClick={testUrlFetch}
+            title={settings?.urlFetchEnabled && settings?.urlFetchBaseUrl ? undefined : 'Enable it and set a base URL first.'}
+          >
+            {testingUrlFetch ? 'Testing…' : 'Test fetch'}
+          </button>
+        </div>
+        {urlFetchTestResult && (
+          <p className={urlFetchTestResult.ok ? 'planner-test-ok' : 'planner-test-fail'}>
+            {urlFetchTestResult.ok
+              ? `OK (${urlFetchTestResult.latencyMs}ms): ${urlFetchTestResult.message}`
+              : `Failed: ${urlFetchTestResult.message}`}
+          </p>
+        )}
       </div>
 
       <div className="planner-section">
