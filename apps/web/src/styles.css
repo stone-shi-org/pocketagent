@@ -5017,6 +5017,19 @@ button.chat-rate-limit-badge {
   color: var(--text-dim);
 }
 
+/* PA-39: the delivery jumped the directory queue because of the skip-queue label. */
+.history-skip-queue-tag {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  color: var(--accent);
+}
+
 .history-row-secondary {
   display: flex;
   align-items: center;

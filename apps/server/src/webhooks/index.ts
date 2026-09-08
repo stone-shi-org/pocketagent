@@ -87,6 +87,7 @@ import { treeRootOf, worktreePathFor } from '../git/worktree-paths.js';
 import type { JiraEventFacts } from './jira.js';
 import {
   evaluateJiraFilter,
+  hasSkipQueueLabel,
   parseJiraEvent,
   resolveComponentBranchName,
   resolveLabelOverrides,
@@ -266,6 +267,8 @@ export interface WebhookSpecCommon {
   conversationMode: WebhookConversationMode;
   overlapPolicy: WebhookOverlapPolicy;
   directoryPolicy: WebhookDirectoryPolicy;
+  /** PA-39: whether this webhook honours the `skip-queue` Jira label. */
+  skipQueueLabelEnabled: boolean;
   maxConcurrent: number;
   storePayloads: boolean;
 }
@@ -354,6 +357,18 @@ interface FrozenRun {
   spec:
     | { kind: 'coding'; run: Omit<RunSpec, 'prompt'> }
     | { kind: 'pocket'; run: Omit<PocketRunSpec, 'prompt'> };
+  /**
+   * PA-39: the directory policy this *delivery* runs under — `hook.directory_policy`,
+   * unless the `skip-queue` label overrode it to `'allow'`. Frozen for the same
+   * reason `agent` is: decided once, at dispatch time, alongside the rest of
+   * what this delivery will do. In practice this only matters for disclosure —
+   * a delivery whose policy resolves to `'allow'` never reaches the queue at
+   * all, so a delivery that *is* queued was never label-exempted and
+   * `runQueued` has nothing new to re-check.
+   */
+  directoryPolicy: WebhookDirectoryPolicy;
+  /** Whether `directoryPolicy` above is `'allow'` because of the label specifically. */
+  skippedByLabel: boolean;
 }
 
 export class WebhookService {
@@ -736,6 +751,11 @@ export class WebhookService {
       resolved.plannerWorkspaceId !== null
         ? null
         : this.specFor(hook, facts, route.cwd);
+    // PA-39: resolved alongside everything else `FrozenRun` freezes, and for
+    // the same reason — a queued delivery's saved spec is "what was decided,"
+    // not something to re-derive against a payload that may not even be
+    // stored (`storePayloads: false`) once the queue finally lets it through.
+    const directoryPolicy = this.resolveDirectoryPolicy(hook, facts);
     const frozen: FrozenRun = {
       subjectKey,
       prompt: prompt.text,
@@ -753,17 +773,33 @@ export class WebhookService {
                 resolved.model,
               ),
             },
+      directoryPolicy: directoryPolicy.policy,
+      skippedByLabel: directoryPolicy.skippedByLabel,
     };
     updateWebhookDelivery(this.db, deliveryId, {
       rendered_prompt: prompt.text,
       payload_truncated: prompt.truncated ? 1 : 0,
+      // Stamped here, before the directory gate is even reached, so it is
+      // visible even for a delivery that fails before it would have queued —
+      // the same "copied at delivery time" discipline `skip_permissions_enabled`
+      // already follows.
+      queue_skipped_by_label: directoryPolicy.skippedByLabel ? 1 : 0,
     });
+    if (directoryPolicy.skippedByLabel) {
+      this.opts.logger?.info(
+        { webhook: hook.id, delivery: deliveryId, subject: subjectKey },
+        'webhook delivery skipped the directory queue because it carried the skip-queue label',
+      );
+    }
 
     // 9. The directory gate. Two agents in one working tree corrupt each
     //    other's work, so unless this run gets a directory of its own, it waits
-    //    for whoever is mid-turn in that tree to conclude.
+    //    for whoever is mid-turn in that tree to conclude. `frozen.directoryPolicy`,
+    //    not `hook.directory_policy`: the `skip-queue` label (PA-39) overrides
+    //    this one delivery to `'allow'` without changing the webhook's own
+    //    configured policy for every other delivery.
     const queueKey = this.queueKeyFor(hook, frozen, built?.sharedTree ?? null);
-    if (queueKey !== null && hook.directory_policy === 'queue') {
+    if (queueKey !== null && frozen.directoryPolicy === 'queue') {
       const acquired = this.queue.tryAcquire(queueKey, deliveryId);
       if (!acquired.granted) {
         return this.parkDelivery(hook, deliveryId, queueKey, frozen, acquired.position);
@@ -1625,6 +1661,29 @@ export class WebhookService {
   }
 
   /**
+   * PA-39: the directory policy this *delivery* runs under, and whether the
+   * `skip-queue` label is why.
+   *
+   * A no-op — the configured policy, unchanged — unless all three hold: the
+   * webhook has explicitly opted in (`skip_queue_label_enabled`), the
+   * delivery is Jira (Bamboo has no labels), and the configured policy is
+   * still `'queue'` (a webhook already `'allow'` has nothing for the label to
+   * override, and reporting `skippedByLabel` there would claim credit for a
+   * bypass that didn't happen — see `FrozenRun.skippedByLabel`'s doc comment).
+   */
+  private resolveDirectoryPolicy(
+    hook: WebhookRow,
+    facts: AnyEventFacts,
+  ): { policy: WebhookDirectoryPolicy; skippedByLabel: boolean } {
+    const configured = hook.directory_policy as WebhookDirectoryPolicy;
+    if (configured === 'allow' || hook.skip_queue_label_enabled !== 1 || hook.type !== 'jira') {
+      return { policy: configured, skippedByLabel: false };
+    }
+    const labelled = hasSkipQueueLabel((facts as JiraEventFacts).labels ?? []);
+    return labelled ? { policy: 'allow', skippedByLabel: true } : { policy: configured, skippedByLabel: false };
+  }
+
+  /**
    * The spec for a Pocket Agent run. No worktree, no branch, no cwd: a planner
    * workspace is app-owned scratch space that the planner's own tools write to
    * directly, so `worktreeMode` and `effort` are simply not expressible here
@@ -1873,6 +1932,10 @@ export class WebhookService {
       // Copied now, so history records what this delivery actually ran with even
       // after the toggle is changed.
       skip_permissions_enabled: hook.skip_permissions,
+      // PA-39: corrected in `dispatch()` once the label is actually evaluated
+      // (step 8) — false here is right for every delivery that never reaches
+      // that far (rejected, invalid, duplicate, filtered).
+      queue_skipped_by_label: 0,
       payload_json: null,
       payload_bytes: 0,
       payload_truncated: 0,
@@ -2092,6 +2155,7 @@ export class WebhookService {
       conversation_mode: spec.conversationMode,
       overlap_policy: spec.overlapPolicy,
       directory_policy: spec.directoryPolicy,
+      skip_queue_label_enabled: spec.skipQueueLabelEnabled ? 1 : 0,
       max_concurrent: spec.maxConcurrent,
       store_payloads: spec.storePayloads ? 1 : 0,
       created_at: now,
@@ -2149,6 +2213,9 @@ export class WebhookService {
         : {}),
       ...(patch.overlapPolicy !== undefined ? { overlap_policy: patch.overlapPolicy } : {}),
       ...(patch.directoryPolicy !== undefined ? { directory_policy: patch.directoryPolicy } : {}),
+      ...(patch.skipQueueLabelEnabled !== undefined
+        ? { skip_queue_label_enabled: patch.skipQueueLabelEnabled ? 1 : 0 }
+        : {}),
       ...(patch.maxConcurrent !== undefined ? { max_concurrent: patch.maxConcurrent } : {}),
       ...(patch.storePayloads !== undefined
         ? { store_payloads: patch.storePayloads ? 1 : 0 }
@@ -2386,6 +2453,7 @@ export class WebhookService {
       conversationMode: row.conversation_mode as WebhookConversationMode,
       overlapPolicy: row.overlap_policy as WebhookOverlapPolicy,
       directoryPolicy: row.directory_policy as WebhookDirectoryPolicy,
+      skipQueueLabelEnabled: row.skip_queue_label_enabled === 1,
       maxConcurrent: row.max_concurrent,
       storePayloads: row.store_payloads === 1,
       createdAt: row.created_at,
@@ -2413,6 +2481,7 @@ export class WebhookService {
       actor: row.actor,
       reason: row.reason,
       skipPermissionsEnabled: row.skip_permissions_enabled === 1,
+      queueSkippedByLabel: row.queue_skipped_by_label === 1,
       payloadBytes: row.payload_bytes,
       payloadTruncated: row.payload_truncated === 1,
       receivedAt: row.received_at,

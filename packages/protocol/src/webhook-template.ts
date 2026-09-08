@@ -35,6 +35,18 @@ const LABELS_MAX_ITEMS = 20;
 export const JIRA_ISSUE_KEY_RE = /^[A-Z][A-Z0-9]*-\d+$/;
 
 /**
+ * PA-39: the bare Jira label that lets one delivery bypass the directory
+ * queue (`RunQueue`, PA-11) — treated as if that webhook's `directoryPolicy`
+ * were `allow`, for that delivery only. Fixed rather than configurable per
+ * webhook, matching the precedent the `agent:`/`model:` label prefixes
+ * already set (`resolveLabelOverrides` in the server's `webhooks/jira.ts`):
+ * one literal string, matched case-insensitively and trimmed, not a pattern.
+ * Only honoured when the webhook has explicitly opted in
+ * (`skipQueueLabelEnabled`) — see that field's doc comment in `webhooks.ts`.
+ */
+export const JIRA_SKIP_QUEUE_LABEL = 'skip-queue';
+
+/**
  * A Bamboo plan key, e.g. `EM-EM` (project key `EM`, plan key `EM-EM`) —
  * *not* a `buildResultKey`, which appends a trailing `-<build number>` and is
  * therefore deliberately rejected by this pattern so the two can never be

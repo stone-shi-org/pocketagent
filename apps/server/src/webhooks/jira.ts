@@ -2,6 +2,7 @@ import type { JiraWebhookFilter } from '@pocketagent/protocol';
 import {
   CUSTOM_PROVIDER_LABEL_PREFIX,
   JIRA_ISSUE_KEY_RE,
+  JIRA_SKIP_QUEUE_LABEL,
   POCKET_AGENT_LABEL_PREFIX,
   customProviderLabelSlug,
   modelLabelSlug,
@@ -560,6 +561,18 @@ export function resolveLabelOverrides(
   }
 
   return result;
+}
+
+/**
+ * PA-39: whether the issue carries the bare `skip-queue` label.
+ *
+ * Case-insensitive and trimmed, like every other label/name comparison in
+ * this file (`eq()`), but an *exact* match rather than a prefix — unlike
+ * `agent:`/`model:`, `skip-queue` carries no value after a separator, so
+ * there is nothing to extract and no reason to use a regex here.
+ */
+export function hasSkipQueueLabel(labels: string[]): boolean {
+  return labels.some((l) => l.trim().toLowerCase() === JIRA_SKIP_QUEUE_LABEL);
 }
 
 /** A one-line description of what a filter accepts, for the home-screen row. */

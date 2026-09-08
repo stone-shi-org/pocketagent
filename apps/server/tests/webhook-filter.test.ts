@@ -3,6 +3,7 @@ import type { JiraEventFacts } from '../src/webhooks/jira.js';
 import {
   describeJiraFilter,
   evaluateJiraFilter,
+  hasSkipQueueLabel,
   parseJiraEvent,
   resolveComponentBranchName,
   resolveLabelOverrides,
@@ -531,6 +532,24 @@ describe('sanitizeBranchSegment', () => {
     expect(sanitizeBranchSegment('feature/component')).toBe('feature-component');
     expect(sanitizeBranchSegment('...special$$chars!@#...')).toBe('special-chars');
     expect(sanitizeBranchSegment('   trailing-spaces   ')).toBe('trailing-spaces');
+  });
+});
+
+describe('hasSkipQueueLabel', () => {
+  it('matches the bare skip-queue label case-insensitively and trimmed', () => {
+    expect(hasSkipQueueLabel(['skip-queue'])).toBe(true);
+    expect(hasSkipQueueLabel(['Skip-Queue'])).toBe(true);
+    expect(hasSkipQueueLabel(['  skip-queue  '])).toBe(true);
+    expect(hasSkipQueueLabel(['agent-ready', 'skip-queue', 'other'])).toBe(true);
+  });
+
+  it('does not match when the label is absent, or only a substring/prefixed label', () => {
+    expect(hasSkipQueueLabel([])).toBe(false);
+    expect(hasSkipQueueLabel(['agent-ready'])).toBe(false);
+    // Not a key:value label like `agent:`/`model:` — no prefix form is recognised.
+    expect(hasSkipQueueLabel(['agent:skip-queue'])).toBe(false);
+    expect(hasSkipQueueLabel(['skip-queue-please'])).toBe(false);
+    expect(hasSkipQueueLabel(['not-skip-queue'])).toBe(false);
   });
 });
 

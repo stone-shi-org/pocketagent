@@ -1088,6 +1088,24 @@ export const MIGRATIONS: readonly string[] = [
   CREATE UNIQUE INDEX IF NOT EXISTS idx_planner_agent_disabled_mcp_registries_unique
     ON planner_agent_disabled_mcp_registries (workspace_id, registry_id);
   `,
+  // PA-39: let a single delivery bypass the directory queue by carrying the
+  // bare Jira label `skip-queue`, without changing the webhook's own
+  // `directory_policy` for every other delivery.
+  //
+  // `skip_queue_label_enabled` defaults to 0, like every other override of a
+  // safety default in this file — a label anyone with Jira comment access
+  // (or, on a Service Desk project, an anonymous customer) can attach must
+  // not silently change delivery behaviour until an operator opts a specific
+  // webhook in.
+  //
+  // `queue_skipped_by_label` is the delivery-side disclosure: 1 only when the
+  // label is the reason a delivery ran ahead of a busy directory, so history
+  // can answer "why did this jump the queue" from the row alone, the same
+  // way `skip_permissions_enabled` already answers "did this run unattended".
+  `
+  ALTER TABLE webhooks ADD COLUMN skip_queue_label_enabled INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE webhook_deliveries ADD COLUMN queue_skipped_by_label INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 /**
@@ -1229,6 +1247,32 @@ export function openDatabase(databasePath: string): Db {
   // PA-37, same positional-migration hazard once more: see `MCP_REGISTRIES_DDL`'s
   // own doc comment.
   db.exec(MCP_REGISTRIES_DDL);
+  // PA-39, same positional-migration hazard as `auto_select_agent_model`
+  // (PA-21) and `webhook_issue_sessions.agent` (PA-26) above: this migration
+  // is appended at the tail of `MIGRATIONS`, but so could a second feature
+  // branch's own tail append, landing at the same migration-count checkpoint
+  // for a schema that never ran this one. `create`/`update` write both
+  // columns unconditionally, so a miss would 500 the whole save path exactly
+  // like PA-21's did. Probed idempotently for that reason.
+  const webhookColumnsForSkipQueue = new Set(
+    (db.prepare('PRAGMA table_info(webhooks)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (webhookColumnsForSkipQueue.size > 0 && !webhookColumnsForSkipQueue.has('skip_queue_label_enabled')) {
+    db.exec('ALTER TABLE webhooks ADD COLUMN skip_queue_label_enabled INTEGER NOT NULL DEFAULT 0');
+  }
+  const deliveryColumnsForSkipQueue = new Set(
+    (db.prepare('PRAGMA table_info(webhook_deliveries)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (
+    deliveryColumnsForSkipQueue.size > 0 &&
+    !deliveryColumnsForSkipQueue.has('queue_skipped_by_label')
+  ) {
+    db.exec('ALTER TABLE webhook_deliveries ADD COLUMN queue_skipped_by_label INTEGER NOT NULL DEFAULT 0');
+  }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
   return db;
@@ -1653,6 +1697,12 @@ export interface WebhookRow {
    * directory that any trigger (or a human) can be working in.
    */
   directory_policy: string;
+  /**
+   * PA-39: 1 when this webhook honours the `skip-queue` Jira label as a
+   * per-delivery override of `directory_policy` (to `allow`, for that
+   * delivery only). Off by default — see `WebhookSpecCommon.skipQueueLabelEnabled`.
+   */
+  skip_queue_label_enabled: number;
   max_concurrent: number;
   store_payloads: number;
   created_at: number;
@@ -1684,6 +1734,14 @@ export interface WebhookDeliveryRow {
   signature_state: string;
   /** Copied at delivery time, so history records what actually ran. */
   skip_permissions_enabled: number;
+  /**
+   * PA-39: 1 when this delivery actually bypassed the directory queue because
+   * it carried the `skip-queue` label and its webhook had opted in. Stamped
+   * at the same point `rendered_prompt` is (before the directory gate is even
+   * reached), so it is visible even for a delivery that fails before it would
+   * have queued.
+   */
+  queue_skipped_by_label: number;
   payload_json: string | null;
   payload_bytes: number;
   payload_truncated: number;
@@ -1824,13 +1882,13 @@ export function insertWebhook(db: Db, row: WebhookRow): void {
        id, name, slug, enabled, type, auth_mode, secret, auth_token_hash,
        secret_set_at, filter_json, project_map_json, prompt_template_map_json, cwd, agent, worktree_mode, model, effort,
        effort_set, skip_permissions, auto_select_agent_model, prompt_template, conversation_mode,
-       overlap_policy, directory_policy, max_concurrent, store_payloads,
+       overlap_policy, directory_policy, skip_queue_label_enabled, max_concurrent, store_payloads,
        created_at, updated_at, last_delivery_at, last_delivery_status, last_error
      ) VALUES (
        @id, @name, @slug, @enabled, @type, @auth_mode, @secret, @auth_token_hash,
        @secret_set_at, @filter_json, @project_map_json, @prompt_template_map_json, @cwd, @agent, @worktree_mode, @model, @effort,
        @effort_set, @skip_permissions, @auto_select_agent_model, @prompt_template, @conversation_mode,
-       @overlap_policy, @directory_policy, @max_concurrent, @store_payloads,
+       @overlap_policy, @directory_policy, @skip_queue_label_enabled, @max_concurrent, @store_payloads,
        @created_at, @updated_at, @last_delivery_at, @last_delivery_status, @last_error
      )`,
   ).run(row);
@@ -1872,14 +1930,14 @@ export function insertWebhookDelivery(db: Db, row: WebhookDeliveryRow): void {
     `INSERT INTO webhook_deliveries (
        id, webhook_id, webhook_name, agent, status, trigger, body_hash,
        delivery_header, event, event_type, issue_key, project_key, actor,
-       signature_state, skip_permissions_enabled, payload_json, payload_bytes,
+       signature_state, skip_permissions_enabled, queue_skipped_by_label, payload_json, payload_bytes,
        payload_truncated, rendered_prompt, reason, received_at, started_at,
        finished_at, session_id, agent_session_id, planner_chat_id, cwd, error,
        queue_key, queued_at, queued_spec_json
      ) VALUES (
        @id, @webhook_id, @webhook_name, @agent, @status, @trigger, @body_hash,
        @delivery_header, @event, @event_type, @issue_key, @project_key, @actor,
-       @signature_state, @skip_permissions_enabled, @payload_json, @payload_bytes,
+       @signature_state, @skip_permissions_enabled, @queue_skipped_by_label, @payload_json, @payload_bytes,
        @payload_truncated, @rendered_prompt, @reason, @received_at, @started_at,
        @finished_at, @session_id, @agent_session_id, @planner_chat_id, @cwd, @error,
        @queue_key, @queued_at, @queued_spec_json

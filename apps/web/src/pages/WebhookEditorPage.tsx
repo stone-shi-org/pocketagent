@@ -171,6 +171,9 @@ export function WebhookEditorPage({
   // PA-11. Defaults to `queue`, matching the server: two agents in one working
   // tree corrupt each other, and waiting loses nothing.
   const [directoryPolicy, setDirectoryPolicy] = useState<WebhookDirectoryPolicy>('queue');
+  // PA-39. Off by default: a bare Jira label must not change delivery
+  // behaviour until an operator opts this specific webhook in.
+  const [skipQueueLabelEnabled, setSkipQueueLabelEnabled] = useState(false);
   const [maxConcurrent, setMaxConcurrent] = useState(2);
   const [storePayloads, setStorePayloads] = useState(true);
 
@@ -292,6 +295,7 @@ export function WebhookEditorPage({
       setConversationMode(hook.conversationMode);
       setOverlapPolicy(hook.overlapPolicy);
       setDirectoryPolicy(hook.directoryPolicy);
+      setSkipQueueLabelEnabled(hook.skipQueueLabelEnabled ?? false);
       setMaxConcurrent(hook.maxConcurrent);
       setStorePayloads(hook.storePayloads);
       setDeliveryPath(hook.deliveryPath);
@@ -727,6 +731,7 @@ export function WebhookEditorPage({
       conversationMode,
       overlapPolicy,
       directoryPolicy,
+      skipQueueLabelEnabled,
       maxConcurrent,
       storePayloads,
       skipPermissions,
@@ -1648,6 +1653,42 @@ export function WebhookEditorPage({
             <div className="warn-callout" role="alert">
               Two agents editing one working copy overwrite each other’s changes. Only choose
               this if every run gets its own working copy, or if the runs only ever read.
+            </div>
+          )}
+          {type === 'jira' && (
+            <div className="settings-row">
+              <div className="settings-row-main">
+                <div className="settings-row-info">
+                  <label className="settings-row-label">
+                    Honor the <code>skip-queue</code> label
+                  </label>
+                  <p className="transport-hint">
+                    {directoryPolicy === 'allow'
+                      ? 'Not needed — this webhook already starts anyway when another agent is in the same directory.'
+                      : skipQueueLabelEnabled
+                        ? 'A ticket labelled skip-queue runs immediately even if another agent is working in the same directory — meant for tickets that only plan, and never write. An unlabelled ticket is unaffected.'
+                        : 'Off by default. A skip-queue label does nothing until this is turned on.'}
+                  </p>
+                </div>
+                <div className="settings-row-control">
+                  <label className="switch">
+                    <input
+                      type="checkbox"
+                      checked={skipQueueLabelEnabled}
+                      disabled={busy}
+                      onChange={(e) => setSkipQueueLabelEnabled(e.target.checked)}
+                      aria-label="Honor the skip-queue label"
+                    />
+                    <span className="switch-track" />
+                  </label>
+                </div>
+              </div>
+              {skipQueueLabelEnabled && directoryPolicy === 'queue' && (
+                <div className="warn-callout" role="alert">
+                  A skip-queue label lets a specific delivery skip the wait above. Only label
+                  tickets you’re sure won’t write to the working copy.
+                </div>
+              )}
             </div>
           )}
         </SectionCard>

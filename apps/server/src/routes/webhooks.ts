@@ -214,6 +214,9 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
           : {}),
         ...(body.overlapPolicy !== undefined ? { overlapPolicy: body.overlapPolicy } : {}),
         ...(body.directoryPolicy !== undefined ? { directoryPolicy: body.directoryPolicy } : {}),
+        ...(body.skipQueueLabelEnabled !== undefined
+          ? { skipQueueLabelEnabled: body.skipQueueLabelEnabled }
+          : {}),
         ...(body.maxConcurrent !== undefined ? { maxConcurrent: body.maxConcurrent } : {}),
         ...(body.storePayloads !== undefined ? { storePayloads: body.storePayloads } : {}),
       };
@@ -606,6 +609,7 @@ function specFrom(
     conversationMode: body.conversationMode,
     overlapPolicy: body.overlapPolicy,
     directoryPolicy: body.directoryPolicy,
+    skipQueueLabelEnabled: body.skipQueueLabelEnabled,
     maxConcurrent: body.maxConcurrent,
     storePayloads: body.storePayloads,
   };

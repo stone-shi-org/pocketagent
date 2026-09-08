@@ -152,6 +152,15 @@ export function WebhookHistoryPanel({
                     {e.kind === 'delivery' && e.trigger === 'test' && (
                       <span className="history-test-tag">test</span>
                     )}
+
+                    {e.kind === 'delivery' && e.queueSkippedByLabel && (
+                      <span
+                        className="history-skip-queue-tag"
+                        title="Ran ahead of a busy directory because it carried the skip-queue label"
+                      >
+                        skip-queue
+                      </span>
+                    )}
                   </div>
 
                   <div className="history-row-secondary">

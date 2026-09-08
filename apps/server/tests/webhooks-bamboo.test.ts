@@ -250,6 +250,31 @@ describe('bamboo webhook delivery: per-plan conversation grouping', () => {
   });
 });
 
+describe('bamboo webhook: the skip-queue label has no effect (PA-39)', () => {
+  it('still queues a busy directory regardless of skipQueueLabelEnabled, since Bamboo builds carry no labels', async () => {
+    const hook = await createBambooWebhook({
+      overlapPolicy: 'allow',
+      maxConcurrent: 5,
+      // Settable for a Bamboo webhook (the schema doesn't discriminate), but
+      // `BambooEventFacts` has no `labels` field for `resolveDirectoryPolicy`
+      // to check, so it must be a pure no-op.
+      skipQueueLabelEnabled: true,
+    });
+    expect(
+      (await deliverBearer(SLUG, hook.token, bambooPayloadFor({ buildNumber: '1', buildResultKey: 'EM-EM-1' })))
+        .json().status,
+    ).toBe('running');
+    const second = await deliverBearer(
+      SLUG,
+      hook.token,
+      bambooPayloadFor({ buildNumber: '2', buildResultKey: 'EM-EM-2' }),
+    );
+    expect(second.json().status).toBe('queued');
+    const rows = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 });
+    expect(rows.find((r) => r.status === 'queued')?.queue_skipped_by_label).toBe(0);
+  });
+});
+
 describe('bamboo webhook home-screen label', () => {
   it('surfaces a Bamboo-flavored trigger label via the project list', async () => {
     await createBambooWebhook({ config: { type: 'bamboo', filter: { buildStates: ['Failed'] } } });

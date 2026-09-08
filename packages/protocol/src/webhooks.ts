@@ -364,6 +364,19 @@ const WebhookFields = z
     conversationMode: WebhookConversationMode,
     overlapPolicy: WebhookOverlapPolicy,
     directoryPolicy: WebhookDirectoryPolicy,
+    /**
+     * PA-39: let a single delivery override `directoryPolicy` to `allow` by
+     * carrying the bare Jira label `skip-queue` (`JIRA_SKIP_QUEUE_LABEL`).
+     *
+     * Off by default, like every other override of a safety default in this
+     * file (`skipPermissions`, `directoryPolicy` itself) — a label any project
+     * member (or, on a Service Desk project, an anonymous customer) can attach
+     * must not silently change delivery behaviour until an operator opts a
+     * specific webhook into honouring it. Jira-only: `BambooEventFacts` has no
+     * `labels` field, so the editor hides this for a Bamboo webhook and the
+     * server ignores it for one regardless of how it is stored.
+     */
+    skipQueueLabelEnabled: z.boolean(),
     /** Runs this webhook may have going at once. The global cap still applies. */
     maxConcurrent: z.number().int().min(1).max(10),
     /** Keep raw payloads for debugging. Bounded and scrubbed regardless. */
@@ -413,6 +426,7 @@ export const CreateWebhookRequest = WebhookFields.extend({
    */
   skipPermissions: z.boolean().default(false),
   autoSelectAgentModel: z.boolean().default(false),
+  skipQueueLabelEnabled: z.boolean().default(false),
 });
 export type CreateWebhookRequest = z.infer<typeof CreateWebhookRequest>;
 
@@ -470,6 +484,7 @@ export const Webhook = z.object({
   conversationMode: WebhookConversationMode,
   overlapPolicy: WebhookOverlapPolicy,
   directoryPolicy: WebhookDirectoryPolicy,
+  skipQueueLabelEnabled: z.boolean(),
   maxConcurrent: z.number().int(),
   storePayloads: z.boolean(),
   createdAt: z.number().int(),
@@ -528,6 +543,15 @@ export const WebhookDelivery = z.object({
   reason: z.string().nullable(),
   /** What this delivery ran with, copied at delivery time. */
   skipPermissionsEnabled: z.boolean(),
+  /**
+   * PA-39: whether this delivery actually bypassed the directory queue
+   * because it carried the `skip-queue` label and its webhook had opted in.
+   * `false` for the overwhelming majority of deliveries — including one from
+   * a webhook whose `directoryPolicy` was already `allow`, where the label
+   * would have been a no-op — so this field only ever means "the label is
+   * why this one ran ahead of a busy directory."
+   */
+  queueSkippedByLabel: z.boolean(),
   payloadBytes: z.number().int(),
   payloadTruncated: z.boolean(),
   receivedAt: z.number().int(),

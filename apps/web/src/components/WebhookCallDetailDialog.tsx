@@ -104,6 +104,10 @@ export function WebhookCallDetailDialog({
             <Fact label="Project" value={entry.projectKey} />
             <Fact label="Actor" value={entry.actor} />
             <Fact label="Directory" value={entry.cwd} />
+            <Fact
+              label="Directory queue"
+              value={entry.queueSkippedByLabel ? 'Skipped — carried the skip-queue label' : null}
+            />
             <Fact label="Received" value={formatRelative(entry.receivedAt)} />
             <Fact label="Error" value={entry.error} />
 

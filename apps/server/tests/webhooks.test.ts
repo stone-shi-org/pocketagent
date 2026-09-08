@@ -2110,6 +2110,73 @@ describe('webhook delivery: the directory queue (PA-11)', () => {
   });
 });
 
+describe('webhook delivery: skip the directory queue via a Jira label (PA-39)', () => {
+  const payloadForIssue = (issueKey: string, labels: string[] = []): string =>
+    JSON.stringify({
+      ...(JIRA_SAMPLE_PAYLOAD as object),
+      timestamp: Date.now(),
+      issue: { key: issueKey, fields: { project: { key: 'ENG' }, labels } },
+    });
+
+  const rowFor = (webhookId: string, issueKey: string) =>
+    readWebhookDeliveries(ctx.db, { webhookId, limit: 20 }).find((r) => r.issue_key === issueKey);
+
+  it('lets a labelled delivery run immediately when the webhook has opted in', async () => {
+    const hook = await createWebhook({
+      overlapPolicy: 'allow',
+      maxConcurrent: 5,
+      skipQueueLabelEnabled: true,
+    });
+    expect((await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret })).json().status).toBe(
+      'running',
+    );
+
+    const res = await deliver(SLUG, payloadForIssue('ENG-2', ['skip-queue']), { secret: hook.secret });
+    expect(res.json().status).toBe('running');
+    expect(res.json().sessionId).not.toBeNull();
+    expect(rowFor(hook.id, 'ENG-2')?.queue_skipped_by_label).toBe(1);
+  });
+
+  it('still queues an unlabelled delivery even with the toggle on (regression guard)', async () => {
+    const hook = await createWebhook({
+      overlapPolicy: 'allow',
+      maxConcurrent: 5,
+      skipQueueLabelEnabled: true,
+    });
+    await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret });
+    const res = await deliver(SLUG, payloadForIssue('ENG-2'), { secret: hook.secret });
+    expect(res.json().status).toBe('queued');
+    expect(rowFor(hook.id, 'ENG-2')?.queue_skipped_by_label).toBe(0);
+  });
+
+  it('ignores the label when the webhook has not opted in (default off)', async () => {
+    const hook = await createWebhook({ overlapPolicy: 'allow', maxConcurrent: 5 });
+    await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret });
+    const res = await deliver(SLUG, payloadForIssue('ENG-2', ['skip-queue']), { secret: hook.secret });
+    // The toggle, not the label alone, gates the behaviour — a webhook that
+    // never opted in must not have its queueing silently changed by a label
+    // any project member (or an anonymous Service Desk customer) can attach.
+    expect(res.json().status).toBe('queued');
+    expect(rowFor(hook.id, 'ENG-2')?.queue_skipped_by_label).toBe(0);
+  });
+
+  it('reports queueSkippedByLabel: false when directoryPolicy is already allow', async () => {
+    // Nothing was actually skipped here — the policy was already permissive —
+    // so the disclosure field must not claim credit for a bypass that never
+    // happened.
+    const hook = await createWebhook({
+      overlapPolicy: 'allow',
+      directoryPolicy: 'allow',
+      skipQueueLabelEnabled: true,
+      maxConcurrent: 5,
+    });
+    await deliver(SLUG, payloadForIssue('ENG-1'), { secret: hook.secret });
+    const res = await deliver(SLUG, payloadForIssue('ENG-2', ['skip-queue']), { secret: hook.secret });
+    expect(res.json().status).toBe('running');
+    expect(rowFor(hook.id, 'ENG-2')?.queue_skipped_by_label).toBe(0);
+  });
+});
+
 describe('webhook Jira component worktrees', () => {
   it('creates and shares worktree for Jira tickets with same component', async () => {
     // Initialize git repo in projectDir
