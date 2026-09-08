@@ -48,6 +48,20 @@ export const PlannerWorkspace = z.object({
       service's ticker has run at least once for this agent (a freshly
       created agent, or one whose memory was just turned back on). */
   lastConsolidatedAt: z.number().int().nullable(),
+  /**
+   * PA-37 follow-up (reporter: "Let's not list the mcp tool as separate
+   * tools to allow/disallow. Let's just enable/disable mcp as whole for
+   * global or each agent."): whether *this agent* can use any MCP registry's
+   * tools at all — the per-agent half of a two-layer on/off switch (the
+   * other half is `PlannerSettingsDto.mcpEnabled`, global). Deliberately not
+   * a per-tool or per-registry list the way native tools are: an agent
+   * editor cannot change what a registry *is* (url/auth stay a global,
+   * operator-only resource), only whether this one agent may reach any of
+   * them. Both layers must be true for `McpRegistryService.listEnabledTools`
+   * to return anything for this workspace — see that method's own doc
+   * comment.
+   */
+  mcpEnabled: z.boolean(),
 });
 export type PlannerWorkspace = z.infer<typeof PlannerWorkspace>;
 
@@ -96,6 +110,10 @@ export const UpdatePlannerWorkspaceRequest = z.object({
   path: z.string().min(1).max(4096).optional(),
   createPath: z.boolean().optional(),
   memoryEnabled: z.boolean().optional(),
+  /** PA-37 follow-up: this agent's own MCP on/off switch — see
+      `PlannerWorkspace.mcpEnabled`'s doc comment. Trivially reversible, like
+      `memoryEnabled`, so it needs no confirmation step either. */
+  mcpEnabled: z.boolean().optional(),
 });
 export type UpdatePlannerWorkspaceRequest = z.infer<typeof UpdatePlannerWorkspaceRequest>;
 
@@ -215,6 +233,17 @@ export const PlannerSettingsDto = z.object({
   urlFetchEnabled: z.boolean(),
   urlFetchBaseUrl: z.string().nullable(),
   urlFetchHasApiKey: z.boolean(),
+  /**
+   * PA-37 follow-up: the global half of the MCP on/off switch — the other
+   * half is per-agent (`PlannerWorkspace.mcpEnabled`). Unlike
+   * `webSearchEnabled`/`urlFetchEnabled`, which are off until an operator
+   * configures a base URL, this defaults to **on**: an MCP registry already
+   * has its own `enabled` flag and its own connect/test gate
+   * (`McpRegistrySummary`), so there is no "unconfigured" state this needs
+   * to protect against — the switch exists purely so "MCP as a whole" can be
+   * turned off globally or for one agent without touching any registry row.
+   */
+  mcpEnabled: z.boolean(),
 });
 export type PlannerSettingsDto = z.infer<typeof PlannerSettingsDto>;
 
@@ -244,6 +273,9 @@ export const UpdatePlannerSettingsRequest = z.object({
   urlFetchEnabled: z.boolean().optional(),
   urlFetchBaseUrl: z.string().max(2048).nullable().optional(),
   urlFetchApiKey: z.string().max(2048).optional(),
+  /** PA-37 follow-up: the global MCP on/off switch — see
+      `PlannerSettingsDto.mcpEnabled`'s doc comment. */
+  mcpEnabled: z.boolean().optional(),
 });
 export type UpdatePlannerSettingsRequest = z.infer<typeof UpdatePlannerSettingsRequest>;
 

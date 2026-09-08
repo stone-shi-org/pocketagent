@@ -156,6 +156,16 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
     void withBusy(() => api.updatePlannerWorkspace(agentId, { memoryEnabled: enabled }));
   };
 
+  // PA-37 follow-up: this agent's own half of the whole-MCP on/off switch —
+  // same trivially-reversible, no-confirmation posture as memory above. This
+  // is the *only* MCP-related control on this page by design (reporter:
+  // "can't change setting, but has enable/disable") — a registry's url/auth
+  // stay a global, operator-only resource, edited only from the settings
+  // page's own "MCP servers" section.
+  const toggleMcpEnabled = (enabled: boolean): void => {
+    void withBusy(() => api.updatePlannerWorkspace(agentId, { mcpEnabled: enabled }));
+  };
+
   const startEditMemory = (memory: PlannerMemory): void => {
     setEditingMemoryId(memory.id);
     setEditContent(memory.content);
@@ -357,6 +367,25 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
             </label>
           ))
         )}
+      </div>
+
+      <div className="planner-section">
+        <h3>MCP</h3>
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          Whether this agent may use any MCP registry's tools at all. This is the only MCP control
+          here — a registry's own settings (url, auth, which servers exist) are managed globally
+          from the Pocket Agent settings page's "MCP servers" section, not per agent. Off here even
+          while the global switch is on.
+        </p>
+        <label className="planner-checkbox-row" style={{ marginBottom: 6 }}>
+          <input
+            type="checkbox"
+            checked={agent.mcpEnabled}
+            disabled={busy}
+            onChange={(e) => toggleMcpEnabled(e.target.checked)}
+          />
+          <span>Enable MCP for this agent</span>
+        </label>
       </div>
 
       <div className="planner-section">

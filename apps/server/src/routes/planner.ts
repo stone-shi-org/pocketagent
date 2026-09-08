@@ -72,6 +72,7 @@ import {
   writePlannerEmbeddingApiKey,
   writePlannerEmbeddingBaseUrl,
   writePlannerEmbeddingModelId,
+  writePlannerMcpEnabled,
   writePlannerToolApproval,
   writePlannerUrlFetchApiKey,
   writePlannerUrlFetchBaseUrl,
@@ -246,6 +247,11 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       if (parsed.data.memoryEnabled !== undefined) {
         row = app.pocket.plannerWorkspaces.setMemoryEnabled(id, parsed.data.memoryEnabled);
       }
+      // PA-37 follow-up: same trivially-reversible posture as `memoryEnabled`
+      // above — this agent's own half of the whole-MCP on/off switch.
+      if (parsed.data.mcpEnabled !== undefined) {
+        row = app.pocket.plannerWorkspaces.setMcpEnabled(id, parsed.data.mcpEnabled);
+      }
       return reply.send(row);
     } catch (err) {
       return mapWorkspaceError(reply, err);
@@ -357,6 +363,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       urlFetchEnabled,
       urlFetchBaseUrl,
       urlFetchApiKey,
+      mcpEnabled,
     } = parsed.data;
     if (baseUrl !== undefined) writePlannerBaseUrl(db, baseUrl);
     if (apiKey !== undefined) writePlannerApiKey(db, apiKey.length > 0 ? apiKey : null);
@@ -379,6 +386,8 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     if (urlFetchApiKey !== undefined) {
       writePlannerUrlFetchApiKey(db, urlFetchApiKey.length > 0 ? urlFetchApiKey : null);
     }
+    // PA-37 follow-up: the global half of the whole-MCP on/off switch.
+    if (mcpEnabled !== undefined) writePlannerMcpEnabled(db, mcpEnabled);
     const dto: PlannerSettingsDto = readPlannerSettings(db);
     return reply.send(dto);
   });
@@ -538,23 +547,19 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
   });
 
   /**
-   * The full tool catalog, native and MCP-derived alike (PA-37: "MCP treat
-   * same as tools") — every reader below (both listing routes, and the two
-   * `PATCH`/`POST` handlers' "is this a real tool name" checks) goes through
-   * this instead of `PLANNER_TOOLS` directly, so an MCP tool is
-   * indistinguishable from a native one anywhere a name is validated or
-   * listed. An MCP tool's `name` is already namespaced
-   * (`mcpQualifiedToolName`), so it cannot collide with a native one.
+   * The native tool catalog. **MCP tools are deliberately not listed here**
+   * (PA-37 follow-up, reversing that ticket's own first cut: "Let's not list
+   * the mcp tool as separate tools to allow/disallow. Let's just
+   * enable/disable mcp as whole for global or each agent.") —
+   * `list_mcp_tools`/`call_mcp_tool` are the only two MCP-related entries
+   * that ever appear here, and they're plain `PLANNER_TOOLS` members like
+   * any other; the individual tools an MCP registry exposes have their own
+   * whole-MCP on/off switch instead (`PlannerSettingsDto.mcpEnabled` /
+   * `PlannerWorkspace.mcpEnabled`), surfaced on the MCP servers section of
+   * the settings page and the agent editor's own MCP section, not here.
    */
   function fullToolCatalog(): { name: string; description: string; readOnly: boolean }[] {
-    return [
-      ...PLANNER_TOOLS.map((t) => ({ name: t.name, description: t.description, readOnly: t.readOnly })),
-      ...app.pocket.mcpRegistry.listKnownTools().map((t) => ({
-        name: t.qualifiedName,
-        description: t.description,
-        readOnly: t.readOnly,
-      })),
-    ];
+    return PLANNER_TOOLS.map((t) => ({ name: t.name, description: t.description, readOnly: t.readOnly }));
   }
 
   /** The global catalog for a settings page — see `PlannerToolInfo`'s doc

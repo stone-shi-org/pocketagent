@@ -93,20 +93,55 @@ describe('list_mcp_tools / call_mcp_tool', () => {
     expect(parsed.map((p) => p.tool)).toEqual([`mcp__${id}__echo`]);
   });
 
-  it('list_mcp_tools omits a tool disabled globally', async () => {
+  // PA-37 follow-up (reporter: "Let's not list the mcp tool as separate
+  // tools to allow/disallow. Let's just enable/disable mcp as whole for
+  // global or each agent."): enablement is no longer per-tool — these two
+  // tests cover the whole-MCP switch at both layers instead of the retired
+  // per-tool-name PATCH routes.
+
+  it('list_mcp_tools reports nothing when MCP is disabled globally, even with a registered, reachable registry', async () => {
     t = await createTestApp();
     const id = await registerRegistry();
     await t.app.inject({
       method: 'PATCH',
-      url: `/api/planner/tools/${encodeURIComponent(`mcp__${id}__echo`)}`,
+      url: '/api/planner/settings',
       headers: authHeaders(t.cookie),
-      payload: { enabled: false },
+      payload: { mcpEnabled: false },
     });
     const tool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
     const result = await tool.execute(depsFor(t), {});
-    const parsed = JSON.parse(result) as { tool: string }[];
-    expect(parsed.map((p) => p.tool)).not.toContain(`mcp__${id}__echo`);
-    expect(parsed.map((p) => p.tool)).toContain(`mcp__${id}__delete_thing`);
+    expect(result).toMatch(/no mcp tools are currently enabled/i);
+
+    // Turning it back on restores every tool from that registry, with no
+    // re-connect needed — the cache was never touched by the switch.
+    await t.app.inject({
+      method: 'PATCH',
+      url: '/api/planner/settings',
+      headers: authHeaders(t.cookie),
+      payload: { mcpEnabled: true },
+    });
+    const restored = JSON.parse(await tool.execute(depsFor(t), {})) as { tool: string }[];
+    expect(restored.map((p) => p.tool)).toContain(`mcp__${id}__echo`);
+  });
+
+  it('list_mcp_tools reports nothing for one agent with MCP disabled, but is unaffected for another agent in the same workspace default', async () => {
+    t = await createTestApp();
+    const id = await registerRegistry();
+    const workspaceId = t.context.plannerWorkspaces.getDefault()!.id;
+    await t.app.inject({
+      method: 'PATCH',
+      url: `/api/planner/workspaces/${workspaceId}`,
+      headers: authHeaders(t.cookie),
+      payload: { mcpEnabled: false },
+    });
+    const tool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
+    const result = await tool.execute(depsFor(t, workspaceId), {});
+    expect(result).toMatch(/no mcp tools are currently enabled/i);
+
+    // An orphaned chat (no workspace) only answers to the global switch,
+    // which is still on, so it still sees the registry's tools.
+    const orphanResult = JSON.parse(await tool.execute(depsFor(t, null), {})) as { tool: string }[];
+    expect(orphanResult.map((p) => p.tool)).toContain(`mcp__${id}__echo`);
   });
 
   it('call_mcp_tool dispatches a real call and returns the tool result text', async () => {
@@ -128,21 +163,25 @@ describe('list_mcp_tools / call_mcp_tool', () => {
     expect(result).toMatch(/unknown mcp tool/i);
   });
 
-  it('call_mcp_tool refuses a tool disabled for this specific agent, even though the wrapper is enabled', async () => {
+  it('call_mcp_tool refuses every tool for an agent with MCP disabled, even though the registry itself is fine', async () => {
     t = await createTestApp();
     const id = await registerRegistry();
     const workspaceId = t.context.plannerWorkspaces.getDefault()!.id;
     await t.app.inject({
-      method: 'POST',
-      url: `/api/planner/workspaces/${workspaceId}/tools`,
+      method: 'PATCH',
+      url: `/api/planner/workspaces/${workspaceId}`,
       headers: authHeaders(t.cookie),
-      payload: { toolName: `mcp__${id}__delete_thing`, enabled: false },
+      payload: { mcpEnabled: false },
     });
     const tool = findPlannerTool(CALL_MCP_TOOL_NAME)!;
-    const result = await tool.execute(depsFor(t), { tool: `mcp__${id}__delete_thing`, arguments: { id: 'x' } });
+    const result = await tool.execute(depsFor(t, workspaceId), {
+      tool: `mcp__${id}__delete_thing`,
+      arguments: { id: 'x' },
+    });
     expect(result).toMatch(/is disabled/i);
-    // The registry's other tool is unaffected.
-    const okResult = await tool.execute(depsFor(t), { tool: `mcp__${id}__echo`, arguments: { text: 'hi' } });
+    // An orphaned chat (no workspace) is unaffected — only the global switch
+    // (still on) governs it.
+    const okResult = await tool.execute(depsFor(t, null), { tool: `mcp__${id}__echo`, arguments: { text: 'hi' } });
     expect(okResult).toBe('echo: hi');
   });
 

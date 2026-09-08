@@ -30,6 +30,9 @@ export interface PlannerWorkspaceRow {
   /** PA-29 phase 3: when `MemoryConsolidationService` last ran for this
       agent. `null` until its ticker has processed this agent at least once. */
   lastConsolidatedAt: number | null;
+  /** PA-37 follow-up: this agent's own MCP on/off switch — see
+      `PlannerWorkspace.mcpEnabled` (protocol package) for the full reasoning. */
+  mcpEnabled: boolean;
 }
 
 /** Persistence seam, so the registry stays testable without a database. */
@@ -47,6 +50,8 @@ export interface PlannerWorkspaceStore {
   setPath(id: string, newPath: string): void;
   /** PA-29 phase 4: the memory system's own on/off switch for one agent. */
   setMemoryEnabled(id: string, enabled: boolean): void;
+  /** PA-37 follow-up: this agent's own MCP on/off switch. */
+  setMcpEnabled(id: string, enabled: boolean): void;
   /** PA-29 phase 3: written by `MemoryConsolidationService` after it
       finishes processing this agent (including a cycle with nothing new to
       fold — see that service's own doc comment for why the marker still
@@ -119,6 +124,7 @@ export class PlannerWorkspaceRegistry {
       defaultModelId: null,
       memoryEnabled: true,
       lastConsolidatedAt: null,
+      mcpEnabled: true,
     };
     this.store.insert(row);
     this.rows = [...this.rows, row];
@@ -182,6 +188,7 @@ export class PlannerWorkspaceRegistry {
       defaultModelId: null,
       memoryEnabled: true,
       lastConsolidatedAt: null,
+      mcpEnabled: true,
     };
     this.store.insert(row);
     this.rows = [...this.rows, row];
@@ -253,6 +260,24 @@ export class PlannerWorkspaceRegistry {
     if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
     this.store.setMemoryEnabled(id, enabled);
     const updated = { ...row, memoryEnabled: enabled };
+    this.rows = this.rows.map((r) => (r.id === id ? updated : r));
+    return updated;
+  }
+
+  /**
+   * PA-37 follow-up: turn this agent's own MCP access on or off — the
+   * per-agent half of the two-layer switch (`readPlannerSettings(db).mcpEnabled`
+   * is the global half). Trivially reversible, same posture as
+   * `setMemoryEnabled`. Deliberately does not touch any registry row or any
+   * remembered approval decision — it only changes whether
+   * `McpRegistryService.listEnabledTools` returns anything at all *for this
+   * workspace*.
+   */
+  setMcpEnabled(id: string, enabled: boolean): PlannerWorkspaceRow {
+    const row = this.get(id);
+    if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
+    this.store.setMcpEnabled(id, enabled);
+    const updated = { ...row, mcpEnabled: enabled };
     this.rows = this.rows.map((r) => (r.id === id ? updated : r));
     return updated;
   }

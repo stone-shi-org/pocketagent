@@ -12,7 +12,7 @@ import {
 } from '@pocketagent/protocol';
 import type { Db } from '../../db/index.js';
 import { SETTINGS_ENC_KEY_VAR, decryptSecret, encryptSecret } from '../../crypto/secret-box.js';
-import { readDisabledToolNames, readGlobalDisabledToolNames } from '../store.js';
+import { readPlannerSettings } from '../store.js';
 import { McpClient, McpClientError, type McpConnectionConfig, type McpToolDescriptor } from './client.js';
 
 export class McpRegistryError extends Error {
@@ -211,12 +211,15 @@ export class McpRegistryService {
   }
 
   /**
-   * Forget a registry. Any `planner_global_disabled_tools`/
-   * `planner_agent_disabled_tools`/`planner_tool_approvals` rows this
-   * registry's tools own are pure current configuration for tools that no
-   * longer exist — cleaned up here, unlike `cron_runs`/`webhook_deliveries`
-   * history, which is deliberately kept after the thing that created it is
-   * gone.
+   * Forget a registry. Any `planner_tool_approvals` rows for this registry's
+   * tools (a remembered "always allow"/"always deny" for one specific real
+   * tool, from the dynamic `call_mcp_tool` approval-gating special case) are
+   * pure current configuration for tools that no longer exist — cleaned up
+   * here, unlike `cron_runs`/`webhook_deliveries` history, which is
+   * deliberately kept after the thing that created it is gone. There is
+   * nothing to clean up in `planner_global_disabled_tools`/
+   * `planner_agent_disabled_tools` — MCP tool names are never written there
+   * (PA-37 follow-up: enablement is whole-MCP, not per-tool).
    */
   remove(id: string): boolean {
     const changes = this.db.prepare('DELETE FROM mcp_registries WHERE id = ?').run(id).changes;
@@ -262,12 +265,13 @@ export class McpRegistryService {
 
   /**
    * Every tool from every *enabled* registry that has connected at least
-   * once, namespaced — the raw catalog the planner's tool-listing routes and
-   * `PlannerChatService.toolsFor` merge with the native `PLANNER_TOOLS`
-   * array before applying the (unchanged) global/per-agent disabled-name
-   * filters. A disabled registry, or one that has never successfully
-   * connected, contributes nothing — not an error, the same "unconfigured is
-   * a normal steady state" posture `web_search`/`url_fetch` already take.
+   * once, namespaced. A disabled registry, or one that has never
+   * successfully connected, contributes nothing — not an error, the same
+   * "unconfigured is a normal steady state" posture `web_search`/`url_fetch`
+   * already take. Unfiltered by the whole-MCP on/off switch — see
+   * `listEnabledTools` for that; this raw form exists for the settings page
+   * to show what a registry has (§ its own tool-count display), independent
+   * of whether MCP is currently switched on anywhere.
    */
   listKnownTools(): McpKnownTool[] {
     const out: McpKnownTool[] = [];
@@ -285,22 +289,40 @@ export class McpRegistryService {
   }
 
   /**
-   * `listKnownTools()` filtered by the *existing* two-layer deny-lists
-   * (`planner_global_disabled_tools`/`planner_agent_disabled_tools`) for one
-   * agent — this is what `list_mcp_tools`'s own `execute()` and
-   * `PlannerChatService.toolsFor`/`effectiveMcpToolIdentity` all call, so
-   * "MCP tools treat same as tools" (PA-37) is enforced in exactly one place
-   * rather than re-implemented at each call site. `workspaceId: null` (an
-   * orphaned chat) applies only the global layer, the same fallback
-   * `PlannerChatService.toolsFor` already uses for native tools.
+   * `listKnownTools()`, gated by the whole-MCP on/off switch for one agent —
+   * this is what `list_mcp_tools`/`call_mcp_tool`'s own `execute()` and
+   * `PlannerChatService.toolsFor`/`effectiveMcpToolIdentity` all call.
+   *
+   * PA-37 follow-up (reporter: "Let's not list the mcp tool as separate
+   * tools to allow/disallow. Let's just enable/disable mcp as whole for
+   * global or each agent."): deliberately **not** per-tool or per-registry
+   * filtering — either every enabled registry's tools are available to this
+   * agent, or none are. Two layers, both must be true: the global switch
+   * (`readPlannerSettings(db).mcpEnabled`, defaulting to on) and, when this
+   * chat has a real agent, that agent's own `planner_workspaces.mcp_enabled`
+   * (also defaulting to on — a fresh migration must not silently take MCP
+   * away from an agent that never touched the setting). `workspaceId: null`
+   * (an orphaned chat) skips the per-agent read entirely and defers to the
+   * global layer alone, the same fallback the native tool catalog's own
+   * `PlannerChatService.toolsFor` already uses.
    */
   listEnabledTools(workspaceId: string | null): McpKnownTool[] {
-    const globalDisabled = readGlobalDisabledToolNames(this.db);
-    const agentDisabled = workspaceId ? readDisabledToolNames(this.db, workspaceId) : new Set<string>();
-    if (globalDisabled.size === 0 && agentDisabled.size === 0) return this.listKnownTools();
-    return this.listKnownTools().filter(
-      (t) => !globalDisabled.has(t.qualifiedName) && !agentDisabled.has(t.qualifiedName),
-    );
+    if (!readPlannerSettings(this.db).mcpEnabled) return [];
+    if (workspaceId && !this.isMcpEnabledForWorkspace(workspaceId)) return [];
+    return this.listKnownTools();
+  }
+
+  /** Raw read of one agent's own MCP switch, straight off `planner_workspaces`
+      — a direct query rather than a `PlannerWorkspaceRegistry` dependency,
+      since this is the only field this service ever needs from that table
+      and a missing row (should not normally happen) defaults to enabled,
+      the same "fail open at the per-agent layer, the global layer is the
+      real kill switch" reasoning `workspaceId: null` above already uses. */
+  private isMcpEnabledForWorkspace(workspaceId: string): boolean {
+    const row = this.db.prepare('SELECT mcp_enabled FROM planner_workspaces WHERE id = ?').get(workspaceId) as
+      | { mcp_enabled: number }
+      | undefined;
+    return row ? row.mcp_enabled === 1 : true;
   }
 
   /**
@@ -417,16 +439,13 @@ export class McpRegistryService {
   }
 
   private cleanupToolConfigFor(registryId: string): void {
-    const tables = ['planner_global_disabled_tools', 'planner_agent_disabled_tools', 'planner_tool_approvals'] as const;
-    for (const table of tables) {
-      const rows = this.db.prepare(`SELECT DISTINCT tool_name FROM ${table}`).all() as { tool_name: string }[];
-      const stale = rows
-        .map((r) => r.tool_name)
-        .filter((name) => parseMcpQualifiedToolName(name)?.registryId === registryId);
-      if (stale.length === 0) continue;
-      const placeholders = stale.map(() => '?').join(',');
-      this.db.prepare(`DELETE FROM ${table} WHERE tool_name IN (${placeholders})`).run(...stale);
-    }
+    const rows = this.db.prepare('SELECT DISTINCT tool_name FROM planner_tool_approvals').all() as {
+      tool_name: string;
+    }[];
+    const stale = rows.map((r) => r.tool_name).filter((name) => parseMcpQualifiedToolName(name)?.registryId === registryId);
+    if (stale.length === 0) return;
+    const placeholders = stale.map(() => '?').join(',');
+    this.db.prepare(`DELETE FROM planner_tool_approvals WHERE tool_name IN (${placeholders})`).run(...stale);
   }
 
   private liveOrThrow(id: string): LiveRegistry {

@@ -643,6 +643,10 @@ describe('planner routes over HTTP', () => {
       urlFetchEnabled: false,
       urlFetchBaseUrl: null,
       urlFetchHasApiKey: false,
+      // PA-37 follow-up: absence means on — see `PLANNER_MCP_ENABLED_KEY`'s
+      // own doc comment for why this defaults the other way from
+      // webSearch/urlFetch above.
+      mcpEnabled: true,
     });
   });
 

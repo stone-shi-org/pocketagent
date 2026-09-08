@@ -54,20 +54,30 @@ function formFor(registry: McpRegistrySummary): FormState {
 
 /**
  * PA-37: manage MCP (Model Context Protocol) registries — remote servers
- * whose tools join the planner's own catalog (see the `Tools` section right
- * below this one on the settings page: an enabled registry's tools appear
- * there automatically, with no separate enable/disable surface of their own,
- * per "MCP tools treat same as tools").
+ * whose tools join the planner's own tool-calling loop through the
+ * `list_mcp_tools`/`call_mcp_tool` meta-tools.
  *
- * Modeled directly on `CustomClaudeProvidersSection`: an explicit **Save**
- * rather than autosave (this is a live connection target, not a preference —
- * a half-typed URL must never be pushed into a real connection attempt on
- * every keystroke), a password-style secret field with no reveal, and
- * blank-on-edit meaning "keep the stored value".
+ * Follow-up (reporter: "Let's not list the mcp tool as separate tools to
+ * allow/disallow. Let's just enable/disable mcp as whole for global or each
+ * agent. So mcp list will add something to enable or disable [...]"):
+ * individual MCP tools are **not** listed in the global "Tools" settings
+ * section the way native tools are — this section instead owns the one
+ * global on/off switch for MCP as a whole (`PlannerSettingsDto.mcpEnabled`);
+ * the per-agent half of that same switch lives on each agent's own editor
+ * page, in its own "MCP" section that can flip the switch but cannot touch
+ * any registry's settings.
+ *
+ * Registry CRUD itself is modeled directly on `CustomClaudeProvidersSection`:
+ * an explicit **Save** rather than autosave (this is a live connection
+ * target, not a preference — a half-typed URL must never be pushed into a
+ * real connection attempt on every keystroke), a password-style secret field
+ * with no reveal, and blank-on-edit meaning "keep the stored value".
  */
 export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Element {
   const [registries, setRegistries] = useState<McpRegistrySummary[] | null>(null);
   const [encryptionAvailable, setEncryptionAvailable] = useState(true);
+  const [mcpEnabled, setMcpEnabledState] = useState(true);
+  const [togglingMcpEnabled, setTogglingMcpEnabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /** `null` = closed, `'new'` = create, otherwise the id being edited. */
@@ -78,9 +88,10 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
 
   const load = useCallback(async () => {
     try {
-      const res = await api.listMcpRegistries();
-      setRegistries(res.registries);
-      setEncryptionAvailable(res.encryptionAvailable);
+      const [registriesRes, settings] = await Promise.all([api.listMcpRegistries(), api.getPlannerSettings()]);
+      setRegistries(registriesRes.registries);
+      setEncryptionAvailable(registriesRes.encryptionAvailable);
+      setMcpEnabledState(settings.mcpEnabled);
       setError(null);
     } catch (err) {
       onApiError(err);
@@ -91,6 +102,20 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
   useEffect(() => {
     void load();
   }, [load]);
+
+  async function toggleMcpEnabled(next: boolean): Promise<void> {
+    setTogglingMcpEnabled(true);
+    try {
+      const settings = await api.updatePlannerSettings({ mcpEnabled: next });
+      setMcpEnabledState(settings.mcpEnabled);
+      onChanged();
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not update the MCP switch.');
+    } finally {
+      setTogglingMcpEnabled(false);
+    }
+  }
 
   function patch(next: Partial<FormState>): void {
     setForm((prev) => ({ ...prev, ...next }));
@@ -194,13 +219,27 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
   return (
     <>
       <p className="transport-hint" style={{ marginBottom: 10 }}>
-        Remote MCP (Model Context Protocol) servers. An enabled registry's tools join the catalog in
-        the "Tools" section below automatically — namespaced as{' '}
-        <code>mcp__&lt;registry&gt;__&lt;tool&gt;</code> — with no separate enable/disable surface of
-        their own. A new registry is connected to once immediately on save; if that fails (a wrong
-        URL, an unreachable host), it's still saved so you can fix it and use "Test connection" to
-        retry — until a connection succeeds at least once, it contributes no tools.
+        Remote MCP (Model Context Protocol) servers. Their tools are not listed individually — an
+        agent either has MCP access or it doesn't, switched on below globally and per agent (each
+        agent's own editor page has its own "MCP" section with just this one switch — it cannot
+        change what a registry is). A new registry is connected to once immediately on save; if
+        that fails (a wrong URL, an unreachable host), it's still saved so you can fix it and use
+        "Test connection" to retry.
       </p>
+
+      <label className="planner-checkbox-row" style={{ marginBottom: 14 }}>
+        <input
+          type="checkbox"
+          checked={mcpEnabled}
+          disabled={togglingMcpEnabled}
+          onChange={(e) => void toggleMcpEnabled(e.target.checked)}
+        />
+        <span>
+          <strong>Enable MCP</strong> — the global switch. Off hides every registry's tools from
+          every agent, even one with its own per-agent switch on, and even a fully configured,
+          reachable registry.
+        </span>
+      </label>
 
       {!encryptionAvailable && (
         <div className="warn-callout" role="alert">

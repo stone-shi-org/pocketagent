@@ -23,6 +23,7 @@ interface PlannerWorkspaceDbRow {
   default_model_id: string | null;
   memory_enabled: number;
   last_consolidated_at: number | null;
+  mcp_enabled: number;
 }
 
 function fromDbRow(row: PlannerWorkspaceDbRow): PlannerWorkspaceRow {
@@ -35,6 +36,7 @@ function fromDbRow(row: PlannerWorkspaceDbRow): PlannerWorkspaceRow {
     defaultModelId: row.default_model_id,
     memoryEnabled: row.memory_enabled === 1,
     lastConsolidatedAt: row.last_consolidated_at,
+    mcpEnabled: row.mcp_enabled === 1,
   };
 }
 
@@ -47,8 +49,8 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
     insert: (row) => {
       db.prepare(
         `INSERT INTO planner_workspaces
-           (id, name, path, is_default, created_at, default_model_id, memory_enabled, last_consolidated_at)
-         VALUES (@id, @name, @path, @isDefault, @createdAt, @defaultModelId, @memoryEnabled, @lastConsolidatedAt)`,
+           (id, name, path, is_default, created_at, default_model_id, memory_enabled, last_consolidated_at, mcp_enabled)
+         VALUES (@id, @name, @path, @isDefault, @createdAt, @defaultModelId, @memoryEnabled, @lastConsolidatedAt, @mcpEnabled)`,
       ).run({
         id: row.id,
         name: row.name,
@@ -58,6 +60,7 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
         defaultModelId: row.defaultModelId,
         memoryEnabled: row.memoryEnabled ? 1 : 0,
         lastConsolidatedAt: row.lastConsolidatedAt,
+        mcpEnabled: row.mcpEnabled ? 1 : 0,
       });
     },
     delete: (id) => db.prepare('DELETE FROM planner_workspaces WHERE id = ?').run(id).changes > 0,
@@ -72,6 +75,9 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
     },
     setMemoryEnabled: (id, enabled) => {
       db.prepare('UPDATE planner_workspaces SET memory_enabled = ? WHERE id = ?').run(enabled ? 1 : 0, id);
+    },
+    setMcpEnabled: (id, enabled) => {
+      db.prepare('UPDATE planner_workspaces SET mcp_enabled = ? WHERE id = ?').run(enabled ? 1 : 0, id);
     },
     setLastConsolidatedAt: (id, at) => {
       db.prepare('UPDATE planner_workspaces SET last_consolidated_at = ? WHERE id = ?').run(at, id);
@@ -338,6 +344,18 @@ export const PLANNER_URL_FETCH_ENABLED_KEY = 'planner_url_fetch_enabled';
 export const PLANNER_URL_FETCH_BASE_URL_KEY = 'planner_url_fetch_base_url';
 export const PLANNER_URL_FETCH_API_KEY_KEY = 'planner_url_fetch_api_key';
 
+/**
+ * PA-37 follow-up: the global half of the MCP on/off switch — the per-agent
+ * half is `planner_workspaces.mcp_enabled`. Unlike `PLANNER_WEB_SEARCH_ENABLED_KEY`/
+ * `PLANNER_URL_FETCH_ENABLED_KEY`, which gate a tool that has no meaning
+ * until a base URL is entered, MCP already has its own per-registry
+ * `enabled`/connect-test gate, so absence of this key means **on** — a
+ * fresh deployment with no MCP registries configured behaves identically
+ * whether this key is set or not, and only an explicit turn-off changes
+ * anything observable.
+ */
+export const PLANNER_MCP_ENABLED_KEY = 'planner_mcp_enabled';
+
 export interface PlannerSettingsSnapshot {
   baseUrl: string | null;
   hasApiKey: boolean;
@@ -352,6 +370,7 @@ export interface PlannerSettingsSnapshot {
   urlFetchEnabled: boolean;
   urlFetchBaseUrl: string | null;
   urlFetchHasApiKey: boolean;
+  mcpEnabled: boolean;
 }
 
 export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
@@ -369,7 +388,13 @@ export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
     urlFetchEnabled: readSetting(db, PLANNER_URL_FETCH_ENABLED_KEY) === '1',
     urlFetchBaseUrl: readSetting(db, PLANNER_URL_FETCH_BASE_URL_KEY) || null,
     urlFetchHasApiKey: (readSetting(db, PLANNER_URL_FETCH_API_KEY_KEY) ?? '').length > 0,
+    // Absence means on — see `PLANNER_MCP_ENABLED_KEY`'s own doc comment.
+    mcpEnabled: readSetting(db, PLANNER_MCP_ENABLED_KEY) !== '0',
   };
+}
+
+export function writePlannerMcpEnabled(db: Db, enabled: boolean): void {
+  writeSetting(db, PLANNER_MCP_ENABLED_KEY, enabled ? '1' : '0');
 }
 
 export function writePlannerBaseUrl(db: Db, baseUrl: string | null): void {

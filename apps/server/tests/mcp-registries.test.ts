@@ -116,21 +116,31 @@ describe('MCP registry routes', () => {
       }
     });
 
-    it('deletes a registry and cleans up its disabled-tool/approval rows, but leaves other registries alone', async () => {
+    it('deletes a registry and cleans up its remembered approval decisions, but leaves other registries alone', async () => {
+      // PA-37 follow-up: MCP tools are no longer listed in
+      // planner_global_disabled_tools/planner_agent_disabled_tools at all
+      // (enablement is whole-MCP now, not per-tool) — the only per-tool
+      // config left to clean up on delete is a remembered `call_mcp_tool`
+      // approval decision (`planner_tool_approvals`), from the dynamic
+      // approval-gating special case.
       const a = (await post('/api/mcp-registries', valid({ name: 'A' }))).json();
       const b = (await post('/api/mcp-registries', valid({ name: 'B' }))).json();
       const aTool = `mcp__${a.id}__thing`;
       const bTool = `mcp__${b.id}__thing`;
       t.db
-        .prepare('INSERT INTO planner_global_disabled_tools (tool_name, created_at) VALUES (?, ?)')
-        .run(aTool, Date.now());
+        .prepare(
+          "INSERT INTO planner_tool_approvals (id, scope, workspace_id, tool_name, decision, created_at) VALUES (?, 'global', NULL, ?, 'allow', ?)",
+        )
+        .run('approval-a', aTool, Date.now());
       t.db
-        .prepare('INSERT INTO planner_global_disabled_tools (tool_name, created_at) VALUES (?, ?)')
-        .run(bTool, Date.now());
+        .prepare(
+          "INSERT INTO planner_tool_approvals (id, scope, workspace_id, tool_name, decision, created_at) VALUES (?, 'global', NULL, ?, 'allow', ?)",
+        )
+        .run('approval-b', bTool, Date.now());
 
       expect((await del(`/api/mcp-registries/${encodeURIComponent(a.id)}`)).statusCode).toBe(204);
 
-      const remaining = t.db.prepare('SELECT tool_name FROM planner_global_disabled_tools').all() as {
+      const remaining = t.db.prepare('SELECT tool_name FROM planner_tool_approvals').all() as {
         tool_name: string;
       }[];
       expect(remaining.map((r) => r.tool_name)).toEqual([bTool]);

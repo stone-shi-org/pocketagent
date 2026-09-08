@@ -1042,6 +1042,21 @@ export const MIGRATIONS: readonly string[] = [
   CREATE UNIQUE INDEX IF NOT EXISTS idx_planner_agent_disabled_skills_unique
     ON planner_agent_disabled_skills (workspace_id, skill_id);
   `,
+  // PA-37 follow-up (reporter: "Let's not list the mcp tool as separate
+  // tools to allow/disallow. Let's just enable/disable mcp as whole for
+  // global or each agent."): a per-agent MCP on/off switch, the same shape
+  // as `memory_enabled` one layer above — defaults to 1 (on) so every
+  // existing agent is unaffected until someone explicitly turns it off, the
+  // same "adding a feature must not silently restrict what already worked"
+  // discipline every other per-agent toggle in this table follows. The
+  // global half of the switch is a plain `settings` row
+  // (`PLANNER_MCP_ENABLED_KEY`, `planner/store.ts`), not a column here — it
+  // has no per-agent identity to be scoped by, the same reasoning
+  // `planner_global_disabled_tools` being a separate flat table already
+  // documents.
+  `
+  ALTER TABLE planner_workspaces ADD COLUMN mcp_enabled INTEGER NOT NULL DEFAULT 1;
+  `,
 ];
 
 /**
