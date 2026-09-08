@@ -457,17 +457,30 @@ export class PlannerChatService {
   private toolsFor(workspaceId: string | null): readonly PlannerToolDefinition[] {
     const globalDisabled = readGlobalDisabledToolNames(this.opts.db);
     const agentDisabled = workspaceId ? readDisabledToolNames(this.opts.db, workspaceId) : EMPTY_DISABLED_SET;
+    // PA-37 round three: `list_mcp_tools`/`call_mcp_tool` are deliberately
+    // exempt from the ordinary global/per-agent deny-list, even though they
+    // are plain `PLANNER_TOOLS` entries like any other. They are the *only*
+    // gate an MCP tool call passes through, so letting the everyday Tools
+    // checklist individually disable one of them would silently reintroduce
+    // the per-tool footgun the PA-37 follow-up asked to remove — an operator
+    // unchecking a row that looks like any other native tool, with nothing
+    // marking it as "this is the whole of MCP," and getting no MCP tools at
+    // all with no explanation (the prod bug report this round fixes). MCP
+    // availability is governed solely by `mcpRegistry.listEnabledTools`
+    // below; `fullToolCatalog()` (`routes/planner.ts`) also excludes both
+    // names from the Tools UI entirely, so there is no checkbox that would
+    // silently do nothing.
+    const exempt = (name: string): boolean => name === LIST_MCP_TOOLS_NAME || name === CALL_MCP_TOOL_NAME;
     let tools =
       globalDisabled.size === 0 && agentDisabled.size === 0
         ? this.tools
-        : this.tools.filter((t) => !globalDisabled.has(t.name) && !agentDisabled.has(t.name));
+        : this.tools.filter((t) => exempt(t.name) || (!globalDisabled.has(t.name) && !agentDisabled.has(t.name)));
 
     // PA-37: `list_mcp_tools`/`call_mcp_tool` stand in for every MCP
     // registry's tools (see `tools.ts`'s own "MCP" section doc comment) —
-    // omitted entirely, on top of whatever the deny-lists above already
-    // decided, when this agent has nothing enabled behind them. An agent
-    // with no MCP registries configured must see no difference at all from
-    // before this feature existed.
+    // omitted entirely when this agent has nothing enabled behind them. An
+    // agent with no MCP registries configured must see no difference at all
+    // from before this feature existed.
     if (this.opts.mcpRegistry.listEnabledTools(workspaceId).length === 0) {
       tools = tools.filter((t) => t.name !== LIST_MCP_TOOLS_NAME && t.name !== CALL_MCP_TOOL_NAME);
     }
@@ -537,9 +550,18 @@ export class PlannerChatService {
       off globally (PA-6 round 5), and one that's merely restricted for this
       one agent — so a genuinely unknown name, an operator-wide switch, and a
       per-agent restriction never read as the same failure to whoever's
-      watching the transcript. */
+      watching the transcript.
+
+      `list_mcp_tools`/`call_mcp_tool` are special-cased (PA-37 round three):
+      since `toolsFor` exempts them from the ordinary deny-lists, the only
+      way either can reach this method at all is `mcpRegistry.listEnabledTools`
+      being empty for this agent — reporting "disabled globally"/"disabled
+      for this agent" there would name the wrong mechanism entirely. */
   private toolUnavailableMessage(workspaceId: string | null, name: string): string {
     if (!findPlannerTool(name)) return `Unknown tool: ${name}`;
+    if (name === LIST_MCP_TOOLS_NAME || name === CALL_MCP_TOOL_NAME) {
+      return 'No MCP tools are currently enabled for this agent.';
+    }
     if (readGlobalDisabledToolNames(this.opts.db).has(name)) return `Tool "${name}" is disabled globally.`;
     return `Tool "${name}" is disabled for this agent.`;
   }

@@ -910,6 +910,27 @@ describe('planner routes over HTTP', () => {
     expect(byName.exec_command).toBe(false);
   });
 
+  // PA-37 round three (prod bug report: an agent with MCP fully configured
+  // and enabled still had no MCP tools at all). Root cause: `list_mcp_tools`/
+  // `call_mcp_tool` were plain catalog rows, individually toggleable through
+  // this same endpoint with no indication they were MCP-related — silently
+  // reintroducing the exact per-tool footgun the earlier PA-37 follow-up
+  // asked to remove. Both are now excluded from this catalog entirely, so
+  // there is no checkbox anywhere that could silently disable all of MCP.
+  it('excludes the MCP meta-tools from the global and per-agent tool catalogs, and refuses to toggle them', async () => {
+    const globalTools = (await get('/api/planner/tools')).json().tools as { name: string }[];
+    expect(globalTools.map((t) => t.name)).not.toContain('list_mcp_tools');
+    expect(globalTools.map((t) => t.name)).not.toContain('call_mcp_tool');
+
+    const workspaceId = (await get('/api/planner/workspaces')).json().workspaces[0].id as string;
+    const agentTools = (await get(`/api/planner/workspaces/${workspaceId}/tools`)).json().tools as { name: string }[];
+    expect(agentTools.map((t) => t.name)).not.toContain('list_mcp_tools');
+    expect(agentTools.map((t) => t.name)).not.toContain('call_mcp_tool');
+
+    const patched = await patch('/api/planner/tools/list_mcp_tools', { enabled: false });
+    expect(patched.statusCode).toBe(404);
+  });
+
   it('has no remembered decisions by default', async () => {
     const res = await get('/api/planner/tool-approvals');
     expect(res.json().approvals).toEqual([]);

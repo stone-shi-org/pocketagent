@@ -168,6 +168,45 @@ describe('call_mcp_tool approval gating', () => {
     expect(findEvent(secondEvents, 'text')?.text).toBe('Deleted b too.');
   });
 
+  // PA-37 round three: a prod deployment reported an agent with MCP fully
+  // enabled (globally, per-agent, and the registry itself connected) still
+  // showing zero MCP tools. Root cause: `list_mcp_tools`/`call_mcp_tool`
+  // were plain `PLANNER_TOOLS` rows subject to the *ordinary* global/
+  // per-agent tool deny-list — the same one `write_file`/`exec_command` go
+  // through — so a stale or accidental row there silently disabled all of
+  // MCP with no indication why. This proves the fix: even with such a row
+  // present (simulating a pre-fix mistake, or one carried over from before
+  // this round), a chat can still discover and call an MCP tool, because
+  // `toolsFor` now exempts both meta-tools from that deny-list entirely —
+  // the whole-MCP switches are their one and only gate.
+  it('a stale global disable row for the MCP meta-tools does not hide MCP from a chat', async () => {
+    const fetchImpl = vi.fn();
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch('/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const registryId = await registerRegistry();
+
+    // Simulate the exact footgun: both meta-tools individually "disabled"
+    // via the same table `PATCH /api/planner/tools/:name` used to write to
+    // before this round excluded them from that route entirely.
+    const insertDisabled = t.context.db.prepare(
+      'INSERT INTO planner_global_disabled_tools (tool_name, created_at) VALUES (?, ?)',
+    );
+    insertDisabled.run('list_mcp_tools', Date.now());
+    insertDisabled.run('call_mcp_tool', Date.now());
+
+    fetchImpl
+      .mockResolvedValueOnce(
+        fakeToolCallResponse(CALL_MCP_TOOL_NAME, { tool: `mcp__${registryId}__echo`, arguments: { text: 'hi' } }),
+      )
+      .mockResolvedValueOnce(fakeCompletionResponse('Echoed it.'));
+
+    const chat = (await post('/api/planner/chats', { modelId: 'gpt-4o' })).json();
+    const { events } = await sendMessage(chat.id, 'echo hi');
+
+    expect(findEvent(events, 'tool_result')).toMatchObject({ content: 'echo: hi', isError: false });
+    expect(findEvent(events, 'text')?.text).toBe('Echoed it.');
+  });
+
   it('skipToolApprovalsEnabled (an unattended-trigger chat) bypasses the pause for a mutating MCP tool exactly as it does for a native one', async () => {
     // No HTTP field can set this — it is only ever set server-side (PA-10).
     // Exercised via the service directly, the same way `PlannerChat`'s own

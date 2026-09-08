@@ -1,9 +1,11 @@
 import crypto from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import {
+  CALL_MCP_TOOL_NAME,
   CreatePlannerChatRequest,
   CreatePlannerModelRequest,
   CreatePlannerWorkspaceRequest,
+  LIST_MCP_TOOLS_NAME,
   PlannerMemoryTier,
   RegisterPlannerSkillRequest,
   SetPlannerAgentMcpRegistryRequest,
@@ -553,16 +555,35 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
    * The native tool catalog. **MCP tools are deliberately not listed here**
    * (PA-37 follow-up, reversing that ticket's own first cut: "Let's not list
    * the mcp tool as separate tools to allow/disallow. Let's just
-   * enable/disable mcp as whole for global or each agent.") —
-   * `list_mcp_tools`/`call_mcp_tool` are the only two MCP-related entries
-   * that ever appear here, and they're plain `PLANNER_TOOLS` members like
-   * any other; the individual tools an MCP registry exposes have their own
-   * whole-MCP on/off switch instead (`PlannerSettingsDto.mcpEnabled` /
-   * `PlannerWorkspace.mcpEnabled`), surfaced on the MCP servers section of
-   * the settings page and the agent editor's own MCP section, not here.
+   * enable/disable mcp as whole for global or each agent.") — the individual
+   * tools an MCP registry exposes have their own whole-MCP on/off switch
+   * instead (`PlannerSettingsDto.mcpEnabled` / `PlannerWorkspace.mcpEnabled`,
+   * plus the per-registry layer), surfaced on the MCP servers section of the
+   * settings page and the agent editor's own MCP section, not here.
+   *
+   * PA-37 round three (prod bug report: an agent that looked fully
+   * configured — MCP enabled globally and per-agent, registry enabled and
+   * connected — still had no MCP tools, because `list_mcp_tools`/
+   * `call_mcp_tool` themselves were, until this fix, plain `PLANNER_TOOLS`
+   * members that ALSO went through the ordinary global/per-agent tool
+   * deny-list (`chats.ts`'s `toolsFor`) — an operator could uncheck one of
+   * these two rows in the everyday Tools list without any indication it was
+   * MCP-related, silently reintroducing exactly the per-tool footgun the
+   * comment above says was deliberately removed, just one level of
+   * indirection up. Both are now excluded from this catalog entirely (so
+   * neither the global nor the per-agent Tools UI offers them as a
+   * checkbox at all — a checkbox that did nothing once MCP's own switches
+   * governed the outcome would only be confusing), and `chats.ts`'s
+   * `toolsFor` no longer subjects them to `readGlobalDisabledToolNames`/
+   * `readDisabledToolNames` — the whole-MCP switches are their one and
+   * only gate, matching the follow-up's intent for real.
    */
   function fullToolCatalog(): { name: string; description: string; readOnly: boolean }[] {
-    return PLANNER_TOOLS.map((t) => ({ name: t.name, description: t.description, readOnly: t.readOnly }));
+    return PLANNER_TOOLS.filter((t) => t.name !== LIST_MCP_TOOLS_NAME && t.name !== CALL_MCP_TOOL_NAME).map((t) => ({
+      name: t.name,
+      description: t.description,
+      readOnly: t.readOnly,
+    }));
   }
 
   /** The global catalog for a settings page — see `PlannerToolInfo`'s doc
