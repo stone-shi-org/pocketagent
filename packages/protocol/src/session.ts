@@ -174,6 +174,32 @@ export function isCustomClaudeProviderId(agent: string): boolean {
 }
 
 /**
+ * The token a Jira label uses to name a custom Claude provider:
+ * `agent:custom-<slug>`.
+ *
+ * Same problem `POCKET_AGENT_LABEL_PREFIX` solves for Pocket Agents, for the
+ * same reason: a provider's wire id (`custom-claude:<slug>-<hex>`) contains a
+ * `:`, which ends `resolveLabelOverrides`' agent-label match at the first
+ * separator, and the `-<hex>` suffix is not something anyone types from
+ * memory anyway. So a label names a provider by a slug of its *display name*
+ * instead, resolved against the live provider list at delivery time — "Claude
+ * Code (DeepSeek)" becomes `agent:custom-claude-code-deepseek`.
+ *
+ * Deliberately not `POCKET_AGENT_LABEL_PREFIX` itself: the two namespaces
+ * must stay distinguishable in a label the same way their wire ids already
+ * are, or a provider and a Pocket Agent sharing a slug would collide.
+ */
+export const CUSTOM_PROVIDER_LABEL_PREFIX = 'custom-';
+
+/** Same lowercase-and-hyphen rule as `pocketAgentLabelSlug`/`modelLabelSlug`. */
+export function customProviderLabelSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/**
  * Whether this agent reads and writes Claude Code's own on-disk transcripts,
  * and therefore shares one conversation namespace with every other such agent.
  *

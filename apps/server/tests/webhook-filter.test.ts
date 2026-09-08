@@ -377,8 +377,53 @@ describe('resolveLabelOverrides', () => {
 
   it('allows any agent when availableAgentIds is omitted', () => {
     expect(
-      resolveLabelOverrides(['agent:custom-agent', 'model:pro']),
-    ).toEqual({ agent: 'custom-agent', model: 'pro' });
+      resolveLabelOverrides(['agent:my-agent', 'model:pro']),
+    ).toEqual({ agent: 'my-agent', model: 'pro' });
+  });
+
+  it('resolves a custom Claude provider by a slug of its display name', () => {
+    const customProviders = [
+      { id: 'custom-claude:claude-code-deepseek-a1b2', name: 'Claude Code (DeepSeek)' },
+      { id: 'custom-claude:gateway-9f3e', name: 'Internal Gateway' },
+    ];
+
+    expect(
+      resolveLabelOverrides(
+        ['agent:custom-claude-code-deepseek'],
+        ['claude'],
+        undefined,
+        undefined,
+        undefined,
+        customProviders,
+      ),
+    ).toEqual({ agent: 'custom-claude:claude-code-deepseek-a1b2' });
+
+    // Hyphen separator form works too, same as the coding-agent and Pocket
+    // Agent forms.
+    expect(
+      resolveLabelOverrides(
+        ['agent-custom-claude-code-deepseek'],
+        ['claude'],
+        undefined,
+        undefined,
+        undefined,
+        customProviders,
+      ),
+    ).toEqual({ agent: 'custom-claude:claude-code-deepseek-a1b2' });
+  });
+
+  it('ignores a custom-provider label naming no known provider', () => {
+    expect(
+      resolveLabelOverrides(['agent:custom-nonexistent'], ['claude'], undefined, undefined, undefined, []),
+    ).toEqual({});
+  });
+
+  it('does not resolve a custom-provider label when no custom providers are passed', () => {
+    // Same "omitted means unavailable here" rule the Pocket Agent form uses:
+    // the reserved `custom-` prefix still swallows the label rather than
+    // falling through to a literal agent id, but with no list to match
+    // against nothing is selected either.
+    expect(resolveLabelOverrides(['agent:custom-claude-code-deepseek'], ['claude'])).toEqual({});
   });
 
   it('takes the last matching label when multiple agent/model labels are present', () => {

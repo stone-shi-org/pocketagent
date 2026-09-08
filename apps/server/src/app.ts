@@ -433,6 +433,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     // constructed above precisely so this ordering works.
     plannerWorkspaces,
     plannerChats,
+    // So a Jira label can also name a custom Claude provider by a slug of its
+    // display name (`agent:custom-<slug>`) — constructed above, same reason.
+    customClaudeProviders,
     // Shared with interactive sessions: the service carves a reservation out of
     // this so a Jira delivery storm can never take the user's last slots.
     maxSessions: config.maxSessions,

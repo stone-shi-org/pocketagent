@@ -75,6 +75,7 @@ import type { WorkspaceRegistry } from '../workspaces/index.js';
 import { isContained } from '../workspaces/index.js';
 import type { WorktreeService } from '../git/worktree.js';
 import type { AgentRegistry } from '../agents/registry.js';
+import type { CustomClaudeProviderStore } from '../agents/custom-providers-store.js';
 import { safeTokenEqual } from '../auth/index.js';
 import type { PocketRunSpec, RunSink, RunSpec } from '../runs/executor.js';
 import { RunExecutor, mintBranchName } from '../runs/executor.js';
@@ -232,6 +233,12 @@ export interface WebhookServiceOptions {
    */
   plannerWorkspaces: PlannerWorkspaceRegistry;
   plannerChats: PlannerChatService;
+  /**
+   * Needed so a Jira label can name a custom Claude provider by a slug of its
+   * display name (`agent:custom-<slug>`) the same way `plannerWorkspaces`
+   * lets one name a Pocket Agent — see `resolveLabelOverrides`.
+   */
+  customClaudeProviders: CustomClaudeProviderStore;
   /** Ceiling shared with interactive sessions; the reservation is carved from it. */
   maxSessions: number;
   logger?: {
@@ -1564,9 +1571,21 @@ export class WebhookService {
       if (Array.isArray(jFacts.labels) && jFacts.labels.length > 0) {
         const availableAgents = this.opts.agents.list().map((a) => a.id);
         const pocketAgents = this.opts.plannerWorkspaces.list().map((w) => ({ id: w.id, name: w.name }));
+        // `id` is already the full `custom-claude:<slug>-<hex>` agent id (see
+        // `CustomClaudeProviderSummary`), unlike `pocketAgents` above.
+        const customProviders = this.opts.customClaudeProviders
+          .list()
+          .map((p) => ({ id: p.id, name: p.name }));
 
         // First pass: resolve agent override to determine which model catalog to query
-        const agentOverrides = resolveLabelOverrides(jFacts.labels, availableAgents, pocketAgents);
+        const agentOverrides = resolveLabelOverrides(
+          jFacts.labels,
+          availableAgents,
+          pocketAgents,
+          undefined,
+          undefined,
+          customProviders,
+        );
         const effectiveAgent = agentOverrides.agent ?? agent;
         const pocketId = parsePocketAgentId(effectiveAgent);
 
@@ -1595,6 +1614,7 @@ export class WebhookService {
           pocketAgents,
           availableModels,
           defaultModel,
+          customProviders,
         );
         if (overrides.agent) agent = overrides.agent;
         if (overrides.model) model = overrides.model;
