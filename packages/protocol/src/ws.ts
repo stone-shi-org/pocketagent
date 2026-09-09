@@ -42,8 +42,18 @@ import { LIMITS } from './limits.js';
  * v12 added OpenCode as a rate-limit provider. Older bundles reject the new
  * enum value, so they must reconnect rather than drop the overlay event.
  * v13 added Codex as a rate-limit provider for the same reason.
+ * v14 added the `terminated` error code (PA-40), for a live session stopped
+ * from a different tab/view. Same "unknown enum value fails the whole
+ * message's schema" reason as v12/v13 — an older bundle must reconnect
+ * rather than silently drop the push telling it to close.
+ * v15 added `watch_conversation`/`unwatch_conversation` and the
+ * `chat_removed` push (PA-40 round 3): a finished chat opened read-only in
+ * `ChatPreviewPage` has no session to `attach` to at all, so it had no way
+ * to learn its chat was removed from the list elsewhere — `attach`'s own
+ * "closed elsewhere" fan-out (v14 and the `not_found`/`terminated` codes
+ * before it) only ever reaches a tab that attached to a *session*.
  */
-export const PROTOCOL_VERSION = 14;
+export const PROTOCOL_VERSION = 15;
 
 /**
  * WebSocket close codes the server uses for conditions the client must not
@@ -61,6 +71,9 @@ export const WsCloseCode = {
 } as const;
 
 const SessionId = z.string().min(1).max(64);
+
+/** A conversation/transcript id, as recorded in `hidden_chats` and `ChatSummary.conversationId`. */
+const ConversationId = z.string().min(1).max(128);
 
 /** Signals a browser is permitted to deliver. Deliberately not the full set. */
 export const AllowedSignal = z.enum(['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT', 'SIGKILL']);
@@ -107,6 +120,30 @@ export const AttachMessage = z.object({
 export const DetachMessage = z.object({
   type: z.literal('detach'),
   sessionId: SessionId,
+});
+
+/**
+ * Watch one conversation for removal (PA-40 round 3).
+ *
+ * `ChatPreviewPage` has no session to `attach` to — it reads a finished
+ * chat's transcript once, over plain HTTP, and otherwise has no live
+ * process to observe. Without this it had no way to learn that the same
+ * chat's "Remove from list" was clicked (which never touches a session at
+ * all when the record has no `sessionId` left, or touches one this tab
+ * never attached to) and stayed open forever showing a chat the sidebar no
+ * longer lists. Deliberately not folded into `attach`: that message's whole
+ * shape — replay, epoch, buffers — is about a session's output stream, and
+ * a plain "tell me if this goes away" has none of that.
+ */
+export const WatchConversationMessage = z.object({
+  type: z.literal('watch_conversation'),
+  conversationId: ConversationId,
+});
+
+/** Stop watching. Sent on unmount, mirroring `detach`. */
+export const UnwatchConversationMessage = z.object({
+  type: z.literal('unwatch_conversation'),
+  conversationId: ConversationId,
 });
 
 export const InputMessage = z.object({
@@ -228,6 +265,8 @@ export const ResolveQueuedPromptMessage = z.object({
 export const ClientMessage = z.discriminatedUnion('type', [
   AttachMessage,
   DetachMessage,
+  WatchConversationMessage,
+  UnwatchConversationMessage,
   InputMessage,
   ResizeMessage,
   SignalMessage,
@@ -330,6 +369,20 @@ export const ErrorMessage = z.object({
   sessionId: SessionId.optional(),
 });
 
+/**
+ * The conversation a `watch_conversation` was watching just got removed from
+ * the list (`POST /api/chats/remove`, a project's "Clear finished", or a
+ * worktree delete that forgets its chats). Not folded into `ErrorMessage`:
+ * that shape's `sessionId` and its whole "attach"-scoped error codes
+ * (`not_found`/`terminated`/...) are about a session, and this fires for a
+ * conversation that may never have had one attached in this connection at
+ * all — a dedicated message keeps the two from being conflated later.
+ */
+export const ChatRemovedMessage = z.object({
+  type: z.literal('chat_removed'),
+  conversationId: ConversationId,
+});
+
 /** Optional, advisory-only terminal state hints. Never used to auto-approve. */
 export const TerminalHintKind = z.enum([
   'working',
@@ -410,6 +463,7 @@ export const ServerMessage = z.discriminatedUnion('type', [
   StatusMessage,
   ExitMessage,
   ErrorMessage,
+  ChatRemovedMessage,
   HintMessage,
   ResizedMessage,
   PromptQueuedMessage,

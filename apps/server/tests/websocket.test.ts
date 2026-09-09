@@ -662,4 +662,80 @@ describe('websocket terminal transport', () => {
     const error = await client.next('error', (m) => m.code === 'terminated');
     expect(error.sessionId).toBe(id);
   });
+
+  /**
+   * PA-40 round 3: the reporter's repro survived both earlier rounds because
+   * neither one was the actual gap. Double-clicking a *finished* chat opens
+   * it read-only in `ChatPreviewPage` (`useProjects.open`'s `onOpenChat`
+   * branch, taken whenever the chat is not live) — a page with no session to
+   * `attach` to at all, since it reads a transcript once over plain HTTP.
+   * `POST /api/chats/remove` with only a `conversationId` (the normal shape
+   * once a chat's session row has been pruned, or whenever the caller sends
+   * both ids) called the db-level `hideChat` directly and notified nobody —
+   * not even the WS registry the two previous rounds built, since that one
+   * is keyed entirely by session id. `watch_conversation` gives a
+   * session-less preview tab something to register with, and `chat_removed`
+   * is what a removal now pushes to it.
+   */
+  it('notifies a client watching a conversation when it is removed elsewhere', async () => {
+    const client = await connect();
+    const conversationId = 'fake-conversation-id';
+
+    client.send({ type: 'watch_conversation', conversationId });
+    // No ack message exists for a watch — give the registration a moment to
+    // land server-side before triggering the removal that should race it.
+    await sleep(100);
+
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/chats/remove',
+      headers: { cookie: t.cookie },
+      payload: { conversationId },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const removed = await client.next('chat_removed');
+    expect(removed.conversationId).toBe(conversationId);
+  });
+
+  it('stops notifying once the client explicitly unwatches', async () => {
+    const client = await connect();
+    const conversationId = 'fake-conversation-id-2';
+
+    client.send({ type: 'watch_conversation', conversationId });
+    await sleep(100);
+    client.send({ type: 'unwatch_conversation', conversationId });
+    await sleep(100);
+
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/chats/remove',
+      headers: { cookie: t.cookie },
+      payload: { conversationId },
+    });
+    expect(res.statusCode).toBe(200);
+
+    await sleep(300);
+    expect(client.messages.some((m) => m.type === 'chat_removed')).toBe(false);
+  });
+
+  it('stops notifying once the watching connection disconnects', async () => {
+    const client = await connect();
+    const conversationId = 'fake-conversation-id-3';
+
+    client.send({ type: 'watch_conversation', conversationId });
+    await sleep(100);
+    await client.close();
+
+    // The removal itself must not throw just because the one watcher for
+    // this conversation is already gone — the same "notify whoever's left,
+    // quietly do nothing otherwise" shape `onForgotten`/`onTerminated` have.
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/chats/remove',
+      headers: { cookie: t.cookie },
+      payload: { conversationId },
+    });
+    expect(res.statusCode).toBe(200);
+  });
 });

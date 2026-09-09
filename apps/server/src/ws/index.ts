@@ -143,6 +143,37 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
+  /**
+   * The conversation-id counterpart of `attachmentsBySession` above (PA-40
+   * round 3). `ChatPreviewPage` has no session to `attach` to — it reads a
+   * finished chat's transcript once, over plain HTTP — so removing that chat
+   * from a *different* tab/view never reached it through the mechanism
+   * above, no matter how correctly that one was wired: `onForgotten`/
+   * `onTerminated` are keyed by session id and fire only for a connection
+   * that actually attached to a session. `watch_conversation` gives a
+   * read-only preview tab something to register with instead.
+   */
+  const watchersByConversation = new Map<string, Set<() => void>>();
+
+  const registerConversationWatch = (conversationId: string, onRemoved: () => void): (() => void) => {
+    let set = watchersByConversation.get(conversationId);
+    if (!set) {
+      set = new Set();
+      watchersByConversation.set(conversationId, set);
+    }
+    set.add(onRemoved);
+    return () => {
+      set!.delete(onRemoved);
+      if (set!.size === 0) watchersByConversation.delete(conversationId);
+    };
+  };
+
+  sessions.onChatHidden((conversationId) => {
+    const set = watchersByConversation.get(conversationId);
+    if (!set) return;
+    for (const onRemoved of [...set]) onRemoved();
+  });
+
   app.get('/api/ws', { websocket: true }, (socket, request) => {
     const ws = socket as unknown as WebSocket;
 
@@ -160,6 +191,11 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
     }
 
     const attachments = new Map<string, Attachment>();
+    // Unregister callbacks for this connection's own `watch_conversation`s,
+    // keyed by conversation id — the connection-scoped mirror of
+    // `attachments` above, for `registerConversationWatch` rather than
+    // `attachTo`.
+    const conversationWatches = new Map<string, () => void>();
     let alive = true;
     let messageCount = 0;
     let windowStart = Date.now();
@@ -443,6 +479,26 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
           detachFrom(message.sessionId);
           break;
 
+        case 'watch_conversation': {
+          // Idempotent, like a re-`attach`: a `ChatPreviewPage` remount (a
+          // fast route change, React StrictMode in dev, ...) must not leak a
+          // second registration that then double-fires the removal push.
+          conversationWatches.get(message.conversationId)?.();
+          conversationWatches.set(
+            message.conversationId,
+            registerConversationWatch(message.conversationId, () => {
+              send({ type: 'chat_removed', conversationId: message.conversationId });
+              conversationWatches.delete(message.conversationId);
+            }),
+          );
+          break;
+        }
+
+        case 'unwatch_conversation':
+          conversationWatches.get(message.conversationId)?.();
+          conversationWatches.delete(message.conversationId);
+          break;
+
         case 'input': {
           const session = requireAttached(message.sessionId);
           if (!session) break;
@@ -608,6 +664,8 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
       unsubscribeQueue();
       // Detach only. The PTY keeps running: that is the whole point.
       for (const sessionId of [...attachments.keys()]) detachFrom(sessionId);
+      for (const unregister of [...conversationWatches.values()]) unregister();
+      conversationWatches.clear();
     };
 
     ws.on('close', cleanup);

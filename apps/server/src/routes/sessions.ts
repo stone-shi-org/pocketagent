@@ -14,7 +14,7 @@ import { SessionError } from '../sessions/manager.js';
 import { CronServiceError } from '../cron/index.js';
 import { readSessionHistory } from '../sessions/history.js';
 import { WorkspaceError } from '../workspaces/index.js';
-import { hideChat, readAgentDefaults } from '../db/index.js';
+import { readAgentDefaults } from '../db/index.js';
 import { resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
@@ -120,7 +120,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         } else throw err;
       }
     }
-    if (parsed.data.conversationId) hideChat(app.pocket.db, parsed.data.conversationId);
+    if (parsed.data.conversationId) sessions.hideChat(parsed.data.conversationId);
 
     return reply.send({ ok: true });
   });
@@ -159,7 +159,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       }
       for (const chat of p.chats) {
         if (chat.live || !chat.conversationId) continue;
-        hideChat(app.pocket.db, chat.conversationId);
+        sessions.hideChat(chat.conversationId);
         removedConversations++;
       }
     }
