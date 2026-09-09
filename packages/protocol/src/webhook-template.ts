@@ -250,7 +250,7 @@ Workflow Instructions:
       - Before committing, rebase your branch onto the latest main/master branch.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Fix: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
-      - Transition/mark the Jira ticket status as "In Review" (or "in-review") and reassign the ticket back to the reporter ({{issue.reporter}}).
+      - Transition/mark the Jira ticket status as "In Review" (or "in-review").
 3. If not yet approved or ready, analyze the root cause, post the findings and proposed solution plan as a comment on the Jira ticket {{issue.key}} without modifying code.`;
 
 export const JIRA_PROMPT_TEMPLATE_NEW_FEATURE = `A Jira feature request event arrived: {{event}}.
@@ -289,7 +289,7 @@ Workflow Instructions:
       - Before committing, rebase your branch onto the latest main/master branch.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Feature: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
-      - Transition/mark the Jira ticket status as "In Review" (or "in-review") and reassign the ticket back to the reporter ({{issue.reporter}}).`;
+      - Transition/mark the Jira ticket status as "In Review" (or "in-review").`;
 
 export const JIRA_PROMPT_TEMPLATE_TASK = `A Jira task event arrived: {{event}}.
 
@@ -326,7 +326,7 @@ Workflow Instructions:
       - Before committing, rebase your branch onto the latest main/master branch.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Task: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
-      - Transition/mark the Jira ticket status as "In Review" (or "in-review") and reassign the ticket back to the reporter ({{issue.reporter}}).
+      - Transition/mark the Jira ticket status as "In Review" (or "in-review").
    - If not yet approved and not tagged "agent-ready", post a brief assessment or plan on {{issue.key}} without modifying code.`;
 
 export const JIRA_PROMPT_TEMPLATE_IMPROVEMENT = `A Jira improvement event arrived: {{event}}.
@@ -364,7 +364,7 @@ Workflow Instructions:
       - Before committing, rebase your branch onto the latest main/master branch.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Improvement: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
-      - Transition/mark the Jira ticket status as "In Review" (or "in-review") and reassign the ticket back to the reporter ({{issue.reporter}}).
+      - Transition/mark the Jira ticket status as "In Review" (or "in-review").
    - If not yet approved and not tagged "agent-ready", post a brief assessment or plan on {{issue.key}} without modifying code.`;
 
 export interface JiraPromptTemplatePreset {
