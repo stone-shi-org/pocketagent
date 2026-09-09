@@ -366,6 +366,33 @@ export class SessionManager {
   }
 
   /**
+   * Called when `forget()` actually removes a session's record.
+   *
+   * The WS layer subscribes here, once, at server setup — not per connection
+   * — so a tab already attached to a session that gets removed from a
+   * *different* tab/view (PA-40) is told the same way a fresh `attach` to a
+   * since-forgotten session already is, rather than sitting idle forever
+   * believing the session still exists.
+   */
+  private readonly forgottenListeners = new Set<(id: string) => void>();
+
+  /** Subscribe to "a session's record was just forgotten". Returns an unsubscribe. */
+  onForgotten(listener: (id: string) => void): () => void {
+    this.forgottenListeners.add(listener);
+    return () => this.forgottenListeners.delete(listener);
+  }
+
+  private notifyForgotten(id: string): void {
+    for (const listener of this.forgottenListeners) {
+      try {
+        listener(id);
+      } catch (err) {
+        this.opts.logger?.warn({ err, id }, 'forgotten listener threw');
+      }
+    }
+  }
+
+  /**
    * Working trees with a live session mid-turn right now.
    *
    * This is the run queue's whole notion of "occupied", and it is derived on
@@ -1331,6 +1358,7 @@ export class SessionManager {
     if (changes === 0 && !live) {
       throw new SessionError(`No such session: ${id}`, 'not_found', 404);
     }
+    this.notifyForgotten(id);
   }
 
   /**

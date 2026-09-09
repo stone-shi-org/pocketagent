@@ -549,4 +549,44 @@ describe('websocket terminal transport', () => {
     await waitFor(() => t.context.sessions.attachedCount(id) === 0);
     expect(t.context.sessions.getOrThrow(id).isAlive()).toBe(true);
   });
+
+  /**
+   * PA-40: "Remove chat" (`SessionManager.forget`, reached from the sidebar's
+   * (x) button) used to only touch the in-memory map and the DB row — a tab
+   * already attached and idle, in a *different* browser connection than the
+   * one that removed it, was never told and sat there believing the session
+   * still existed. `SessionManager.onForgotten` plus the ws layer's
+   * process-wide `attachmentsBySession` registry fix that: any live
+   * attachment for a forgotten session gets the same `not_found` error a
+   * fresh `attach` to an already-gone session gets, then is force-detached.
+   */
+  it('notifies and detaches an attached client when the session is forgotten elsewhere', async () => {
+    const id = await newShellSession();
+    const session = t.context.sessions.getOrThrow(id);
+    const client = await connect();
+
+    client.send({ type: 'attach', sessionId: id, afterSeq: 0 });
+    await client.next('attached');
+    expect(t.context.sessions.attachedCount(id)).toBe(1);
+
+    // `forget()` refuses a running session, so end it first — the same
+    // precondition the "Remove chat" button's own confirm dialog enforces.
+    await sleep(300);
+    session.write('exit 0\n');
+    await waitFor(() => !session.isAlive());
+    await client.next('exit');
+
+    // Simulate a *different* tab/view issuing the removal.
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/chats/remove',
+      headers: { cookie: t.cookie },
+      payload: { sessionId: id },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const error = await client.next('error', (m) => m.code === 'not_found');
+    expect(error.sessionId).toBe(id);
+    await waitFor(() => t.context.sessions.attachedCount(id) === 0);
+  });
 });

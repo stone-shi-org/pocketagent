@@ -80,10 +80,42 @@ interface Attachment {
   detach: () => void;
   /** See `attachTo`'s `peek` parameter. */
   peek: boolean;
+  /** Unregisters this attachment from `attachmentsBySession` below. */
+  unregisterForgotten: () => void;
 }
 
 export const websocketRoutes: FastifyPluginAsync = async (app) => {
   const { sessions, config, promptQueue } = app.pocket;
+
+  /**
+   * Every live attachment, across every connection, indexed by session id —
+   * unlike a connection's own `attachments` map (keyed by session id but
+   * scoped to that one socket), this is process-wide and lets `forget()`'s
+   * notification below reach a tab that is attached but idle, in a
+   * *different* connection than the one that removed the session (PA-40).
+   */
+  const attachmentsBySession = new Map<string, Set<() => void>>();
+
+  const registerAttachment = (sessionId: string, onForgotten: () => void): (() => void) => {
+    let set = attachmentsBySession.get(sessionId);
+    if (!set) {
+      set = new Set();
+      attachmentsBySession.set(sessionId, set);
+    }
+    set.add(onForgotten);
+    return () => {
+      set!.delete(onForgotten);
+      if (set!.size === 0) attachmentsBySession.delete(sessionId);
+    };
+  };
+
+  // Subscribed once, at plugin setup, not per connection — see
+  // `SessionManager.onForgotten`'s own doc comment for why.
+  sessions.onForgotten((sessionId) => {
+    const set = attachmentsBySession.get(sessionId);
+    if (!set) return;
+    for (const onForgotten of [...set]) onForgotten();
+  });
 
   app.get('/api/ws', { websocket: true }, (socket, request) => {
     const ws = socket as unknown as WebSocket;
@@ -139,6 +171,7 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
       const attachment = attachments.get(sessionId);
       if (!attachment) return;
       attachment.detach();
+      attachment.unregisterForgotten();
       attachments.delete(sessionId);
       // Peek attaches never incremented the count in the first place — see
       // `attachTo`'s `peek` parameter.
@@ -250,12 +283,22 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
         };
       }
 
+      // If this session's record is forgotten (PA-40: "Remove chat" tapped
+      // from a different tab/view) while this attachment is still live and
+      // idle, tell this connection the same way a fresh `attach` to an
+      // already-forgotten session would, then force it to detach.
+      const unregisterForgotten = registerAttachment(sessionId, () => {
+        sendError('not_found', 'Session is no longer available on this server.', sessionId);
+        detachFrom(sessionId);
+      });
+
       attachments.set(sessionId, {
         session,
         peek,
         detach: () => {
           for (const off of unsubscribers) off();
         },
+        unregisterForgotten,
       });
       if (!peek) sessions.attach(sessionId);
 
