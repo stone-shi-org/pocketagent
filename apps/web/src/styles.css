@@ -4364,6 +4364,19 @@ button.chat-rate-limit-badge {
   gap: 2px;
 }
 
+.webhook-editor-nav-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.webhook-editor-nav-actions button {
+  width: 100%;
+  justify-content: center;
+}
+
 .webhook-editor-nav-item {
   display: flex;
   align-items: center;

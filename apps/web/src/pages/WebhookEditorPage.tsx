@@ -27,6 +27,7 @@ import {
   pocketAgentLabelSlug,
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
+import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { CopyButton } from '../components/CopyButton.js';
 import { Icon, type IconName } from '../components/Icon.js';
 import { SecretReveal } from '../components/SecretReveal.js';
@@ -146,6 +147,7 @@ export function WebhookEditorPage({
   const [deliveryPath, setDeliveryPath] = useState<string | null>(null);
   const [firstDeliveryAt, setFirstDeliveryAt] = useState<number | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // ---- The form -------------------------------------------------------------
   /**
@@ -656,47 +658,58 @@ export function WebhookEditorPage({
   const save = async (): Promise<void> => {
     if (busy) return;
     if (name.trim() === '') {
-      setError('Give the webhook a name.');
+      const msg = 'Give the webhook a name.';
+      setError(msg);
+      setSaveStatus({ type: 'error', message: msg });
       return;
     }
     if (promptTemplate.trim() === '') {
-      setError('A webhook needs a prompt template.');
+      const msg = 'A webhook needs a prompt template.';
+      setError(msg);
+      setSaveStatus({ type: 'error', message: msg });
       return;
     }
     if (slugProblem !== null) {
       setError(slugProblem);
+      setSaveStatus({ type: 'error', message: slugProblem });
       return;
     }
     if (type === 'bamboo' && authMode === 'hmac') {
-      setError('A Bamboo webhook can only use bearer-token auth — Bamboo cannot sign a request body.');
+      const msg = 'A Bamboo webhook can only use bearer-token auth — Bamboo cannot sign a request body.';
+      setError(msg);
+      setSaveStatus({ type: 'error', message: msg });
       return;
     }
     if (directoryMode === 'auto-map') {
       const dup = type === 'bamboo' ? planMapDuplicate : projectMapDuplicate;
       if (dup !== null) {
-        setError(`${type === 'bamboo' ? 'Plan' : 'Project'} "${dup}" is mapped more than once.`);
+        const msg = `${type === 'bamboo' ? 'Plan' : 'Project'} "${dup}" is mapped more than once.`;
+        setError(msg);
+        setSaveStatus({ type: 'error', message: msg });
         return;
       }
       const empty = type === 'bamboo' ? cleanedPlanMap.length === 0 : cleanedProjectMap.length === 0;
       if (empty) {
-        setError(
-          `Add at least one ${type === 'bamboo' ? 'plan' : 'project'} mapping, or switch to Workspace mode.`,
-        );
+        const msg = `Add at least one ${type === 'bamboo' ? 'plan' : 'project'} mapping, or switch to Workspace mode.`;
+        setError(msg);
+        setSaveStatus({ type: 'error', message: msg });
         return;
       }
     }
     if (promptTemplateMode === 'by-issue-type') {
       const dup = type === 'bamboo' ? bambooPromptTemplateMapDuplicate : promptTemplateMapDuplicate;
       if (dup !== null) {
-        setError(
-          `${type === 'bamboo' ? 'Build state' : 'Issue type'} "${dup}" is mapped more than once.`,
-        );
+        const msg = `${type === 'bamboo' ? 'Build state' : 'Issue type'} "${dup}" is mapped more than once.`;
+        setError(msg);
+        setSaveStatus({ type: 'error', message: msg });
         return;
       }
       const empty =
         type === 'bamboo' ? cleanedBambooPromptTemplateMap.length === 0 : cleanedPromptTemplateMap.length === 0;
       if (empty) {
-        setError('Add at least one prompt template mapping, or switch to Single template mode.');
+        const msg = 'Add at least one prompt template mapping, or switch to Single template mode.';
+        setError(msg);
+        setSaveStatus({ type: 'error', message: msg });
         return;
       }
     }
@@ -771,6 +784,7 @@ export function WebhookEditorPage({
         setDeliveryPath(created.webhook.deliveryPath);
         setSecret(created.secret);
         setToken(created.token ?? null);
+        setSaveStatus({ type: 'success', message: 'Webhook created successfully.' });
       } else {
         const updated = await api.updateWebhook(id, {
           ...common,
@@ -781,10 +795,13 @@ export function WebhookEditorPage({
           effort: isPocketAgent || effort.trim() === '' ? null : effort.trim(),
         });
         setDeliveryPath(updated.deliveryPath);
+        setSaveStatus({ type: 'success', message: 'Change Saved' });
       }
     } catch (err) {
       onApiError(err);
-      setError(err instanceof ApiError ? err.message : 'Could not save the webhook.');
+      const errMsg = err instanceof ApiError ? err.message : 'Could not save the webhook.';
+      setError(errMsg);
+      setSaveStatus({ type: 'error', message: errMsg });
     } finally {
       setBusy(false);
     }
@@ -878,13 +895,13 @@ export function WebhookEditorPage({
       { id: 'section-filter', title: 'Filter', icon: 'folder' },
       { id: 'section-prompt', title: 'Prompt', icon: 'compose' },
       { id: 'section-conversation', title: 'Conversation', icon: 'terminal' },
-      { id: 'section-project', title: 'Project & agent', icon: 'folder' },
+      { id: 'section-project', title: 'Project directory', icon: 'folder' },
     );
     if (directoryMode === 'auto-map') {
       list.push({ id: 'section-automap', title: 'Project routing', icon: 'folder' });
     }
     list.push(
-      { id: 'section-model', title: 'Model & effort', icon: 'code' },
+      { id: 'section-agent-model', title: 'Agent & model', icon: 'code' },
       { id: 'section-approvals', title: 'Approvals', icon: 'shield' },
     );
     if (!isNew) {
@@ -1695,7 +1712,7 @@ export function WebhookEditorPage({
       </div>
 
       <div id="section-project">
-        <SectionCard title="Project & agent" icon="folder">
+        <SectionCard title="Project directory" icon="folder">
           <SelectRowNative
             busy={busy}
             label="Directory"
@@ -1725,18 +1742,6 @@ export function WebhookEditorPage({
               onChange={setCwd}
             />
           )}
-          <SelectRowNative
-            busy={busy}
-            label="Agent"
-            value={agent}
-            options={agentOptions}
-            help={
-              isPocketAgent
-                ? `Runs in the Pocket Agent's own workspace${selectedPocketAgent ? ` (${selectedPocketAgent.path})` : ''}, not in a project directory — so the working copy, effort and worktree settings below do not apply. Its transcript opens as a Pocket Agent chat.`
-                : undefined
-            }
-            onChange={setAgent}
-          />
           {!isPocketAgent && (
             <SelectRowNative
               busy={busy || !selectedIsRepo}
@@ -1905,12 +1910,24 @@ export function WebhookEditorPage({
         </div>
       )}
 
-      <div id="section-model">
+      <div id="section-agent-model">
         <SectionCard
-          title="Model & effort"
+          title="Agent & model"
           icon="code"
-          desc="Free text — each agent has its own vocabulary."
+          desc="Pick the agent, model, and optional effort settings."
         >
+          <SelectRowNative
+            busy={busy}
+            label="Agent"
+            value={agent}
+            options={agentOptions}
+            help={
+              isPocketAgent
+                ? `Runs in the Pocket Agent's own workspace${selectedPocketAgent ? ` (${selectedPocketAgent.path})` : ''}, not in a project directory — so the working copy, effort and worktree settings do not apply. Its transcript opens as a Pocket Agent chat.`
+                : undefined
+            }
+            onChange={setAgent}
+          />
           <TextRow
             label="Model"
             value={model}
@@ -2197,8 +2214,25 @@ export function WebhookEditorPage({
               </button>
             ))}
           </div>
+          <div className="webhook-editor-nav-actions">
+            <button type="button" className="primary" disabled={busy} onClick={() => void save()}>
+              {isNew ? 'Create webhook' : 'Save changes'}
+            </button>
+          </div>
         </nav>
       </div>
+
+      {saveStatus !== null && (
+        <ConfirmDialog
+          title={saveStatus.type === 'success' ? 'Saved' : 'Error'}
+          body={saveStatus.message}
+          confirmLabel="OK"
+          danger={saveStatus.type === 'error'}
+          hideCancel
+          onConfirm={() => setSaveStatus(null)}
+          onCancel={() => setSaveStatus(null)}
+        />
+      )}
     </div>
   );
 
