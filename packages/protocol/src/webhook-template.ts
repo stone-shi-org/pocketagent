@@ -245,8 +245,9 @@ Workflow Instructions:
    - Understand what needs to be fixed from the summary, description, comments, and recent changes.
    - When the ticket is assigned or reassigned to you by a user (e.g. {{user.displayName}}), treat this event and the attached latest comment as active instructions from the user to proceed (not a stale echo).
 2. Execution Phase (When Approved / Ready):
-   - If the user commented "go ahead" / "fix it" / "approve", or if the issue has the tag/label "agent-ready" or "approved", or if the ticket was assigned to you to fix:
+   - If the user commented "go ahead" / "fix it" / "approve", or if the issue has the tag/label "agent-ready" or "approved":
       - Implement the fix in the codebase and run verification tests.
+      - Before committing, rebase your branch onto the latest main/master branch.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Fix: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review") and reassign the ticket back to the reporter ({{issue.reporter}}).
@@ -282,9 +283,10 @@ Workflow Instructions:
    - Wait for review and approval.
 2. Execution Phase (Once Approved):
    - When the ticket is assigned or reassigned to you by a user (e.g. {{user.displayName}}), treat this event and the attached latest comment as active instructions from the user to proceed (not a stale echo).
-   - Once a user comments "go ahead" or "approve", or adds the tag/label "agent-ready" or "approved", or assigns the ticket to you to implement:
+   - Once a user comments "go ahead" or "approve", or adds the tag/label "agent-ready" or "approved":
       - Execute the implementation plan carefully across the codebase.
       - Verify with relevant test suites.
+      - Before committing, rebase your branch onto the latest main/master branch.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Feature: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review") and reassign the ticket back to the reporter ({{issue.reporter}}).`;
@@ -318,9 +320,10 @@ Workflow Instructions:
    - When the ticket is assigned or reassigned to you by a user (e.g. {{user.displayName}}), treat this event and the attached latest comment as active instructions from the user to proceed (not a stale echo).
    - If the task is complex, you may optionally post your findings or proposed plan as a comment on Jira ticket {{issue.key}} before starting.
 2. Execution Phase (Once Approved / Ready):
-   - If the user commented "go ahead" or "approve", or if the issue has the tag/label "agent-ready" or "approved", or if the ticket was assigned to you to execute:
+   - If the user commented "go ahead" or "approve", or if the issue has the tag/label "agent-ready" or "approved":
       - Implement the requested task directly across the codebase.
       - Verify with relevant test suites.
+      - Before committing, rebase your branch onto the latest main/master branch.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Task: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review") and reassign the ticket back to the reporter ({{issue.reporter}}).
@@ -355,9 +358,10 @@ Workflow Instructions:
    - When the ticket is assigned or reassigned to you by a user (e.g. {{user.displayName}}), treat this event and the attached latest comment as active instructions from the user to proceed (not a stale echo).
    - If the improvement is complex, you may optionally post your findings or proposed plan as a comment on Jira ticket {{issue.key}} before starting.
 2. Execution Phase (Once Approved / Ready):
-   - If the user commented "go ahead" or "approve", or if the issue has the tag/label "agent-ready" or "approved", or if the ticket was assigned to you to execute:
+   - If the user commented "go ahead" or "approve", or if the issue has the tag/label "agent-ready" or "approved":
       - Implement the requested improvement directly across the codebase.
       - Verify with relevant test suites.
+      - Before committing, rebase your branch onto the latest main/master branch.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Improvement: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review") and reassign the ticket back to the reporter ({{issue.reporter}}).
