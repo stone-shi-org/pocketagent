@@ -3363,15 +3363,30 @@ button.chat-rate-limit-badge {
   pointer-events: none;
 }
 
-/* Safe-area padding is for a phone edge, not a pane in the middle of a screen. */
 .workspace .topbar,
 .workspace .home-bar,
-.workspace .transcript,
 .workspace .promptbar,
 .workspace .composer-dock,
 .workspace .composer-body {
   padding-left: 20px;
   padding-right: 20px;
+}
+
+/* On desktop, keep transcript's replies and unpinned prompt headers aligned with the 20px workspace grid,
+   while allowing .prompt-glass / .prompt-glass-anchor to remain 100% edge-to-edge with zero margin. */
+.workspace .turn-header {
+  margin-left: 20px;
+  margin-right: 20px;
+}
+
+.workspace .turn-body {
+  padding-left: 28px;
+  padding-right: 20px;
+}
+
+.workspace .history-divider {
+  margin-left: 20px;
+  margin-right: 20px;
 }
 
 .workspace .composer-dock {
