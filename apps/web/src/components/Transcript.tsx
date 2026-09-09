@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { TranscriptItem, TranscriptState, TurnNode } from '../agent/transcript.js';
 import { groupIntoTurns } from '../agent/transcript.js';
 import { promptHeadline } from '../agent/prompt-headline.js';
@@ -217,7 +217,11 @@ function useStackedOffsets(keys: string[]): {
   const [tops, setTops] = useState<number[]>([]);
   const [heights, setHeights] = useState<number[]>([]);
 
-  const recompute = (): void => {
+  // Stable across renders (reads refs.current fresh each call) so passing
+  // it as a prop never trips a consumer's own effect dependency array —
+  // a fresh closure here every render turned TurnPanel's onHeightChange
+  // effect into an infinite recompute -> setState -> re-render loop.
+  const recompute = useCallback((): void => {
     const nextTops: number[] = [];
     const nextHeights: number[] = [];
     let sum = 0;
@@ -229,7 +233,7 @@ function useStackedOffsets(keys: string[]): {
     }
     setTops(nextTops);
     setHeights(nextHeights);
-  };
+  }, []);
 
   const keySignature = keys.join('|');
   useLayoutEffect(() => {
