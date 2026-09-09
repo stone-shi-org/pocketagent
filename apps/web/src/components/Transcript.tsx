@@ -55,6 +55,7 @@ export function Transcript({
   const endRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
+  const [scrollTop, setScrollTop] = useState(0);
 
   // Follow the tail, but stop fighting the user the moment they scroll up.
   useEffect(() => {
@@ -64,6 +65,7 @@ export function Transcript({
   const onScroll = (): void => {
     const el = scrollRef.current;
     if (!el) return;
+    setScrollTop(el.scrollTop);
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     setPinned(atBottom);
   };
@@ -72,20 +74,70 @@ export function Transcript({
   const historyTurns = useMemo(() => groupIntoTurns(past), [past]);
   const liveTurns = useMemo(() => groupIntoTurns(state.items), [state.items]);
 
-  // History and live turns share one continuous scroll region, so the sticky
-  // window and stacking offsets are computed over both combined — otherwise
-  // "the last 3 turns" would mean the last 3 of the live session only, even
-  // while still scrolled up inside resumed history.
-  const totalTurns = historyTurns.length + liveTurns.length;
-  const windowStart = Math.max(0, totalTurns - STICKY_WINDOW);
-  const eligibleKeys = useMemo(() => {
-    const combined = [
-      ...historyTurns.map((t) => `h_${t.key}`),
-      ...liveTurns.map((t) => t.key),
+  const allTurns = useMemo(() => {
+    return [
+      ...historyTurns.map((t) => ({ key: `h_${t.key}`, turn: t })),
+      ...liveTurns.map((t) => ({ key: t.key, turn: t })),
     ];
-    return combined.slice(windowStart);
-  }, [historyTurns, liveTurns, windowStart]);
-  const { tops, heights, setHeaderRef } = useStackedOffsets(eligibleKeys);
+  }, [historyTurns, liveTurns]);
+
+  const promptTurnIndices = useMemo(() => {
+    const indices: number[] = [];
+    allTurns.forEach((t, i) => {
+      if (t.turn.prompt) indices.push(i);
+    });
+    return indices;
+  }, [allTurns]);
+
+  const allKeys = useMemo(() => allTurns.map((t) => t.key), [allTurns]);
+  const { tops, heights, setHeaderRef, turnAnchorsRef, recompute } = useStackedOffsets(allKeys);
+
+  // Determine which turns are currently sticky/pinned based on scroll position:
+  // Find turns where the header has reached or scrolled past its stacked top offset.
+  // The most recent `STICKY_WINDOW` turns among those that have reached the top are pinned.
+  const stickyTurnIndices = useMemo(() => {
+    const container = scrollRef.current;
+    if (!container || promptTurnIndices.length === 0) {
+      // Default: last STICKY_WINDOW prompt turns if not yet scrolled or before measurement
+      return new Set(promptTurnIndices.slice(-STICKY_WINDOW));
+    }
+    const containerRect = container.getBoundingClientRect();
+    const passed: number[] = [];
+    promptTurnIndices.forEach((turnIdx) => {
+      const anchorEl = turnAnchorsRef.current[turnIdx];
+      if (anchorEl) {
+        const anchorRect = anchorEl.getBoundingClientRect();
+        // The anchor's position relative to the scroll container's top
+        const relTop = anchorRect.top - containerRect.top;
+        // If anchor has scrolled past or reached its stacking top offset
+        if (relTop <= (tops[turnIdx] ?? 0) + TOP_INSET + 2) {
+          passed.push(turnIdx);
+        }
+      }
+    });
+    // Keep at most the newest STICKY_WINDOW passed turns pinned
+    const active = passed.slice(-STICKY_WINDOW);
+    // If no turns have passed yet (e.g. at the very top of a short transcript),
+    // default to the last STICKY_WINDOW so headers behave correctly
+    if (active.length === 0) {
+      return new Set(promptTurnIndices.slice(-STICKY_WINDOW));
+    }
+    return new Set(active);
+  }, [promptTurnIndices, allTurns, tops, turnAnchorsRef, scrollTop]);
+
+  // Compute stacking offsets for the currently active sticky turns
+  const activeStickyTops = useMemo(() => {
+    const map = new Map<number, number>();
+    let sum = 0;
+    promptTurnIndices.forEach((turnIdx) => {
+      if (stickyTurnIndices.has(turnIdx)) {
+        map.set(turnIdx, sum);
+        const h = heights[turnIdx] ?? 0;
+        if (h > 0) sum += h + STICKY_GAP;
+      }
+    });
+    return map;
+  }, [promptTurnIndices, stickyTurnIndices, heights]);
 
   return (
     <div className="transcript" ref={scrollRef} onScroll={onScroll}>
@@ -94,16 +146,17 @@ export function Transcript({
       )}
 
       {historyTurns.map((turn, i) => {
-        const position = i - windowStart;
-        const sticky = position >= 0;
+        const turnIdx = i;
+        const sticky = stickyTurnIndices.has(turnIdx);
         return (
           <TurnPanel
             key={`h_${turn.key}`}
             turn={turn}
             sticky={sticky}
-            top={sticky ? tops[position] : undefined}
-            height={sticky ? heights[position] : undefined}
-            setHeaderRef={sticky ? setHeaderRef(position) : undefined}
+            top={sticky ? activeStickyTops.get(turnIdx) : undefined}
+            height={sticky ? heights[turnIdx] : undefined}
+            setHeaderRef={setHeaderRef(turnIdx)}
+            onHeightChange={recompute}
           />
         );
       })}
@@ -114,16 +167,17 @@ export function Transcript({
       )}
 
       {liveTurns.map((turn, i) => {
-        const position = historyTurns.length + i - windowStart;
-        const sticky = position >= 0;
+        const turnIdx = historyTurns.length + i;
+        const sticky = stickyTurnIndices.has(turnIdx);
         return (
           <TurnPanel
             key={turn.key}
             turn={turn}
             sticky={sticky}
-            top={sticky ? tops[position] : undefined}
-            height={sticky ? heights[position] : undefined}
-            setHeaderRef={sticky ? setHeaderRef(position) : undefined}
+            top={sticky ? activeStickyTops.get(turnIdx) : undefined}
+            height={sticky ? heights[turnIdx] : undefined}
+            setHeaderRef={setHeaderRef(turnIdx)}
+            onHeightChange={recompute}
           />
         );
       })}
@@ -150,24 +204,14 @@ export function Transcript({
  * stacks directly below header N-1 rather than both sticking to `top: 0`
  * and overlapping. Plain `getBoundingClientRect` measurement of the actual
  * rendered header, not a guessed constant — a prompt's height depends on how
- * many lines it wraps to, and this box never changes shape once mounted
- * (unlike the old compact-on-stick version, nothing here toggles a class or
- * a size in response to scrolling, which is what caused the flicker: native
- * `position: sticky` repositions the box, it never touches the box itself).
- *
- * Recomputes when the *set* of pinned turns changes (a new prompt enters the
- * window) and on viewport resize (a rotation or width change can rewrap a
- * prompt to a different number of lines). Never on scroll — scrolling only
- * moves already-correctly-offset boxes, it doesn't change their heights.
+ * many lines it wraps to or whether it is expanded.
  */
 function useStackedOffsets(keys: string[]): {
   tops: number[];
-  /** Each pinned header's own measured height — separate from `tops`
-      because the glass panel needs *its own* height per turn (see
-      `.prompt-glass` in styles.css), not just the cumulative offset that
-      positions it. */
   heights: number[];
   setHeaderRef: (position: number) => (el: HTMLDivElement | null) => void;
+  turnAnchorsRef: React.MutableRefObject<(HTMLDivElement | null)[]>;
+  recompute: () => void;
 } {
   const refs = useRef<(HTMLDivElement | null)[]>([]);
   const [tops, setTops] = useState<number[]>([]);
@@ -181,9 +225,6 @@ function useStackedOffsets(keys: string[]): {
       nextTops.push(sum);
       const height = el?.getBoundingClientRect().height ?? 0;
       nextHeights.push(height);
-      // No gap after a slot with nothing rendered into it yet (the leading,
-      // prompt-less turn can occupy a window position early in a session) —
-      // otherwise the next real header would start one gap too far down.
       if (height > 0) sum += height + STICKY_GAP;
     }
     setTops(nextTops);
@@ -193,24 +234,18 @@ function useStackedOffsets(keys: string[]): {
   const keySignature = keys.join('|');
   useLayoutEffect(() => {
     recompute();
-    // Deliberately keyed on the key signature alone, not `recompute` itself
-    // (a new closure every render) — re-measuring on every render would
-    // defeat the point of only reacting to the pinned set actually changing.
   }, [keySignature]);
 
   useEffect(() => {
     window.addEventListener('resize', recompute);
     return () => window.removeEventListener('resize', recompute);
-    // Runs once: `recompute` always reads the latest refs via `.current`
-    // regardless of which render's closure is still attached as the
-    // listener, so it never goes stale.
   }, []);
 
   const setHeaderRef = (position: number) => (el: HTMLDivElement | null) => {
     refs.current[position] = el;
   };
 
-  return { tops, heights, setHeaderRef };
+  return { tops, heights, setHeaderRef, turnAnchorsRef: refs, recompute };
 }
 
 function TurnPanel({
@@ -219,41 +254,30 @@ function TurnPanel({
   top,
   height,
   setHeaderRef,
+  onHeightChange,
 }: {
   turn: TurnNode;
   sticky: boolean;
   top: number | undefined;
-  /** This turn's own measured header height, once known — sizes its glass
-      segment (see the render below and `.prompt-glass` in styles.css). */
   height: number | undefined;
   setHeaderRef: ((el: HTMLDivElement | null) => void) | undefined;
+  onHeightChange?: () => void;
 }): JSX.Element {
-  // No per-turn wrapper div: `position: sticky` can never escape its own
-  // parent's box, so a header boxed inside "just this turn's own content"
-  // gets forced to release the instant that (often short) box scrolls past —
-  // it can't stay pinned through a later turn's content. Header, glass
-  // anchor, and body are all siblings directly under `.transcript` instead,
-  // so `.transcript` itself (which spans the whole conversation) is every
-  // sticky element's containing block, and a pinned header stays put for as
-  // long as the JS-computed sticky window (see Transcript.tsx) says it
-  // should, not for however tall its own turn happens to be.
+  const [expanded, setExpanded] = useState(false);
+  const promptText = turn.prompt?.text ?? '';
+  const isMultiline = promptText.includes('\n') || promptText.length > 80;
+
+  const toggleExpand = (): void => {
+    setExpanded((v) => !v);
+  };
+
+  useLayoutEffect(() => {
+    onHeightChange?.();
+  }, [expanded, onHeightChange]);
+
   return (
     <>
       {turn.prompt && sticky && (
-        // The glass backdrop for this turn's pinned header — a genuine
-        // sibling *before* the header in the DOM, not a pseudo-element on
-        // it. That's load-bearing: a pseudo-element can never paint behind
-        // its own element's background (only behind its own *normal
-        // content*, which is a different, higher paint step — an earlier
-        // version tried a `::after` with a negative z-index for this and it
-        // ended up painting a translucent layer directly over the header's
-        // own solid tint, not just around it). A true sibling rendered
-        // first paints first, so the header's own opaque box — rendered
-        // right after it, in the same call — naturally paints on top of it,
-        // the same way an `.agent-strip` chip sits opaque on that bar's own
-        // background. Positioned at the raw (un-inset) `top`, one turn's
-        // worth of glass segments end up contiguous — see the comment on
-        // `.prompt-glass-anchor` in styles.css.
         <div className="prompt-glass-anchor" style={{ top }} aria-hidden="true">
           <div className="prompt-glass" style={{ height: (height ?? 0) + GLASS_BRIDGE }} />
         </div>
@@ -261,18 +285,30 @@ function TurnPanel({
       {turn.prompt && (
         <header
           ref={setHeaderRef}
-          className={`turn-header${sticky ? ' pinned' : ''}`}
+          className={`turn-header${sticky ? ' pinned' : ''}${expanded ? ' expanded' : ''}`}
           style={sticky ? { top: (top ?? 0) + TOP_INSET } : undefined}
         >
-          {/* Single line, icon on the same row: a stack of pinned prompts
-              needs to stay thin, and a prompt is for "what did I ask"
-              at a glance, not for re-reading in full here. The thumbnail
-              itself renders below, outside this header, so a pinned prompt
-              never grows past one line while scrolling through its turn. */}
-          <div className="prompt-text">
-            {turn.prompt.text ? promptHeadline(turn.prompt.text) : (turn.prompt.image ? 'Sent an image' : '')}
+          <div className={`prompt-text${expanded ? ' expanded' : ''}`}>
+            {turn.prompt.text
+              ? expanded
+                ? promptText
+                : promptHeadline(turn.prompt.text)
+              : (turn.prompt.image ? 'Sent an image' : '')}
           </div>
           {turn.prompt.text && <CopyButton text={turn.prompt.text} label="Copy prompt" />}
+          {isMultiline && (
+            <button
+              type="button"
+              className="prompt-expand-btn"
+              onClick={toggleExpand}
+              aria-expanded={expanded}
+              aria-label={expanded ? 'Collapse prompt' : 'Expand prompt'}
+            >
+              <span className="chev" aria-hidden="true">
+                {expanded ? '▾' : '▸'}
+              </span>
+            </button>
+          )}
         </header>
       )}
       {turn.prompt?.image && (

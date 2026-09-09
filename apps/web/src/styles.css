@@ -1459,6 +1459,10 @@ input[type='number']::-webkit-outer-spin-button {
   box-shadow: var(--shadow-sm);
 }
 
+.turn-header.expanded {
+  align-items: flex-start;
+}
+
 .prompt-text {
   flex: 1;
   min-width: 0;
@@ -1468,7 +1472,36 @@ input[type='number']::-webkit-outer-spin-button {
   font-size: 14px;
 }
 
+.prompt-text.expanded {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: visible;
+  text-overflow: clip;
+}
+
 .turn-header .copy-btn { flex: none; }
+
+.prompt-expand-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  padding: 2px 4px;
+  cursor: pointer;
+  color: var(--text-dim);
+}
+
+.prompt-expand-btn:hover {
+  color: var(--text);
+  background: var(--bg-elev);
+}
+
+.prompt-expand-btn .chev {
+  color: inherit;
+}
 
 /* The screenshot a prompt attached, if any — a true sibling of `.turn-header`
    rather than something inside it, so it never becomes part of the sticky
