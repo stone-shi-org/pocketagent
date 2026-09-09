@@ -102,6 +102,39 @@ export class McpRegistryService {
   private readonly logger: FastifyBaseLogger;
   private readonly live = new Map<string, LiveRegistry>();
 
+  /**
+   * Resolves once every registry that was `enabled` at construction has
+   * finished its boot-time reconnect attempt (success or failure) — never
+   * rejects, since `checkConnection` itself never throws. `Promise.resolve()`
+   * immediately when nothing needs warming (the overwhelmingly common case:
+   * no registries configured, or none enabled), so this costs nothing for a
+   * deployment that isn't using the feature.
+   *
+   * PA-37 round four (prod bug report, comment 10276: "whenever system
+   * refresh start, pocket agent can't find mcp tool, but once I click
+   * test/refresh... it will work... without doing anything and same
+   * prompt"). Root cause: the constructor below always hydrated `tools` as
+   * `null` for every row, regardless of what `tool_count`/`last_connected_at`
+   * said in the database — a registry that connected successfully seconds
+   * before a restart looked exactly like one that had *never* connected,
+   * because the tool cache lives only in process memory (`LiveRegistry.tools`),
+   * never in the row. `checkConnection`'s own doc comment already floated
+   * this as a known gap ("if it becomes convenient, a boot-time warm-up") —
+   * this is that warm-up, finally wired in.
+   *
+   * Deliberately fire-and-forget from the caller's point of view: nothing in
+   * `app.ts`'s boot sequence awaits this field, so a slow or unreachable
+   * registry (each capped at `MCP_CONNECT_TIMEOUT_MS` = 15s, all run
+   * concurrently via `Promise.allSettled`, never serially) cannot delay the
+   * server from accepting requests. It exists as a public field rather than
+   * a purely internal side effect only so a test can `await` it directly
+   * instead of racing a real reconnect with an arbitrary sleep — the same
+   * "no timeout, deterministic wait" preference this codebase applies to
+   * approval gates, expressed here for a background task instead of a human
+   * decision.
+   */
+  readonly warmupComplete: Promise<void>;
+
   constructor(opts: McpRegistryServiceOptions) {
     this.db = opts.db;
     this.encKey = opts.encKey;
@@ -118,6 +151,21 @@ export class McpRegistryService {
       );
     }
     for (const row of rows) this.live.set(row.id, { row, tools: null });
+
+    const enabledIds = rows.filter((r) => r.enabled === 1).map((r) => r.id);
+    this.warmupComplete =
+      enabledIds.length === 0
+        ? Promise.resolve()
+        : Promise.allSettled(enabledIds.map((id) => this.checkConnection(id))).then((results) => {
+            // `checkConnection` never throws (its own doc comment says so),
+            // so every settlement is `fulfilled`; a connection failure shows
+            // up as `value.ok === false`, not as `status: 'rejected'`.
+            // `allSettled` (rather than `all`) is still the right call here
+            // purely as defense in depth against that contract changing
+            // later without this warm-up loop being revisited.
+            const failed = results.filter((r) => r.status === 'rejected' || !r.value.ok).length;
+            this.logger.info({ registries: enabledIds.length, failed }, 'MCP registry boot-time warm-up complete');
+          });
   }
 
   get encryptionAvailable(): boolean {
@@ -238,14 +286,16 @@ export class McpRegistryService {
   }
 
   /**
-   * Connect, list tools, disconnect — shared by the "Test connection" and
-   * "Refresh tools" buttons (and, if it becomes convenient, a boot-time
-   * warm-up); a successful call replaces this registry's cached catalog,
-   * which is what actually makes its tools usable by `list_mcp_tools`/
-   * `call_mcp_tool`. Never throws: a failed connection is the expected,
-   * common outcome of clicking this button, not a server error, so the route
-   * can always answer 200 with a verdict — the same posture
-   * `PlannerChatService.testModel` already takes for the LLM endpoint.
+   * Connect, list tools, disconnect — shared by the "Test connection" button,
+   * the "Refresh tools" button, and (PA-37 round four) the constructor's own
+   * `warmupComplete` boot-time reconnect; a successful call replaces this
+   * registry's cached catalog, which is what actually makes its tools usable
+   * by `list_mcp_tools`/`call_mcp_tool`. Never throws: a failed connection is
+   * the expected, common outcome of any of those three callers, not a server
+   * error, so a route can always answer 200 with a verdict — the same
+   * posture `PlannerChatService.testModel` already takes for the LLM
+   * endpoint — and the boot-time warm-up can `Promise.allSettled` many of
+   * these without a `.catch` per call.
    */
   async checkConnection(id: string): Promise<TestMcpRegistryResponse> {
     const live = this.liveOrThrow(id);

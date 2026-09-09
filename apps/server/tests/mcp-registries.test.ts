@@ -321,6 +321,88 @@ describe('MCP registry routes', () => {
     });
   });
 
+  // PA-37 round four (prod bug report, comment 10276: "whenever system
+  // refresh start, pocket agent can't find mcp tool, but once I click
+  // test/refresh... it will work... without doing anything and same
+  // prompt"). The tool cache (`LiveRegistry.tools`) lives only in process
+  // memory, so a bare restart used to wipe it silently even though the row
+  // itself still showed a successful `lastConnectedAt`/`toolCount` from
+  // before the restart. `McpRegistryService.warmupComplete` is the fix: a
+  // boot-time reconnect for every registry that was `enabled` at
+  // construction, with nothing in `app.ts` waiting on it — so a slow or
+  // unreachable registry cannot delay the server from serving requests.
+  describe('boot-time warm-up after a restart', () => {
+    it("repopulates a registry's tool cache automatically on the next boot, with no manual Test/Refresh", async () => {
+      mcpServer = await startStreamableHttpTestServer();
+      t = await createTestApp();
+      const created = (
+        await post('/api/mcp-registries', {
+          name: 'Jira MCP',
+          transport: 'streamable_http',
+          url: mcpServer.url,
+          authKind: 'none',
+        })
+      ).json();
+      expect(created.toolCount).toBe(2);
+
+      // Simulate a real process restart: close this app instance (which
+      // never touches the shared in-memory db — see `createTestApp`'s own
+      // `cleanup`) and boot a fresh one against the very same db. A fresh
+      // `McpRegistryService` starts with `tools: null` for this row again,
+      // exactly like a real restart, even though the row's own
+      // `tool_count`/`last_connected_at` still show the prior success.
+      const db = t.db;
+      await t.cleanup();
+      t = await createTestApp({}, db);
+
+      // Before this round's fix, this would stay empty forever without an
+      // operator clicking Test/Refresh — `warmupComplete` is what makes the
+      // wait bounded and automatic instead of manual and indefinite.
+      await t.context.mcpRegistry.warmupComplete;
+
+      const known = t.context.mcpRegistry.listKnownTools();
+      expect(known.map((k) => k.qualifiedName)).toContain(`mcp__${created.id}__echo`);
+    });
+
+    it('resolves without crashing construction when a registry is unreachable at boot', async () => {
+      t = await createTestApp();
+      await post('/api/mcp-registries', {
+        name: 'Unreachable at boot',
+        transport: 'streamable_http',
+        url: 'http://127.0.0.1:1/mcp',
+        authKind: 'none',
+      });
+
+      const db = t.db;
+      await t.cleanup();
+      t = await createTestApp({}, db);
+
+      await expect(t.context.mcpRegistry.warmupComplete).resolves.toBeUndefined();
+      expect(t.context.mcpRegistry.listKnownTools()).toEqual([]);
+    });
+
+    it('excludes a registry disabled at boot from the reconnect attempt, and it stays uncached', async () => {
+      mcpServer = await startStreamableHttpTestServer();
+      t = await createTestApp();
+      const created = (
+        await post('/api/mcp-registries', {
+          name: 'Disabled registry',
+          transport: 'streamable_http',
+          url: mcpServer.url,
+          authKind: 'none',
+        })
+      ).json();
+      await patch(`/api/mcp-registries/${encodeURIComponent(created.id)}`, { enabled: false });
+
+      const db = t.db;
+      await t.cleanup();
+      t = await createTestApp({}, db);
+      await t.context.mcpRegistry.warmupComplete;
+
+      expect(t.context.mcpRegistry.listKnownTools()).toEqual([]);
+    });
+  });
+
   // PA-37 follow-up round two (reporter: "we can globally disable bamboo
   // mcp but allow Jira mcp. Same concept for per agent base - enable/disable
   // all AND separate enable/disable for each mcp"): per-registry enablement,
