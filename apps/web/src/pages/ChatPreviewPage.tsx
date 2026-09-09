@@ -8,6 +8,7 @@ import { PromptBox } from '../components/PromptBox.js';
 import { PickerSheet, type SelectorOption } from '../components/SelectorRow.js';
 import { Icon } from '../components/Icon.js';
 import { setPendingPrompt } from '../agent/pending-prompt.js';
+import { ConversationWatchConnection } from '../api/ws-client.js';
 
 interface Props {
   conversationId: string;
@@ -77,6 +78,24 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
   useEffect(() => {
     if (missing) onBack();
   }, [missing, onBack]);
+
+  /**
+   * PA-40 round 3: this page has no session to `attach` to, so the WS-based
+   * "closed elsewhere" pushes `AgentPage`/`TerminalPage` already rely on
+   * (round 1's `forget`, round 2's `terminate`) never reached it — clicking
+   * the same sidebar row's own "Remove from list" left this tab open
+   * forever, still showing a chat the list no longer has. `missing` is the
+   * exact right signal to reuse: it already means "this conversation is
+   * gone, close the tab" regardless of *why*, so a removal notification
+   * just sets the same state the initial fetch's 404 does.
+   */
+  useEffect(() => {
+    const watcher = new ConversationWatchConnection({
+      onRemoved: () => setMissing(true),
+    });
+    watcher.open(conversationId);
+    return () => watcher.close();
+  }, [conversationId]);
 
   // Stable across renders so `Transcript` doesn't re-group turns on every one —
   // there is no live session here, so this transcript state never changes.

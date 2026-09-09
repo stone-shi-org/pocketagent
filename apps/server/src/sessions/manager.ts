@@ -11,6 +11,7 @@ import type {
 import type { Db, SessionRow } from '../db/index.js';
 import {
   GLOBAL_SKIP_PERMISSIONS_KEY,
+  hideChat,
   markStaleSessionsInterrupted,
   pruneOldSessions,
   readAgentDefaults,
@@ -418,6 +419,35 @@ export class SessionManager {
         listener(id);
       } catch (err) {
         this.opts.logger?.warn({ err, id }, 'terminated listener threw');
+      }
+    }
+  }
+
+  /**
+   * Called when `hideChat()` above actually removes a conversation from the
+   * list (PA-40 round 3, reporter: double-click a finished chat to open it
+   * read-only in `ChatPreviewPage`, click that same row's "Remove from
+   * list", and the open tab never closed). `forgottenListeners`/
+   * `terminatedListeners` above both fire only for a *session* id, reaching
+   * a tab that `attach`ed to one — `ChatPreviewPage` never does, since it
+   * reads a finished transcript once over plain HTTP and has no process to
+   * observe. This is the conversation-id counterpart the ws layer's
+   * `watch_conversation` subscribes to instead.
+   */
+  private readonly chatHiddenListeners = new Set<(conversationId: string) => void>();
+
+  /** Subscribe to "a conversation was just removed from the list". Returns an unsubscribe. */
+  onChatHidden(listener: (conversationId: string) => void): () => void {
+    this.chatHiddenListeners.add(listener);
+    return () => this.chatHiddenListeners.delete(listener);
+  }
+
+  private notifyChatHidden(conversationId: string): void {
+    for (const listener of this.chatHiddenListeners) {
+      try {
+        listener(conversationId);
+      } catch (err) {
+        this.opts.logger?.warn({ err, conversationId }, 'chat-hidden listener threw');
       }
     }
   }
@@ -1389,6 +1419,22 @@ export class SessionManager {
       throw new SessionError(`No such session: ${id}`, 'not_found', 404);
     }
     this.notifyForgotten(id);
+  }
+
+  /**
+   * Remove one conversation from the list (PA-40 round 3).
+   *
+   * A thin wrapper around the db-level `hideChat`, kept here — rather than
+   * called directly from a route — for the same reason `forget()` fires its
+   * own notification instead of leaving the caller to remember to: a route
+   * that hid a chat and forgot to notify would silently reintroduce this bug
+   * for the next caller. Unlike `forget()`, there is no session to check for
+   * "still running" — a conversation is a transcript, not a process, and
+   * removing it never touches whatever session row happens to reference it.
+   */
+  hideChat(conversationId: string): void {
+    hideChat(this.opts.db, conversationId);
+    this.notifyChatHidden(conversationId);
   }
 
   /**

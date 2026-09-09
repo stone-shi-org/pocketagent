@@ -441,3 +441,131 @@ export class TerminalConnection {
     this.setState('disconnected');
   }
 }
+
+/**
+ * Watches one finished conversation for removal (PA-40 round 3).
+ *
+ * `ChatPreviewPage` has no session to hand `TerminalConnection` — it reads a
+ * finished chat's transcript once, over plain HTTP, and has no PTY or agent
+ * process to attach to at all. Without something on the wire, that tab never
+ * learned that its own chat's "Remove from list" (clicked on the same
+ * sidebar row it was opened from) had fired: `POST /api/chats/remove` used
+ * to touch nothing this tab was listening to when the chat had no live
+ * session, or one this tab had never `attach`ed to. This is deliberately a
+ * separate, much smaller class rather than a mode bolted onto
+ * `TerminalConnection`: there is no replay, no sequence number, no buffered
+ * output to reconcile on reconnect — only "tell me once if this goes away."
+ */
+export class ConversationWatchConnection {
+  private socket: WebSocket | null = null;
+  private conversationId: string | null = null;
+  private closedByUser = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private attempt = 0;
+
+  private readonly onRemoved: (conversationId: string) => void;
+  private readonly createSocket: (url: string) => WebSocket;
+  private readonly baseDelay: number;
+  private readonly maxDelay: number;
+  private readonly random: () => number;
+
+  constructor(options: {
+    onRemoved: (conversationId: string) => void;
+    createSocket?: (url: string) => WebSocket;
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+    random?: () => number;
+  }) {
+    this.onRemoved = options.onRemoved;
+    this.createSocket = options.createSocket ?? ((url) => new WebSocket(url));
+    this.baseDelay = options.baseDelayMs ?? DEFAULT_BASE_DELAY;
+    this.maxDelay = options.maxDelayMs ?? DEFAULT_MAX_DELAY;
+    this.random = options.random ?? Math.random;
+  }
+
+  /** Start watching, connecting if necessary. */
+  open(conversationId: string): void {
+    this.conversationId = conversationId;
+    this.closedByUser = false;
+    this.connect();
+  }
+
+  private connect(): void {
+    if (this.socket && (this.socket.readyState === 0 || this.socket.readyState === 1)) return;
+
+    let socket: WebSocket;
+    try {
+      socket = this.createSocket(wsUrl());
+    } catch {
+      this.scheduleReconnect();
+      return;
+    }
+    this.socket = socket;
+
+    socket.onopen = () => {
+      this.attempt = 0;
+      if (!this.conversationId) return;
+      this.send({ type: 'watch_conversation', conversationId: this.conversationId });
+    };
+
+    socket.onmessage = (event: MessageEvent) => {
+      if (typeof event.data !== 'string') return;
+      let json: unknown;
+      try {
+        json = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      const parsed = ServerMessage.safeParse(json);
+      if (!parsed.success) return;
+      if (parsed.data.type === 'chat_removed' && parsed.data.conversationId === this.conversationId) {
+        this.onRemoved(parsed.data.conversationId);
+      }
+    };
+
+    socket.onerror = () => {
+      // `onclose` always follows; reconnect scheduling lives there.
+    };
+
+    socket.onclose = () => {
+      this.socket = null;
+      if (this.closedByUser) return;
+      this.scheduleReconnect();
+    };
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer !== null) return;
+    // Same full-jitter backoff as `TerminalConnection`, so a server restart
+    // does not get a synchronised stampede from every open preview tab.
+    const exponential = Math.min(this.maxDelay, this.baseDelay * 2 ** this.attempt);
+    const delay = Math.round(exponential / 2 + this.random() * (exponential / 2));
+    this.attempt++;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
+  }
+
+  private send(message: ClientMessage): void {
+    if (!this.socket || this.socket.readyState !== 1) return;
+    this.socket.send(JSON.stringify(message));
+  }
+
+  /** Stop watching. Nothing on the server side needed this to have happened. */
+  close(): void {
+    this.closedByUser = true;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.socket) {
+      if (this.conversationId && this.socket.readyState === 1) {
+        this.send({ type: 'unwatch_conversation', conversationId: this.conversationId });
+      }
+      this.socket.onclose = null;
+      this.socket.close();
+      this.socket = null;
+    }
+  }
+}
