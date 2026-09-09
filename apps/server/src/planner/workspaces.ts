@@ -33,6 +33,10 @@ export interface PlannerWorkspaceRow {
   /** PA-37 follow-up: this agent's own MCP on/off switch — see
       `PlannerWorkspace.mcpEnabled` (protocol package) for the full reasoning. */
   mcpEnabled: boolean;
+  /** PA-45: this agent's own persona/capability text — see
+      `PlannerWorkspace.identityPrompt` (protocol package) for the full
+      reasoning. `null` until an operator writes one (or clears it back). */
+  identityPrompt: string | null;
 }
 
 /** Persistence seam, so the registry stays testable without a database. */
@@ -52,6 +56,8 @@ export interface PlannerWorkspaceStore {
   setMemoryEnabled(id: string, enabled: boolean): void;
   /** PA-37 follow-up: this agent's own MCP on/off switch. */
   setMcpEnabled(id: string, enabled: boolean): void;
+  /** PA-45: this agent's own persona/capability text, or `null` to clear it. */
+  setIdentityPrompt(id: string, identityPrompt: string | null): void;
   /** PA-29 phase 3: written by `MemoryConsolidationService` after it
       finishes processing this agent (including a cycle with nothing new to
       fold — see that service's own doc comment for why the marker still
@@ -125,6 +131,7 @@ export class PlannerWorkspaceRegistry {
       memoryEnabled: true,
       lastConsolidatedAt: null,
       mcpEnabled: true,
+      identityPrompt: null,
     };
     this.store.insert(row);
     this.rows = [...this.rows, row];
@@ -189,6 +196,7 @@ export class PlannerWorkspaceRegistry {
       memoryEnabled: true,
       lastConsolidatedAt: null,
       mcpEnabled: true,
+      identityPrompt: null,
     };
     this.store.insert(row);
     this.rows = [...this.rows, row];
@@ -278,6 +286,21 @@ export class PlannerWorkspaceRegistry {
     if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
     this.store.setMcpEnabled(id, enabled);
     const updated = { ...row, mcpEnabled: enabled };
+    this.rows = this.rows.map((r) => (r.id === id ? updated : r));
+    return updated;
+  }
+
+  /**
+   * PA-45: set (or clear, with `null`) this agent's own persona/capability
+   * text. Trivially reversible, same posture as `setMemoryEnabled`/
+   * `setMcpEnabled` — no confirmation step, no directory/transcript
+   * consequence.
+   */
+  setIdentityPrompt(id: string, identityPrompt: string | null): PlannerWorkspaceRow {
+    const row = this.get(id);
+    if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
+    this.store.setIdentityPrompt(id, identityPrompt);
+    const updated = { ...row, identityPrompt };
     this.rows = this.rows.map((r) => (r.id === id ? updated : r));
     return updated;
   }

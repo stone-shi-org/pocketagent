@@ -24,6 +24,7 @@ interface PlannerWorkspaceDbRow {
   memory_enabled: number;
   last_consolidated_at: number | null;
   mcp_enabled: number;
+  identity_prompt: string | null;
 }
 
 function fromDbRow(row: PlannerWorkspaceDbRow): PlannerWorkspaceRow {
@@ -37,6 +38,7 @@ function fromDbRow(row: PlannerWorkspaceDbRow): PlannerWorkspaceRow {
     memoryEnabled: row.memory_enabled === 1,
     lastConsolidatedAt: row.last_consolidated_at,
     mcpEnabled: row.mcp_enabled === 1,
+    identityPrompt: row.identity_prompt,
   };
 }
 
@@ -49,8 +51,8 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
     insert: (row) => {
       db.prepare(
         `INSERT INTO planner_workspaces
-           (id, name, path, is_default, created_at, default_model_id, memory_enabled, last_consolidated_at, mcp_enabled)
-         VALUES (@id, @name, @path, @isDefault, @createdAt, @defaultModelId, @memoryEnabled, @lastConsolidatedAt, @mcpEnabled)`,
+           (id, name, path, is_default, created_at, default_model_id, memory_enabled, last_consolidated_at, mcp_enabled, identity_prompt)
+         VALUES (@id, @name, @path, @isDefault, @createdAt, @defaultModelId, @memoryEnabled, @lastConsolidatedAt, @mcpEnabled, @identityPrompt)`,
       ).run({
         id: row.id,
         name: row.name,
@@ -61,6 +63,7 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
         memoryEnabled: row.memoryEnabled ? 1 : 0,
         lastConsolidatedAt: row.lastConsolidatedAt,
         mcpEnabled: row.mcpEnabled ? 1 : 0,
+        identityPrompt: row.identityPrompt,
       });
     },
     delete: (id) => db.prepare('DELETE FROM planner_workspaces WHERE id = ?').run(id).changes > 0,
@@ -78,6 +81,9 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
     },
     setMcpEnabled: (id, enabled) => {
       db.prepare('UPDATE planner_workspaces SET mcp_enabled = ? WHERE id = ?').run(enabled ? 1 : 0, id);
+    },
+    setIdentityPrompt: (id, identityPrompt) => {
+      db.prepare('UPDATE planner_workspaces SET identity_prompt = ? WHERE id = ?').run(identityPrompt, id);
     },
     setLastConsolidatedAt: (id, at) => {
       db.prepare('UPDATE planner_workspaces SET last_consolidated_at = ? WHERE id = ?').run(at, id);
@@ -395,6 +401,26 @@ export const PLANNER_URL_FETCH_API_KEY_KEY = 'planner_url_fetch_api_key';
  */
 export const PLANNER_MCP_ENABLED_KEY = 'planner_mcp_enabled';
 
+/**
+ * PA-45 (reporter: "add 'me' instruction, like my name is XXX, email, Jira
+ * name, etc whenever agent need have context of myself"): free text about
+ * the human operator, global rather than per-agent — see
+ * `PlannerSettingsDto.meInstruction`'s doc comment (protocol package) for
+ * why. `''`/absent both read as unset (`|| null` below), the same
+ * "empty string means unset" convention `PLANNER_LLM_BASE_URL_KEY` already
+ * uses.
+ */
+export const PLANNER_ME_INSTRUCTION_KEY = 'planner_me_instruction';
+
+/**
+ * PA-45 (reporter: "add 'tools' instruction, for environment settings, like
+ * ssh key, url for certain things, which environment variable has
+ * something used for something"): free text about the operator's own
+ * environment/tooling — same "global, empty means unset" shape as
+ * `PLANNER_ME_INSTRUCTION_KEY` immediately above.
+ */
+export const PLANNER_TOOLS_INSTRUCTION_KEY = 'planner_tools_instruction';
+
 export interface PlannerSettingsSnapshot {
   baseUrl: string | null;
   hasApiKey: boolean;
@@ -410,6 +436,8 @@ export interface PlannerSettingsSnapshot {
   urlFetchBaseUrl: string | null;
   urlFetchHasApiKey: boolean;
   mcpEnabled: boolean;
+  meInstruction: string | null;
+  toolsInstruction: string | null;
 }
 
 export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
@@ -429,11 +457,23 @@ export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
     urlFetchHasApiKey: (readSetting(db, PLANNER_URL_FETCH_API_KEY_KEY) ?? '').length > 0,
     // Absence means on — see `PLANNER_MCP_ENABLED_KEY`'s own doc comment.
     mcpEnabled: readSetting(db, PLANNER_MCP_ENABLED_KEY) !== '0',
+    meInstruction: readSetting(db, PLANNER_ME_INSTRUCTION_KEY) || null,
+    toolsInstruction: readSetting(db, PLANNER_TOOLS_INSTRUCTION_KEY) || null,
   };
 }
 
 export function writePlannerMcpEnabled(db: Db, enabled: boolean): void {
   writeSetting(db, PLANNER_MCP_ENABLED_KEY, enabled ? '1' : '0');
+}
+
+/** PA-45: see `PLANNER_ME_INSTRUCTION_KEY`'s own doc comment. */
+export function writePlannerMeInstruction(db: Db, text: string | null): void {
+  writeSetting(db, PLANNER_ME_INSTRUCTION_KEY, text ?? '');
+}
+
+/** PA-45: see `PLANNER_TOOLS_INSTRUCTION_KEY`'s own doc comment. */
+export function writePlannerToolsInstruction(db: Db, text: string | null): void {
+  writeSetting(db, PLANNER_TOOLS_INSTRUCTION_KEY, text ?? '');
 }
 
 export function writePlannerBaseUrl(db: Db, baseUrl: string | null): void {

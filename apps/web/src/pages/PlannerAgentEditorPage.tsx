@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
-import type {
-  PlannerAgentMcpRegistryInfo,
-  PlannerAgentSkillInfo,
-  PlannerAgentToolInfo,
-  PlannerMemory,
-  PlannerMemoryTier,
-  PlannerModel,
-  PlannerWorkspace,
+import {
+  DEFAULT_PLANNER_IDENTITY_PROMPT,
+  type PlannerAgentMcpRegistryInfo,
+  type PlannerAgentSkillInfo,
+  type PlannerAgentToolInfo,
+  type PlannerMemory,
+  type PlannerMemoryTier,
+  type PlannerModel,
+  type PlannerWorkspace,
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
@@ -47,6 +48,7 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [nameInput, setNameInput] = useState('');
+  const [identityInput, setIdentityInput] = useState('');
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
   const [pendingDirectory, setPendingDirectory] = useState<{ path: string; create: boolean } | null>(null);
   const [memoryTier, setMemoryTier] = useState<PlannerMemoryTier>('short');
@@ -68,6 +70,7 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
       const found = workspaces.find((w) => w.id === agentId) ?? null;
       setAgent(found);
       setNameInput(found?.name ?? '');
+      setIdentityInput(found?.identityPrompt ?? '');
       setModels(modelList);
       setTools(agentTools.tools);
       setSkills(agentSkills.skills);
@@ -126,6 +129,16 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
     const trimmed = nameInput.trim();
     if (!trimmed || trimmed === agent?.name) return;
     void withBusy(() => api.updatePlannerWorkspace(agentId, { name: trimmed }));
+  };
+
+  // PA-45: this agent's own persona/capability text. Empty string saves as
+  // `null` (clears it), the same "empty means unset" convention every other
+  // nullable-text setting in this app uses — including the global "me"/
+  // "tools" instructions on `PlannerPage`.
+  const saveIdentity = (): void => {
+    const trimmed = identityInput.trim();
+    if (trimmed === (agent?.identityPrompt ?? '')) return;
+    void withBusy(() => api.updatePlannerWorkspace(agentId, { identityPrompt: trimmed || null }));
   };
 
   const setDefaultModel = (modelId: string): void => {
@@ -286,6 +299,27 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
             }}
           />
         </div>
+      </div>
+
+      <div className="planner-section">
+        <h3>Identity</h3>
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          Who this agent is and what it's for — sent ahead of every turn as context, the same way
+          the global "About you" and "Tools &amp; environment" text on the Pocket Agent settings
+          page is. Blank until you write something; the grey text below is only a suggestion for
+          the shape to fill in (e.g. "I am a release-notes specialist for the payments repo"), not
+          a value that's already saved.
+        </p>
+        <textarea
+          id="planner-agent-identity"
+          value={identityInput}
+          disabled={busy}
+          onChange={(e) => setIdentityInput(e.target.value)}
+          onBlur={saveIdentity}
+          placeholder={DEFAULT_PLANNER_IDENTITY_PROMPT}
+          rows={4}
+          style={{ width: '100%', resize: 'vertical' }}
+        />
       </div>
 
       <div className="planner-section">

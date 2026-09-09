@@ -574,6 +574,62 @@ describe('planner chat routes over HTTP', () => {
 
   // ---- PA-6 round 5: global tool disable, layered on top of per-agent -------
 
+  // ---- PA-45: identity/"me"/"tools" context, prepended as a system message -
+
+  it('sends no persona system message when identity/me/tools are all unset', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    await sendMessage(t, chat.id, 'hi');
+    const messages = JSON.parse(fetchImpl.mock.calls[0]![1].body as string).messages;
+    expect(messages).toEqual([{ role: 'user', content: 'hi' }]);
+  });
+
+  it("prepends this agent's identity, the global me instruction, and the global tools instruction as one system message, in that order", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', {
+      baseUrl: 'https://api.example.com',
+      meInstruction: 'My name is Stone.',
+      toolsInstruction: 'BAMBOO_TOKEN holds the Bamboo CI token.',
+    });
+    const ws = (await post(t, '/api/planner/workspaces', { name: 'Coder' })).json();
+    await patch(t, `/api/planner/workspaces/${ws.id}`, {
+      identityPrompt: 'I am a coding assistant for this repo.',
+    });
+    const chat = (await post(t, '/api/planner/chats', { workspaceId: ws.id, modelId: 'gpt-4o' })).json();
+
+    await sendMessage(t, chat.id, 'hi');
+    const messages = JSON.parse(fetchImpl.mock.calls[0]![1].body as string).messages;
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe('system');
+    expect(messages[0].content).toBe(
+      'Who you are:\nI am a coding assistant for this repo.\n\n' +
+        'About the person you are helping:\nMy name is Stone.\n\n' +
+        'About their tools and environment:\nBAMBOO_TOKEN holds the Bamboo CI token.',
+    );
+    expect(messages[1]).toEqual({ role: 'user', content: 'hi' });
+  });
+
+  it('omits a persona section that is unset while still including the ones that are', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', {
+      baseUrl: 'https://api.example.com',
+      meInstruction: 'My name is Stone.',
+    });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    await sendMessage(t, chat.id, 'hi');
+    const messages = JSON.parse(fetchImpl.mock.calls[0]![1].body as string).messages;
+    expect(messages[0]).toEqual({
+      role: 'system',
+      content: 'About the person you are helping:\nMy name is Stone.',
+    });
+  });
+
   it('excludes a globally-disabled tool from what is offered, even for an agent that never touched it', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
     t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);

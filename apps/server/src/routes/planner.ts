@@ -78,6 +78,8 @@ import {
   writePlannerEmbeddingBaseUrl,
   writePlannerEmbeddingModelId,
   writePlannerMcpEnabled,
+  writePlannerMeInstruction,
+  writePlannerToolsInstruction,
   writePlannerToolApproval,
   writePlannerUrlFetchApiKey,
   writePlannerUrlFetchBaseUrl,
@@ -257,6 +259,11 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       if (parsed.data.mcpEnabled !== undefined) {
         row = app.pocket.plannerWorkspaces.setMcpEnabled(id, parsed.data.mcpEnabled);
       }
+      // PA-45: same trivially-reversible posture as `memoryEnabled`/`mcpEnabled`
+      // above — this agent's own persona/capability text.
+      if (parsed.data.identityPrompt !== undefined) {
+        row = app.pocket.plannerWorkspaces.setIdentityPrompt(id, parsed.data.identityPrompt);
+      }
       return reply.send(row);
     } catch (err) {
       return mapWorkspaceError(reply, err);
@@ -369,6 +376,8 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       urlFetchBaseUrl,
       urlFetchApiKey,
       mcpEnabled,
+      meInstruction,
+      toolsInstruction,
     } = parsed.data;
     if (baseUrl !== undefined) writePlannerBaseUrl(db, baseUrl);
     if (apiKey !== undefined) writePlannerApiKey(db, apiKey.length > 0 ? apiKey : null);
@@ -393,6 +402,10 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     }
     // PA-37 follow-up: the global half of the whole-MCP on/off switch.
     if (mcpEnabled !== undefined) writePlannerMcpEnabled(db, mcpEnabled);
+    // PA-45: the "me"/"tools" context instructions, same "only touch what's
+    // sent, null clears it" idiom as every field above.
+    if (meInstruction !== undefined) writePlannerMeInstruction(db, meInstruction);
+    if (toolsInstruction !== undefined) writePlannerToolsInstruction(db, toolsInstruction);
     const dto: PlannerSettingsDto = readPlannerSettings(db);
     return reply.send(dto);
   });

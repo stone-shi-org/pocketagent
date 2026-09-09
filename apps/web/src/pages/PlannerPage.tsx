@@ -81,6 +81,10 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
   const [newAgentPath, setNewAgentPath] = useState<{ path: string; create: boolean } | null>(null);
   const [confirmingDeleteAgent, setConfirmingDeleteAgent] = useState<PlannerWorkspace | null>(null);
+  // PA-45: the global "me"/"tools" context instructions, folded into every
+  // agent's turn — see `PlannerSettingsDto.meInstruction`'s doc comment.
+  const [meInstructionInput, setMeInstructionInput] = useState('');
+  const [toolsInstructionInput, setToolsInstructionInput] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -99,6 +103,8 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       setEmbeddingModelIdInput(se.embeddingModelId ?? '');
       setWebSearchBaseUrlInput(se.webSearchBaseUrl ?? '');
       setUrlFetchBaseUrlInput(se.urlFetchBaseUrl ?? '');
+      setMeInstructionInput(se.meInstruction ?? '');
+      setToolsInstructionInput(se.toolsInstruction ?? '');
       setTools(to.tools);
       setApprovals(ap.approvals);
       setError(null);
@@ -130,6 +136,22 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
 
   const saveEndpoint = (): void => {
     void withBusy(() => api.updatePlannerSettings({ baseUrl: baseUrlInput.trim() || null }));
+  };
+
+  // PA-45 (reporter: "add 'me' instruction ... whenever agent need have
+  // context of myself" / "add 'tools' instruction, for environment
+  // settings"): global, not per-agent — folded into every agent's turn
+  // alongside that agent's own `identityPrompt` (see
+  // `buildPersonaSystemMessage`). Empty string saves as `null`, same "empty
+  // means unset" convention as `saveEndpoint` above.
+  const saveMeInstruction = (): void => {
+    void withBusy(() => api.updatePlannerSettings({ meInstruction: meInstructionInput.trim() || null }));
+  };
+
+  const saveToolsInstruction = (): void => {
+    void withBusy(() =>
+      api.updatePlannerSettings({ toolsInstruction: toolsInstructionInput.trim() || null }),
+    );
   };
 
   const saveApiKey = (): void => {
@@ -478,6 +500,42 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
           {error}
         </div>
       )}
+
+      <div className="planner-section">
+        <h3>About you</h3>
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          Sent to every agent alongside its own Identity text (set per agent, in that agent's own
+          editor page) — your name, email, Jira username, or anything else an agent should know
+          about who it's talking to.
+        </p>
+        <textarea
+          id="planner-me-instruction"
+          value={meInstructionInput}
+          disabled={busy}
+          onChange={(e) => setMeInstructionInput(e.target.value)}
+          onBlur={saveMeInstruction}
+          rows={3}
+          style={{ width: '100%', resize: 'vertical' }}
+        />
+      </div>
+
+      <div className="planner-section">
+        <h3>Tools &amp; environment</h3>
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          Also sent to every agent — SSH key paths, URLs for things you reference by name, which
+          environment variable is used for what. Anything an agent would otherwise have to guess
+          about your setup.
+        </p>
+        <textarea
+          id="planner-tools-instruction"
+          value={toolsInstructionInput}
+          disabled={busy}
+          onChange={(e) => setToolsInstructionInput(e.target.value)}
+          onBlur={saveToolsInstruction}
+          rows={3}
+          style={{ width: '100%', resize: 'vertical' }}
+        />
+      </div>
 
       <div className="planner-section">
         <h3>LLM endpoint</h3>

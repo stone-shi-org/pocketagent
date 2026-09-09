@@ -42,6 +42,10 @@ function makeStore(): PlannerWorkspaceStore {
       const row = rows.find((r) => r.id === id);
       if (row) row.path = newPath;
     },
+    setIdentityPrompt: (id, identityPrompt) => {
+      const row = rows.find((r) => r.id === id);
+      if (row) row.identityPrompt = identityPrompt;
+    },
     isSeeded: () => seeded,
     markSeeded: () => {
       seeded = true;
@@ -204,6 +208,34 @@ describe('PlannerWorkspaceRegistry', () => {
   it('throws setting a default model on an unknown workspace', () => {
     const registry = new PlannerWorkspaceRegistry(makeStore());
     expect(() => registry.setDefaultModelId('does-not-exist', 'gpt-4o')).toThrow(PlannerWorkspaceError);
+  });
+
+  // ---- PA-45: this agent's own persona/capability text ----------------------
+
+  it('starts with no identity prompt, unlike a seeded default', async () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    const row = await registry.create(root, 'Coder');
+    // Deliberately null, not a generated default — see
+    // `PlannerWorkspace.identityPrompt`'s doc comment for why seeding one
+    // automatically was rejected in favor of the editor's placeholder text.
+    expect(row.identityPrompt).toBeNull();
+  });
+
+  it('sets and clears a workspace identity prompt', async () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    const row = await registry.create(root, 'Coder');
+
+    const updated = registry.setIdentityPrompt(row.id, 'I am a release-notes specialist.');
+    expect(updated.identityPrompt).toBe('I am a release-notes specialist.');
+    expect(registry.get(row.id)?.identityPrompt).toBe('I am a release-notes specialist.');
+
+    const cleared = registry.setIdentityPrompt(row.id, null);
+    expect(cleared.identityPrompt).toBeNull();
+  });
+
+  it('throws setting an identity prompt on an unknown workspace', () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    expect(() => registry.setIdentityPrompt('does-not-exist', 'hi')).toThrow(PlannerWorkspaceError);
   });
 
   it('refuses to remove the default workspace', async () => {
@@ -483,6 +515,34 @@ describe('planner routes over HTTP', () => {
     expect(cleared.json().defaultModelId).toBeNull();
   });
 
+  // ---- PA-45: this agent's own identity/capability text over HTTP -----------
+
+  it('sets and clears an agent\'s own identity prompt, independent of a plain rename', async () => {
+    const created = await post('/api/planner/workspaces', { name: 'Coder' });
+    const row = created.json();
+    // Never auto-populated, even for a brand new agent — see
+    // `PlannerWorkspace.identityPrompt`'s doc comment.
+    expect(row.identityPrompt).toBeNull();
+
+    const withIdentity = await patch(`/api/planner/workspaces/${row.id}`, {
+      identityPrompt: 'I am a release-notes specialist for the payments repo.',
+    });
+    expect(withIdentity.statusCode).toBe(200);
+    expect(withIdentity.json().identityPrompt).toBe(
+      'I am a release-notes specialist for the payments repo.',
+    );
+
+    // A plain rename (identityPrompt omitted) must not clobber it.
+    const renamed = await patch(`/api/planner/workspaces/${row.id}`, { name: 'Coder 2' });
+    expect(renamed.json().identityPrompt).toBe(
+      'I am a release-notes specialist for the payments repo.',
+    );
+
+    // Explicit null clears it back to unset.
+    const cleared = await patch(`/api/planner/workspaces/${row.id}`, { identityPrompt: null });
+    expect(cleared.json().identityPrompt).toBeNull();
+  });
+
   // ---- PA-6 round 4: real multi-agent — per-agent tool subset ---------------
 
   it("lists every global tool as enabled for a brand new agent", async () => {
@@ -647,6 +707,10 @@ describe('planner routes over HTTP', () => {
       // own doc comment for why this defaults the other way from
       // webSearch/urlFetch above.
       mcpEnabled: true,
+      // PA-45: global "me"/"tools" context, unset until an operator writes
+      // one.
+      meInstruction: null,
+      toolsInstruction: null,
     });
   });
 
@@ -693,6 +757,36 @@ describe('planner routes over HTTP', () => {
     await patch('/api/planner/settings', { webSearchApiKey: 'sk-web-search-secret' });
     expect((await post('/api/planner/settings/web-search-api-key/reveal')).statusCode).toBe(404);
     expect((await post('/api/planner/settings/url-fetch-api-key/reveal')).statusCode).toBe(404);
+  });
+
+  // ---- PA-45: the global "me"/"tools" context instructions ------------------
+
+  it('PATCH sets and clears the global me/tools instructions, independently of every other setting', async () => {
+    await patch('/api/planner/settings', { baseUrl: 'https://chat.example.com/v1' });
+    const res = await patch('/api/planner/settings', {
+      meInstruction: 'My name is Stone, email stone@example.com, Jira username stoneshi.',
+      toolsInstruction: 'SSH key at ~/.ssh/deploy_key. BAMBOO_TOKEN is the Bamboo CI token.',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.baseUrl).toBe('https://chat.example.com/v1');
+    expect(body.meInstruction).toBe('My name is Stone, email stone@example.com, Jira username stoneshi.');
+    expect(body.toolsInstruction).toBe('SSH key at ~/.ssh/deploy_key. BAMBOO_TOKEN is the Bamboo CI token.');
+
+    // A plain rename of an unrelated setting (baseUrl) must not clobber it.
+    const untouched = await patch('/api/planner/settings', { baseUrl: 'https://chat.example.com/v2' });
+    expect(untouched.json().meInstruction).toBe(
+      'My name is Stone, email stone@example.com, Jira username stoneshi.',
+    );
+
+    // Explicit null clears each back to unset, independently.
+    const clearedMe = await patch('/api/planner/settings', { meInstruction: null });
+    expect(clearedMe.json().meInstruction).toBeNull();
+    expect(clearedMe.json().toolsInstruction).toBe(
+      'SSH key at ~/.ssh/deploy_key. BAMBOO_TOKEN is the Bamboo CI token.',
+    );
+    const clearedTools = await patch('/api/planner/settings', { toolsInstruction: null });
+    expect(clearedTools.json().toolsInstruction).toBeNull();
   });
 
   // ---- PA-29: the embedding provider's own settings ----------------------

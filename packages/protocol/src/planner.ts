@@ -62,8 +62,43 @@ export const PlannerWorkspace = z.object({
    * comment.
    */
   mcpEnabled: z.boolean(),
+  /**
+   * PA-45: this agent's own persona/capability text — "you are an AI
+   * assistant, you need ... system expert etc" — injected as a system
+   * message ahead of the conversation
+   * (`PlannerChatService.driveLoop`/`buildPersonaSystemMessage`). `null`
+   * until an operator writes one, including for a freshly created agent:
+   * seeding every new row with generated text would mean every agent
+   * silently starts sending extra context to the LLM with no explicit
+   * action taken, the same "a consequential default must be an explicit
+   * act" posture this codebase applies elsewhere. The "generate default for
+   * me" half of the request is instead `DEFAULT_PLANNER_IDENTITY_PROMPT`
+   * below, shown by the editor as the textarea's placeholder — visible
+   * guidance for what to write, never persisted until the operator actually
+   * types something. Doubles as the capability description a future
+   * agent-to-agent lookup tool (PA-44) would read to decide which agent to
+   * route a call to; nothing reads it that way yet.
+   */
+  identityPrompt: z.string().nullable(),
 });
 export type PlannerWorkspace = z.infer<typeof PlannerWorkspace>;
+
+/**
+ * The suggested starter text for `PlannerWorkspace.identityPrompt`'s editor
+ * textarea (PA-45 reporter: "generate default for me"). Lives here, not
+ * only in `apps/web`, so a server-rendered surface could reuse the exact
+ * same wording later — the same "one string, not a copy on each side"
+ * reasoning `webhook-template.ts`'s variable list already follows.
+ * Deliberately generic (role/area of expertise, not a specific one) since
+ * only the operator knows what a given agent is actually for; shown as a
+ * placeholder, never written to the row automatically — see
+ * `PlannerWorkspace.identityPrompt`'s own doc comment for why.
+ */
+export const DEFAULT_PLANNER_IDENTITY_PROMPT =
+  "You are an AI assistant with read/write access to this workspace's files and tools. " +
+  'Describe your role and area of expertise here — for example "I am a release-notes ' +
+  'specialist for the payments repo" or "I am a general coding assistant" — so that other ' +
+  'agents and the person you are helping know what you are for.';
 
 export const PlannerWorkspaceListResponse = z.object({
   workspaces: z.array(PlannerWorkspace),
@@ -114,6 +149,12 @@ export const UpdatePlannerWorkspaceRequest = z.object({
       `PlannerWorkspace.mcpEnabled`'s doc comment. Trivially reversible, like
       `memoryEnabled`, so it needs no confirmation step either. */
   mcpEnabled: z.boolean().optional(),
+  /** PA-45: this agent's own persona/capability text — see
+      `PlannerWorkspace.identityPrompt`'s doc comment. `null` clears it back
+      to unset (the editor's textarea saves `''` as `null`, the same
+      "empty string means unset" convention this app's other nullable-text
+      settings use); trivially reversible, so no confirmation step. */
+  identityPrompt: z.string().max(4000).nullable().optional(),
 });
 export type UpdatePlannerWorkspaceRequest = z.infer<typeof UpdatePlannerWorkspaceRequest>;
 
@@ -244,6 +285,23 @@ export const PlannerSettingsDto = z.object({
    * turned off globally or for one agent without touching any registry row.
    */
   mcpEnabled: z.boolean(),
+  /**
+   * PA-45 (reporter: "add 'me' instruction, like my name is XXX, email,
+   * Jira name, etc whenever agent need have context of myself"): free text
+   * about the human operator, folded into every agent's turn as a system
+   * message (`buildPersonaSystemMessage`) — global, not per-agent, because
+   * who "me" is does not change per agent, unlike `identityPrompt`. `null`
+   * until set; nothing is pre-filled automatically.
+   */
+  meInstruction: z.string().nullable(),
+  /**
+   * PA-45 (reporter: "add 'tools' instruction, for environment settings,
+   * like ssh key, url for certain things, which environment variable has
+   * something used for something"): free text describing the operator's own
+   * environment/tooling, folded into every agent's turn the same way as
+   * `meInstruction` — same "global, not per-agent" reasoning.
+   */
+  toolsInstruction: z.string().nullable(),
 });
 export type PlannerSettingsDto = z.infer<typeof PlannerSettingsDto>;
 
@@ -276,6 +334,12 @@ export const UpdatePlannerSettingsRequest = z.object({
   /** PA-37 follow-up: the global MCP on/off switch — see
       `PlannerSettingsDto.mcpEnabled`'s doc comment. */
   mcpEnabled: z.boolean().optional(),
+  /** PA-45: see `PlannerSettingsDto.meInstruction`'s doc comment. `null`
+      clears it, same "omitted keeps it, empty string/null clears it"
+      convention as every other field above. */
+  meInstruction: z.string().max(4000).nullable().optional(),
+  /** PA-45: see `PlannerSettingsDto.toolsInstruction`'s doc comment. */
+  toolsInstruction: z.string().max(4000).nullable().optional(),
 });
 export type UpdatePlannerSettingsRequest = z.infer<typeof UpdatePlannerSettingsRequest>;
 

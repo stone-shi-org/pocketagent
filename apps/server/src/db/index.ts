@@ -1116,6 +1116,28 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE webhooks ADD COLUMN agent_identity TEXT NOT NULL DEFAULT '';
   `,
+  // PA-45 (reporter: "add agent identity box ... generate default for me,
+  // add agent capability kind of thing ... so main agent can use agent to
+  // agent call or correct subagent invoke"): free-text persona/capability
+  // text for one agent, injected as a system message ahead of the
+  // conversation (`PlannerChatService.driveLoop`, via
+  // `buildPersonaSystemMessage`). Nullable with no `DEFAULT`, unlike
+  // `memory_enabled`/`mcp_enabled` above: this is prose an operator writes,
+  // not an on/off switch, and it is never auto-populated even for a
+  // *newly* created agent — seeding it would mean every agent silently
+  // starts sending extra context to the LLM with no explicit action taken.
+  // The "generate default for me" half of the request is
+  // `DEFAULT_PLANNER_IDENTITY_PROMPT` (protocol package), shown only as the
+  // editor's placeholder text, never persisted until an operator actually
+  // types something. The "me" (name/email/Jira username) and "tools"
+  // (environment: ssh keys, URLs, which env var means what) instructions
+  // the same request asked for are global rather than per-agent — nothing
+  // about either changes per agent — so they are plain `settings` rows
+  // (`PLANNER_ME_INSTRUCTION_KEY`/`PLANNER_TOOLS_INSTRUCTION_KEY`,
+  // `planner/store.ts`), not columns here.
+  `
+  ALTER TABLE planner_workspaces ADD COLUMN identity_prompt TEXT;
+  `,
 ];
 
 /**

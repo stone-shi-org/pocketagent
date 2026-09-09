@@ -11,7 +11,7 @@ import type { WorkspaceRegistry } from '../workspaces/index.js';
 import type { SessionManager } from '../sessions/manager.js';
 import type { SessionHistoryDeps } from '../sessions/history.js';
 import type { WorktreeService } from '../git/worktree.js';
-import type { PlannerWorkspaceRegistry } from './workspaces.js';
+import type { PlannerWorkspaceRegistry, PlannerWorkspaceRow } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
 import {
   deletePlannerChat,
@@ -28,6 +28,7 @@ import {
   updatePlannerChat,
   writePlannerChatMemoryFoldedTurns,
   writePlannerLastModelId,
+  type PlannerSettingsSnapshot,
 } from './store.js';
 import { CALL_MCP_TOOL_NAME, LIST_MCP_TOOLS_NAME, LIST_SKILLS_NAME, USE_SKILL_NAME } from '@pocketagent/protocol';
 import { resolveApprovalStatus, rememberDecisionIfAsked } from './approval.js';
@@ -815,6 +816,18 @@ export class PlannerChatService {
         messages.unshift({ role: 'system', content: buildMemorySystemMessage(results.map((r) => r.memory)) });
       }
     }
+    // PA-45: this agent's own identity/capability text plus the global "me"
+    // (who the operator is) and "tools" (their environment) instructions,
+    // unshifted last so it lands ahead of the memory system message above —
+    // who this agent is and who it's talking to is more foundational than
+    // what it remembers. Omitted entirely (not an empty system message)
+    // when every one of the three is unset, so an agent with none of this
+    // configured behaves exactly as it did before this feature existed.
+    const workspace = chat.workspaceId ? this.opts.plannerWorkspaces.get(chat.workspaceId) : undefined;
+    const personaMessage = buildPersonaSystemMessage(workspace ?? null, settings);
+    if (personaMessage) {
+      messages.unshift({ role: 'system', content: personaMessage });
+    }
     const client = new PlannerLlmClient({
       baseUrl: settings.baseUrl!,
       apiKey: revealPlannerApiKey(this.opts.db),
@@ -1286,4 +1299,31 @@ function lastUserPromptText(events: readonly AgentEvent[]): string {
 function buildMemorySystemMessage(memories: readonly PlannerMemory[]): string {
   const lines = memories.map((m) => `- ${m.content}`);
   return `Relevant memories from earlier conversations with this agent:\n${lines.join('\n')}`;
+}
+
+/**
+ * PA-45: combines this agent's own `identityPrompt` with the global `me`
+ * (who the operator is) and `tools` (their environment) instructions into
+ * one system message — `null` when all three are unset, so `driveLoop`
+ * skips injecting anything at all rather than an empty/near-empty system
+ * message. Each section is labelled so the model can tell "who I am" from
+ * "who I'm talking to" from "what's in their environment" rather than
+ * treating all three as one undifferentiated blob; a section with nothing
+ * configured is simply omitted, not sent as an empty heading.
+ */
+function buildPersonaSystemMessage(
+  workspace: PlannerWorkspaceRow | null,
+  settings: Pick<PlannerSettingsSnapshot, 'meInstruction' | 'toolsInstruction'>,
+): string | null {
+  const sections: string[] = [];
+  if (workspace?.identityPrompt) {
+    sections.push(`Who you are:\n${workspace.identityPrompt}`);
+  }
+  if (settings.meInstruction) {
+    sections.push(`About the person you are helping:\n${settings.meInstruction}`);
+  }
+  if (settings.toolsInstruction) {
+    sections.push(`About their tools and environment:\n${settings.toolsInstruction}`);
+  }
+  return sections.length > 0 ? sections.join('\n\n') : null;
 }
