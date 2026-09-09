@@ -512,8 +512,7 @@ export function jiraTemplateVariables(
   const fieldsComments = Array.isArray(asRecord(fields['comment'])['comments'])
     ? (asRecord(fields['comment'])['comments'] as unknown[])
     : [];
-  const lastFieldComment =
-    fieldsComments.length > 0 ? asRecord(fieldsComments[fieldsComments.length - 1]) : {};
+  const lastFieldComment = mostRecentComment(fieldsComments);
   const comment = Object.keys(rootComment).length > 0 ? rootComment : lastFieldComment;
 
   const items = Array.isArray(changelog['items']) ? changelog['items'] : [];
@@ -759,6 +758,35 @@ function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+/**
+ * The entry in `fields.comment.comments` with the latest `created` timestamp.
+ *
+ * `[length - 1]` used to be trusted as "the newest", on the assumption Jira
+ * always returns the list oldest-first. Verified false against a real
+ * production payload (PA-40, five comments): this Jira instance returns it
+ * newest-first, so the old code was handing the agent the *first* comment
+ * ever posted while two rounds of "still not fixed" sat unseen. Sorting by
+ * `created` is correct regardless of which order Jira happens to use.
+ *
+ * Falls back to array position only when no entry has a parseable `created`
+ * — an absent/malformed timestamp should not make the comment disappear.
+ */
+function mostRecentComment(comments: unknown[]): Record<string, unknown> {
+  if (comments.length === 0) return {};
+  let best: Record<string, unknown> | null = null;
+  let bestTime = -Infinity;
+  for (const c of comments) {
+    const record = asRecord(c);
+    const created = Date.parse(str(record['created']));
+    if (Number.isNaN(created)) continue;
+    if (best === null || created > bestTime) {
+      best = record;
+      bestTime = created;
+    }
+  }
+  return best ?? asRecord(comments[comments.length - 1]);
 }
 
 /**

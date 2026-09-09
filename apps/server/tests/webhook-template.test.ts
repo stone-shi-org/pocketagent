@@ -71,6 +71,55 @@ describe('jiraTemplateVariables', () => {
     const v = vars(issue({ description: { type: 'doc', content: [] } }));
     expect(v['issue.description']).toBe('');
   });
+
+  /**
+   * PA-40 in production: `fields.comment.comments` came back newest-first, and
+   * the old code trusted array position (`[length - 1]`) as "the newest" — so a
+   * ticket with five comments handed the agent the very first one ever posted,
+   * with two rounds of "still not fixed" from the reporter completely unseen.
+   * `created` must be the tiebreaker, not position, regardless of which order
+   * Jira happens to return the list in.
+   */
+  it('picks the comment with the latest `created`, not the last array entry', () => {
+    const v = vars(
+      issue({
+        comment: {
+          comments: [
+            { created: '2026-09-08T22:52:11.984-0700', body: 'still not fixed' },
+            { created: '2026-09-08T21:10:42.448-0700', body: 'summary of changes round 2' },
+            { created: '2026-09-08T19:00:26.828-0700', body: 'triage: root-cause analysis' },
+          ],
+        },
+      }),
+    );
+    expect(v['comment.body']).toBe('still not fixed');
+  });
+
+  it('also works when Jira happens to return comments oldest-first', () => {
+    const v = vars(
+      issue({
+        comment: {
+          comments: [
+            { created: '2026-09-08T19:00:26.828-0700', body: 'triage: root-cause analysis' },
+            { created: '2026-09-08T21:10:42.448-0700', body: 'summary of changes round 2' },
+            { created: '2026-09-08T22:52:11.984-0700', body: 'still not fixed' },
+          ],
+        },
+      }),
+    );
+    expect(v['comment.body']).toBe('still not fixed');
+  });
+
+  it('falls back to the last array entry when no comment has a parseable `created`', () => {
+    const v = vars(
+      issue({
+        comment: {
+          comments: [{ body: 'first, no timestamp' }, { body: 'second, no timestamp' }],
+        },
+      }),
+    );
+    expect(v['comment.body']).toBe('second, no timestamp');
+  });
 });
 
 describe('renderJiraTemplate', () => {
