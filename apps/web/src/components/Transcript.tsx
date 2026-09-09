@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { TranscriptItem, TranscriptState, TurnNode } from '../agent/transcript.js';
 import { groupIntoTurns } from '../agent/transcript.js';
+import { promptHeadline } from '../agent/prompt-headline.js';
 import { renderMarkdown } from '../agent/markdown.js';
 import { ToolCard } from './ToolCard.js';
 import { CopyButton } from './CopyButton.js';
@@ -269,7 +270,7 @@ function TurnPanel({
               itself renders below, outside this header, so a pinned prompt
               never grows past one line while scrolling through its turn. */}
           <div className="prompt-text">
-            {turn.prompt.text || (turn.prompt.image ? 'Sent an image' : '')}
+            {turn.prompt.text ? promptHeadline(turn.prompt.text) : (turn.prompt.image ? 'Sent an image' : '')}
           </div>
           {turn.prompt.text && <CopyButton text={turn.prompt.text} label="Copy prompt" />}
         </header>

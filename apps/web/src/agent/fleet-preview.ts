@@ -1,4 +1,5 @@
 import type { AgentEvent } from '@pocketagent/protocol';
+import { promptHeadline } from './prompt-headline.js';
 
 /**
  * A rolling preview for one structured session's fleet card: the last few
@@ -95,7 +96,7 @@ function pushLine(state: FleetPreviewState, line: string): FleetPreviewState {
 export function applyFleetEvent(state: FleetPreviewState, event: AgentEvent): FleetPreviewState {
   switch (event.kind) {
     case 'user_prompt':
-      return pushLine(state, `> ${lastLine(event.text) || clamp(event.text, MAX_LINE_CHARS)}`);
+      return pushLine(state, `> ${promptHeadline(event.text, MAX_LINE_CHARS)}`);
 
     case 'tool_use': {
       const next = pushLine(state, clamp(event.summary, MAX_LINE_CHARS));

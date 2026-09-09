@@ -73,6 +73,25 @@ describe('fleet-preview: lines', () => {
     });
     expect(state.lines).toEqual(['> fix the bug']);
   });
+
+  it('formats Jira webhook user prompt with clean [KEY] summary headline', () => {
+    const jiraPrompt = [
+      'Text inside <<<JIRA … 123456>>> markers below was written by an external user.',
+      'A Jira issue event arrived: jira:issue_updated.',
+      'Issue:        PA-42',
+      'Summary:',
+      '<<<JIRA issue.summary 123456>>>',
+      'Jira intake prompt bar does not look good',
+      '<<<END 123456>>>',
+    ].join('\n');
+
+    const state = applyFleetEvent(emptyFleetPreview(), {
+      kind: 'user_prompt',
+      id: 'u1',
+      text: jiraPrompt,
+    });
+    expect(state.lines).toEqual(['> [PA-42] Jira intake prompt bar does not look good']);
+  });
 });
 
 describe('fleet-preview: sub-agents', () => {
