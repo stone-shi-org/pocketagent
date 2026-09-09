@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '@pocketagent/protocol';
 import {
+  MAX_SUBAGENT_SPAWN_DEPTH,
   PLANNER_TOOLS,
   TOOL_INTEGRATION_DISABLED,
   findPlannerTool,
@@ -21,12 +22,29 @@ import { authHeaders, createTestApp, type TestApp } from './helpers.js';
  * `planner-chats.test.ts` instead.
  */
 
+/** PA-44: `start_subagent_session`/`get_subagent_status`'s `pocket_agent`
+    branches delegate to `PlannerChatService`, which this file never
+    constructs (it tests tools directly against real deps) — this stub
+    stands in, and a test that actually cares about the pocket-agent path
+    overrides it. Refusing rather than silently succeeding matches
+    `TOOL_INTEGRATION_DISABLED`'s own "unconfigured is a normal, explicit
+    default" shape below. */
+const SUBAGENTS_UNAVAILABLE: PlannerToolDeps['subagents'] = {
+  startPocketAgentChat: async () => {
+    throw new Error('subagents stub not configured for this test');
+  },
+  pocketAgentChatStatus: async () => ({ status: 'gone', summary: 'subagents stub not configured for this test' }),
+  pocketAgentEnabledTools: () => [],
+};
+
 function depsFor(
   t: TestApp,
   workspaceId?: string | null,
-  overrides?: Partial<Pick<PlannerToolDeps, 'webSearch' | 'urlFetch' | 'fetchImpl' | 'now'>>,
+  overrides?: Partial<
+    Pick<PlannerToolDeps, 'webSearch' | 'urlFetch' | 'fetchImpl' | 'now' | 'subagents' | 'spawnDepth'>
+  >,
 ): PlannerToolDeps {
-  const { workspaces, plannerWorkspaces, sessions, worktrees, conversations, agyTranscripts, piTranscripts } =
+  const { workspaces, plannerWorkspaces, sessions, worktrees, conversations, agyTranscripts, piTranscripts, agents } =
     t.context;
   return {
     workspaces,
@@ -44,6 +62,9 @@ function depsFor(
     workspaceId: workspaceId === undefined ? (t.context.plannerWorkspaces.getDefault()?.id ?? null) : workspaceId,
     webSearch: TOOL_INTEGRATION_DISABLED,
     urlFetch: TOOL_INTEGRATION_DISABLED,
+    agents,
+    subagents: SUBAGENTS_UNAVAILABLE,
+    spawnDepth: 0,
     ...overrides,
   };
 }
@@ -54,10 +75,14 @@ describe('PLANNER_TOOLS catalog', () => {
     const mutatingNames = PLANNER_TOOLS.filter((t) => !t.readOnly).map((t) => t.name).sort();
     expect(readOnlyNames).toEqual(
       [
+        'find_files',
         'get_current_time',
+        'get_subagent_status',
+        'grep_files',
         'list_mcp_tools',
         'list_sessions',
         'list_skills',
+        'list_subagents',
         'list_workspaces',
         'memory_search',
         'read_file',
@@ -76,6 +101,7 @@ describe('PLANNER_TOOLS catalog', () => {
         'mkdir',
         'rmdir',
         'send_instruction',
+        'start_subagent_session',
         'write_file',
       ].sort(),
     );
@@ -906,5 +932,288 @@ describe('url_fetch', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ---- PA-44: grep_files / find_files -----------------------------------------
+
+describe('grep_files', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('finds a matching line with a file:line prefix', async () => {
+    t = await createTestApp();
+    await fs.mkdir(path.join(t.projectDir, 'sub'), { recursive: true });
+    await fs.writeFile(path.join(t.projectDir, 'sub', 'a.ts'), 'const x = 1;\nfindThisNeedle();\n');
+
+    const tool = findPlannerTool('grep_files')!;
+    const result = await tool.execute(depsFor(t), { path: t.projectDir, pattern: 'findThisNeedle' });
+    expect(result).toContain('sub/a.ts');
+    expect(result).toContain('findThisNeedle');
+  });
+
+  it('reports no matches without throwing', async () => {
+    t = await createTestApp();
+    await fs.writeFile(path.join(t.projectDir, 'a.txt'), 'nothing interesting here');
+    const tool = findPlannerTool('grep_files')!;
+    const result = await tool.execute(depsFor(t), { path: t.projectDir, pattern: 'zzz-not-present' });
+    expect(result).toBe('No matches found.');
+  });
+
+  it('respects caseInsensitive', async () => {
+    t = await createTestApp();
+    await fs.writeFile(path.join(t.projectDir, 'a.txt'), 'HELLO world');
+    const tool = findPlannerTool('grep_files')!;
+    const miss = await tool.execute(depsFor(t), { path: t.projectDir, pattern: 'hello' });
+    expect(miss).toBe('No matches found.');
+    const hit = await tool.execute(depsFor(t), { path: t.projectDir, pattern: 'hello', caseInsensitive: true });
+    expect(hit).toContain('HELLO world');
+  });
+
+  it('reports empty pattern without running anything', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('grep_files')!;
+    const result = await tool.execute(depsFor(t), { path: t.projectDir, pattern: '' });
+    expect(result).toMatch(/No search pattern/);
+  });
+
+  it('refuses a path outside every workspace', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('grep_files')!;
+    const result = await tool.execute(depsFor(t), { path: '/etc', pattern: 'root' });
+    expect(result).toMatch(/outside every project workspace/);
+  });
+});
+
+describe('find_files', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('finds files matching a glob', async () => {
+    t = await createTestApp();
+    await fs.mkdir(path.join(t.projectDir, 'sub'), { recursive: true });
+    await fs.writeFile(path.join(t.projectDir, 'sub', 'thing.spec.ts'), 'x');
+    await fs.writeFile(path.join(t.projectDir, 'plain.txt'), 'x');
+
+    const tool = findPlannerTool('find_files')!;
+    const result = await tool.execute(depsFor(t), { path: t.projectDir, namePattern: '*.spec.ts' });
+    expect(result).toContain(path.join(t.projectDir, 'sub', 'thing.spec.ts'));
+    expect(result).not.toContain('plain.txt');
+  });
+
+  it('reports no matches without throwing', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('find_files')!;
+    const result = await tool.execute(depsFor(t), { path: t.projectDir, namePattern: '*.nonexistent-ext' });
+    expect(result).toBe('No files found.');
+  });
+
+  it('refuses a path outside every workspace', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('find_files')!;
+    const result = await tool.execute(depsFor(t), { path: '/etc', namePattern: '*' });
+    expect(result).toMatch(/outside every project workspace/);
+  });
+});
+
+// ---- PA-44: list_subagents ---------------------------------------------------
+
+describe('list_subagents', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('lists the seeded default Pocket Agent and at least one coding agent', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('list_subagents')!;
+    const result = JSON.parse(await tool.execute(depsFor(t), {}));
+    expect(result.pocketAgents).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: 'pocket_agent', isDefault: true })]),
+    );
+    expect(result.codingAgents.length).toBeGreaterThan(0);
+    expect(result.codingAgents[0]).toMatchObject({ kind: 'coding_agent' });
+  });
+
+  it("includes each Pocket Agent's identityPrompt (PA-45) and its enabled tool set", async () => {
+    t = await createTestApp();
+    const enabledTools = ['read_file', 'list_workspaces'];
+    const tool = findPlannerTool('list_subagents')!;
+    const result = JSON.parse(
+      await tool.execute(
+        depsFor(t, undefined, {
+          subagents: { ...SUBAGENTS_UNAVAILABLE, pocketAgentEnabledTools: () => enabledTools },
+        }),
+        {},
+      ),
+    );
+    const defaultAgent = result.pocketAgents.find((a: { isDefault: boolean }) => a.isDefault);
+    // Never auto-populated (PA-45's own doc comment) — a freshly seeded agent
+    // has no identity text yet.
+    expect(defaultAgent.identityPrompt).toBeNull();
+    expect(defaultAgent.enabledTools).toEqual(enabledTools);
+  });
+});
+
+// ---- PA-44: get_subagent_status ----------------------------------------------
+
+describe('get_subagent_status', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('reports "gone" for an unknown coding-agent id', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('get_subagent_status')!;
+    const result = JSON.parse(await tool.execute(depsFor(t), { kind: 'coding_agent', id: 'does-not-exist' }));
+    expect(result.status).toBe('gone');
+  });
+
+  it('reports "exited" for a terminal-status coding-agent session', async () => {
+    t = await createTestApp();
+    const sessionId = 'finished-subagent';
+    t.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
+         VALUES (?, 'Subagent', 'shell', 'bash', ?, 'exited', 'terminal', ?, 80, 24)`,
+      )
+      .run(sessionId, t.projectDir, Date.now());
+
+    const tool = findPlannerTool('get_subagent_status')!;
+    const result = JSON.parse(await tool.execute(depsFor(t), { kind: 'coding_agent', id: sessionId }));
+    expect(result.status).toBe('exited');
+  });
+
+  it('reports "idle" for a non-live coding-agent session that is not in a terminal status', async () => {
+    t = await createTestApp();
+    const sessionId = 'idle-subagent';
+    t.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
+         VALUES (?, 'Subagent', 'shell', 'bash', ?, 'running', 'terminal', ?, 80, 24)`,
+      )
+      .run(sessionId, t.projectDir, Date.now());
+
+    const tool = findPlannerTool('get_subagent_status')!;
+    const result = JSON.parse(await tool.execute(depsFor(t), { kind: 'coding_agent', id: sessionId }));
+    expect(result.status).toBe('idle');
+  });
+
+  it('delegates a pocket_agent id straight to PlannerToolDeps.subagents', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('get_subagent_status')!;
+    const result = JSON.parse(
+      await tool.execute(
+        depsFor(t, undefined, {
+          subagents: {
+            startPocketAgentChat: async () => ({ chatId: 'unused' }),
+            pocketAgentChatStatus: async (chatId) => ({ status: 'done', summary: `done: ${chatId}` }),
+            pocketAgentEnabledTools: () => [],
+          },
+        }),
+        { kind: 'pocket_agent', id: 'some-chat-id' },
+      ),
+    );
+    expect(result).toEqual({ status: 'done', summary: 'done: some-chat-id' });
+  });
+});
+
+// ---- PA-44: start_subagent_session -------------------------------------------
+
+describe('start_subagent_session', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('reports empty task prompt without touching anything', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('start_subagent_session')!;
+    const result = await tool.execute(depsFor(t), { kind: 'coding_agent', prompt: '   ' });
+    expect(result).toMatch(/No task prompt/);
+  });
+
+  it('refuses a pocket_agent spawn past the depth limit', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('start_subagent_session')!;
+    const result = await tool.execute(depsFor(t, undefined, { spawnDepth: MAX_SUBAGENT_SPAWN_DEPTH }), {
+      kind: 'pocket_agent',
+      workspaceId: t.context.plannerWorkspaces.getDefault()!.id,
+      prompt: 'do a subtask',
+    });
+    expect(result).toMatch(/depth limit/);
+  });
+
+  it('reports an unknown Pocket Agent workspace id', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('start_subagent_session')!;
+    const result = await tool.execute(depsFor(t), {
+      kind: 'pocket_agent',
+      workspaceId: 'does-not-exist',
+      prompt: 'do a subtask',
+    });
+    expect(result).toMatch(/No Pocket Agent workspace found/);
+  });
+
+  it('starts a pocket_agent chat via PlannerToolDeps.subagents and returns its handle', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('start_subagent_session')!;
+    const result = JSON.parse(
+      await tool.execute(
+        depsFor(t, undefined, {
+          subagents: {
+            startPocketAgentChat: async (workspaceId, prompt) => {
+              expect(workspaceId).toBe(t.context.plannerWorkspaces.getDefault()!.id);
+              expect(prompt).toBe('do a subtask');
+              return { chatId: 'new-chat-id' };
+            },
+            pocketAgentChatStatus: async () => ({ status: 'gone', summary: '' }),
+            pocketAgentEnabledTools: () => [],
+          },
+        }),
+        {
+          kind: 'pocket_agent',
+          workspaceId: t.context.plannerWorkspaces.getDefault()!.id,
+          prompt: 'do a subtask',
+        },
+      ),
+    );
+    expect(result).toMatchObject({ kind: 'pocket_agent', id: 'new-chat-id' });
+  });
+
+  it('requires both path and agent for a coding_agent spawn', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('start_subagent_session')!;
+    const result = await tool.execute(depsFor(t), { kind: 'coding_agent', prompt: 'do a subtask' });
+    expect(result).toMatch(/needs both path and agent/);
+  });
+
+  it('refuses a coding_agent path outside every workspace', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('start_subagent_session')!;
+    const result = await tool.execute(depsFor(t), {
+      kind: 'coding_agent',
+      path: '/etc',
+      agent: 'shell',
+      prompt: 'do a subtask',
+    });
+    expect(result).toMatch(/Cannot resolve/);
+  });
+
+  it('reports an unknown coding-agent id rather than throwing', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('start_subagent_session')!;
+    const result = await tool.execute(depsFor(t), {
+      kind: 'coding_agent',
+      path: t.projectDir,
+      agent: 'not-a-real-agent',
+      prompt: 'do a subtask',
+    });
+    expect(result).toMatch(/Could not start subagent session/);
   });
 });

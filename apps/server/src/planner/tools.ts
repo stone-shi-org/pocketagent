@@ -6,6 +6,7 @@ import {
   LIST_MCP_TOOLS_NAME,
   LIST_SKILLS_NAME,
   USE_SKILL_NAME,
+  isTerminalStatus,
   type AgentEvent,
   type SessionInfo,
 } from '@pocketagent/protocol';
@@ -16,6 +17,7 @@ import { stripAnsi } from '../terminal/classifier.js';
 import type { WorktreeService } from '../git/worktree.js';
 import { WorktreeError } from '../git/worktree.js';
 import { buildChildEnv } from '../sessions/env.js';
+import type { AgentRegistry } from '../agents/registry.js';
 import type { PlannerWorkspaceRegistry } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
 import type { McpRegistryService } from './mcp/registry-service.js';
@@ -54,6 +56,27 @@ import { SkillRegistryError, type SkillRegistryService } from './skills.js';
  * no PocketAgent subsystem, just the host clock and `Intl`), so a chat can
  * ground "today"/"now"/a relative date against the host's actual wall clock
  * and timezone instead of the model guessing from its training cutoff.
+ *
+ * PA-44 adds two independent things. `grep_files`/`find_files` are plain
+ * read-only search over the same containment boundary `read_file` already
+ * enforces — no new trust model, just two more ways to look inside it.
+ * `list_subagents`, `start_subagent_session` and `get_subagent_status` are
+ * the "agent to agent" half: `list_subagents` (read-only) enumerates every
+ * *configured* subagent — Pocket Agent workspaces and coding agents — so a
+ * turn can pick one before committing to it; `start_subagent_session`
+ * (mutating, gated) hands one an initial task and returns a handle
+ * immediately rather than blocking the calling turn on however long the
+ * subagent takes; `get_subagent_status` (read-only) is how a later turn
+ * checks whether that handle is done yet. A coding-agent subagent is nothing
+ * new — it is the same session `send_instruction` already treats as a
+ * sub-agent, just freshly created rather than existing — but a Pocket Agent
+ * spawning *another* Pocket Agent chat is: nothing before this could create
+ * an unattached chat from inside a tool call, so `PlannerToolDeps.spawnDepth`
+ * (read from `PlannerChatService`'s own in-memory, restart-resets-to-zero
+ * bookkeeping — the same durability tradeoff `pendingTurns`/`observers`
+ * already make) and `MAX_SUBAGENT_SPAWN_DEPTH` below exist specifically to
+ * bound how deep that chain can go before anything is actually built to spawn
+ * one.
  */
 
 export interface PlannerToolDeps {
@@ -114,7 +137,76 @@ export interface PlannerToolDeps {
    * disk mid-conversation takes effect on the very next turn.
    */
   skills: SkillRegistryService;
+  /** PA-44: the coding-agent catalog, for `list_subagents` — the same
+      registry `GET /api/agents` reads, so a subagent's listed abilities
+      (transports, static models, availability) never disagree with what the
+      composer's own model picker shows for that agent. */
+  agents: AgentRegistry;
+  /** PA-44: `start_subagent_session`/`get_subagent_status`'s escape hatch for
+      the one thing this file cannot do on its own — create or inspect
+      *another Pocket Agent chat*, which is `PlannerChatService`'s state, not
+      this module's. See `PlannerSubagentDeps`'s own doc comment. */
+  subagents: PlannerSubagentDeps;
+  /**
+   * PA-44: how many Pocket-Agent-spawned-Pocket-Agent hops separate the
+   * *calling* chat from a human. `0` for every chat a human started (the
+   * overwhelming majority); `start_subagent_session`'s `pocket_agent` branch
+   * refuses once this reaches `MAX_SUBAGENT_SPAWN_DEPTH`, which is the only
+   * thing standing between this feature and an agent that spawns an agent
+   * that spawns an agent forever — nothing else in this codebase has ever
+   * needed a recursion guard, because nothing before this let a tool call
+   * create a brand-new, unattached conversation.
+   */
+  spawnDepth: number;
 }
+
+/**
+ * PA-44: the planner-tool-facing surface of "create or check on another
+ * Pocket Agent chat" — implemented by `PlannerChatService` (see
+ * `startSubagentChatForTool`/`subagentChatStatusForTool`), not here, because
+ * only that service owns chat creation, the turn loop, and the transcript a
+ * status check reads. Kept to exactly the two operations a tool call needs,
+ * rather than handing the whole service down: a tool should not be able to
+ * do anything to another chat that isn't mediated by this narrow seam.
+ */
+export interface PlannerSubagentDeps {
+  /** Creates a new chat in `workspaceId` and starts it on `prompt`,
+      returning as soon as the chat exists — see `start_subagent_session`'s
+      doc comment for why this does not wait for the subagent's own turn to
+      finish. Throws (never resolves to an error string) so the tool's own
+      `execute` can fold the message into its result the same way every
+      other refusal here does. */
+  startPocketAgentChat(workspaceId: string, prompt: string): Promise<{ chatId: string }>;
+  /** Reads back whether a chat started this way has finished its turn yet —
+      see `get_subagent_status`'s doc comment for the status values. */
+  pocketAgentChatStatus(chatId: string): Promise<SubagentChatStatus>;
+  /**
+   * PA-44: the tool names actually enabled for a Pocket Agent workspace
+   * right now — the reporter's own "combine with available tools ... main
+   * agent can pick correct subagent" ask for `list_subagents`. Delegates to
+   * `PlannerChatService.toolsFor` (global *and* per-agent disabled sets
+   * already applied, PA-6 round 5) rather than this file re-deriving that
+   * filtering from the disabled-tool tables directly, so the two can never
+   * disagree about which tools a given agent's own turns actually see.
+   * Synchronous — `toolsFor` touches no I/O — unlike the two methods above.
+   */
+  pocketAgentEnabledTools(workspaceId: string): string[];
+}
+
+/** One `get_subagent_status` answer for a `pocket_agent` handle. `'gone'`
+    covers both an unknown id and a chat since deleted — indistinguishable to
+    a caller, and both mean "nothing left to check on". */
+export interface SubagentChatStatus {
+  status: 'running' | 'paused_for_approval' | 'done' | 'error' | 'gone';
+  summary: string;
+}
+
+/** PA-44: see `PlannerToolDeps.spawnDepth`'s doc comment. Exported so
+    `PlannerChatService` can apply the same limit defensively on its own side
+    of `subagents.startPocketAgentChat` — belt and suspenders, the same
+    "the model choosing to call something is not this server's decision to
+    trust unchecked" posture the disabled-tool checks already take. */
+export const MAX_SUBAGENT_SPAWN_DEPTH = 2;
 
 /** PA-31: one third-party HTTP integration's live config — see
     `PlannerToolDeps.webSearch`/`.urlFetch`. */
@@ -158,6 +250,16 @@ const EXEC_TIMEOUT_MS = 60_000;
     search/fetch call has no reason to run anywhere near a minute, and a
     tighter cap keeps one slow provider from stalling a whole chat turn. */
 const TOOL_HTTP_TIMEOUT_MS = 20_000;
+/** PA-44: `grep_files`/`find_files` walk a real directory tree rather than
+    calling out to a network, so this is closer to `TOOL_HTTP_TIMEOUT_MS`
+    than to `EXEC_TIMEOUT_MS` — a search that hasn't finished in 20s is far
+    more likely mis-scoped (too shallow a `path`, too broad a pattern) than
+    genuinely still working. */
+const SEARCH_TIMEOUT_MS = 20_000;
+/** PA-44: caps how many matches/paths `grep_files`/`find_files` hand back
+    before `MAX_TOOL_RESULT_CHARS` even gets a chance to bite — a result list
+    this long is a sign the search needs narrowing, not more room. */
+const MAX_SEARCH_RESULTS = 300;
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -193,6 +295,39 @@ export function summarizeEvents(events: readonly AgentEvent[]): string {
     }
   }
   return lines.length > 0 ? lines.join('\n') : '(no transcript content yet)';
+}
+
+/**
+ * The body of `read_session_output`, factored out so `get_subagent_status`'s
+ * `coding_agent` branch (PA-44) can report the same summary once a spawned
+ * session is done, rather than re-deriving "live buffer vs. on-disk history,
+ * terminal vs. structured" a second time. Assumes the caller already
+ * confirmed the id resolves to a real session (`read_session_output` and
+ * `get_subagent_status` each do this their own way, since one refuses before
+ * calling this and the other has already read `SessionInfo` to get here).
+ */
+async function sessionOutputSummary(deps: PlannerToolDeps, sessionId: string): Promise<string> {
+  const live = deps.sessions.get(sessionId);
+  if (live) {
+    if (live.transport === 'terminal') {
+      const raw = live.buffer.replayAfter(0).data;
+      const text = stripAnsi(raw).trim();
+      if (text.length === 0) return '(no terminal output yet)';
+      return truncate(text, MAX_TOOL_RESULT_CHARS);
+    }
+    const buffered = live.buffer.replayAfter(0).events.map((e) => e.event);
+    const { events: priorEvents } = await readSessionHistory(deps.historyDeps, sessionId);
+    const allEvents = [...priorEvents, ...buffered];
+    if (allEvents.length === 0) {
+      return 'This session has no readable transcript yet (it has not resumed or produced a conversation).';
+    }
+    return truncate(summarizeEvents(allEvents), MAX_TOOL_RESULT_CHARS);
+  }
+  const { conversationId, events } = await readSessionHistory(deps.historyDeps, sessionId);
+  if (!conversationId || events.length === 0) {
+    return 'This session has no readable transcript yet (it has not resumed or produced a conversation).';
+  }
+  return truncate(summarizeEvents(events), MAX_TOOL_RESULT_CHARS);
 }
 
 function isWithinTrustedRoot(deps: PlannerToolDeps, real: string): boolean {
@@ -373,27 +508,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     async execute(deps, args) {
       const sessionId = String(args.sessionId ?? '');
       if (!deps.sessions.find(sessionId)) return `No session found with id ${sessionId}.`;
-      const live = deps.sessions.get(sessionId);
-      if (live) {
-        if (live.transport === 'terminal') {
-          const raw = live.buffer.replayAfter(0).data;
-          const text = stripAnsi(raw).trim();
-          if (text.length === 0) return '(no terminal output yet)';
-          return truncate(text, MAX_TOOL_RESULT_CHARS);
-        }
-        const buffered = live.buffer.replayAfter(0).events.map((e) => e.event);
-        const { events: priorEvents } = await readSessionHistory(deps.historyDeps, sessionId);
-        const allEvents = [...priorEvents, ...buffered];
-        if (allEvents.length === 0) {
-          return 'This session has no readable transcript yet (it has not resumed or produced a conversation).';
-        }
-        return truncate(summarizeEvents(allEvents), MAX_TOOL_RESULT_CHARS);
-      }
-      const { conversationId, events } = await readSessionHistory(deps.historyDeps, sessionId);
-      if (!conversationId || events.length === 0) {
-        return 'This session has no readable transcript yet (it has not resumed or produced a conversation).';
-      }
-      return truncate(summarizeEvents(events), MAX_TOOL_RESULT_CHARS);
+      return sessionOutputSummary(deps, sessionId);
     },
   },
   {
@@ -447,6 +562,201 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         utcOffset,
         local: now.toLocaleString('en-US', { timeZone }),
       });
+    },
+  },
+  {
+    name: 'grep_files',
+    description:
+      'Search file contents for a pattern under a directory, like `grep -r`. The directory must be ' +
+      'inside an added project workspace or a planner workspace.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Directory to search under.' },
+        pattern: { type: 'string', description: 'A basic regular expression to search for.' },
+        caseInsensitive: { type: 'boolean', description: 'Match case-insensitively. Default false.' },
+        filePattern: {
+          type: 'string',
+          description: 'Only search files matching this glob, e.g. "*.ts". Default: every file.',
+        },
+        maxResults: {
+          type: 'number',
+          description: `Maximum number of matching lines to return (default 100, capped at ${MAX_SEARCH_RESULTS}).`,
+        },
+      },
+      required: ['path', 'pattern'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    async execute(deps, args) {
+      const requested = String(args.path ?? '');
+      const pattern = String(args.pattern ?? '');
+      if (!pattern) return 'No search pattern provided.';
+      let real: string;
+      try {
+        real = await resolveExistingPathWithin(deps, requested);
+      } catch (err) {
+        return (err as Error).message;
+      }
+      const stat = await fs.stat(real);
+      if (!stat.isDirectory()) return `${requested} is not a directory.`;
+
+      // `-I` skips binary files (grep's own heuristic) — a binary match is
+      // never something an LLM can usefully act on, and it risks smuggling
+      // non-UTF8 bytes into the tool result. Argv array, not a shell string:
+      // unlike `exec_command`, the pattern and glob here are never
+      // shell-interpreted, so there is nothing for either to inject into.
+      const grepArgs = ['-r', '-n', '-I'];
+      if (args.caseInsensitive === true) grepArgs.push('-i');
+      if (typeof args.filePattern === 'string' && args.filePattern.trim()) {
+        grepArgs.push(`--include=${args.filePattern.trim()}`);
+      }
+      grepArgs.push('--', pattern, '.');
+
+      const result = await runArgvCommand('grep', grepArgs, real, SEARCH_TIMEOUT_MS);
+      if (result.timedOut) return `grep timed out after ${SEARCH_TIMEOUT_MS / 1000}s. Narrow path or pattern.`;
+      // grep's own exit codes: 0 = matches found, 1 = none found (not an
+      // error), 2+ = a real usage/read error.
+      if (result.code !== null && result.code > 1) {
+        return `grep failed: ${truncate(result.stderr || result.stdout, 500)}`;
+      }
+      const lines = result.stdout.split('\n').filter((l) => l.length > 0);
+      if (lines.length === 0) return 'No matches found.';
+      const rawLimit = typeof args.maxResults === 'number' ? Math.round(args.maxResults) : 100;
+      const limit = Math.min(MAX_SEARCH_RESULTS, Math.max(1, rawLimit));
+      const shown = lines.slice(0, limit);
+      const suffix =
+        lines.length > shown.length ? `\n…(${lines.length - shown.length} more matches — narrow your search)` : '';
+      return truncate(shown.join('\n'), MAX_TOOL_RESULT_CHARS) + suffix;
+    },
+  },
+  {
+    name: 'find_files',
+    description:
+      'Find files by name under a directory, like `find -iname`. The directory must be inside an ' +
+      'added project workspace or a planner workspace.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Directory to search under.' },
+        namePattern: { type: 'string', description: 'A glob to match file/directory names, e.g. "*.test.ts".' },
+        maxResults: {
+          type: 'number',
+          description: `Maximum number of paths to return (default 200, capped at ${MAX_SEARCH_RESULTS}).`,
+        },
+      },
+      required: ['path', 'namePattern'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    async execute(deps, args) {
+      const requested = String(args.path ?? '');
+      const namePattern = String(args.namePattern ?? '');
+      if (!namePattern) return 'No name pattern provided.';
+      let real: string;
+      try {
+        real = await resolveExistingPathWithin(deps, requested);
+      } catch (err) {
+        return (err as Error).message;
+      }
+      const stat = await fs.stat(real);
+      if (!stat.isDirectory()) return `${requested} is not a directory.`;
+
+      const result = await runArgvCommand('find', ['.', '-iname', namePattern], real, SEARCH_TIMEOUT_MS);
+      if (result.timedOut) return `find timed out after ${SEARCH_TIMEOUT_MS / 1000}s. Narrow path or pattern.`;
+      if (result.code !== 0) return `find failed: ${truncate(result.stderr || result.stdout, 500)}`;
+      const lines = result.stdout
+        .split('\n')
+        .filter((l) => l.length > 0)
+        .map((l) => path.join(real, l.replace(/^\.\//, '').replace(/^\.$/, '')));
+      if (lines.length === 0) return 'No files found.';
+      const rawLimit = typeof args.maxResults === 'number' ? Math.round(args.maxResults) : 200;
+      const limit = Math.min(MAX_SEARCH_RESULTS, Math.max(1, rawLimit));
+      const shown = lines.slice(0, limit);
+      const suffix =
+        lines.length > shown.length ? `\n…(${lines.length - shown.length} more — narrow your search)` : '';
+      return truncate(shown.join('\n'), MAX_TOOL_RESULT_CHARS) + suffix;
+    },
+  },
+  {
+    name: 'list_subagents',
+    description:
+      "List every configured subagent this planner can hand work to: this server's Pocket Agent " +
+      "workspaces (with each one's own identity/capability description, if it has one) and its coding " +
+      'agents, with what each one is (model defaults, memory, transports, availability) — call this ' +
+      'before start_subagent_session to pick the right target.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    readOnly: true,
+    async execute(deps) {
+      const pocketAgents = deps.plannerWorkspaces.list().map((w) => ({
+        kind: 'pocket_agent' as const,
+        id: w.id,
+        name: w.name,
+        isDefault: w.isDefault,
+        // PA-45: this agent's own free-text persona/capability description —
+        // exactly the "ability" a caller picking a subagent needs, and the
+        // reason this tool waited on PA-45 rather than inventing a second
+        // description field. `null` (the common case: never auto-populated,
+        // see that field's own doc comment) just means this agent has not
+        // said anything about itself beyond its name.
+        identityPrompt: w.identityPrompt,
+        defaultModelId: w.defaultModelId,
+        memoryEnabled: w.memoryEnabled,
+        // PA-44: the other half of "pick the right subagent" — a Pocket
+        // Agent with `exec_command`/`start_subagent_session` disabled is a
+        // different tool for routing purposes than one with everything on,
+        // even if their identity text reads the same.
+        enabledTools: deps.subagents.pocketAgentEnabledTools(w.id),
+      }));
+      const codingAgents = deps.agents.list().map((a) => ({
+        kind: 'coding_agent' as const,
+        id: a.id,
+        name: a.displayName,
+        description: a.description,
+        available: a.available,
+        transports: a.transports,
+        staticModels: a.staticModels,
+      }));
+      return JSON.stringify({ pocketAgents, codingAgents });
+    },
+  },
+  {
+    name: 'get_subagent_status',
+    description:
+      'Check whether a subagent started with start_subagent_session has finished the task it was ' +
+      "given, and read back its latest output if so. Use the same 'kind' and 'id' start_subagent_session " +
+      'returned.',
+    parameters: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['coding_agent', 'pocket_agent'] },
+        id: { type: 'string', description: 'The id start_subagent_session returned.' },
+      },
+      required: ['kind', 'id'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    async execute(deps, args) {
+      const id = String(args.id ?? '');
+      if (args.kind === 'pocket_agent') {
+        const result = await deps.subagents.pocketAgentChatStatus(id);
+        return truncate(JSON.stringify(result), MAX_TOOL_RESULT_CHARS);
+      }
+      const info = deps.sessions.find(id);
+      if (!info) return JSON.stringify({ status: 'gone', summary: `No session found with id ${id}.` });
+      if (isTerminalStatus(info.status)) {
+        return truncate(
+          JSON.stringify({ status: 'exited', sessionStatus: info.status, summary: await sessionOutputSummary(deps, id) }),
+          MAX_TOOL_RESULT_CHARS,
+        );
+      }
+      if (info.busy) {
+        return JSON.stringify({ status: 'running', summary: 'Still working on its assigned task.' });
+      }
+      return truncate(
+        JSON.stringify({ status: 'idle', summary: await sessionOutputSummary(deps, id) }),
+        MAX_TOOL_RESULT_CHARS,
+      );
     },
   },
   {
@@ -633,6 +943,98 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
           : `Resumed session ${sessionId} as ${resumed.id}, but it ended before the instruction could be sent.`;
       } catch (err) {
         return `Could not resume session ${sessionId}: ${(err as Error).message}`;
+      }
+    },
+  },
+  {
+    name: 'start_subagent_session',
+    description:
+      'Start a new subagent and hand it a task: either a fresh coding-agent session in an ' +
+      'already-configured project workspace, or a new chat with another configured Pocket Agent. ' +
+      'Call list_subagents first to see what is configured. Returns a handle immediately — the ' +
+      'subagent keeps working after this call returns, so poll get_subagent_status (for a coding ' +
+      'agent, list_sessions/read_session_output work too) to learn when it is done. Starting another ' +
+      `Pocket Agent chat is refused past a depth of ${MAX_SUBAGENT_SPAWN_DEPTH} hops from a human, to ` +
+      'stop an unbounded chain of agents spawning agents.',
+    parameters: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['coding_agent', 'pocket_agent'] },
+        workspaceId: {
+          type: 'string',
+          description: 'A Pocket Agent id from list_subagents. Required when kind is "pocket_agent".',
+        },
+        path: {
+          type: 'string',
+          description: 'A project workspace directory to run in. Required when kind is "coding_agent".',
+        },
+        agent: {
+          type: 'string',
+          description: 'A coding-agent id from list_subagents. Required when kind is "coding_agent".',
+        },
+        prompt: { type: 'string', description: 'The task to hand the subagent.' },
+      },
+      required: ['kind', 'prompt'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const prompt = String(args.prompt ?? '').trim();
+      if (!prompt) return 'No task prompt provided.';
+
+      if (args.kind === 'pocket_agent') {
+        if (deps.spawnDepth >= MAX_SUBAGENT_SPAWN_DEPTH) {
+          return (
+            `Refusing: this chat is already ${deps.spawnDepth} subagent hop(s) from a human; starting ` +
+            `another Pocket Agent chat would exceed the depth limit of ${MAX_SUBAGENT_SPAWN_DEPTH}.`
+          );
+        }
+        const workspaceId = String(args.workspaceId ?? '');
+        if (!deps.plannerWorkspaces.get(workspaceId)) {
+          return `No Pocket Agent workspace found with id ${workspaceId}. Check list_subagents.`;
+        }
+        try {
+          const { chatId } = await deps.subagents.startPocketAgentChat(workspaceId, prompt);
+          return JSON.stringify({
+            kind: 'pocket_agent',
+            id: chatId,
+            message: `Started Pocket Agent chat ${chatId}. Use get_subagent_status to check on it.`,
+          });
+        } catch (err) {
+          return `Could not start subagent chat: ${(err as Error).message}`;
+        }
+      }
+
+      const requestedPath = String(args.path ?? '');
+      const agentId = String(args.agent ?? '');
+      if (!requestedPath || !agentId) return 'A coding-agent subagent needs both path and agent. Check list_subagents.';
+      let cwd: string;
+      try {
+        cwd = await deps.workspaces.resolveWorkspacePath(requestedPath);
+      } catch (err) {
+        return `Cannot resolve ${requestedPath}: ${(err as Error).message}`;
+      }
+      try {
+        const session = await deps.sessions.create({
+          agent: agentId,
+          cwd,
+          cols: 0,
+          rows: 0,
+          transport: 'structured',
+        });
+        if (!('prompt' in session)) {
+          return `${agentId} could not be started as a structured session that can receive a task.`;
+        }
+        const sent = (session as StructuredLikeSession).prompt(prompt);
+        return JSON.stringify({
+          kind: 'coding_agent',
+          id: session.id,
+          message: sent
+            ? `Started session ${session.id} and sent it the task.`
+            : `Started session ${session.id}, but it ended before the task could be sent.`,
+        });
+      } catch (err) {
+        return `Could not start subagent session: ${(err as Error).message}`;
       }
     },
   },
@@ -1056,6 +1458,58 @@ function runShellCommand(shell: string, command: string, cwd: string): Promise<s
           : `exit code ${code}`;
       const body = truncate(output, MAX_TOOL_RESULT_CHARS) + (truncated ? '\n…(output truncated)' : '');
       resolve(`$ ${command}\n(${status})\n${body}`);
+    });
+  });
+}
+
+/**
+ * PA-44: one no-shell process run for `grep_files`/`find_files` — `bin`/`args`
+ * reach `spawn` as an argv array, never through a shell, so an untrusted
+ * `pattern`/`namePattern` from the model has no shell metacharacters to
+ * inject into (unlike `exec_command`, which is deliberately a full shell
+ * because that is the feature). Output is captured up to a generous cap
+ * (twice `MAX_TOOL_RESULT_CHARS`, since the caller still line-limits and
+ * `truncate`s afterward) so a runaway search cannot hold megabytes of stdout
+ * in memory while it fills the caller's own limit.
+ */
+function runArgvCommand(
+  bin: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+): Promise<{ stdout: string; stderr: string; code: number | null; timedOut: boolean }> {
+  const CAPTURE_CAP = MAX_TOOL_RESULT_CHARS * 2;
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(bin, args, { cwd, env: buildChildEnv({ cwd }) });
+    } catch (err) {
+      resolve({ stdout: '', stderr: `Could not start ${bin}: ${(err as Error).message}`, code: null, timedOut: false });
+      return;
+    }
+
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (stdout.length < CAPTURE_CAP) stdout += chunk.toString('utf8');
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      if (stderr.length < CAPTURE_CAP) stderr += chunk.toString('utf8');
+    });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, timeoutMs);
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ stdout, stderr: stderr || err.message, code: null, timedOut });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ stdout, stderr, code, timedOut });
     });
   });
 }

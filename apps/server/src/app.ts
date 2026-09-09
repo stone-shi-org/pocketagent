@@ -399,6 +399,8 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     memory: plannerMemory,
     mcpRegistry,
     skills,
+    // PA-44: `list_subagents`' coding-agent half reads this same registry.
+    agents,
     logger: app.log,
     ...(options.plannerLlmFetch ? { llmFetch: options.plannerLlmFetch } : {}),
   });

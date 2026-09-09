@@ -11,6 +11,7 @@ import type { WorkspaceRegistry } from '../workspaces/index.js';
 import type { SessionManager } from '../sessions/manager.js';
 import type { SessionHistoryDeps } from '../sessions/history.js';
 import type { WorktreeService } from '../git/worktree.js';
+import type { AgentRegistry } from '../agents/registry.js';
 import type { PlannerWorkspaceRegistry, PlannerWorkspaceRow } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
 import {
@@ -41,7 +42,15 @@ import {
   type PlannerLlmToolCall,
   type PlannerLlmUsage,
 } from './llm-client.js';
-import { PLANNER_TOOLS, findPlannerTool, toOpenAiToolSpecs, type PlannerToolDefinition } from './tools.js';
+import {
+  MAX_SUBAGENT_SPAWN_DEPTH,
+  PLANNER_TOOLS,
+  findPlannerTool,
+  summarizeEvents,
+  toOpenAiToolSpecs,
+  type PlannerToolDefinition,
+  type SubagentChatStatus,
+} from './tools.js';
 import type { McpRegistryService } from './mcp/registry-service.js';
 import type { SkillRegistryService } from './skills.js';
 
@@ -104,6 +113,8 @@ export interface PlannerChatServiceOptions {
   sessions: SessionManager;
   worktrees: WorktreeService;
   historyDeps: SessionHistoryDeps;
+  /** PA-44: threaded to `list_subagents`' coding-agent half. */
+  agents: AgentRegistry;
   /** The configured shell binary, forwarded to `exec_command`. */
   shell: string;
   /** PA-29: the memory service, threaded to `memory_save`/`memory_search`
@@ -242,6 +253,18 @@ export class PlannerChatService {
    */
   private readonly observers = new Map<string, Set<(event: AgentEvent) => void>>();
 
+  /**
+   * PA-44: how many Pocket-Agent-spawned-Pocket-Agent hops separate a chat
+   * from a human — see `PlannerToolDeps.spawnDepth`'s doc comment for why
+   * this exists at all. Absence means `0`, so every chat a human created
+   * (the entire map, before this feature's first use) reads as depth zero
+   * without needing a backfill. In-memory only, like `pendingTurns`/
+   * `observers` above: after a restart nothing is mid-spawn anyway, and a
+   * chat that already exists is unaffected either way — depth only ever
+   * gates *starting a new* subagent chat, never resuming an old one.
+   */
+  private readonly spawnDepthByChat = new Map<string, number>();
+
   constructor(private readonly opts: PlannerChatServiceOptions) {
     this.tools = opts.tools ?? PLANNER_TOOLS;
   }
@@ -344,6 +367,10 @@ export class PlannerChatService {
     // row is closed out either by `turn_complete` or, if the chat was deleted
     // mid-turn, by the sweep at the next restart.
     this.observers.delete(id);
+    // PA-44: same reasoning as the two deletes above — a removed chat can
+    // never spawn or be spawned into again, so its depth entry would just
+    // leak for the life of the process otherwise.
+    this.spawnDepthByChat.delete(id);
     return deletePlannerChat(this.opts.db, id);
   }
 
@@ -1025,6 +1052,14 @@ export class PlannerChatService {
             baseUrl: settings.urlFetchBaseUrl,
             apiKey: resolvePlannerUrlFetchApiKey(this.opts.db),
           },
+          agents: this.opts.agents,
+          subagents: {
+            startPocketAgentChat: (workspaceId: string, prompt: string) =>
+              this.startSubagentChatForTool(chat.id, workspaceId, prompt),
+            pocketAgentChatStatus: (chatId: string) => this.subagentChatStatusForTool(chatId),
+            pocketAgentEnabledTools: (workspaceId: string) => this.toolsFor(workspaceId).map((t) => t.name),
+          },
+          spawnDepth: this.spawnDepthOf(chat.id),
           ...(this.opts.toolFetch ? { fetchImpl: this.opts.toolFetch } : {}),
         },
         args,
@@ -1076,6 +1111,95 @@ export class PlannerChatService {
   private memoryEnabledFor(workspaceId: string | null): boolean {
     if (!workspaceId) return false;
     return this.opts.plannerWorkspaces.get(workspaceId)?.memoryEnabled ?? false;
+  }
+
+  /** See `spawnDepthByChat`'s doc comment: absence means a human started it. */
+  private spawnDepthOf(chatId: string): number {
+    return this.spawnDepthByChat.get(chatId) ?? 0;
+  }
+
+  /**
+   * PA-44: backs `start_subagent_session`'s `pocket_agent` branch —
+   * `PlannerToolDeps.subagents.startPocketAgentChat`. Creates a new chat in
+   * `workspaceId` and starts its first turn following the exact ordering
+   * `RunExecutor.startPocketAgent` already established for a cron/webhook
+   * pocket run — chat, then prompt via the `sendMessage` generator, with its
+   * first `next()` awaited synchronously so a precondition failure (no LLM
+   * endpoint configured for this agent, no model to use) surfaces as part of
+   * *this* call's own rejection rather than a background warning nobody
+   * reads — and the rest of the turn pumped in the background afterward, so
+   * the calling turn gets its handle back immediately rather than blocking
+   * on however long the subagent takes. Every event the pump produces is
+   * still persisted and notified through `emit`/`notify` exactly as a
+   * human-driven turn's would be; nothing here bypasses that, only who is
+   * doing the draining changes.
+   *
+   * The depth check is re-derived from `callerChatId` here too, not merely
+   * trusted from the tool's own check — the same defense-in-depth
+   * `resolveEnabledTool` already applies to a disabled tool name the model
+   * might still send.
+   */
+  private async startSubagentChatForTool(
+    callerChatId: string,
+    workspaceId: string,
+    prompt: string,
+  ): Promise<{ chatId: string }> {
+    const callerDepth = this.spawnDepthOf(callerChatId);
+    if (callerDepth >= MAX_SUBAGENT_SPAWN_DEPTH) {
+      throw new Error(
+        `Refusing: starting another Pocket Agent chat here would exceed the depth limit of ${MAX_SUBAGENT_SPAWN_DEPTH}.`,
+      );
+    }
+    const workspace = this.opts.plannerWorkspaces.get(workspaceId);
+    if (!workspace) throw new Error(`No Pocket Agent workspace found with id ${workspaceId}.`);
+
+    const child = this.create({ workspaceId });
+    this.spawnDepthByChat.set(child.id, callerDepth + 1);
+
+    const turn = this.sendMessage(child.id, prompt);
+    try {
+      await turn.next();
+    } catch (err) {
+      throw err instanceof PlannerChatError ? new Error(err.message) : err;
+    }
+    void (async () => {
+      try {
+        while (true) {
+          const next = await turn.next();
+          if (next.done === true) break;
+        }
+      } catch (err) {
+        this.opts.logger?.warn({ err, chatId: child.id }, 'subagent chat turn failed');
+      }
+    })();
+
+    return { chatId: child.id };
+  }
+
+  /**
+   * PA-44: backs `get_subagent_status`'s `pocket_agent` branch. A spawned
+   * chat has no `SessionInfo.status`/`busy` the way a coding-agent session
+   * does — there is no live process to ask — so "is it done yet" is read
+   * off the tail of the same persisted transcript `history()` returns,
+   * which can never disagree with what a human opening the chat in the UI
+   * would see.
+   */
+  private async subagentChatStatusForTool(chatId: string): Promise<SubagentChatStatus> {
+    const chat = this.get(chatId);
+    if (!chat) return { status: 'gone', summary: `No subagent chat found with id ${chatId}.` };
+    const events = await this.history(chatId);
+    const last = events[events.length - 1];
+    if (!last) return { status: 'running', summary: '(just started, no output yet)' };
+    if (last.kind === 'turn_complete') {
+      return { status: last.isError ? 'error' : 'done', summary: summarizeEvents(events) };
+    }
+    if (last.kind === 'permission_request') {
+      return {
+        status: 'paused_for_approval',
+        summary: `Waiting on a human to approve tool "${last.toolName}" — open this chat in the Pocket Agent UI to answer.`,
+      };
+    }
+    return { status: 'running', summary: '(still working on its assigned task)' };
   }
 
   /**

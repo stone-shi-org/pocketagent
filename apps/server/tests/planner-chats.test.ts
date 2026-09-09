@@ -1078,4 +1078,135 @@ describe('planner chat routes over HTTP', () => {
     const res = await post(t, `/api/planner/models/${model.id}/test`, undefined);
     expect(res.statusCode).toBe(409);
   });
+
+  // ---- PA-44: start_subagent_session's pocket_agent branch, end to end ------
+
+  /**
+   * The background pump `PlannerChatService.startSubagentChatForTool` kicks
+   * off is a *separate* promise chain from the one `app.inject()` above is
+   * waiting on (the parent turn's own SSE response) — nothing here awaits
+   * the child's turn before the parent's HTTP response resolves, by design
+   * (that's the whole point of "returns a handle immediately"). So this
+   * polls the child's own transcript for a little while rather than assuming
+   * it is already done the instant the parent's request returns.
+   */
+  async function waitForChatDone(t2: TestApp, chatId: string, timeoutMs = 2000): Promise<unknown[]> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const events = (await get(t2, `/api/planner/chats/${chatId}/history`)).json().events as Array<{
+        kind: string;
+      }>;
+      if (events.some((e) => e.kind === 'turn_complete')) return events;
+      if (Date.now() > deadline) {
+        throw new Error(`Subagent chat ${chatId} never reached turn_complete within ${timeoutMs}ms`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  it('spawns a Pocket Agent subagent chat and can later check that it finished', async () => {
+    const helperWorkspace = { id: '' };
+    const fetchImpl = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string) as {
+        messages: Array<{ role: string; content: string | null }>;
+      };
+      const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+      const hasToolResult = body.messages.some((m) => m.role === 'tool');
+      if (lastUser?.content === 'spawn a helper' && !hasToolResult) {
+        return fakeToolCallResponse('start_subagent_session', {
+          kind: 'pocket_agent',
+          workspaceId: helperWorkspace.id,
+          prompt: 'sub task',
+        });
+      }
+      if (lastUser?.content === 'spawn a helper' && hasToolResult) {
+        return fakeCompletionResponse('ok, spawned it');
+      }
+      // The subagent chat's own first (and only) turn.
+      return fakeCompletionResponse('sub task done');
+    });
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
+    const helper = (await post(t, '/api/planner/workspaces', { name: 'Helper' })).json();
+    helperWorkspace.id = helper.id;
+    // A spawned chat's own turn resolves its model the same way any new chat
+    // in this workspace would (`create`'s own `defaultModelId ?? global
+    // last-used` fallback) — with no turn having completed yet in this fresh
+    // app, the global last-used model is still unset, so the helper agent
+    // needs its own default for the spawned chat to have a model to run with.
+    await patch(t, `/api/planner/workspaces/${helper.id}`, { defaultModelId: 'gpt-4o' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const { res, events } = await sendMessage(t, chat.id, 'spawn a helper');
+    expect(res.statusCode).toBe(200);
+    const toolResult = events.find(
+      (e) => e.kind === 'tool_result' && String(e.content).includes('"kind":"pocket_agent"'),
+    );
+    expect(toolResult).toBeDefined();
+    const handle = JSON.parse(String(toolResult!.content)) as { id: string };
+    expect(handle.id).not.toBe(chat.id);
+
+    // The parent's own turn already finished (it never blocked on the
+    // subagent) — its final reply says so.
+    expect(findEvent(events, 'text')?.text).toBe('ok, spawned it');
+
+    // The subagent's own turn finishes on its own, in the background.
+    const childEvents = await waitForChatDone(t, handle.id);
+    expect(childEvents.map((e: { kind: string }) => e.kind)).toContain('turn_complete');
+
+    const allChats = (await get(t, '/api/planner/chats')).json().chats as Array<{
+      id: string;
+      workspaceId: string | null;
+    }>;
+    expect(allChats.find((c) => c.id === handle.id)?.workspaceId).toBe(helper.id);
+  });
+
+  it('refuses a pocket_agent spawn once the depth limit is reached', async () => {
+    // `MAX_SUBAGENT_SPAWN_DEPTH` is 2, so a chain of three spawns is needed to
+    // observe a refusal: root (depth 0) spawning chat B (depth 1) is allowed,
+    // B (depth 1) spawning chat C (depth 2) is *also* allowed — the limit is
+    // "already at the limit", not "about to cross it" — and only C (depth 2)
+    // attempting to spawn a fourth chat is refused, inline, by the tool
+    // itself, before it ever calls into `PlannerChatService`.
+    let workspaceId = '';
+    const fetchImpl = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string) as {
+        messages: Array<{ role: string; content: string | null }>;
+      };
+      const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+      const hasToolResult = body.messages.some((m) => m.role === 'tool');
+      if (lastUser?.content === 'continue the chain' && !hasToolResult) {
+        return fakeToolCallResponse('start_subagent_session', {
+          kind: 'pocket_agent',
+          workspaceId,
+          prompt: 'continue the chain',
+        });
+      }
+      return fakeCompletionResponse('done');
+    });
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
+    const ws = (await post(t, '/api/planner/workspaces', { name: 'Chain' })).json();
+    workspaceId = ws.id;
+    // See the identical note in the test above — every spawned chat in this
+    // chain lands in the same workspace, so it needs its own default model.
+    await patch(t, `/api/planner/workspaces/${workspaceId}`, { defaultModelId: 'gpt-4o' });
+    const root = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    /** Extracts the spawned chat's id from a chat's own tool_result. */
+    function spawnedIdFrom(chatEvents: Array<{ kind: string; content?: unknown }>): string {
+      const toolResult = chatEvents.find((e) => e.kind === 'tool_result')!;
+      return (JSON.parse(String(toolResult.content)) as { id: string }).id;
+    }
+
+    const { events: rootEvents } = await sendMessage(t, root.id, 'continue the chain');
+    const chatB = spawnedIdFrom(rootEvents); // depth 1
+
+    const chatBEvents = await waitForChatDone(t, chatB);
+    const chatC = spawnedIdFrom(chatBEvents as Array<{ kind: string; content?: unknown }>); // depth 2
+
+    const chatCEvents = (await waitForChatDone(t, chatC)) as Array<{ kind: string; content?: unknown }>;
+    const chatCToolResult = chatCEvents.find((e) => e.kind === 'tool_result');
+    expect(String(chatCToolResult?.content)).toMatch(/depth limit/);
+  });
 });
