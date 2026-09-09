@@ -217,6 +217,7 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
         ...(body.skipQueueLabelEnabled !== undefined
           ? { skipQueueLabelEnabled: body.skipQueueLabelEnabled }
           : {}),
+        ...(body.agentIdentity !== undefined ? { agentIdentity: body.agentIdentity } : {}),
         ...(body.maxConcurrent !== undefined ? { maxConcurrent: body.maxConcurrent } : {}),
         ...(body.storePayloads !== undefined ? { storePayloads: body.storePayloads } : {}),
       };
@@ -610,6 +611,7 @@ function specFrom(
     overlapPolicy: body.overlapPolicy,
     directoryPolicy: body.directoryPolicy,
     skipQueueLabelEnabled: body.skipQueueLabelEnabled,
+    agentIdentity: body.agentIdentity,
     maxConcurrent: body.maxConcurrent,
     storePayloads: body.storePayloads,
   };

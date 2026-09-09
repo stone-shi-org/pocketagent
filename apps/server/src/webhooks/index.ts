@@ -269,6 +269,8 @@ export interface WebhookSpecCommon {
   directoryPolicy: WebhookDirectoryPolicy;
   /** PA-39: whether this webhook honours the `skip-queue` Jira label. */
   skipQueueLabelEnabled: boolean;
+  /** The Jira display name this webhook's own comments are posted under. See `db/index.ts`'s `agent_identity` doc comment. */
+  agentIdentity?: string;
   maxConcurrent: number;
   storePayloads: boolean;
 }
@@ -1785,7 +1787,7 @@ export class WebhookService {
     routeKey?: string | null,
   ): { text: string; truncated: boolean } {
     const type = hook.type as WebhookType;
-    const extra = { webhookName: hook.name, deliveryId };
+    const extra = { webhookName: hook.name, deliveryId, agentIdentity: hook.agent_identity };
     // A fresh nonce per delivery: a fixed one would eventually appear in an
     // issue description or a commit message, and the fence would then be
     // closable from inside.
@@ -2156,6 +2158,7 @@ export class WebhookService {
       overlap_policy: spec.overlapPolicy,
       directory_policy: spec.directoryPolicy,
       skip_queue_label_enabled: spec.skipQueueLabelEnabled ? 1 : 0,
+      agent_identity: spec.agentIdentity ?? '',
       max_concurrent: spec.maxConcurrent,
       store_payloads: spec.storePayloads ? 1 : 0,
       created_at: now,
@@ -2216,6 +2219,7 @@ export class WebhookService {
       ...(patch.skipQueueLabelEnabled !== undefined
         ? { skip_queue_label_enabled: patch.skipQueueLabelEnabled ? 1 : 0 }
         : {}),
+      ...(patch.agentIdentity !== undefined ? { agent_identity: patch.agentIdentity } : {}),
       ...(patch.maxConcurrent !== undefined ? { max_concurrent: patch.maxConcurrent } : {}),
       ...(patch.storePayloads !== undefined
         ? { store_payloads: patch.storePayloads ? 1 : 0 }
@@ -2376,7 +2380,11 @@ export class WebhookService {
       );
     const rendered = renderJiraTemplate(
       template,
-      jiraTemplateVariables(payload, { webhookName: hook.name, deliveryId: 'preview' }),
+      jiraTemplateVariables(payload, {
+        webhookName: hook.name,
+        deliveryId: 'preview',
+        agentIdentity: hook.agent_identity,
+      }),
       { nonce: crypto.randomBytes(8).toString('hex') },
     );
     const filteredReason = !parsed.ok
@@ -2454,6 +2462,7 @@ export class WebhookService {
       overlapPolicy: row.overlap_policy as WebhookOverlapPolicy,
       directoryPolicy: row.directory_policy as WebhookDirectoryPolicy,
       skipQueueLabelEnabled: row.skip_queue_label_enabled === 1,
+      agentIdentity: row.agent_identity,
       maxConcurrent: row.max_concurrent,
       storePayloads: row.store_payloads === 1,
       createdAt: row.created_at,

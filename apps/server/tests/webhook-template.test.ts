@@ -77,48 +77,126 @@ describe('jiraTemplateVariables', () => {
    * the old code trusted array position (`[length - 1]`) as "the newest" — so a
    * ticket with five comments handed the agent the very first one ever posted,
    * with two rounds of "still not fixed" from the reporter completely unseen.
-   * `created` must be the tiebreaker, not position, regardless of which order
-   * Jira happens to return the list in.
+   * `created` must be the tiebreaker for `comment.author`, not position,
+   * regardless of which order Jira happens to return the list in.
    */
-  it('picks the comment with the latest `created`, not the last array entry', () => {
+  it('`comment.author` is whoever wrote the latest comment, not the last array entry', () => {
     const v = vars(
       issue({
         comment: {
           comments: [
-            { created: '2026-09-08T22:52:11.984-0700', body: 'still not fixed' },
-            { created: '2026-09-08T21:10:42.448-0700', body: 'summary of changes round 2' },
-            { created: '2026-09-08T19:00:26.828-0700', body: 'triage: root-cause analysis' },
+            { created: '2026-09-08T22:52:11.984-0700', author: { displayName: 'Newest' }, body: 'still not fixed' },
+            { created: '2026-09-08T21:10:42.448-0700', author: { displayName: 'Middle' }, body: 'round 2' },
+            { created: '2026-09-08T19:00:26.828-0700', author: { displayName: 'Oldest' }, body: 'triage' },
           ],
         },
       }),
     );
-    expect(v['comment.body']).toBe('still not fixed');
+    expect(v['comment.author']).toBe('Newest');
   });
 
-  it('also works when Jira happens to return comments oldest-first', () => {
+  it('`comment.author` also works when Jira happens to return comments oldest-first', () => {
     const v = vars(
       issue({
         comment: {
           comments: [
-            { created: '2026-09-08T19:00:26.828-0700', body: 'triage: root-cause analysis' },
-            { created: '2026-09-08T21:10:42.448-0700', body: 'summary of changes round 2' },
-            { created: '2026-09-08T22:52:11.984-0700', body: 'still not fixed' },
+            { created: '2026-09-08T19:00:26.828-0700', author: { displayName: 'Oldest' }, body: 'triage' },
+            { created: '2026-09-08T21:10:42.448-0700', author: { displayName: 'Middle' }, body: 'round 2' },
+            { created: '2026-09-08T22:52:11.984-0700', author: { displayName: 'Newest' }, body: 'still not fixed' },
           ],
         },
       }),
     );
-    expect(v['comment.body']).toBe('still not fixed');
+    expect(v['comment.author']).toBe('Newest');
   });
 
-  it('falls back to the last array entry when no comment has a parseable `created`', () => {
-    const v = vars(
-      issue({
-        comment: {
-          comments: [{ body: 'first, no timestamp' }, { body: 'second, no timestamp' }],
-        },
-      }),
-    );
-    expect(v['comment.body']).toBe('second, no timestamp');
+  describe('comment.body: the assembled thread', () => {
+    it('assembles every comment into one thread, oldest first, regardless of payload order', () => {
+      const v = vars(
+        issue({
+          comment: {
+            comments: [
+              { created: '2026-09-08T22:52:00.000-0700', author: { displayName: 'Stone Shi' }, body: 'still not fixed' },
+              { created: '2026-09-08T19:00:00.000-0700', author: { displayName: 'Bamboozen' }, body: 'triage: root-cause analysis' },
+            ],
+          },
+        }),
+      );
+      const body = v['comment.body'];
+      // Oldest first: the triage comment's text appears before "still not fixed".
+      expect(body.indexOf('triage: root-cause analysis')).toBeLessThan(body.indexOf('still not fixed'));
+      expect(body).toContain('Stone Shi');
+      expect(body).toContain('Bamboozen');
+    });
+
+    it("trims the configured agent identity's own comments to a short preview, keeps everyone else's in full", () => {
+      const longAgentComment = ['line 1', 'line 2', 'line 3', 'line 4', 'line 5'].join('\n');
+      const longHumanComment = ['human says A', 'human says B', 'human says C', 'human says D'].join('\n');
+      const v = jiraTemplateVariables(
+        issue({
+          comment: {
+            comments: [
+              { created: '2026-09-08T19:00:00.000-0700', author: { displayName: 'Bamboozen' }, body: longAgentComment },
+              { created: '2026-09-08T20:00:00.000-0700', author: { displayName: 'Stone Shi' }, body: longHumanComment },
+            ],
+          },
+        }),
+        { webhookName: 'Triage', deliveryId: 'd1', agentIdentity: 'Bamboozen' },
+      );
+      const body = v['comment.body'];
+      // The agent's own comment is cut after 3 lines, with a trailing marker.
+      expect(body).toContain('line 1\nline 2\nline 3\n...');
+      expect(body).not.toContain('line 4');
+      expect(body).not.toContain('line 5');
+      // Everyone else's comment is untouched.
+      expect(body).toContain(longHumanComment);
+    });
+
+    it('matches the agent identity case-insensitively and trimmed', () => {
+      const v = jiraTemplateVariables(
+        issue({
+          comment: {
+            comments: [
+              { created: '2026-09-08T19:00:00.000-0700', author: { displayName: ' bamboozen ' }, body: 'a\nb\nc\nd' },
+            ],
+          },
+        }),
+        { webhookName: 'Triage', deliveryId: 'd1', agentIdentity: 'Bamboozen' },
+      );
+      expect(v['comment.body']).toContain('a\nb\nc\n...');
+    });
+
+    it('trims nothing when no agent identity is configured', () => {
+      const v = vars(
+        issue({
+          comment: {
+            comments: [
+              { created: '2026-09-08T19:00:00.000-0700', author: { displayName: 'Bamboozen' }, body: 'a\nb\nc\nd' },
+            ],
+          },
+        }),
+      );
+      expect(v['comment.body']).toContain('a\nb\nc\nd');
+      expect(v['comment.body']).not.toContain('...');
+    });
+
+    it('keeps a comment with no parseable `created` in the thread rather than dropping it', () => {
+      const v = vars(
+        issue({
+          comment: {
+            comments: [{ body: 'first, no timestamp' }, { body: 'second, no timestamp' }],
+          },
+        }),
+      );
+      expect(v['comment.body']).toContain('first, no timestamp');
+      expect(v['comment.body']).toContain('second, no timestamp');
+    });
+
+    it('falls back to the single comment when the payload carries no comment list', () => {
+      // A bare comment-only event with no `fields.comment.comments` embedded.
+      const v = vars({ comment: { author: { displayName: 'Ada' }, body: 'just this one' } });
+      expect(v['comment.body']).toBe('just this one');
+    });
   });
 });
 

@@ -94,8 +94,8 @@ export const JIRA_TEMPLATE_VARS: readonly TemplateVarSpec[] = [
   { name: 'issue.summary', kind: 'prose', description: 'The issue title. Written by a user.', example: 'Login fails on Safari' },
   { name: 'issue.description', kind: 'prose', description: 'The issue body. Written by a user.', example: 'Steps to reproduce…' },
   { name: 'user.displayName', kind: 'prose', description: 'Who triggered the event.', example: 'Ada Lovelace' },
-  { name: 'comment.author', kind: 'prose', description: 'Comment author, when the event carries one.', example: 'Ada Lovelace' },
-  { name: 'comment.body', kind: 'prose', description: 'Comment text. Written by a user.', example: 'Still broken in 2.1.' },
+  { name: 'comment.author', kind: 'prose', description: 'Author of the most recent comment, when the event carries one.', example: 'Ada Lovelace' },
+  { name: 'comment.body', kind: 'prose', description: "The full comment thread, oldest first. Every other author's comment is included in full; the webhook's own Agent identity's past comments are shown as a short preview so a long history does not crowd out what a human wrote.", example: 'Still broken in 2.1.' },
   { name: 'changelog.fields', kind: 'structured', description: 'Names of fields changed, comma-separated.', example: 'status, assignee' },
   { name: 'changelog.summary', kind: 'prose', description: 'One line per change, with old and new values.', example: 'status: "To Do" → "In Progress"' },
   { name: 'webhook.name', kind: 'structured', description: 'The name you gave this webhook.', example: 'Triage new bugs' },
@@ -499,10 +499,16 @@ function sanitizeText(value: string, max: number): { text: string; truncated: bo
  * Total, not partial: every name in `JIRA_TEMPLATE_VARS` gets a key, so an
  * absent payload field renders as empty rather than leaving the literal
  * `{{issue.priority}}` in a prompt an agent then tries to interpret.
+ *
+ * `extra.agentIdentity` is the webhook's own "this Jira display name is
+ * me" setting (`Webhook.agentIdentity`), threaded through so
+ * `assembleCommentThread` can tell the agent's own past comments from
+ * everyone else's. Optional and defaults to "unknown" (nothing gets
+ * trimmed) rather than guessing, for a webhook that never set it.
  */
 export function jiraTemplateVariables(
   payload: unknown,
-  extra: { webhookName: string; deliveryId: string },
+  extra: { webhookName: string; deliveryId: string; agentIdentity?: string },
 ): Record<string, string> {
   const root = asRecord(payload);
   const issue = asRecord(root['issue']);
@@ -514,6 +520,11 @@ export function jiraTemplateVariables(
     : [];
   const lastFieldComment = mostRecentComment(fieldsComments);
   const comment = Object.keys(rootComment).length > 0 ? rootComment : lastFieldComment;
+  // Only meaningful when the payload actually carries the issue's full comment
+  // list (every real `issue_created`/`issue_updated` payload we've seen does).
+  // A bare comment-only payload with no `fields.comment.comments` falls back
+  // to the single comment below, exactly like before this existed.
+  const commentThread = assembleCommentThread(fieldsComments, extra.agentIdentity ?? '');
 
   const items = Array.isArray(changelog['items']) ? changelog['items'] : [];
   const changed = items.map((i) => asRecord(i));
@@ -548,7 +559,7 @@ export function jiraTemplateVariables(
     'issue.description': str(fields['description']),
     'user.displayName': str(asRecord(root['user'])['displayName']),
     'comment.author': str(asRecord(comment['author'])['displayName']),
-    'comment.body': str(comment['body']),
+    'comment.body': fieldsComments.length > 0 ? commentThread : str(comment['body']),
     'changelog.fields': changed
       .map((i) => str(i['field']) || str(i['fieldId']))
       .filter((f) => f !== '')
@@ -663,7 +674,7 @@ export function renderTemplate(
       return clean.text;
     }
 
-    const cap = longProseVars.has(name) ? PROSE_MAX : SCALAR_MAX;
+    const cap = PROSE_CAP_OVERRIDES.get(name) ?? (longProseVars.has(name) ? PROSE_MAX : SCALAR_MAX);
     const clean = sanitizeText(stripFence(value, opts.nonce, fenceOpen), cap);
     truncated = truncated || clean.truncated;
     return fence(name, clean.text, opts.nonce, fenceOpen);
@@ -685,6 +696,18 @@ export function renderTemplate(
 
 /** The Jira-specific fields that need the larger prose cap rather than the scalar one. */
 const DEFAULT_LONG_PROSE_VARS = new Set(['issue.description', 'comment.body']);
+
+/**
+ * `comment.body` now carries a whole assembled thread rather than one
+ * comment (see `assembleCommentThread`), so `PROSE_MAX` — sized for a single
+ * comment or description — would defeat the point by truncating most of it
+ * away. Keyed by name rather than folded into `longProseVars` because this
+ * is Jira-only and the two caps are unrelated: this one only ever applies
+ * to a variable name the renderer would otherwise fall back to `PROSE_MAX`
+ * for, so a Bamboo template with no `comment.body` in its variable set is
+ * unaffected regardless.
+ */
+const PROSE_CAP_OVERRIDES = new Map<string, number>([['comment.body', 12_000]]);
 
 /**
  * The original name, kept as a plain re-export so no existing call site or
@@ -761,32 +784,79 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 /**
- * The entry in `fields.comment.comments` with the latest `created` timestamp.
+ * `fields.comment.comments`, oldest first by `created`.
  *
- * `[length - 1]` used to be trusted as "the newest", on the assumption Jira
- * always returns the list oldest-first. Verified false against a real
- * production payload (PA-40, five comments): this Jira instance returns it
- * newest-first, so the old code was handing the agent the *first* comment
- * ever posted while two rounds of "still not fixed" sat unseen. Sorting by
- * `created` is correct regardless of which order Jira happens to use.
+ * Array position used to be trusted as chronological order — verified false
+ * against a real production payload (PA-40, five comments): this Jira
+ * instance returns the list newest-first, so code that trusted position
+ * handed the agent the *first* comment ever posted while later rounds of
+ * "still not fixed" sat unseen. Sorting by `created` is correct regardless
+ * of which order Jira happens to use.
  *
- * Falls back to array position only when no entry has a parseable `created`
- * — an absent/malformed timestamp should not make the comment disappear.
+ * An entry with no parseable `created` sorts last, on the same "we cannot
+ * prove it's old, so treat it as recent" logic that made array-position the
+ * fallback in the first place — but stably, by original array position
+ * among ties, so a run of undated entries does not get shuffled.
  */
+function commentsByCreated(comments: unknown[]): Record<string, unknown>[] {
+  return comments
+    .map((c, index) => {
+      const record = asRecord(c);
+      const parsed = Date.parse(str(record['created']));
+      return { record, index, time: Number.isNaN(parsed) ? Infinity : parsed };
+    })
+    .sort((a, b) => (a.time !== b.time ? a.time - b.time : a.index - b.index))
+    .map((x) => x.record);
+}
+
+/** The entry in `fields.comment.comments` with the latest `created` timestamp. */
 function mostRecentComment(comments: unknown[]): Record<string, unknown> {
-  if (comments.length === 0) return {};
-  let best: Record<string, unknown> | null = null;
-  let bestTime = -Infinity;
-  for (const c of comments) {
-    const record = asRecord(c);
-    const created = Date.parse(str(record['created']));
-    if (Number.isNaN(created)) continue;
-    if (best === null || created > bestTime) {
-      best = record;
-      bestTime = created;
-    }
-  }
-  return best ?? asRecord(comments[comments.length - 1]);
+  const ordered = commentsByCreated(comments);
+  return ordered.length > 0 ? ordered[ordered.length - 1]! : {};
+}
+
+/** First few lines only, so a long comment reads as "there's more" rather than being silently cut mid-sentence. */
+const AGENT_COMMENT_PREVIEW_LINES = 3;
+
+/**
+ * The full comment thread as one prose block, oldest first — the point being
+ * the agent gets the whole conversation for free and does not need a
+ * separate MCP round-trip just to read what is already sitting in the
+ * ticket.
+ *
+ * Every other author's comment is kept in full: that is exactly the text an
+ * agent would otherwise have to fetch. A comment whose author matches
+ * `agentIdentity` (case-insensitively and trimmed, like every other name
+ * comparison in this file — see `eq()` in the server's `webhooks/jira.ts`)
+ * is the agent's own past words, already known to whichever agent posted
+ * it, so it is shown as a short preview instead — long enough to recognize
+ * which round it was, short enough that several rounds of "Summary of
+ * Changes" do not crowd out what a human actually said. Blank
+ * `agentIdentity` means "unknown", so nothing is trimmed rather than
+ * guessing wrong and hiding text a human needs.
+ */
+function assembleCommentThread(comments: unknown[], agentIdentity: string): string {
+  const ordered = commentsByCreated(comments);
+  if (ordered.length === 0) return '';
+  const identity = agentIdentity.trim().toLowerCase();
+
+  return ordered
+    .map((c) => {
+      const author = str(asRecord(c['author'])['displayName']);
+      const when = str(c['created']);
+      const isAgent = identity !== '' && author.trim().toLowerCase() === identity;
+      let body = str(c['body']);
+      if (isAgent) {
+        const lines = body.split('\n');
+        if (lines.length > AGENT_COMMENT_PREVIEW_LINES) {
+          body = `${lines.slice(0, AGENT_COMMENT_PREVIEW_LINES).join('\n')}\n...`;
+        }
+      }
+      const who = isAgent ? `${author || 'Agent'} (you)` : author || '(unknown)';
+      const header = when !== '' ? `${who} — ${when}:` : `${who}:`;
+      return `${header}\n${body}`;
+    })
+    .join('\n\n');
 }
 
 /**

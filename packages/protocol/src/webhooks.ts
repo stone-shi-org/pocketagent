@@ -377,6 +377,22 @@ const WebhookFields = z
      * server ignores it for one regardless of how it is stored.
      */
     skipQueueLabelEnabled: z.boolean(),
+    /**
+     * The Jira display name this webhook's own comments are posted under —
+     * the account behind whatever Jira credential actually posts them. Used
+     * only to assemble `{{comment.body}}` (`assembleCommentThread` in
+     * `webhook-template.ts`): a comment whose author matches this is the
+     * agent's own past words and is shown as a short preview rather than in
+     * full, so a multi-round thread stays readable without an agent needing
+     * a separate MCP call just to see what is already in the ticket.
+     *
+     * Blank means "unknown" — the safe default, since nothing gets trimmed
+     * rather than guessing wrong and hiding text a human wrote. Jira-only,
+     * exactly like `skipQueueLabelEnabled`: the editor hides this for a
+     * Bamboo webhook (which has no comment concept at all) and the server
+     * ignores it for one regardless of how it is stored.
+     */
+    agentIdentity: z.string().max(200),
     /** Runs this webhook may have going at once. The global cap still applies. */
     maxConcurrent: z.number().int().min(1).max(10),
     /** Keep raw payloads for debugging. Bounded and scrubbed regardless. */
@@ -427,6 +443,7 @@ export const CreateWebhookRequest = WebhookFields.extend({
   skipPermissions: z.boolean().default(false),
   autoSelectAgentModel: z.boolean().default(false),
   skipQueueLabelEnabled: z.boolean().default(false),
+  agentIdentity: z.string().max(200).default(''),
 });
 export type CreateWebhookRequest = z.infer<typeof CreateWebhookRequest>;
 
@@ -485,6 +502,7 @@ export const Webhook = z.object({
   overlapPolicy: WebhookOverlapPolicy,
   directoryPolicy: WebhookDirectoryPolicy,
   skipQueueLabelEnabled: z.boolean(),
+  agentIdentity: z.string(),
   maxConcurrent: z.number().int(),
   storePayloads: z.boolean(),
   createdAt: z.number().int(),

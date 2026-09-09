@@ -176,6 +176,10 @@ export function WebhookEditorPage({
   // PA-39. Off by default: a bare Jira label must not change delivery
   // behaviour until an operator opts this specific webhook in.
   const [skipQueueLabelEnabled, setSkipQueueLabelEnabled] = useState(false);
+  // The Jira display name this webhook's own comments are posted under, so
+  // the assembled comment thread can tell the agent's own past comments
+  // from a human's. Blank means unknown — nothing gets trimmed.
+  const [agentIdentity, setAgentIdentity] = useState('');
   const [maxConcurrent, setMaxConcurrent] = useState(2);
   const [storePayloads, setStorePayloads] = useState(true);
 
@@ -298,6 +302,7 @@ export function WebhookEditorPage({
       setOverlapPolicy(hook.overlapPolicy);
       setDirectoryPolicy(hook.directoryPolicy);
       setSkipQueueLabelEnabled(hook.skipQueueLabelEnabled ?? false);
+      setAgentIdentity(hook.agentIdentity ?? '');
       setMaxConcurrent(hook.maxConcurrent);
       setStorePayloads(hook.storePayloads);
       setDeliveryPath(hook.deliveryPath);
@@ -745,6 +750,7 @@ export function WebhookEditorPage({
       overlapPolicy,
       directoryPolicy,
       skipQueueLabelEnabled,
+      agentIdentity: agentIdentity.trim(),
       maxConcurrent,
       storePayloads,
       skipPermissions,
@@ -1322,6 +1328,16 @@ export function WebhookEditorPage({
 
       <div id="section-prompt">
         <SectionCard title="Prompt" icon="compose">
+          {type === 'jira' && (
+            <TextRow
+              label="Agent identity"
+              value={agentIdentity}
+              busy={busy}
+              placeholder="Bamboozen"
+              help="The Jira display name this webhook's own comments are posted under. {{comment.body}} assembles the whole comment thread so the agent doesn't need a separate tool call just to read the ticket — every other author's comment is included in full, but a comment matching this name (its own past comments) is shown as a short preview so several rounds of back-and-forth don't crowd out what a human wrote. Leave blank if unsure — nothing is trimmed."
+              onChange={setAgentIdentity}
+            />
+          )}
           <SelectRowNative
             busy={busy}
             label="Template routing"

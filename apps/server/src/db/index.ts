@@ -1106,6 +1106,16 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE webhooks ADD COLUMN skip_queue_label_enabled INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE webhook_deliveries ADD COLUMN queue_skipped_by_label INTEGER NOT NULL DEFAULT 0;
   `,
+  // The Jira display name this webhook's own comments are posted under, so
+  // `assembleCommentThread` (webhook-template.ts) can tell the agent's own
+  // past comments from a human's when it assembles `{{comment.body}}` into
+  // one thread. Blank means "unknown" — the safe default, since nothing
+  // gets trimmed rather than guessing wrong. Jira-only, like
+  // `skip_queue_label_enabled`: ignored for a `type: 'bamboo'` webhook
+  // regardless of what is stored here.
+  `
+  ALTER TABLE webhooks ADD COLUMN agent_identity TEXT NOT NULL DEFAULT '';
+  `,
 ];
 
 /**
@@ -1272,6 +1282,19 @@ export function openDatabase(databasePath: string): Db {
     !deliveryColumnsForSkipQueue.has('queue_skipped_by_label')
   ) {
     db.exec('ALTER TABLE webhook_deliveries ADD COLUMN queue_skipped_by_label INTEGER NOT NULL DEFAULT 0');
+  }
+  // Same positional-migration hazard once more, for `agent_identity`:
+  // `create`/`update` write it unconditionally, so a database whose
+  // checkpoint already sat at or past this migration's tail index (another
+  // branch's own tail append) would 500 the whole webhook save path on a
+  // "no such column" error, exactly like PA-21's did. Probed idempotently.
+  const webhookColumnsForAgentIdentity = new Set(
+    (db.prepare('PRAGMA table_info(webhooks)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (webhookColumnsForAgentIdentity.size > 0 && !webhookColumnsForAgentIdentity.has('agent_identity')) {
+    db.exec("ALTER TABLE webhooks ADD COLUMN agent_identity TEXT NOT NULL DEFAULT ''");
   }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
@@ -1703,6 +1726,11 @@ export interface WebhookRow {
    * delivery only). Off by default — see `WebhookSpecCommon.skipQueueLabelEnabled`.
    */
   skip_queue_label_enabled: number;
+  /**
+   * The Jira display name this webhook's own comments are posted under —
+   * see `WebhookSpecCommon.agentIdentity`. `''` means unknown.
+   */
+  agent_identity: string;
   max_concurrent: number;
   store_payloads: number;
   created_at: number;
@@ -1882,13 +1910,13 @@ export function insertWebhook(db: Db, row: WebhookRow): void {
        id, name, slug, enabled, type, auth_mode, secret, auth_token_hash,
        secret_set_at, filter_json, project_map_json, prompt_template_map_json, cwd, agent, worktree_mode, model, effort,
        effort_set, skip_permissions, auto_select_agent_model, prompt_template, conversation_mode,
-       overlap_policy, directory_policy, skip_queue_label_enabled, max_concurrent, store_payloads,
+       overlap_policy, directory_policy, skip_queue_label_enabled, agent_identity, max_concurrent, store_payloads,
        created_at, updated_at, last_delivery_at, last_delivery_status, last_error
      ) VALUES (
        @id, @name, @slug, @enabled, @type, @auth_mode, @secret, @auth_token_hash,
        @secret_set_at, @filter_json, @project_map_json, @prompt_template_map_json, @cwd, @agent, @worktree_mode, @model, @effort,
        @effort_set, @skip_permissions, @auto_select_agent_model, @prompt_template, @conversation_mode,
-       @overlap_policy, @directory_policy, @skip_queue_label_enabled, @max_concurrent, @store_payloads,
+       @overlap_policy, @directory_policy, @skip_queue_label_enabled, @agent_identity, @max_concurrent, @store_payloads,
        @created_at, @updated_at, @last_delivery_at, @last_delivery_status, @last_error
      )`,
   ).run(row);

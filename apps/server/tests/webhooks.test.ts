@@ -888,6 +888,89 @@ describe('webhook delivery: prompt template routing', () => {
   });
 });
 
+/**
+ * The "agent identity" setting: `{{comment.body}}` assembles the whole
+ * comment thread rather than just the latest comment, so the agent does not
+ * need a separate tool call to read what is already on the ticket — but a
+ * comment matching this webhook's own identity (its past round-trips) is
+ * shortened, so a long back-and-forth does not crowd out what a human wrote.
+ */
+describe('webhook delivery: agent identity in the assembled comment thread', () => {
+  const payloadWithComments = (comments: { author: string; body: string; created: string }[]): string =>
+    JSON.stringify({
+      ...(JIRA_SAMPLE_PAYLOAD as object),
+      timestamp: Date.now(),
+      issue: {
+        key: 'PA-100',
+        fields: {
+          project: { key: 'PA', name: 'Pocket Agent' },
+          issuetype: { name: 'Bug' },
+          summary: 'Test',
+          labels: [],
+          comment: {
+            comments: comments.map((c) => ({
+              author: { displayName: c.author },
+              body: c.body,
+              created: c.created,
+            })),
+          },
+        },
+      },
+    });
+
+  it('round-trips through create, get and patch', async () => {
+    const hook = await createWebhook({ agentIdentity: 'Bamboozen' });
+    expect((await get(`/api/webhooks/${hook.id}`)).json().agentIdentity).toBe('Bamboozen');
+
+    const res = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/webhooks/${hook.id}`,
+      headers: authHeaders(ctx.cookie),
+      payload: { agentIdentity: 'Someone Else' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().agentIdentity).toBe('Someone Else');
+  });
+
+  it('defaults to blank, and blank trims nothing', async () => {
+    const hook = await createWebhook();
+    expect((await get(`/api/webhooks/${hook.id}`)).json().agentIdentity).toBe('');
+
+    const payload = payloadWithComments([
+      { author: 'Bamboozen', body: 'a\nb\nc\nd\ne', created: '2026-09-08T19:00:00.000-0700' },
+    ]);
+    const preview = (await post(`/api/webhooks/${hook.id}/preview`, { payload })).json();
+    expect(preview.prompt).toContain('a\nb\nc\nd\ne');
+    expect(preview.prompt).not.toContain('...');
+  });
+
+  it("keeps every other author's comment in full, trims the configured identity's own", async () => {
+    const hook = await createWebhook({ agentIdentity: 'Bamboozen' });
+    const payload = payloadWithComments([
+      {
+        author: 'Bamboozen',
+        body: 'Triage: root-cause analysis\nline 2\nline 3\nline 4\nline 5',
+        created: '2026-09-08T19:00:00.000-0700',
+      },
+      {
+        author: 'Stone Shi',
+        body: 'Fix does not work.\nStill broken on retry.',
+        created: '2026-09-08T20:00:00.000-0700',
+      },
+    ]);
+    const preview = (await post(`/api/webhooks/${hook.id}/preview`, { payload })).json();
+    // The agent's own comment: first 3 lines, then a truncation marker.
+    expect(preview.prompt).toContain('Triage: root-cause analysis\nline 2\nline 3\n...');
+    expect(preview.prompt).not.toContain('line 4');
+    // The human's comment: untouched, in full.
+    expect(preview.prompt).toContain('Fix does not work.\nStill broken on retry.');
+    // Oldest first.
+    expect(preview.prompt.indexOf('Triage: root-cause analysis')).toBeLessThan(
+      preview.prompt.indexOf('Fix does not work.'),
+    );
+  });
+});
+
 describe('webhook delivery: unusable payloads', () => {
   it('rejects a body that is not JSON, after the signature passed', async () => {
     const hook = await createWebhook();
