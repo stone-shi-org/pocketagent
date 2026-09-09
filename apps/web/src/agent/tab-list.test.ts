@@ -170,6 +170,40 @@ describe('tabListReducer: openPermanent', () => {
   });
 });
 
+describe('tabListReducer: replace', () => {
+  it('promotes a preview tab in place to a permanent tab under a new session (PA-46)', () => {
+    const previewTabA: OpenTab = { ...tabA, preview: true };
+    const tabs: OpenTab[] = [tabB, previewTabA, tabC];
+    const newSessionTab: OpenTab = { id: 't:new1', route: { name: 'terminal', sessionId: 'new1' } };
+
+    const next = tabListReducer(tabs, { type: 'replace', id: tabA.id, route: newSessionTab.route });
+    expect(next).toEqual([tabB, newSessionTab, tabC]);
+    expect(next[1]?.preview).toBeUndefined();
+  });
+
+  it('replaces a permanent tab in place when superseded (e.g. reattaching/resuming)', () => {
+    const tabs: OpenTab[] = [tabA, tabB, tabC];
+    const newSessionTab: OpenTab = { id: 't:new1', route: { name: 'terminal', sessionId: 'new1' } };
+
+    const next = tabListReducer(tabs, { type: 'replace', id: tabB.id, route: newSessionTab.route });
+    expect(next).toEqual([tabA, newSessionTab, tabC]);
+  });
+
+  it('appends as a permanent tab if the replaced tab id is not currently open', () => {
+    const tabs: OpenTab[] = [tabA, tabB];
+    const newSessionTab: OpenTab = { id: 't:new1', route: { name: 'terminal', sessionId: 'new1' } };
+
+    const next = tabListReducer(tabs, { type: 'replace', id: 't:nonexistent', route: newSessionTab.route });
+    expect(next).toEqual([tabA, tabB, newSessionTab]);
+  });
+
+  it('does not duplicate if the new route is already open when replacing a missing tab', () => {
+    const tabs: OpenTab[] = [tabA, tabB];
+    const next = tabListReducer(tabs, { type: 'replace', id: 't:nonexistent', route: tabB.route });
+    expect(next).toBe(tabs);
+  });
+});
+
 describe('tabListReducer: close', () => {
   it('removes exactly the closed tab', () => {
     expect(tabListReducer([tabA, tabB, tabC], { type: 'close', id: tabB.id })).toEqual([tabA, tabC]);

@@ -84,6 +84,7 @@ export type TabListAction =
   | { type: 'sync'; route: Route }
   | { type: 'openPreview'; route: TabRoute }
   | { type: 'openPermanent'; route: TabRoute }
+  | { type: 'replace'; id: string; route: TabRoute }
   | { type: 'close'; id: string }
   | { type: 'reorder'; orderedIds: string[] };
 
@@ -159,6 +160,22 @@ export function tabListReducer(tabs: OpenTab[], action: TabListAction): OpenTab[
       if (!tabs[index]?.preview) return tabs;
       const next = tabs.slice();
       next[index] = { id, route: action.route };
+      return next;
+    }
+    case 'replace': {
+      // Replaces an existing tab (e.g. promoting a preview tab or superseded
+      // session to a newly created session) in-place in its same slot,
+      // cleared of the `preview` flag.
+      const newId = tabIdFor(action.route);
+      const index = tabs.findIndex((t) => t.id === action.id);
+      if (index === -1) {
+        if (tabs.some((t) => t.id === newId)) return tabs;
+        return [...tabs, { id: newId, route: action.route }];
+      }
+      const filtered = tabs.filter((t, i) => i === index || t.id !== newId);
+      const filteredIndex = filtered.findIndex((t) => t.id === action.id);
+      const next = filtered.slice();
+      next[filteredIndex] = { id: newId, route: action.route };
       return next;
     }
     case 'close':

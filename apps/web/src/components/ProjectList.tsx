@@ -157,6 +157,7 @@ export function useProjects(
   onOpen: (sessionId: string, opts?: OpenChatOptions) => void,
   onOpenChat: (conversationId: string, opts?: OpenChatOptions) => void,
   onApiError: (error: unknown) => void,
+  onReplaceSession?: (oldSessionId: string, newSessionId: string) => void,
 ): ProjectsState {
   const [projects, setProjects] = useState<ProjectInfo[] | null>(null);
   const [shells, setShells] = useState<ShellSessionSummary[] | null>(null);
@@ -392,7 +393,11 @@ export function useProjects(
           transport: 'terminal',
           adoptTargetId: chat.adoptTargetId,
         });
-        onOpen(created.id);
+        if (onReplaceSession && chat.sessionId) {
+          onReplaceSession(chat.sessionId, created.id);
+        } else {
+          onOpen(created.id);
+        }
       } catch (err) {
         onApiError(err);
         setError(err instanceof ApiError ? err.message : 'Could not re-attach to that tmux session.');
@@ -400,7 +405,7 @@ export function useProjects(
         await refresh();
       }
     },
-    [onApiError, onOpen, refresh],
+    [onApiError, onOpen, onReplaceSession, refresh],
   );
 
   /**

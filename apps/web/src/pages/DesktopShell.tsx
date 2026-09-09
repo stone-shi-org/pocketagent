@@ -303,6 +303,27 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
     [onNavigate],
   );
 
+  /** Replaces an existing tab in place with a new route (e.g. promoting a preview
+      tab or superseded session to a newly created session). */
+  const replaceTab = useCallback(
+    (id: string, tabRoute: TabRoute) => {
+      openTabsRef.current = tabListReducer(openTabsRef.current, { type: 'replace', id, route: tabRoute });
+      dispatch({ type: 'replace', id, route: tabRoute });
+      routeRef.current = tabRoute;
+      onNavigate(tabRoute);
+    },
+    [onNavigate],
+  );
+
+  const onReplaceSession = useCallback(
+    (oldSessionId: string, newSessionId: string) => {
+      const oldTabId = `t:${oldSessionId}`;
+      const tabRoute: TabRoute = { name: 'terminal', sessionId: newSessionId };
+      replaceTab(oldTabId, tabRoute);
+    },
+    [replaceTab],
+  );
+
   // PA-36: the same data `PocketAgentsSection` polls for the sidebar's own
   // "Pocket Agents" rows, lifted here too so the tab strip's planner-chat
   // titles (`chatById` below) come from one shared poller rather than a
@@ -326,6 +347,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
       else openPermanentTab(tabRoute);
     },
     onApiError,
+    onReplaceSession,
   );
 
   // Title and live status for the tab strip come from the same polled project
@@ -643,14 +665,22 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                     sessionId={tab.route.sessionId}
                     onBack={() => closeTab(tab.id)}
                     onApiError={onApiError}
-                    onResumed={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+                    onResumed={(sessionId) => {
+                      // PA-46: "promoting" a preview/dead session to a live session replaces
+                      // the superseded tab in place with the live one.
+                      replaceTab(tab.id, { name: 'terminal', sessionId });
+                    }}
                   />
                 ) : tab.route.name === 'chat' ? (
                   <ChatPreviewPage
                     conversationId={tab.route.conversationId}
                     onBack={() => closeTab(tab.id)}
                     onApiError={onApiError}
-                    onStarted={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+                    onStarted={(sessionId) => {
+                      // PA-36 / PA-46: "promoting" a preview to a live session replaces
+                      // the preview tab in place with the live one.
+                      replaceTab(tab.id, { name: 'terminal', sessionId });
+                    }}
                   />
                 ) : tab.route.name === 'planner-chat' ? (
                   // PA-36: same "onBack closes this tab" wiring as the other
