@@ -45,6 +45,13 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
   const fitRef = useRef<FitAddon | null>(null);
   const connRef = useRef<TerminalConnection | null>(null);
   const lastSizeRef = useRef<{ cols: number; rows: number }>({ cols: 0, rows: 0 });
+  /**
+   * PA-40: see `AgentPage`'s identical ref for why this is set just before
+   * the request fires rather than after it resolves, and why it distinguishes
+   * "this tab's own Stop/Detach button did this" from "a different tab/view
+   * did" for the `terminated` error code.
+   */
+  const stoppedHereRef = useRef(false);
 
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [status, setStatus] = useState<SessionStatus>('starting');
@@ -255,6 +262,15 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
           if (code === 'not_found') {
             setFatal(message);
             setMissing(true);
+          } else if (code === 'terminated') {
+            if (stoppedHereRef.current) {
+              // This tab's own Stop/Detach button caused this; ignore the
+              // echo and let the ordinary `exit` event drive the UI below.
+              stoppedHereRef.current = false;
+            } else {
+              setFatal(message);
+              setMissing(true);
+            }
           } else if (code === 'session_ended') setNotice(message);
         },
 
@@ -416,9 +432,11 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
 
   const terminate = useCallback(async () => {
     setStopping(true);
+    stoppedHereRef.current = true;
     try {
       await api.deleteSession(sessionId);
     } catch (err) {
+      stoppedHereRef.current = false;
       onApiError(err);
     } finally {
       setStopping(false);

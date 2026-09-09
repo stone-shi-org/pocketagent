@@ -47,6 +47,17 @@ interface Props {
  */
 export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): JSX.Element {
   const connRef = useRef<TerminalConnection | null>(null);
+  /**
+   * PA-40: set just before this tab's own `terminate()` fires its request,
+   * not after it resolves — the server's `terminated` push can arrive over
+   * the WS connection before the HTTP response does, and this has to be in
+   * place by then. Lets this tab tell "I'm the one who just stopped this" (stay
+   * open, show the resume prompt below, same as before this fix) apart from
+   * "a *different* tab/view stopped it" (close, per the ticket). Read once
+   * and cleared, so a *second*, later stop from elsewhere is not mistaken for
+   * an echo of this one.
+   */
+  const stoppedHereRef = useRef(false);
   const [transcript, setTranscript] = useState<TranscriptState>(emptyTranscript);
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [status, setStatus] = useState<SessionStatus>('starting');
@@ -178,6 +189,15 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           if (code === 'not_found') {
             setFatal(message);
             setMissing(true);
+          } else if (code === 'terminated') {
+            if (stoppedHereRef.current) {
+              // This tab's own Stop button caused this; ignore the echo and
+              // let the ordinary `exit` event drive the resume prompt below.
+              stoppedHereRef.current = false;
+            } else {
+              setFatal(message);
+              setMissing(true);
+            }
           } else setNotice(message);
         },
 
@@ -278,9 +298,11 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
 
   const terminate = useCallback(async () => {
     setStopping(true);
+    stoppedHereRef.current = true;
     try {
       await api.deleteSession(sessionId);
     } catch (err) {
+      stoppedHereRef.current = false;
       onApiError(err);
     } finally {
       setStopping(false);

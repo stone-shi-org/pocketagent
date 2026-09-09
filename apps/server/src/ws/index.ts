@@ -91,20 +91,27 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
    * Every live attachment, across every connection, indexed by session id —
    * unlike a connection's own `attachments` map (keyed by session id but
    * scoped to that one socket), this is process-wide and lets `forget()`'s
-   * notification below reach a tab that is attached but idle, in a
-   * *different* connection than the one that removed the session (PA-40).
+   * and `terminate()`'s notifications below reach a tab that is attached but
+   * idle, in a *different* connection than the one that closed the session
+   * (PA-40). The callback takes the error to send rather than being
+   * forget-specific, since `terminate()` needs the same fan-out with a
+   * different, milder code (see `onTerminated` below) — one registry, two
+   * possible reasons a session stops being worth staying attached to.
    */
-  const attachmentsBySession = new Map<string, Set<() => void>>();
+  const attachmentsBySession = new Map<string, Set<(code: ErrorCode, message: string) => void>>();
 
-  const registerAttachment = (sessionId: string, onForgotten: () => void): (() => void) => {
+  const registerAttachment = (
+    sessionId: string,
+    onClosedElsewhere: (code: ErrorCode, message: string) => void,
+  ): (() => void) => {
     let set = attachmentsBySession.get(sessionId);
     if (!set) {
       set = new Set();
       attachmentsBySession.set(sessionId, set);
     }
-    set.add(onForgotten);
+    set.add(onClosedElsewhere);
     return () => {
-      set!.delete(onForgotten);
+      set!.delete(onClosedElsewhere);
       if (set!.size === 0) attachmentsBySession.delete(sessionId);
     };
   };
@@ -114,7 +121,26 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
   sessions.onForgotten((sessionId) => {
     const set = attachmentsBySession.get(sessionId);
     if (!set) return;
-    for (const onForgotten of [...set]) onForgotten();
+    for (const onClosedElsewhere of [...set]) {
+      onClosedElsewhere('not_found', 'Session is no longer available on this server.');
+    }
+  });
+
+  // Same fan-out, for an explicit `terminate()` rather than a `forget()` —
+  // see `SessionManager.onTerminated`'s own doc comment for why this is a
+  // different code than the one above. Sent to *every* attachment, including
+  // one on the same tab that requested the stop; that tab's own page already
+  // knows it asked for this and ignores the redundant push (see
+  // `AgentPage`/`TerminalPage`'s `stoppedHereRef`) rather than the server
+  // trying to guess which connection issued the `DELETE` — there is no
+  // reliable way to correlate an HTTP request with a WS connection here, and
+  // guessing wrong would either leave a stale tab open or close the wrong one.
+  sessions.onTerminated((sessionId) => {
+    const set = attachmentsBySession.get(sessionId);
+    if (!set) return;
+    for (const onClosedElsewhere of [...set]) {
+      onClosedElsewhere('terminated', 'This session was stopped from elsewhere.');
+    }
   });
 
   app.get('/api/ws', { websocket: true }, (socket, request) => {
@@ -283,12 +309,14 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
         };
       }
 
-      // If this session's record is forgotten (PA-40: "Remove chat" tapped
-      // from a different tab/view) while this attachment is still live and
-      // idle, tell this connection the same way a fresh `attach` to an
-      // already-forgotten session would, then force it to detach.
-      const unregisterForgotten = registerAttachment(sessionId, () => {
-        sendError('not_found', 'Session is no longer available on this server.', sessionId);
+      // If this session is closed elsewhere while this attachment is still
+      // live and idle — its record forgotten ("Remove chat" tapped from a
+      // different tab/view) or the session explicitly stopped (a fleet
+      // card's X, another tab's own Stop button, ...) — tell this connection
+      // the same way a fresh `attach` to an already-closed session would,
+      // then force it to detach (PA-40).
+      const unregisterForgotten = registerAttachment(sessionId, (code, message) => {
+        sendError(code, message, sessionId);
         detachFrom(sessionId);
       });
 

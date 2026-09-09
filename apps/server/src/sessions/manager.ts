@@ -393,6 +393,36 @@ export class SessionManager {
   }
 
   /**
+   * Called when `terminate()` actually stops a live session — a deliberate
+   * "close this session" action (a fleet card's X, a session header's Stop
+   * button, the Active Sessions dialog, ...), not a session finishing on its
+   * own. That distinction matters: an agent that simply completes its turn
+   * must not chase away a tab someone is reading the result in, but a session
+   * someone explicitly closed elsewhere should not go on looking live in a
+   * tab that never heard about it (PA-40). Separate from `onForgotten`
+   * because `terminate()` leaves the record behind — still resumable, still
+   * a 200 from `GET /api/sessions/:id` — so the WS push it drives is a
+   * different, milder error code than `forget()`'s `not_found`.
+   */
+  private readonly terminatedListeners = new Set<(id: string) => void>();
+
+  /** Subscribe to "a live session was just explicitly stopped". Returns an unsubscribe. */
+  onTerminated(listener: (id: string) => void): () => void {
+    this.terminatedListeners.add(listener);
+    return () => this.terminatedListeners.delete(listener);
+  }
+
+  private notifyTerminated(id: string): void {
+    for (const listener of this.terminatedListeners) {
+      try {
+        listener(id);
+      } catch (err) {
+        this.opts.logger?.warn({ err, id }, 'terminated listener threw');
+      }
+    }
+  }
+
+  /**
    * Working trees with a live session mid-turn right now.
    *
    * This is the run queue's whole notion of "occupied", and it is derived on
@@ -1459,7 +1489,13 @@ export class SessionManager {
   terminate(id: string): void {
     const session = this.live.get(id);
     if (session) {
-      if (session.isAlive()) session.terminate();
+      if (session.isAlive()) {
+        session.terminate();
+        // Fires unconditionally, not from the session's own `exit` event:
+        // this is specifically "someone just asked to stop it", which an
+        // agent finishing its own turn must not be confused with (PA-40).
+        this.notifyTerminated(id);
+      }
       return;
     }
     const row = this.opts.db.prepare('SELECT id FROM sessions WHERE id = ?').get(id);

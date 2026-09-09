@@ -307,6 +307,14 @@ export const ErrorCode = z.enum([
   'not_found',
   /** Known to the database, but its process belonged to a previous server. */
   'session_ended',
+  /**
+   * PA-40: a *different* tab/view just explicitly stopped this session
+   * (`SessionManager.terminate()`). Deliberately not `not_found` — the
+   * record survives and is still resumable, unlike a forgotten session — so
+   * a client can tell "this is gone" from "someone just closed the one you
+   * were looking at" and react differently if it ever needs to.
+   */
+  'terminated',
   'not_attached',
   'session_not_running',
   'rate_limited',

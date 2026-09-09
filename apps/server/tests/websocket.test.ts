@@ -589,4 +589,77 @@ describe('websocket terminal transport', () => {
     expect(error.sessionId).toBe(id);
     await waitFor(() => t.context.sessions.attachedCount(id) === 0);
   });
+
+  /**
+   * PA-40 round 2: the reporter's actual repro was not the sidebar's
+   * "Remove chat" — it was stopping a *running* session from somewhere else
+   * (the fleet view's card, the Active Sessions dialog, a Stop button on a
+   * different tab of the same session, ...), all of which reach
+   * `DELETE /api/sessions/:id` -> `SessionManager.terminate()`, a completely
+   * different method from `forget()` that only the previous round wired up.
+   * `terminate()` never removed the session's record and never notified
+   * anyone, so a tab attached elsewhere just sat there. `SessionManager`'s
+   * new `onTerminated` closes that gap the same way `onForgotten` already
+   * closes it for a full removal, but with the `terminated` code rather than
+   * `not_found` — the record survives a mere stop, unlike a forgotten one.
+   */
+  it('notifies and detaches an attached client when the session is stopped elsewhere', async () => {
+    const id = await newShellSession();
+    const client = await connect();
+
+    client.send({ type: 'attach', sessionId: id, afterSeq: 0 });
+    await client.next('attached');
+    expect(t.context.sessions.attachedCount(id)).toBe(1);
+
+    // Simulate a *different* tab/view stopping the still-running session —
+    // the fleet card's "X", not the sidebar's "Remove from list".
+    const res = await t.app.inject({
+      method: 'DELETE',
+      url: `/api/sessions/${id}`,
+      headers: { cookie: t.cookie },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const error = await client.next('error', (m) => m.code === 'terminated');
+    expect(error.sessionId).toBe(id);
+    await waitFor(() => t.context.sessions.attachedCount(id) === 0);
+
+    // Unlike `forget()`, the record survives — still resumable, still a 200.
+    const still = await t.app.inject({
+      method: 'GET',
+      url: `/api/sessions/${id}`,
+      headers: { cookie: t.cookie },
+    });
+    expect(still.statusCode).toBe(200);
+  });
+
+  /**
+   * The mirror image of the test above: a session's own tab must not close
+   * itself just because it is the one that clicked Stop. That distinction is
+   * made on the frontend (`AgentPage`/`TerminalPage`'s `stoppedHereRef`), not
+   * the server — `terminate()` fires `onTerminated` unconditionally, to
+   * every attachment including the one that requested the stop, because the
+   * server has no reliable way to know an HTTP request and a WS connection
+   * came from the same tab. This test only pins the server half: the
+   * `terminated` push still reaches an attachment that is still open after
+   * issuing its own stop, which is what makes the frontend-side suppression
+   * necessary in the first place.
+   */
+  it('still pushes `terminated` to the connection that requested the stop', async () => {
+    const id = await newShellSession();
+    const client = await connect();
+
+    client.send({ type: 'attach', sessionId: id, afterSeq: 0 });
+    await client.next('attached');
+
+    const res = await t.app.inject({
+      method: 'DELETE',
+      url: `/api/sessions/${id}`,
+      headers: { cookie: t.cookie },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const error = await client.next('error', (m) => m.code === 'terminated');
+    expect(error.sessionId).toBe(id);
+  });
 });
