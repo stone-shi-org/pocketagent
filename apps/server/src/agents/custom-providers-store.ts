@@ -1,8 +1,12 @@
 import crypto from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 import {
+  CUSTOM_PROVIDER_LABEL_PREFIX,
   DEEPSEEK_DEFAULTS,
+  POCKET_AGENT_LABEL_PREFIX,
   customClaudeProviderId,
+  customProviderLabelSlug,
+  isCustomClaudeProviderId,
   type CreateCustomClaudeProviderRequest,
   type CustomClaudeProviderKind,
   type CustomClaudeProviderSummary,
@@ -103,6 +107,7 @@ export class CustomClaudeProviderStore {
 
   create(req: CreateCustomClaudeProviderRequest): CustomClaudeProviderSummary {
     const key = this.requireKey();
+    this.assertNameNotReserved(req.name);
     const models = normalizeModels(req.models);
     const baseUrl = normalizeBaseUrl(req.baseUrl);
     const defaultModel = req.defaultModel.trim();
@@ -144,6 +149,7 @@ export class CustomClaudeProviderStore {
    */
   update(id: string, req: UpdateCustomClaudeProviderRequest): CustomClaudeProviderSummary {
     const existing = this.rowOrThrow(id);
+    if (req.name !== undefined) this.assertNameNotReserved(req.name);
     const rekeying = (req.apiKey ?? '').trim().length > 0;
     // Only demanded when something actually has to be encrypted. Without this,
     // an operator with no key set could not even turn `allowUnattended` off on
@@ -342,6 +348,53 @@ export class CustomClaudeProviderStore {
           `${SETTINGS_ENC_KEY_VAR}. Re-enter the key in Settings to repair it.`,
       );
       return null;
+    }
+  }
+
+  /**
+   * A custom provider's name doubles as the plain, unprefixed slug a Jira
+   * `agent:<slug>` label may name it by (`resolveLabelOverrides` in
+   * `webhooks/jira.ts`) — that fallback is only ever reached once every
+   * built-in coding agent id has already missed, so it can never *shadow*
+   * one, but a provider named the same thing as one would still be
+   * permanently unreachable by its own plain-name label, silently falling
+   * back to whatever the webhook's configured agent already was. That is
+   * exactly the confusing failure this guard exists to turn into an error at
+   * creation/rename time instead of a support ticket later. Same reasoning
+   * for the two reserved label prefixes: a name that slugs to `pocket-...` or
+   * `custom-...` gets diverted into the *other* namespace's branch before the
+   * plain-name fallback ever runs, so it could never be reached by its own
+   * name either.
+   */
+  private assertNameNotReserved(name: string): void {
+    const slug = customProviderLabelSlug(name);
+    if (!slug) return;
+
+    if (slug.startsWith(POCKET_AGENT_LABEL_PREFIX) || slug.startsWith(CUSTOM_PROVIDER_LABEL_PREFIX)) {
+      throw new CustomClaudeProviderError(
+        `Provider name cannot start with "${POCKET_AGENT_LABEL_PREFIX}" or ` +
+          `"${CUSTOM_PROVIDER_LABEL_PREFIX}" (as a label slug) — that would make it unreachable by ` +
+          'its own name in a Jira `agent:` label.',
+        'invalid',
+        400,
+      );
+    }
+
+    // `registry.list()` at this point is every built-in coding agent plus
+    // every *other* already-registered custom provider; only the former is
+    // reserved. Filtering the latter out (rather than the still-simpler "any
+    // id") is what lets renaming a provider to its own current name pass.
+    const codingAgentIds = this.registry
+      .list()
+      .map((a) => a.id)
+      .filter((id) => !isCustomClaudeProviderId(id));
+    if (codingAgentIds.includes(slug)) {
+      throw new CustomClaudeProviderError(
+        `Provider name conflicts with the built-in agent "${slug}". Choose a name whose slug ` +
+          '(lowercase, hyphenated) does not match a coding agent id.',
+        'invalid',
+        400,
+      );
     }
   }
 

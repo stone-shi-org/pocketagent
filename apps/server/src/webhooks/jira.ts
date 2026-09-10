@@ -359,8 +359,11 @@ export function resolveComponentBranchName(component: string | null | undefined)
  * Supported label formats:
  * - Agent: `agent:<agent-id>` or `agent-<agent-id>` (e.g. `agent:claude`, `agent:agy`, `agent-codex`)
  * - Pocket Agent: `agent:pocket-<slug-of-agent-name>` (e.g. `agent:pocket-release-notes`)
- * - Custom Claude provider: `agent:custom-<slug-of-provider-name>` (e.g. `agent:custom-claude-code-deepseek`
- *   for a provider named "Claude Code (DeepSeek)")
+ * - Custom Claude provider: a plain slug of the provider's name
+ *   (e.g. `agent:claude-code-deepseek` for a provider named "Claude Code
+ *   (DeepSeek)"), or the same slug prefixed with `custom-`
+ *   (`agent:custom-claude-code-deepseek`) if it would otherwise collide with
+ *   a coding agent's literal id.
  * - Model: `model:<model-name>` or `model-<model-name>` (e.g. `model:Sonnet`, `model:opus`, `model:pro`, `model-flash`)
  *
  * If multiple matching labels are present, the last non-empty one takes precedence.
@@ -375,12 +378,22 @@ export function resolveComponentBranchName(component: string | null | undefined)
  * (`assignees`, `labels`, `issueTypes` all compare names, because a webhook
  * filter has no Jira credentials to resolve a name to an id).
  *
- * The custom-provider form exists for the identical reason: a provider's wire
+ * The custom-provider form originally *required* the `custom-` prefix, for
+ * two reasons that still justify keeping it as an option: a provider's wire
  * id (`custom-claude:<slug>-<hex>`) both contains a `:` — which the agent
  * regex below cannot capture — and ends in a random hex suffix nobody can
- * type. `CUSTOM_PROVIDER_LABEL_PREFIX` is deliberately distinct from
- * `POCKET_AGENT_LABEL_PREFIX` so the two namespaces cannot collide on a
- * shared slug, the same way their wire ids already cannot.
+ * type, so the slug has to be resolved against the provider's *name* instead,
+ * and a mandatory prefix made that namespace unambiguous by construction.
+ * In practice the prefix bought disambiguation nobody needed twice over: a
+ * provider's own display name is already required (see
+ * `CustomClaudeProviderStore.assertNameNotReserved`) not to collide with a
+ * coding agent id or with either reserved prefix, so the plain-name fallback
+ * below is checked only after every literal coding agent id and the
+ * `pocket-`/`custom-` namespaces have already missed — it can fill in a slug
+ * nothing else claimed, but it can never shadow one that something else does.
+ * `CUSTOM_PROVIDER_LABEL_PREFIX` remains available for anyone who typed it
+ * into an existing label or filter before this change, or who would rather be
+ * explicit.
  *
  * An unrecognised agent label is **ignored**, leaving the webhook's configured
  * agent in place, rather than failing the delivery. That is the pre-existing
@@ -547,7 +560,26 @@ export function resolveLabelOverrides(
           result.agent = match.id;
         }
       } else if (!availableAgentIds || availableAgentIds.includes(candidate)) {
+        // A literal coding-agent id always wins over a custom provider's
+        // plain name below. `CustomClaudeProviderStore` refuses to create a
+        // provider whose slug collides with one of these in the first place,
+        // but this ordering is the actual tie-break, and it is what keeps the
+        // `custom-` prefix branch above optional rather than load-bearing.
         result.agent = candidate;
+      } else {
+        // Unprefixed fallback: match a custom Claude provider by a plain slug
+        // of its name, so `agent:claude-code-local` works without also
+        // requiring `agent:custom-claude-code-local`. Only reached once the
+        // Pocket Agent prefix, the `custom-` prefix, and every literal coding
+        // agent id have already missed, so this can never shadow a coding
+        // agent's id — only ever fill in where nothing else claimed the
+        // label.
+        const match = (customProviders ?? []).find(
+          (p) => customProviderLabelSlug(p.name) === candidate,
+        );
+        if (match) {
+          result.agent = match.id;
+        }
       }
     }
 

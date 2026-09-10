@@ -276,6 +276,38 @@ describe('custom Claude provider routes', () => {
     expect((await post(valid({ models: [] }))).statusCode).toBe(400);
   });
 
+  it('refuses a name whose slug collides with a built-in coding agent id', async () => {
+    // `resolveLabelOverrides` matches a custom provider by a plain slug of its
+    // name (e.g. `agent:claude-code-local`) once no literal coding agent id
+    // claimed the label first — so a provider named exactly like one would be
+    // permanently unreachable by its own name, silently deferring to the
+    // built-in agent every time. Caught here instead of surfacing later as
+    // "my webhook label isn't picking my provider".
+    for (const name of ['agy', 'Agy', 'codex', 'claude']) {
+      const res = await post(valid({ name }));
+      expect(res.statusCode, name).toBe(400);
+    }
+  });
+
+  it('refuses a name that would slug into the pocket-/custom- label namespaces', async () => {
+    for (const name of ['Pocket Release Notes', 'Custom Gateway']) {
+      const res = await post(valid({ name }));
+      expect(res.statusCode, name).toBe(400);
+    }
+  });
+
+  it('lets a rename keep its own current name', async () => {
+    const id = await create({ name: 'House Gateway' });
+    const res = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/custom-claude-providers/${encodeURIComponent(id)}`,
+      headers: authHeaders(ctx.cookie),
+      payload: { name: 'House Gateway' },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+  });
+
+
   it('404s an unknown id on both PATCH and DELETE', async () => {
     const missing = customClaudeProviderId('nope-00000000');
     for (const method of ['PATCH', 'DELETE'] as const) {

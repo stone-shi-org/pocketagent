@@ -427,6 +427,66 @@ describe('resolveLabelOverrides', () => {
     expect(resolveLabelOverrides(['agent:custom-claude-code-deepseek'], ['claude'])).toEqual({});
   });
 
+  it('resolves a custom Claude provider by its plain, unprefixed name (TES-7)', () => {
+    // The bug this covers: a webhook configured with `agent: agy` and a Jira
+    // ticket labelled `agent:claude-code-local` — the provider's plain
+    // display name, no `custom-` prefix — used to be silently ignored
+    // (unrecognised literal agent id), leaving the delivery on `agy`. It must
+    // now resolve straight to the provider.
+    const customProviders = [{ id: 'custom-claude:omniroute', name: 'claude-code-local' }];
+    expect(
+      resolveLabelOverrides(
+        ['agent:claude-code-local'],
+        ['claude', 'agy', 'codex', 'opencode', 'pi'],
+        undefined,
+        undefined,
+        undefined,
+        customProviders,
+      ),
+    ).toEqual({ agent: 'custom-claude:omniroute' });
+  });
+
+  it('a literal coding agent id always wins over a same-named custom provider', () => {
+    // Cannot happen through the API today (CustomClaudeProviderStore refuses
+    // to create a provider whose name collides with a coding agent id), but
+    // the resolution order is what actually enforces "never shadow", so it is
+    // asserted here independent of that guard.
+    const customProviders = [{ id: 'custom-claude:agy-imposter', name: 'agy' }];
+    expect(
+      resolveLabelOverrides(['agent:agy'], ['claude', 'agy'], undefined, undefined, undefined, customProviders),
+    ).toEqual({ agent: 'agy' });
+  });
+
+  it('still requires the explicit custom- prefix to take priority over a plain-name match', () => {
+    // Two providers, one of whose name happens to be a substring/slug that a
+    // plain label alone would be ambiguous about — the `custom-` prefix form
+    // stays available so an operator can always be explicit.
+    const customProviders = [
+      { id: 'custom-claude:claude-code-deepseek-a1b2', name: 'Claude Code (DeepSeek)' },
+      { id: 'custom-claude:local-9f3e', name: 'claude-code-local' },
+    ];
+    expect(
+      resolveLabelOverrides(
+        ['agent:custom-claude-code-deepseek'],
+        ['claude'],
+        undefined,
+        undefined,
+        undefined,
+        customProviders,
+      ),
+    ).toEqual({ agent: 'custom-claude:claude-code-deepseek-a1b2' });
+    expect(
+      resolveLabelOverrides(
+        ['agent:claude-code-local'],
+        ['claude'],
+        undefined,
+        undefined,
+        undefined,
+        customProviders,
+      ),
+    ).toEqual({ agent: 'custom-claude:local-9f3e' });
+  });
+
   it('takes the last matching label when multiple agent/model labels are present', () => {
     const available = ['claude', 'agy', 'codex'];
     expect(
