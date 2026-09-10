@@ -52,7 +52,7 @@ or use private remote-control APIs. It launches `claude` exactly the way you wou
 
 - **Linux** (this is Linux-first; macOS likely works, Windows does not)
 - **Node.js 22+**
-- **pnpm 10+**
+- **pnpm 12+**
 - A C++ toolchain for the two native modules (`node-pty`, `better-sqlite3`):
   `sudo apt install build-essential python3` on Debian/Ubuntu
 - Whatever agent CLI you want to drive, already installed and already logged in
@@ -220,7 +220,7 @@ built against.
 # Debian/Ubuntu. tmux is optional but see Process backends.
 sudo apt install -y build-essential python3 git tmux
 # Node 22+ — nvm, NodeSource, or your distribution's package
-npm i -g pnpm@10
+npm i -g pnpm@12
 
 git clone https://github.com/stone-shi/pocketagent && cd pocketagent
 pnpm install          # compiles node-pty and better-sqlite3 here

@@ -6,7 +6,7 @@
   "engines": {
     "node": ">=22"
   },
-  "packageManager": "pnpm@10.34.5",
+  "packageManager": "pnpm@12.3.4",
   "scripts": {
     "dev": "pnpm protocol && concurrently -n server,web -c cyan,magenta \"pnpm -F @pocketagent/server dev\" \"pnpm -F @pocketagent/web dev\"",
     "build": "pnpm -F @pocketagent/protocol build && pnpm -F @pocketagent/server build && pnpm -F @pocketagent/web build",

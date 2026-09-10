@@ -2,7 +2,11 @@ packages:
   - 'apps/*'
   - 'packages/*'
 
-onlyBuiltDependencies:
-  - node-pty
-  - better-sqlite3
-  - esbuild
+# pnpm 12 (via pnpm 11) replaced onlyBuiltDependencies/neverBuiltDependencies/
+# ignoredBuiltDependencies with one allowBuilds map. These three are still the
+# native modules this repo depends on compiling from source on install (see
+# README's "compiles node-pty and better-sqlite3 from source" note).
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+  node-pty: true
