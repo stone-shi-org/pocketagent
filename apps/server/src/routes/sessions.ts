@@ -120,7 +120,10 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         } else throw err;
       }
     }
-    if (parsed.data.conversationId) sessions.hideChat(parsed.data.conversationId);
+    if (parsed.data.conversationId) {
+      sessions.hideChat(parsed.data.conversationId);
+      sessions.forgetByConversationId(parsed.data.conversationId);
+    }
 
     return reply.send({ ok: true });
   });
@@ -128,21 +131,14 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
   /**
    * Forget every finished chat in a directory. Running ones are left alone.
    *
-   * Takes a real directory only. The Shell category has its own route
-   * (`/api/shells/clear-finished`) because it has no directory to name — see
-   * PA-25 and `ProjectService.shells`; a shell session's own `cwd` column is
-   * the pane's real directory, so clearing "every finished shell" was never
-   * expressible as a cwd here in the first place.
+   * Takes a real directory or a deleted worktree directory known to the server.
+   * The Shell category has its own route (`/api/shells/clear-finished`) because
+   * it has no directory to name — see PA-25 and `ProjectService.shells`; a shell
+   * session's own `cwd` column is the pane's real directory, so clearing "every
+   * finished shell" was never expressible as a cwd here in the first place.
    */
   app.post('/api/projects/clear-finished', async (request, reply) => {
-    const parsed = ProjectRequest.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({
-        error: { code: 'bad_request', message: parsed.error.issues[0]?.message ?? 'Invalid body.' },
-      });
-    }
-
-    const cwd = await resolveWorkspaceCwdOrReply(workspaces, parsed.data.cwd, reply);
+    const cwd = await resolveProjectCwd(request.body, reply);
     if (cwd === null) return reply;
 
     let removedSessions = sessions.forgetFinishedIn(cwd);
@@ -158,9 +154,19 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         removedSessions += sessions.forgetFinishedIn(p.cwd);
       }
       for (const chat of p.chats) {
-        if (chat.live || !chat.conversationId) continue;
-        sessions.hideChat(chat.conversationId);
-        removedConversations++;
+        if (chat.live) continue;
+        if (chat.conversationId) {
+          sessions.hideChat(chat.conversationId);
+          sessions.forgetByConversationId(chat.conversationId);
+          removedConversations++;
+        } else if (chat.sessionId) {
+          try {
+            sessions.forget(chat.sessionId);
+          } catch {
+            /* ignore if session was already removed */
+          }
+          removedConversations++;
+        }
       }
     }
     return reply.send({ ok: true, removedSessions, removedConversations });

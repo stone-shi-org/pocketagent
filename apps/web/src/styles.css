@@ -2375,6 +2375,13 @@ button.chat-rate-limit-badge {
   border-left: 1px solid var(--border);
 }
 
+.deleted-worktrees-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .deleted-worktrees-toggle {
   opacity: 0.75;
 }

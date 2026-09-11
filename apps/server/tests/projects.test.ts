@@ -931,6 +931,36 @@ describe('ProjectService', () => {
       expect(main?.worktrees[1]?.name).toBe('a-deleted');
       expect(main?.worktrees[1]?.isDeleted).toBe(true);
     });
+
+    it('excludes sessions whose agentSessionId or sessionId was hidden', async () => {
+      const deletedWorktreePath = path.join(ws.project, '.worktrees', 'deleted-hidden');
+      hideChat(db, 'hidden-conv-id');
+      hideChat(db, 'hidden-sess-id');
+
+      const projects = await service.list([
+        makeSession({ id: 'main-sess', cwd: ws.project }),
+        makeSession({
+          id: 'del-sess-1',
+          cwd: deletedWorktreePath,
+          agentSessionId: 'hidden-conv-id',
+          title: 'Hidden conversation',
+        }),
+        makeSession({
+          id: 'hidden-sess-id',
+          cwd: deletedWorktreePath,
+          title: 'Hidden session id',
+        }),
+        makeSession({
+          id: 'visible-sess',
+          cwd: deletedWorktreePath,
+          title: 'Visible chat',
+        }),
+      ]);
+
+      const main = projects.find((p) => p.cwd === ws.project);
+      expect(main?.worktrees).toHaveLength(1);
+      expect(main?.worktrees[0]?.chats.map((c) => c.title)).toEqual(['Visible chat']);
+    });
   });
 
   it('drops a directory once its folder is no longer a project', async () => {
@@ -1425,6 +1455,53 @@ describe('removing and hiding over HTTP', () => {
     });
     expect(unhide.statusCode).toBe(200);
     expect(await chatsIn(worktreeDir)).not.toHaveLength(0);
+  });
+
+  it('clears finished chats in a deleted worktree directory', async () => {
+    const worktreeDir = path.join(t.projectDir, 'worktree-clear');
+    fs.mkdirSync(worktreeDir);
+    const id = await startSession(worktreeDir);
+    await t.app.inject({ method: 'DELETE', url: `/api/sessions/${id}`, headers: headers() });
+    await waitFor(async () => !(await chatsIn(worktreeDir)).some((c) => c.live));
+    fs.rmSync(worktreeDir, { recursive: true, force: true });
+
+    const clear = await t.app.inject({
+      method: 'POST',
+      url: '/api/projects/clear-finished',
+      headers: headers(),
+      payload: { cwd: worktreeDir },
+    });
+    expect(clear.statusCode).toBe(200);
+    expect(await chatsIn(worktreeDir)).toHaveLength(0);
+  });
+
+  it('removes all sessions matching a conversationId when removed', async () => {
+    const worktreeDir = path.join(t.projectDir, 'worktree-multi-sess');
+    const convId = 'multi-sess-conv-1';
+    t.db
+      .prepare(
+        `INSERT INTO sessions
+           (id, title, agent, command, args_json, cwd, env_keys_json, status, pid,
+            cols, rows, created_at, started_at, transport, agent_session_id)
+         VALUES
+           ('sess-a', 'Session A', 'claude', '', '[]', ?, '[]', 'finished', NULL, 0, 0, 1000, 1000, 'structured', ?),
+           ('sess-b', 'Session B', 'claude', '', '[]', ?, '[]', 'finished', NULL, 0, 0, 2000, 2000, 'structured', ?)`,
+      )
+      .run(worktreeDir, convId, worktreeDir, convId);
+
+    const remove = await t.app.inject({
+      method: 'POST',
+      url: '/api/chats/remove',
+      headers: headers(),
+      payload: { conversationId: convId, sessionId: 'sess-b' },
+    });
+    expect(remove.statusCode).toBe(200);
+
+    const rows = t.db
+      .prepare('SELECT id FROM sessions WHERE agent_session_id = ?')
+      .all(convId);
+    expect(rows).toHaveLength(0);
+    expect(await chatsIn(worktreeDir)).toHaveLength(0);
   });
 
   it('will not hide a directory outside the workspace roots', async () => {

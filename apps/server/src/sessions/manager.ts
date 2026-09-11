@@ -1438,6 +1438,24 @@ export class SessionManager {
   }
 
   /**
+   * Forget every finished session that belongs to a specific conversation id
+   * (e.g. after hiding or deleting the conversation).
+   */
+  forgetByConversationId(conversationId: string): number {
+    for (const [id, session] of this.live) {
+      if (session.agentSessionId === conversationId && !session.isAlive()) {
+        this.live.delete(id);
+      }
+    }
+    return this.opts.db
+      .prepare(
+        `DELETE FROM sessions
+          WHERE agent_session_id = ? AND status NOT IN ('starting', 'running')`,
+      )
+      .run(conversationId).changes;
+  }
+
+  /**
    * True if any session, of any transport or backend, is currently alive
    * with this exact `cwd`. Used to refuse deleting a worktree out from under
    * a running process — the same "never disturb a running session" posture

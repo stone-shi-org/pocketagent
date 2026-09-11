@@ -15,6 +15,7 @@ import { filterProjects } from '../agent/search.js';
 import { formatCountdown } from '../agent/cron-format.js';
 import { formatRelative } from './StatusBadge.js';
 import { DeleteWorktreeFlow } from './DeleteWorktreeFlow.js';
+import { ConfirmDialog } from './ConfirmDialog.js';
 
 const REFRESH_MS = 5000;
 
@@ -685,6 +686,8 @@ function ProjectSection({
   const [limitMenuFor, setLimitMenuFor] = useState<string | null>(null);
   const [continuationFor, setContinuationFor] = useState<string | null>(null);
   const [continuationError, setContinuationError] = useState<string | null>(null);
+  const [confirmingDeleteAllDeleted, setConfirmingDeleteAllDeleted] = useState(false);
+  const [isDeletingAll, setIsDeletingAll] = useState(false);
   const limitMenuRef = useRef<HTMLSpanElement>(null);
   // A search that hid a folder's other chats should not also hide the ones it
   // matched, so collapsing is ignored while searching.
@@ -1253,25 +1256,36 @@ function ProjectSection({
 
               {deletedWorktrees.length > 0 && (
                 <div className="deleted-worktrees-group">
-                  <button
-                    type="button"
-                    className="project-name deleted-worktrees-toggle"
-                    onClick={() => toggleDeleted(project.cwd)}
-                    aria-expanded={isDeletedExpanded}
-                    title="Deleted worktrees"
-                  >
-                    <span className="project-icon">
-                      <Icon name="folder" className="folder" />
-                    </span>
-                    <span className="project-label">Deleted worktrees</span>
-                    <Icon
-                      name="chevron-down"
-                      className={`project-caret${isDeletedExpanded ? '' : ' closed'}`}
-                    />
-                    {!isDeletedExpanded && (
-                      <span className="project-count">{deletedWorktrees.length}</span>
-                    )}
-                  </button>
+                  <div className="deleted-worktrees-head project-head">
+                    <button
+                      type="button"
+                      className="project-name deleted-worktrees-toggle"
+                      onClick={() => toggleDeleted(project.cwd)}
+                      aria-expanded={isDeletedExpanded}
+                      title="Deleted worktrees"
+                    >
+                      <span className="project-icon">
+                        <Icon name="folder" className="folder" />
+                      </span>
+                      <span className="project-label">Deleted worktrees</span>
+                      <Icon
+                        name="chevron-down"
+                        className={`project-caret${isDeletedExpanded ? '' : ' closed'}`}
+                      />
+                      {!isDeletedExpanded && (
+                        <span className="project-count">{deletedWorktrees.length}</span>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      className="round-btn plain deleted-worktrees-delete-all"
+                      onClick={() => setConfirmingDeleteAllDeleted(true)}
+                      title="Delete all in deleted worktrees"
+                      aria-label="Delete all in deleted worktrees"
+                    >
+                      <Icon name="trash" size={16} />
+                    </button>
+                  </div>
                   {isDeletedExpanded &&
                     deletedWorktrees.map((worktree) => (
                       <ProjectSection
@@ -1301,6 +1315,31 @@ function ProjectSection({
                         {...(onOpenWebhook ? { onOpenWebhook } : {})}
                       />
                     ))}
+                  {confirmingDeleteAllDeleted && (
+                    <ConfirmDialog
+                      title="Delete all in deleted worktrees?"
+                      body="This will permanently clear all finished conversations from every deleted worktree under this project."
+                      confirmLabel="Delete All"
+                      cancelLabel="Cancel"
+                      danger
+                      busy={isDeletingAll}
+                      onConfirm={async () => {
+                        setIsDeletingAll(true);
+                        try {
+                          for (const wt of deletedWorktrees) {
+                            await api.clearFinished(wt.cwd);
+                          }
+                        } catch (err) {
+                          onApiError(err);
+                        } finally {
+                          setIsDeletingAll(false);
+                          setConfirmingDeleteAllDeleted(false);
+                          await state.refresh();
+                        }
+                      }}
+                      onCancel={() => setConfirmingDeleteAllDeleted(false)}
+                    />
+                  )}
                 </div>
               )}
             </>

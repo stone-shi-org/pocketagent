@@ -290,6 +290,12 @@ export class ProjectService {
       // what stops it appearing twice, and is why a directory whose only
       // activity was a shell no longer gets a project card of its own.
       if (isShellSession(session)) continue;
+      if (
+        (session.agentSessionId && removedChats.has(session.agentSessionId)) ||
+        removedChats.has(session.id)
+      ) {
+        continue;
+      }
       const liveConversation = session.agentSessionId
         ? conversationById.get(session.agentSessionId)
         : undefined;
