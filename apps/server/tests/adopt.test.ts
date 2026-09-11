@@ -241,6 +241,7 @@ describeTmux('adopting a tmux session on a foreign server', () => {
     const info = created.json();
 
     expect(info.adopted).toBe(true);
+    expect(info.adoptSessionName).toBe('shared');
     // The session's size wins over whatever the browser asked for; adopting
     // must not resize a terminal the user is sitting at. 31, not 30: nobody
     // else was attached, so this falls back to the window's content area

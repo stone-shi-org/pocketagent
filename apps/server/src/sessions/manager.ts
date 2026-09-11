@@ -111,6 +111,8 @@ export interface CreateSessionInput {
     cols: number;
     rows: number;
     label: string;
+    /** The tmux session name being adopted. */
+    sessionName?: string;
     /**
      * The pane's stable `AdoptableTarget.id`, persisted onto the session row.
      * Distinct from using it to resolve the target (that already happened in
@@ -845,6 +847,7 @@ export class SessionManager {
         outputBufferBytes: this.opts.outputBufferBytes,
         adopted: input.adopt !== undefined,
         adoptTargetId: input.adopt?.targetId ?? null,
+        adoptSessionName: input.adopt?.sessionName ?? null,
         skipPermissions,
       },
       // Adoption always runs the attach client as our own child: the thing we
@@ -1667,6 +1670,11 @@ export class SessionManager {
       durable: session.survivesServerRestart,
       adopted: session.transport === 'terminal' && session.spec.adopted === true,
       adoptTargetId: session.transport === 'terminal' ? session.spec.adoptTargetId ?? null : null,
+      adoptSessionName:
+        session.transport === 'terminal'
+          ? session.spec.adoptSessionName ??
+            (session.spec.args ? extractSessionNameFromArgs(session.spec.args) : null)
+          : null,
       // `spec.skipPermissions` is the honest record of what this session was
       // created with; a structured session can additionally have the global
       // switch applied to it live after the fact (see
@@ -1724,6 +1732,7 @@ export class SessionManager {
       // session classified as a shell chat for as long as the row exists.
       adopted: row.adopt_target_id !== null,
       adoptTargetId: row.adopt_target_id,
+      adoptSessionName: row.adopt_target_id ? extractSessionNameFromArgsJson(row.args_json) : null,
       skipPermissionsEnabled: row.skip_permissions === 1,
       providerDisclosure: this.opts.agents.get(row.agent)?.providerDisclosure ?? null,
     };
@@ -1963,3 +1972,20 @@ function safeParseArgs(json: string): string[] {
     return [];
   }
 }
+
+function extractSessionNameFromArgs(args: string[]): string | null {
+  const tIdx = args.indexOf('-t');
+  if (tIdx !== -1) {
+    const target = args[tIdx + 1];
+    if (typeof target === 'string') {
+      return target.startsWith('=') ? target.slice(1) : target;
+    }
+  }
+  return null;
+}
+
+function extractSessionNameFromArgsJson(argsJson: string): string | null {
+  return extractSessionNameFromArgs(safeParseArgs(argsJson));
+}
+
+

@@ -2,6 +2,11 @@ import { useState } from 'react';
 import type { ShellSessionSummary } from '@pocketagent/protocol';
 import { Icon } from './Icon.js';
 import type { OpenChatOptions, ProjectsState } from './ProjectList.js';
+import {
+  extractTmuxSessionName,
+  isMissingAdoptTargetError,
+  RecreateShellDialog,
+} from './RecreateShellDialog.js';
 
 interface Props {
   state: ProjectsState;
@@ -47,7 +52,24 @@ export function ShellSection({
   search = '',
 }: Props): JSX.Element | null {
   const [collapsed, setCollapsed] = useState(false);
+  const [recreatePrompt, setRecreatePrompt] = useState<{
+    shell: ShellSessionSummary;
+    sessionName: string;
+  } | null>(null);
   const { shells } = state;
+
+  const handleReattach = async (shell: ShellSessionSummary) => {
+    try {
+      await state.reattachChat(shell);
+    } catch (err) {
+      if (isMissingAdoptTargetError(err)) {
+        setRecreatePrompt({
+          shell,
+          sessionName: extractTmuxSessionName(shell),
+        });
+      }
+    }
+  };
 
   const needle = search.trim().toLowerCase();
   const searching = needle.length > 0;
@@ -161,7 +183,7 @@ export function ShellSection({
               <button
                 type="button"
                 className="chat-remove"
-                onClick={() => void state.reattachChat(shell)}
+                onClick={() => void handleReattach(shell)}
                 aria-label={`Re-attach ${shell.title}`}
                 title="Re-attach to this tmux pane"
               >
@@ -182,6 +204,23 @@ export function ShellSection({
             )}
           </div>
         ))}
+
+      {recreatePrompt && (
+        <RecreateShellDialog
+          sessionName={recreatePrompt.sessionName}
+          cwd={recreatePrompt.shell.cwd}
+          cwdLabel={recreatePrompt.shell.cwdLabel}
+          onClose={() => setRecreatePrompt(null)}
+          onConfirm={async () => {
+            await state.recreateAndAttachChat(
+              recreatePrompt.shell,
+              recreatePrompt.sessionName,
+              recreatePrompt.shell.cwd,
+            );
+            setRecreatePrompt(null);
+          }}
+        />
+      )}
     </div>
   );
 }

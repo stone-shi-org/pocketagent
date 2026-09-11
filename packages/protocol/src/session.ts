@@ -88,6 +88,11 @@ export const SessionInfo = z.object({
    */
   adoptTargetId: z.string().nullable(),
   /**
+   * The tmux session name behind an adopted session, if known. Used to prompt
+   * for recreation when re-attaching after a server/tmux restart.
+   */
+  adoptSessionName: z.string().nullable().optional(),
+  /**
    * True when this session was started with approvals bypassed. Surfaced so
    * the UI can show it persistently while the session runs — the opt-in must
    * stay visible, not just be a fire-and-forget checkbox at creation time.
@@ -398,6 +403,8 @@ export const ChatSummary = z.object({
    * /api/sessions` needs to resolve the same pane again.
    */
   adoptTargetId: z.string().nullable(),
+  /** The tmux session name behind an adopted session, if known. */
+  adoptSessionName: z.string().nullable().optional(),
   /**
    * Set when this chat was started by a scheduled job, so the row can carry a
    * clock badge instead of reading as something a human began.

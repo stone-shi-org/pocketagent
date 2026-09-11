@@ -578,6 +578,7 @@ function chatFromSession(
     directoryBusy: false,
     busySince: session.busySince,
     adoptTargetId: session.adoptTargetId,
+    adoptSessionName: session.adoptSessionName ?? null,
     rateLimit: session.rateLimit,
   };
 }

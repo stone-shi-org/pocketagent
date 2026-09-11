@@ -16,6 +16,7 @@ import { formatCountdown } from '../agent/cron-format.js';
 import { formatRelative } from './StatusBadge.js';
 import { DeleteWorktreeFlow } from './DeleteWorktreeFlow.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
+import { isMissingAdoptTargetError } from './RecreateShellDialog.js';
 
 const REFRESH_MS = 5000;
 
@@ -122,6 +123,7 @@ export interface ProjectsState {
   removeChat: (chat: ChatSummary) => Promise<void>;
   detachChat: (chat: ChatSummary) => Promise<void>;
   reattachChat: (chat: ChatSummary) => Promise<void>;
+  recreateAndAttachChat: (chat: ChatSummary, sessionName: string, cwd: string) => Promise<void>;
   newTmuxSession: (project: ProjectInfo) => Promise<void>;
   clearFinished: (project: ProjectInfo) => Promise<void>;
   /** The Shell category's counterpart to `clearFinished`. Takes no directory. */
@@ -400,8 +402,53 @@ export function useProjects(
           onOpen(created.id);
         }
       } catch (err) {
+        if (isMissingAdoptTargetError(err)) {
+          throw err;
+        }
         onApiError(err);
         setError(err instanceof ApiError ? err.message : 'Could not re-attach to that tmux session.');
+      } finally {
+        await refresh();
+      }
+    },
+    [onApiError, onOpen, onReplaceSession, refresh],
+  );
+
+  /**
+   * Recreate a missing tmux session and attach to it, replacing the old
+   * dead session row in place (PA-48).
+   */
+  const recreateAndAttachChat = useCallback(
+    async (chat: ChatSummary, sessionName: string, cwd: string) => {
+      try {
+        let target = (await api.listAdoptable(true)).targets.find((t) => t.sessionName === sessionName);
+        if (!target) {
+          try {
+            target = await api.createAdoptableSession(sessionName, cwd);
+          } catch (err) {
+            if (err instanceof ApiError && err.status === 409) {
+              target = (await api.listAdoptable(true)).targets.find((t) => t.sessionName === sessionName);
+            }
+            if (!target) throw err;
+          }
+        }
+        const created = await api.createSession({
+          agent: 'shell',
+          cwd: target.cwd,
+          cols: target.cols,
+          rows: target.rows,
+          transport: 'terminal',
+          adoptTargetId: target.id,
+        });
+        if (onReplaceSession && chat.sessionId) {
+          onReplaceSession(chat.sessionId, created.id);
+        } else {
+          onOpen(created.id);
+        }
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not recreate tmux session.');
+        throw err;
       } finally {
         await refresh();
       }
@@ -480,6 +527,7 @@ export function useProjects(
     removeChat,
     detachChat,
     reattachChat,
+    recreateAndAttachChat,
     newTmuxSession,
     clearFinished,
     clearFinishedShells,
