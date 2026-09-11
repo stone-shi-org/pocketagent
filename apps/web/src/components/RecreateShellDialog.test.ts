@@ -63,6 +63,11 @@ describe('isMissingAdoptTargetError', () => {
     expect(isMissingAdoptTargetError(err)).toBe(true);
   });
 
+  it('detects adoption_disabled error code as missing target', () => {
+    const err = new ApiError('Adopting existing tmux sessions is not enabled on this server.', 400, 'adoption_disabled');
+    expect(isMissingAdoptTargetError(err)).toBe(true);
+  });
+
   it('rejects other ApiError codes', () => {
     const err = new ApiError('Forbidden', 403, 'forbidden');
     expect(isMissingAdoptTargetError(err)).toBe(false);
