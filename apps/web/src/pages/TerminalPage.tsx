@@ -12,6 +12,11 @@ import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
 import { Icon } from '../components/Icon.js';
 import { notifyIdle, ensureNotificationPermission } from '../agent/notifications.js';
 import { getTakeOverSizePref, setTakeOverSizePref } from '../agent/adopted-size-prefs.js';
+import {
+  extractTmuxSessionName,
+  isMissingAdoptTargetError,
+  RecreateShellDialog,
+} from '../components/RecreateShellDialog.js';
 
 interface Props {
   sessionId: string;
@@ -102,6 +107,11 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
   const [confirmingStop, setConfirmingStop] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [reattaching, setReattaching] = useState(false);
+  const [recreatePrompt, setRecreatePrompt] = useState<{
+    sessionName: string;
+    cwd: string;
+    cwdLabel: string;
+  } | null>(null);
 
   const ctrlActiveRef = useRef(false);
   ctrlActiveRef.current = ctrlActive;
@@ -466,11 +476,47 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
       });
       onResumed(created.id);
     } catch (err) {
-      onApiError(err);
-      setNotice(err instanceof ApiError ? err.message : 'Could not re-attach to that tmux session.');
+      if (isMissingAdoptTargetError(err)) {
+        setRecreatePrompt({
+          sessionName: extractTmuxSessionName(session),
+          cwd: session.cwd,
+          cwdLabel: session.workspaceLabel,
+        });
+      } else {
+        onApiError(err);
+        setNotice(err instanceof ApiError ? err.message : 'Could not re-attach to that tmux session.');
+      }
+    } finally {
       setReattaching(false);
     }
   }, [session, onApiError, onResumed]);
+
+  const recreateAndAttach = useCallback(async () => {
+    if (!session || !recreatePrompt) return;
+    const sessionName = recreatePrompt.sessionName;
+    const cwd = recreatePrompt.cwd;
+    let target = (await api.listAdoptable(true)).targets.find((t) => t.sessionName === sessionName);
+    if (!target) {
+      try {
+        target = await api.createAdoptableSession(sessionName, cwd);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) {
+          target = (await api.listAdoptable(true)).targets.find((t) => t.sessionName === sessionName);
+        }
+        if (!target) throw err;
+      }
+    }
+    const created = await api.createSession({
+      agent: 'shell',
+      cwd: target.cwd,
+      cols: target.cols,
+      rows: target.rows,
+      transport: 'terminal',
+      adoptTargetId: target.id,
+    });
+    setRecreatePrompt(null);
+    onResumed(created.id);
+  }, [session, recreatePrompt, onResumed]);
 
   const alive = !isTerminalStatus(status);
   const inputDisabled = !alive || connection !== 'connected';
@@ -596,6 +642,16 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
           busy={stopping}
           onConfirm={() => void terminate()}
           onCancel={() => setConfirmingStop(false)}
+        />
+      )}
+
+      {recreatePrompt && (
+        <RecreateShellDialog
+          sessionName={recreatePrompt.sessionName}
+          cwd={recreatePrompt.cwd}
+          cwdLabel={recreatePrompt.cwdLabel}
+          onClose={() => setRecreatePrompt(null)}
+          onConfirm={recreateAndAttach}
         />
       )}
     </div>
