@@ -29,7 +29,11 @@ export function extractTmuxSessionName(chat: {
  */
 export function isMissingAdoptTargetError(err: unknown): boolean {
   if (err instanceof ApiError) {
-    return err.status === 404 || err.code === 'not_found';
+    return (
+      err.status === 404 ||
+      err.code === 'not_found' ||
+      err.code === 'adoption_disabled'
+    );
   }
   return false;
 }
