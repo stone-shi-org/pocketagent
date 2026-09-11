@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { LIMITS } from './limits.js';
 import { AgentEvent } from './agent-events.js';
+import { PromptImage } from './prompt-image.js';
 
 /**
  * PA-6, phase 1 (foundation): the planner — an LLM chat (any OpenAI-compatible
@@ -493,11 +494,17 @@ export const PlannerChatHistoryResponse = z.object({
 });
 export type PlannerChatHistoryResponse = z.infer<typeof PlannerChatHistoryResponse>;
 
-export const PlannerSendMessageRequest = z.object({
-  content: z.string().min(1).max(LIMITS.maxInputChars),
-  /** Overrides the chat's remembered model for this turn onward. */
-  modelId: z.string().max(200).optional(),
-});
+export const PlannerSendMessageRequest = z
+  .object({
+    content: z.string().max(LIMITS.maxInputChars).default(''),
+    /** Optional image attachment for multimodal turns. */
+    image: PromptImage.optional(),
+    /** Overrides the chat's remembered model for this turn onward. */
+    modelId: z.string().max(200).optional(),
+  })
+  .refine((data) => data.content.trim().length > 0 || !!data.image, {
+    message: 'Must provide content or an image.',
+  });
 export type PlannerSendMessageRequest = z.infer<typeof PlannerSendMessageRequest>;
 
 /**

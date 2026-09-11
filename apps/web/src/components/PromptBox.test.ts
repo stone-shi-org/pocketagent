@@ -50,13 +50,17 @@ describe('filterSlashCommands', () => {
     expect(filterSlashCommands(commands, 'zzz')).toEqual([]);
   });
 
-  it('caps the result count', () => {
-    const many = Array.from({ length: 20 }, (_, i) => ({
-      name: `cmd${i}`,
-      description: '',
-      argumentHint: '',
-      aliases: [],
-    }));
-    expect(filterSlashCommands(many, 'cmd', 3)).toHaveLength(3);
+  it('matches pocket agent commands by name and alias', () => {
+    const pocketCommands: SlashCommandInfo[] = [
+      { name: 'clear', description: 'Clear the conversation history', argumentHint: '', aliases: ['reset'] },
+      { name: 'context', description: 'Preview context window', argumentHint: '', aliases: [] },
+      { name: 'mcp', description: 'List available MCP servers', argumentHint: '', aliases: [] },
+      { name: 'add', description: 'Add photo or file', argumentHint: '<file/photo>', aliases: ['photo', 'file', 'attach'] },
+    ];
+    expect(filterSlashCommands(pocketCommands, 'cont')).toEqual([pocketCommands[1]]);
+    expect(filterSlashCommands(pocketCommands, 'mcp')).toEqual([pocketCommands[2]]);
+    expect(filterSlashCommands(pocketCommands, 'reset')).toEqual([pocketCommands[0]]);
+    expect(filterSlashCommands(pocketCommands, 'photo')).toEqual([pocketCommands[3]]);
+    expect(filterSlashCommands(pocketCommands, 'attach')).toEqual([pocketCommands[3]]);
   });
 });

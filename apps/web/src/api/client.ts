@@ -735,6 +735,9 @@ export const api = {
   plannerChatHistory: (id: string) =>
     request<PlannerChatHistoryResponse>(`/api/planner/chats/${encodeURIComponent(id)}/history`),
 
+  clearPlannerChatHistory: (id: string) =>
+    request<void>(`/api/planner/chats/${encodeURIComponent(id)}/history`, { method: 'DELETE' }),
+
   /**
    * Streams one turn's `AgentEvent`s as they happen — see
    * `PlannerChatHistoryResponse`'s doc comment (protocol package) for what

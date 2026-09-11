@@ -968,6 +968,16 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
+  app.delete('/api/planner/chats/:id/history', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      await app.pocket.plannerChats.clearHistory(id);
+      return reply.code(204).send();
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
   /**
    * PA-29: a read-only "as if a turn were about to run" preview of the
    * memory ranking and rolling-window trimming the next real turn would
@@ -1003,7 +1013,10 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const generator = app.pocket.plannerChats.sendMessage(
       id,
       parsed.data.content,
-      parsed.data.modelId ? { modelId: parsed.data.modelId } : {},
+      {
+        ...(parsed.data.modelId ? { modelId: parsed.data.modelId } : {}),
+        ...(parsed.data.image ? { image: parsed.data.image } : {}),
+      },
     );
     await streamPlannerEvents(reply, generator);
   });

@@ -8,8 +8,13 @@ export interface PlannerLlmToolCall {
   function: { name: string; arguments: string };
 }
 
+export type PlannerUserContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
 export type PlannerChatMessage =
-  | { role: 'system' | 'user'; content: string }
+  | { role: 'system'; content: string }
+  | { role: 'user'; content: string | PlannerUserContentPart[] }
   | { role: 'assistant'; content: string | null; tool_calls?: PlannerLlmToolCall[] }
   | { role: 'tool'; tool_call_id: string; content: string };
 

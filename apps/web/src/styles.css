@@ -5894,6 +5894,35 @@ button.chat-rate-limit-badge {
   font-size: 12.5px;
 }
 
+.planner-context-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.planner-context-preview-title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.planner-context-preview-close {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.planner-context-preview-close:hover {
+  color: var(--text);
+  background: var(--bg-elev);
+}
+
 .planner-context-preview-window {
   margin: 0 0 8px;
   color: var(--text-dim);

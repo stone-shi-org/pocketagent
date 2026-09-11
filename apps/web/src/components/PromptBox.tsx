@@ -161,6 +161,7 @@ export function PromptBox({
     }
   });
   const ref = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   // Not persisted to sessionStorage like `text` — an attached image surviving
   // a reload but pointing at nothing the user can see again would be worse
   // than just losing the draft, since there would be no way to tell it was
@@ -287,6 +288,12 @@ export function PromptBox({
   }
 
   function pick(command: SlashCommandInfo): void {
+    if (command.name === 'add' && supportsImageAttachment) {
+      setText('');
+      setDismissed(true);
+      fileInputRef.current?.click();
+      return;
+    }
     setText(`/${command.name} `);
     setDismissed(false);
     ref.current?.focus();
@@ -473,7 +480,7 @@ export function PromptBox({
         </div>
       )}
       {supportsImageAttachment && (
-        <AttachButton onFile={(file) => void attach(file)} disabled={disabled} />
+        <AttachButton inputRef={fileInputRef} onFile={(file) => void attach(file)} disabled={disabled} />
       )}
       <textarea
         ref={ref}

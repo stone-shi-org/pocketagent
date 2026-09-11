@@ -47,3 +47,17 @@ export async function readTranscriptEvents(
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line) as AgentEvent);
 }
+
+/** Removes the transcript file for a cleared or deleted chat. */
+export async function clearTranscriptEvents(
+  workspacePath: string,
+  chatId: string,
+): Promise<void> {
+  const file = transcriptPath(workspacePath, chatId);
+  try {
+    await fs.unlink(file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+}

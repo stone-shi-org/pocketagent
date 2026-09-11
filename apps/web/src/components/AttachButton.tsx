@@ -7,6 +7,8 @@ interface Props {
   /** A file the user picked from the menu's "Add photos & files" item. */
   onFile: (file: File) => void;
   disabled?: boolean;
+  /** Optional ref forwarded to the underlying file input. */
+  inputRef?: React.RefObject<HTMLInputElement>;
 }
 
 /**
@@ -19,9 +21,10 @@ interface Props {
  * about the trigger has to change to add "Add from library" or anything else
  * later, only another row here.
  */
-export function AttachButton({ onFile, disabled = false }: Props): JSX.Element {
+export function AttachButton({ onFile, disabled = false, inputRef }: Props): JSX.Element {
   const [open, setOpen] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const fallbackRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = inputRef ?? fallbackRef;
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 

@@ -31,9 +31,9 @@ import {
   writePlannerLastModelId,
   type PlannerSettingsSnapshot,
 } from './store.js';
-import { CALL_MCP_TOOL_NAME, LIST_MCP_TOOLS_NAME, LIST_SKILLS_NAME, USE_SKILL_NAME } from '@pocketagent/protocol';
+import { CALL_MCP_TOOL_NAME, LIST_MCP_TOOLS_NAME, LIST_SKILLS_NAME, USE_SKILL_NAME, type PromptImage } from '@pocketagent/protocol';
 import { resolveApprovalStatus, rememberDecisionIfAsked } from './approval.js';
-import { appendTranscriptEvent, readTranscriptEvents } from './transcript.js';
+import { appendTranscriptEvent, clearTranscriptEvents, readTranscriptEvents } from './transcript.js';
 import {
   PlannerLlmClient,
   PlannerLlmError,
@@ -41,6 +41,7 @@ import {
   type PlannerLlmCompletion,
   type PlannerLlmToolCall,
   type PlannerLlmUsage,
+  type PlannerUserContentPart,
 } from './llm-client.js';
 import {
   MAX_SUBAGENT_SPAWN_DEPTH,
@@ -398,6 +399,20 @@ export class PlannerChatService {
   }
 
   /**
+   * Clears all stored transcript events for this chat and drops any in-flight
+   * pending approvals.
+   */
+  async clearHistory(id: string): Promise<void> {
+    const chat = this.requireChat(id);
+    for (const [pendingId, pending] of this.pendingTurns) {
+      if (pending.chatId === id) this.pendingTurns.delete(pendingId);
+    }
+    const workspacePath = this.workspacePathFor(chat);
+    await clearTranscriptEvents(workspacePath, chat.id);
+    updatePlannerChat(this.opts.db, chat.id, { lastActivityAt: Date.now() });
+  }
+
+  /**
    * PA-29: a read-only "as if a turn were about to run" view of the memory
    * ranking and rolling-window trimming `driveLoop` would apply right now —
    * for `GET /api/planner/chats/:id/context-preview`. Must never call the
@@ -649,18 +664,23 @@ export class PlannerChatService {
   async *sendMessage(
     id: string,
     content: string,
-    opts: { modelId?: string; signal?: AbortSignal } = {},
+    opts: { modelId?: string; image?: PromptImage; signal?: AbortSignal } = {},
   ): AsyncGenerator<AgentEvent> {
     const chat = this.requireChat(id);
     const modelId = this.resolveModelId(chat, opts.modelId);
     const workspacePath = this.workspacePathFor(chat);
 
     if (chat.title === null) {
-      const title = deriveChatTitle(content);
+      const title = deriveChatTitle(content || (opts.image ? 'Image prompt' : ''));
       if (title) updatePlannerChat(this.opts.db, chat.id, { title });
     }
 
-    const userEvent: AgentEvent = { kind: 'user_prompt', id: crypto.randomUUID(), text: content };
+    const userEvent: AgentEvent = {
+      kind: 'user_prompt',
+      id: crypto.randomUUID(),
+      text: content,
+      ...(opts.image ? { image: opts.image } : {}),
+    };
     await appendTranscriptEvent(workspacePath, chat.id, userEvent);
     yield userEvent;
 
@@ -1327,7 +1347,18 @@ function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatMessage[
     switch (event.kind) {
       case 'user_prompt':
         flushPendingCalls();
-        messages.push({ role: 'user', content: event.text });
+        if (event.image) {
+          const parts: PlannerUserContentPart[] = [
+            {
+              type: 'image_url',
+              image_url: { url: `data:${event.image.mediaType};base64,${event.image.data}` },
+            },
+            ...(event.text ? [{ type: 'text' as const, text: event.text }] : []),
+          ];
+          messages.push({ role: 'user', content: parts });
+        } else {
+          messages.push({ role: 'user', content: event.text });
+        }
         break;
       case 'text':
         flushPendingCalls();

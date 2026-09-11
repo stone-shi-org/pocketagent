@@ -6,12 +6,41 @@ import type {
   PlannerContextPreviewResponse,
   PlannerModel,
   PlannerToolApprovalChoice,
+  PromptImage,
+  SlashCommandInfo,
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { Transcript } from '../components/Transcript.js';
 import { PromptBox } from '../components/PromptBox.js';
 import { applyEvent, applyEvents, emptyTranscript, type TranscriptState } from '../agent/transcript.js';
+
+const PLANNER_SLASH_COMMANDS: SlashCommandInfo[] = [
+  {
+    name: 'clear',
+    description: 'Clear the conversation history',
+    argumentHint: '',
+    aliases: ['reset'],
+  },
+  {
+    name: 'context',
+    description: 'Preview context window and memory candidates',
+    argumentHint: '',
+    aliases: [],
+  },
+  {
+    name: 'mcp',
+    description: 'List available MCP servers and tools',
+    argumentHint: '',
+    aliases: [],
+  },
+  {
+    name: 'add',
+    description: 'Add photo or file from this device',
+    argumentHint: '<file/photo>',
+    aliases: ['attach', 'photo', 'file'],
+  },
+];
 
 interface Props {
   chatId: string;
@@ -171,9 +200,77 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
   /** `PromptBox.onSend` is synchronous by contract (see its own props doc):
       a `true` return clears the composer immediately, matching how a real
       session's prompt clears on submit rather than waiting for a reply. */
-  const handleSend = (content: string): boolean => {
+  const handleSend = (content: string, image?: PromptImage): boolean => {
     const trimmed = content.trim();
-    if (!trimmed || sending) return false;
+    if ((!trimmed && !image) || sending) return false;
+
+    // Handle slash commands without sending to LLM:
+    if (!image && (trimmed === '/clear' || trimmed === '/reset')) {
+      void (async () => {
+        try {
+          await api.clearPlannerChatHistory(chatId);
+          setTranscript({
+            ...emptyTranscript(),
+            items: [
+              {
+                type: 'notice',
+                key: `reset_${Date.now()}`,
+                level: 'info',
+                text: 'Conversation cleared.',
+              },
+            ],
+          });
+          setPreviewOpen(false);
+          setContextPreview(null);
+        } catch (err) {
+          onApiError(err);
+          setError(err instanceof ApiError ? err.message : 'Could not clear conversation history.');
+        }
+      })();
+      return true;
+    }
+
+    if (!image && trimmed === '/context') {
+      togglePreview();
+      return true;
+    }
+
+    if (!image && trimmed === '/mcp') {
+      void (async () => {
+        try {
+          const regList = await api.listMcpRegistries();
+          let text = '';
+          if (regList.registries.length === 0) {
+            text = 'No MCP registries are currently configured. Add one in Settings → MCP Registries.';
+          } else {
+            text =
+              'Available MCP Registries:\n\n' +
+              regList.registries
+                .map((r) => {
+                  const status = r.lastError
+                    ? `[Error: ${r.lastError}]`
+                    : r.enabled
+                      ? '[Enabled]'
+                      : '[Disabled]';
+                  return `• ${r.name} (${r.url}) ${status} — ${r.toolCount} tool${r.toolCount === 1 ? '' : 's'}`;
+                })
+                .join('\n');
+          }
+          setTranscript((prev) =>
+            applyEvent(prev ?? emptyTranscript(), {
+              kind: 'command_output',
+              id: crypto.randomUUID(),
+              text,
+            }),
+          );
+        } catch (err) {
+          onApiError(err);
+          setError(err instanceof ApiError ? err.message : 'Could not load MCP registries.');
+        }
+      })();
+      return true;
+    }
+
     setSending(true);
     setError(null);
     // The server auto-titles an untitled chat from its first prompt (see
@@ -184,7 +281,7 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
     const wasUntitled = chat?.title == null;
     void (async () => {
       try {
-        await api.sendPlannerMessage(chatId, { content: trimmed }, onStreamEvent);
+        await api.sendPlannerMessage(chatId, { content: trimmed, image }, onStreamEvent);
         if (wasUntitled) {
           const { chats } = await api.listPlannerChats();
           setChat((prev) => chats.find((c) => c.id === chatId) ?? prev);
@@ -330,14 +427,19 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
         </div>
       )}
 
-      <div className="planner-context-preview-toggle">
-        <button type="button" className="planner-link-btn" onClick={togglePreview}>
-          {previewOpen ? 'Hide context preview' : 'Preview context'}
-        </button>
-      </div>
-
       {previewOpen && (
         <div className="planner-context-preview">
+          <div className="planner-context-preview-header">
+            <span className="planner-context-preview-title">Context Preview</span>
+            <button
+              type="button"
+              className="planner-context-preview-close"
+              onClick={() => setPreviewOpen(false)}
+              aria-label="Close context preview"
+            >
+              <Icon name="close" size={14} />
+            </button>
+          </div>
           {previewLoading ? (
             <div className="spinner">Loading…</div>
           ) : contextPreview ? (
@@ -376,6 +478,8 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
         sessionId={`planner_${chatId}`}
         onSend={handleSend}
         disabled={disabled}
+        supportsImageAttachment={true}
+        commands={PLANNER_SLASH_COMMANDS}
         models={toModelInfos(models)}
         currentModel={chat?.lastModelId ?? null}
         onSetModel={changeModel}

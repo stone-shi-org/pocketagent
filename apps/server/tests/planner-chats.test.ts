@@ -473,6 +473,47 @@ describe('planner chat routes over HTTP', () => {
     expect(sentMessages).toEqual([{ role: 'user', content: 'plan my week' }]);
   });
 
+  it('clears chat history via DELETE /api/planner/chats/:id/history', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    await sendMessage(t, chat.id, 'first message');
+    let history = (await get(t, `/api/planner/chats/${chat.id}/history`)).json().events;
+    expect(history.length).toBeGreaterThan(0);
+
+    const delRes = await del(t, `/api/planner/chats/${chat.id}/history`);
+    expect(delRes.statusCode).toBe(204);
+
+    history = (await get(t, `/api/planner/chats/${chat.id}/history`)).json().events;
+    expect(history).toEqual([]);
+  });
+
+  it('sends an image attachment as multimodal user prompt to LLM and includes it in history', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('I see the image!'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const image = { mediaType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' };
+    const res = await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'Describe this', image });
+    expect(res.statusCode).toBe(200);
+    const events = parseEvents(res);
+    expect(events[0]).toMatchObject({ kind: 'user_prompt', text: 'Describe this', image });
+
+    const sentBody = JSON.parse(fetchImpl.mock.calls[0]![1].body as string);
+    expect(sentBody.messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: `data:${image.mediaType};base64,${image.data}` } },
+          { type: 'text', text: 'Describe this' },
+        ],
+      },
+    ]);
+  });
+
   it('turn_complete carries durationMs, token usage, and a completedAt timestamp when the provider reports usage', async () => {
     const fetchImpl = vi.fn().mockImplementation(() =>
       sseResponse([
