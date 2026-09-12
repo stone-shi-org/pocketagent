@@ -150,6 +150,26 @@ if (prompt === 'CONTEXT_CANCELED_ONCE') {
   }
 }
 
+if (prompt === 'STREAM_INTERRUPTED_ONCE') {
+  const stateFile = process.env.AGY_FIXTURE_TIMEOUT_ONCE_FILE;
+  if (stateFile && !fs.existsSync(stateFile)) {
+    fs.writeFileSync(stateFile, 'seen');
+    emit({
+      event: 'result',
+      result: {
+        conversation_id: conversationId,
+        status: 'ERROR',
+        response: '',
+        error: 'The stream was interrupted. Please continue the task you were working on.',
+        duration_seconds: 0,
+        num_turns: 0,
+        usage: { input_tokens: 0, output_tokens: 0 },
+      },
+    });
+    process.exit(1);
+  }
+}
+
 // Mirrors a permanently wedged conversation, captured live: replaying a turn
 // against a specific `--conversation <id>` twice outside PocketAgent, both
 // times, finished in a few seconds with the model's answer already in

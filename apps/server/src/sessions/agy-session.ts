@@ -134,7 +134,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
    * that had nothing to do with what they asked.
    */
   private static readonly TRANSIENT_ERROR_PATTERN =
-    /\btimed?\s*out\b|deadline exceeded|context canceled|context cancelled|econnreset|etimedout|eai_again|enotfound|econnrefused|socket hang up|network error|connection reset|\bunavailable\b/i;
+    /\btimed?\s*out\b|deadline exceeded|context canceled|context cancelled|econnreset|etimedout|eai_again|enotfound|econnrefused|socket hang up|network error|connection reset|\bunavailable\b|stream (?:was )?interrupted/i;
 
   constructor(spec: AgySessionSpec, epoch?: string) {
     super();

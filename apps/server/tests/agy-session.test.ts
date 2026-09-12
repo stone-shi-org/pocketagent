@@ -485,6 +485,29 @@ describe('AgySession', () => {
     await waitFor(() => session?.busy === false);
   });
 
+  it('silently retries a stream interrupted error and succeeds without surfacing it as a failure', async () => {
+    const stateFile = path.join(os.tmpdir(), `agy-interrupted-once-${crypto.randomUUID()}.state`);
+    session = new AgySession(
+      makeSpec({ env: { ...process.env, AGY_FIXTURE_TIMEOUT_ONCE_FILE: stateFile } as Record<string, string> }),
+    );
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('STREAM_INTERRUPTED_ONCE');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    expect(events.some((e) => e.kind === 'notice' && e.level === 'error')).toBe(false);
+    const warnings = events.filter((e) => e.kind === 'notice' && e.level === 'warn');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({ text: expect.stringContaining('stream was interrupted') });
+
+    const turnComplete = events.find((e) => e.kind === 'turn_complete');
+    expect(turnComplete).toMatchObject({ isError: false });
+
+    fs.rmSync(stateFile, { force: true });
+    await waitFor(() => session?.busy === false);
+  });
+
   it('drops a permanently wedged conversation and retries fresh once the normal retry budget is spent', async () => {
     session = new AgySession(makeSpec({ resumeAgentSessionId: 'stuck-conversation-id' }));
     await session.start();
