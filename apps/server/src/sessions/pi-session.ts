@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import type { AgentEvent, PermissionRequestEvent, SessionStatus } from '@pocketagent/protocol';
+import type { AgentEvent, EffortLevel, PermissionRequestEvent, SessionStatus } from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
 import {
   normalizePiEvent,
@@ -26,6 +26,24 @@ export interface PiSessionSpec {
   resumeAgentSessionId?: string;
   /** Absolute path to the `pi` executable, when not on PATH. */
   executablePath?: string;
+  /**
+   * Model to switch to right after spawn, before any prompt is queued —
+   * either an explicit per-session choice or the per-agent cached default
+   * (see `SessionManager.create`'s shared `cachedDefaults` resolution).
+   * Undefined means "whatever pi starts with", same as before this field
+   * existed. Applied in `start()` via `setModel`, which supersedes
+   * `reportCurrentModelAndEffort`'s own report for the same reason given on
+   * that method's doc comment.
+   */
+  model?: string;
+  /**
+   * Same idea as `model`, for effort. Unlike `StructuredSessionSpec.effort`,
+   * `null` here is not "reset to the model's own default" — pi has no such
+   * reset (see `setEffort`'s doc comment) — so a `null` passed through here
+   * produces the same "pick an explicit level instead" notice a live `null`
+   * request would.
+   */
+  effort?: EffortLevel | null;
   /**
    * Always `true` — see `agents/pi.ts` for why. pi has no approval concept
    * anywhere, in any mode, by explicit design ("does not include a built-in
@@ -258,7 +276,21 @@ export class PiSession extends EventEmitter<StructuredSessionEvents> {
 
     void this.fetchInitialCommands();
     void this.fetchInitialModels();
-    void this.reportCurrentModelAndEffort();
+
+    // Sequenced (not each fired independently) so `reportCurrentModelAndEffort`
+    // — which round-trips its own RPC — cannot resolve in between an override
+    // and its own `model_changed`/`effort_changed` and clobber the UI back to
+    // whatever pi actually started with. Awaiting `get_state` last means it
+    // always observes the *post-override* truth when an override ran, so it
+    // is never skipped outright: a request for only one of model/effort still
+    // needs the other axis reported from somewhere.
+    void (async () => {
+      if (this.spec.model) await this.setModel(this.spec.model);
+      if (this.spec.effort !== undefined) await this.setEffort(this.spec.effort);
+      if (!this.spec.model || this.spec.effort === undefined) {
+        await this.reportCurrentModelAndEffort();
+      }
+    })();
   }
 
   /**

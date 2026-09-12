@@ -2,7 +2,13 @@ import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { promisify } from 'node:util';
-import type { AgentEvent, PermissionDecision, PermissionRequestEvent, SessionStatus } from '@pocketagent/protocol';
+import type {
+  AgentEvent,
+  EffortLevel,
+  PermissionDecision,
+  PermissionRequestEvent,
+  SessionStatus,
+} from '@pocketagent/protocol';
 import { EventBuffer } from '../terminal/event-buffer.js';
 import { codexHistoryEvents, normalizeCodexEvent, normalizeCodexModels, type CodexIncoming } from './normalize.js';
 import type { CodexServerManager } from './codex-server.js';
@@ -21,6 +27,19 @@ export interface CodexSessionSpec {
   createdAt: number;
   /** codex's own thread id, to resume via `thread/resume` instead of `thread/start`. */
   resumeAgentSessionId?: string;
+  /**
+   * Model to switch to right after `thread/start`/`thread/resume`, before any
+   * prompt is queued — either an explicit per-session choice or the per-agent
+   * cached default (see `SessionManager.create`'s shared `cachedDefaults`
+   * resolution). Undefined means "whatever the thread starts with", same as
+   * before this field existed. Applied via `setModel` in `start()`, the same
+   * "next turn" RPC a live switch uses — see that method's doc comment for
+   * why "next turn" means "immediately" for a session with no prompt queued
+   * yet.
+   */
+  model?: string;
+  /** Same idea as `model`, for effort. `null` explicitly resets to the model's own default. */
+  effort?: EffortLevel | null;
   /**
    * Explicit, off-by-default opt-in to auto-approving every command/file
    * change. Real per-session choice, same reasoning as `OpencodeSessionSpec`:
@@ -251,6 +270,18 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
         // A resumed session without its backstory still works.
       }
     }
+
+    // Applied after `session_started` (which already carries whatever the
+    // thread actually started with) rather than folded into `thread/start`'s
+    // request — that RPC has no model/effort field of its own (confirmed
+    // live, v0.147.0: only `cwd`), so an explicit choice can only take effect
+    // as an immediate post-start switch. Fire-and-forget, same as
+    // `fetchInitialModels` below and the same pattern `StructuredSession.start`
+    // uses for its own `spec.model`/`spec.effort` — the two RPCs (`model`,
+    // `effort`) touch independent fields on `thread/settings/update`, so
+    // there is no ordering hazard running them concurrently.
+    if (this.spec.model) void this.setModel(this.spec.model);
+    if (this.spec.effort !== undefined) void this.setEffort(this.spec.effort);
 
     void this.fetchInitialModels();
   }

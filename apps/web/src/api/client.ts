@@ -355,6 +355,13 @@ export const api = {
 
   listAgents: () => request<{ agents: AgentInfo[] }>('/api/agents'),
 
+  /**
+   * PA-50: Settings' "Coding Agents" section's "Refresh" button — re-runs
+   * every structured agent's own model discovery, with no session created,
+   * and answers with the same shape `listAgents` does.
+   */
+  refreshAgents: () => request<{ agents: AgentInfo[] }>('/api/agents/refresh', { method: 'POST' }),
+
   // ---- Custom Claude providers (PA-28) ---------------------------------------
   //
   // No `reveal` method, deliberately: there is no such route. The API key is

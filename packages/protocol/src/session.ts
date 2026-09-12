@@ -286,6 +286,19 @@ export const AgentInfo = z.object({
    * See `SessionInfo.providerDisclosure`.
    */
   providerDisclosure: z.string().nullable(),
+  /**
+   * When the last explicit "Refresh" (Settings' "Coding Agents" section,
+   * `POST /api/agents/refresh`) ran for this agent — distinct from
+   * `defaultModel`/`cachedModels` above, which also update silently every
+   * time a *live* session happens to report what it ran with. Null until a
+   * refresh has been explicitly requested at least once. See
+   * `agent_defaults.last_refresh_at` in db/index.ts.
+   */
+  lastRefreshAt: z.number().nullable(),
+  /** Whether that last refresh succeeded. Null alongside `lastRefreshAt`. */
+  lastRefreshOk: z.boolean().nullable(),
+  /** The error from that refresh, set only when `lastRefreshOk` is false. */
+  lastRefreshError: z.string().nullable(),
 });
 export type AgentInfo = z.infer<typeof AgentInfo>;
 

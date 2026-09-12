@@ -24,37 +24,65 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
   // Merges in the per-agent "last observed live" cache (see `agent_defaults`
   // in db/index.ts) so a brand-new chat's composer can pre-select a model
   // and effort even though nothing about model choice is knowable before a
-  // session exists to ask. Composed at the route rather than inside
-  // `AgentRegistry.list()`, which has no `db` reference and stays that way —
-  // this is the only consumer of a DB-backed fact about an otherwise static
-  // registry.
-  app.get('/api/agents', async () => ({
-    agents: agents.list().map((agent) => {
-      const cached = readAgentDefaults(db, agent.id);
-      let cachedModels: ModelInfo[] = [];
-      if (cached?.models_json) {
-        try {
-          cachedModels = JSON.parse(cached.models_json) as ModelInfo[];
-        } catch {
-          // A malformed cache row must never break the agent list.
+  // session exists to ask. A function rather than inlined at the one route
+  // below, now that a second route (`/api/agents/refresh`) needs the exact
+  // same merge on the exact same shape after mutating the underlying cache —
+  // two copies of this would drift the moment one of the two fields below
+  // changed. Still composed at the route layer rather than inside
+  // `AgentRegistry.list()`, which has no `db` reference and stays that way.
+  function listAgentsWithCache() {
+    return {
+      agents: agents.list().map((agent) => {
+        const cached = readAgentDefaults(db, agent.id);
+        let cachedModels: ModelInfo[] = [];
+        if (cached?.models_json) {
+          try {
+            cachedModels = JSON.parse(cached.models_json) as ModelInfo[];
+          } catch {
+            // A malformed cache row must never break the agent list.
+          }
         }
-      }
-      return {
-        ...agent,
-        defaultModel: cached?.model ?? null,
-        defaultEffort: cached?.effort ?? null,
-        // An adapter-declared catalog replaces the observed cache rather than
-        // being merged into it. A Claude Code variant pointed at a third-party
-        // endpoint still writes `models_available` into `agent_defaults` like
-        // any other agent, but for the *variant* that cached list is whatever
-        // the adapter declared anyway — and if it ever were the CLI's own
-        // Anthropic catalog, merging would put ids the provider rejects back
-        // into the picker. Empty `staticModels` (every stock adapter) leaves
-        // this exactly as it was.
-        cachedModels: agent.staticModels.length > 0 ? agent.staticModels : cachedModels,
-      };
-    }),
-  }));
+        return {
+          ...agent,
+          defaultModel: cached?.model ?? null,
+          defaultEffort: cached?.effort ?? null,
+          // An adapter-declared catalog replaces the observed cache rather than
+          // being merged into it. A Claude Code variant pointed at a third-party
+          // endpoint still writes `models_available` into `agent_defaults` like
+          // any other agent, but for the *variant* that cached list is whatever
+          // the adapter declared anyway — and if it ever were the CLI's own
+          // Anthropic catalog, merging would put ids the provider rejects back
+          // into the picker. Empty `staticModels` (every stock adapter) leaves
+          // this exactly as it was.
+          cachedModels: agent.staticModels.length > 0 ? agent.staticModels : cachedModels,
+          lastRefreshAt: cached?.last_refresh_at ?? null,
+          lastRefreshOk: cached?.last_refresh_ok === null || cached?.last_refresh_ok === undefined
+            ? null
+            : cached.last_refresh_ok === 1,
+          lastRefreshError: cached?.last_refresh_error ?? null,
+        };
+      }),
+    };
+  }
+
+  app.get('/api/agents', async () => listAgentsWithCache());
+
+  /**
+   * PA-50: Settings' "Coding Agents" section's "Refresh" button. Re-runs
+   * every structured agent's own model discovery (`SessionManager.
+   * refreshAgentCatalogs`) with no session created, then answers with the
+   * exact same shape `GET /api/agents` does so the section can just replace
+   * its list wholesale — the same REPLACE-on-refresh pattern
+   * `POST /api/planner/skills/refresh` already uses. Best-effort per agent
+   * (see that method's doc comment): this route itself cannot fail on a
+   * single agent's probe erroring, only on something wrong with the request
+   * itself, so there is no per-agent error response here — `lastRefreshError`
+   * on each row is where that surfaces.
+   */
+  app.post('/api/agents/refresh', async () => {
+    await sessions.refreshAgentCatalogs();
+    return listAgentsWithCache();
+  });
 
   /**
    * The home screen: every directory with activity and the chats inside it,

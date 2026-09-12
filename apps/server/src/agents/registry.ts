@@ -97,13 +97,18 @@ export class AgentRegistry {
   }
 
   /**
-   * `defaultModel`/`defaultEffort`/`cachedModels` are deliberately absent
-   * here: those three fields are a per-agent DB-backed cache (see
-   * `agent_defaults` in db/index.ts) and this registry holds no `db`
-   * reference. `GET /api/agents` — the only consumer — merges them in at the
-   * route layer, the one place that already has both.
+   * `defaultModel`/`defaultEffort`/`cachedModels`/`lastRefreshAt`/
+   * `lastRefreshOk`/`lastRefreshError` are deliberately absent here: all six
+   * fields are a per-agent DB-backed cache (see `agent_defaults` in
+   * db/index.ts) and this registry holds no `db` reference. `GET /api/agents`
+   * (and `POST /api/agents/refresh`, which answers the same shape) — the only
+   * consumers — merge them in at the route layer, the one place that already
+   * has both.
    */
-  list(): Omit<AgentInfo, 'defaultModel' | 'defaultEffort' | 'cachedModels'>[] {
+  list(): Omit<
+    AgentInfo,
+    'defaultModel' | 'defaultEffort' | 'cachedModels' | 'lastRefreshAt' | 'lastRefreshOk' | 'lastRefreshError'
+  >[] {
     return this.ordered().map((a) => ({
       id: a.id,
       displayName: a.displayName,

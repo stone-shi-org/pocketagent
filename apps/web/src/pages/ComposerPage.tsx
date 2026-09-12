@@ -7,7 +7,6 @@ import type {
   ProjectInfo,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
-import { usesClaudeTranscripts } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { SelectorRow, type SelectorOption } from '../components/SelectorRow.js';
 import { AddProject } from '../components/AddProject.js';
@@ -251,21 +250,15 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
   // resumed) always keeps whatever it was already using, same reasoning as
   // `effectiveAgentId` above.
   //
-  // Every structured backend already reports `AgentInfo.cachedModels` (all
-  // five normalize `models_available`/`model_changed`/`effort_changed` into
-  // the same events `SessionManager.wire` caches from), but `claude` is the
-  // only one `SessionManager.create` actually threads a cached/explicit
-  // model+effort into at spawn today (see its doc comment). Showing this
-  // picker for another backend would look like a real choice and silently do
-  // nothing on submit, so it stays gated on the backends that honour it until
-  // the others grow the same spawn-time wiring. The Claude Code third-party
-  // variants qualify for exactly the same reason stock `claude` does — same
-  // SDK path, same spawn-time threading — and they need it more, since their
-  // catalog is the adapter's own `staticModels` rather than Anthropic's.
-  const selectedAgent =
-    !picked && usesClaudeTranscripts(agentId)
-      ? (agents.find((a) => a.id === agentId) ?? null)
-      : null;
+  // Every structured backend reports `AgentInfo.cachedModels` (all five
+  // normalize `models_available`/`model_changed`/`effort_changed` into the
+  // same events `SessionManager.wire` caches from), and as of PA-50
+  // `SessionManager.create` threads a cached/explicit model into every one of
+  // them (effort too, for the three — `claude`/`codex`/`pi` — with a real
+  // per-turn effort switch; see `showEffortPicker` below). So the model
+  // picker's gate is just "does this agent have a catalog to show" —
+  // `cachedModels.length` alone, same as `showModelPicker` already checks.
+  const selectedAgent = !picked ? (agents.find((a) => a.id === agentId) ?? null) : null;
   // `model` holds a picker `value` (e.g. `'sonnet'`), but `AgentInfo.defaultModel`
   // is the *resolved* wire id Claude's `session_started` actually reports (e.g.
   // `'claude-sonnet-5'`) — same mismatch `resolveCurrentModel`'s doc comment

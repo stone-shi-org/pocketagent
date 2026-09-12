@@ -1138,6 +1138,18 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE planner_workspaces ADD COLUMN identity_prompt TEXT;
   `,
+  // PA-50: the outcome of the Settings "Coding Agents" section's explicit
+  // "Refresh" action, distinct from `updated_at` above — that column also
+  // moves every time a *live* session merely reports what it happened to run
+  // with, so it cannot answer "did the last explicit refresh I asked for
+  // actually work". `last_refresh_at` stays null forever for an agent nobody
+  // has ever clicked Refresh for, same "explicit action, not a default"
+  // discipline `workspaces`/`legacy_claude_providers_migrated` use elsewhere.
+  `
+  ALTER TABLE agent_defaults ADD COLUMN last_refresh_at INTEGER;
+  ALTER TABLE agent_defaults ADD COLUMN last_refresh_ok INTEGER;
+  ALTER TABLE agent_defaults ADD COLUMN last_refresh_error TEXT;
+  `,
 ];
 
 /**
@@ -1411,6 +1423,12 @@ export interface AgentDefaultsRow {
   /** Raw JSON of the agent's last-reported `ModelInfo[]` catalog; parsed by the caller. */
   models_json: string | null;
   updated_at: number;
+  /** See `recordAgentRefresh`. Null until an explicit refresh has ever run for this agent. */
+  last_refresh_at: number | null;
+  /** 1/0/null, mirroring `last_refresh_at`'s "never asked" null. */
+  last_refresh_ok: number | null;
+  /** Set only when `last_refresh_ok` is 0. */
+  last_refresh_error: string | null;
 }
 
 export function readAgentDefaults(db: Db, agentId: string): AgentDefaultsRow | null {
@@ -1444,6 +1462,43 @@ export function writeAgentDefaults(
          model = excluded.model, effort = excluded.effort, models_json = excluded.models_json,
          updated_at = excluded.updated_at`,
   ).run(agentId, model, effort, modelsJson, Date.now());
+}
+
+/**
+ * Record the outcome of one explicit, user-initiated refresh (Settings'
+ * "Coding Agents" section, `POST /api/agents/refresh`) — see
+ * `AgentDefaultsRow.last_refresh_at`'s doc comment for why this is a separate
+ * write from `writeAgentDefaults`'s own `updated_at`. Only the refresh
+ * bookkeeping columns are touched; `model`/`effort`/`models_json` are carried
+ * forward unchanged from whatever is already cached (a failed refresh must
+ * not blank out a catalog a previous success — live session or refresh —
+ * already populated). Call `writeAgentDefaults` first when a refresh
+ * actually obtained a fresh catalog; this only stamps the attempt itself.
+ */
+export function recordAgentRefresh(
+  db: Db,
+  agentId: string,
+  result: { ok: true } | { ok: false; error: string },
+): void {
+  const existing = readAgentDefaults(db, agentId);
+  db.prepare(
+    `INSERT INTO agent_defaults
+       (agent_id, model, effort, models_json, updated_at, last_refresh_at, last_refresh_ok, last_refresh_error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET
+         last_refresh_at = excluded.last_refresh_at,
+         last_refresh_ok = excluded.last_refresh_ok,
+         last_refresh_error = excluded.last_refresh_error`,
+  ).run(
+    agentId,
+    existing?.model ?? null,
+    existing?.effort ?? null,
+    existing?.models_json ?? null,
+    existing?.updated_at ?? Date.now(),
+    Date.now(),
+    result.ok ? 1 : 0,
+    result.ok ? null : result.error,
+  );
 }
 
 export interface CronJobRow {

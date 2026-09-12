@@ -23,6 +23,16 @@ export interface OpencodeSessionSpec {
   /** opencode's own session id, to attach to an existing conversation instead of creating one. */
   resumeAgentSessionId?: string;
   /**
+   * Model to switch to right after the session is created, before any prompt
+   * is queued — either an explicit per-session choice or the per-agent
+   * cached default (see `SessionManager.create`'s shared `cachedDefaults`
+   * resolution). Undefined means "whatever opencode's own default is", same
+   * as before this field existed. Applied via `setModel` in `start()`. No
+   * effort counterpart: opencode has no per-model effort axis to switch (see
+   * `normalizeOpencodeModels`'s doc comment).
+   */
+  model?: string;
+  /**
    * Explicit, off-by-default opt-in to auto-approving every tool call.
    *
    * Unlike agy, opencode has a genuine synchronous permission gate
@@ -199,6 +209,13 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
 
     void this.fetchInitialCommands();
     void this.fetchInitialModels();
+
+    // Applied after `session_started` (which reports `model: null` — see
+    // that event above; opencode's session-create response carries no
+    // model of its own) rather than at creation: `POST /session` has no
+    // model field, only `setModel`'s own switch endpoint does. Fire-and-
+    // forget, same as `fetchInitialModels`.
+    if (this.spec.model) void this.setModel(this.spec.model);
   }
 
   /**

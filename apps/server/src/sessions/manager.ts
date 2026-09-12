@@ -8,6 +8,7 @@ import type {
   SessionStatus,
   SessionTransport,
 } from '@pocketagent/protocol';
+import { isCustomClaudeProviderId } from '@pocketagent/protocol';
 import type { Db, SessionRow } from '../db/index.js';
 import {
   GLOBAL_SKIP_PERMISSIONS_KEY,
@@ -16,15 +17,18 @@ import {
   pruneOldSessions,
   readAgentDefaults,
   readSetting,
+  recordAgentRefresh,
   writeAgentDefaults,
   writeSetting,
 } from '../db/index.js';
+import type { AgentAdapter } from '../agents/types.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import { resolveExecutable } from '../agents/registry.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 import { treeRootOf } from '../git/worktree-paths.js';
 import type { AdoptionService } from '../adopt/index.js';
 import type { ProcessBackend } from '../backends/index.js';
+import { usageProbeCwd } from '../usage/probe-cwd.js';
 import { PtySession } from './pty-session.js';
 import { StructuredSession } from './structured-session.js';
 import { AgySession } from './agy-session.js';
@@ -34,7 +38,8 @@ import { CodexSession } from './codex-session.js';
 import { CodexServerManager } from './codex-server.js';
 import { PiSession } from './pi-session.js';
 import { buildChildEnv } from './env.js';
-import { codexHistoryEvents, opencodeHistoryEvents } from './normalize.js';
+import { codexHistoryEvents, normalizeCodexModels, normalizeOpencodeModels, opencodeHistoryEvents } from './normalize.js';
+import { probeAgyModels, probeClaudeModels, probePiModels } from './agent-probe.js';
 
 /**
  * Any engine behind the `structured` transport. `StructuredSession` holds the
@@ -730,6 +735,21 @@ export class SessionManager {
     if (transport === 'structured') {
       const env = buildChildEnv({ cwd: input.cwd, overrides: built.env });
 
+      // Only a brand-new conversation gets an auto-applied model/effort
+      // default — a resume already carries its own conversation's model in
+      // that agent's own state (the SDK's, agy's `--conversation`, codex's
+      // thread, opencode's session, pi's session file), and forcing this
+      // agent's most-recently-seen value onto it could silently switch a
+      // conversation that never asked to change. Shared across every
+      // structured backend below (previously computed only for `claude`) —
+      // `AgentDefaultsRow` is keyed by agent id and caches whatever any of
+      // the five backends last reported, via `SessionManager.wire`.
+      const cachedDefaults = input.resumeAgentSessionId
+        ? null
+        : readAgentDefaults(this.opts.db, input.agent);
+      const model = input.model ?? cachedDefaults?.model ?? undefined;
+      const effort = input.effort !== undefined ? input.effort : (cachedDefaults?.effort ?? undefined);
+
       if (adapter.structuredKind === 'agy-cli') {
         return this.startAgy({
           id,
@@ -743,7 +763,7 @@ export class SessionManager {
           ...(input.resumeAgentSessionId
             ? { resumeAgentSessionId: input.resumeAgentSessionId }
             : {}),
-          ...(input.model !== undefined ? { model: input.model } : {}),
+          ...(model !== undefined ? { model } : {}),
         });
       }
 
@@ -760,6 +780,7 @@ export class SessionManager {
           ...(input.resumeAgentSessionId
             ? { resumeAgentSessionId: input.resumeAgentSessionId }
             : {}),
+          ...(model !== undefined ? { model } : {}),
           skipPermissions,
         });
       }
@@ -777,6 +798,8 @@ export class SessionManager {
           ...(input.resumeAgentSessionId
             ? { resumeAgentSessionId: input.resumeAgentSessionId }
             : {}),
+          ...(model !== undefined ? { model } : {}),
+          ...(effort !== undefined ? { effort } : {}),
           skipPermissions,
         });
       }
@@ -794,19 +817,10 @@ export class SessionManager {
           ...(input.resumeAgentSessionId
             ? { resumeAgentSessionId: input.resumeAgentSessionId }
             : {}),
+          ...(model !== undefined ? { model } : {}),
+          ...(effort !== undefined ? { effort } : {}),
         });
       }
-
-      // Only a brand-new `claude` conversation gets an auto-applied
-      // model/effort default — a resume already carries its own conversation's
-      // model in the SDK's own state (see `StructuredSessionSpec.model`'s doc
-      // comment), and forcing this agent's most-recently-seen value onto it
-      // could silently switch a conversation that never asked to change.
-      const cachedDefaults = input.resumeAgentSessionId
-        ? null
-        : readAgentDefaults(this.opts.db, input.agent);
-      const model = input.model ?? cachedDefaults?.model ?? undefined;
-      const effort = input.effort !== undefined ? input.effort : (cachedDefaults?.effort ?? undefined);
 
       return this.startStructured({
         id,
@@ -1042,6 +1056,8 @@ export class SessionManager {
     executable: string;
     env: Record<string, string>;
     resumeAgentSessionId?: string;
+    model?: string;
+    effort?: EffortLevel | null;
   }): Promise<PiSession> {
     const session = new PiSession({
       id: args.id,
@@ -1057,6 +1073,8 @@ export class SessionManager {
       ...(args.resumeAgentSessionId
         ? { resumeAgentSessionId: args.resumeAgentSessionId }
         : {}),
+      ...(args.model !== undefined ? { model: args.model } : {}),
+      ...(args.effort !== undefined ? { effort: args.effort } : {}),
       skipPermissions: true,
     });
 
@@ -1132,6 +1150,7 @@ export class SessionManager {
     executable: string;
     env: Record<string, string>;
     resumeAgentSessionId?: string;
+    model?: string;
     skipPermissions?: boolean;
   }): Promise<OpencodeSession> {
     const server = this.getOrCreateOpencodeServer(args.executable, args.env);
@@ -1148,6 +1167,7 @@ export class SessionManager {
         ...(args.resumeAgentSessionId
           ? { resumeAgentSessionId: args.resumeAgentSessionId }
           : {}),
+        ...(args.model !== undefined ? { model: args.model } : {}),
         skipPermissions: args.skipPermissions === true,
       },
       server,
@@ -1311,6 +1331,8 @@ export class SessionManager {
     executable: string;
     env: Record<string, string>;
     resumeAgentSessionId?: string;
+    model?: string;
+    effort?: EffortLevel | null;
     skipPermissions?: boolean;
   }): Promise<CodexSession> {
     const server = this.getOrCreateCodexServer(args.executable, args.env);
@@ -1324,6 +1346,8 @@ export class SessionManager {
         workspaceLabel: args.workspaceLabel,
         eventBufferBytes: this.opts.outputBufferBytes,
         createdAt: args.createdAt,
+        ...(args.model !== undefined ? { model: args.model } : {}),
+        ...(args.effort !== undefined ? { effort: args.effort } : {}),
         ...(args.resumeAgentSessionId
           ? { resumeAgentSessionId: args.resumeAgentSessionId }
           : {}),
@@ -1961,6 +1985,93 @@ export class SessionManager {
   /** Test seam: statuses currently held in memory. */
   debugStatuses(): Record<string, SessionStatus> {
     return Object.fromEntries([...this.live].map(([id, s]) => [id, s.status]));
+  }
+
+  /**
+   * PA-50: Settings' "Coding Agents" section's explicit "Refresh" action.
+   * Re-runs every structured agent's own model discovery — the same
+   * `fetchInitialModels`-style call its session class already makes on
+   * start — with no session created, so none of this counts against
+   * `maxSessions` and nothing here is a "real" session at all. Custom Claude
+   * providers (`custom-claude:*`) are excluded: they declare their own fixed
+   * catalog (`staticModels`) rather than discovering one, and have their own
+   * management page (`CustomClaudeProvidersSection`) already.
+   *
+   * Best-effort and independent per agent — `Promise.allSettled` rather than
+   * `Promise.all`, since one agent's binary being missing or one CLI hanging
+   * must never stop the others from reporting their own outcome.
+   */
+  async refreshAgentCatalogs(): Promise<void> {
+    const ids = this.opts.agents
+      .list()
+      .filter((a) => a.transports.includes('structured') && !isCustomClaudeProviderId(a.id))
+      .map((a) => a.id);
+    await Promise.allSettled(ids.map((id) => this.refreshAgentCatalog(id)));
+  }
+
+  private async refreshAgentCatalog(agentId: string): Promise<void> {
+    const adapter = this.opts.agents.get(agentId);
+    if (!adapter) return;
+    try {
+      const models = await this.discoverModels(adapter);
+      writeAgentDefaults(this.opts.db, agentId, { modelsJson: JSON.stringify(models) });
+      recordAgentRefresh(this.opts.db, agentId, { ok: true });
+    } catch (err) {
+      recordAgentRefresh(this.opts.db, agentId, {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Dispatch one agent's standalone model probe by `structuredKind` — see
+   * `agent-probe.ts` for why `agy`/`pi`/`claude` (and any `custom-claude:*`
+   * variant, though those short-circuit below) each need their own
+   * throwaway process, while `codex`/`opencode` reuse the same shared daemon
+   * `getOrCreateCodexServer`/`getOrCreateOpencodeServer` already hand a real
+   * session — one more request on a connection that already exists, not a
+   * new process. `usageProbeCwd()` (never a workspace root) for the same
+   * reason `usage/probe-cwd.ts` documents: any headless CLI invocation with
+   * no session of its own to inherit a real cwd from must run outside every
+   * workspace, or a probe leaves a phantom chat behind for a poller to find.
+   */
+  private async discoverModels(adapter: AgentAdapter): Promise<ModelInfo[]> {
+    // A declared catalog *is* the answer — nothing to probe, and probing
+    // anyway (asking the CLI itself) would risk resurrecting the wrong
+    // catalog `staticModels` exists specifically to override. See
+    // `AgentAdapter.staticModels`'s doc comment.
+    if (adapter.staticModels && adapter.staticModels.length > 0) return adapter.staticModels;
+
+    const cwd = usageProbeCwd();
+    const built = adapter.buildCommand({ cwd, cols: 80, rows: 24, skipPermissions: false });
+    const executable = resolveExecutable(built.command);
+    if (!executable) {
+      throw new Error(`${adapter.displayName} (${built.command}) was not found on PATH.`);
+    }
+    const env = buildChildEnv({ cwd, overrides: built.env });
+
+    switch (adapter.structuredKind) {
+      case 'agy-cli':
+        return probeAgyModels(executable, cwd, env);
+      case 'pi-rpc':
+        return probePiModels(executable, cwd, env);
+      case 'codex-app-server': {
+        const server = this.getOrCreateCodexServer(executable, env);
+        const res = await server.sendRequest<{ data?: unknown[] }>('model/list', {});
+        return normalizeCodexModels(res.data);
+      }
+      case 'opencode-server': {
+        const server = this.getOrCreateOpencodeServer(executable, env);
+        const res = await server.request<{ data?: unknown[] }>('/api/model', {
+          method: 'GET',
+          query: { 'location[directory]': cwd },
+        });
+        return normalizeOpencodeModels(res.data);
+      }
+      default:
+        return probeClaudeModels(executable, cwd, env);
+    }
   }
 }
 
