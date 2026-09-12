@@ -279,6 +279,46 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
     return (await res.json()) as T;
   }
 
+  /**
+   * `GET /api/model`, tolerant of the one race this server genuinely has.
+   *
+   * `ensureStarted()` (inside `request()`) resolves the moment opencode
+   * prints "listening on" — that only means the HTTP server accepted the
+   * socket, not that its own provider/model catalog has finished loading.
+   * Confirmed empirically against a real, freshly-spawned `opencode serve`
+   * (v1.18.30): the very first `/api/model` call after "listening" answers
+   * `data: []` every time, and every call from roughly one to two seconds
+   * later answers with the real catalog (hundreds to low thousands of
+   * entries) — `location[directory]` played no part; a directory with no
+   * project at all answered identically to a real one once warm. Both
+   * callers of this (a session's own `fetchInitialModels`, and PA-50's
+   * "Refresh" button in `SessionManager.discoverModels`) have no catalog of
+   * their own to fall back on, so an empty answer from a server that only
+   * just started is indistinguishable from "opencode truly has zero models
+   * configured" without retrying — and the latter is not something a real
+   * deployment produces: even with no provider configured, `/api/model`
+   * still lists the built-in community database once warm. So retry briefly
+   * rather than trust a lone empty answer; give up and return whatever the
+   * last attempt got (including `[]`) if it never warms up in time, since
+   * this must never hang a "Refresh" click or a session's own startup
+   * indefinitely.
+   */
+  async requestModelCatalog(directory: string): Promise<unknown[]> {
+    const attempts = 8;
+    const delayMs = 400;
+    let data: unknown[] = [];
+    for (let i = 0; i < attempts; i++) {
+      const res = await this.request<{ data?: unknown[] }>('/api/model', {
+        method: 'GET',
+        query: { 'location[directory]': directory },
+      });
+      data = res.data ?? [];
+      if (data.length > 0) return data;
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs));
+    }
+    return data;
+  }
+
   /** Kills the shared process. Every registered session must have already stopped using it. */
   dispose(): void {
     for (const { abort } of this.eventStreams.values()) abort.abort();

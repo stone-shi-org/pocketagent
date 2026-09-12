@@ -2063,11 +2063,14 @@ export class SessionManager {
       }
       case 'opencode-server': {
         const server = this.getOrCreateOpencodeServer(executable, env);
-        const res = await server.request<{ data?: unknown[] }>('/api/model', {
-          method: 'GET',
-          query: { 'location[directory]': cwd },
-        });
-        return normalizeOpencodeModels(res.data);
+        // `requestModelCatalog` (not a raw `request('/api/model', ...)`)
+        // because a freshly-spawned server's very first answer races its own
+        // provider-catalog warm-up and comes back empty — see that method's
+        // doc comment. Without the retry it does, a "Refresh" click against
+        // a shared server nobody has used yet always won this race and
+        // silently cached an empty catalog as `last_refresh_ok: true`.
+        const data = await server.requestModelCatalog(cwd);
+        return normalizeOpencodeModels(data);
       }
       default:
         return probeClaudeModels(executable, cwd, env);

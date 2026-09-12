@@ -265,12 +265,16 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
    */
   private async fetchInitialModels(): Promise<void> {
     try {
-      const res = await this.server.request<{ data?: unknown[] }>('/api/model', {
-        method: 'GET',
-        query: { 'location[directory]': this.spec.cwd },
-      });
+      // `requestModelCatalog`, not a raw `request('/api/model', ...)`: the
+      // very first call against a server nobody has used yet races
+      // opencode's own provider-catalog warm-up and comes back empty — see
+      // that method's doc comment. Without the retry it does, the *first*
+      // opencode session started after this process boots would show an
+      // empty model picker forever, since this call is fire-and-forget and
+      // never repeated.
+      const data = await this.server.requestModelCatalog(this.spec.cwd);
       if (!this.isAlive()) return;
-      this.emitEvent({ kind: 'models_available', models: normalizeOpencodeModels(res.data) });
+      this.emitEvent({ kind: 'models_available', models: normalizeOpencodeModels(data) });
     } catch {
       // Best-effort, same discipline as `fetchInitialCommands` above.
     }

@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '@pocketagent/protocol';
 import { OpencodeServerManager } from '../src/sessions/opencode-server.js';
 import { OpencodeSession, type OpencodeSessionSpec } from '../src/sessions/opencode-session.js';
@@ -81,6 +81,43 @@ describe('OpencodeServerManager', () => {
       'SIGKILL',
     );
     await crashed;
+  });
+
+  // A freshly-spawned `opencode serve` races its own provider-catalog
+  // warm-up: the very first `/api/model` answer after "listening" can be
+  // `data: []` even though the real catalog is non-empty and arrives within
+  // a second or two — confirmed empirically against a real, installed
+  // opencode binary (see `requestModelCatalog`'s doc comment). These two
+  // tests stub `request()` directly rather than the fixture (which always
+  // answers non-empty and has no reason to simulate opencode's own startup
+  // race) to pin down `requestModelCatalog`'s retry-until-non-empty and
+  // eventual-give-up behaviour in isolation.
+  it('retries an empty /api/model answer until a non-empty one arrives', async () => {
+    server = makeServer();
+    let calls = 0;
+    vi.spyOn(server, 'request').mockImplementation(async () => {
+      calls++;
+      return calls < 3 ? { data: [] } : { data: [{ id: 'x', providerID: 'y' }] };
+    });
+
+    const data = await server.requestModelCatalog('/tmp');
+
+    expect(calls).toBe(3);
+    expect(data).toEqual([{ id: 'x', providerID: 'y' }]);
+  });
+
+  it('gives up and returns an empty catalog if it never warms up', async () => {
+    server = makeServer();
+    let calls = 0;
+    vi.spyOn(server, 'request').mockImplementation(async () => {
+      calls++;
+      return { data: [] };
+    });
+
+    const data = await server.requestModelCatalog('/tmp');
+
+    expect(calls).toBe(8);
+    expect(data).toEqual([]);
   });
 });
 
