@@ -83,7 +83,7 @@ const BUILD_STATE_CHOICES: readonly ('Successful' | 'Failed' | 'Unknown')[] = [
 const BAMBOO_WEBHOOK_TEMPLATE = `{
   "notification": "\${bamboo.webhook.notification.description}",
   "timestamp": "\${bamboo.webhook.timestamp}",
-  "planKey": "\${bamboo.planKey}",
+  "planKey": "\${bamboo.buildKey}",
   "planName": "\${bamboo.buildPlanName}",
   "buildNumber": "\${bamboo.buildNumber}",
   "buildResultKey": "\${bamboo.buildResultKey}",
@@ -1111,13 +1111,14 @@ export function WebhookEditorPage({
                 <div className="settings-row-info">
                   <label className="settings-row-label">Set this up in Bamboo</label>
                   <p className="transport-hint">
-                    Create a webhook on the Bamboo plan (or globally) pointed at the URL above, set
+                    Create a webhook notification on the Bamboo plan (or globally) pointed at the URL above, set
                     its notification to <strong>&ldquo;All Builds Completed&rdquo;</strong> (this
                     webhook&rsquo;s own filter below decides which builds actually run — narrowing
                     in Bamboo too is supported, but can make a webhook go quiet with no error if the
                     two disagree), add the header{' '}
-                    <code>Authorization: Bearer {token ?? '<token — reveal above>'}</code>, and paste
-                    this as the webhook body:
+                    <code>Authorization: Bearer {token ?? '<token — reveal above>'}</code>.
+                    You can select Bamboo&rsquo;s built-in <strong>&ldquo;Build webhook&rdquo;</strong> template,
+                    or use this custom payload body:
                   </p>
                 </div>
                 <div className="hook-preview-wrap">

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BAMBOO_DEFAULT_SAMPLE_PAYLOAD,
   BAMBOO_SAMPLE_PAYLOAD,
   BAMBOO_TEMPLATE_VARS,
   DEFAULT_BAMBOO_PROMPT_TEMPLATE,
@@ -39,6 +40,18 @@ const fencedBody = (text: string): string =>
 describe('bambooTemplateVariables', () => {
   it('extracts every declared variable from a realistic payload', () => {
     const v = vars(BAMBOO_SAMPLE_PAYLOAD);
+    expect(v['notification']).toBe('Plan status changed');
+    expect(v['plan.key']).toBe('EM-EM');
+    expect(v['plan.name']).toBe('Example Microservice');
+    expect(v['build.number']).toBe('123');
+    expect(v['build.state']).toBe('Failed');
+    expect(v['build.resultKey']).toBe('EM-EM-123');
+    expect(v['trigger.sentence']).toContain('Ada Lovelace');
+    expect(v['webhook.name']).toBe('Fix failed builds');
+  });
+
+  it('extracts variables from Bamboo built-in default nested build payload', () => {
+    const v = vars(BAMBOO_DEFAULT_SAMPLE_PAYLOAD);
     expect(v['notification']).toBe('Plan status changed');
     expect(v['plan.key']).toBe('EM-EM');
     expect(v['plan.name']).toBe('Example Microservice');

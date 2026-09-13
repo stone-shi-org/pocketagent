@@ -582,10 +582,36 @@ export function jiraTemplateVariables(
 }
 
 /**
- * Build the substitution map from a parsed Bamboo delivery payload — the JSON
- * shape produced by the recommended webhook template this feature documents
- * for operators to paste into Bamboo (see `BAMBOO_TEMPLATE_VARS`), i.e. flat
- * string fields at the top level rather than Jira's nested `issue.fields`.
+ * Bamboo's built-in default "Build webhook" payload shape, where build
+ * metadata is nested under the `build` object and `planKey` is derived from
+ * `buildResultKey`.
+ */
+export const BAMBOO_DEFAULT_SAMPLE_PAYLOAD: unknown = {
+  uuid: '8030ef68-cffd-4d36-add1-dc664fd228c3',
+  timestamp: '1756000000000',
+  notification: 'Plan status changed',
+  webhook: {
+    webhookTemplatedId: '393217',
+    webhookTemplatedName: 'Build webhook',
+  },
+  build: {
+    buildResultKey: 'EM-EM-123',
+    status: 'Failed',
+    buildPlanName: 'Example Microservice',
+    startedAt: '2026-09-04T12:00:00Z',
+    finishedAt: '2026-09-04T12:05:00Z',
+    triggerReason: 'Code change',
+    triggerSentence: 'Code changed by Ada Lovelace: fix off-by-one in retry loop',
+  },
+};
+
+/**
+ * Build the substitution map from a parsed Bamboo delivery payload.
+ *
+ * Supports both the flat payload format (with top-level `planKey` / `buildKey`)
+ * and Bamboo's built-in default "Build webhook" template format (where build
+ * metadata is nested under a `build` object, `status` is used for build state,
+ * and `planKey` is derived from `buildResultKey`).
  *
  * Total, exactly like `jiraTemplateVariables`: every name in
  * `BAMBOO_TEMPLATE_VARS` gets a key, so a payload missing a field (an operator
@@ -597,19 +623,71 @@ export function bambooTemplateVariables(
   extra: { webhookName: string; deliveryId: string },
 ): Record<string, string> {
   const root = asRecord(payload);
+  const build = asRecord(root['build']);
+
+  const buildResultKey = str(root['buildResultKey']) || str(build['buildResultKey']);
+  let derivedPlanKey = '';
+  let derivedBuildNumber = '';
+  if (buildResultKey) {
+    const lastDash = buildResultKey.lastIndexOf('-');
+    if (lastDash > 0) {
+      const pKey = buildResultKey.slice(0, lastDash);
+      const bNum = buildResultKey.slice(lastDash + 1);
+      if (BAMBOO_PLAN_KEY_RE.test(pKey)) derivedPlanKey = pKey;
+      if (/^\d+$/.test(bNum)) derivedBuildNumber = bNum;
+    }
+  }
+
+  const explicitPlanKey =
+    ('planKey' in root ? str(root['planKey']) : null) ??
+    ('buildKey' in root ? str(root['buildKey']) : null) ??
+    ('planKey' in build ? str(build['planKey']) : null) ??
+    ('buildKey' in build ? str(build['buildKey']) : null);
+
+  const planKey = explicitPlanKey ?? derivedPlanKey;
+
+  const planName =
+    str(root['planName']) ||
+    str(root['buildPlanName']) ||
+    str(build['planName']) ||
+    str(build['buildPlanName']);
+
+  const explicitBuildNumber =
+    ('buildNumber' in root ? str(root['buildNumber']) : null) ??
+    ('buildNumber' in build ? str(build['buildNumber']) : null);
+
+  const buildNumber = explicitBuildNumber ?? derivedBuildNumber;
+
+  const buildState =
+    str(root['buildState']) ||
+    str(root['status']) ||
+    str(build['status']) ||
+    str(build['buildState']);
+
+  const buildResultUrl =
+    str(root['buildResultUrl']) ||
+    str(root['resultsUrl']) ||
+    str(build['buildResultUrl']) ||
+    str(build['resultsUrl']);
+
+  const startedAt = str(root['startedAt']) || str(build['startedAt']);
+  const finishedAt = str(root['finishedAt']) || str(build['finishedAt']);
+  const triggerReason = str(root['triggerReason']) || str(build['triggerReason']);
+  const triggerSentence = str(root['triggerSentence']) || str(build['triggerSentence']);
+  const notification = str(root['notification']) || str(build['notification']);
 
   const vars: Record<string, string> = {
-    notification: str(root['notification']),
-    'plan.key': str(root['planKey']),
-    'plan.name': str(root['planName']),
-    'build.number': str(root['buildNumber']),
-    'build.resultKey': str(root['buildResultKey']),
-    'build.state': str(root['buildState']),
-    'build.resultUrl': str(root['buildResultUrl']),
-    'build.startedAt': str(root['startedAt']),
-    'build.finishedAt': str(root['finishedAt']),
-    'trigger.reason': str(root['triggerReason']),
-    'trigger.sentence': str(root['triggerSentence']),
+    notification,
+    'plan.key': planKey,
+    'plan.name': planName,
+    'build.number': buildNumber,
+    'build.resultKey': buildResultKey,
+    'build.state': buildState,
+    'build.resultUrl': buildResultUrl,
+    'build.startedAt': startedAt,
+    'build.finishedAt': finishedAt,
+    'trigger.reason': triggerReason,
+    'trigger.sentence': triggerSentence,
     'webhook.name': extra.webhookName,
     'delivery.id': extra.deliveryId,
   };

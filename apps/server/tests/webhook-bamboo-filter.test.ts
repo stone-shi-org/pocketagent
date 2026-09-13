@@ -61,6 +61,62 @@ describe('parseBambooEvent', () => {
     expect(r.facts.startedAt).toBe(1_756_000_000_000);
   });
 
+  it('extracts facts from Bamboo built-in default nested build template', () => {
+    const r = parseBambooEvent({
+      uuid: '8030ef68-cffd-4d36-add1-dc664fd228c3',
+      timestamp: '1756000100000',
+      notification: 'Plan status changed',
+      webhook: {
+        webhookTemplatedId: '393217',
+        webhookTemplatedName: 'Build webhook',
+      },
+      build: {
+        buildResultKey: 'LIV-LIV-30',
+        status: 'Failed',
+        buildPlanName: 'live-stt - live-stt-docker',
+        startedAt: '2026-09-04T12:00:00Z',
+        finishedAt: '2026-09-04T12:05:00Z',
+        triggerReason: 'Code change',
+        triggerSentence: 'Code changed by Ada Lovelace',
+      },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.facts.planKey).toBe('LIV-LIV');
+    expect(r.facts.projectKey).toBe('LIV');
+    expect(r.facts.buildNumber).toBe(30);
+    expect(r.facts.buildResultKey).toBe('LIV-LIV-30');
+    expect(r.facts.buildState).toBe('Failed');
+    expect(r.facts.planName).toBe('live-stt - live-stt-docker');
+    expect(r.facts.triggerReason).toBe('Code change');
+    expect(r.facts.triggerSentence).toBe('Code changed by Ada Lovelace');
+  });
+
+  it('accepts a top-level buildKey alias for planKey', () => {
+    const r = parseBambooEvent({
+      buildKey: 'MYM-MYM',
+      buildNumber: '15',
+      buildState: 'Successful',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.facts.planKey).toBe('MYM-MYM');
+    expect(r.facts.projectKey).toBe('MYM');
+    expect(r.facts.buildNumber).toBe(15);
+    expect(r.facts.buildState).toBe('Successful');
+  });
+
+  it('derives planKey and buildNumber from a top-level buildResultKey when planKey is absent', () => {
+    const r = parseBambooEvent({
+      buildResultKey: 'AR-AR-99',
+      buildState: 'Failed',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.facts.planKey).toBe('AR-AR');
+    expect(r.facts.buildNumber).toBe(99);
+  });
+
   it('refuses a payload with no plan key', () => {
     const r = parseBambooEvent({ buildState: 'Failed' });
     expect(r).toMatchObject({ ok: false });

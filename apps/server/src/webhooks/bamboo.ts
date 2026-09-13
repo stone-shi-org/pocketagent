@@ -49,7 +49,25 @@ export type BambooParseResult =
 const VALID_BUILD_STATES = ['Successful', 'Failed', 'Unknown'] as const;
 
 /**
+ * Try to split a Bamboo buildResultKey (e.g. "EM-EM-123") into planKey ("EM-EM") and buildNumber (123).
+ * Returns null if the result key does not match that structure.
+ */
+function splitBuildResultKey(key: string): { planKey: string; buildNumber: number | null } | null {
+  const lastDash = key.lastIndexOf('-');
+  if (lastDash <= 0) return null;
+  const planKey = key.slice(0, lastDash);
+  const numPart = key.slice(lastDash + 1);
+  if (!BAMBOO_PLAN_KEY_RE.test(planKey)) return null;
+  const buildNumber = /^\d+$/.test(numPart) ? Number(numPart) : null;
+  return { planKey, buildNumber };
+}
+
+/**
  * Pull the facts out of a parsed payload, refusing anything unusable.
+ *
+ * Supports both flat payloads and Bamboo's built-in default "Build webhook"
+ * template (where build metadata is nested under `build`, status is `status`,
+ * and plan key / build number can be derived from `buildResultKey`).
  *
  * `planKey` is *validated*, not sanitized, for the same reason Jira's issue
  * key is: it is the one untrusted value used structurally. A key that does
@@ -58,31 +76,75 @@ const VALID_BUILD_STATES = ['Successful', 'Failed', 'Unknown'] as const;
  */
 export function parseBambooEvent(payload: unknown): BambooParseResult {
   const root = asRecord(payload);
+  const build = asRecord(root['build']);
 
-  const planKey = str(root['planKey']);
-  if (planKey === '') {
+  const buildResultKey = str(root['buildResultKey']) || str(build['buildResultKey']) || null;
+  const split = buildResultKey ? splitBuildResultKey(buildResultKey) : null;
+
+  const explicitPlanKey =
+    ('planKey' in root ? str(root['planKey']) : null) ??
+    ('buildKey' in root ? str(root['buildKey']) : null) ??
+    ('planKey' in build ? str(build['planKey']) : null) ??
+    ('buildKey' in build ? str(build['buildKey']) : null);
+
+  const rawPlanKey = explicitPlanKey ?? split?.planKey ?? '';
+
+  if (rawPlanKey === '') {
     return { ok: false, reason: 'The payload carried no "planKey", so there is nothing to route by.' };
   }
-  if (!BAMBOO_PLAN_KEY_RE.test(planKey)) {
-    return { ok: false, reason: `"${clip(planKey)}" is not a valid Bamboo plan key.` };
+  if (!BAMBOO_PLAN_KEY_RE.test(rawPlanKey)) {
+    return { ok: false, reason: `"${clip(rawPlanKey)}" is not a valid Bamboo plan key.` };
   }
+
+  const buildNumber =
+    parseIntOrNull(str(root['buildNumber'])) ??
+    parseIntOrNull(str(build['buildNumber'])) ??
+    split?.buildNumber ??
+    null;
+
+  const planName =
+    str(root['planName']) ||
+    str(root['buildPlanName']) ||
+    str(build['planName']) ||
+    str(build['buildPlanName']) ||
+    null;
+
+  const rawBuildState =
+    str(root['buildState']) ||
+    str(root['status']) ||
+    str(build['status']) ||
+    str(build['buildState']);
+
+  const triggerReason = str(root['triggerReason']) || str(build['triggerReason']) || null;
+  const triggerSentence = str(root['triggerSentence']) || str(build['triggerSentence']) || null;
+  const buildResultUrl =
+    str(root['buildResultUrl']) ||
+    str(root['resultsUrl']) ||
+    str(build['buildResultUrl']) ||
+    str(build['resultsUrl']) ||
+    null;
+
+  const startedAt = parseTimestamp(str(root['startedAt']) || str(build['startedAt']));
+  const finishedAt = parseTimestamp(str(root['finishedAt']) || str(build['finishedAt']));
+  const timestamp = parseTimestamp(str(root['timestamp']) || str(build['timestamp']));
+  const notification = str(root['notification']) || str(build['notification']);
 
   return {
     ok: true,
     facts: {
-      notification: str(root['notification']),
-      planKey,
-      projectKey: planKey.includes('-') ? planKey.slice(0, planKey.indexOf('-')) : null,
-      planName: str(root['planName']) || null,
-      buildNumber: parseIntOrNull(str(root['buildNumber'])),
-      buildResultKey: str(root['buildResultKey']) || null,
-      buildState: normalizeBuildState(str(root['buildState'])),
-      triggerReason: str(root['triggerReason']) || null,
-      triggerSentence: str(root['triggerSentence']) || null,
-      buildResultUrl: str(root['buildResultUrl']) || null,
-      startedAt: parseTimestamp(str(root['startedAt'])),
-      finishedAt: parseTimestamp(str(root['finishedAt'])),
-      timestamp: parseTimestamp(str(root['timestamp'])),
+      notification,
+      planKey: rawPlanKey,
+      projectKey: rawPlanKey.includes('-') ? rawPlanKey.slice(0, rawPlanKey.indexOf('-')) : null,
+      planName,
+      buildNumber,
+      buildResultKey,
+      buildState: normalizeBuildState(rawBuildState),
+      triggerReason,
+      triggerSentence,
+      buildResultUrl,
+      startedAt,
+      finishedAt,
+      timestamp,
     },
   };
 }

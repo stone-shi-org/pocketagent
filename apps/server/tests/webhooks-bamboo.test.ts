@@ -248,6 +248,27 @@ describe('bamboo webhook delivery: per-plan conversation grouping', () => {
     // `issue_key` is the generic delivery column reused for a Bamboo plan key.
     expect(rows1[0]?.issue_key).toBe('EM-EM');
   });
+
+  it('accepts and runs a delivery using Bamboo built-in default nested template', async () => {
+    const hook = await createBambooWebhook({ overlapPolicy: 'allow' });
+    const payload = JSON.stringify({
+      uuid: '8030ef68-cffd-4d36-add1-dc664fd228c3',
+      timestamp: String(Date.now()),
+      notification: 'Plan status changed',
+      build: {
+        buildResultKey: 'LIV-LIV-30',
+        status: 'Failed',
+        buildPlanName: 'live-stt - live-stt-docker',
+      },
+    });
+    const res = await deliverBearer(SLUG, hook.token, payload);
+    expect(res.statusCode).toBe(202);
+    expect(res.json().status).toBe('running');
+    const rows = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 });
+    expect(rows[0]?.issue_key).toBe('LIV-LIV');
+    expect(rows[0]?.rendered_prompt).toContain('LIV-LIV');
+    expect(rows[0]?.rendered_prompt).toContain('30');
+  });
 });
 
 describe('bamboo webhook: the skip-queue label has no effect (PA-39)', () => {
