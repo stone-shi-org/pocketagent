@@ -5757,6 +5757,30 @@ button.chat-rate-limit-badge {
   padding: 24px 4px;
 }
 
+/* Nested under a Telegram bot row: its paired chat ids (PA-53). Its own
+   class rather than reusing `.planner-model-row` at the top level — this
+   sits one level down, so a left border and inset read as "belonging to
+   the row above" instead of another top-level entry. */
+.telegram-pairings {
+  margin: 4px 0 10px 16px;
+  padding: 4px 0 4px 12px;
+  border-left: 2px solid var(--border);
+}
+
+.telegram-pairing-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.telegram-pairing-row:last-child {
+  border-bottom: none;
+}
+
 .planner-row {
   display: flex;
   align-items: center;

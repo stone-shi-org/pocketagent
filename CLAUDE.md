@@ -629,6 +629,75 @@ just with its own four choices (once / remember for this workspace / remember gl
 instead of `ApprovalSheet`'s two, since the shared `PermissionDecision` type has no
 workspace/global concept of its own.
 
+### Telegram channel (PA-53)
+
+Telegram is a second front end onto `PlannerChatService`, built entirely by reusing patterns
+that already existed for other triggers rather than inventing parallel ones —
+`apps/server/src/telegram/` holds all of it, alongside `routes/telegram.ts` and
+`packages/protocol/src/telegram.ts`.
+
+**A bot is a secret-backed row, exactly like a custom Claude provider.** `TelegramBotStore`
+(`telegram/bots-store.ts`) is `CustomClaudeProviderStore`'s shape with the `AgentRegistry`
+wiring removed: the token is encrypted at rest with the same `crypto/secret-box.ts` primitive,
+there is no reveal endpoint (editing leaves the token blank to keep the stored one), and a row
+that cannot be decrypted degrades to `revealToken() => null` rather than throwing, so one bad
+key cannot take the whole poller down. Unlike a provider, a bot is not pushed into a live
+registry on mutation — nothing selects a bot the way an agent id is selected — so
+`TelegramPollerService` simply re-lists enabled bots on its own fixed reconcile tick instead of
+needing a push-on-mutation callback.
+
+**A pairing (`telegram_links`) is `webhook_issue_sessions` transplanted**: a cache, not
+history, of which Pocket Agent chat one Telegram chat id is talking to, keyed on
+`(bot_id, telegram_chat_id)` and `ON DELETE CASCADE` from its bot for the same "a row here
+outliving its bot is meaningless" reason that table CASCADEs from its webhook.
+`workspace_id` is `SET NULL` rather than CASCADE, so deleting the Pocket Agent a pairing points
+at surfaces as a repairable orphan instead of silently deleting the pairing — the same
+distinction `planner_chats.workspace_id` already draws. `TelegramLinksStore` splits "patch one
+field on an existing pairing" into dedicated methods (`setPlannerChatId`, `touchLabel`) rather
+than one generic upsert, because `skip_tool_approvals` is a `NOT NULL` boolean with no
+representable "leave unspecified" value the way a nullable `TEXT` column's
+`COALESCE(excluded.x, table.x)` upsert idiom gets for free — a single upsert that only
+sometimes received that field could not tell "explicitly false" from "not provided" once it had
+already been converted to `0`/`1` for binding.
+
+**Transport is long-polling, not an inbound webhook** (`telegram/poller.ts`,
+`TelegramPollerService`), because this app's own default posture is loopback-bind and
+"exposing this is a deliberate act" — a Telegram webhook would require a public HTTPS URL,
+which support for a chat bot should not force on every installer just to work behind a NAT or
+Tailscale. Shaped like `CronService`: `init()`/`stop()` wired into `app.ts` next to
+`cron`/`webhooks`, but one self-rescheduling long-poll loop *per enabled bot* rather than a
+shared fixed tick, since a real `getUpdates` call itself blocks server-side for up to
+`LONG_POLL_TIMEOUT_SECONDS`. Every network call this service makes is outbound.
+
+**`TelegramBridge` drives a chat turn exactly the way `RunExecutor.startPocketAgent` already
+does for a webhook's Pocket Agent runs**: resolve-or-create the chat, `observe()` before
+prompting (a turn that pauses for approval ends its generator while genuinely still running —
+missing this would silently drop the pause), await the turn's first `next()` synchronously so a
+precondition failure becomes an immediate reply rather than a background rejection, then drain
+the rest in the background. An unpaired chat id gets a fixed refusal and touches nothing — no
+chat, no LLM call — so an unauthorized id can never spend a token.
+
+**There is no server-side slash-command mechanism for Pocket Agent chats to reuse.** The web
+UI's `/clear`, `/context`, `/mcp` (`PlannerChatPage.tsx`) are intercepted entirely client-side
+and call REST endpoints directly; none of that reaches the server as a chat message. Telegram
+has no client-side JS, so `telegram/slash-commands.ts` + `TelegramBridge.runSlashCommand`
+re-implement the same three commands server-side, directly against `PlannerChatService`/
+`McpRegistryService` — a second, independent implementation of the same semantics, since the
+two surfaces share no transport to unify over.
+
+**Approval relay, not a bypass, is the default** — the one place this feature adds a genuinely
+new decision rather than reusing an old one; see the sixth invariant override below.
+
+`send_telegram_message` (`planner/tools.ts`) is the one tool that reaches a human directly
+rather than another PocketAgent subsystem or a third-party API. It is `readOnly: false` even
+though `web_search`/`url_fetch` (also outbound HTTP) are not, because a message landing in a
+stranger's Telegram client is exactly the consequential action the approval gate exists for —
+gated like `send_instruction`/`exec_command`, unconditionally, even from a chat whose own
+inbound messages are approval-exempt (`skipToolApprovals`): "this chat may talk to the agent"
+and "this agent may message anyone" are different grants. It can only address an id already
+present in `telegram_links` — never an arbitrary id typed into the argument — the same posture
+`exec_command`'s own input validation takes.
+
 ### The home screen
 
 `projects/index.ts` composes `GET /api/projects`: live sessions and on-disk conversations
@@ -879,20 +948,37 @@ These are load-bearing. Several were bugs first.
   cron's/webhooks' inverted defaults from quietly becoming the norm elsewhere.
 - **`PlannerChat.skipToolApprovalsEnabled` is the fifth override, and the narrowest one yet**
   (PA-10). It pre-approves the mutating tool calls of **one chat**, because that chat was created
-  by an unattended trigger — today only an inbound webhook — whose own `skipPermissions` was
-  already on. It is not a new decision, it is the existing one reaching the planner's gate: a
-  webhook with the toggle *off* still parks its pocket turn on the first mutating call and waits
-  **forever** for a human to answer in the Pocket Agent UI, with no timeout added anywhere, which
-  is exactly cron's own "unattended run waits forever" behaviour. Three things keep it from
-  widening. It lives on the chat row rather than being threaded through a turn, because it has to
-  survive an approval pause, a restart and a `per-issue` webhook reusing the chat — but that row
-  can only be written by the server: `CreatePlannerChatRequest` has **no such field**, so no
-  browser can mint a pre-approved chat, and `apps/server/tests/webhooks-pocket.test.ts` asserts
-  that a client asking for one is ignored. It short-circuits *before* the remembered-decision
-  lookup and, like yolo, **never writes one** — turning the webhook's toggle off later must not
-  leave the tool looking individually approved for everyone. And it is disclosed persistently:
-  `PlannerChatPage` renders a standing callout on every visit, per the first invariant's "not
-  just at the moment it was created".
+  by an unattended trigger — an inbound webhook, or (PA-53) a Telegram pairing an operator has
+  explicitly opted in — whose own skip-permissions decision was already made. It is not a new
+  decision, it is the existing one reaching the planner's gate: a webhook (or Telegram pairing)
+  with the toggle *off* still parks its pocket turn on the first mutating call and waits
+  **forever** for a human to answer, with no timeout added anywhere, which is exactly cron's own
+  "unattended run waits forever" behaviour. Three things keep it from widening. It lives on the
+  chat row rather than being threaded through a turn, because it has to survive an approval
+  pause, a restart and a `per-issue` webhook reusing the chat — but that row can only be written
+  by the server: `CreatePlannerChatRequest` has **no such field**, so no browser can mint a
+  pre-approved chat, and `apps/server/tests/webhooks-pocket.test.ts` asserts that a client asking
+  for one is ignored. It short-circuits *before* the remembered-decision lookup and, like yolo,
+  **never writes one** — turning the toggle off later must not leave the tool looking
+  individually approved for everyone. And it is disclosed persistently: `PlannerChatPage`
+  renders a standing callout on every visit, per the first invariant's "not just at the moment it
+  was created" (Telegram's own disclosure is the pairing row's persistent "skip approvals" state
+  in Settings, per the sixth override below).
+- **Telegram approval relay is the sixth override, and it goes the other way from webhook's
+  default** (PA-53). A webhook chat is unattended *by definition* — nobody is watching to answer
+  an approval, so its own override (above) defaults toward not asking. A Telegram-paired chat has
+  exactly the human it's paired to, present the whole time it's talking to the agent — the
+  premise of "just like web UI" the ticket asked for — so inheriting the webhook default would be
+  exactly the quiet default flip the first invariant forbids, on a channel where a human genuinely
+  is there to answer. `telegram_links.skip_tool_approvals` therefore defaults to **off**, and a
+  `permission_request` instead becomes a real inline-keyboard message
+  (`TelegramBridge.sendApprovalPrompt`) offering the same four choices the web UI's own card does;
+  a `callback_query` reply resolves it through the identical `PlannerChatService.resolveApproval`
+  path a browser's `POST .../approvals/:id` would use — no timeout, same as every other approval
+  in this app. The per-pairing opt-in is explicit, off by default, and surfaced persistently on
+  the pairing row in Settings — an operator who deliberately wants one paired id to run
+  unattended sets it there, and it reuses the *fifth* override's own field/mechanism
+  (`PlannerChat.skipToolApprovalsEnabled`) rather than inventing a second one.
 - **One agent per working tree, and occupancy is derived rather than leased.** `RunQueue`
   (`runs/queue.ts`) keys on `treeRootOf` — the working tree, so a cwd below a tree root rolls up
   to it, and a run in `<project>` deliberately does **not** conflict with one in

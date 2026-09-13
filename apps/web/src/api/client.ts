@@ -85,6 +85,15 @@ import type {
   SetPlannerSkillEnabledRequest,
   PlannerAgentSkillsResponse,
   SetPlannerAgentSkillRequest,
+  TelegramBotListResponse,
+  TelegramBotSummary,
+  CreateTelegramBotRequest,
+  UpdateTelegramBotRequest,
+  TelegramBotTestResult,
+  TelegramLink,
+  TelegramLinkListResponse,
+  CreateTelegramLinkRequest,
+  UpdateTelegramLinkRequest,
 } from '@pocketagent/protocol';
 
 export class ApiError extends Error {
@@ -425,6 +434,56 @@ export const api = {
     request<PlannerAgentMcpRegistriesResponse>(
       `/api/planner/workspaces/${encodeURIComponent(workspaceId)}/mcp-registries`,
       { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  // ---- Telegram bots & pairings (PA-53) ----------------------------------
+  //
+  // No `reveal` method for a bot's token, same reasoning as a custom Claude
+  // provider's API key — write-only, re-enter to change, blank keeps the
+  // stored one.
+
+  listTelegramBots: () => request<TelegramBotListResponse>('/api/telegram/bots'),
+
+  createTelegramBot: (body: CreateTelegramBotRequest) =>
+    request<TelegramBotSummary>('/api/telegram/bots', { method: 'POST', body: JSON.stringify(body) }),
+
+  updateTelegramBot: (id: string, body: UpdateTelegramBotRequest) =>
+    request<TelegramBotSummary>(`/api/telegram/bots/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  deleteTelegramBot: (id: string) =>
+    request<void>(`/api/telegram/bots/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  testTelegramBot: (id: string) =>
+    request<TelegramBotTestResult>(`/api/telegram/bots/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+
+  testTelegramBotToken: (botToken: string) =>
+    request<TelegramBotTestResult>('/api/telegram/bots/test-token', {
+      method: 'POST',
+      body: JSON.stringify({ botToken }),
+    }),
+
+  listTelegramLinks: (botId: string) =>
+    request<TelegramLinkListResponse>(`/api/telegram/bots/${encodeURIComponent(botId)}/links`),
+
+  createTelegramLink: (botId: string, body: CreateTelegramLinkRequest) =>
+    request<TelegramLink>(`/api/telegram/bots/${encodeURIComponent(botId)}/links`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  updateTelegramLink: (botId: string, chatId: string, body: UpdateTelegramLinkRequest) =>
+    request<TelegramLink>(
+      `/api/telegram/bots/${encodeURIComponent(botId)}/links/${encodeURIComponent(chatId)}`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+
+  deleteTelegramLink: (botId: string, chatId: string) =>
+    request<void>(
+      `/api/telegram/bots/${encodeURIComponent(botId)}/links/${encodeURIComponent(chatId)}`,
+      { method: 'DELETE' },
     ),
 
   listConversations: () =>

@@ -51,6 +51,11 @@ import { worktreeRoutes } from './routes/worktrees.js';
 import { webhookRoutes } from './routes/webhooks.js';
 import { plannerRoutes } from './routes/planner.js';
 import { mcpRegistryRoutes } from './routes/mcp-registries.js';
+import { telegramRoutes } from './routes/telegram.js';
+import { TelegramBotStore } from './telegram/bots-store.js';
+import { TelegramLinksStore } from './telegram/links-store.js';
+import { TelegramBridge } from './telegram/bridge.js';
+import { TelegramPollerService } from './telegram/poller.js';
 import { websocketRoutes } from './ws/index.js';
 import { WebhookService } from './webhooks/index.js';
 import { PlannerWorkspaceRegistry } from './planner/workspaces.js';
@@ -164,6 +169,14 @@ export interface BuildAppOptions {
    */
   legacyProviderEnv?: NodeJS.ProcessEnv;
   serveStatic?: boolean;
+  /** Injected in tests so a Telegram poll loop never makes a real network
+      call — the same reasoning `plannerLlmFetch` is injected for. In
+      practice this never fires in a test unless the test itself creates a
+      `telegram_bots` row, since an empty bot list polls nothing. */
+  telegramFetch?: typeof fetch;
+  /** Injected in tests to make the poller's reconcile tick fast enough to
+      assert against without a real 10s wait. */
+  telegramReconcileIntervalMs?: number;
 }
 
 export interface BuiltApp {
@@ -388,6 +401,13 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const plannerSkillsRoot = options.plannerSkillsRoot ?? resolvePlannerSkillsRoot(config.databasePath);
   const skills = new SkillRegistryService({ db, plannerWorkspaces, workspaces, skillsRoot: plannerSkillsRoot, logger: app.log });
 
+  // PA-53: Telegram bots and their Telegram-id -> Pocket Agent pairings.
+  // Constructed before `plannerChats` for the same reason `mcpRegistry`/
+  // `skills` are — `send_telegram_message`'s tool `execute` (via
+  // `PlannerChatService.executeTool`) needs both stores.
+  const telegramBots = new TelegramBotStore({ db, encKey: config.settingsEncKey, logger: app.log });
+  const telegramLinks = new TelegramLinksStore(db);
+
   const plannerChats = new PlannerChatService({
     db,
     workspaces,
@@ -401,8 +421,28 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     skills,
     // PA-44: `list_subagents`' coding-agent half reads this same registry.
     agents,
+    // PA-53: `send_telegram_message`'s tool `execute` needs both.
+    telegramBots,
+    telegramLinks,
     logger: app.log,
     ...(options.plannerLlmFetch ? { llmFetch: options.plannerLlmFetch } : {}),
+    ...(options.telegramFetch ? { telegramFetch: options.telegramFetch } : {}),
+  });
+
+  // PA-53: the Telegram bridge and its background long-poll loop. Constructed
+  // after `plannerChats` (which it drives, the same way `RunExecutor` does
+  // for a webhook's Pocket Agent runs) and `mcpRegistry` (its `/mcp` slash
+  // command reads it). Started explicitly below alongside `cron.init()`/
+  // `webhooks.init()`, and stopped in the same `onClose` hook.
+  const telegramBridge = new TelegramBridge({ links: telegramLinks, plannerChats, mcpRegistry, logger: app.log });
+  const telegramPoller = new TelegramPollerService({
+    bots: telegramBots,
+    bridge: telegramBridge,
+    logger: app.log,
+    ...(options.telegramFetch ? { fetchImpl: options.telegramFetch } : {}),
+    ...(options.telegramReconcileIntervalMs !== undefined
+      ? { reconcileIntervalMs: options.telegramReconcileIntervalMs }
+      : {}),
   });
 
   const usage = new UsageService([
@@ -506,6 +546,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     ...(options.plannerLlmFetch ? { plannerLlmFetch: options.plannerLlmFetch } : {}),
     agents,
     customClaudeProviders,
+    telegramBots,
+    telegramLinks,
+    ...(options.telegramFetch ? { telegramFetch: options.telegramFetch } : {}),
     db,
     backend,
     push,
@@ -539,6 +582,12 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // No reconciliation needed at boot — a due workspace is simply discovered
   // on the first tick, whenever the server last shut down.
   memoryConsolidation.start();
+
+  // PA-53: no session/delivery-row reconciliation needed at boot, unlike
+  // cron/webhooks — a bot's `polling_offset` already picks up exactly where
+  // the last run left off, and an enabled bot is simply discovered on the
+  // first reconcile tick.
+  await telegramPoller.init();
 
   await app.register(cookie);
   await app.register(rateLimit, {
@@ -628,6 +677,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(webhookRoutes);
   await app.register(plannerRoutes);
   await app.register(mcpRegistryRoutes);
+  await app.register(telegramRoutes);
   await app.register(settingsRoutes);
   await app.register(pushRoutes);
   await app.register(usageRoutes);
@@ -677,6 +727,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     cron.stop();
     webhooks.stop();
     memoryConsolidation.stop();
+    telegramPoller.stop();
     await sessions.shutdown();
     if (ownsDb) db.close();
   });

@@ -115,6 +115,64 @@ export const MCP_REGISTRIES_DDL = `
 `;
 
 /**
+ * The `telegram_bots`/`telegram_links` tables (PA-53).
+ *
+ * Same "named constant, used both as an appended migration and as an
+ * idempotent repair in `openDatabase`" discipline as `CUSTOM_CLAUDE_PROVIDERS_DDL`
+ * and `MCP_REGISTRIES_DDL` — a database whose `schema_version` checkpoint
+ * lands at or past this migration's tail index (another branch's own tail
+ * append landing on the same count) would otherwise never create these
+ * tables, and every Telegram query would throw "no such table".
+ *
+ * `telegram_bots` is modeled directly on `custom_claude_providers`: a bot's
+ * token is encrypted at rest with the same `crypto/secret-box.ts` primitive,
+ * and there is deliberately no reveal endpoint (see `TelegramBotStore`) —
+ * editing a bot leaves the token blank to keep the one already stored.
+ * `polling_offset` is the last Telegram `update_id` consumed, persisted so a
+ * restart does not re-deliver already-handled messages by starting the
+ * long-poll loop from the beginning again.
+ *
+ * `telegram_links` is modeled on `webhook_issue_sessions`: a *cache* of which
+ * Pocket Agent chat a paired Telegram id is talking to, not history — hence
+ * `ON DELETE CASCADE` from the owning bot, since a pairing row outliving its
+ * bot is meaningless (the same reasoning `webhook_issue_sessions`'s own doc
+ * comment gives for its CASCADE). `workspace_id` is `ON DELETE SET NULL`
+ * rather than CASCADE, because deleting the *Pocket Agent* a Telegram id was
+ * paired to should surface as an orphaned pairing an operator can see and
+ * repoint, not silently delete the pairing itself — the same distinction
+ * `planner_chats.workspace_id` already draws against `planner_workspaces`.
+ * `planner_chat_id` is deliberately not a foreign key either, for the same
+ * reason `webhook_issue_sessions.planner_chat_id` isn't: a stale reference is
+ * detected and rebuilt at read time, never a corruption to repair.
+ */
+export const TELEGRAM_DDL = `
+  CREATE TABLE IF NOT EXISTS telegram_bots (
+    id                   TEXT PRIMARY KEY,
+    name                 TEXT NOT NULL,
+    bot_token_ciphertext TEXT NOT NULL,
+    bot_username         TEXT,
+    enabled              INTEGER NOT NULL DEFAULT 1,
+    polling_offset       INTEGER,
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS telegram_links (
+    bot_id              TEXT NOT NULL REFERENCES telegram_bots (id) ON DELETE CASCADE,
+    telegram_chat_id    TEXT NOT NULL,
+    telegram_user_label TEXT,
+    workspace_id        TEXT REFERENCES planner_workspaces (id) ON DELETE SET NULL,
+    planner_chat_id     TEXT,
+    skip_tool_approvals INTEGER NOT NULL DEFAULT 0,
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL,
+    PRIMARY KEY (bot_id, telegram_chat_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_telegram_links_workspace ON telegram_links (workspace_id);
+`;
+
+/**
  * Exported for one test only: `cron.test.ts` builds a *genuine* historical
  * database by replaying a prefix of this array, rather than by fully migrating
  * and then rewriting `schema_version`. Rewinding a fully-migrated database
@@ -1150,6 +1208,9 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE agent_defaults ADD COLUMN last_refresh_ok INTEGER;
   ALTER TABLE agent_defaults ADD COLUMN last_refresh_error TEXT;
   `,
+  // PA-53: Telegram as a second conversational surface for Pocket Agent. See
+  // `TELEGRAM_DDL`'s own doc comment for the table shapes and FK reasoning.
+  TELEGRAM_DDL,
 ];
 
 /**
@@ -1330,6 +1391,10 @@ export function openDatabase(databasePath: string): Db {
   if (webhookColumnsForAgentIdentity.size > 0 && !webhookColumnsForAgentIdentity.has('agent_identity')) {
     db.exec("ALTER TABLE webhooks ADD COLUMN agent_identity TEXT NOT NULL DEFAULT ''");
   }
+  // PA-53, same positional-migration hazard once more: see `TELEGRAM_DDL`'s
+  // own doc comment. Re-running the same DDL constant the migration uses is
+  // idempotent (`IF NOT EXISTS`) and cannot drift from it.
+  db.exec(TELEGRAM_DDL);
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
   return db;

@@ -4,6 +4,7 @@ import { api, ApiError } from '../api/client.js';
 import { Icon, type IconName } from '../components/Icon.js';
 import { CustomClaudeProvidersSection } from '../components/CustomClaudeProvidersSection.js';
 import { CodingAgentsSection } from '../components/CodingAgentsSection.js';
+import { TelegramSection } from '../components/TelegramSection.js';
 import { getTerminalFontOverride, setTerminalFontOverride } from '../agent/terminal-font-pref.js';
 import { formatBuildInfo } from '../version.js';
 
@@ -357,6 +358,14 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
         desc="Claude Code driven against a third-party Anthropic-compatible endpoint."
       >
         <CustomClaudeProvidersSection onApiError={onApiError} />
+      </SectionCard>
+
+      <SectionCard
+        title="Telegram"
+        icon="compose"
+        desc="Pair a Telegram bot's chats to a Pocket Agent so it can be reached from Telegram."
+      >
+        <TelegramSection onApiError={onApiError} />
       </SectionCard>
 
       <SectionCard title="Process Backend" icon="agents" desc="Changing options while sessions run applies to new sessions after restart.">

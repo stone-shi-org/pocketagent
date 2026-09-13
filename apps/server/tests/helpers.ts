@@ -81,6 +81,9 @@ export async function createTestApp(
   piTranscripts?: PiTranscriptStore,
   /** Injected so a planner chat turn never makes a real network call. */
   plannerLlmFetch?: typeof fetch,
+  /** Injected so a Telegram poll loop / `send_telegram_message` tool call
+      never makes a real network call either. */
+  telegramFetch?: typeof fetch,
 ): Promise<TestApp> {
   const ws = makeWorkspace();
   const config = makeConfig({
@@ -105,6 +108,10 @@ export async function createTestApp(
     plannerWorkspacesRoot,
     plannerSkillsRoot,
     ...(plannerLlmFetch ? { plannerLlmFetch } : {}),
+    ...(telegramFetch ? { telegramFetch } : {}),
+    // Fast enough for a test to assert against without a real 10s wait,
+    // slow enough not to spin the CPU during tests that never touch Telegram.
+    telegramReconcileIntervalMs: 200,
     extraAgents: [makeTestAgent(config.shell)],
     // Empty rather than `process.env`: this checkout's own `.env` is already
     // loaded by the time a test runs, so a developer with a legacy

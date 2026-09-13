@@ -22,6 +22,8 @@ import type { PlannerChatService } from './planner/chats.js';
 import type { PlannerMemoryService } from './planner/memory.js';
 import type { McpRegistryService } from './planner/mcp/registry-service.js';
 import type { SkillRegistryService } from './planner/skills.js';
+import type { TelegramBotStore } from './telegram/bots-store.js';
+import type { TelegramLinksStore } from './telegram/links-store.js';
 
 export interface PocketContext {
   config: Config;
@@ -56,6 +58,15 @@ export interface PocketContext {
   agents: AgentRegistry;
   /** PA-28: user-managed Claude Code provider variants, kept in sync with `agents`. */
   customClaudeProviders: CustomClaudeProviderStore;
+  /** PA-53: Telegram bots (secret-backed rows) and their Telegram-id -> Pocket
+      Agent pairings — see `telegram/bridge.ts`'s doc comment for how a chat
+      turn is driven from an inbound message. */
+  telegramBots: TelegramBotStore;
+  telegramLinks: TelegramLinksStore;
+  /** Injected in tests so a Telegram "Test" button's `getMe()` call
+      (`routes/telegram.ts`) never makes a real network call — same reasoning
+      as `plannerLlmFetch`. */
+  telegramFetch?: typeof fetch;
   db: Db;
   backend: ProcessBackend;
   push: PushService;

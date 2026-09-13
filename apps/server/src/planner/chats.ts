@@ -54,6 +54,9 @@ import {
 } from './tools.js';
 import type { McpRegistryService } from './mcp/registry-service.js';
 import type { SkillRegistryService } from './skills.js';
+import type { TelegramBotStore } from '../telegram/bots-store.js';
+import type { TelegramLinksStore } from '../telegram/links-store.js';
+import { TelegramClient } from '../telegram/client.js';
 
 export class PlannerChatError extends Error {
   override readonly name = 'PlannerChatError';
@@ -130,6 +133,15 @@ export interface PlannerChatServiceOptions {
       what `toolsFor`'s own omission rule reads — mirrors `mcpRegistry`
       exactly, one layer up. */
   skills: SkillRegistryService;
+  /**
+   * PA-53: `send_telegram_message`'s own view of the world, threaded the same
+   * way `mcpRegistry`/`skills` are. Both optional — every existing test that
+   * constructs a `PlannerChatService` directly and never touches Telegram
+   * keeps compiling unchanged, and `executeTool` degrades to "no pairings, no
+   * delivery" when either is absent rather than throwing.
+   */
+  telegramBots?: TelegramBotStore;
+  telegramLinks?: TelegramLinksStore;
   logger?: { warn: (obj: unknown, msg?: string) => void };
   /** Injected in tests so no real network call is ever made. */
   llmFetch?: typeof fetch;
@@ -137,6 +149,9 @@ export interface PlannerChatServiceOptions {
       network call either — distinct from `llmFetch` above, which is only
       ever handed to `PlannerLlmClient`, not to `PlannerToolDeps`. */
   toolFetch?: typeof fetch;
+  /** PA-53: injected in tests so `send_telegram_message` never makes a real
+      network call either. */
+  telegramFetch?: typeof fetch;
   /** Injected in tests to control exactly which tools are offered. Defaults to `PLANNER_TOOLS`. */
   tools?: readonly PlannerToolDefinition[];
 }
@@ -1080,6 +1095,26 @@ export class PlannerChatService {
             pocketAgentEnabledTools: (workspaceId: string) => this.toolsFor(workspaceId).map((t) => t.name),
           },
           spawnDepth: this.spawnDepthOf(chat.id),
+          telegram: {
+            links:
+              this.opts.telegramLinks
+                ?.list()
+                .map((l) => ({ botId: l.botId, telegramChatId: l.telegramChatId, label: l.telegramUserLabel })) ?? [],
+            send: async (botId: string, telegramChatId: string, text: string) => {
+              const token = this.opts.telegramBots?.revealToken(botId) ?? null;
+              if (!token) return { ok: false, error: 'Telegram is not configured on this server.' };
+              const client = new TelegramClient({
+                token,
+                ...(this.opts.telegramFetch ? { fetchImpl: this.opts.telegramFetch } : {}),
+              });
+              try {
+                await client.sendMessage(telegramChatId, text);
+                return { ok: true };
+              } catch (err) {
+                return { ok: false, error: (err as Error).message };
+              }
+            },
+          },
           ...(this.opts.toolFetch ? { fetchImpl: this.opts.toolFetch } : {}),
         },
         args,

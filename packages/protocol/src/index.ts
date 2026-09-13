@@ -12,6 +12,7 @@ export * from './webhooks.js';
 export * from './planner.js';
 export * from './planner-memory.js';
 export * from './mcp-registry.js';
+export * from './telegram.js';
 
 /** Name of the HttpOnly cookie holding the server-side session id. */
 export const AUTH_COOKIE_NAME = 'pocketagent_sid';

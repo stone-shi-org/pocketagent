@@ -158,6 +158,31 @@ export interface PlannerToolDeps {
    * create a brand-new, unattached conversation.
    */
   spawnDepth: number;
+  /**
+   * PA-53: `send_telegram_message`'s own view of the world — every currently
+   * paired Telegram id (across every configured bot) it may address, and how
+   * to actually deliver to one. Rebuilt fresh per call by
+   * `PlannerChatService.executeTool`, the same "read live configuration on
+   * every call" posture `webSearch`/`urlFetch` already take, so a pairing
+   * added or removed in Settings mid-conversation takes effect on the very
+   * next call rather than requiring a fresh chat.
+   */
+  telegram: PlannerTelegramDeps;
+}
+
+/** See `PlannerToolDeps.telegram`'s own doc comment. */
+export interface PlannerTelegramDeps {
+  /** Every currently paired Telegram id. `send_telegram_message` may only
+      address one of these — never an arbitrary id typed into the argument —
+      the same "the model choosing to call something is not this server's
+      decision to trust unchecked" posture `exec_command`'s own input
+      validation already takes. */
+  links: readonly { botId: string; telegramChatId: string; label: string | null }[];
+  /** Deliver `text` to `telegramChatId` via `botId`'s bot. Never throws —
+      failure (bad token, Telegram API error, network) comes back as
+      `{ ok: false, error }` so the tool can fold it into its result text the
+      same way every other refusal here does. */
+  send(botId: string, telegramChatId: string, text: string): Promise<{ ok: boolean; error?: string }>;
 }
 
 /**
@@ -1242,6 +1267,57 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       if (!stat.isDirectory()) return `${requestedCwd} is not a directory.`;
 
       return runShellCommand(deps.shell, command, cwd);
+    },
+  },
+
+  // ---- Telegram (PA-53) --------------------------------------------------
+  //
+  // The one tool here that reaches a human directly rather than another
+  // PocketAgent subsystem or a third-party HTTP API. `readOnly: false` even
+  // though `web_search`/`url_fetch` (also outbound HTTP) are read-only: those
+  // two change nothing this system tracks, but a message landing in a
+  // stranger's Telegram client is exactly the consequential action the
+  // approval gate exists for, so this is gated like `send_instruction`/
+  // `exec_command` instead. It goes through that gate unconditionally, even
+  // when called from a chat whose own inbound messages are approval-exempt
+  // (a Telegram pairing with `skipToolApprovals` on) — "this chat is trusted
+  // to talk to the agent" and "this agent is trusted to message anyone" are
+  // different grants, and collapsing them would let one bypass double as the
+  // other.
+  {
+    name: 'send_telegram_message',
+    description:
+      'Send a message to a Telegram user who has paired their chat with a Pocket Agent. Only ids ' +
+      'already paired in Settings -> Telegram may be addressed; call list_workspaces or ask an ' +
+      'operator if you need to know which ids are available.',
+    parameters: {
+      type: 'object',
+      properties: {
+        telegramChatId: { type: 'string', description: 'A paired Telegram chat id.' },
+        text: { type: 'string', description: 'The message to send.' },
+      },
+      required: ['telegramChatId', 'text'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const telegramChatId = String(args.telegramChatId ?? '').trim();
+      const text = String(args.text ?? '').trim();
+      if (!telegramChatId) return 'No telegramChatId provided.';
+      if (!text) return 'No message text provided.';
+
+      const link = deps.telegram.links.find((l) => l.telegramChatId === telegramChatId);
+      if (!link) {
+        return (
+          `"${telegramChatId}" is not a paired Telegram id. Paired ids: ` +
+          (deps.telegram.links.length > 0
+            ? deps.telegram.links.map((l) => `${l.telegramChatId}${l.label ? ` (${l.label})` : ''}`).join(', ')
+            : 'none configured.')
+        );
+      }
+
+      const result = await deps.telegram.send(link.botId, telegramChatId, text);
+      return result.ok ? `Message sent to ${telegramChatId}.` : `Failed to send message: ${result.error}`;
     },
   },
 

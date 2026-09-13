@@ -37,11 +37,23 @@ const SUBAGENTS_UNAVAILABLE: PlannerToolDeps['subagents'] = {
   pocketAgentEnabledTools: () => [],
 };
 
+/** PA-53: `send_telegram_message`'s default stub — no pairings, and a `send`
+    that refuses, matching `TOOL_INTEGRATION_DISABLED`'s own "unconfigured is
+    a normal, explicit default" shape. A test that cares about the Telegram
+    path overrides it via `depsFor`'s `telegram` override. */
+const TELEGRAM_UNAVAILABLE: PlannerToolDeps['telegram'] = {
+  links: [],
+  send: async () => ({ ok: false, error: 'telegram stub not configured for this test' }),
+};
+
 function depsFor(
   t: TestApp,
   workspaceId?: string | null,
   overrides?: Partial<
-    Pick<PlannerToolDeps, 'webSearch' | 'urlFetch' | 'fetchImpl' | 'now' | 'subagents' | 'spawnDepth'>
+    Pick<
+      PlannerToolDeps,
+      'webSearch' | 'urlFetch' | 'fetchImpl' | 'now' | 'subagents' | 'spawnDepth' | 'telegram'
+    >
   >,
 ): PlannerToolDeps {
   const { workspaces, plannerWorkspaces, sessions, worktrees, conversations, agyTranscripts, piTranscripts, agents } =
@@ -65,6 +77,7 @@ function depsFor(
     agents,
     subagents: SUBAGENTS_UNAVAILABLE,
     spawnDepth: 0,
+    telegram: TELEGRAM_UNAVAILABLE,
     ...overrides,
   };
 }
@@ -101,6 +114,7 @@ describe('PLANNER_TOOLS catalog', () => {
         'mkdir',
         'rmdir',
         'send_instruction',
+        'send_telegram_message',
         'start_subagent_session',
         'write_file',
       ].sort(),
@@ -1215,5 +1229,90 @@ describe('start_subagent_session', () => {
       prompt: 'do a subtask',
     });
     expect(result).toMatch(/Could not start subagent session/);
+  });
+});
+
+/**
+ * PA-53: `send_telegram_message`. The tool itself never talks to
+ * `TelegramBotStore`/`TelegramLinksStore` directly — it only ever sees
+ * whatever `PlannerToolDeps.telegram` hands it — so this exercises exactly
+ * the boundary a real `PlannerChatService.executeTool` call builds: a fixed
+ * `links` list (what's currently paired) and a `send` function (how to
+ * actually deliver). The "only an already-paired id, never an arbitrary one"
+ * refusal is the load-bearing behavior here, mirroring `exec_command`'s own
+ * input-validation posture.
+ */
+describe('send_telegram_message', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('refuses an id that is not in the paired list, without calling send', async () => {
+    t = await createTestApp();
+    let called = false;
+    const tool = findPlannerTool('send_telegram_message')!;
+    const result = await tool.execute(
+      depsFor(t, undefined, {
+        telegram: {
+          links: [{ botId: 'telegram:bot-1', telegramChatId: '111', label: '@alice' }],
+          send: async () => {
+            called = true;
+            return { ok: true };
+          },
+        },
+      }),
+      { telegramChatId: '999', text: 'hi' },
+    );
+    expect(result).toMatch(/not a paired Telegram id/);
+    expect(result).toContain('111');
+    expect(called).toBe(false);
+  });
+
+  it('delivers to a paired id via the bot it is paired through', async () => {
+    t = await createTestApp();
+    const sent: { botId: string; telegramChatId: string; text: string }[] = [];
+    const tool = findPlannerTool('send_telegram_message')!;
+    const result = await tool.execute(
+      depsFor(t, undefined, {
+        telegram: {
+          links: [{ botId: 'telegram:bot-1', telegramChatId: '111', label: null }],
+          send: async (botId, telegramChatId, text) => {
+            sent.push({ botId, telegramChatId, text });
+            return { ok: true };
+          },
+        },
+      }),
+      { telegramChatId: '111', text: 'hello from the agent' },
+    );
+    expect(result).toMatch(/Message sent to 111/);
+    expect(sent).toEqual([{ botId: 'telegram:bot-1', telegramChatId: '111', text: 'hello from the agent' }]);
+  });
+
+  it('folds a delivery failure into the tool result rather than throwing', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('send_telegram_message')!;
+    const result = await tool.execute(
+      depsFor(t, undefined, {
+        telegram: {
+          links: [{ botId: 'telegram:bot-1', telegramChatId: '111', label: null }],
+          send: async () => ({ ok: false, error: 'Telegram API rejected the message.' }),
+        },
+      }),
+      { telegramChatId: '111', text: 'hi' },
+    );
+    expect(result).toMatch(/Failed to send message: Telegram API rejected the message\./);
+  });
+
+  it('refuses empty telegramChatId or text before ever consulting the paired list', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('send_telegram_message')!;
+    expect(await tool.execute(depsFor(t), { telegramChatId: '', text: 'hi' })).toMatch(/No telegramChatId/);
+    expect(await tool.execute(depsFor(t), { telegramChatId: '111', text: '  ' })).toMatch(/No message text/);
+  });
+
+  it('is gated by the approval flow like every other mutating tool (readOnly: false)', () => {
+    const tool = findPlannerTool('send_telegram_message')!;
+    expect(tool.readOnly).toBe(false);
   });
 });
