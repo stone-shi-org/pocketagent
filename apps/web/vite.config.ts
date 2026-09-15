@@ -57,6 +57,7 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
+          vendor: ['react', 'react-dom'],
           xterm: ['@xterm/xterm', '@xterm/addon-fit', '@xterm/addon-web-links'],
         },
       },
