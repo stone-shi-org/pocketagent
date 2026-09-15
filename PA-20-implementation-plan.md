@@ -542,3 +542,44 @@ real tests rather than assuming correctness):
   as a fast follow rather than done silently or claimed as complete.
 - Terminal-transport (PTY) voice UI remains out of scope, per Phase 1's own note — nothing in
   Phases 2-4 changes that.
+
+## Follow-up: `liveSttUrl` moved from env var to Settings UI
+
+Per review feedback ("Should configure in setting UI, instead of using
+`POCKETAGENT_LIVE_STT_URL` variable to control"), `liveSttUrl` is now a database-backed,
+live (no-restart) `SETTINGS_FIELDS` entry — editable from the Settings page's Integrations
+section, right beside `codeServerUrl`, whose exact pattern this mirrors
+(`nullableStr('liveSttUrl', 'live_stt_url', true)`).
+
+`POCKETAGENT_LIVE_STT_URL` still exists in `.env`/`.env.example`, but only *seeds* the
+database row on first boot, same as `POCKETAGENT_CODE_SERVER_URL` already does — the database
+wins forever after, on every future boot, regardless of what `.env` says.
+
+**This required a real refactor, not just DB plumbing**, because `codeServerBaseUrl`'s own
+`live: true` only works because `ProjectService` is handed a getter closure
+(`getCodeServerBaseUrl: () => config.codeServerBaseUrl`) rather than a resolved value —
+`VoiceTtsService` and `routes/voice.ts` were both capturing a constructed `LiveSttClient` once
+at boot, which would have made a `live: true` flag a lie. Fixed by:
+- `VoiceTtsService`'s constructor now takes `getClient: () => LiveSttClient | null` instead of
+  a resolved client, re-resolving it on every `isConfigured()`/`attach()`/per-sentence
+  `synthesize()` call.
+- `routes/voice.ts` constructs the client inside the request handler, not once at plugin
+  registration (a route plugin's setup body runs exactly once at boot — the same trap).
+- `createLiveSttClient` now strips a trailing slash itself (`config/index.ts`'s old
+  boot-time `new URL(...)` normalization only ever covered the env-var path; a value typed
+  into Settings bypasses it entirely, so the double-slash risk had to move to the one place
+  that covers both origins).
+- `FixedServerInfo.voiceEnabled` — a "fact fixed at boot" per its own doc comment, which
+  stopped being true — was removed outright rather than left stale; the frontend derives it
+  from `RuntimeSettings.liveSttUrl !== ''` instead, the same live field Settings itself reads.
+
+**Proven, not just plausible**: `voice-route.test.ts` has a new describe block that boots with
+no `POCKETAGENT_LIVE_STT_URL` at all, confirms a transcribe attempt is `503`, `PATCH`es
+`liveSttUrl` in, and confirms the *same already-running test app* now transcribes
+successfully — then reverses it. A second `createTestApp()` boot would have proven nothing
+about live-reload; this proves the actual behavior requested.
+
+Known limitation carried over from the existing settings architecture, not new here: the
+composer only fetches `voiceEnabled` once per page mount, so a Settings-page edit made while a
+chat is already open needs a reload to show the mic button — flagged in `AgentPage.tsx`'s own
+comment rather than silently accepted.

@@ -16,12 +16,14 @@ import { createLiveSttClient, LiveSttError } from '../voice/live-stt-client.js';
 export const voiceRoutes: FastifyPluginAsync = async (app) => {
   const { sessions, config } = app.pocket;
 
-  // Constructed once at boot from a fixed `Config` value — a set-but-invalid
-  // `POCKETAGENT_LIVE_STT_URL` already fails `loadConfig` before this ever
-  // runs, so there is nothing left to validate here, only "configured or not".
-  const client = config.liveSttUrl ? createLiveSttClient(config.liveSttUrl) : null;
-
   app.post<{ Params: { id: string } }>('/api/sessions/:id/voice/transcribe', async (request, reply) => {
+    // `liveSttUrl` is a live (no-restart) `SETTINGS_FIELDS` entry (PA-20),
+    // so this is re-derived per request rather than captured once at plugin
+    // registration — a route plugin's setup body runs exactly once at boot,
+    // which would otherwise pin every future request to whatever the value
+    // was then. Constructing a `LiveSttClient` is cheap (wraps `fetch`,
+    // opens nothing eagerly), so there's no cost to not caching it.
+    const client = config.liveSttUrl ? createLiveSttClient(config.liveSttUrl) : null;
     if (!client) {
       return reply.code(503).send({
         error: { code: 'voice_disabled', message: 'Voice input is not configured on this server.' },

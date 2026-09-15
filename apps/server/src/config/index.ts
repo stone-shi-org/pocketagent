@@ -76,12 +76,13 @@ const RawEnv = z.object({
    * Reachable only from this server, never the browser: `live-stt` has no
    * auth on its own HTTP/gRPC surface today. Optional, and unset does not
    * fail the boot — it disables the voice-input feature entirely (the mic
-   * button and, later, the live-listen toggle are hidden), the same
-   * "absence means the feature doesn't exist" treatment
-   * `POCKETAGENT_SETTINGS_ENC_KEY` gets. Set-but-invalid (not a URL) does
-   * throw, so a typo reads as a boot-time configuration complaint rather
-   * than a mystifying runtime fetch failure the first time someone taps the
-   * mic button.
+   * button and live-listen toggle are hidden). Set-but-invalid (not a URL)
+   * does throw, so a typo reads as a boot-time configuration complaint
+   * rather than a mystifying runtime fetch failure the first time someone
+   * taps the mic button. Like `POCKETAGENT_CODE_SERVER_URL`, this only
+   * *seeds* the value on first boot — it's a live `SETTINGS_FIELDS` entry
+   * (`settings/fields.ts`), editable from Settings from then on with no
+   * restart needed, and the database wins over this var forever after.
    */
   POCKETAGENT_LIVE_STT_URL: z.string().optional(),
 
@@ -218,11 +219,14 @@ export interface Config {
    */
   codeServerBaseUrl: string | null;
   /**
-   * Base URL of `live-stt`'s HTTP admin surface, or null when
-   * `POCKETAGENT_LIVE_STT_URL` is unset — in which case PA-20's voice-input
-   * feature is disabled (`FixedServerInfo.voiceEnabled` is false, so the
-   * browser never shows the mic button). Trailing slash stripped so callers
-   * can always do `` `${liveSttUrl}/v1/audio/...` `` without a double slash.
+   * Base URL of `live-stt`'s HTTP admin surface, or null when unset — in
+   * which case PA-20's voice-input feature is disabled and the browser
+   * never shows the mic button (`RuntimeSettings.liveSttUrl === ''`).
+   * `POCKETAGENT_LIVE_STT_URL` only *seeds* this on first boot, the same
+   * "database wins forever after" rule every other `SETTINGS_FIELDS` entry
+   * follows (see `settings/fields.ts`) — it's a live, Settings-UI-editable
+   * value, not a fixed one, per user feedback that it belonged there rather
+   * than in `.env`.
    */
   liveSttUrl: string | null;
 }

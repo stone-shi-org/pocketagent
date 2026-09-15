@@ -530,11 +530,15 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   // PA-20 Phase 3: one instance, shared across every session — it looks up
   // `sessions.isVoiceModeEnabled` live rather than caching it, so a toggle
-  // takes effect on the very next event with no extra wiring. `null` client
-  // when `POCKETAGENT_LIVE_STT_URL` is unset means every call is a no-op —
-  // see `VoiceTtsService.isConfigured()`.
+  // takes effect on the very next event with no extra wiring. The client
+  // getter is the same shape as `getCodeServerBaseUrl` above: `liveSttUrl`
+  // is a live `SETTINGS_FIELDS` entry (per user feedback that this belongs
+  // in Settings, not `POCKETAGENT_LIVE_STT_URL`), so re-reading
+  // `config.liveSttUrl` on every call — rather than resolving it once here
+  // — is what makes a `PATCH /api/settings` take effect immediately. `null`
+  // when unset means every call is a no-op — see `VoiceTtsService.isConfigured()`.
   const voiceTts = new VoiceTtsService(
-    config.liveSttUrl ? createLiveSttClient(config.liveSttUrl) : null,
+    () => (config.liveSttUrl ? createLiveSttClient(config.liveSttUrl) : null),
     (sessionId) => sessions.isVoiceModeEnabled(sessionId),
     app.log,
   );

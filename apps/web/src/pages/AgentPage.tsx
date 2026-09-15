@@ -542,12 +542,19 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   // just below — a mic button that never appears because this request failed
   // is not worth a notice for a control the user has not tried to use yet,
   // and the composer works exactly as it did before this feature existed.
+  // `liveSttUrl` lives in `settings` (not `fixed`) because it's an editable,
+  // live `SETTINGS_FIELDS` entry now, not a boot-only fact — `''` is its
+  // "unset" wire value, the same convention `codeServerUrl` uses. This is
+  // still only fetched once per page mount, so a Settings-page edit made
+  // while this chat is already open needs a reload to be reflected here —
+  // an accepted limitation, not a bug: making it reactive would need a
+  // settings-changed push this feature doesn't otherwise need.
   useEffect(() => {
     let cancelled = false;
     void api
       .getSettings()
       .then((res) => {
-        if (!cancelled) setVoiceEnabled(res.fixed.voiceEnabled);
+        if (!cancelled) setVoiceEnabled(res.settings.liveSttUrl !== '');
       })
       .catch(() => {});
     return () => {

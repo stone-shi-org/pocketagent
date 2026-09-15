@@ -329,15 +329,6 @@ export const FixedServerInfo = z.object({
   databasePath: z.string(),
   nodeEnv: z.enum(['development', 'production', 'test']),
   isNetworkExposed: z.boolean(),
-  /**
-   * PA-20: true when `POCKETAGENT_LIVE_STT_URL` is configured, i.e. the mic
-   * button and (once later phases land) the live-listen toggle should be
-   * shown at all. Fixed rather than a `RuntimeSettings` field for the same
-   * reason `isNetworkExposed` is: it names a fact about *this process*
-   * (which external service it can reach), not a value edited from the
-   * Settings page — there is nothing to write back.
-   */
-  voiceEnabled: z.boolean(),
 });
 export type FixedServerInfo = z.infer<typeof FixedServerInfo>;
 
@@ -379,6 +370,12 @@ export const RuntimeSettings = z.object({
   trustProxy: z.boolean(),
   /** `''` hides the "Open in code-server" action. */
   codeServerUrl: z.string(),
+  /** `''` disables voice input (PA-20) — the mic button and live-listen
+   *  toggle are hidden. Base URL of live-stt's HTTP admin surface, e.g.
+   *  `http://10.100.0.50:8000`. Live: takes effect on the next request, no
+   *  restart — see `VoiceTtsService`'s own doc comment for why it's shaped
+   *  as a getter rather than a boot-time value. */
+  liveSttUrl: z.string(),
   shell: z.string().min(1),
   claudeBin: z.string().min(1),
   agyBin: z.string().min(1),

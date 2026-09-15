@@ -113,7 +113,16 @@ export interface LiveSttClient {
   synthesize(text: string): Promise<SynthesizedSpeech>;
 }
 
-export function createLiveSttClient(baseUrl: string, fetchImpl: typeof fetch = fetch): LiveSttClient {
+export function createLiveSttClient(rawBaseUrl: string, fetchImpl: typeof fetch = fetch): LiveSttClient {
+  // Stripped here, not by the caller: `liveSttUrl` used to be boot-only
+  // (`config/index.ts`'s `loadConfig` normalized it once via `new URL(...)`),
+  // but is now a live `SETTINGS_FIELDS` entry (PA-20) whose `nullableStr`
+  // parse/serialize is a plain passthrough with no normalization — a value
+  // set via the Settings UI would otherwise reach here with a trailing
+  // slash intact, producing a double slash against `/v1/audio/...` that
+  // this codebase has no evidence live-stt's simple route dispatch
+  // tolerates. Doing it here covers both origins uniformly.
+  const baseUrl = rawBaseUrl.replace(/\/$/, '');
   return {
     async transcribe(pcm16: Buffer): Promise<string> {
       const wav = pcm16ToWav(pcm16);

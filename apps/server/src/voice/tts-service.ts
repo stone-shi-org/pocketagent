@@ -26,6 +26,18 @@ export type { TtsAudioChunk } from './turn-tts-pump.js';
  * currently attached — dynamic, session-scoped event names rather than one
  * generic event every connection would have to filter, since only a
  * genuinely small number of sessions have voice mode on at once.
+ *
+ * Takes a *getter* for the `LiveSttClient`, not a constructed instance —
+ * `liveSttUrl` is a live (no-restart) `SETTINGS_FIELDS` entry (PA-20,
+ * following user feedback that it belongs in Settings, not
+ * `POCKETAGENT_LIVE_STT_URL`), so `app.ts` passes `() =>
+ * (config.liveSttUrl ? createLiveSttClient(config.liveSttUrl) : null)`
+ * rather than resolving it once at construction — the same
+ * `getCodeServerBaseUrl: () => config.codeServerBaseUrl` shape
+ * `ProjectService` already uses for its own live field. Constructing a
+ * `LiveSttClient` is cheap (it wraps `fetch`, opens nothing eagerly), so
+ * re-deriving it on every call is not a meaningful cost for how rarely
+ * voice mode toggles or a turn starts.
  */
 export class VoiceTtsService extends EventEmitter {
   private readonly attached = new Set<string>();
@@ -33,7 +45,7 @@ export class VoiceTtsService extends EventEmitter {
   private readonly pumps = new Map<string, TurnTtsPump>();
 
   constructor(
-    private readonly client: LiveSttClient | null,
+    private readonly getClient: () => LiveSttClient | null,
     private readonly isVoiceModeEnabled: (sessionId: string) => boolean,
     private readonly logger?: { warn: (obj: unknown, msg: string) => void },
   ) {
@@ -41,7 +53,7 @@ export class VoiceTtsService extends EventEmitter {
   }
 
   isConfigured(): boolean {
-    return this.client !== null;
+    return this.getClient() !== null;
   }
 
   /**
@@ -62,7 +74,7 @@ export class VoiceTtsService extends EventEmitter {
    *  on/off. The listener itself checks `isVoiceModeEnabled` on every event,
    *  so toggling off needs no unsubscribe — it just becomes a no-op. */
   attach(session: StructuredLikeSession): void {
-    if (!this.client) return;
+    if (!this.getClient()) return;
     if (this.attached.has(session.id)) return;
     this.attached.add(session.id);
 
@@ -120,7 +132,19 @@ export class VoiceTtsService extends EventEmitter {
       sessionId,
       new TurnTtsPump(
         turnId,
-        (text) => this.client!.synthesize(text),
+        // Re-resolved per sentence, not captured once per turn — a URL
+        // change mid-turn (unlikely, but this is a live setting) shouldn't
+        // pin the rest of that turn's audio to a stale client. An explicit
+        // throw (rather than a non-null assertion on a possibly-null
+        // client) if it's been cleared entirely mid-turn — still caught by
+        // `TurnTtsPump.push()`'s own try/catch and routed to `onError`,
+        // the same graceful "this sentence's audio is lost, the text reply
+        // is not" degradation any other synthesis failure gets.
+        (text) => {
+          const client = this.getClient();
+          if (!client) throw new Error('live-stt is no longer configured');
+          return client.synthesize(text);
+        },
         (chunk) => this.emit(`audio:${sessionId}`, chunk),
         (err) =>
           this.logger?.warn(

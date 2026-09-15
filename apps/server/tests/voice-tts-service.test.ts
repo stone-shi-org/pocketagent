@@ -42,7 +42,7 @@ async function flush(times = 4): Promise<void> {
 describe('VoiceTtsService', () => {
   it('does nothing when voice mode is off for the session', async () => {
     const synthesize = vi.fn(async (t: string) => speech(t));
-    const service = new VoiceTtsService(fakeClient(synthesize), () => false);
+    const service = new VoiceTtsService(() => fakeClient(synthesize), () => false);
     const session = fakeSession('s1');
     service.attach(session);
 
@@ -63,7 +63,7 @@ describe('VoiceTtsService', () => {
 
   it('synthesizes each sentence as it completes and emits a final done chunk', async () => {
     const synthesize = vi.fn(async (t: string) => speech(t));
-    const service = new VoiceTtsService(fakeClient(synthesize), () => true);
+    const service = new VoiceTtsService(() => fakeClient(synthesize), () => true);
     const session = fakeSession('s1');
     const chunks: TtsAudioChunk[] = [];
     service.on('audio:s1', (c: TtsAudioChunk) => chunks.push(c));
@@ -97,7 +97,7 @@ describe('VoiceTtsService', () => {
 
   it('cancel() stops audio for the current turn without needing its turnId', async () => {
     const synthesize = vi.fn(async (t: string) => speech(t));
-    const service = new VoiceTtsService(fakeClient(synthesize), () => true);
+    const service = new VoiceTtsService(() => fakeClient(synthesize), () => true);
     const session = fakeSession('s1');
     const chunks: TtsAudioChunk[] = [];
     service.on('audio:s1', (c: TtsAudioChunk) => chunks.push(c));
@@ -124,7 +124,7 @@ describe('VoiceTtsService', () => {
 
   it('starts a turn lazily when voice mode is toggled on mid-reply (no user_prompt seen)', async () => {
     const synthesize = vi.fn(async (t: string) => speech(t));
-    const service = new VoiceTtsService(fakeClient(synthesize), () => true);
+    const service = new VoiceTtsService(() => fakeClient(synthesize), () => true);
     const session = fakeSession('s1');
     const chunks: TtsAudioChunk[] = [];
     service.on('audio:s1', (c: TtsAudioChunk) => chunks.push(c));
@@ -149,7 +149,7 @@ describe('VoiceTtsService', () => {
 
   it('attach() is idempotent — a second call does not double-subscribe', async () => {
     const synthesize = vi.fn(async (t: string) => speech(t));
-    const service = new VoiceTtsService(fakeClient(synthesize), () => true);
+    const service = new VoiceTtsService(() => fakeClient(synthesize), () => true);
     const session = fakeSession('s1');
     service.attach(session);
     service.attach(session);
@@ -163,7 +163,7 @@ describe('VoiceTtsService', () => {
   });
 
   it('does nothing at all when live-stt is not configured', async () => {
-    const service = new VoiceTtsService(null, () => true);
+    const service = new VoiceTtsService(() => null, () => true);
     const session = fakeSession('s1');
     const chunks: TtsAudioChunk[] = [];
     service.on('audio:s1', (c: TtsAudioChunk) => chunks.push(c));
@@ -178,7 +178,7 @@ describe('VoiceTtsService', () => {
   });
 
   it('notifyModeChanged() fans out to every listener on that session, not just one', () => {
-    const service = new VoiceTtsService(fakeClient(async (t) => speech(t)), () => true);
+    const service = new VoiceTtsService(() => fakeClient(async (t) => speech(t)), () => true);
     const seenByTabA: boolean[] = [];
     const seenByTabB: boolean[] = [];
     service.on('mode:s1', (enabled: boolean) => seenByTabA.push(enabled));
@@ -196,7 +196,7 @@ describe('VoiceTtsService', () => {
 
   it("cleans up a session's state on exit so a later re-emit does nothing", async () => {
     const synthesize = vi.fn(async (t: string) => speech(t));
-    const service = new VoiceTtsService(fakeClient(synthesize), () => true);
+    const service = new VoiceTtsService(() => fakeClient(synthesize), () => true);
     const session = fakeSession('s1');
     service.attach(session);
     (session as unknown as EventEmitter).emit('exit', 0, null);

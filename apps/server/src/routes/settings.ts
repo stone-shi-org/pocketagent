@@ -30,7 +30,6 @@ function buildSettingsResponse(context: PocketContext): SettingsResponse {
       databasePath: config.databasePath,
       nodeEnv: config.nodeEnv,
       isNetworkExposed: config.isNetworkExposed,
-      voiceEnabled: config.liveSttUrl !== null,
     },
     settings: snapshot.settings as SettingsResponse['settings'],
     restartRequiredKeys: snapshot.restartRequiredKeys,

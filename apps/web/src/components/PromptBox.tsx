@@ -60,15 +60,15 @@ interface Props {
   supportsImageAttachment?: boolean;
   /**
    * Shows the push-to-talk mic button (PA-20 Phase 1). Gated on the server
-   * having `POCKETAGENT_LIVE_STT_URL` configured (`FixedServerInfo.voiceEnabled`)
-   * — unlike `supportsImageAttachment`, this is not backend-specific: any
-   * transport can submit a transcribed prompt, since it goes through the
-   * same `onSend` a typed message already uses. Requires `onTranscribeVoice`
-   * to actually do anything; the two are separate props (rather than
-   * inferring one from the other) so a caller that supports voice but has no
-   * session yet (nothing to transcribe *into*) can pass neither, the same
-   * "undefined means omit the affordance" convention `commands`/`models`
-   * already use.
+   * having a `liveSttUrl` configured (`RuntimeSettings.liveSttUrl !== ''` —
+   * editable from Settings, not an env var) — unlike `supportsImageAttachment`,
+   * this is not backend-specific: any transport can submit a transcribed
+   * prompt, since it goes through the same `onSend` a typed message already
+   * uses. Requires `onTranscribeVoice` to actually do anything; the two are
+   * separate props (rather than inferring one from the other) so a caller
+   * that supports voice but has no session yet (nothing to transcribe
+   * *into*) can pass neither, the same "undefined means omit the
+   * affordance" convention `commands`/`models` already use.
    */
   supportsVoiceInput?: boolean;
   /**

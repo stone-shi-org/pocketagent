@@ -124,6 +124,110 @@ describe('POST /api/sessions/:id/voice/transcribe', () => {
     });
   });
 
+  describe('configuring live-stt via PATCH /api/settings, no restart (PA-20 follow-up)', () => {
+    // Per reviewer feedback: this must be a Settings-UI-editable value, not
+    // `POCKETAGENT_LIVE_STT_URL`. The whole point of `liveSttUrl` being a
+    // *live* `SETTINGS_FIELDS` entry is that this test needs no restart
+    // between "unconfigured" and "configured" — a second `createTestApp()`
+    // boot would prove nothing about the live-reload behavior actually
+    // requested.
+    let t: TestApp;
+    let liveStt: { url: string; close: () => Promise<void> };
+    let sessionId: string;
+
+    beforeEach(async () => {
+      liveStt = await startFakeLiveStt((req, res) => {
+        req.resume();
+        req.on('end', () => {
+          res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ text: 'hello from live reload' }));
+        });
+      });
+      // Deliberately no POCKETAGENT_LIVE_STT_URL — starts fully unconfigured.
+      t = await createTestApp();
+      const created = await t.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: { cookie: t.cookie },
+        payload: { agent: TEST_AGENT_ID, cwd: t.projectDir, cols: 80, rows: 24 },
+      });
+      sessionId = created.json().id as string;
+    });
+
+    afterEach(async () => {
+      await t.cleanup();
+      await liveStt.close();
+    });
+
+    it('is not in restartRequiredKeys and reports "" when unset', async () => {
+      const res = await t.app.inject({ method: 'GET', url: '/api/settings', headers: { cookie: t.cookie } });
+      expect(res.json().settings.liveSttUrl).toBe('');
+      expect(res.json().restartRequiredKeys).not.toContain('liveSttUrl');
+    });
+
+    it('starts disabled, then works immediately after a PATCH — no restart', async () => {
+      const before = await t.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sessionId}/voice/transcribe`,
+        headers: { cookie: t.cookie },
+        payload: { audio: { data: SOME_AUDIO_BASE64, durationMs: 500 } },
+      });
+      expect(before.statusCode).toBe(503);
+      expect(before.json().error.code).toBe('voice_disabled');
+
+      const patch = await t.app.inject({
+        method: 'PATCH',
+        url: '/api/settings',
+        headers: { cookie: t.cookie },
+        payload: { liveSttUrl: liveStt.url },
+      });
+      expect(patch.statusCode).toBe(200);
+      expect(patch.json().settings.liveSttUrl).toBe(liveStt.url);
+
+      const after = await t.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sessionId}/voice/transcribe`,
+        headers: { cookie: t.cookie },
+        payload: { audio: { data: SOME_AUDIO_BASE64, durationMs: 500 } },
+      });
+      expect(after.statusCode).toBe(200);
+      expect(after.json()).toEqual({ text: 'hello from live reload' });
+    });
+
+    it('round-trips back to disabled after clearing it via PATCH', async () => {
+      await t.app.inject({
+        method: 'PATCH',
+        url: '/api/settings',
+        headers: { cookie: t.cookie },
+        payload: { liveSttUrl: liveStt.url },
+      });
+      // Confirm it actually turned on before proving it turns back off.
+      const on = await t.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sessionId}/voice/transcribe`,
+        headers: { cookie: t.cookie },
+        payload: { audio: { data: SOME_AUDIO_BASE64, durationMs: 500 } },
+      });
+      expect(on.statusCode).toBe(200);
+
+      await t.app.inject({
+        method: 'PATCH',
+        url: '/api/settings',
+        headers: { cookie: t.cookie },
+        payload: { liveSttUrl: '' },
+      });
+
+      const off = await t.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sessionId}/voice/transcribe`,
+        headers: { cookie: t.cookie },
+        payload: { audio: { data: SOME_AUDIO_BASE64, durationMs: 500 } },
+      });
+      expect(off.statusCode).toBe(503);
+      expect(off.json().error.code).toBe('voice_disabled');
+    });
+
+  });
+
   describe('upstream live-stt failure', () => {
     let t: TestApp;
     let liveStt: { url: string; close: () => Promise<void> };

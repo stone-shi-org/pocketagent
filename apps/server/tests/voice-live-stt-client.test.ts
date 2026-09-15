@@ -43,6 +43,34 @@ describe('pcm16ToWav', () => {
   });
 });
 
+describe('createLiveSttClient — base URL normalization', () => {
+  let close: (() => Promise<void>) | undefined;
+  afterEach(async () => {
+    await close?.();
+    close = undefined;
+  });
+
+  it('strips a trailing slash so the request path never has a double slash', async () => {
+    // `liveSttUrl` used to be boot-only (`config/index.ts`'s `loadConfig`
+    // normalized it once via `new URL(...)`), but is now a live
+    // `SETTINGS_FIELDS` entry (PA-20 follow-up) whose plain-passthrough
+    // parse/serialize does no normalization — a value entered via the
+    // Settings UI can genuinely carry a trailing slash, so this has to be
+    // handled here, not just at the old boot-time parse site.
+    let seenPath = '';
+    const server = await startFakeLiveStt((req, res) => {
+      seenPath = req.url ?? '';
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ text: 'ok' }));
+    });
+    close = server.close;
+
+    const client = createLiveSttClient(`${server.url}/`);
+    await client.transcribe(Buffer.alloc(10));
+
+    expect(seenPath).toBe('/v1/audio/transcriptions');
+  });
+});
+
 describe('createLiveSttClient.transcribe', () => {
   let close: (() => Promise<void>) | undefined;
   afterEach(async () => {

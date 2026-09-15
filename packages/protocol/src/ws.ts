@@ -271,8 +271,9 @@ export const ResolveQueuedPromptMessage = z.object({
  * Toggle live-listen/talk-back mode for a structured session (PA-20 Phase 2).
  * Off by default and never implied by anything else — the toggle is the only
  * way this turns on, and the server rejects it outright when live-stt is not
- * configured (`FixedServerInfo.voiceEnabled`) or the session is not
- * structured, the same gating `SetModelMessage`/`SetEffortMessage` apply.
+ * configured (`RuntimeSettings.liveSttUrl === ''`, editable from Settings)
+ * or the session is not structured, the same gating
+ * `SetModelMessage`/`SetEffortMessage` apply.
  */
 export const VoiceModeMessage = z.object({
   type: z.literal('voice_mode'),
