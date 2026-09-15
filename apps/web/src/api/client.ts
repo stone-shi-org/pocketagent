@@ -95,6 +95,8 @@ import type {
   TelegramLinkListResponse,
   CreateTelegramLinkRequest,
   UpdateTelegramLinkRequest,
+  VoiceTranscribeRequest,
+  VoiceTranscribeResponse,
 } from '@pocketagent/protocol';
 
 export class ApiError extends Error {
@@ -275,6 +277,15 @@ export const api = {
       `/api/sessions/${encodeURIComponent(id)}/continue-after-limit`,
       { method: 'POST' },
     ),
+
+  /** PA-20 Phase 1: transcribes one buffered push-to-talk utterance. Does
+      not submit a prompt itself — the caller (`PromptBox`) sends the
+      returned text through the same path a typed message already uses. */
+  transcribeVoice: (id: string, audio: VoiceTranscribeRequest['audio']) =>
+    request<VoiceTranscribeResponse>(`/api/sessions/${encodeURIComponent(id)}/voice/transcribe`, {
+      method: 'POST',
+      body: JSON.stringify({ audio }),
+    }),
 
   createSession: (input: {
     agent: string;

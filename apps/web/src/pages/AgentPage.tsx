@@ -81,6 +81,11 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
    */
   const [resumeAgent, setResumeAgent] = useState<string | null>(null);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  /** PA-20: whether the server has `POCKETAGENT_LIVE_STT_URL` configured at
+      all — gates the mic button. Fetched once per page mount rather than
+      threaded down from a higher-level app state, since nothing above this
+      page currently fetches `/api/settings` at all. */
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [pickingAgent, setPickingAgent] = useState(false);
   const [confirmingStop, setConfirmingStop] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -366,6 +371,23 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
    * choose — the process is already running as some agent — so this would be a
    * request per chat opened, for a control that is not on screen.
    */
+  // PA-20: same "fetch once, fail silently" shape as the agents-roster effect
+  // just below — a mic button that never appears because this request failed
+  // is not worth a notice for a control the user has not tried to use yet,
+  // and the composer works exactly as it did before this feature existed.
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getSettings()
+      .then((res) => {
+        if (!cancelled) setVoiceEnabled(res.fixed.voiceEnabled);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     if (!canResume || agents.length > 0) return;
     let cancelled = false;
@@ -597,6 +619,10 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         onSend={handleSend}
         disabled={inputDisabled}
         supportsImageAttachment={session?.transport === 'structured'}
+        supportsVoiceInput={voiceEnabled}
+        onTranscribeVoice={
+          voiceEnabled ? (audio) => api.transcribeVoice(sessionId, audio).then((res) => res.text) : undefined
+        }
         commands={transcript.commands}
         models={transcript.models}
         currentModel={transcript.model}

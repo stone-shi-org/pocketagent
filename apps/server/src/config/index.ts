@@ -69,6 +69,22 @@ const RawEnv = z.object({
    */
   POCKETAGENT_CODE_SERVER_URL: z.string().optional(),
 
+  /**
+   * Base URL of the self-hosted `live-stt` service (PA-20), e.g.
+   * `http://10.100.0.50:8000` — its HTTP admin port, not its gRPC port
+   * (this feature is HTTP-only; see the PA-20 implementation plan's D1).
+   * Reachable only from this server, never the browser: `live-stt` has no
+   * auth on its own HTTP/gRPC surface today. Optional, and unset does not
+   * fail the boot — it disables the voice-input feature entirely (the mic
+   * button and, later, the live-listen toggle are hidden), the same
+   * "absence means the feature doesn't exist" treatment
+   * `POCKETAGENT_SETTINGS_ENC_KEY` gets. Set-but-invalid (not a URL) does
+   * throw, so a typo reads as a boot-time configuration complaint rather
+   * than a mystifying runtime fetch failure the first time someone taps the
+   * mic button.
+   */
+  POCKETAGENT_LIVE_STT_URL: z.string().optional(),
+
   POCKETAGENT_SHELL: z.string().optional(),
   POCKETAGENT_CLAUDE_BIN: z.string().default('claude'),
   POCKETAGENT_AGY_BIN: z.string().default('agy'),
@@ -201,6 +217,14 @@ export interface Config {
    * global response field — see `ProjectService.host()`.
    */
   codeServerBaseUrl: string | null;
+  /**
+   * Base URL of `live-stt`'s HTTP admin surface, or null when
+   * `POCKETAGENT_LIVE_STT_URL` is unset — in which case PA-20's voice-input
+   * feature is disabled (`FixedServerInfo.voiceEnabled` is false, so the
+   * browser never shows the mic button). Trailing slash stripped so callers
+   * can always do `` `${liveSttUrl}/v1/audio/...` `` without a double slash.
+   */
+  liveSttUrl: string | null;
 }
 
 const MIN_TOKEN_LENGTH = 24;
@@ -310,6 +334,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new ConfigError(err instanceof Error ? err.message : String(err));
   }
 
+  // Same "unset disables, invalid throws" shape as settingsEncKey above, but
+  // for a URL rather than a crypto key: unset just means PA-20's voice
+  // feature is off, while a typo'd value fails at boot instead of on the
+  // first tap of the mic button.
+  let liveSttUrl: string | null = null;
+  const liveSttUrlRaw = e.POCKETAGENT_LIVE_STT_URL?.trim();
+  if (liveSttUrlRaw) {
+    try {
+      liveSttUrl = new URL(liveSttUrlRaw).toString().replace(/\/$/, '');
+    } catch {
+      throw new ConfigError(`POCKETAGENT_LIVE_STT_URL is not a valid URL: ${JSON.stringify(liveSttUrlRaw)}`);
+    }
+  }
+
   return {
     nodeEnv: e.NODE_ENV,
     isProduction,
@@ -346,5 +384,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     pushContact: e.POCKETAGENT_PUSH_CONTACT.trim(),
     isNetworkExposed,
     codeServerBaseUrl: e.POCKETAGENT_CODE_SERVER_URL?.trim() || null,
+    liveSttUrl,
   };
 }

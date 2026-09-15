@@ -9,8 +9,10 @@ import {
 import type { EffortLevel, ModelInfo, PromptImage, SlashCommandInfo } from '@pocketagent/protocol';
 import { readImageFile } from '../agent/image-attachment.js';
 import { resolveCurrentModel } from '../agent/transcript.js';
+import type { RecordedUtterance } from '../audio/capture.js';
 import { AttachButton } from './AttachButton.js';
 import { Icon } from './Icon.js';
+import { MicButton } from './MicButton.js';
 
 /**
  * Friendlier names for the effort levels the Claude Agent SDK defines.
@@ -56,6 +58,28 @@ interface Props {
    * just error for every other agent and for terminal sessions.
    */
   supportsImageAttachment?: boolean;
+  /**
+   * Shows the push-to-talk mic button (PA-20 Phase 1). Gated on the server
+   * having `POCKETAGENT_LIVE_STT_URL` configured (`FixedServerInfo.voiceEnabled`)
+   * — unlike `supportsImageAttachment`, this is not backend-specific: any
+   * transport can submit a transcribed prompt, since it goes through the
+   * same `onSend` a typed message already uses. Requires `onTranscribeVoice`
+   * to actually do anything; the two are separate props (rather than
+   * inferring one from the other) so a caller that supports voice but has no
+   * session yet (nothing to transcribe *into*) can pass neither, the same
+   * "undefined means omit the affordance" convention `commands`/`models`
+   * already use.
+   */
+  supportsVoiceInput?: boolean;
+  /**
+   * Sends one recorded utterance to `POST /api/sessions/:id/voice/transcribe`
+   * and resolves with the transcript. `PromptBox` itself never calls the API
+   * client directly — same separation `onSend`/`onSetModel` already keep —
+   * so the caller (`AgentPage`) owns the actual network call and can decide
+   * how to surface a mid-flight auth/connectivity failure consistently with
+   * everything else it already handles.
+   */
+  onTranscribeVoice?: (audio: { data: string; durationMs: number }) => Promise<string>;
   /**
    * Slash commands this agent currently supports, for the `/` picker.
    * Undefined/empty just means no picker — the box still sends whatever text
@@ -143,6 +167,8 @@ export function PromptBox({
   onSend,
   disabled,
   supportsImageAttachment = false,
+  supportsVoiceInput = false,
+  onTranscribeVoice,
   commands = [],
   models = [],
   currentModel = null,
@@ -168,6 +194,9 @@ export function PromptBox({
   // still going to be sent.
   const [attachedImage, setAttachedImage] = useState<PromptImage | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
+  // Same "don't persist across a reload" reasoning as `attachError` — a
+  // transcription failure is only meaningful right after it happens.
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
   // One entry per currently-rendered picker row, so the active one can be
   // scrolled into view on arrow-key navigation — `.slash-picker` scrolls
@@ -273,6 +302,31 @@ export function PromptBox({
     } catch (err) {
       setAttachError(err instanceof Error ? err.message : 'Could not attach that image.');
     }
+  }
+
+  /**
+   * The mic button's release handler: transcribe, then submit exactly like a
+   * typed message — no local `text` state involved, so a voice prompt never
+   * flickers through the textarea on its way out. An empty/whitespace-only
+   * transcript (silence, or the utterance was too short for whisper to hear
+   * anything) is treated as a soft failure rather than sending a blank
+   * prompt no one meant to submit.
+   */
+  async function handleVoiceRecorded(utterance: RecordedUtterance): Promise<void> {
+    if (!onTranscribeVoice) return;
+    setVoiceError(null);
+    let text: string;
+    try {
+      text = await onTranscribeVoice({ data: utterance.audioBase64, durationMs: utterance.durationMs });
+    } catch (err) {
+      setVoiceError(err instanceof Error ? err.message : 'Could not transcribe that recording.');
+      return;
+    }
+    if (!text.trim()) {
+      setVoiceError("Didn't catch that — try again.");
+      return;
+    }
+    onSend(text);
   }
 
   function onPaste(event: ClipboardEvent<HTMLTextAreaElement>): void {
@@ -457,7 +511,7 @@ export function PromptBox({
           ))}
         </div>
       )}
-      {supportsImageAttachment && !pickerOpen && (attachedImage || attachError) && (
+      {!pickerOpen && (attachedImage || attachError || voiceError) && (
         <div className="attach-preview">
           {attachedImage ? (
             <>
@@ -475,12 +529,19 @@ export function PromptBox({
               </button>
             </>
           ) : (
-            <span className="attach-error">{attachError}</span>
+            <span className="attach-error">{attachError ?? voiceError}</span>
           )}
         </div>
       )}
       {supportsImageAttachment && (
         <AttachButton inputRef={fileInputRef} onFile={(file) => void attach(file)} disabled={disabled} />
+      )}
+      {supportsVoiceInput && onTranscribeVoice && (
+        <MicButton
+          onRecorded={(utterance) => void handleVoiceRecorded(utterance)}
+          onError={setVoiceError}
+          disabled={disabled}
+        />
       )}
       <textarea
         ref={ref}

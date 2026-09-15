@@ -30,6 +30,7 @@ export type IconName =
   | 'check'
   | 'close'
   | 'attach'
+  | 'mic'
   | 'plus'
   | 'minimize'
   | 'shield'
@@ -209,6 +210,17 @@ const PATHS: Record<IconName, JSX.Element> = {
   // files" item, so it reads distinctly from `compose`'s pencil-in-square.
   attach: (
     <path d="M16.5 6.5v9a4 4 0 0 1-8 0v-10a2.5 2.5 0 0 1 5 0v9a1 1 0 0 1-2 0v-8" />
+  ),
+
+  // A classic mic capsule on a stand: PA-20's push-to-talk button. Distinct
+  // silhouette from `attach`'s paperclip and `plus`'s cross so a phone-sized
+  // composer row can tell "record" apart from "attach a file" at a glance.
+  mic: (
+    <>
+      <rect x="9" y="3.5" width="6" height="11" rx="3" />
+      <path d="M6 11.5a6 6 0 0 0 12 0" />
+      <path d="M12 17.5v3M9 20.5h6" />
+    </>
   ),
 
   // A plain "+": the prompt box's attach trigger, same glyph most chat apps

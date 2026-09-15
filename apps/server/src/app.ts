@@ -47,6 +47,7 @@ import { pushRoutes } from './routes/push.js';
 import { sessionRoutes } from './routes/sessions.js';
 import { settingsRoutes } from './routes/settings.js';
 import { usageRoutes } from './routes/usage.js';
+import { voiceRoutes } from './routes/voice.js';
 import { worktreeRoutes } from './routes/worktrees.js';
 import { webhookRoutes } from './routes/webhooks.js';
 import { plannerRoutes } from './routes/planner.js';
@@ -700,6 +701,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(settingsRoutes);
   await app.register(pushRoutes);
   await app.register(usageRoutes);
+  await app.register(voiceRoutes);
   await app.register(websocketRoutes);
 
   // ---- Static frontend ------------------------------------------------------

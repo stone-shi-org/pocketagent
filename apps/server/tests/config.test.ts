@@ -90,6 +90,24 @@ describe('config', () => {
     }
   });
 
+  it('leaves voice input disabled (liveSttUrl null) when POCKETAGENT_LIVE_STT_URL is unset', () => {
+    const config = loadConfig(env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN }));
+    expect(config.liveSttUrl).toBeNull();
+  });
+
+  it('parses and normalizes a configured live-stt URL, stripping a trailing slash', () => {
+    const config = loadConfig(
+      env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN, POCKETAGENT_LIVE_STT_URL: 'http://10.100.0.50:8000/' }),
+    );
+    expect(config.liveSttUrl).toBe('http://10.100.0.50:8000');
+  });
+
+  it('fails the boot on a malformed POCKETAGENT_LIVE_STT_URL rather than failing on first use', () => {
+    expect(() =>
+      loadConfig(env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN, POCKETAGENT_LIVE_STT_URL: 'not a url' })),
+    ).toThrow(/POCKETAGENT_LIVE_STT_URL is not a valid URL/);
+  });
+
   it('rejects out-of-range numeric settings', () => {
     const ws = makeWorkspace();
     try {

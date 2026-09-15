@@ -12,6 +12,7 @@ import {
 } from './session.js';
 import { EffortLevel, SessionTransport } from './agent-events.js';
 import { LIMITS } from './limits.js';
+import { VoiceAudioUpload } from './voice-audio.js';
 
 export const LoginRequest = z.object({
   token: z.string().min(1).max(512),
@@ -122,6 +123,27 @@ export const CreateWorktreeResponse = z.object({
   branch: z.string(),
 });
 export type CreateWorktreeResponse = z.infer<typeof CreateWorktreeResponse>;
+
+/**
+ * PA-20 Phase 1 (push-to-talk): one buffered utterance, uploaded after the
+ * mic button is released. `POST /api/sessions/:id/voice/transcribe` forwards
+ * it to `live-stt`'s batch `whisper` endpoint and hands back plain text — the
+ * browser then submits that text through the *same* prompt path any typed
+ * message uses (`PromptBox`'s existing `onSend`), so there is no "voice
+ * prompt" concept anywhere in the protocol. `:id` need not name a structured
+ * session — push-to-talk works for any transport, unlike the later
+ * live-listen/talk-back mode, which needs `text_delta`/`interrupt` and so is
+ * structured-only.
+ */
+export const VoiceTranscribeRequest = z.object({
+  audio: VoiceAudioUpload,
+});
+export type VoiceTranscribeRequest = z.infer<typeof VoiceTranscribeRequest>;
+
+export const VoiceTranscribeResponse = z.object({
+  text: z.string(),
+});
+export type VoiceTranscribeResponse = z.infer<typeof VoiceTranscribeResponse>;
 
 /**
  * Removes a linked git worktree and its local branch (three-dot menu, worktree
@@ -307,6 +329,15 @@ export const FixedServerInfo = z.object({
   databasePath: z.string(),
   nodeEnv: z.enum(['development', 'production', 'test']),
   isNetworkExposed: z.boolean(),
+  /**
+   * PA-20: true when `POCKETAGENT_LIVE_STT_URL` is configured, i.e. the mic
+   * button and (once later phases land) the live-listen toggle should be
+   * shown at all. Fixed rather than a `RuntimeSettings` field for the same
+   * reason `isNetworkExposed` is: it names a fact about *this process*
+   * (which external service it can reach), not a value edited from the
+   * Settings page — there is nothing to write back.
+   */
+  voiceEnabled: z.boolean(),
 });
 export type FixedServerInfo = z.infer<typeof FixedServerInfo>;
 
