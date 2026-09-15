@@ -52,8 +52,13 @@ import { LIMITS } from './limits.js';
  * to learn its chat was removed from the list elsewhere — `attach`'s own
  * "closed elsewhere" fan-out (v14 and the `not_found`/`terminated` codes
  * before it) only ever reaches a tab that attached to a *session*.
+ * v16 added the `voice_mode` client message and the `voice_mode_changed`/
+ * `tts_audio` server messages (PA-20 Phases 2-3). An older bundle doesn't
+ * know `tts_audio` and would otherwise silently discard talk-back audio
+ * while continuing on the same socket — same reasoning as v10's
+ * `rate_limit` event.
  */
-export const PROTOCOL_VERSION = 15;
+export const PROTOCOL_VERSION = 16;
 
 /**
  * WebSocket close codes the server uses for conditions the client must not
@@ -262,6 +267,19 @@ export const ResolveQueuedPromptMessage = z.object({
   action: z.enum(['cancel', 'force']),
 });
 
+/**
+ * Toggle live-listen/talk-back mode for a structured session (PA-20 Phase 2).
+ * Off by default and never implied by anything else — the toggle is the only
+ * way this turns on, and the server rejects it outright when live-stt is not
+ * configured (`FixedServerInfo.voiceEnabled`) or the session is not
+ * structured, the same gating `SetModelMessage`/`SetEffortMessage` apply.
+ */
+export const VoiceModeMessage = z.object({
+  type: z.literal('voice_mode'),
+  sessionId: SessionId,
+  enabled: z.boolean(),
+});
+
 export const ClientMessage = z.discriminatedUnion('type', [
   AttachMessage,
   DetachMessage,
@@ -277,6 +295,7 @@ export const ClientMessage = z.discriminatedUnion('type', [
   ResolveQueuedPromptMessage,
   SetModelMessage,
   SetEffortMessage,
+  VoiceModeMessage,
 ]);
 export type ClientMessage = z.infer<typeof ClientMessage>;
 
@@ -456,6 +475,44 @@ export const PongMessage = z.object({
   type: z.literal('pong'),
 });
 
+/** Echoes the new state back, including to every other tab attached to the
+ *  same session — the toggle and the persistent "mic is live" indicator must
+ *  never disagree across tabs, or read across a reconnect. */
+export const VoiceModeChangedMessage = z.object({
+  type: z.literal('voice_mode_changed'),
+  sessionId: SessionId,
+  enabled: z.boolean(),
+});
+
+/**
+ * One chunk of synthesized speech for the agent's reply (PA-20 Phase 3),
+ * sentence-chunked as the reply streams rather than waiting for it to
+ * finish — see the PA-20 implementation plan's D5/D6 for why this carries a
+ * plain PCM payload from one non-streaming `live-stt` call per sentence,
+ * not `live-stt`'s own `stream: true` mode (which multiplexes independently
+ * re-encoded files per sentence over one chunked-transfer response — not
+ * what this frame carries).
+ *
+ * Never replayed on reconnect, unlike `agent_event`: stale audio for a reply
+ * already finished (or superseded) on screen is not worth resurrecting, so
+ * this bypasses `EventBuffer`/`seq` entirely and is pushed the same direct
+ * way `resized`/`hint` already are.
+ */
+export const TtsAudioMessage = z.object({
+  type: z.literal('tts_audio'),
+  sessionId: SessionId,
+  /** Correlates chunks to the reply they belong to, so a chunk already
+   *  mid-flight when the turn is interrupted can be told apart from one
+   *  belonging to whatever the user says next. */
+  turnId: z.string(),
+  sentenceSeq: z.number().int().nonnegative(),
+  /** Base64 raw PCM16 mono at `sampleRateHz`. Empty on the final `done` chunk. */
+  data: z.string(),
+  sampleRateHz: z.number().int().positive(),
+  /** True on the last chunk for this `turnId` — no more will follow. */
+  done: z.boolean(),
+});
+
 export const ServerMessage = z.discriminatedUnion('type', [
   AttachedMessage,
   OutputMessage,
@@ -469,6 +526,8 @@ export const ServerMessage = z.discriminatedUnion('type', [
   PromptQueuedMessage,
   PromptReleasedMessage,
   PongMessage,
+  VoiceModeChangedMessage,
+  TtsAudioMessage,
 ]);
 export type ServerMessage = z.infer<typeof ServerMessage>;
 

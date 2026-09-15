@@ -64,3 +64,34 @@ export function int16ArrayToBase64(samples: Int16Array): string {
   }
   return btoa(binary);
 }
+
+/**
+ * The playback-side inverse of `int16ArrayToBase64` — decodes a `tts_audio`
+ * frame's `data` field back into PCM16 samples. `atob` (not `Buffer`,
+ * unavailable in the browser) plus a byte-by-byte `Uint8Array` fill, which
+ * is the standard base64-to-bytes idiom without a `Buffer` polyfill.
+ */
+export function base64ToInt16Array(base64: string): Int16Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Int16Array(bytes.buffer);
+}
+
+/**
+ * Signed 16-bit PCM back to Float32 `[-1, 1]` — the shape
+ * `AudioBuffer.copyToChannel`/`getChannelData` needs to actually play a
+ * `tts_audio` chunk through the Web Audio API. The exact inverse of
+ * `floatTo16BitPcm`'s two-sided scale (`0x8000` for negative, `0x7fff` for
+ * non-negative), so a round trip through both functions is lossless up to
+ * quantization — not the same expression as one might naively apply to
+ * every sample uniformly.
+ */
+export function int16ToFloat32(samples: Int16Array): Float32Array {
+  const output = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i]!;
+    output[i] = s < 0 ? s / 0x8000 : s / 0x7fff;
+  }
+  return output;
+}

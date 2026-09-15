@@ -81,6 +81,40 @@ interface Props {
    */
   onTranscribeVoice?: (audio: { data: string; durationMs: number }) => Promise<string>;
   /**
+   * Shows the live-listen toggle (PA-20 Phase 2) — the "no button, the app
+   * just listens" mode. Unlike `supportsVoiceInput`, this genuinely is
+   * structured-only: barge-in needs `interrupt` and talk-back needs
+   * `text_delta`, neither of which a terminal session has. Off by default,
+   * every session, every time — this mode removes push-to-talk's implicit
+   * privacy guarantee (mic can't be listening unless a finger is down), so
+   * nothing about it may ever default to on.
+   */
+  supportsLiveListen?: boolean;
+  /**
+   * The session's *actual* current live-listen state — mirrors
+   * `SessionInfo.voiceModeEnabled`/the `voice_mode_changed` push, not local
+   * component state, so two tabs open on the same chat and a page reload
+   * never show a stale toggle. `AgentPage` owns starting/stopping the real
+   * `LiveListenController` and sending the `voice_mode` WS message; this
+   * component only reflects the result, the same read-only relationship
+   * `currentModel` already has to the model picker.
+   */
+  liveListenActive?: boolean;
+  /** Flips the toggle. `AgentPage` decides whether to actually honor it
+   *  (e.g. a mic-permission denial keeps the toggle off and reports why via
+   *  `onVoiceError` below). */
+  onSetLiveListen?: (enabled: boolean) => void;
+  /** Live RMS energy while listening, for the ticket's one "listening" UI
+   *  affordance — an audio-level meter, deliberately not live captions or
+   *  word-by-word partials. `undefined`/`0` while not actively capturing. */
+  micLevel?: number;
+  /** A live-listen-specific failure (mic revoked mid-session, browser
+   *  unsupported), reported by `AgentPage` since that's what owns the
+   *  actual `LiveListenController` instance and can observe it async —
+   *  same naming convention `attachError` uses for a message prop, not a
+   *  callback, despite the neighboring `onX` callback props. */
+  liveListenError?: string | null;
+  /**
    * Slash commands this agent currently supports, for the `/` picker.
    * Undefined/empty just means no picker — the box still sends whatever text
    * is typed, so an agent-agnostic caller (e.g. TerminalPage) can omit this
@@ -169,6 +203,11 @@ export function PromptBox({
   supportsImageAttachment = false,
   supportsVoiceInput = false,
   onTranscribeVoice,
+  supportsLiveListen = false,
+  liveListenActive = false,
+  onSetLiveListen,
+  micLevel = 0,
+  liveListenError = null,
   commands = [],
   models = [],
   currentModel = null,
@@ -511,7 +550,7 @@ export function PromptBox({
           ))}
         </div>
       )}
-      {!pickerOpen && (attachedImage || attachError || voiceError) && (
+      {!pickerOpen && (attachedImage || attachError || voiceError || liveListenError) && (
         <div className="attach-preview">
           {attachedImage ? (
             <>
@@ -529,19 +568,54 @@ export function PromptBox({
               </button>
             </>
           ) : (
-            <span className="attach-error">{attachError ?? voiceError}</span>
+            <span className="attach-error">{attachError ?? voiceError ?? liveListenError}</span>
           )}
+        </div>
+      )}
+      {/*
+        PA-20's persistent "mic is live" indicator: rendered inline, always,
+        whenever this session's live-listen mode is actually on — never only
+        transiently (e.g. tucked inside the picker-gated preview above,
+        which a slash-command picker would hide). This mode removes
+        push-to-talk's implicit privacy guarantee (mic can't be listening
+        unless a finger is down), so the UI has to make that trade-off
+        honest on every render, not just at the moment the toggle was
+        clicked. The level meter is deliberately the *only* extra feedback —
+        no live captions, no partials, per the ticket.
+      */}
+      {liveListenActive && (
+        <div className="live-listen-indicator" role="status" aria-live="polite">
+          <span className="live-listen-dot" aria-hidden="true" />
+          <span>Listening…</span>
+          <span className="live-listen-meter" aria-hidden="true">
+            <span
+              className="live-listen-meter-fill"
+              style={{ transform: `scaleX(${Math.min(1, micLevel * 8)})` }}
+            />
+          </span>
         </div>
       )}
       {supportsImageAttachment && (
         <AttachButton inputRef={fileInputRef} onFile={(file) => void attach(file)} disabled={disabled} />
       )}
-      {supportsVoiceInput && onTranscribeVoice && (
+      {supportsVoiceInput && onTranscribeVoice && !liveListenActive && (
         <MicButton
           onRecorded={(utterance) => void handleVoiceRecorded(utterance)}
           onError={setVoiceError}
           disabled={disabled}
         />
+      )}
+      {supportsLiveListen && onSetLiveListen && (
+        <button
+          type="button"
+          className={liveListenActive ? 'live-listen-btn active' : 'live-listen-btn'}
+          onClick={() => onSetLiveListen(!liveListenActive)}
+          disabled={disabled}
+          aria-pressed={liveListenActive}
+          aria-label={liveListenActive ? 'Turn off live listening' : 'Turn on live listening (hands-free)'}
+        >
+          <Icon name="live-listen" size={19} />
+        </button>
       )}
       <textarea
         ref={ref}

@@ -111,6 +111,20 @@ export const SessionInfo = z.object({
    */
   providerDisclosure: z.string().nullable(),
   /**
+   * PA-20 Phase 2: true while this session's live-listen/talk-back mode is
+   * on. Runtime-togglable (the `voice_mode` WS message), not creation-time
+   * like `skipPermissionsEnabled` — a client turns it on/off per chat, so
+   * this mirrors whatever the server's in-memory state actually is right
+   * now rather than a value fixed at spawn. Resets to `false` on a server
+   * restart (never persisted), which is the correct behavior for a mode
+   * that must never come back on by itself. Surfaced persistently, same
+   * "not just at the moment it was toggled" reasoning as
+   * `skipPermissionsEnabled` — this mode removes push-to-talk's implicit
+   * privacy guarantee, so a standing "mic is live" indicator has to reflect
+   * the truth on every render, not just the toggle click.
+   */
+  voiceModeEnabled: z.boolean(),
+  /**
    * True while the agent is mid-turn (structured backends) or the terminal
    * classifier's last hint included `working` (raw PTY). Advisory only, same
    * spirit as `TerminalHintKind` — a heuristic for a status dot, never a

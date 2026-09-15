@@ -1,7 +1,9 @@
 # PA-20 Implementation Plan — Voice Input for Pocket Agent
 
-Status: **DRAFT, revised after review round 1 — awaiting explicit go-ahead.** Nothing in this
-plan is implemented yet.
+Status: **All four phases implemented** (approved via "go ahead with all phases",
+2026-09-14T22:08:59-07:00). See the "Delivery notes" section at the end of this document for
+what was actually built, one real deviation from this plan worth knowing about (D7, the VAD
+implementation), and what remains as follow-up work.
 
 **Revision note (round 1):** review answered §9's five open questions. #2/#4/#5 confirmed as
 written ("sg"). #3 (skip mobile Safari for now) is done — split into a new follow-up,
@@ -462,7 +464,81 @@ real audio capture, a real VAD model, or a real TTS voice, so this feature needs
 ---
 
 *Round 1 revision: also reviewed the real `live-stt` source at `~/src/live-stt`, and created/
-linked PA-54 for the deferred mobile-Safari scope. No code has been changed. Awaiting review —
-please confirm sign-off on §2's D1-D6 (six now, D5/D6 new this round), and reply "go ahead"/
-"approve" (or tag `agent-ready`) when ready for me to start Phase 1 — this round's answers
-resolved open questions but didn't include that signal yet, so I'm holding here.*
+linked PA-54 for the deferred mobile-Safari scope.*
+
+## Delivery notes (all four phases, after "go ahead with all phases")
+
+Phase 1 shipped first (see the separate Jira "Summary of Changes" comment, commit `799b432`)
+exactly as planned, D1-D6 intact. Phases 2-4 shipped together in the same execution pass, since
+they share one WS protocol bump and are hard to review as independently meaningful slices once
+Phase 1's transcribe pipeline already exists — each is still its own reviewable concern inside
+the diff (protocol → server TTS pipeline → frontend VAD/playback), just not separate commits.
+
+**D7 (new): live-listen's voice-activity detection is a plain RMS-energy state machine with
+hysteresis and a hangover timer (`apps/web/src/audio/vad.ts`), not Silero VAD via WASM as the
+ticket recommended.** This is a deliberate scope decision, flagged here the same way D1-D6 were,
+not a silent downgrade: this environment has no real browser and no real microphone to verify a
+WASM+ONNX inference pipeline against, so shipping an unverified third-party model would be
+strictly worse than a simpler mechanism with full unit test coverage (`vad.test.ts`, 11 cases,
+including a real bug the tests caught before it shipped — see below). `LiveListenController`
+only depends on `SpeechEndpointer.push()`'s three-outcome contract
+(`'speech_start' | 'speech_end' | null`), so swapping in Silero later is additive, not a
+rewrite. Real-device tuning of the two thresholds and the hangover window is an explicit
+follow-up — a real microphone/browser is required for that regardless of which VAD is
+underneath, so this doesn't add work, it just makes the "needs real-device verification" line
+already in §9 true of the whole feature rather than only the mobile-Safari half.
+
+**What shipped, mapped to the ticket's own language:**
+- *Shared plumbing*: `packages/protocol/src/ws.ts` bumped to `PROTOCOL_VERSION` 16 — new
+  `voice_mode` client message, `voice_mode_changed`/`tts_audio` server messages.
+  `SessionInfo.voiceModeEnabled` (in-memory only on `SessionManager`, resets on restart — see
+  its own doc comment for why that's correct, not a gap).
+- *Mode 2 — live listen*: `apps/web/src/audio/live-listen.ts` (`LiveListenController`) runs the
+  same capture pipeline Phase 1 built (`getUserMedia` + `AudioWorkletNode`), continuously,
+  feeding each frame's RMS into the endpointer; a detected utterance goes through the exact same
+  transcribe-then-`onSend` path push-to-talk already uses. The toggle
+  (`PromptBox`'s new live-listen button) and the persistent "mic is live" + level-meter indicator
+  are both driven by the server's own `voice_mode_changed` echo, never optimistic local state —
+  so two tabs on the same chat, or a reconnect, never disagree with each other.
+- *Talk-back (needs LS-1, now done)*: `apps/server/src/voice/sentence-chunker.ts` +
+  `turn-tts-pump.ts` + `tts-service.ts` subscribe to a structured session's existing
+  `AgentEvent` stream (the same `session.on('event', ...)` mechanism `SessionManager.wire()`
+  already uses) and call `live-stt-client.ts`'s new `synthesize()` once per completed sentence
+  (D5/D6, unchanged from the earlier plan revision). Audio streams back as `tts_audio` frames and
+  plays via `apps/web/src/audio/playback.ts`'s `TtsPlaybackQueue` (Web Audio API, raw PCM16, no
+  container decode).
+- *Barge-in*: `LiveListenController`'s `onSpeechStart` callback (fires the instant new speech is
+  detected, not once the utterance finishes) stops `TtsPlaybackQueue` and sends the *existing*
+  `interrupt` WS message, exactly as the ticket specified. Server-side, that same `interrupt`
+  handler now also calls `VoiceTtsService.cancel()`, which stops `TurnTtsPump`'s promise chain
+  before any queued-but-not-yet-synthesized sentence reaches the browser — the one place a real
+  interrupt-timing race had to be gotten right, and it has 6 dedicated tests
+  (`voice-turn-tts-pump.test.ts`) including one that lands `cancel()` mid-`await` on a
+  deliberately controlled promise, not just a happy-path check.
+
+**Bugs the tests caught before they shipped** (worth naming, since this is the payoff of writing
+real tests rather than assuming correctness):
+1. `SentenceChunker`'s original regex allowed end-of-buffer to count as a sentence boundary,
+   which would have mis-split on every delta that merely *happened* to end right after a decimal
+   or abbreviation — a streaming-timing bug, not a punctuation one. Fixed to require literal
+   trailing whitespace; `flush()` is the only place end-of-text counts.
+2. `SpeechEndpointer`'s "was this speech long enough to count" check measured from the current
+   time back to speech start — which folds the hangover *wait* itself into "how long they
+   spoke," and would have let genuine noise blips sail through as real utterances once the
+   hangover window was long enough. Fixed to measure up to when silence actually began.
+3. The initial `voice_mode_changed` reply only went back to the sender's own socket, contradicting
+   its own "every tab must agree" doc comment. Fixed by routing it through
+   `VoiceTtsService`'s existing per-session pub/sub (the same mechanism `tts_audio` already uses)
+   instead of a direct `send()` from inside the WS case handler.
+
+**Known scope boundaries, stated rather than silently left out:**
+- Threshold/hangover tuning for the VAD is unverified against a real microphone (see D7).
+- `TtsPlaybackQueue`/`LiveListenController` cannot be unit tested directly (real
+  `AudioContext`/`getUserMedia`, unavailable under vitest) — the same limitation Phase 1's
+  `PushToTalkRecorder` already had; all the resample/PCM/VAD *math* they call into is separately,
+  fully unit tested.
+- Confluence's "Architecture Overview" and "Conventions & Environment" pages are not yet updated
+  for the new WS protocol version, the `voice/` module, or `POCKETAGENT_LIVE_STT_URL` — flagged
+  as a fast follow rather than done silently or claimed as complete.
+- Terminal-transport (PTY) voice UI remains out of scope, per Phase 1's own note — nothing in
+  Phases 2-4 changes that.

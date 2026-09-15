@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { floatTo16BitPcm, int16ArrayToBase64, resampleLinear } from './pcm.js';
+import {
+  base64ToInt16Array,
+  floatTo16BitPcm,
+  int16ArrayToBase64,
+  int16ToFloat32,
+  resampleLinear,
+} from './pcm.js';
 
 describe('resampleLinear', () => {
   it('returns the input unchanged when rates already match', () => {
@@ -70,5 +76,39 @@ describe('int16ArrayToBase64', () => {
     const buf = Buffer.from(encoded, 'base64');
     const decoded = new Int16Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
     expect(Array.from(decoded)).toEqual(Array.from(samples));
+  });
+});
+
+describe('base64ToInt16Array (playback-side decode)', () => {
+  it('round-trips with int16ArrayToBase64', () => {
+    const samples = new Int16Array([0, 1, -1, 12345, -12345, 32767, -32768]);
+    const decoded = base64ToInt16Array(int16ArrayToBase64(samples));
+    expect(Array.from(decoded)).toEqual(Array.from(samples));
+  });
+
+  it('round-trips against a server-encoded (Buffer-based) payload', () => {
+    // Proves interop with the actual server-side encoder
+    // (`speech.pcm.toString('base64')` in turn-tts-pump.ts), not just this
+    // module's own encoder.
+    const samples = new Int16Array([100, -100, 0, 30000]);
+    const serverEncoded = Buffer.from(samples.buffer).toString('base64');
+    expect(Array.from(base64ToInt16Array(serverEncoded))).toEqual(Array.from(samples));
+  });
+});
+
+describe('int16ToFloat32', () => {
+  it('is the exact inverse of floatTo16BitPcm at the extremes and zero', () => {
+    const original = new Float32Array([0, 1, -1]);
+    const roundTripped = int16ToFloat32(floatTo16BitPcm(original));
+    expect(Array.from(roundTripped)).toEqual([0, 1, -1]);
+  });
+
+  it('stays within [-1, 1] for the full int16 range', () => {
+    const samples = new Int16Array([-32768, -1, 0, 1, 32767]);
+    const floats = int16ToFloat32(samples);
+    for (const f of floats) {
+      expect(f).toBeGreaterThanOrEqual(-1);
+      expect(f).toBeLessThanOrEqual(1);
+    }
   });
 });

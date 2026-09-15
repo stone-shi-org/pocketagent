@@ -4,8 +4,14 @@
  * the real service's source (`~/src/live-stt`), not from documentation —
  * see the PA-20 implementation plan's §5.1/§9 for what was verified and why.
  *
- * Phase 1 (push-to-talk) only needs `transcribe()`. `synthesize()` lands in
- * a later phase alongside the sentence-chunked TTS pipeline (plan §5.4).
+ * Phase 1 (push-to-talk) added `transcribe()`. `synthesize()` (Phase 3) is
+ * called once per already-chunked sentence from `voice/tts-service.ts` — see
+ * the plan's D5/D6: no `stream: true` (live-stt's own streaming mode
+ * multiplexes several independently-encoded files over one chunked-transfer
+ * response, which this client would then have to re-split — pointless when
+ * the caller already sentence-chunks) and `response_format: 'pcm'`, not the
+ * default `mp3` (which pipes through `ffmpeg` and, on failure, silently
+ * falls back to raw WAV while still labelling the response `audio/mpeg`).
  *
  * Uses Node's built-in `fetch`/`FormData`/`Blob` (Node 22+, no dependency
  * needed) to build the outbound `multipart/form-data` request — that global
@@ -18,6 +24,17 @@
 const SAMPLE_RATE_HZ = 16000;
 const CHANNELS = 1;
 const BITS_PER_SAMPLE = 16;
+
+/**
+ * live-stt's default TTS model (`kokoro-82m-v1`) emits 24kHz mono PCM16 — a
+ * fact about that specific model, not something the `/v1/audio/speech`
+ * response headers report back, so it has to be hardcoded rather than read
+ * off the wire. This client never passes a `model` override, so this is
+ * always correct *today*; if live-stt's default model ever changes, this
+ * constant has to change with it — flagged rather than silently wrong,
+ * since a mismatched sample rate makes played-back speech sound pitched.
+ */
+const TTS_SAMPLE_RATE_HZ = 24000;
 
 /**
  * Thrown for every failure this client can distinguish. `retryable` is set
@@ -75,9 +92,25 @@ function parseTranscribeError(status: number, body: unknown): LiveSttError {
   return new LiveSttError(message, status === 503);
 }
 
+/** `tts_http.py`'s error envelope is flatter than transcribe's: `{"error": "..."}`. */
+function parseSpeechError(status: number, body: unknown): LiveSttError {
+  const message =
+    body && typeof body === 'object' && 'error' in body && typeof (body as { error: unknown }).error === 'string'
+      ? (body as { error: string }).error
+      : `live-stt returned ${status}`;
+  return new LiveSttError(message, status === 503);
+}
+
+export interface SynthesizedSpeech {
+  pcm: Buffer;
+  sampleRateHz: number;
+}
+
 export interface LiveSttClient {
   /** Transcribes one buffered utterance. Throws `LiveSttError` on any failure. */
   transcribe(pcm16: Buffer): Promise<string>;
+  /** Synthesizes one already-chunked sentence. Throws `LiveSttError` on any failure. */
+  synthesize(text: string): Promise<SynthesizedSpeech>;
 }
 
 export function createLiveSttClient(baseUrl: string, fetchImpl: typeof fetch = fetch): LiveSttClient {
@@ -116,6 +149,36 @@ export function createLiveSttClient(baseUrl: string, fetchImpl: typeof fetch = f
         throw new LiveSttError('The voice service response was missing a transcript.', false);
       }
       return transcript;
+    },
+
+    async synthesize(text: string): Promise<SynthesizedSpeech> {
+      let response: Response;
+      try {
+        response = await fetchImpl(`${baseUrl}/v1/audio/speech`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ input: text, response_format: 'pcm' }),
+        });
+      } catch (err) {
+        throw new LiveSttError(
+          `Could not reach the voice service: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+
+      if (!response.ok) {
+        const text2 = await response.text();
+        let body: unknown;
+        try {
+          body = text2 ? JSON.parse(text2) : {};
+        } catch {
+          body = {};
+        }
+        throw parseSpeechError(response.status, body);
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      return { pcm: Buffer.from(arrayBuffer), sampleRateHz: TTS_SAMPLE_RATE_HZ };
     },
   };
 }

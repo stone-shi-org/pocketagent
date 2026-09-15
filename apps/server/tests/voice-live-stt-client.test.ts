@@ -123,3 +123,65 @@ describe('createLiveSttClient.transcribe', () => {
     });
   });
 });
+
+describe('createLiveSttClient.synthesize', () => {
+  let close: (() => Promise<void>) | undefined;
+  afterEach(async () => {
+    await close?.();
+    close = undefined;
+  });
+
+  it('posts JSON with response_format=pcm (D6) and no stream field (D5), returning raw PCM bytes', async () => {
+    let receivedBody: unknown;
+    let receivedContentType = '';
+    const fakePcm = Buffer.from(new Int16Array([1, 2, 3, 4]).buffer);
+    const server = await startFakeLiveStt((req, res, body) => {
+      receivedContentType = req.headers['content-type'] ?? '';
+      receivedBody = JSON.parse(body.toString('utf8'));
+      res.writeHead(200, { 'content-type': 'audio/pcm' }).end(fakePcm);
+    });
+    close = server.close;
+
+    const client = createLiveSttClient(server.url);
+    const result = await client.synthesize('Turn on the lights.');
+
+    expect(receivedContentType).toBe('application/json');
+    expect(receivedBody).toEqual({ input: 'Turn on the lights.', response_format: 'pcm' });
+    expect(result.pcm.equals(fakePcm)).toBe(true);
+    expect(result.sampleRateHz).toBe(24000);
+  });
+
+  it('surfaces a 503 with the flatter speech error shape ({"error": "..."}), not transcribe\'s nested one', async () => {
+    const server = await startFakeLiveStt((_req, res) => {
+      res
+        .writeHead(503, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: 'insufficient free VRAM for TTS (100 MiB free, 500 MiB required)' }));
+    });
+    close = server.close;
+
+    const client = createLiveSttClient(server.url);
+    await expect(client.synthesize('hello')).rejects.toMatchObject({
+      name: 'LiveSttError',
+      retryable: true,
+      message: expect.stringContaining('insufficient free VRAM'),
+    });
+  });
+
+  it('surfaces a non-503 error as non-retryable', async () => {
+    const server = await startFakeLiveStt((_req, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'text is required' }));
+    });
+    close = server.close;
+
+    const client = createLiveSttClient(server.url);
+    await expect(client.synthesize('')).rejects.toMatchObject({ retryable: false });
+  });
+
+  it('treats an unreachable server as a retryable error', async () => {
+    const client = createLiveSttClient('http://127.0.0.1:1');
+    await expect(client.synthesize('hello')).rejects.toMatchObject({
+      name: 'LiveSttError',
+      retryable: true,
+    });
+  });
+});

@@ -29,6 +29,8 @@ import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
 import { Icon } from '../components/Icon.js';
 import { notifyApproval, notifyTurnComplete, ensureNotificationPermission } from '../agent/notifications.js';
 import { takePendingPrompt, setPendingPrompt } from '../agent/pending-prompt.js';
+import { LiveListenController } from '../audio/live-listen.js';
+import { TtsPlaybackQueue } from '../audio/playback.js';
 
 interface Props {
   sessionId: string;
@@ -86,6 +88,12 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
       threaded down from a higher-level app state, since nothing above this
       page currently fetches `/api/settings` at all. */
   const [voiceEnabled, setVoiceEnabled] = useState(false);
+  /** PA-20 Phase 2: mirrors `SessionInfo.voiceModeEnabled`/`voice_mode_changed` —
+      the *actual* server-side state, not merely "did I click the toggle,"
+      so a reconnect or a second tab never shows a stale indicator. */
+  const [liveListenActive, setLiveListenActive] = useState(false);
+  const [micLevel, setMicLevel] = useState(0);
+  const [liveListenError, setLiveListenError] = useState<string | null>(null);
   const [pickingAgent, setPickingAgent] = useState(false);
   const [confirmingStop, setConfirmingStop] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -113,6 +121,113 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
     // always see the latest write here without the staleness a `session`
     // state read would have inside this same closure.
     let latestTitle: string | null = null;
+
+    // PA-20 Phases 2-4: one `TtsPlaybackQueue` for this connection's whole
+    // lifetime (created eagerly — it needs no mic permission, so there is no
+    // reason to defer it) and a `LiveListenController` created/destroyed as
+    // the session's live-listen toggle actually flips. Both live in this
+    // effect's closure, not component state: neither needs to trigger a
+    // re-render on their own, and they must be torn down in lockstep with
+    // this same connection on cleanup.
+    const ttsQueue = new TtsPlaybackQueue();
+    let liveListen: LiveListenController | null = null;
+    let liveListenStarting = false;
+    // The most recently requested state, kept separate from `liveListen`
+    // itself (which only reflects a *committed* controller) — `start()` can
+    // take a few hundred ms (the mic permission prompt), and a
+    // `voice_mode_changed(false)` landing during that window must not be
+    // lost just because there was nothing yet to stop.
+    let desiredLiveListen = false;
+
+    /**
+     * Reconciles the real `LiveListenController` (a live mic stream) with
+     * the server's authoritative toggle state — called from every place
+     * that learns what that state is (`onAttached`, `onStatus`,
+     * `onVoiceModeChanged`), not just the toggle click, so a session that
+     * already had live-listen on when this tab attached actually starts
+     * capturing rather than only showing the indicator.
+     */
+    async function syncLiveListen(shouldBeOn: boolean): Promise<void> {
+      desiredLiveListen = shouldBeOn;
+      // A start already in flight will re-check `desiredLiveListen` itself
+      // the moment it settles (see the `finally` block below) — calling in
+      // again here would race it rather than help it.
+      if (liveListenStarting) return;
+      if (shouldBeOn === (liveListen !== null)) return;
+
+      if (!shouldBeOn) {
+        const controller = liveListen;
+        liveListen = null;
+        setMicLevel(0);
+        await controller?.stop();
+        return;
+      }
+
+      liveListenStarting = true;
+      const controller = new LiveListenController({
+        onUtterance: (utterance) => {
+          void (async () => {
+            try {
+              const { text } = await api.transcribeVoice(sessionId, {
+                data: utterance.audioBase64,
+                durationMs: utterance.durationMs,
+              });
+              if (text.trim()) handleSendRef.current(text);
+            } catch (err) {
+              setLiveListenError(
+                err instanceof Error ? err.message : 'Could not transcribe that recording.',
+              );
+            }
+          })();
+        },
+        // Barge-in (Phase 4): react the instant new speech starts, not once
+        // the utterance finishes — waiting for `onUtterance` would mean the
+        // agent keeps talking for the entire time the user is interrupting.
+        onSpeechStart: () => {
+          if (!ttsQueue.isPlaying()) return;
+          ttsQueue.stop();
+          conn.sendInterrupt();
+        },
+        onLevel: setMicLevel,
+        onError: (message) => {
+          setLiveListenError(message);
+          liveListen = null;
+          desiredLiveListen = false;
+          setMicLevel(0);
+          // The capture died out from under the toggle — tell the server so
+          // `SessionInfo.voiceModeEnabled` (and every other tab's indicator)
+          // stops claiming the mic is live when it demonstrably is not.
+          conn.sendVoiceMode(false);
+        },
+      });
+      try {
+        await controller.start();
+        if (!desiredLiveListen) {
+          // Toggled off again while the permission prompt was still
+          // pending — honor the *latest* request rather than the one that
+          // kicked off this call.
+          await controller.stop();
+          return;
+        }
+        liveListen = controller;
+        setLiveListenError(null);
+      } catch (err) {
+        setLiveListenError(err instanceof Error ? err.message : 'Could not start live listening.');
+        // Without this, the `finally` block's own convergence check would
+        // see `desiredLiveListen` still `true` against a `liveListen` that
+        // never got set and immediately retry — an infinite loop on any
+        // permanent failure (e.g. an unsupported browser), not just a
+        // transient one.
+        desiredLiveListen = false;
+        conn.sendVoiceMode(false);
+      } finally {
+        liveListenStarting = false;
+        // Converges any request that arrived mid-start (a no-op if nothing
+        // changed — `syncLiveListen` itself checks that first).
+        if (desiredLiveListen !== (liveListen !== null)) void syncLiveListen(desiredLiveListen);
+      }
+    }
+
     const conn = new TerminalConnection({
       handlers: {
         onConnectionState: setConnection,
@@ -122,13 +237,32 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           setStatus(info.status);
           setFatal(null);
           setMissing(false);
+          setLiveListenActive(info.voiceModeEnabled);
+          void syncLiveListen(info.voiceModeEnabled);
         },
         onStatus: (next, info) => {
           setStatus(next);
           if (info) {
             latestTitle = info.title;
             setSession(info);
+            setLiveListenActive(info.voiceModeEnabled);
+            void syncLiveListen(info.voiceModeEnabled);
           }
+        },
+        // PA-20 Phase 2: broadcast to every tab attached to this session,
+        // including the one that toggled it — see `VoiceTtsService.notifyModeChanged`'s
+        // doc comment on the server side for why this is the single source
+        // of truth rather than the toggle click optimistically flipping
+        // local state.
+        onVoiceModeChanged: (enabled) => {
+          setLiveListenActive(enabled);
+          void syncLiveListen(enabled);
+        },
+        // PA-20 Phase 3: one sentence's synthesized reply audio. `data` is
+        // empty on the pure end-of-turn marker — `TtsPlaybackQueue.enqueue`
+        // already no-ops on that, so nothing needs filtering here.
+        onTtsAudio: (chunk) => {
+          ttsQueue.enqueue(chunk.data, chunk.sampleRateHz);
         },
         onAgentEvent: (event) => {
           setTranscript((prev) => applyEvent(prev, event));
@@ -216,6 +350,13 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
     return () => {
       conn.close();
       connRef.current = null;
+      // Tear down in the same order they were created — the mic (if live)
+      // first, so a leftover `LiveListenController` never keeps a stream
+      // open after this tab has navigated away from the session.
+      void liveListen?.stop();
+      ttsQueue.stop();
+      setLiveListenActive(false);
+      setMicLevel(0);
     };
   }, [sessionId]);
 
@@ -363,6 +504,32 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
       alive ? sendPrompt(text, image) : resumeAndSend(text, image),
     [alive, sendPrompt, resumeAndSend],
   );
+
+  /**
+   * PA-20 Phase 2: the connection `useEffect` below only re-runs on
+   * `sessionId` change, so a closure captured there would otherwise keep
+   * calling whatever `handleSend` was at that render — stale the moment
+   * `alive`/`sendPrompt`/`resumeAndSend` change without a new session. A
+   * ref kept in sync on every render sidesteps that without re-running the
+   * (expensive: opens a new socket) connection effect just to pick up a
+   * callback identity change.
+   */
+  const handleSendRef = useRef(handleSend);
+  useEffect(() => {
+    handleSendRef.current = handleSend;
+  }, [handleSend]);
+
+  /**
+   * PA-20 Phase 2: sends the toggle and nothing else — `liveListenActive`
+   * only ever changes in response to the server's own `voice_mode_changed`
+   * echo (`onVoiceModeChanged` in the connection effect above), never
+   * optimistically here. That is deliberate: if the server refuses (not
+   * configured, session not structured), there is nothing to revert,
+   * because nothing was ever set.
+   */
+  const handleSetLiveListen = useCallback((enabled: boolean) => {
+    connRef.current?.sendVoiceMode(enabled);
+  }, []);
 
   /**
    * The agent roster, fetched only once this chat can actually be resumed.
@@ -623,6 +790,11 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         onTranscribeVoice={
           voiceEnabled ? (audio) => api.transcribeVoice(sessionId, audio).then((res) => res.text) : undefined
         }
+        supportsLiveListen={voiceEnabled && session?.transport === 'structured'}
+        liveListenActive={liveListenActive}
+        onSetLiveListen={handleSetLiveListen}
+        micLevel={micLevel}
+        liveListenError={liveListenError}
         commands={transcript.commands}
         models={transcript.models}
         currentModel={transcript.model}

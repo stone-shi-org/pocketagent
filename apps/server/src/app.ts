@@ -40,6 +40,8 @@ import {
   createAgyUsageSource,
 } from './usage/index.js';
 import { CronService } from './cron/index.js';
+import { createLiveSttClient } from './voice/live-stt-client.js';
+import { VoiceTtsService } from './voice/tts-service.js';
 import { authRoutes } from './routes/auth.js';
 import { cronRoutes } from './routes/cron.js';
 import { customClaudeProviderRoutes } from './routes/custom-claude-providers.js';
@@ -526,6 +528,17 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // before the server accepts its first request.
   plannerChats.attachRunServices({ webhooks, cron });
 
+  // PA-20 Phase 3: one instance, shared across every session — it looks up
+  // `sessions.isVoiceModeEnabled` live rather than caching it, so a toggle
+  // takes effect on the very next event with no extra wiring. `null` client
+  // when `POCKETAGENT_LIVE_STT_URL` is unset means every call is a no-op —
+  // see `VoiceTtsService.isConfigured()`.
+  const voiceTts = new VoiceTtsService(
+    config.liveSttUrl ? createLiveSttClient(config.liveSttUrl) : null,
+    (sessionId) => sessions.isVoiceModeEnabled(sessionId),
+    app.log,
+  );
+
   // PA-11: one queue, shared. A webhook delivery, a scheduled run and a human's
   // own prompt all contend for the same working trees, so they have to be
   // ordered against each other rather than each keeping a private queue.
@@ -554,6 +567,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     sessions,
     cron,
     webhooks,
+    voiceTts,
     promptQueue,
     workspaces,
     plannerWorkspaces,
