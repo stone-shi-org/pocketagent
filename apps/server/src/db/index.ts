@@ -1211,6 +1211,17 @@ export const MIGRATIONS: readonly string[] = [
   // PA-53: Telegram as a second conversational surface for Pocket Agent. See
   // `TELEGRAM_DDL`'s own doc comment for the table shapes and FK reasoning.
   TELEGRAM_DDL,
+  // A registry's own one- or two-sentence "what this server is for" —
+  // user-authored, since an empirical check found the MCP protocol's own
+  // optional `InitializeResult.instructions` field unset on every registry
+  // actually configured here (see `McpRegistrySummary.description`'s own
+  // doc comment). Surfaced by `list_mcp_tools`'s no-argument "registry
+  // directory" tier so an agent can tell which registry is relevant before
+  // paying to load any of its tool schemas, the same role a Skill's own
+  // `description` plays for `use_skill`.
+  `
+  ALTER TABLE mcp_registries ADD COLUMN description TEXT;
+  `,
 ];
 
 /**
@@ -1395,6 +1406,20 @@ export function openDatabase(databasePath: string): Db {
   // own doc comment. Re-running the same DDL constant the migration uses is
   // idempotent (`IF NOT EXISTS`) and cannot drift from it.
   db.exec(TELEGRAM_DDL);
+  // Same positional-migration hazard once more, for `mcp_registries.description`:
+  // `create`/`update` don't write it unconditionally (it's optional), so a
+  // miss here would silently drop the field rather than 500 — but it must
+  // still be probed idempotently, or a database whose checkpoint already sat
+  // at or past this migration's tail index would never gain the column and
+  // every attempted description would vanish on save with no error at all.
+  const mcpRegistryColumns = new Set(
+    (db.prepare('PRAGMA table_info(mcp_registries)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (mcpRegistryColumns.size > 0 && !mcpRegistryColumns.has('description')) {
+    db.exec('ALTER TABLE mcp_registries ADD COLUMN description TEXT');
+  }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
   return db;

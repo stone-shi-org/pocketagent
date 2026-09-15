@@ -1430,6 +1430,18 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
   // enabled MCP tool exists for the calling agent, so an agent with no
   // registries sees no change at all.
   //
+  // `list_mcp_tools` itself is two-tiered (follow-up: a real deployment with
+  // several registries found a no-argument call dumping the first 50 tools'
+  // full schemas across *every* registry combined — a single chatty registry
+  // (many tools, verbose per-tool descriptions) could exhaust the whole
+  // `MAX_TOOL_RESULT_CHARS` budget before any other registry's tools even
+  // appeared, mid-truncated). A no-argument, no-`query` call now answers with
+  // the cheap `listEnabledRegistries()` directory — id/name/description/
+  // toolCount per registry, no schemas — so the model reads *which* registry
+  // is relevant first; a follow-up call scoped by `registry` then gets that
+  // one registry's own `MAX_TOOL_RESULT_CHARS` budget entirely to itself,
+  // rather than sharing one budget across every registry configured.
+  //
   // `call_mcp_tool`'s approval gating cannot come from its own `readOnly`
   // below — its risk depends entirely on which underlying tool `arguments.tool`
   // names. `PlannerChatService.effectiveMcpToolIdentity` resolves that
@@ -1440,16 +1452,28 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
   {
     name: LIST_MCP_TOOLS_NAME,
     description:
-      'Discover MCP (Model Context Protocol) tools available to this agent right now, by name or ' +
-      'keyword. Returns each match\'s full description and parameter schema, so this is the way to ' +
-      'learn how to call one — never assume a schema; always call this first. Omit `query` to see ' +
-      'everything currently enabled (capped at 50).',
+      'Discover MCP (Model Context Protocol) tools available to this agent, in two steps. Step 1: ' +
+      'call with no arguments to see the *registry directory* — every enabled MCP server\'s name, ' +
+      'description, and tool count, never a full tool schema. Step 2: once you know which registry ' +
+      'is relevant, call again with `registry` set to its name or id (from the directory) to see ' +
+      'that registry\'s own tools, each with its full description and parameter schema — optionally ' +
+      'narrowed further with `query`. Never assume a schema; always call this before call_mcp_tool. ' +
+      '`query` with no `registry` searches by keyword across every enabled registry instead of ' +
+      'browsing one (capped at 50 matches) — useful when you already know the tool name you want.',
     parameters: {
       type: 'object',
       properties: {
+        registry: {
+          type: 'string',
+          description:
+            'An MCP registry name or id, from the directory returned by a no-argument call. Omit to see ' +
+            'the directory itself (or, combined with `query` alone, to search across every registry).',
+        },
         query: {
           type: 'string',
-          description: 'Text to match against MCP tool names and descriptions. Omit to list everything.',
+          description:
+            'Text to match against tool names and descriptions, within `registry` if given, otherwise ' +
+            'across every enabled registry. Omit (with a registry) to list all of that registry\'s tools.',
         },
       },
       additionalProperties: false,
@@ -1457,17 +1481,51 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     readOnly: true,
     async execute(deps, args) {
       const query = typeof args.query === 'string' ? args.query.trim().toLowerCase() : '';
-      const enabled = deps.mcpRegistry.listEnabledTools(deps.workspaceId);
-      if (enabled.length === 0) {
-        return 'No MCP tools are currently enabled for this agent.';
+      const registryRef = typeof args.registry === 'string' ? args.registry.trim() : '';
+
+      // Step 1, and the fix for a chatty registry (many tools, verbose
+      // per-tool descriptions — arr-mcp's Lidarr/Radarr/Sonarr tools were the
+      // reported case) blowing through `MAX_TOOL_RESULT_CHARS` before every
+      // *other* registry's tools even got a chance to appear: with no
+      // `registry` scope and no `query`, answer with the cheap directory
+      // instead of dumping the first 50 tools' full schemas across every
+      // registry combined.
+      if (!registryRef && !query) {
+        const registries = deps.mcpRegistry.listEnabledRegistries(deps.workspaceId);
+        if (registries.length === 0) {
+          return 'No MCP registries are currently enabled for this agent.';
+        }
+        return truncate(JSON.stringify(registries), MAX_TOOL_RESULT_CHARS);
       }
+
+      // A `query` with no `registry` keeps the old cross-registry keyword
+      // search working — useful when the model already knows roughly what
+      // tool it wants and would rather not browse the directory first.
+      let candidates = deps.mcpRegistry.listEnabledTools(deps.workspaceId);
+      if (candidates.length === 0) {
+        return 'No MCP registries are currently enabled for this agent.';
+      }
+
+      if (registryRef) {
+        const registryId = deps.mcpRegistry.resolveRegistryRef(registryRef, deps.workspaceId);
+        if (!registryId) {
+          const directory = deps.mcpRegistry.listEnabledRegistries(deps.workspaceId);
+          return (
+            `No enabled MCP registry matched "${registryRef}". Available: ` +
+            (directory.length > 0 ? directory.map((r) => r.name).join(', ') : 'none.')
+          );
+        }
+        candidates = candidates.filter((t) => t.registryId === registryId);
+      }
+
       const matches = query
-        ? enabled.filter(
+        ? candidates.filter(
             (t) => t.qualifiedName.toLowerCase().includes(query) || t.description.toLowerCase().includes(query),
           )
-        : enabled.slice(0, 50);
+        : candidates.slice(0, 50);
       if (matches.length === 0) {
-        return `No enabled MCP tool matched "${query}". ${enabled.length} tool(s) are enabled in total; call again with no query to list them.`;
+        return `No enabled MCP tool matched "${query}"${registryRef ? ` in "${registryRef}"` : ''}. ` +
+          `${candidates.length} tool(s) available there in total; call again with no query to list them.`;
       }
       const detailed = matches.map((t) => {
         const resolved = deps.mcpRegistry.resolveTool(t.qualifiedName);

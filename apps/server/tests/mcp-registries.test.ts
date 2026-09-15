@@ -152,6 +152,37 @@ describe('MCP registry routes', () => {
       expect((await patch('/api/mcp-registries/does-not-exist', { name: 'x' })).statusCode).toBe(404);
       expect((await del('/api/mcp-registries/does-not-exist')).statusCode).toBe(404);
     });
+
+    // A registry's own "what is this for" summary — the trigger
+    // `list_mcp_tools`' cheap directory tier reads, mirroring a Skill's own
+    // `description`. Never sensitive, so (unlike a secret) it round-trips
+    // straight back through every route.
+    it('stores a description and returns it from both create and list', async () => {
+      const created = (await post('/api/mcp-registries', valid({ description: 'Manages TV/movie downloads.' }))).json();
+      expect(created.description).toBe('Manages TV/movie downloads.');
+
+      const listed = (await get('/api/mcp-registries')).json().registries[0];
+      expect(listed.description).toBe('Manages TV/movie downloads.');
+    });
+
+    it('defaults description to null when omitted, and an update can set, keep, or clear it', async () => {
+      const created = (await post('/api/mcp-registries', valid())).json();
+      expect(created.description).toBeNull();
+
+      const withDescription = (
+        await patch(`/api/mcp-registries/${encodeURIComponent(created.id)}`, { description: 'A description.' })
+      ).json();
+      expect(withDescription.description).toBe('A description.');
+
+      // Omitted entirely: keeps the stored value.
+      const unchanged = (await patch(`/api/mcp-registries/${encodeURIComponent(created.id)}`, { name: 'Renamed' })).json();
+      expect(unchanged.description).toBe('A description.');
+
+      // Explicit empty string: clears it back to null, same "blank means
+      // unset" convention a chat's own title edit uses.
+      const cleared = (await patch(`/api/mcp-registries/${encodeURIComponent(created.id)}`, { description: '' })).json();
+      expect(cleared.description).toBeNull();
+    });
   });
 
   describe('connecting to a real server', () => {

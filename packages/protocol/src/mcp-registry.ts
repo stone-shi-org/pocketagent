@@ -46,6 +46,28 @@ export const McpRegistrySummary = z.object({
   /** `mcp:<slug>-<hex>` — stable, never reused after deletion. */
   id: z.string(),
   name: z.string(),
+  /**
+   * User-authored one- or two-sentence summary of what this server is *for*
+   * ("Manages the *arr stack (Sonarr/Radarr/Lidarr) — TV, movie, and music
+   * downloads"), not a technical detail already covered by `url`/`transport`.
+   * It plays the same role a Skill's own `description` plays for `use_skill`
+   * — the trigger a model reads to decide whether this registry is relevant
+   * *before* paying to load any of its tool schemas — which is why
+   * `list_mcp_tools` (`planner/tools.ts`) surfaces it in the cheap,
+   * no-argument "registry directory" tier rather than only in a settings
+   * page. `null` when never written, distinct from an empty string a user
+   * explicitly cleared (the same "blank means unset, not merely empty"
+   * convention `PlannerChat.title` uses).
+   *
+   * Deliberately not auto-filled from the MCP protocol's own optional
+   * `InitializeResult.instructions` field: an empirical check against every
+   * registry actually configured in this deployment (arr-mcp, Atlassian,
+   * Bamboo, IMDB Watch List) found every one of them returns `undefined` for
+   * it, so treating that field as authoritative would leave this column
+   * empty for every real server anyway. A user-authored field is the only
+   * thing that reliably answers "what is this for."
+   */
+  description: z.string().nullable(),
   transport: McpTransportKind,
   url: z.string(),
   authKind: McpAuthKind,
@@ -78,6 +100,7 @@ const NAME = z.string().min(1).max(128);
 const URL_FIELD = z.string().min(1).max(2048);
 const HEADER_NAME = z.string().min(1).max(200);
 const SECRET = z.string().max(4096);
+const DESCRIPTION = z.string().max(2000);
 
 export const CreateMcpRegistryRequest = z
   .object({
@@ -91,6 +114,10 @@ export const CreateMcpRegistryRequest = z
     headerName: HEADER_NAME.optional(),
     headerValue: SECRET.optional(),
     enabled: z.boolean().optional(),
+    /** Omitted or blank means "none yet" (`null`), not an error — a registry
+        is fully usable without one, just invisible to `list_mcp_tools`'
+        directory tier until someone writes one. */
+    description: DESCRIPTION.optional(),
   })
   .refine((v) => v.authKind !== 'bearer' || (v.bearerToken ?? '').length > 0, {
     message: 'A bearer token is required when auth is set to bearer.',
@@ -117,6 +144,11 @@ export const UpdateMcpRegistryRequest = z.object({
   headerName: HEADER_NAME.optional(),
   headerValue: SECRET.optional(),
   enabled: z.boolean().optional(),
+  /** Omitted keeps the stored value; an empty string clears it back to
+      `null` — the same "blank means unset" convention a chat's own title
+      edit uses, and unlike a secret field, there is nothing sensitive here
+      to protect by refusing to round-trip it back to the editor. */
+  description: DESCRIPTION.optional(),
 });
 export type UpdateMcpRegistryRequest = z.infer<typeof UpdateMcpRegistryRequest>;
 

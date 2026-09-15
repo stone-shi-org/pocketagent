@@ -9,6 +9,15 @@ import { findPlannerTool, TOOL_INTEGRATION_DISABLED, type PlannerToolDeps } from
  * for every MCP registry's tools so a turn's own `tools` array never grows
  * with the number of configured registries — see PA-37's posted plan, §4.
  *
+ * `list_mcp_tools` is two-tiered (follow-up: a no-argument call used to dump
+ * the first 50 tools' full schemas across *every* enabled registry combined,
+ * so one chatty registry — many tools, verbose per-tool descriptions — could
+ * exhaust the whole truncation budget before any other registry's tools
+ * appeared at all). A no-argument call now returns the cheap registry
+ * directory (id/name/description/toolCount, no schemas); a `registry`-scoped
+ * call returns that one registry's own tools with full schemas, with its own
+ * truncation budget rather than sharing one across every registry.
+ *
  * Exercised directly against `execute()` (same posture `planner-tools.test.ts`
  * already takes for the rest of the catalog) with a *real*
  * `McpRegistryService` pointed at a real test MCP server, not a mock —
@@ -48,13 +57,19 @@ describe('list_mcp_tools / call_mcp_tool', () => {
     if (t) await t.cleanup();
   });
 
-  async function registerRegistry(name = 'Test Registry'): Promise<string> {
+  async function registerRegistry(name = 'Test Registry', description?: string): Promise<string> {
     mcpServer = await startStreamableHttpTestServer();
     const created = await t.app.inject({
       method: 'POST',
       url: '/api/mcp-registries',
       headers: authHeaders(t.cookie),
-      payload: { name, transport: 'streamable_http', url: mcpServer.url, authKind: 'none' },
+      payload: {
+        name,
+        transport: 'streamable_http',
+        url: mcpServer.url,
+        authKind: 'none',
+        ...(description !== undefined ? { description } : {}),
+      },
     });
     const id = created.json().id as string;
     const tested = await t.app.inject({
@@ -90,14 +105,36 @@ describe('list_mcp_tools / call_mcp_tool', () => {
     t = await createTestApp();
     const tool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
     const result = await tool.execute(depsFor(t), {});
-    expect(result).toMatch(/no mcp tools are currently enabled/i);
+    expect(result).toMatch(/no mcp registries are currently enabled/i);
   });
 
-  it('list_mcp_tools returns name, description, and schema for a real registered tool', async () => {
+  it('list_mcp_tools with no arguments returns the registry directory, never a tool schema', async () => {
+    t = await createTestApp();
+    const id = await registerRegistry('Arr MCP', 'Manages the *arr stack — TV, movie, and music downloads.');
+    const tool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
+    const result = await tool.execute(depsFor(t), {});
+    const parsed = JSON.parse(result) as { id: string; name: string; description: string | null; toolCount: number }[];
+    expect(parsed).toEqual([
+      { id, name: 'Arr MCP', description: 'Manages the *arr stack — TV, movie, and music downloads.', toolCount: 2 },
+    ]);
+    // Never a tool schema or qualified tool name at this tier.
+    expect(result).not.toContain('mcp__');
+    expect(result).not.toContain('inputSchema');
+  });
+
+  it('list_mcp_tools registry directory lists a registry with no description as null, not omitted', async () => {
+    t = await createTestApp();
+    await registerRegistry();
+    const tool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
+    const parsed = JSON.parse(await tool.execute(depsFor(t), {})) as { description: string | null }[];
+    expect(parsed[0]!.description).toBeNull();
+  });
+
+  it('list_mcp_tools scoped to a registry returns name, description, and schema for its tools', async () => {
     t = await createTestApp();
     const id = await registerRegistry();
     const tool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
-    const result = await tool.execute(depsFor(t), {});
+    const result = await tool.execute(depsFor(t), { registry: id });
     const parsed = JSON.parse(result) as { tool: string; description: string; parameters: unknown }[];
     const names = parsed.map((p) => p.tool);
     expect(names).toContain(`mcp__${id}__echo`);
@@ -107,7 +144,35 @@ describe('list_mcp_tools / call_mcp_tool', () => {
     expect(echo.parameters).toMatchObject({ type: 'object' });
   });
 
-  it('list_mcp_tools filters by query against name and description', async () => {
+  it('list_mcp_tools scoped to a registry accepts its display name, not only its id', async () => {
+    t = await createTestApp();
+    const id = await registerRegistry('Jira MCP');
+    const tool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
+    const parsed = JSON.parse(await tool.execute(depsFor(t), { registry: 'Jira MCP' })) as { tool: string }[];
+    expect(parsed.map((p) => p.tool)).toContain(`mcp__${id}__echo`);
+  });
+
+  it('list_mcp_tools scoped to one registry never returns another registry\'s tools', async () => {
+    t = await createTestApp();
+    const jiraId = await registerRegistry('Jira MCP');
+    const bambooId = await registerSecondRegistry('Bamboo MCP');
+    const tool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
+    const parsed = JSON.parse(await tool.execute(depsFor(t), { registry: jiraId })) as { tool: string }[];
+    const names = parsed.map((p) => p.tool);
+    expect(names).toContain(`mcp__${jiraId}__echo`);
+    expect(names).not.toContain(`mcp__${bambooId}__echo`);
+  });
+
+  it('list_mcp_tools refuses an unknown registry ref and names what is actually available', async () => {
+    t = await createTestApp();
+    await registerRegistry('Jira MCP');
+    const tool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
+    const result = await tool.execute(depsFor(t), { registry: 'not-a-real-registry' });
+    expect(result).toMatch(/no enabled mcp registry matched/i);
+    expect(result).toContain('Jira MCP');
+  });
+
+  it('list_mcp_tools filters by query against name and description, across every registry when none is specified', async () => {
     t = await createTestApp();
     const id = await registerRegistry();
     const tool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
@@ -133,17 +198,20 @@ describe('list_mcp_tools / call_mcp_tool', () => {
     });
     const tool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
     const result = await tool.execute(depsFor(t), {});
-    expect(result).toMatch(/no mcp tools are currently enabled/i);
+    expect(result).toMatch(/no mcp registries are currently enabled/i);
 
-    // Turning it back on restores every tool from that registry, with no
-    // re-connect needed — the cache was never touched by the switch.
+    // Turning it back on restores the registry (directory tier) and its
+    // tools (registry-scoped tier), with no re-connect needed — the cache
+    // was never touched by the switch.
     await t.app.inject({
       method: 'PATCH',
       url: '/api/planner/settings',
       headers: authHeaders(t.cookie),
       payload: { mcpEnabled: true },
     });
-    const restored = JSON.parse(await tool.execute(depsFor(t), {})) as { tool: string }[];
+    const directory = JSON.parse(await tool.execute(depsFor(t), {})) as { id: string }[];
+    expect(directory.map((r) => r.id)).toContain(id);
+    const restored = JSON.parse(await tool.execute(depsFor(t), { registry: id })) as { tool: string }[];
     expect(restored.map((p) => p.tool)).toContain(`mcp__${id}__echo`);
   });
 
@@ -159,11 +227,11 @@ describe('list_mcp_tools / call_mcp_tool', () => {
     });
     const tool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
     const result = await tool.execute(depsFor(t, workspaceId), {});
-    expect(result).toMatch(/no mcp tools are currently enabled/i);
+    expect(result).toMatch(/no mcp registries are currently enabled/i);
 
     // An orphaned chat (no workspace) only answers to the global switch,
     // which is still on, so it still sees the registry's tools.
-    const orphanResult = JSON.parse(await tool.execute(depsFor(t, null), {})) as { tool: string }[];
+    const orphanResult = JSON.parse(await tool.execute(depsFor(t, null), { registry: id })) as { tool: string }[];
     expect(orphanResult.map((p) => p.tool)).toContain(`mcp__${id}__echo`);
   });
 
@@ -233,10 +301,19 @@ describe('list_mcp_tools / call_mcp_tool', () => {
     });
 
     const listTool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
-    const parsed = JSON.parse(await listTool.execute(depsFor(t, workspaceId), {})) as { tool: string }[];
-    const names = parsed.map((p) => p.tool);
-    expect(names).toContain(`mcp__${jiraId}__echo`);
-    expect(names).not.toContain(`mcp__${bambooId}__echo`);
+    // The directory tier itself no longer lists the disabled registry at all.
+    const directory = JSON.parse(await listTool.execute(depsFor(t, workspaceId), {})) as { id: string }[];
+    expect(directory.map((r) => r.id)).toContain(jiraId);
+    expect(directory.map((r) => r.id)).not.toContain(bambooId);
+
+    // Jira's own tools are listed scoped by id; Bamboo's registry ref no
+    // longer resolves for this agent at all.
+    const jiraTools = JSON.parse(await listTool.execute(depsFor(t, workspaceId), { registry: jiraId })) as {
+      tool: string;
+    }[];
+    expect(jiraTools.map((p) => p.tool)).toContain(`mcp__${jiraId}__echo`);
+    const bambooAttempt = await listTool.execute(depsFor(t, workspaceId), { registry: bambooId });
+    expect(bambooAttempt).toMatch(/no enabled mcp registry matched/i);
 
     const callTool = findPlannerTool(CALL_MCP_TOOL_NAME)!;
     expect(
@@ -255,7 +332,9 @@ describe('list_mcp_tools / call_mcp_tool', () => {
       payload: { name: 'Other agent' },
     });
     const otherId = otherAgent.json().id as string;
-    const otherParsed = JSON.parse(await listTool.execute(depsFor(t, otherId), {})) as { tool: string }[];
-    expect(otherParsed.map((p) => p.tool)).toContain(`mcp__${bambooId}__echo`);
+    const otherTools = JSON.parse(
+      await listTool.execute(depsFor(t, otherId), { registry: bambooId }),
+    ) as { tool: string }[];
+    expect(otherTools.map((p) => p.tool)).toContain(`mcp__${bambooId}__echo`);
   });
 });

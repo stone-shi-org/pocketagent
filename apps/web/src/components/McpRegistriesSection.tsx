@@ -15,6 +15,7 @@ interface Props {
 
 interface FormState {
   name: string;
+  description: string;
   transport: McpTransportKind;
   url: string;
   authKind: McpAuthKind;
@@ -27,6 +28,7 @@ interface FormState {
 function blankForm(): FormState {
   return {
     name: '',
+    description: '',
     transport: 'streamable_http',
     url: '',
     authKind: 'none',
@@ -40,6 +42,7 @@ function blankForm(): FormState {
 function formFor(registry: McpRegistrySummary): FormState {
   return {
     name: registry.name,
+    description: registry.description ?? '',
     transport: registry.transport,
     url: registry.url,
     authKind: registry.authKind,
@@ -152,6 +155,10 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
     try {
       const common = {
         name: form.name.trim(),
+        // Sent even when blank — an empty string is how an edit clears a
+        // previously-written description back to `null` (create has nothing
+        // to clear, so this is a no-op there beyond "leave it unset").
+        description: form.description.trim(),
         transport: form.transport,
         url: form.url.trim(),
         authKind: form.authKind,
@@ -298,6 +305,12 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
                 </span>
                 {!r.enabled && <span className="settings-badge">Disabled</span>}
                 <br />
+                {r.description && (
+                  <>
+                    <span className="planner-row-meta">{r.description}</span>
+                    <br />
+                  </>
+                )}
                 <span className="planner-row-meta" style={{ wordBreak: 'break-all' }}>
                   {r.url}
                 </span>
@@ -372,6 +385,24 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
               disabled={busy}
               onChange={(e) => patch({ name: e.target.value })}
             />
+          </div>
+
+          <div className="planner-field">
+            <label htmlFor="mcp-description">Description</label>
+            <input
+              id="mcp-description"
+              type="text"
+              placeholder="Manages the *arr stack (Sonarr/Radarr/Lidarr) — TV, movie, and music downloads"
+              value={form.description}
+              disabled={busy}
+              onChange={(e) => patch({ description: e.target.value })}
+            />
+            <p className="planner-row-meta">
+              What this server is *for*, in a sentence — every agent's <code>list_mcp_tools</code> reads
+              this to decide whether to load this registry's tools at all, before ever seeing one of
+              their schemas. Optional, but a registry with no description is easy for an agent to
+              overlook.
+            </p>
           </div>
 
           <div className="planner-field">

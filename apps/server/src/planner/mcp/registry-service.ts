@@ -42,6 +42,7 @@ interface Row {
   last_error: string | null;
   created_at: number;
   updated_at: number;
+  description: string | null;
 }
 
 /** One registry's live, in-memory state: the row (kept in step with the
@@ -71,6 +72,19 @@ export interface McpKnownTool {
       mutating (gated), the same fail-closed posture every other
       safety-unknown case in this codebase takes. */
   readOnly: boolean;
+}
+
+/** One entry of `listEnabledRegistries()` — the cheap "directory" tier
+    `list_mcp_tools` (`planner/tools.ts`) returns with no `registry` argument,
+    so a model can decide which registry is relevant before spending any of
+    its per-registry tool-schema budget. Deliberately much smaller than
+    `McpRegistrySummary`: no `url`/`transport`/`authKind`/timestamps, none of
+    which help a model choose. */
+export interface McpRegistryDirectoryEntry {
+  id: string;
+  name: string;
+  description: string | null;
+  toolCount: number;
 }
 
 export interface McpRegistryServiceOptions {
@@ -201,6 +215,7 @@ export class McpRegistryService {
       last_error: null,
       created_at: now,
       updated_at: now,
+      description: req.description?.trim() || null,
     };
     this.insert(row);
     this.live.set(row.id, { row, tools: null });
@@ -252,6 +267,10 @@ export class McpRegistryService {
               : null,
       enabled: req.enabled === undefined ? existing.enabled : req.enabled ? 1 : 0,
       updated_at: Date.now(),
+      // Omitted keeps the stored value; an empty (or whitespace-only) string
+      // clears it back to `null` — same "blank means unset" convention as a
+      // chat title edit, and safe to round-trip unlike a secret field.
+      description: req.description === undefined ? existing.description : req.description.trim() || null,
     };
     this.persist(row);
     this.live.set(row.id, { row, tools: this.live.get(row.id)?.tools ?? null });
@@ -378,6 +397,55 @@ export class McpRegistryService {
     const disabledRegistries = readAgentDisabledMcpRegistries(this.db, workspaceId);
     if (disabledRegistries.size === 0) return this.listKnownTools();
     return this.listKnownTools().filter((t) => !disabledRegistries.has(t.registryId));
+  }
+
+  /**
+   * The cheap "directory" tier `list_mcp_tools` returns with no `registry`
+   * argument: one entry per registry visible to this agent (same three-layer
+   * gating `listEnabledTools` applies — global switch, per-agent switch,
+   * per-registry enable), each just `{id, name, description, toolCount}`,
+   * never a tool schema. This is what lets a model learn *that* a registry
+   * exists and roughly *what it's for* without paying to serialize every one
+   * of its tools' full JSON schemas — the fix for a chatty registry (many
+   * tools, verbose per-tool descriptions) starving every other registry's
+   * share of `list_mcp_tools`' own truncation budget, since that budget is
+   * now spent per registry (via `registry`) rather than once across all of
+   * them.
+   *
+   * Lists a registry even if it has never successfully connected
+   * (`tool_count` then reads `0`) — unlike `listKnownTools()`, this is a
+   * discovery surface, not a live tool catalog, so a freshly-added,
+   * not-yet-tested registry is still worth an agent knowing about.
+   */
+  listEnabledRegistries(workspaceId: string | null): McpRegistryDirectoryEntry[] {
+    if (!readPlannerSettings(this.db).mcpEnabled) return [];
+    if (workspaceId && !this.isMcpEnabledForWorkspace(workspaceId)) return [];
+    const disabledRegistries = workspaceId ? readAgentDisabledMcpRegistries(this.db, workspaceId) : new Set<string>();
+    return [...this.live.values()]
+      .filter((l) => l.row.enabled === 1 && !disabledRegistries.has(l.row.id))
+      .map((l) => ({ id: l.row.id, name: l.row.name, description: l.row.description, toolCount: l.row.tool_count }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /**
+   * Resolve the `registry` argument `list_mcp_tools`/`call_mcp_tool`'s own
+   * `execute()` accepts — a registry's id (as minted, `mcp:<slug>-<hex>`) or
+   * its display name, case-insensitively, since a model is far more likely
+   * to echo back the human-readable name it just read from the directory
+   * tier than to retype an opaque id correctly. Gated through
+   * `listEnabledRegistries` rather than a raw lookup, so a ref naming a
+   * registry that exists but is disabled (globally or for this agent)
+   * resolves to `null` exactly like an unknown one — the same "disabled
+   * looks like absent from in here" posture `listEnabledTools` already
+   * takes for an individual tool.
+   */
+  resolveRegistryRef(ref: string, workspaceId: string | null): string | null {
+    const lower = ref.trim().toLowerCase();
+    if (!lower) return null;
+    const match = this.listEnabledRegistries(workspaceId).find(
+      (r) => r.id === ref || r.name.toLowerCase() === lower,
+    );
+    return match?.id ?? null;
   }
 
   /** Raw read of one agent's own whole-MCP switch, straight off
@@ -552,10 +620,10 @@ export class McpRegistryService {
         `INSERT INTO mcp_registries
            (id, name, transport, url, auth_kind, bearer_token_ciphertext, header_name,
             header_value_ciphertext, enabled, tool_count, last_connected_at, last_error,
-            created_at, updated_at)
+            created_at, updated_at, description)
          VALUES (@id, @name, @transport, @url, @auth_kind, @bearer_token_ciphertext, @header_name,
             @header_value_ciphertext, @enabled, @tool_count, @last_connected_at, @last_error,
-            @created_at, @updated_at)`,
+            @created_at, @updated_at, @description)`,
       )
       .run(row);
   }
@@ -568,7 +636,7 @@ export class McpRegistryService {
                 bearer_token_ciphertext = @bearer_token_ciphertext, header_name = @header_name,
                 header_value_ciphertext = @header_value_ciphertext, enabled = @enabled,
                 tool_count = @tool_count, last_connected_at = @last_connected_at,
-                last_error = @last_error, updated_at = @updated_at
+                last_error = @last_error, updated_at = @updated_at, description = @description
           WHERE id = @id`,
       )
       .run(row);
@@ -579,6 +647,7 @@ function toSummary(row: Row): McpRegistrySummary {
   return {
     id: row.id,
     name: row.name,
+    description: row.description,
     transport: row.transport as McpTransportKind,
     url: row.url,
     authKind: row.auth_kind as McpAuthKind,
