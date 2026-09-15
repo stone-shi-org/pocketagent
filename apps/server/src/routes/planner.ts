@@ -29,6 +29,7 @@ import {
   type PlannerApiKeyRevealResponse,
   type PlannerChatHistoryResponse,
   type PlannerChatListResponse,
+  type DiscoverablePlannerSkillsResponse,
   type PlannerContextPreviewResponse,
   type PlannerEmbeddingApiKeyRevealResponse,
   type PlannerMemoryListResponse,
@@ -718,6 +719,37 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     } catch (err) {
       return mapSkillError(reply, err);
     }
+  });
+
+  /**
+   * PA-38 round 2: "a way from UI to 'promote' any skills to global in case
+   * needed." No body — the id in the URL is everything this needs, per
+   * `SkillRegistryService.promoteToGlobal`'s own doc comment on why this
+   * takes an id rather than a path. Reuses `toGlobalSkillInfo`/
+   * `mapSkillError` exactly like `POST /api/planner/skills` does, since the
+   * response shape (a newly-global `PlannerSkillInfo`) is identical.
+   */
+  app.post('/api/planner/skills/:id/promote', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      const summary = await app.pocket.skills.promoteToGlobal(id);
+      const globalDisabled = readGlobalDisabledSkillNames(app.pocket.db);
+      return reply.code(200).send(toGlobalSkillInfo(summary, globalDisabled));
+    } catch (err) {
+      return mapSkillError(reply, err);
+    }
+  });
+
+  /**
+   * PA-38 round 2: "You can have a UI, globally scan and user can choose to
+   * import." A stateless scan (see `discoverImportableSkills`'s own doc
+   * comment) — the frontend imports one by calling the *existing*
+   * `POST /api/planner/skills` with the discovered `path`, so no separate
+   * import route was needed.
+   */
+  app.get('/api/planner/skills/discoverable', async () => {
+    const response: DiscoverablePlannerSkillsResponse = { skills: app.pocket.skills.discoverImportableSkills() };
+    return response;
   });
 
   app.post('/api/planner/skills/refresh', async () => {

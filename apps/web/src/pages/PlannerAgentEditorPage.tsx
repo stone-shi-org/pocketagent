@@ -153,6 +153,16 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
     void withBusy(() => api.setPlannerAgentSkill(agentId, { skillId, enabled }));
   };
 
+  // PA-38 round 2: "a way from UI to 'promote' any skills to global in case
+  // needed" — a workspace-local skill only, never a `source: 'global'` one
+  // (the button is only ever rendered for the former). `withBusy` already
+  // re-runs `load()`, which re-fetches this agent's own skills list, so the
+  // promoted row flips from this agent's `sourceLabel` to "Global" without
+  // any extra bookkeeping here.
+  const promoteSkill = (skillId: string): void => {
+    void withBusy(() => api.promotePlannerSkill(skillId));
+  };
+
   const pickDirectory = (path: string, opts?: { create?: boolean }): void => {
     setPendingDirectory({ path, create: opts?.create ?? false });
     setShowDirectoryPicker(false);
@@ -411,6 +421,19 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
                 <br />
                 <span className="planner-row-meta">{s.description}</span>
               </span>
+              {s.source !== 'global' && (
+                <div className="planner-row-actions">
+                  <button
+                    type="button"
+                    className="planner-btn"
+                    disabled={busy}
+                    onClick={() => promoteSkill(s.id)}
+                    title="Copy this skill into the global catalog, so every agent can load it."
+                  >
+                    Promote to global
+                  </button>
+                </div>
+              )}
             </label>
           ))
         )}

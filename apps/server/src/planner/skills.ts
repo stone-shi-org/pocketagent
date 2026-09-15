@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { FastifyBaseLogger } from 'fastify';
-import type { Db } from '../db/index.js';
+import { readSetting, writeSetting, type Db } from '../db/index.js';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
 import { MAX_FILE_READ_BYTES } from './tools.js';
 import { readDisabledSkillNames, readGlobalDisabledSkillNames } from './store.js';
@@ -81,6 +81,29 @@ interface LiveSkill {
       internal only; see `SkillSummary`'s own doc comment for why this never
       leaves the service directly. */
   dirPath: string;
+}
+
+/**
+ * PA-38 round 2: one skill found under a *project* workspace's own
+ * `.claude/skills/` or `.agents/skills/` — the coding-agent conventions
+ * (Claude Code, and the newer cross-tool `.agents/` layout Codex and others
+ * use) — but not yet copied into the Pocket Agent catalog. Unlike
+ * `SkillSummary`, `path` is the real absolute directory, deliberately: this
+ * shape only ever feeds `POST /api/planner/skills` (which re-validates
+ * containment itself), never a cached handle used unchecked later, so there
+ * is no invariant here to protect by hiding it. Discovery is stateless and
+ * computed fresh on every call — see `discoverImportableSkills`'s own doc
+ * comment for why nothing here is merged into the visible catalog
+ * automatically.
+ */
+export interface DiscoveredSkill {
+  path: string;
+  name: string;
+  description: string;
+  source: 'claude' | 'agents';
+  /** Whatever readable label the owning project workspace has — see
+      `discoverImportableSkills`'s own doc comment. */
+  projectLabel: string;
 }
 
 export interface SkillRegistryServiceOptions {
@@ -389,27 +412,157 @@ export class SkillRegistryService {
       );
     }
 
-    const baseSlug = slugifyDirName(path.basename(real));
+    const summary = await this.copyIntoGlobalCatalog(real, path.basename(real));
+    this.logger.info({ skill: summary.id }, 'Global skill registered');
+    return summary;
+  }
+
+  /**
+   * Shared by `registerGlobalSkill` and `promoteToGlobal`: copy `sourceDir`
+   * into the skills root under a slug derived from `slugBasis`, de-duplicated
+   * the same way `PlannerWorkspaceRegistry.create` de-duplicates a
+   * workspace's on-disk directory name — `-2`, `-3`, ... until one is free.
+   * A no-op copy (the source already *is* the target directory — an operator
+   * who dropped a `SKILL.md` straight into `planner-skills/<slug>/` and is
+   * now just registering it) is detected and skipped rather than erroring on
+   * "copy onto itself".
+   */
+  private async copyIntoGlobalCatalog(sourceDir: string, slugBasis: string): Promise<SkillSummary> {
+    const baseSlug = slugifyDirName(slugBasis);
     if (baseSlug.length === 0) {
       throw new SkillRegistryError('Could not derive a slug from this directory name.', 'invalid', 400);
     }
     let slug = baseSlug;
     let suffix = 2;
-    while (this.global.has(slug) && path.join(this.skillsRoot, slug) !== real) {
+    while (this.global.has(slug) && path.join(this.skillsRoot, slug) !== sourceDir) {
       slug = `${baseSlug}-${suffix++}`;
     }
     const target = path.join(this.skillsRoot, slug);
-    if (target !== real) {
-      await fsp.cp(real, target, { recursive: true });
+    if (target !== sourceDir) {
+      await fsp.cp(sourceDir, target, { recursive: true });
     }
 
     this.refresh();
     const summary = this.get(mintSkillId('global', slug));
     if (!summary) {
-      throw new SkillRegistryError('Registered the skill, but it could not be re-read.', 'invalid', 500);
+      throw new SkillRegistryError('Copied the skill, but it could not be re-read.', 'invalid', 500);
     }
-    this.logger.info({ skill: summary.id }, 'Global skill registered');
     return summary;
+  }
+
+  /**
+   * PA-38 round 2: "a way from UI to 'promote' any skills to global in case
+   * needed, that's user manual operation." Takes an id, not a path — same
+   * reason `SkillSummary` never carries one — so the frontend never round-
+   * trips a filesystem path for this action; it only ever passes back an id
+   * it already displayed. Refuses a skill that is already global (copying it
+   * onto itself would be a confusing no-op, not a promotion) rather than
+   * silently succeeding.
+   */
+  async promoteToGlobal(id: string): Promise<SkillSummary> {
+    const live = this.find(id);
+    if (!live) throw new SkillRegistryError(`No such skill: ${id}`, 'not_found', 404);
+    if (live.summary.source === 'global') {
+      throw new SkillRegistryError(`"${live.summary.name}" is already global.`, 'invalid', 400);
+    }
+    let real: string;
+    try {
+      real = await fsp.realpath(live.dirPath);
+    } catch {
+      throw new SkillRegistryError(`"${live.summary.name}"'s directory no longer exists.`, 'not_found', 404);
+    }
+    const summary = await this.copyIntoGlobalCatalog(real, live.summary.slug);
+    this.logger.info({ skill: id, promotedTo: summary.id }, 'Skill promoted to global');
+    return summary;
+  }
+
+  /**
+   * PA-38 round 2: author a new skill directly in the *calling* agent's own
+   * workspace (`<workspace>/.skills/<slug>/SKILL.md`) — the `write_skill`
+   * tool's implementation. Deliberately narrower than `registerGlobalSkill`:
+   * it never reaches the global catalog (promotion there is the separate,
+   * explicit, manual UI action above) and it never auto-suffixes a slug to
+   * dodge a collision — a repeated call with the same name refuses outright
+   * unless `overwrite` is set, so the model's own retries can't silently pile
+   * up `foo`, `foo-2`, `foo-3`, ....
+   */
+  async writeWorkspaceSkill(
+    workspaceId: string,
+    opts: { name: string; description: string; body: string; overwrite?: boolean },
+  ): Promise<SkillSummary> {
+    const ws = this.plannerWorkspaces.get(workspaceId);
+    if (!ws) throw new SkillRegistryError('This agent workspace no longer exists.', 'not_found', 404);
+    const name = opts.name.trim();
+    const description = opts.description.trim();
+    const body = opts.body.trim();
+    if (!name) throw new SkillRegistryError('A skill needs a name.', 'invalid', 400);
+    if (!description) throw new SkillRegistryError('A skill needs a description.', 'invalid', 400);
+    if (!body) throw new SkillRegistryError('A skill needs a body.', 'invalid', 400);
+
+    const slug = slugifyDirName(name);
+    if (slug.length === 0) {
+      throw new SkillRegistryError('Could not derive a slug from this name.', 'invalid', 400);
+    }
+    const dir = path.join(ws.path, '.skills', slug);
+    const existing = await fsp.stat(dir).catch(() => null);
+    if (existing && !opts.overwrite) {
+      throw new SkillRegistryError(
+        `A skill named "${slug}" already exists in this agent's workspace. Pass overwrite: true to replace it.`,
+        'invalid',
+        409,
+      );
+    }
+
+    await fsp.mkdir(dir, { recursive: true });
+    const frontmatter = `---\nname: ${yamlScalar(name)}\ndescription: ${yamlScalar(description)}\n---\n`;
+    await fsp.writeFile(path.join(dir, 'SKILL.md'), `${frontmatter}${body}\n`, 'utf8');
+
+    this.refresh();
+    const summary = this.get(mintSkillId(workspaceId, slug));
+    if (!summary) {
+      throw new SkillRegistryError('Wrote the skill, but it could not be re-read.', 'invalid', 500);
+    }
+    this.logger.info({ skill: summary.id }, 'Workspace skill written');
+    return summary;
+  }
+
+  /**
+   * PA-38 round 2: "You can have a UI, globally scan and user can choose to
+   * import" — scans every *project* workspace's own `.claude/skills/`
+   * (Claude Code's convention) and `.agents/skills/` (the newer cross-tool
+   * convention Codex and others use) for a valid `SKILL.md`, using the exact
+   * same `scanSkillDir` this service already scans the global root and every
+   * planner workspace's `.skills/` with. Deliberately **not** folded into
+   * `listVisibleTo`/`listKnownSkills` — the reporter's own "user can choose
+   * to import" means visibility here is opt-in, so a coding agent's skill
+   * never silently becomes available to a Pocket Agent chat. Stateless: a
+   * fresh scan on every call, never cached beyond the single call, so a
+   * skill added to a project between two calls is picked up on the next one
+   * with no `refresh()` needed (nothing here mutates `this.global`/
+   * `this.byWorkspace`).
+   */
+  discoverImportableSkills(): DiscoveredSkill[] {
+    const out: DiscoveredSkill[] = [];
+    const sources: readonly ['claude' | 'agents', string][] = [
+      ['claude', '.claude/skills'],
+      ['agents', '.agents/skills'],
+    ];
+    for (const root of this.workspaces.getRoots()) {
+      const projectLabel = path.basename(root) || root;
+      for (const [source, relDir] of sources) {
+        const scanned = scanSkillDir(path.join(root, ...relDir.split('/')), source, projectLabel, this.logger);
+        for (const live of scanned.values()) {
+          out.push({
+            path: live.dirPath,
+            name: live.summary.name,
+            description: live.summary.description,
+            source,
+            projectLabel,
+          });
+        }
+      }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
   }
 
   /**
@@ -478,4 +631,122 @@ function slugifyDirName(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+/**
+ * Quotes a frontmatter scalar when writing one out (`writeWorkspaceSkill`),
+ * so it round-trips cleanly through `parseSkillFile`'s own naive strip-one-
+ * matching-pair-of-quotes logic. A colon inside an unquoted value is
+ * actually harmless to *this* parser (the whole rest of the line is
+ * captured as the value regardless), but a value that itself starts and
+ * ends with a quote character is not — reading it back would strip real
+ * content mistaking it for wrapping. Quoting proactively for either case
+ * avoids relying on that parser detail staying true. Prefers double quotes;
+ * falls back to single if the value itself contains a `"`, and to double
+ * again (imperfect, but only reachable when a value contains both quote
+ * characters) if it contains both — `parseSkillFile` only ever strips the
+ * single outermost pair we add here, so any consistent wrapping round-trips
+ * the original value byte-for-byte no matter what it contains.
+ */
+function yamlScalar(value: string): string {
+  const needsQuoting =
+    value.includes(':') || value.startsWith('"') || value.startsWith("'") || value.endsWith('"') || value.endsWith("'");
+  if (!needsQuoting) return value;
+  if (!value.includes('"')) return `"${value}"`;
+  if (!value.includes("'")) return `'${value}'`;
+  return `"${value}"`;
+}
+
+/** Settings flag guarding the bundled `skill-creator` meta-skill's seed —
+    the exact one-shot pattern `workspaces_seeded`/
+    `legacy_claude_providers_migrated` already use elsewhere (see
+    `CLAUDE.md`'s own description of that discipline): flag-gated rather than
+    "the directory is empty", so deleting the seeded skill through the
+    ordinary delete route does not resurrect it on the next boot. */
+const PLANNER_DEFAULT_SKILLS_SEEDED_KEY = 'planner_default_skills_seeded';
+
+/**
+ * PA-38 round 2: a bundled meta-skill seeded once into the global catalog —
+ * guidance for the model on writing a *good* skill, modeled loosely on
+ * Anthropic's own public `skill-creator` example skill's purpose (not its
+ * full test-harness machinery — this is guidance content, kept short).
+ */
+const SKILL_CREATOR_CONTENT = `---
+name: skill-creator
+description: Use when asked to create, write, or generate a new skill for this agent (or another one) — explains how to write one that will actually get used, not just one that technically exists.
+---
+
+# Writing a skill that gets used
+
+A skill is only useful if two things happen: the model reaches for it at the
+right moment, and it can act on it once loaded. Most skills that go unused
+fail at the first part, not the second.
+
+## The description is the trigger, not a summary
+
+\`list_skills\` shows every enabled skill's name and description, and that is
+the *only* signal deciding whether a skill gets loaded with \`use_skill\`.
+"Formats a report" describes what a skill does; "Use when asked to turn raw
+notes into a shareable status report" describes *when* to reach for it.
+Write the second kind. State the trigger — the phrasing, task, or situation
+that should make this skill come to mind — before (or instead of) describing
+the mechanism.
+
+## Keep the body focused
+
+The body is what actually lands in the conversation once loaded. A skimmable,
+few-hundred-word set of steps beats an exhaustive manual: the model has
+already decided to use the skill by the time it reads the body, so the job
+left is "tell me exactly what to do," not "teach me the whole subject."
+
+## Split long reference material out
+
+If a skill genuinely needs a large reference — a full API spec, a long list
+of edge cases, a style guide — do not inline it into \`SKILL.md\`. Write it to
+a separate file alongside \`SKILL.md\` (in the same skill directory, via
+\`write_file\`) and have the body point to it by name. That keeps the skill
+itself skimmable and lets the model open the reference only when the task at
+hand actually needs that depth.
+
+## Worked example
+
+Bad description: "Generates changelogs." Better: "Use when asked to write a
+changelog entry from a list of commits or PR titles — turns raw commit
+messages into user-facing release notes." The second version fires when
+someone actually asks for a changelog; the first only fires if the model
+happens to already be thinking about changelogs.
+
+## Saving what you draft
+
+Once you have drafted a skill's name, description, and body, save it with
+the \`write_skill\` tool — it writes straight to this agent's own
+\`.skills/\` directory as a proper \`SKILL.md\`. From there, an operator can
+promote it to the global catalog from Settings if every agent should have
+it, not just this one.
+`;
+
+/**
+ * Seeds the bundled `skill-creator` meta-skill into the global catalog, the
+ * first time only — mirrors `PlannerWorkspaceRegistry.ensureDefaultWorkspace`
+ * exactly: the flag is checked *before* anything is written, so a crash or a
+ * concurrent second call can never write the skill twice, and deleting it
+ * afterward through the ordinary `DELETE /api/planner/skills/:id` route does
+ * not bring it back on the next boot. Called from `app.ts` right after
+ * `SkillRegistryService` is constructed (so `skillsRoot` is guaranteed to
+ * exist already).
+ */
+export async function seedDefaultSkills(opts: {
+  skills: SkillRegistryService;
+  skillsRoot: string;
+  db: Db;
+  logger: FastifyBaseLogger;
+}): Promise<void> {
+  const { skills, skillsRoot, db, logger } = opts;
+  if (readSetting(db, PLANNER_DEFAULT_SKILLS_SEEDED_KEY) !== null) return;
+  const dir = path.join(skillsRoot, 'skill-creator');
+  await fsp.mkdir(dir, { recursive: true });
+  await fsp.writeFile(path.join(dir, 'SKILL.md'), SKILL_CREATOR_CONTENT, 'utf8');
+  skills.refresh();
+  writeSetting(db, PLANNER_DEFAULT_SKILLS_SEEDED_KEY, new Date().toISOString());
+  logger.info('Seeded the bundled skill-creator meta-skill into the global catalog.');
 }

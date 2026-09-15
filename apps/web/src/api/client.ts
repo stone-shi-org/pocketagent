@@ -85,6 +85,7 @@ import type {
   SetPlannerSkillEnabledRequest,
   PlannerAgentSkillsResponse,
   SetPlannerAgentSkillRequest,
+  DiscoverablePlannerSkillsResponse,
   TelegramBotListResponse,
   TelegramBotSummary,
   CreateTelegramBotRequest,
@@ -857,6 +858,12 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
+
+  promotePlannerSkill: (id: string) =>
+    request<PlannerSkillInfo>(`/api/planner/skills/${encodeURIComponent(id)}/promote`, { method: 'POST' }),
+
+  listDiscoverablePlannerSkills: () =>
+    request<DiscoverablePlannerSkillsResponse>('/api/planner/skills/discoverable'),
 
   listPlannerToolApprovals: () =>
     request<PlannerToolApprovalListResponse>('/api/planner/tool-approvals'),

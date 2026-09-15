@@ -1512,6 +1512,67 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       }
     },
   },
+  // PA-38 round 2: authoring a skill via `mkdir` + `write_file` worked, but a
+  // purpose-built tool gets the frontmatter format right (quoted where it
+  // needs to be, so it round-trips through `parseSkillFile`) and de-dupes
+  // the model having to know that layout at all. Mutating (it writes to
+  // disk) and gated exactly like `write_file`/`mkdir` — no new approval
+  // mechanism, same trust level. Deliberately limited to the calling agent's
+  // *own* workspace: reaching the global catalog is the separate, explicit
+  // "promote to global" action a human takes from Settings, never something
+  // a model call can do directly.
+  {
+    name: 'write_skill',
+    description:
+      "Create or overwrite a skill in this agent's own workspace (as <workspace>/.skills/<slug>/SKILL.md), " +
+      'so it can be loaded later with use_skill. Refuses if a skill with the same name already exists here ' +
+      'unless overwrite is true. This never reaches the global catalog shared with other agents — that is a ' +
+      'separate, manual "promote to global" action a human takes from Settings.',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'A short, human-readable name for the skill.' },
+        description: {
+          type: 'string',
+          description:
+            'States when to use this skill (the trigger), not just what it does — this is the only text ' +
+            'list_skills shows when deciding whether to load it.',
+        },
+        body: { type: 'string', description: "The skill's instructions, as Markdown." },
+        overwrite: { type: 'boolean', description: 'Replace an existing skill with the same name. Default false.' },
+      },
+      required: ['name', 'description', 'body'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      if (deps.workspaceId === null) {
+        return 'This chat has no agent workspace to write a skill into (its workspace was removed).';
+      }
+      const name = String(args.name ?? '').trim();
+      const description = String(args.description ?? '').trim();
+      const body = String(args.body ?? '').trim();
+      if (!name) return 'No skill name provided.';
+      if (!description) return 'No skill description provided.';
+      if (!body) return 'No skill body provided.';
+      try {
+        const summary = await deps.skills.writeWorkspaceSkill(deps.workspaceId, {
+          name,
+          description,
+          body,
+          overwrite: args.overwrite === true,
+        });
+        return (
+          `Wrote skill "${summary.name}" (${summary.id}) to this agent's own workspace. ` +
+          'Use list_skills/use_skill to confirm, or promote it to the global catalog from Settings if other ' +
+          'agents should have it too.'
+        );
+      } catch (err) {
+        if (err instanceof SkillRegistryError) return err.message;
+        throw err;
+      }
+    },
+  },
 ];
 
 /**

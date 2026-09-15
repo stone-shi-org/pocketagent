@@ -2,7 +2,14 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { findPlannerTool, TOOL_INTEGRATION_DISABLED, type PlannerToolDeps } from '../src/planner/tools.js';
+import { SkillRegistryService, seedDefaultSkills } from '../src/planner/skills.js';
 import { authHeaders, createTestApp, type TestApp } from './helpers.js';
+
+/** `FastifyBaseLogger` is structurally larger than this; a directly
+    constructed `SkillRegistryService` in the seeding tests below only ever
+    calls these — same posture `custom-claude-providers.test.ts`'s own
+    `silentLogger` already takes. */
+const silentLogger = { info: () => {}, warn: () => {}, error: () => {} } as never;
 
 /**
  * PA-38: skills — discovery (global root, and each planner workspace's own
@@ -29,6 +36,19 @@ async function writeSkill(
         : `---\nname: ${frontmatter.name ?? 'Untitled'}\ndescription: ${frontmatter.description ?? 'No description.'}\n---\n${body}\n`;
   await fs.writeFile(path.join(skillDir, 'SKILL.md'), content, 'utf8');
   return skillDir;
+}
+
+/**
+ * Every `createTestApp()` now boots with the bundled `skill-creator`
+ * meta-skill already seeded (PA-38 round 2's `seedDefaultSkills`, called
+ * from `app.ts` for every app, test or otherwise). Tests written against
+ * round 1's "the catalog starts empty" assumption remove it first, the same
+ * way a test asserting "zero workspaces" would have to account for
+ * `ensureDefaultWorkspace`'s own seed — this restores that starting point
+ * without touching the assertions those tests actually care about.
+ */
+async function removeSeededSkillCreator(t: TestApp): Promise<void> {
+  await t.context.skills.removeGlobalSkill('global:skill-creator');
 }
 
 function depsFor(t: TestApp, workspaceId?: string | null): PlannerToolDeps {
@@ -58,6 +78,7 @@ describe('skill discovery', () => {
 
   it('discovers a valid global SKILL.md', async () => {
     t = await createTestApp();
+    await removeSeededSkillCreator(t);
     await writeSkill(t.context.plannerSkillsRoot, 'greeter', { name: 'Greeter', description: 'Says hello.' });
     t.context.skills.refresh();
     const found = t.context.skills.listGlobalSkills();
@@ -84,6 +105,7 @@ describe('skill discovery', () => {
 
   it('skips a directory with no SKILL.md, and one with malformed frontmatter, without throwing', async () => {
     t = await createTestApp();
+    await removeSeededSkillCreator(t);
     await fs.mkdir(path.join(t.context.plannerSkillsRoot, 'empty-dir'), { recursive: true });
     await writeSkill(t.context.plannerSkillsRoot, 'bad-frontmatter', 'malformed');
     await writeSkill(t.context.plannerSkillsRoot, 'no-name', 'no-frontmatter-name');
@@ -95,6 +117,7 @@ describe('skill discovery', () => {
 
   it('rejects a directory name that is not a valid slug', async () => {
     t = await createTestApp();
+    await removeSeededSkillCreator(t);
     await writeSkill(t.context.plannerSkillsRoot, 'Not_A_Slug', { name: 'X', description: 'Y' });
     t.context.skills.refresh();
     expect(t.context.skills.listGlobalSkills()).toEqual([]);
@@ -153,6 +176,7 @@ describe('list_skills / use_skill tools', () => {
 
   it('list_skills reports "(no skills available)" when none are configured', async () => {
     t = await createTestApp();
+    await removeSeededSkillCreator(t);
     const tool = findPlannerTool('list_skills')!;
     const result = await tool.execute(depsFor(t), {});
     expect(result).toBe('(no skills available)');
@@ -160,6 +184,7 @@ describe('list_skills / use_skill tools', () => {
 
   it('list_skills lists an enabled skill by name and description', async () => {
     t = await createTestApp();
+    await removeSeededSkillCreator(t);
     await writeSkill(t.context.plannerSkillsRoot, 'greeter', { name: 'Greeter', description: 'Says hello.' });
     t.context.skills.refresh();
     const tool = findPlannerTool('list_skills')!;
@@ -261,6 +286,7 @@ describe('skill routes', () => {
 
   it('GET /api/planner/skills lists the global catalog with its enabled flag', async () => {
     t = await createTestApp();
+    await removeSeededSkillCreator(t);
     await writeSkill(t.context.plannerSkillsRoot, 'greeter', { name: 'Greeter', description: 'Says hello.' });
     t.context.skills.refresh();
     const res = await get('/api/planner/skills');
@@ -296,6 +322,7 @@ describe('skill routes', () => {
 
   it('DELETE /api/planner/skills/:id removes a global skill and its directory', async () => {
     t = await createTestApp();
+    await removeSeededSkillCreator(t);
     await writeSkill(t.context.plannerSkillsRoot, 'greeter', { name: 'Greeter', description: 'Says hello.' });
     t.context.skills.refresh();
     const res = await del('/api/planner/skills/global:greeter');
@@ -315,6 +342,7 @@ describe('skill routes', () => {
 
   it('GET/POST /api/planner/workspaces/:id/skills reflect the per-agent view, greying out a globally disabled one', async () => {
     t = await createTestApp();
+    await removeSeededSkillCreator(t);
     await writeSkill(t.context.plannerSkillsRoot, 'greeter', { name: 'Greeter', description: 'Says hello.' });
     t.context.skills.refresh();
     const wsId = t.context.plannerWorkspaces.getDefault()!.id;
@@ -350,6 +378,10 @@ describe('toolsFor omission when zero skills are enabled', () => {
   it('omits list_skills/use_skill from the tools sent upstream until at least one skill is enabled', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
     t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    // The bundled `skill-creator` meta-skill (PA-38 round 2) is otherwise
+    // always enabled, which would make "zero skills enabled" unreachable —
+    // removed here so this test still exercises the omission rule itself.
+    await removeSeededSkillCreator(t);
     await t.app.inject({
       method: 'PATCH',
       url: '/api/planner/settings',
@@ -399,5 +431,225 @@ describe('toolsFor omission when zero skills are enabled', () => {
     ).map((spec) => spec.function.name);
     expect(secondCallNames).toContain('list_skills');
     expect(secondCallNames).toContain('use_skill');
+  });
+});
+
+describe('write_skill tool (PA-38 round 2)', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('writes into the calling agent workspace, and it is immediately visible to list_skills', async () => {
+    t = await createTestApp();
+    const wsId = t.context.plannerWorkspaces.getDefault()!.id;
+    const tool = findPlannerTool('write_skill')!;
+    const result = await tool.execute(depsFor(t, wsId), {
+      name: 'My New Skill',
+      description: 'Use when testing write_skill.',
+      body: 'Step 1: do the thing.',
+    });
+    expect(result).toContain(`${wsId}:my-new-skill`);
+
+    const listed = t.context.skills.listVisibleTo(wsId);
+    expect(listed.map((s) => s.id)).toContain(`${wsId}:my-new-skill`);
+    const onDisk = await fs.readFile(path.join(t.context.plannerWorkspaces.getDefault()!.path, '.skills', 'my-new-skill', 'SKILL.md'), 'utf8');
+    expect(onDisk).toContain('name: My New Skill');
+    expect(onDisk).toContain('description: Use when testing write_skill.');
+    expect(onDisk).toContain('Step 1: do the thing.');
+  });
+
+  it('refuses a duplicate slug without overwrite, and replaces it with overwrite: true', async () => {
+    t = await createTestApp();
+    const wsId = t.context.plannerWorkspaces.getDefault()!.id;
+    const tool = findPlannerTool('write_skill')!;
+    await tool.execute(depsFor(t, wsId), {
+      name: 'Dup',
+      description: 'First version.',
+      body: 'v1',
+    });
+
+    const refused = await tool.execute(depsFor(t, wsId), {
+      name: 'Dup',
+      description: 'Second version.',
+      body: 'v2',
+    });
+    expect(refused).toMatch(/already exists/);
+    expect(t.context.skills.get(`${wsId}:dup`)?.description).toBe('First version.');
+
+    const overwritten = await tool.execute(depsFor(t, wsId), {
+      name: 'Dup',
+      description: 'Second version.',
+      body: 'v2',
+      overwrite: true,
+    });
+    expect(overwritten).toContain(`${wsId}:dup`);
+    expect(t.context.skills.get(`${wsId}:dup`)?.description).toBe('Second version.');
+  });
+
+  it('refuses when the calling chat has no workspace', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('write_skill')!;
+    const result = await tool.execute(depsFor(t, null), {
+      name: 'Orphan',
+      description: 'Should not be written.',
+      body: 'x',
+    });
+    expect(result).toMatch(/no agent workspace/);
+  });
+});
+
+describe('SkillRegistryService.promoteToGlobal (PA-38 round 2)', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('copies a workspace-local skill into the global catalog', async () => {
+    t = await createTestApp();
+    const ws = t.context.plannerWorkspaces.getDefault()!;
+    await writeSkill(path.join(ws.path, '.skills'), 'mine', { name: 'Mine', description: 'Agent-owned.' }, 'Do it.');
+    t.context.skills.refresh();
+
+    const promoted = await t.context.skills.promoteToGlobal(`${ws.id}:mine`);
+    expect(promoted.id).toBe('global:mine');
+    expect(promoted.source).toBe('global');
+    expect(t.context.skills.listGlobalSkills().map((s) => s.id)).toContain('global:mine');
+    // The original workspace-local copy is untouched — promotion copies,
+    // it does not move.
+    expect(t.context.skills.get(`${ws.id}:mine`)).toBeDefined();
+  });
+
+  it('refuses a skill that is already global', async () => {
+    t = await createTestApp();
+    await writeSkill(t.context.plannerSkillsRoot, 'already-global', { name: 'Already Global', description: 'X' });
+    t.context.skills.refresh();
+    await expect(t.context.skills.promoteToGlobal('global:already-global')).rejects.toThrow(/already global/);
+  });
+
+  it('refuses an unknown id', async () => {
+    t = await createTestApp();
+    await expect(t.context.skills.promoteToGlobal('nope:nope')).rejects.toThrow(/No such skill/);
+  });
+
+  it('POST /api/planner/skills/:id/promote promotes over HTTP', async () => {
+    t = await createTestApp();
+    const ws = t.context.plannerWorkspaces.getDefault()!;
+    await writeSkill(path.join(ws.path, '.skills'), 'mine', { name: 'Mine', description: 'Agent-owned.' });
+    t.context.skills.refresh();
+
+    const res = await t.app.inject({
+      method: 'POST',
+      url: `/api/planner/skills/${ws.id}:mine/promote`,
+      headers: authHeaders(t.cookie),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().id).toBe('global:mine');
+  });
+});
+
+describe('SkillRegistryService.discoverImportableSkills (PA-38 round 2)', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('finds a skill under both .claude/skills/ and .agents/skills/ in a project workspace', async () => {
+    t = await createTestApp();
+    await writeSkill(path.join(t.workspaceRoot, '.claude', 'skills'), 'from-claude', {
+      name: 'From Claude',
+      description: 'Claude Code convention.',
+    });
+    await writeSkill(path.join(t.workspaceRoot, '.agents', 'skills'), 'from-agents', {
+      name: 'From Agents',
+      description: 'Cross-tool convention.',
+    });
+
+    const discovered = t.context.skills.discoverImportableSkills();
+    const byName = new Map(discovered.map((d) => [d.name, d]));
+    expect(byName.get('From Claude')).toMatchObject({ source: 'claude', description: 'Claude Code convention.' });
+    expect(byName.get('From Agents')).toMatchObject({ source: 'agents', description: 'Cross-tool convention.' });
+    expect(byName.get('From Claude')!.path).toContain(path.join('.claude', 'skills', 'from-claude'));
+  });
+
+  it('does not appear in listKnownSkills/listVisibleTo until imported', async () => {
+    t = await createTestApp();
+    const wsId = t.context.plannerWorkspaces.getDefault()!.id;
+    await writeSkill(path.join(t.workspaceRoot, '.claude', 'skills'), 'undiscovered', {
+      name: 'Undiscovered',
+      description: 'Not visible yet.',
+    });
+
+    expect(t.context.skills.discoverImportableSkills().map((d) => d.name)).toContain('Undiscovered');
+    expect(t.context.skills.listVisibleTo(wsId).map((s) => s.name)).not.toContain('Undiscovered');
+    expect(t.context.skills.listKnownSkills(wsId).map((s) => s.name)).not.toContain('Undiscovered');
+
+    const source = path.join(t.workspaceRoot, '.claude', 'skills', 'undiscovered');
+    await t.context.skills.registerGlobalSkill(source);
+    expect(t.context.skills.listVisibleTo(wsId).map((s) => s.name)).toContain('Undiscovered');
+  });
+
+  it('returns an empty list when nothing is discoverable', async () => {
+    t = await createTestApp();
+    expect(t.context.skills.discoverImportableSkills()).toEqual([]);
+  });
+
+  it('GET /api/planner/skills/discoverable reflects the scan over HTTP', async () => {
+    t = await createTestApp();
+    await writeSkill(path.join(t.workspaceRoot, '.claude', 'skills'), 'via-http', {
+      name: 'Via HTTP',
+      description: 'Found over the route.',
+    });
+    const res = await t.app.inject({
+      method: 'GET',
+      url: '/api/planner/skills/discoverable',
+      headers: authHeaders(t.cookie),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().skills.map((s: { name: string }) => s.name)).toContain('Via HTTP');
+  });
+});
+
+describe('bundled skill-creator meta-skill (PA-38 round 2)', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('is seeded once at boot into the global catalog', async () => {
+    t = await createTestApp();
+    const found = t.context.skills.get('global:skill-creator');
+    expect(found?.name).toBe('skill-creator');
+    expect(found?.source).toBe('global');
+  });
+
+  it('a second SkillRegistryService construction against the same db/root does not duplicate the seed', async () => {
+    t = await createTestApp();
+    expect(t.context.skills.listGlobalSkills().filter((s) => s.slug === 'skill-creator')).toHaveLength(1);
+
+    const second = new SkillRegistryService({
+      db: t.db,
+      plannerWorkspaces: t.context.plannerWorkspaces,
+      workspaces: t.context.workspaces,
+      skillsRoot: t.context.plannerSkillsRoot,
+      logger: silentLogger,
+    });
+    await seedDefaultSkills({ skills: second, skillsRoot: t.context.plannerSkillsRoot, db: t.db, logger: silentLogger });
+
+    expect(second.listGlobalSkills().filter((s) => s.slug === 'skill-creator')).toHaveLength(1);
+  });
+
+  it('does not resurrect a deleted skill-creator on a later seed attempt', async () => {
+    t = await createTestApp();
+    await t.context.skills.removeGlobalSkill('global:skill-creator');
+    expect(t.context.skills.get('global:skill-creator')).toBeUndefined();
+
+    await seedDefaultSkills({
+      skills: t.context.skills,
+      skillsRoot: t.context.plannerSkillsRoot,
+      db: t.db,
+      logger: silentLogger,
+    });
+    expect(t.context.skills.get('global:skill-creator')).toBeUndefined();
   });
 });

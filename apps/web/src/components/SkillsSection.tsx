@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { PlannerSkillInfo } from '@pocketagent/protocol';
+import type { DiscoveredSkill, PlannerSkillInfo } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { Icon } from './Icon.js';
@@ -36,6 +36,13 @@ export function SkillsSection({ onApiError, onChanged }: Props): JSX.Element {
   const [showPicker, setShowPicker] = useState(false);
   const [pendingPath, setPendingPath] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState<PlannerSkillInfo | null>(null);
+  // PA-38 round 2: "You can have a UI, globally scan and user can choose to
+  // import" — a separate list, loaded independently of the global catalog
+  // above, since it is opt-in visibility rather than part of it (see
+  // `discoverImportableSkills`'s own doc comment).
+  const [discovered, setDiscovered] = useState<DiscoveredSkill[] | null>(null);
+  const [discoverError, setDiscoverError] = useState<string | null>(null);
+  const [discoverBusy, setDiscoverBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -48,9 +55,38 @@ export function SkillsSection({ onApiError, onChanged }: Props): JSX.Element {
     }
   }, [onApiError]);
 
+  const loadDiscovered = useCallback(async () => {
+    setDiscoverBusy(true);
+    try {
+      const res = await api.listDiscoverablePlannerSkills();
+      setDiscovered(res.skills);
+      setDiscoverError(null);
+    } catch (err) {
+      onApiError(err);
+      setDiscoverError(err instanceof ApiError ? err.message : 'Could not scan for skills.');
+    } finally {
+      setDiscoverBusy(false);
+    }
+  }, [onApiError]);
+
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadDiscovered();
+  }, [load, loadDiscovered]);
+
+  async function importDiscovered(skill: DiscoveredSkill): Promise<void> {
+    setDiscoverBusy(true);
+    try {
+      await api.registerPlannerSkill({ path: skill.path });
+      await Promise.all([load(), loadDiscovered()]);
+      onChanged();
+    } catch (err) {
+      onApiError(err);
+      setDiscoverError(err instanceof ApiError ? err.message : 'Could not import that skill.');
+    } finally {
+      setDiscoverBusy(false);
+    }
+  }
 
   async function refresh(): Promise<void> {
     setBusy(true);
@@ -202,6 +238,57 @@ export function SkillsSection({ onApiError, onChanged }: Props): JSX.Element {
           onCancel={() => setConfirmingDelete(null)}
         />
       )}
+
+      <div style={{ marginTop: 18, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
+        <h4 style={{ fontSize: 14, margin: '0 0 10px' }}>Discovered in your projects</h4>
+        <p className="transport-hint" style={{ marginBottom: 10 }}>
+          Skills already written for a coding agent — <code>.claude/skills/&lt;name&gt;</code> (Claude
+          Code) or <code>.agents/skills/&lt;name&gt;</code> (the newer cross-tool layout) — found under
+          your project folders. Nothing here is visible to any Pocket Agent until you import it, which
+          copies it into the global catalog above.
+        </p>
+
+        {discoverError && (
+          <div className="error-box" role="alert">
+            {discoverError}
+          </div>
+        )}
+
+        {discovered === null ? (
+          <div className="spinner">Loading…</div>
+        ) : discovered.length === 0 ? (
+          <p className="planner-row-meta">Nothing discoverable right now.</p>
+        ) : (
+          discovered.map((s) => (
+            <div key={`${s.source}:${s.path}`} className="planner-checkbox-row" style={{ marginBottom: 6 }}>
+              <span>
+                <strong>{s.name}</strong>{' '}
+                <span className="planner-row-meta">
+                  ({s.projectLabel} · {s.source === 'claude' ? '.claude/skills' : '.agents/skills'})
+                </span>
+                <br />
+                <span className="planner-row-meta">{s.description}</span>
+              </span>
+              <div className="planner-row-actions">
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={discoverBusy}
+                  onClick={() => void importDiscovered(s)}
+                >
+                  Import
+                </button>
+              </div>
+            </div>
+          ))
+        )}
+
+        <div className="planner-inline" style={{ marginTop: 12 }}>
+          <button type="button" className="planner-btn" disabled={discoverBusy} onClick={() => void loadDiscovered()}>
+            Scan
+          </button>
+        </div>
+      </div>
     </>
   );
 }

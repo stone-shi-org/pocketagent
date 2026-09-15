@@ -118,6 +118,7 @@ describe('PLANNER_TOOLS catalog', () => {
         'send_telegram_message',
         'start_subagent_session',
         'write_file',
+        'write_skill',
       ].sort(),
     );
   });

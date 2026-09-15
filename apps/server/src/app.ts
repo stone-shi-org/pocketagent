@@ -63,7 +63,7 @@ import { createPlannerWorkspaceStore, readPlannerSettings, revealPlannerEmbeddin
 import { PlannerChatService } from './planner/chats.js';
 import type { QueuedRunSummary } from '@pocketagent/protocol';
 import { PlannerMemoryService, type PlannerMemoryEmbedConfig } from './planner/memory.js';
-import { SkillRegistryService, resolvePlannerSkillsRoot } from './planner/skills.js';
+import { SkillRegistryService, resolvePlannerSkillsRoot, seedDefaultSkills } from './planner/skills.js';
 import { McpRegistryService } from './planner/mcp/registry-service.js';
 import { PlannerLlmClient } from './planner/llm-client.js';
 import { MemoryConsolidationService } from './planner/memory-consolidation.js';
@@ -400,6 +400,11 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // `plannerWorkspacesRoot` is, just above.
   const plannerSkillsRoot = options.plannerSkillsRoot ?? resolvePlannerSkillsRoot(config.databasePath);
   const skills = new SkillRegistryService({ db, plannerWorkspaces, workspaces, skillsRoot: plannerSkillsRoot, logger: app.log });
+  // PA-38 round 2: the bundled `skill-creator` meta-skill, seeded once — see
+  // that function's own doc comment for why this must run after the service
+  // above (so `skillsRoot` already exists) and why it is flag- rather than
+  // directory-emptiness-gated.
+  await seedDefaultSkills({ skills, skillsRoot: plannerSkillsRoot, db, logger: app.log });
 
   // PA-53: Telegram bots and their Telegram-id -> Pocket Agent pairings.
   // Constructed before `plannerChats` for the same reason `mcpRegistry`/

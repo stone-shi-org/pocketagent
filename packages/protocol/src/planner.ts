@@ -707,6 +707,29 @@ export const SetPlannerAgentSkillRequest = z.object({
 });
 export type SetPlannerAgentSkillRequest = z.infer<typeof SetPlannerAgentSkillRequest>;
 
+/**
+ * PA-38 round 2: one skill found under a *project* workspace's own
+ * `.claude/skills/` or `.agents/skills/` (the coding-agent conventions —
+ * Claude Code's own, and the newer cross-tool layout Codex and others use)
+ * but not yet imported into the Pocket Agent catalog. `path` is the real
+ * absolute directory — unlike `PlannerSkillInfo`, which deliberately never
+ * carries one — because this shape feeds straight into the *existing*
+ * `POST /api/planner/skills` (`path`) route to import it, which re-validates
+ * containment itself; there is no cached handle here to protect by hiding
+ * the path.
+ */
+export const DiscoveredSkill = z.object({
+  path: z.string(),
+  name: z.string(),
+  description: z.string(),
+  source: z.enum(['claude', 'agents']),
+  projectLabel: z.string(),
+});
+export type DiscoveredSkill = z.infer<typeof DiscoveredSkill>;
+
+export const DiscoverablePlannerSkillsResponse = z.object({ skills: z.array(DiscoveredSkill) });
+export type DiscoverablePlannerSkillsResponse = z.infer<typeof DiscoverablePlannerSkillsResponse>;
+
 // ---- Pocket Agents as a selectable "agent" ----------------------------------
 
 /**
