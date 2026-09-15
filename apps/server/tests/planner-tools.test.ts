@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -12,6 +13,7 @@ import {
   toOpenAiToolSpecs,
   type PlannerToolDeps,
 } from '../src/planner/tools.js';
+import { SECRET_KEY_BYTES } from '../src/crypto/secret-box.js';
 import { authHeaders, createTestApp, type TestApp } from './helpers.js';
 
 /**
@@ -52,12 +54,35 @@ function depsFor(
   overrides?: Partial<
     Pick<
       PlannerToolDeps,
-      'webSearch' | 'urlFetch' | 'fetchImpl' | 'now' | 'subagents' | 'spawnDepth' | 'telegram'
+      | 'webSearch'
+      | 'urlFetch'
+      | 'fetchImpl'
+      | 'now'
+      | 'subagents'
+      | 'spawnDepth'
+      | 'telegram'
+      | 'webhooks'
+      | 'cron'
+      | 'telegramBots'
     >
   >,
 ): PlannerToolDeps {
-  const { workspaces, plannerWorkspaces, sessions, worktrees, conversations, agyTranscripts, piTranscripts, agents } =
-    t.context;
+  const {
+    workspaces,
+    plannerWorkspaces,
+    sessions,
+    worktrees,
+    conversations,
+    agyTranscripts,
+    piTranscripts,
+    agents,
+    db,
+    config,
+    customClaudeProviders,
+    telegramBots,
+    webhooks,
+    cron,
+  } = t.context;
   return {
     workspaces,
     plannerWorkspaces,
@@ -78,6 +103,16 @@ function depsFor(
     subagents: SUBAGENTS_UNAVAILABLE,
     spawnDepth: 0,
     telegram: TELEGRAM_UNAVAILABLE,
+    // PA-56: `createTestApp()` boots a real app, so `db`/`config`/
+    // `customClaudeProviders`/`webhooks`/`cron`/`telegramBots` are all real,
+    // wired services — the same ones `PlannerChatService.executeTool` would
+    // hand a tool in production, not stubs.
+    db,
+    config,
+    customClaudeProviders,
+    telegramBots,
+    webhooks,
+    cron,
     ...overrides,
   };
 }
@@ -101,6 +136,7 @@ describe('PLANNER_TOOLS catalog', () => {
         'memory_search',
         'read_file',
         'read_session_output',
+        'read_settings',
         'url_fetch',
         'use_skill',
         'web_search',
@@ -117,6 +153,11 @@ describe('PLANNER_TOOLS catalog', () => {
         'send_instruction',
         'send_telegram_message',
         'start_subagent_session',
+        'update_cron_job',
+        'update_custom_claude_provider',
+        'update_settings',
+        'update_telegram_bot',
+        'update_webhook',
         'write_file',
         'write_skill',
       ].sort(),
@@ -1378,5 +1419,315 @@ describe('list_telegram_links', () => {
   it('is exempt from the approval gate', () => {
     const tool = findPlannerTool('list_telegram_links')!;
     expect(tool.readOnly).toBe(true);
+  });
+});
+
+/**
+ * PA-56: "add internal tool allow pocket agent (planner) access settings" —
+ * read/update access to general settings, webhooks, scheduled jobs, custom
+ * Claude providers and Telegram bots. The load-bearing behaviours these tests
+ * protect: no secret (webhook HMAC secret, provider API key, bot token) is
+ * ever readable through any of these tools; `update_settings` cannot touch
+ * `skipPermissionsEnabled` under any circumstances; and `update_webhook`/
+ * `update_cron_job` run the exact same validation (agent-transport rules,
+ * cwd resolution) their own HTTP routes do, rather than a second copy.
+ */
+describe('read_settings / update_settings (PA-56)', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('read_settings reports general settings and every resource, with no secret anywhere', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('read_settings')!;
+    const raw = await tool.execute(depsFor(t), {});
+    const result = JSON.parse(raw);
+    expect(result.general.maxSessions).toBe(t.context.config.maxSessions);
+    expect(result.general.skipPermissionsEnabled).toBe(false);
+    expect(result.customClaudeProviders).toEqual([]);
+    expect(result.webhooks).toEqual([]);
+    expect(result.cronJobs).toEqual([]);
+    expect(result.telegramBots).toEqual([]);
+    expect(raw).not.toMatch(/ciphertext/i);
+    expect(raw.toLowerCase()).not.toContain('"secret"');
+  });
+
+  it('update_settings changes a general setting and read_settings reflects it', async () => {
+    t = await createTestApp();
+    const update = findPlannerTool('update_settings')!;
+    const result = await update.execute(depsFor(t), { settings: { maxSessions: 12 } });
+    expect(result).toMatch(/Updated: maxSessions/);
+    expect(t.context.config.maxSessions).toBe(12);
+
+    const read = findPlannerTool('read_settings')!;
+    const after = JSON.parse(await read.execute(depsFor(t), {}));
+    expect(after.general.maxSessions).toBe(12);
+  });
+
+  it('refuses to change skipPermissionsEnabled under any circumstances', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('update_settings')!;
+    const before = t.context.sessions.getGlobalSkipPermissions();
+    const result = await tool.execute(depsFor(t), { settings: { skipPermissionsEnabled: true } });
+    expect(result).toMatch(/skipPermissionsEnabled cannot be changed through this tool/);
+    expect(t.context.sessions.getGlobalSkipPermissions()).toBe(before);
+  });
+
+  it('reports a validation failure rather than applying an out-of-range value', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('update_settings')!;
+    const before = t.context.config.maxSessions;
+    const result = await tool.execute(depsFor(t), { settings: { maxSessions: 999999 } });
+    expect(result).toMatch(/Refusing/);
+    expect(t.context.config.maxSessions).toBe(before);
+  });
+
+  it('leaves settings untouched and says so when the patch names no recognized key', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('update_settings')!;
+    const result = await tool.execute(depsFor(t), { settings: { notARealSetting: 1 } });
+    expect(result).toMatch(/Nothing changed/);
+  });
+});
+
+describe('update_webhook (PA-56)', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  async function createWebhook(): Promise<string> {
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/webhooks',
+      headers: authHeaders(t.cookie),
+      payload: {
+        name: 'Triage',
+        slug: 'triage-pa-56',
+        cwd: t.projectDir,
+        agent: 'claude',
+        config: { type: 'jira', filter: {} },
+      },
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    return res.json().webhook.id as string;
+  }
+
+  it('updates an existing webhook through the same validation the route uses, and never carries the secret', async () => {
+    t = await createTestApp();
+    const id = await createWebhook();
+    const tool = findPlannerTool('update_webhook')!;
+    const raw = await tool.execute(depsFor(t), {
+      id,
+      patch: {
+        name: 'Triage bugs',
+        config: {
+          type: 'jira',
+          filter: {},
+          projectMap: [{ projectKey: 'pa', cwd: t.projectDir }],
+        },
+      },
+    });
+    const updated = JSON.parse(raw);
+    expect(updated.name).toBe('Triage bugs');
+    expect(updated.config.projectMap).toEqual([{ projectKey: 'PA', cwd: t.projectDir }]);
+    // `secretSetAt` (a timestamp) is expected and fine; the plaintext secret
+    // itself — `Webhook` has no such field at all (see its own doc comment) —
+    // must never appear.
+    expect(updated.secret).toBeUndefined();
+    expect(updated.token).toBeUndefined();
+  });
+
+  it('reports an unknown webhook id rather than throwing', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('update_webhook')!;
+    const result = await tool.execute(depsFor(t), { id: 'does-not-exist', patch: { name: 'x' } });
+    expect(result).toMatch(/No such webhook/);
+  });
+
+  it('runs the same agent-transport check the route does', async () => {
+    t = await createTestApp();
+    const id = await createWebhook();
+    const tool = findPlannerTool('update_webhook')!;
+    const result = await tool.execute(depsFor(t), { id, patch: { agent: 'does-not-exist' } });
+    expect(result).toMatch(/No such agent/);
+  });
+
+  it('refuses cleanly, rather than throwing, when webhooks are not wired', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('update_webhook')!;
+    const result = await tool.execute(depsFor(t, undefined, { webhooks: null }), {
+      id: 'anything',
+      patch: {},
+    });
+    expect(result).toMatch(/not available/);
+  });
+});
+
+describe('update_cron_job (PA-56)', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  async function createJob(): Promise<string> {
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/cron/jobs',
+      headers: authHeaders(t.cookie),
+      payload: {
+        name: 'Nightly triage',
+        cwd: t.projectDir,
+        agent: 'claude',
+        prompt: 'Triage overnight issues.',
+        cronExpr: '0 9 * * *',
+      },
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    return res.json().id as string;
+  }
+
+  it('updates an existing scheduled job through the same validation the route uses', async () => {
+    t = await createTestApp();
+    const id = await createJob();
+    const tool = findPlannerTool('update_cron_job')!;
+    const result = await tool.execute(depsFor(t), {
+      id,
+      patch: { prompt: 'Triage overnight issues, twice as hard.' },
+    });
+    expect(JSON.parse(result).prompt).toBe('Triage overnight issues, twice as hard.');
+  });
+
+  it('reports an unknown job id rather than throwing', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('update_cron_job')!;
+    const result = await tool.execute(depsFor(t), { id: 'does-not-exist', patch: {} });
+    expect(result).toMatch(/No such scheduled job/);
+  });
+
+  it('runs the same agent-transport check the route does', async () => {
+    t = await createTestApp();
+    const id = await createJob();
+    const tool = findPlannerTool('update_cron_job')!;
+    const result = await tool.execute(depsFor(t), { id, patch: { agent: 'does-not-exist' } });
+    expect(result).toMatch(/No such agent/);
+  });
+
+  it('refuses cleanly, rather than throwing, when scheduled jobs are not wired', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('update_cron_job')!;
+    const result = await tool.execute(depsFor(t, undefined, { cron: null }), {
+      id: 'anything',
+      patch: {},
+    });
+    expect(result).toMatch(/not available/);
+  });
+});
+
+describe('update_custom_claude_provider (PA-56)', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  function withEncKey(): Promise<TestApp> {
+    const encKey = crypto.randomBytes(SECRET_KEY_BYTES).toString('base64');
+    return createTestApp({ POCKETAGENT_SETTINGS_ENC_KEY: encKey });
+  }
+
+  it('updates a provider and never accepts, changes or returns the API key', async () => {
+    t = await withEncKey();
+    const created = t.context.customClaudeProviders.create({
+      name: 'DeepSeek',
+      providerKind: 'claude-compatible',
+      baseUrl: 'https://api.deepseek.com/anthropic',
+      apiKey: 'sk-should-never-appear',
+      models: ['deepseek-v4-pro'],
+      defaultModel: 'deepseek-v4-pro',
+    });
+    const tool = findPlannerTool('update_custom_claude_provider')!;
+    const raw = await tool.execute(depsFor(t), { id: created.id, patch: { name: 'DeepSeek Renamed' } });
+    const updated = JSON.parse(raw);
+    expect(updated.name).toBe('DeepSeek Renamed');
+    expect(raw).not.toMatch(/sk-should-never-appear/);
+    expect(raw).not.toMatch(/ciphertext/i);
+  });
+
+  it('refuses an apiKey field outright, without touching the stored provider', async () => {
+    t = await withEncKey();
+    const created = t.context.customClaudeProviders.create({
+      name: 'DeepSeek',
+      providerKind: 'claude-compatible',
+      baseUrl: 'https://api.deepseek.com/anthropic',
+      apiKey: 'sk-should-never-appear',
+      models: ['deepseek-v4-pro'],
+      defaultModel: 'deepseek-v4-pro',
+    });
+    const tool = findPlannerTool('update_custom_claude_provider')!;
+    const result = await tool.execute(depsFor(t), {
+      id: created.id,
+      patch: { name: 'Should not apply', apiKey: 'sk-new' },
+    });
+    expect(result).toMatch(/can never set, change or read the API key/);
+    expect(t.context.customClaudeProviders.get(created.id).name).toBe('DeepSeek');
+  });
+
+  it('reports an unknown provider id rather than throwing', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('update_custom_claude_provider')!;
+    const result = await tool.execute(depsFor(t), { id: 'does-not-exist', patch: { name: 'x' } });
+    expect(result).toMatch(/No such/i);
+  });
+});
+
+describe('update_telegram_bot (PA-56)', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  function withEncKey(): Promise<TestApp> {
+    const encKey = crypto.randomBytes(SECRET_KEY_BYTES).toString('base64');
+    return createTestApp({ POCKETAGENT_SETTINGS_ENC_KEY: encKey });
+  }
+
+  it('updates a bot and never accepts, changes or returns its token', async () => {
+    t = await withEncKey();
+    const bot = t.context.telegramBots.create({ name: 'Bot', botToken: 'tok-should-never-appear' });
+    const tool = findPlannerTool('update_telegram_bot')!;
+    const raw = await tool.execute(depsFor(t), { id: bot.id, patch: { name: 'Renamed Bot' } });
+    const updated = JSON.parse(raw);
+    expect(updated.name).toBe('Renamed Bot');
+    expect(raw).not.toMatch(/tok-should-never-appear/);
+  });
+
+  it('refuses a botToken field outright, without touching the stored bot', async () => {
+    t = await withEncKey();
+    const bot = t.context.telegramBots.create({ name: 'Bot', botToken: 'tok-should-never-appear' });
+    const tool = findPlannerTool('update_telegram_bot')!;
+    const result = await tool.execute(depsFor(t), {
+      id: bot.id,
+      patch: { name: 'Should not apply', botToken: 'new-token' },
+    });
+    expect(result).toMatch(/can never set, change or read the bot token/);
+    expect(t.context.telegramBots.get(bot.id).name).toBe('Bot');
+  });
+
+  it('reports an unknown bot id rather than throwing', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('update_telegram_bot')!;
+    const result = await tool.execute(depsFor(t), { id: 'does-not-exist', patch: { name: 'x' } });
+    expect(result).toMatch(/No such/i);
+  });
+
+  it('refuses cleanly, rather than throwing, when Telegram is not wired', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('update_telegram_bot')!;
+    const result = await tool.execute(depsFor(t, undefined, { telegramBots: null }), {
+      id: 'anything',
+      patch: {},
+    });
+    expect(result).toMatch(/not available/);
   });
 });

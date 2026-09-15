@@ -6,6 +6,11 @@ import {
   LIST_MCP_TOOLS_NAME,
   LIST_SKILLS_NAME,
   USE_SKILL_NAME,
+  UpdateSettingsRequest,
+  UpdateWebhookRequest,
+  UpdateCronJobRequest,
+  UpdateCustomClaudeProviderRequest,
+  UpdateTelegramBotRequest,
   isTerminalStatus,
   type AgentEvent,
   type SessionInfo,
@@ -22,6 +27,25 @@ import type { PlannerWorkspaceRegistry } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
 import type { McpRegistryService } from './mcp/registry-service.js';
 import { SkillRegistryError, type SkillRegistryService } from './skills.js';
+import type { Db } from '../db/index.js';
+import type { Config } from '../config/index.js';
+import {
+  SETTINGS_FIELDS,
+  dtoKeyFor,
+  fromDtoValue,
+  writeSettingsField,
+  buildRuntimeSettingsSnapshot,
+} from '../settings/index.js';
+import type { WebhookService } from '../webhooks/index.js';
+import { WebhookServiceError } from '../webhooks/index.js';
+import { resolveWebhookUpdatePatch } from '../routes/webhooks.js';
+import type { CronService } from '../cron/index.js';
+import { CronServiceError } from '../cron/index.js';
+import { resolveCronJobUpdatePatch } from '../routes/cron.js';
+import type { CustomClaudeProviderStore } from '../agents/custom-providers-store.js';
+import { CustomClaudeProviderError } from '../agents/custom-providers-store.js';
+import type { TelegramBotStore } from '../telegram/bots-store.js';
+import { TelegramBotError } from '../telegram/bots-store.js';
 
 /**
  * PA-6: the planner's tool catalog.
@@ -142,6 +166,51 @@ export interface PlannerToolDeps {
       (transports, static models, availability) never disagree with what the
       composer's own model picker shows for that agent. */
   agents: AgentRegistry;
+  /**
+   * PA-56: `read_settings`/`update_settings`'s own view of the
+   * `SETTINGS_FIELDS`-backed rows `PATCH /api/settings` writes — the exact
+   * same `db`/`config` pair that route uses, threaded here so a chat can read
+   * or change a setting (e.g. rewire a Jira webhook's project map, per the
+   * reporter's own example) without a human going to the Settings page.
+   * `skipPermissionsEnabled` is deliberately unreachable through either tool:
+   * it is not one of `SETTINGS_FIELDS`, `update_settings`'s own `execute`
+   * refuses it explicitly if a call names it anyway, and there is no code
+   * path here that could call `SessionManager.setGlobalSkipPermissions` even
+   * by accident — see that tool's doc comment for why this is not merely a
+   * validation check but a decision never to widen.
+   */
+  db: Db;
+  config: Config;
+  /** PA-56: `read_settings`'s own listing and `update_custom_claude_provider`'s
+      target — the same store `GET`/`PATCH /api/custom-claude-providers` use.
+      Its own `list()`/`get()`/`update()` already redact the API key (no
+      reveal endpoint exists anywhere in this app), and the tool's own
+      parameter schema never exposes an `apiKey` field at all, so a turn has
+      no way to make a plaintext key part of this chat's persisted
+      transcript — see `update_custom_claude_provider`'s doc comment. */
+  customClaudeProviders: CustomClaudeProviderStore;
+  /** PA-56: the Telegram bot half of `read_settings`/`update_telegram_bot` —
+      same redaction posture as `customClaudeProviders` above (no `botToken`
+      parameter on the tool, ever). `null` only for a test that builds
+      `PlannerToolDeps` directly without it; every real request has it, since
+      `app.ts` constructs it well before `plannerChats`. */
+  telegramBots: TelegramBotStore | null;
+  /**
+   * PA-56: `read_settings`'s listing and `update_webhook`'s target — the
+   * same service `GET`/`PATCH /api/webhooks` use, so the tool runs through
+   * `resolveWebhookUpdatePatch` (`routes/webhooks.ts`), the exact validation
+   * (slug format, cwd containment, agent-transport rules, Bamboo/hmac
+   * rejection, project/plan-map dedup) that route itself runs, rather than a
+   * second copy that could drift from it. `null` briefly at boot and in any
+   * test that never calls `PlannerChatService.attachRunServices` — see that
+   * method's own doc comment for why `webhooks`/`cron` are the one pair of
+   * dependencies here that cannot be threaded through a constructor. Both
+   * tools refuse cleanly when this is `null` rather than throwing.
+   */
+  webhooks: WebhookService | null;
+  /** PA-56: the scheduled-job half of `read_settings`/`update_cron_job` —
+      see `webhooks`'s own doc comment just above for why this is nullable. */
+  cron: CronService | null;
   /** PA-44: `start_subagent_session`/`get_subagent_status`'s escape hatch for
       the one thing this file cannot do on its own — create or inspect
       *another Pocket Agent chat*, which is `PlannerChatService`'s state, not
@@ -1569,6 +1638,299 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         );
       } catch (err) {
         if (err instanceof SkillRegistryError) return err.message;
+        throw err;
+      }
+    },
+  },
+  // PA-56: "add internal tool allow pocket agent (planner) access settings" —
+  // read/update access to general settings, webhooks, scheduled jobs, custom
+  // Claude providers and Telegram bots, so a chat can act on the reporter's
+  // own example ("change Jira webhook auto project map") without a human
+  // going to the Settings page. Scoped deliberately to read + update: create/
+  // delete of any of these resources, and the global skip-permissions switch,
+  // are out of scope for this ticket (see the doc comments on
+  // `update_settings`/`PlannerToolDeps` for why the latter is not just
+  // "unimplemented" but actively refused). `read_settings` is the one
+  // read-only tool of the six; the five updates are mutating and gated
+  // exactly like `write_file`/`exec_command` — no special-cased narrower
+  // "remember" scope, same precedent Phase 5 established.
+  {
+    name: 'read_settings',
+    description:
+      "Read this server's configuration: general settings (log level, session limits, binaries, ...), every " +
+      'configured webhook, scheduled job, custom Claude provider and Telegram bot. Never includes a secret ' +
+      '(a webhook HMAC secret, a provider API key, a Telegram bot token) — those are never readable through ' +
+      'any tool, only re-enterable from the Settings page. Call this before update_settings/update_webhook/' +
+      'update_cron_job/update_custom_claude_provider/update_telegram_bot to see current values and valid ids.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    readOnly: true,
+    async execute(deps) {
+      const snapshot = buildRuntimeSettingsSnapshot(deps.config, deps.sessions.getGlobalSkipPermissions());
+      const result: Record<string, unknown> = {
+        general: snapshot.settings,
+        restartRequiredKeys: snapshot.restartRequiredKeys,
+        note:
+          'general.skipPermissionsEnabled cannot be changed through update_settings — a human must flip ' +
+          'that switch from the Settings page.',
+        customClaudeProviders: deps.customClaudeProviders.list(),
+      };
+      const webhooks = deps.webhooks;
+      if (webhooks) result.webhooks = webhooks.list().map((row) => webhooks.toWebhook(row));
+      const cron = deps.cron;
+      if (cron) result.cronJobs = cron.list().map((row) => cron.toJob(row));
+      const telegramBots = deps.telegramBots;
+      if (telegramBots) result.telegramBots = telegramBots.list();
+      return truncate(JSON.stringify(result), MAX_TOOL_RESULT_CHARS);
+    },
+  },
+  {
+    name: 'update_settings',
+    description:
+      "Change one or more of this server's general settings — the same ones read_settings's \"general\" " +
+      'section shows (e.g. {"settings": {"maxSessions": 20}}). skipPermissionsEnabled is never accepted here: ' +
+      'a human must flip that switch from the Settings page.',
+    parameters: {
+      type: 'object',
+      properties: {
+        settings: {
+          type: 'object',
+          description: 'Partial patch, keyed by the same names read_settings\'s "general" section uses.',
+          additionalProperties: true,
+        },
+      },
+      required: ['settings'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const rawPatch =
+        args.settings && typeof args.settings === 'object' ? (args.settings as Record<string, unknown>) : {};
+      // Checked before validation, and never simply omitted from the schema
+      // above the way a provider/bot's own secret field is: the reporter's
+      // ticket asked for read/write access to "all settings", and this is
+      // the one deliberate exception, decided on PA-56 itself rather than
+      // left to this tool's own judgment — see the invariants list in
+      // CLAUDE.md for the four earlier, all-or-nothing overrides of the same
+      // "never default to skipping approval" rule this switch guards.
+      if ('skipPermissionsEnabled' in rawPatch) {
+        return (
+          'Refusing: skipPermissionsEnabled cannot be changed through this tool. ' +
+          'A human must flip that switch from the Settings page.'
+        );
+      }
+      const parsed = UpdateSettingsRequest.safeParse(rawPatch);
+      if (!parsed.success) {
+        return `Refusing: ${parsed.error.issues[0]?.message ?? 'invalid settings patch.'}`;
+      }
+      const validated = parsed.data as Record<string, unknown>;
+      const applied: string[] = [];
+      for (const field of SETTINGS_FIELDS) {
+        const dtoKey = dtoKeyFor(field);
+        if (!(dtoKey in validated)) continue;
+        writeSettingsField(deps.db, deps.config, field, fromDtoValue(field, validated[dtoKey]));
+        applied.push(dtoKey);
+      }
+      if (applied.length === 0) {
+        return 'Nothing changed: no recognized settings keys were present. Call read_settings for valid keys.';
+      }
+      const restartNeeded = SETTINGS_FIELDS.filter((f) => !f.live && applied.includes(dtoKeyFor(f))).map(dtoKeyFor);
+      return (
+        `Updated: ${applied.join(', ')}.` +
+        (restartNeeded.length > 0 ? ` Restart required to take effect: ${restartNeeded.join(', ')}.` : '')
+      );
+    },
+  },
+  {
+    name: 'update_webhook',
+    description:
+      'Update an existing inbound webhook (see read_settings for ids and current config) — e.g. its Jira/' +
+      'Bamboo project map, filter, or which agent handles it. Runs the exact same validation the Settings ' +
+      'page does. Never returns or accepts the webhook secret — rotate it from the Settings page.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The webhook id, from read_settings.' },
+        patch: {
+          type: 'object',
+          description:
+            'Partial patch — any subset of the fields read_settings shows for this webhook (name, slug, ' +
+            'enabled, config, authMode, cwd, agent, worktreeMode, model, effort, skipPermissions, ' +
+            'autoSelectAgentModel, promptTemplate, conversationMode, overlapPolicy, directoryPolicy, ' +
+            'skipQueueLabelEnabled, agentIdentity, maxConcurrent, storePayloads).',
+          additionalProperties: true,
+        },
+      },
+      required: ['id', 'patch'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const webhooks = deps.webhooks;
+      if (!webhooks) return 'Webhook management is not available on this server right now.';
+      const id = String(args.id ?? '');
+      if (!id) return 'No webhook id provided. Call read_settings to find one.';
+      const parsed = UpdateWebhookRequest.safeParse(args.patch ?? {});
+      if (!parsed.success) return `Refusing: ${parsed.error.issues[0]?.message ?? 'invalid webhook patch.'}`;
+      try {
+        const existing = webhooks.get(id);
+        const result = await resolveWebhookUpdatePatch(
+          { workspaces: deps.workspaces, agents: deps.agents, plannerWorkspaces: deps.plannerWorkspaces },
+          existing,
+          parsed.data,
+        );
+        if (!result.ok) return `Refusing: ${result.error}`;
+        return JSON.stringify(webhooks.toWebhook(webhooks.update(id, result.patch)));
+      } catch (err) {
+        if (err instanceof WebhookServiceError) return err.message;
+        throw err;
+      }
+    },
+  },
+  {
+    name: 'update_cron_job',
+    description:
+      'Update an existing scheduled job (see read_settings for ids and current config) — its schedule, ' +
+      'prompt, agent, directory, or approvals policy. Runs the exact same validation the Settings page does.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The scheduled job id, from read_settings.' },
+        patch: {
+          type: 'object',
+          description:
+            'Partial patch — any subset of the fields read_settings shows for this job (name, enabled, ' +
+            'preset or cronExpr, timeZone, cwd, agent, worktreeMode, model, effort, skipPermissions, prompt, ' +
+            'overlapPolicy).',
+          additionalProperties: true,
+        },
+      },
+      required: ['id', 'patch'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const cron = deps.cron;
+      if (!cron) return 'Scheduled-job management is not available on this server right now.';
+      const id = String(args.id ?? '');
+      if (!id) return 'No scheduled job id provided. Call read_settings to find one.';
+      const existing = cron.get(id);
+      if (existing === null) return `No such scheduled job: ${id}.`;
+      const parsed = UpdateCronJobRequest.safeParse(args.patch ?? {});
+      if (!parsed.success) return `Refusing: ${parsed.error.issues[0]?.message ?? 'invalid job patch.'}`;
+      const result = await resolveCronJobUpdatePatch(
+        { workspaces: deps.workspaces, plannerWorkspaces: deps.plannerWorkspaces, agents: deps.agents },
+        existing.agent,
+        parsed.data,
+      );
+      if (!result.ok) return `Refusing: ${result.error}`;
+      try {
+        const row = cron.update(id, result.patch);
+        if (row.enabled === 1 && row.next_run_at === null) {
+          return 'That schedule has no future run. Check the day and month you picked.';
+        }
+        return JSON.stringify(cron.toJob(row));
+      } catch (err) {
+        if (err instanceof CronServiceError) return err.message;
+        throw err;
+      }
+    },
+  },
+  {
+    name: 'update_custom_claude_provider',
+    description:
+      'Update an existing custom Claude provider variant (see read_settings for ids and current config) — ' +
+      'its name, base URL, model catalog, or unattended-use setting. This tool can never set, change or read ' +
+      'the API key: omit it entirely, and re-enter it from the Settings page if it needs rotating.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The provider id, from read_settings.' },
+        patch: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            providerKind: { type: 'string' },
+            baseUrl: { type: 'string' },
+            models: { type: 'array', items: { type: 'string' } },
+            defaultModel: { type: 'string' },
+            smallModel: { type: 'string' },
+            allowUnattended: { type: 'boolean' },
+          },
+          additionalProperties: false,
+        },
+      },
+      required: ['id', 'patch'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const id = String(args.id ?? '');
+      if (!id) return 'No provider id provided. Call read_settings to find one.';
+      const rawPatch =
+        args.patch && typeof args.patch === 'object' ? (args.patch as Record<string, unknown>) : {};
+      // Never merely omitted from the schema above — checked explicitly so a
+      // model that names the field anyway (a stale memory of the create
+      // form, a guess) gets a refusal that says why, not a silently dropped
+      // argument. See `PlannerToolDeps.customClaudeProviders`'s doc comment.
+      if ('apiKey' in rawPatch) {
+        return (
+          'Refusing: this tool can never set, change or read the API key. ' +
+          'Re-enter it from the Settings page if it needs rotating.'
+        );
+      }
+      const parsed = UpdateCustomClaudeProviderRequest.safeParse(rawPatch);
+      if (!parsed.success) return `Refusing: ${parsed.error.issues[0]?.message ?? 'invalid provider patch.'}`;
+      try {
+        return JSON.stringify(deps.customClaudeProviders.update(id, parsed.data));
+      } catch (err) {
+        if (err instanceof CustomClaudeProviderError) return err.message;
+        throw err;
+      }
+    },
+  },
+  {
+    name: 'update_telegram_bot',
+    description:
+      'Update an existing Telegram bot (see read_settings for ids and current config) — its name or enabled ' +
+      'state. This tool can never set, change or read the bot token: omit it entirely, and re-enter it from ' +
+      'the Settings page if it needs rotating.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The Telegram bot id, from read_settings.' },
+        patch: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            enabled: { type: 'boolean' },
+          },
+          additionalProperties: false,
+        },
+      },
+      required: ['id', 'patch'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const bots = deps.telegramBots;
+      if (!bots) return 'Telegram bot management is not available on this server right now.';
+      const id = String(args.id ?? '');
+      if (!id) return 'No Telegram bot id provided. Call read_settings to find one.';
+      const rawPatch =
+        args.patch && typeof args.patch === 'object' ? (args.patch as Record<string, unknown>) : {};
+      // See `update_custom_claude_provider`'s identical check just above.
+      if ('botToken' in rawPatch) {
+        return (
+          'Refusing: this tool can never set, change or read the bot token. ' +
+          'Re-enter it from the Settings page if it needs rotating.'
+        );
+      }
+      const parsed = UpdateTelegramBotRequest.safeParse(rawPatch);
+      if (!parsed.success) return `Refusing: ${parsed.error.issues[0]?.message ?? 'invalid bot patch.'}`;
+      try {
+        return JSON.stringify(bots.update(id, parsed.data));
+      } catch (err) {
+        if (err instanceof TelegramBotError) return err.message;
         throw err;
       }
     },

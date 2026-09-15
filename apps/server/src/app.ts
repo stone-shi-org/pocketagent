@@ -415,6 +415,13 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   const plannerChats = new PlannerChatService({
     db,
+    // PA-56: `read_settings`/`update_settings`/`update_custom_claude_provider`
+    // — `config` is mutated in place by `writeSettingsField`, and
+    // `customClaudeProviders` is constructed above (line ~275), well before
+    // this, so it threads through the constructor like everything else here.
+    // `webhooks`/`cron` cannot — see `attachRunServices` below.
+    config,
+    customClaudeProviders,
     workspaces,
     plannerWorkspaces,
     sessions,
@@ -510,6 +517,13 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     maxSessions: config.maxSessions,
     logger: app.log,
   });
+
+  // PA-56: `read_settings`/`update_webhook`/`update_cron_job` (planner tools)
+  // need `webhooks`/`cron`, but both are constructed after `plannerChats` —
+  // see `PlannerChatService`'s own `runServices` doc comment for why this
+  // could not instead go through the constructor. Called once, synchronously,
+  // before the server accepts its first request.
+  plannerChats.attachRunServices({ webhooks, cron });
 
   // PA-11: one queue, shared. A webhook delivery, a scheduled run and a human's
   // own prompt all contend for the same working trees, so they have to be

@@ -7,11 +7,15 @@ import type {
   PlannerToolApprovalChoice,
 } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
+import type { Config } from '../config/index.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 import type { SessionManager } from '../sessions/manager.js';
 import type { SessionHistoryDeps } from '../sessions/history.js';
 import type { WorktreeService } from '../git/worktree.js';
 import type { AgentRegistry } from '../agents/registry.js';
+import type { CustomClaudeProviderStore } from '../agents/custom-providers-store.js';
+import type { WebhookService } from '../webhooks/index.js';
+import type { CronService } from '../cron/index.js';
 import type { PlannerWorkspaceRegistry, PlannerWorkspaceRow } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
 import {
@@ -112,6 +116,15 @@ const MEMORY_PREVIEW_CANDIDATES = 20;
 
 export interface PlannerChatServiceOptions {
   db: Db;
+  /** PA-56: `read_settings`/`update_settings`'s own view of the world — see
+      `PlannerToolDeps.config`'s doc comment. */
+  config: Config;
+  /** PA-56: `read_settings`/`update_custom_claude_provider`'s store —
+      constructed well before `plannerChats` in `app.ts` (unlike
+      `webhooks`/`cron` below), so it is threaded through the constructor
+      like every other dependency here rather than needing the same
+      late-binding setter. */
+  customClaudeProviders: CustomClaudeProviderStore;
   workspaces: WorkspaceRegistry;
   plannerWorkspaces: PlannerWorkspaceRegistry;
   sessions: SessionManager;
@@ -281,8 +294,29 @@ export class PlannerChatService {
    */
   private readonly spawnDepthByChat = new Map<string, number>();
 
+  /**
+   * PA-56: `webhooks`/`cron`, for `read_settings`/`update_webhook`/
+   * `update_cron_job`. Unlike every other dependency on this class, these
+   * cannot be threaded through the constructor: `app.ts` builds `cron` and
+   * `webhooks` *after* `plannerChats` (each of them takes `plannerChats`
+   * itself, to drive a Pocket Agent cron run / webhook delivery), so passing
+   * them in the other direction would be a genuine constructor cycle.
+   * `attachRunServices` below closes that one edge — `app.ts` calls it once,
+   * synchronously, right after both exist and before the server accepts its
+   * first request. Until then (and in any test that never calls it) `null`,
+   * and the tools that need these degrade to a refusal rather than throwing —
+   * the same "optional, and the tool checks before using" contract
+   * `telegramBots`/`telegramLinks` already establish above.
+   */
+  private runServices: { webhooks: WebhookService; cron: CronService } | null = null;
+
   constructor(private readonly opts: PlannerChatServiceOptions) {
     this.tools = opts.tools ?? PLANNER_TOOLS;
+  }
+
+  /** See `runServices`'s own doc comment. */
+  attachRunServices(services: { webhooks: WebhookService; cron: CronService }): void {
+    this.runServices = services;
   }
 
   /**
@@ -1088,6 +1122,15 @@ export class PlannerChatService {
             apiKey: resolvePlannerUrlFetchApiKey(this.opts.db),
           },
           agents: this.opts.agents,
+          // PA-56: `read_settings`/`update_settings`/`update_webhook`/
+          // `update_cron_job`/`update_custom_claude_provider`/
+          // `update_telegram_bot` — see `PlannerToolDeps`'s own doc comments.
+          db: this.opts.db,
+          config: this.opts.config,
+          customClaudeProviders: this.opts.customClaudeProviders,
+          telegramBots: this.opts.telegramBots ?? null,
+          webhooks: this.runServices?.webhooks ?? null,
+          cron: this.runServices?.cron ?? null,
           subagents: {
             startPocketAgentChat: (workspaceId: string, prompt: string) =>
               this.startSubagentChatForTool(chat.id, workspaceId, prompt),

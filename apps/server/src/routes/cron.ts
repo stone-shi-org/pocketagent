@@ -6,6 +6,10 @@ import {
 } from '@pocketagent/protocol';
 import type { CronJobSpec } from '../cron/index.js';
 import { CronServiceError } from '../cron/index.js';
+import type { WorkspaceRegistry } from '../workspaces/index.js';
+import { WorkspaceError } from '../workspaces/index.js';
+import type { PlannerWorkspaceRegistry } from '../planner/workspaces.js';
+import type { AgentRegistry } from '../agents/registry.js';
 import { resolveWorkspaceCwdOrReply, structuredAgentProblem } from './shared.js';
 
 /** Default page size for a run list. Enough to fill a phone screen several times. */
@@ -17,7 +21,7 @@ function badRequest(reply: FastifyReply, message: string): FastifyReply {
 }
 
 /** `Intl` is the whole zero-dependency time-zone validation story. */
-function isKnownTimeZone(tz: string): boolean {
+export function isKnownTimeZone(tz: string): boolean {
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: tz });
     return true;
@@ -26,8 +30,92 @@ function isKnownTimeZone(tz: string): boolean {
   }
 }
 
+/**
+ * A cron job is always a structured session. See `structuredAgentProblem`.
+ * Exported (alongside `resolveCronJobUpdatePatch` below) so `update_cron_job`
+ * (a planner tool, `planner/tools.ts`) runs the exact same check on a patch
+ * that touches `agent`, rather than a second copy that could drift from it.
+ */
+export function checkCronAgent(agents: AgentRegistry, id: string): string | null {
+  if (id === 'pocketagent') return null;
+  return structuredAgentProblem(agents, id, 'scheduled');
+}
+
+export interface CronJobUpdateDeps {
+  workspaces: WorkspaceRegistry;
+  plannerWorkspaces: PlannerWorkspaceRegistry;
+  agents: AgentRegistry;
+}
+
+export type CronJobUpdatePatchResult =
+  | { ok: true; patch: Partial<CronJobSpec> }
+  | { ok: false; error: string };
+
+/**
+ * PA-56: the validated-patch half of `PATCH /api/cron/jobs/:id`, pulled out
+ * so the planner tool above can run the exact same checks — known time zone,
+ * the `agent`/`cwd` coupling (a Pocket Agent's `cwd` resolves against
+ * `plannerWorkspaces`, everything else against `workspaces`), and
+ * `checkCronAgent`'s unattended-use rule — instead of a second copy that
+ * could silently stop matching the route's. Takes the job's *current*
+ * `agent` rather than an id, since both callers already have the row in
+ * hand and a second fetch here would just be a race waiting to happen.
+ */
+export async function resolveCronJobUpdatePatch(
+  deps: CronJobUpdateDeps,
+  existingAgent: string,
+  body: UpdateCronJobRequest,
+): Promise<CronJobUpdatePatchResult> {
+  if (body.timeZone !== undefined && !isKnownTimeZone(body.timeZone)) {
+    return { ok: false, error: `Unknown time zone "${body.timeZone}".` };
+  }
+  if (body.agent !== undefined) {
+    const agentCheck = checkCronAgent(deps.agents, body.agent);
+    if (agentCheck !== null) return { ok: false, error: agentCheck };
+  }
+
+  const targetAgent = body.agent ?? existingAgent;
+  let cwd: string | undefined;
+  if (body.cwd !== undefined) {
+    if (targetAgent === 'pocketagent') {
+      const plannerWs =
+        deps.plannerWorkspaces.list().find((w) => w.path === body.cwd || w.id === body.cwd) ??
+        deps.plannerWorkspaces.getDefault();
+      if (!plannerWs) return { ok: false, error: 'No Pocket Agent workspace found.' };
+      cwd = plannerWs.path;
+    } else {
+      try {
+        cwd = await deps.workspaces.resolveWorkspacePath(body.cwd);
+      } catch (err) {
+        if (err instanceof WorkspaceError) return { ok: false, error: err.message };
+        throw err;
+      }
+    }
+  }
+
+  const patch: Partial<CronJobSpec> = {
+    ...(body.name !== undefined ? { name: body.name } : {}),
+    ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+    ...(body.timeZone !== undefined ? { timeZone: body.timeZone } : {}),
+    ...(cwd !== undefined ? { cwd } : {}),
+    ...(body.agent !== undefined ? { agent: body.agent } : {}),
+    ...(body.worktreeMode !== undefined ? { worktreeMode: body.worktreeMode } : {}),
+    ...(body.model !== undefined ? { model: body.model } : {}),
+    ...('effort' in body ? { effort: body.effort ?? null } : {}),
+    ...(body.skipPermissions !== undefined ? { skipPermissions: body.skipPermissions } : {}),
+    ...(body.prompt !== undefined ? { prompt: body.prompt } : {}),
+    ...(body.overlapPolicy !== undefined ? { overlapPolicy: body.overlapPolicy } : {}),
+    ...(body.preset !== undefined
+      ? { schedule: { kind: 'preset' as const, preset: body.preset } }
+      : body.cronExpr !== undefined
+        ? { schedule: { kind: 'expression' as const, cronExpr: body.cronExpr } }
+        : {}),
+  };
+  return { ok: true, patch };
+}
+
 export const cronRoutes: FastifyPluginAsync = async (app) => {
-  const { cron, workspaces, agents } = app.pocket;
+  const { cron, workspaces, agents, plannerWorkspaces } = app.pocket;
 
   const mapError = (reply: FastifyReply, err: unknown): FastifyReply | never => {
     if (err instanceof CronServiceError) {
@@ -71,8 +159,8 @@ export const cronRoutes: FastifyPluginAsync = async (app) => {
 
     let cwd: string;
     if (body.agent === 'pocketagent') {
-      const plannerWs = app.pocket.plannerWorkspaces.list().find((w) => w.path === body.cwd || w.id === body.cwd)
-        ?? app.pocket.plannerWorkspaces.getDefault();
+      const plannerWs = plannerWorkspaces.list().find((w) => w.path === body.cwd || w.id === body.cwd)
+        ?? plannerWorkspaces.getDefault();
       if (!plannerWs) {
         return badRequest(reply, 'No Pocket Agent workspace found.');
       }
@@ -83,7 +171,7 @@ export const cronRoutes: FastifyPluginAsync = async (app) => {
       cwd = resolved;
     }
 
-    const agentCheck = checkAgent(body.agent);
+    const agentCheck = checkCronAgent(agents, body.agent);
     if (agentCheck !== null) return badRequest(reply, agentCheck);
 
     const spec: CronJobSpec = {
@@ -125,58 +213,21 @@ export const cronRoutes: FastifyPluginAsync = async (app) => {
     if (!parsed.success) {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
-    const body = parsed.data;
 
-    if (cron.get(request.params.id) === null) {
+    const existing = cron.get(request.params.id);
+    if (existing === null) {
       return reply.code(404).send({ error: { code: 'not_found', message: 'No such scheduled job.' } });
     }
 
-    if (body.timeZone !== undefined && !isKnownTimeZone(body.timeZone)) {
-      return badRequest(reply, `Unknown time zone "${body.timeZone}".`);
-    }
-    if (body.agent !== undefined) {
-      const agentCheck = checkAgent(body.agent);
-      if (agentCheck !== null) return badRequest(reply, agentCheck);
-    }
-
-    const targetAgent = body.agent ?? cron.get(request.params.id)?.agent;
-    let cwd: string | undefined;
-    if (body.cwd !== undefined) {
-      if (targetAgent === 'pocketagent') {
-        const plannerWs = app.pocket.plannerWorkspaces.list().find((w) => w.path === body.cwd || w.id === body.cwd)
-          ?? app.pocket.plannerWorkspaces.getDefault();
-        if (!plannerWs) {
-          return badRequest(reply, 'No Pocket Agent workspace found.');
-        }
-        cwd = plannerWs.path;
-      } else {
-        const resolved = await resolveWorkspaceCwdOrReply(workspaces, body.cwd, reply);
-        if (resolved === null) return reply;
-        cwd = resolved;
-      }
-    }
-
-    const patch: Partial<CronJobSpec> = {
-      ...(body.name !== undefined ? { name: body.name } : {}),
-      ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
-      ...(body.timeZone !== undefined ? { timeZone: body.timeZone } : {}),
-      ...(cwd !== undefined ? { cwd } : {}),
-      ...(body.agent !== undefined ? { agent: body.agent } : {}),
-      ...(body.worktreeMode !== undefined ? { worktreeMode: body.worktreeMode } : {}),
-      ...(body.model !== undefined ? { model: body.model } : {}),
-      ...('effort' in body ? { effort: body.effort ?? null } : {}),
-      ...(body.skipPermissions !== undefined ? { skipPermissions: body.skipPermissions } : {}),
-      ...(body.prompt !== undefined ? { prompt: body.prompt } : {}),
-      ...(body.overlapPolicy !== undefined ? { overlapPolicy: body.overlapPolicy } : {}),
-      ...(body.preset !== undefined
-        ? { schedule: { kind: 'preset' as const, preset: body.preset } }
-        : body.cronExpr !== undefined
-          ? { schedule: { kind: 'expression' as const, cronExpr: body.cronExpr } }
-          : {}),
-    };
+    const result = await resolveCronJobUpdatePatch(
+      { workspaces, plannerWorkspaces, agents },
+      existing.agent,
+      parsed.data,
+    );
+    if (!result.ok) return badRequest(reply, result.error);
 
     try {
-      const row = cron.update(request.params.id, patch);
+      const row = cron.update(request.params.id, result.patch);
       if (row.enabled === 1 && row.next_run_at === null) {
         return badRequest(
           reply,
@@ -250,11 +301,6 @@ export const cronRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
-  /** A cron job is always a structured session. See `structuredAgentProblem`. */
-  function checkAgent(id: string): string | null {
-    if (id === 'pocketagent') return null;
-    return structuredAgentProblem(agents, id, 'scheduled');
-  }
 };
 
 function parseLimit(raw: string | undefined): number {

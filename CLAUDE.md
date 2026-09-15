@@ -584,6 +584,33 @@ way `RunExecutor` does for cron/webhooks, including re-validating the session's 
 time rather than trusting a cached value. `delete_worktree` calls the same `WorktreeService`
 the UI's own worktree-delete flow uses, not a second implementation.
 
+**PA-56 adds settings access**: `read_settings` (read-only) and five mutating tools —
+`update_settings`, `update_webhook`, `update_cron_job`, `update_custom_claude_provider`,
+`update_telegram_bot` — so a chat can act on a request like "change the Jira webhook's project
+map" without a human opening the Settings page. Scoped deliberately to read + update: create/
+delete of any of these resources is out of scope, decided on the ticket itself rather than
+assumed. Each mutating tool runs through the *same* validation its own HTTP route does — never a
+second copy — via a validator factored out of the route module itself
+(`resolveWebhookUpdatePatch` in `routes/webhooks.ts`, `resolveCronJobUpdatePatch` in
+`routes/cron.ts`; the provider/bot routes had no extra route-level validation to factor out, so
+their tools call `CustomClaudeProviderStore.update`/`TelegramBotStore.update` directly after the
+same Zod schema the route uses). Two things are refused unconditionally, not merely left off a
+parameter list: `update_settings` explicitly rejects a patch naming `skipPermissionsEnabled` —
+the global switch is not one of the four documented overrides of the "never default to skipping
+approval" invariant and PA-56 deliberately did not make it a fifth, on the reporter's own answer
+("not available to this tool, user must flip the switch") — and `update_custom_claude_provider`/
+`update_telegram_bot` refuse a patch naming `apiKey`/`botToken` outright, so a turn can never make
+a plaintext secret part of this chat's own persisted transcript; the JSON-schema `parameters`
+sent to the model don't even list those fields, and the runtime check is the belt-and-suspenders
+half. `read_settings` reuses `buildRuntimeSettingsSnapshot` (`settings/index.ts`) for the general
+section and each store's own already-redacted `list()` for the rest, so nothing here can leak a
+webhook secret, a provider API key, or a Telegram bot token — none of those are ever returned by
+any route either, by the invariants list. `PlannerToolDeps.webhooks`/`.cron` are the one pair of
+dependencies here threaded in *after* construction (`PlannerChatService.attachRunServices`,
+called once from `app.ts`) rather than through the constructor, because `app.ts` builds `cron`/
+`webhooks` after `plannerChats` (each of them needs `plannerChats` itself, to drive a Pocket
+Agent run) — passing them the other way at construction time would be a genuine cycle.
+
 **A turn is streamed at both levels, not request/response.** `PlannerChatService.sendMessage`/
 `resolveApproval` (`planner/chats.ts`) are async generators that `yield` one `AgentEvent` at a
 time as each step of the turn happens; `routes/planner.ts`'s `streamPlannerEvents` drains one

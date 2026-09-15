@@ -16,8 +16,12 @@ import type {
   JiraPromptTemplateMapEntry,
 } from '@pocketagent/protocol';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
+import { WorkspaceError } from '../workspaces/index.js';
+import type { WebhookRow } from '../db/index.js';
 import type { WebhookSpec, WebhookSpecCommon } from '../webhooks/index.js';
 import { WebhookServiceError } from '../webhooks/index.js';
+import type { AgentRegistry } from '../agents/registry.js';
+import type { PlannerWorkspaceRegistry } from '../planner/workspaces.js';
 import { resolveWorkspaceCwdOrReply, webhookAgentProblem } from './shared.js';
 import { webhookDeliveryRoutes } from './webhook-delivery.js';
 
@@ -27,6 +31,139 @@ const MAX_DELIVERY_LIMIT = 200;
 
 function badRequest(reply: FastifyReply, message: string, code = 'bad_request'): FastifyReply {
   return reply.code(400).send({ error: { code, message } });
+}
+
+export interface WebhookUpdateDeps {
+  workspaces: WorkspaceRegistry;
+  agents: AgentRegistry;
+  plannerWorkspaces: PlannerWorkspaceRegistry;
+}
+
+export type WebhookUpdatePatchResult =
+  | {
+      ok: true;
+      patch: Partial<WebhookSpecCommon> & {
+        filter?: WebhookSpec['filter'];
+        routeMap?: JiraProjectMapEntry[] | BambooPlanMapEntry[];
+        promptTemplateMap?: JiraPromptTemplateMapEntry[] | BambooPromptTemplateMapEntry[];
+      };
+    }
+  | { ok: false; error: string; code?: string };
+
+/**
+ * PA-56: the validated-patch half of `PATCH /api/webhooks/:id`, pulled out so
+ * `update_webhook` (a planner tool, `planner/tools.ts`) runs through the
+ * exact same checks — slug format, cwd containment, agent-transport rules,
+ * Bamboo/hmac rejection, project/plan-map dedup — rather than a second,
+ * inevitably-drifting copy. Takes `existing` rather than an id so a caller
+ * that already fetched the row (both do) does not fetch it twice, and
+ * returns a result instead of writing to a `FastifyReply`, since the tool
+ * has no reply to write to.
+ */
+export async function resolveWebhookUpdatePatch(
+  deps: WebhookUpdateDeps,
+  existing: WebhookRow,
+  body: UpdateWebhookRequest,
+): Promise<WebhookUpdatePatchResult> {
+  if (body.slug !== undefined) {
+    const slugProblem = checkSlug(body.slug);
+    if (slugProblem !== null) return { ok: false, error: slugProblem };
+  }
+
+  let cwd: string | undefined;
+  if (body.cwd !== undefined) {
+    try {
+      cwd = await deps.workspaces.resolveWorkspacePath(body.cwd);
+    } catch (err) {
+      if (err instanceof WorkspaceError) return { ok: false, error: err.message };
+      throw err;
+    }
+  }
+
+  if (body.agent !== undefined) {
+    const agentProblem = webhookAgentProblem(deps.agents, deps.plannerWorkspaces, body.agent);
+    if (agentProblem !== null) return { ok: false, error: agentProblem };
+  }
+
+  const effectiveAuthMode = body.authMode ?? existing.auth_mode;
+  if (existing.type === 'bamboo' && effectiveAuthMode === 'hmac') {
+    return {
+      ok: false,
+      error:
+        'A Bamboo webhook can only use bearer-token auth: Bamboo has no way to sign a request body, only to send a static header.',
+      code: 'bamboo_requires_bearer',
+    };
+  }
+
+  let routeMap: JiraProjectMapEntry[] | BambooPlanMapEntry[] | undefined;
+  let promptTemplateMap: JiraPromptTemplateMapEntry[] | BambooPromptTemplateMapEntry[] | undefined;
+  if (body.config !== undefined) {
+    if (body.config.type === 'bamboo') {
+      const dupProblem = checkPlanMapDuplicates(body.config.planMap);
+      if (dupProblem !== null) return { ok: false, error: dupProblem };
+      const resolved: BambooPlanMapEntry[] = [];
+      for (const entry of body.config.planMap) {
+        try {
+          const resolvedCwd = await deps.workspaces.resolveWorkspacePath(entry.cwd);
+          resolved.push({ planKey: entry.planKey.trim().toUpperCase(), cwd: resolvedCwd });
+        } catch (err) {
+          if (err instanceof WorkspaceError) return { ok: false, error: err.message };
+          throw err;
+        }
+      }
+      routeMap = resolved;
+      const templateDup = checkBambooPromptTemplateMapDuplicates(body.config.promptTemplateMap);
+      if (templateDup !== null) return { ok: false, error: templateDup };
+      promptTemplateMap = body.config.promptTemplateMap;
+    } else {
+      const dupProblem = checkProjectMapDuplicates(body.config.projectMap);
+      if (dupProblem !== null) return { ok: false, error: dupProblem };
+      const resolved: JiraProjectMapEntry[] = [];
+      for (const entry of body.config.projectMap) {
+        try {
+          const resolvedCwd = await deps.workspaces.resolveWorkspacePath(entry.cwd);
+          resolved.push({ projectKey: entry.projectKey.trim().toUpperCase(), cwd: resolvedCwd });
+        } catch (err) {
+          if (err instanceof WorkspaceError) return { ok: false, error: err.message };
+          throw err;
+        }
+      }
+      routeMap = resolved;
+      const templateDup = checkPromptTemplateMapDuplicates(body.config.promptTemplateMap);
+      if (templateDup !== null) return { ok: false, error: templateDup };
+      promptTemplateMap = body.config.promptTemplateMap;
+    }
+  }
+
+  const patch = {
+    ...(body.name !== undefined ? { name: body.name } : {}),
+    ...(body.slug !== undefined ? { slug: body.slug } : {}),
+    ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+    ...(body.config !== undefined ? { filter: body.config.filter, routeMap, promptTemplateMap } : {}),
+    ...(body.authMode !== undefined ? { authMode: body.authMode } : {}),
+    ...(cwd !== undefined ? { cwd } : {}),
+    ...(body.agent !== undefined ? { agent: body.agent } : {}),
+    ...(body.worktreeMode !== undefined ? { worktreeMode: body.worktreeMode } : {}),
+    ...(body.model !== undefined ? { model: body.model } : {}),
+    // `in`, not a null check: an explicit null means "the model's own
+    // default", which is a different thing from an omitted key.
+    ...('effort' in body ? { effort: body.effort ?? null } : {}),
+    ...(body.skipPermissions !== undefined ? { skipPermissions: body.skipPermissions } : {}),
+    ...(body.autoSelectAgentModel !== undefined
+      ? { autoSelectAgentModel: body.autoSelectAgentModel }
+      : {}),
+    ...(body.promptTemplate !== undefined ? { promptTemplate: body.promptTemplate } : {}),
+    ...(body.conversationMode !== undefined ? { conversationMode: body.conversationMode } : {}),
+    ...(body.overlapPolicy !== undefined ? { overlapPolicy: body.overlapPolicy } : {}),
+    ...(body.directoryPolicy !== undefined ? { directoryPolicy: body.directoryPolicy } : {}),
+    ...(body.skipQueueLabelEnabled !== undefined
+      ? { skipQueueLabelEnabled: body.skipQueueLabelEnabled }
+      : {}),
+    ...(body.agentIdentity !== undefined ? { agentIdentity: body.agentIdentity } : {}),
+    ...(body.maxConcurrent !== undefined ? { maxConcurrent: body.maxConcurrent } : {}),
+    ...(body.storePayloads !== undefined ? { storePayloads: body.storePayloads } : {}),
+  };
+  return { ok: true, patch };
 }
 
 export const webhookRoutes: FastifyPluginAsync = async (app) => {
@@ -135,93 +272,11 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     if (!parsed.success) {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
-    const body = parsed.data;
-
-    if (body.slug !== undefined) {
-      const slugProblem = checkSlug(body.slug);
-      if (slugProblem !== null) return badRequest(reply, slugProblem);
-    }
-
-    let cwd: string | undefined;
-    if (body.cwd !== undefined) {
-      const resolved = await resolveWorkspaceCwdOrReply(workspaces, body.cwd, reply);
-      if (resolved === null) return reply;
-      cwd = resolved;
-    }
-
-    if (body.agent !== undefined) {
-      const agentProblem = webhookAgentProblem(agents, plannerWorkspaces, body.agent);
-      if (agentProblem !== null) return badRequest(reply, agentProblem);
-    }
-
-    const existing = webhooks.get(request.params.id);
-    const effectiveAuthMode = body.authMode ?? existing.auth_mode;
-    if (existing.type === 'bamboo' && effectiveAuthMode === 'hmac') {
-      return badRequest(
-        reply,
-        'A Bamboo webhook can only use bearer-token auth: Bamboo has no way to sign a request body, only to send a static header.',
-        'bamboo_requires_bearer',
-      );
-    }
-
-    // `config` replaces wholesale, so the route map is re-resolved in full
-    // whenever it is sent — same as the filter object just above it.
-    let routeMap: JiraProjectMapEntry[] | BambooPlanMapEntry[] | undefined;
-    let promptTemplateMap: JiraPromptTemplateMapEntry[] | BambooPromptTemplateMapEntry[] | undefined;
-    if (body.config !== undefined) {
-      const resolved =
-        body.config.type === 'bamboo'
-          ? await resolvePlanMap(workspaces, body.config.planMap, reply)
-          : await resolveProjectMap(workspaces, body.config.projectMap, reply);
-      if (resolved === null) return reply;
-      routeMap = resolved;
-
-      const templateMapDup =
-        body.config.type === 'bamboo'
-          ? checkBambooPromptTemplateMapDuplicates(body.config.promptTemplateMap)
-          : checkPromptTemplateMapDuplicates(body.config.promptTemplateMap);
-      if (templateMapDup !== null) return badRequest(reply, templateMapDup);
-      promptTemplateMap = body.config.promptTemplateMap;
-    }
-
     try {
-      const patch: Partial<WebhookSpecCommon> & {
-        filter?: WebhookSpec['filter'];
-        routeMap?: JiraProjectMapEntry[] | BambooPlanMapEntry[];
-        promptTemplateMap?: JiraPromptTemplateMapEntry[] | BambooPromptTemplateMapEntry[];
-      } = {
-        ...(body.name !== undefined ? { name: body.name } : {}),
-        ...(body.slug !== undefined ? { slug: body.slug } : {}),
-        ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
-        ...(body.config !== undefined
-          ? { filter: body.config.filter, routeMap, promptTemplateMap }
-          : {}),
-        ...(body.authMode !== undefined ? { authMode: body.authMode } : {}),
-        ...(cwd !== undefined ? { cwd } : {}),
-        ...(body.agent !== undefined ? { agent: body.agent } : {}),
-        ...(body.worktreeMode !== undefined ? { worktreeMode: body.worktreeMode } : {}),
-        ...(body.model !== undefined ? { model: body.model } : {}),
-        // `in`, not a null check: an explicit null means "the model's own
-        // default", which is a different thing from an omitted key.
-        ...('effort' in body ? { effort: body.effort ?? null } : {}),
-        ...(body.skipPermissions !== undefined ? { skipPermissions: body.skipPermissions } : {}),
-        ...(body.autoSelectAgentModel !== undefined
-          ? { autoSelectAgentModel: body.autoSelectAgentModel }
-          : {}),
-        ...(body.promptTemplate !== undefined ? { promptTemplate: body.promptTemplate } : {}),
-        ...(body.conversationMode !== undefined
-          ? { conversationMode: body.conversationMode }
-          : {}),
-        ...(body.overlapPolicy !== undefined ? { overlapPolicy: body.overlapPolicy } : {}),
-        ...(body.directoryPolicy !== undefined ? { directoryPolicy: body.directoryPolicy } : {}),
-        ...(body.skipQueueLabelEnabled !== undefined
-          ? { skipQueueLabelEnabled: body.skipQueueLabelEnabled }
-          : {}),
-        ...(body.agentIdentity !== undefined ? { agentIdentity: body.agentIdentity } : {}),
-        ...(body.maxConcurrent !== undefined ? { maxConcurrent: body.maxConcurrent } : {}),
-        ...(body.storePayloads !== undefined ? { storePayloads: body.storePayloads } : {}),
-      };
-      return reply.send(webhooks.toWebhook(webhooks.update(request.params.id, patch)));
+      const existing = webhooks.get(request.params.id);
+      const result = await resolveWebhookUpdatePatch({ workspaces, agents, plannerWorkspaces }, existing, parsed.data);
+      if (!result.ok) return badRequest(reply, result.error, result.code);
+      return reply.send(webhooks.toWebhook(webhooks.update(request.params.id, result.patch)));
     } catch (err) {
       return mapError(reply, err);
     }

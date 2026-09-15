@@ -54,5 +54,61 @@ export function writeSettingsField(db: Db, config: Config, field: SettingsField,
   (config as unknown as Record<string, unknown>)[field.key] = value;
 }
 
+/**
+ * Two fields use a different shape on the wire than in `Config`, because the
+ * HTTP DTO (`RuntimeSettings`, `packages/protocol/src/http.ts`) favors what's
+ * pleasant to edit over what's convenient to store: `sessionTtlMs`
+ * (milliseconds) <-> `sessionTtlHours`, and `codeServerBaseUrl` <->
+ * `codeServerUrl`. Everything else round-trips through each field's own
+ * `parse`/`serialize` for the string-shaped fields, or passes through
+ * unchanged for the ones that are already a plain number/boolean in both
+ * places.
+ *
+ * `dtoKeyFor`/`toDtoValue`/`fromDtoValue` used to live in `routes/settings.ts`
+ * alone; PA-56 moved them here (and exported `buildRuntimeSettingsSnapshot`
+ * below) so `read_settings`/`update_settings` (planner tools,
+ * `planner/tools.ts`) read and write the exact same DTO shape `PATCH
+ * /api/settings` does, rather than a second projection of `SETTINGS_FIELDS`
+ * that could quietly stop matching it.
+ */
+export function dtoKeyFor(field: SettingsField): string {
+  if (field.key === 'codeServerBaseUrl') return 'codeServerUrl';
+  if (field.key === 'sessionTtlMs') return 'sessionTtlHours';
+  return field.key;
+}
+
+export function toDtoValue(field: SettingsField, configValue: unknown): unknown {
+  if (field.key === 'sessionTtlMs') return Math.round((configValue as number) / 3_600_000);
+  if (typeof configValue === 'number' || typeof configValue === 'boolean') return configValue;
+  return field.serialize(configValue as never);
+}
+
+export function fromDtoValue(field: SettingsField, dtoValue: unknown): unknown {
+  if (field.key === 'sessionTtlMs') return Math.round((dtoValue as number) * 3_600_000);
+  if (typeof dtoValue === 'number' || typeof dtoValue === 'boolean') return dtoValue;
+  return field.parse(dtoValue as string);
+}
+
+/**
+ * The `SETTINGS_FIELDS`-backed half of `GET /api/settings`'s response —
+ * everything except the `fixed` block, which is boot-time server facts
+ * (`host`/`port`/`databasePath`/`nodeEnv`) that stay in `routes/settings.ts`
+ * rather than here, since nothing outside an HTTP response needs them.
+ * `skipPermissionsEnabled` is folded in here (as a plain argument, not a
+ * `SessionManager` dependency of this module) because it rides on the same
+ * DTO even though it is not one of `SETTINGS_FIELDS` — see that field's own
+ * doc comment in `routes/settings.ts`.
+ */
+export function buildRuntimeSettingsSnapshot(
+  config: Config,
+  skipPermissionsEnabled: boolean,
+): { settings: Record<string, unknown>; restartRequiredKeys: string[] } {
+  const settings: Record<string, unknown> = { skipPermissionsEnabled };
+  for (const field of SETTINGS_FIELDS) {
+    settings[dtoKeyFor(field)] = toDtoValue(field, config[field.key]);
+  }
+  return { settings, restartRequiredKeys: SETTINGS_FIELDS.filter((f) => !f.live).map(dtoKeyFor) };
+}
+
 export { SETTINGS_FIELDS, RESTART_REQUIRED_KEYS } from './fields.js';
 export type { SettingsField } from './fields.js';

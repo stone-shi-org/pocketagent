@@ -1,7 +1,13 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { UpdateSettingsRequest, type SettingsResponse } from '@pocketagent/protocol';
 import type { PocketContext } from '../types.js';
-import { SETTINGS_FIELDS, writeSettingsField, type SettingsField } from '../settings/index.js';
+import {
+  SETTINGS_FIELDS,
+  writeSettingsField,
+  dtoKeyFor,
+  fromDtoValue,
+  buildRuntimeSettingsSnapshot,
+} from '../settings/index.js';
 
 /**
  * The full settings resource: everything in `SETTINGS_FIELDS` (database-backed,
@@ -9,42 +15,14 @@ import { SETTINGS_FIELDS, writeSettingsField, type SettingsField } from '../sett
  * pre-existing `skipPermissionsEnabled` switch, plus a read-only block of
  * facts that are fixed at boot and never move here (`host`/`port`/
  * `databasePath`/`nodeEnv` — see `FixedServerInfo` in the protocol package for
- * why).
- *
- * Two fields use a different shape on the wire than in `Config`, because the
- * HTTP DTO favors what's pleasant to edit over what's convenient to store:
- * `sessionTtlMs` (milliseconds) <-> `sessionTtlHours`, and `codeServerBaseUrl`
- * <-> `codeServerUrl`. Everything else round-trips through each field's own
- * `parse`/`serialize` (the same codec used for the `settings` table row) for
- * the string-shaped fields, or passes through unchanged for the ones that are
- * already a plain number/boolean in both places.
+ * why). The DTO-shaping helpers (`dtoKeyFor`/`toDtoValue`/`fromDtoValue`) and
+ * the `SETTINGS_FIELDS`-projection loop now live in `settings/index.ts` — see
+ * that module's own doc comment for why — so `skipPermissionsEnabled` plus
+ * `fixed` is all that is specific to this route.
  */
-function dtoKeyFor(field: SettingsField): string {
-  if (field.key === 'codeServerBaseUrl') return 'codeServerUrl';
-  if (field.key === 'sessionTtlMs') return 'sessionTtlHours';
-  return field.key;
-}
-
-function toDtoValue(field: SettingsField, configValue: unknown): unknown {
-  if (field.key === 'sessionTtlMs') return Math.round((configValue as number) / 3_600_000);
-  if (typeof configValue === 'number' || typeof configValue === 'boolean') return configValue;
-  return field.serialize(configValue as never);
-}
-
-function fromDtoValue(field: SettingsField, dtoValue: unknown): unknown {
-  if (field.key === 'sessionTtlMs') return Math.round((dtoValue as number) * 3_600_000);
-  if (typeof dtoValue === 'number' || typeof dtoValue === 'boolean') return dtoValue;
-  return field.parse(dtoValue as string);
-}
-
 function buildSettingsResponse(context: PocketContext): SettingsResponse {
   const { config, sessions } = context;
-  const settings: Record<string, unknown> = {
-    skipPermissionsEnabled: sessions.getGlobalSkipPermissions(),
-  };
-  for (const field of SETTINGS_FIELDS) {
-    settings[dtoKeyFor(field)] = toDtoValue(field, config[field.key]);
-  }
+  const snapshot = buildRuntimeSettingsSnapshot(config, sessions.getGlobalSkipPermissions());
   return {
     fixed: {
       host: config.host,
@@ -53,8 +31,8 @@ function buildSettingsResponse(context: PocketContext): SettingsResponse {
       nodeEnv: config.nodeEnv,
       isNetworkExposed: config.isNetworkExposed,
     },
-    settings: settings as SettingsResponse['settings'],
-    restartRequiredKeys: SETTINGS_FIELDS.filter((f) => !f.live).map(dtoKeyFor),
+    settings: snapshot.settings as SettingsResponse['settings'],
+    restartRequiredKeys: snapshot.restartRequiredKeys,
   };
 }
 
