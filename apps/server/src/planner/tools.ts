@@ -1272,24 +1272,52 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
 
   // ---- Telegram (PA-53) --------------------------------------------------
   //
-  // The one tool here that reaches a human directly rather than another
-  // PocketAgent subsystem or a third-party HTTP API. `readOnly: false` even
-  // though `web_search`/`url_fetch` (also outbound HTTP) are read-only: those
-  // two change nothing this system tracks, but a message landing in a
-  // stranger's Telegram client is exactly the consequential action the
-  // approval gate exists for, so this is gated like `send_instruction`/
-  // `exec_command` instead. It goes through that gate unconditionally, even
-  // when called from a chat whose own inbound messages are approval-exempt
-  // (a Telegram pairing with `skipToolApprovals` on) — "this chat is trusted
-  // to talk to the agent" and "this agent is trusted to message anyone" are
-  // different grants, and collapsing them would let one bypass double as the
-  // other.
+  // `list_telegram_links` is read-only and exempt from the gate for the same
+  // reason `list_workspaces`/`list_sessions` are: it discloses nothing that
+  // `send_telegram_message` itself doesn't already reveal in its own refusal
+  // message, and a model has no other way to learn which ids exist — there
+  // is no picker, and the id is a bare number with no mnemonic to guess.
+  // Added after a live bug report (PA-53 debug comment): the *first* version
+  // of `send_telegram_message`'s own description pointed the model at
+  // `list_workspaces` to discover paired ids, which has nothing to do with
+  // Telegram at all — the model called it, found nothing relevant, and gave
+  // up rather than ever attempting `send_telegram_message` (whose own error
+  // message would have listed the paired ids). That is exactly the kind of
+  // tool-description bug this catalog cannot unit-test its way out of: the
+  // fix is a real tool to point at, not a better sentence.
+  {
+    name: 'list_telegram_links',
+    description:
+      'List the Telegram chat ids currently paired to a Pocket Agent (set up in Settings -> ' +
+      'Telegram). Call this before send_telegram_message if you do not already know which id to ' +
+      'address.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    readOnly: true,
+    async execute(deps) {
+      if (deps.telegram.links.length === 0) return 'No Telegram ids are currently paired.';
+      return JSON.stringify(
+        deps.telegram.links.map((l) => ({ telegramChatId: l.telegramChatId, label: l.label })),
+      );
+    },
+  },
+  // The one mutating tool here that reaches a human directly rather than
+  // another PocketAgent subsystem or a third-party HTTP API. `readOnly:
+  // false` even though `web_search`/`url_fetch` (also outbound HTTP) are
+  // read-only: those two change nothing this system tracks, but a message
+  // landing in a stranger's Telegram client is exactly the consequential
+  // action the approval gate exists for, so this is gated like
+  // `send_instruction`/`exec_command` instead. It goes through that gate
+  // unconditionally, even when called from a chat whose own inbound messages
+  // are approval-exempt (a Telegram pairing with `skipToolApprovals` on) —
+  // "this chat is trusted to talk to the agent" and "this agent is trusted
+  // to message anyone" are different grants, and collapsing them would let
+  // one bypass double as the other.
   {
     name: 'send_telegram_message',
     description:
       'Send a message to a Telegram user who has paired their chat with a Pocket Agent. Only ids ' +
-      'already paired in Settings -> Telegram may be addressed; call list_workspaces or ask an ' +
-      'operator if you need to know which ids are available.',
+      'already paired in Settings -> Telegram may be addressed; call list_telegram_links first if ' +
+      'you do not already know which id to address.',
     parameters: {
       type: 'object',
       properties: {

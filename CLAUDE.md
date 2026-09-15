@@ -698,6 +698,16 @@ and "this agent may message anyone" are different grants. It can only address an
 present in `telegram_links` — never an arbitrary id typed into the argument — the same posture
 `exec_command`'s own input validation takes.
 
+`list_telegram_links` (read-only, exempt from the gate) is what a turn calls first to learn
+which ids exist — added after a live bug report: the first cut of `send_telegram_message`'s own
+description pointed the model at `list_workspaces` to "discover" a paired id, which has nothing
+to do with Telegram at all, and the model dutifully called it, found nothing relevant, and gave
+up rather than ever attempting `send_telegram_message` itself (whose own refusal message would
+have listed every paired id). A tool-description bug like that cannot be caught by a unit test
+that only exercises `execute()` with a known-good id; the fix is a real tool for the model to
+call, not a better sentence, and `planner-tools.test.ts` now pins the description to the tool
+name it actually points at so the two cannot drift apart silently again.
+
 ### The home screen
 
 `projects/index.ts` composes `GET /api/projects`: live sessions and on-disk conversations

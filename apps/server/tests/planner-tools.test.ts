@@ -96,6 +96,7 @@ describe('PLANNER_TOOLS catalog', () => {
         'list_sessions',
         'list_skills',
         'list_subagents',
+        'list_telegram_links',
         'list_workspaces',
         'memory_search',
         'read_file',
@@ -1314,5 +1315,67 @@ describe('send_telegram_message', () => {
   it('is gated by the approval flow like every other mutating tool (readOnly: false)', () => {
     const tool = findPlannerTool('send_telegram_message')!;
     expect(tool.readOnly).toBe(false);
+  });
+
+  /**
+   * Regression for the PA-53 debug report: the model called `list_workspaces`
+   * (per this tool's own, then-wrong, description) looking for a paired
+   * Telegram id, found nothing relevant, and gave up rather than ever
+   * attempting `send_telegram_message` itself. Pins the description to the
+   * tool that actually answers the question, so a future edit can't silently
+   * repoint it at something equally useless.
+   */
+  it("points the model at list_telegram_links, not an unrelated tool, to discover paired ids", () => {
+    const tool = findPlannerTool('send_telegram_message')!;
+    expect(tool.description).toContain('list_telegram_links');
+    expect(tool.description).not.toContain('list_workspaces');
+  });
+});
+
+/**
+ * PA-53 (debug follow-up): without this, a model that doesn't already know a
+ * paired Telegram id has no way to learn one — there is no picker, and the id
+ * is a bare number with no mnemonic to guess. Read-only and exempt from the
+ * approval gate for the same reason `list_workspaces`/`list_sessions` are: it
+ * discloses nothing `send_telegram_message`'s own refusal message doesn't
+ * already reveal.
+ */
+describe('list_telegram_links', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('reports every currently paired id and label', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('list_telegram_links')!;
+    const result = await tool.execute(
+      depsFor(t, undefined, {
+        telegram: {
+          links: [
+            { botId: 'telegram:bot-1', telegramChatId: '111', label: '@alice' },
+            { botId: 'telegram:bot-1', telegramChatId: '222', label: null },
+          ],
+          send: async () => ({ ok: true }),
+        },
+      }),
+      {},
+    );
+    expect(JSON.parse(result)).toEqual([
+      { telegramChatId: '111', label: '@alice' },
+      { telegramChatId: '222', label: null },
+    ]);
+  });
+
+  it('says so, rather than returning an empty array, when nothing is paired', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('list_telegram_links')!;
+    const result = await tool.execute(depsFor(t), {});
+    expect(result).toMatch(/no telegram ids are currently paired/i);
+  });
+
+  it('is exempt from the approval gate', () => {
+    const tool = findPlannerTool('list_telegram_links')!;
+    expect(tool.readOnly).toBe(true);
   });
 });
