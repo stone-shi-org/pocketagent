@@ -25,6 +25,11 @@ export interface TestMcpServerOptions {
       name) or the server answers 401 — used to prove a registry's configured
       bearer token / custom header actually reaches the wire. */
   requireHeader?: { name: string; value: string };
+  /** If set, the server reports this in `initialize`'s optional
+      `instructions` field — most real servers don't set one; this is what
+      lets a test prove `McpRegistryService` captures and refreshes it (a
+      registry's own `reportedInstructions`) when one actually does. */
+  instructions?: string;
 }
 
 export interface TestMcpServerHandle {
@@ -34,8 +39,11 @@ export interface TestMcpServerHandle {
   close: () => Promise<void>;
 }
 
-function buildMcpServer(): McpServer {
-  const server = new McpServer({ name: 'pocketagent-test-mcp-server', version: '1.0.0' });
+function buildMcpServer(opts: TestMcpServerOptions = {}): McpServer {
+  const server = new McpServer(
+    { name: 'pocketagent-test-mcp-server', version: '1.0.0' },
+    opts.instructions !== undefined ? { instructions: opts.instructions } : undefined,
+  );
   server.registerTool(
     'echo',
     {
@@ -124,7 +132,7 @@ export async function startStreamableHttpTestServer(
         mcpServers.delete(id);
       }
     };
-    const mcpServer = buildMcpServer();
+    const mcpServer = buildMcpServer(opts);
     void mcpServer
       .connect(transport)
       .then(() => {
@@ -162,7 +170,7 @@ export async function startSseTestServer(opts: TestMcpServerOptions = {}): Promi
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     if (req.method === 'GET' && url.pathname === '/sse') {
       const transport = new SSEServerTransport('/messages', res);
-      const mcpServer = buildMcpServer();
+      const mcpServer = buildMcpServer(opts);
       transports.set(transport.sessionId, transport);
       mcpServers.set(transport.sessionId, mcpServer);
       transport.onclose = () => {

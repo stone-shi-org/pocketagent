@@ -130,6 +130,36 @@ describe('list_mcp_tools / call_mcp_tool', () => {
     expect(parsed[0]!.description).toBeNull();
   });
 
+  // A server's own reported `instructions` (most don't set one; arr-mcp does
+  // in production) fills the directory tier's `description` only when no
+  // human has written one — the model gets the best available text either
+  // way, without needing to know which source it came from.
+  it('list_mcp_tools registry directory falls back to the server\'s reported instructions when no description is set', async () => {
+    t = await createTestApp();
+    mcpServer = await startStreamableHttpTestServer({ instructions: 'Read the tool list before calling anything.' });
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/mcp-registries',
+      headers: authHeaders(t.cookie),
+      payload: { name: 'Self-describing', transport: 'streamable_http', url: mcpServer.url, authKind: 'none' },
+    });
+    const id = created.json().id as string;
+
+    const tool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
+    const parsed = JSON.parse(await tool.execute(depsFor(t), {})) as { id: string; description: string | null }[];
+    expect(parsed.find((r) => r.id === id)?.description).toBe('Read the tool list before calling anything.');
+
+    // A user-authored description still wins over it.
+    await t.app.inject({
+      method: 'PATCH',
+      url: `/api/mcp-registries/${encodeURIComponent(id)}`,
+      headers: authHeaders(t.cookie),
+      payload: { description: 'Human-written summary.' },
+    });
+    const afterDescription = JSON.parse(await tool.execute(depsFor(t), {})) as { id: string; description: string | null }[];
+    expect(afterDescription.find((r) => r.id === id)?.description).toBe('Human-written summary.');
+  });
+
   it('list_mcp_tools scoped to a registry returns name, description, and schema for its tools', async () => {
     t = await createTestApp();
     const id = await registerRegistry();

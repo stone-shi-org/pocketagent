@@ -120,6 +120,17 @@ export class McpClient {
     this.client = client;
   }
 
+  /**
+   * The MCP `initialize` response's optional `instructions` field, if the
+   * server set one — a server-authored "how to use me" blurb, distinct from
+   * a registry's own user-authored `description`. `null` both when not
+   * connected and when the server simply didn't set one; callers cannot and
+   * do not need to tell those apart. Must be called after `connect()`.
+   */
+  getInstructions(): string | null {
+    return this.client?.getInstructions() ?? null;
+  }
+
   async listTools(): Promise<McpToolDescriptor[]> {
     if (!this.client) throw new McpClientError('Not connected.');
     let result;

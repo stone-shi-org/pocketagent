@@ -1222,6 +1222,16 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE mcp_registries ADD COLUMN description TEXT;
   `,
+  // The MCP `initialize` response's own optional `instructions` field, as
+  // last reported by a successful connect/test/refresh — captured
+  // opportunistically once a real server was observed setting one (arr-mcp,
+  // after the empirical check behind `description` above found nothing did).
+  // Refreshed by `recordSuccess` the same way `tool_count`/`last_connected_at`
+  // already are; never written by create/update, and never auto-copied into
+  // the user-authored `description` column.
+  `
+  ALTER TABLE mcp_registries ADD COLUMN reported_instructions TEXT;
+  `,
 ];
 
 /**
@@ -1419,6 +1429,9 @@ export function openDatabase(databasePath: string): Db {
   );
   if (mcpRegistryColumns.size > 0 && !mcpRegistryColumns.has('description')) {
     db.exec('ALTER TABLE mcp_registries ADD COLUMN description TEXT');
+  }
+  if (mcpRegistryColumns.size > 0 && !mcpRegistryColumns.has('reported_instructions')) {
+    db.exec('ALTER TABLE mcp_registries ADD COLUMN reported_instructions TEXT');
   }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 

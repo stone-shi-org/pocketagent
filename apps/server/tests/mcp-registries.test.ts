@@ -211,6 +211,64 @@ describe('MCP registry routes', () => {
       expect(listed.toolCount).toBe(2);
     });
 
+    // A server's own `initialize`-time `instructions` (most don't set one;
+    // arr-mcp does, in production) — captured separately from the
+    // user-authored `description`, never overwriting it.
+    it('captures a server-reported instructions field on connect, without touching the user-authored description', async () => {
+      mcpServer = await startStreamableHttpTestServer({
+        instructions: 'Call *_get_status first, then a list/search tool, before any mutating call.',
+      });
+      const created = (
+        await post('/api/mcp-registries', {
+          name: 'Self-describing server',
+          transport: 'streamable_http',
+          url: mcpServer.url,
+          authKind: 'none',
+        })
+      ).json();
+      expect(created.reportedInstructions).toBe(
+        'Call *_get_status first, then a list/search tool, before any mutating call.',
+      );
+      expect(created.description).toBeNull();
+    });
+
+    it('leaves reportedInstructions null for a server that does not set one — the common case', async () => {
+      mcpServer = await startStreamableHttpTestServer();
+      const created = (
+        await post('/api/mcp-registries', {
+          name: 'Ordinary server',
+          transport: 'streamable_http',
+          url: mcpServer.url,
+          authKind: 'none',
+        })
+      ).json();
+      expect(created.reportedInstructions).toBeNull();
+    });
+
+    it('refreshes reportedInstructions on Refresh tools, tracking the live server rather than only its value at creation', async () => {
+      mcpServer = await startStreamableHttpTestServer();
+      const created = (
+        await post('/api/mcp-registries', {
+          name: 'Changing server',
+          transport: 'streamable_http',
+          url: mcpServer.url,
+          authKind: 'none',
+        })
+      ).json();
+      expect(created.reportedInstructions).toBeNull();
+
+      await mcpServer.close();
+      mcpServer = await startStreamableHttpTestServer({ instructions: 'Now I say something.' });
+      await patch(`/api/mcp-registries/${encodeURIComponent(created.id)}`, { url: mcpServer.url });
+      const refreshed = await post(`/api/mcp-registries/${encodeURIComponent(created.id)}/refresh-tools`);
+      expect(refreshed.json().ok).toBe(true);
+
+      const listed = (await get('/api/mcp-registries')).json().registries[0];
+      expect(listed.reportedInstructions).toBe('Now I say something.');
+      // Still never touched the user-authored field.
+      expect(listed.description).toBeNull();
+    });
+
     it('still creates the row when the automatic first connection fails, recording lastError rather than blocking the save', async () => {
       const created = (
         await post('/api/mcp-registries', {

@@ -59,15 +59,27 @@ export const McpRegistrySummary = z.object({
    * explicitly cleared (the same "blank means unset, not merely empty"
    * convention `PlannerChat.title` uses).
    *
-   * Deliberately not auto-filled from the MCP protocol's own optional
-   * `InitializeResult.instructions` field: an empirical check against every
-   * registry actually configured in this deployment (arr-mcp, Atlassian,
-   * Bamboo, IMDB Watch List) found every one of them returns `undefined` for
-   * it, so treating that field as authoritative would leave this column
-   * empty for every real server anyway. A user-authored field is the only
-   * thing that reliably answers "what is this for."
+   * Deliberately not auto-filled from `reportedInstructions` below: an
+   * empirical check against every registry actually configured in this
+   * deployment initially found all four returning `undefined` for it, and
+   * even after one server (arr-mcp) was updated to set a real one, the other
+   * three still don't — so a user-authored field is the only thing that
+   * reliably answers "what is this for" across every server, and
+   * auto-overwriting it on every reconnect would silently discard a human's
+   * own wording the moment a server started reporting something.
    */
   description: z.string().nullable(),
+  /**
+   * The MCP `initialize` response's own optional `instructions` field, as
+   * last reported by a successful connect/test/refresh — a server-authored
+   * "how to use me" blurb, distinct from `description` above. `null` when
+   * the server has never set one (most don't) or this registry has never
+   * successfully connected. Read-only: captured from the wire, never
+   * accepted on create/update, and never auto-copied into `description` —
+   * the editor surfaces it as a one-click suggestion instead, so a human
+   * decides whether to adopt it.
+   */
+  reportedInstructions: z.string().nullable(),
   transport: McpTransportKind,
   url: z.string(),
   authKind: McpAuthKind,

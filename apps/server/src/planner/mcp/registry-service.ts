@@ -43,6 +43,7 @@ interface Row {
   created_at: number;
   updated_at: number;
   description: string | null;
+  reported_instructions: string | null;
 }
 
 /** One registry's live, in-memory state: the row (kept in step with the
@@ -216,6 +217,7 @@ export class McpRegistryService {
       created_at: now,
       updated_at: now,
       description: req.description?.trim() || null,
+      reported_instructions: null,
     };
     this.insert(row);
     this.live.set(row.id, { row, tools: null });
@@ -323,7 +325,7 @@ export class McpRegistryService {
     try {
       await client.connect();
       const tools = await client.listTools();
-      this.recordSuccess(id, tools);
+      this.recordSuccess(id, tools, client.getInstructions());
       return {
         ok: true,
         message: `Connected — ${tools.length} tool${tools.length === 1 ? '' : 's'} available.`,
@@ -416,6 +418,14 @@ export class McpRegistryService {
    * (`tool_count` then reads `0`) — unlike `listKnownTools()`, this is a
    * discovery surface, not a live tool catalog, so a freshly-added,
    * not-yet-tested registry is still worth an agent knowing about.
+   *
+   * `description` here is the *effective* one for a model to read: the
+   * user-authored column if set, else the server's own last-reported
+   * `initialize` `instructions` (most servers don't set one, but one that
+   * does is better than nothing) — the model has no use for which of the two
+   * it's reading, only the settings page draws that distinction, so it keeps
+   * both raw fields (`McpRegistrySummary.description`/`reportedInstructions`)
+   * separately.
    */
   listEnabledRegistries(workspaceId: string | null): McpRegistryDirectoryEntry[] {
     if (!readPlannerSettings(this.db).mcpEnabled) return [];
@@ -423,7 +433,12 @@ export class McpRegistryService {
     const disabledRegistries = workspaceId ? readAgentDisabledMcpRegistries(this.db, workspaceId) : new Set<string>();
     return [...this.live.values()]
       .filter((l) => l.row.enabled === 1 && !disabledRegistries.has(l.row.id))
-      .map((l) => ({ id: l.row.id, name: l.row.name, description: l.row.description, toolCount: l.row.tool_count }))
+      .map((l) => ({
+        id: l.row.id,
+        name: l.row.name,
+        description: l.row.description ?? l.row.reported_instructions ?? null,
+        toolCount: l.row.tool_count,
+      }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
@@ -573,17 +588,30 @@ export class McpRegistryService {
     return this.encKey;
   }
 
-  private recordSuccess(id: string, tools: McpToolDescriptor[]): void {
+  /** `reportedInstructions` is refreshed on every successful connect the
+      same way `tool_count`/`last_connected_at` already are — a server that
+      starts (or stops) setting `initialize`'s `instructions` field takes
+      effect on the next Test/Refresh, not only at creation. Never touches
+      the user-authored `description` column. */
+  private recordSuccess(id: string, tools: McpToolDescriptor[], reportedInstructions: string | null): void {
     const live = this.live.get(id);
     if (!live) return;
     const now = Date.now();
     this.db
       .prepare(
-        'UPDATE mcp_registries SET tool_count = ?, last_connected_at = ?, last_error = NULL, updated_at = ? WHERE id = ?',
+        'UPDATE mcp_registries SET tool_count = ?, last_connected_at = ?, last_error = NULL, ' +
+          'reported_instructions = ?, updated_at = ? WHERE id = ?',
       )
-      .run(tools.length, now, now, id);
+      .run(tools.length, now, reportedInstructions, now, id);
     live.tools = tools;
-    live.row = { ...live.row, tool_count: tools.length, last_connected_at: now, last_error: null, updated_at: now };
+    live.row = {
+      ...live.row,
+      tool_count: tools.length,
+      last_connected_at: now,
+      last_error: null,
+      reported_instructions: reportedInstructions,
+      updated_at: now,
+    };
   }
 
   /** Deliberately does not clear the cached tool list or `tool_count` — a
@@ -620,10 +648,10 @@ export class McpRegistryService {
         `INSERT INTO mcp_registries
            (id, name, transport, url, auth_kind, bearer_token_ciphertext, header_name,
             header_value_ciphertext, enabled, tool_count, last_connected_at, last_error,
-            created_at, updated_at, description)
+            created_at, updated_at, description, reported_instructions)
          VALUES (@id, @name, @transport, @url, @auth_kind, @bearer_token_ciphertext, @header_name,
             @header_value_ciphertext, @enabled, @tool_count, @last_connected_at, @last_error,
-            @created_at, @updated_at, @description)`,
+            @created_at, @updated_at, @description, @reported_instructions)`,
       )
       .run(row);
   }
@@ -636,7 +664,8 @@ export class McpRegistryService {
                 bearer_token_ciphertext = @bearer_token_ciphertext, header_name = @header_name,
                 header_value_ciphertext = @header_value_ciphertext, enabled = @enabled,
                 tool_count = @tool_count, last_connected_at = @last_connected_at,
-                last_error = @last_error, updated_at = @updated_at, description = @description
+                last_error = @last_error, updated_at = @updated_at, description = @description,
+                reported_instructions = @reported_instructions
           WHERE id = @id`,
       )
       .run(row);
@@ -648,6 +677,7 @@ function toSummary(row: Row): McpRegistrySummary {
     id: row.id,
     name: row.name,
     description: row.description,
+    reportedInstructions: row.reported_instructions,
     transport: row.transport as McpTransportKind,
     url: row.url,
     authKind: row.auth_kind as McpAuthKind,

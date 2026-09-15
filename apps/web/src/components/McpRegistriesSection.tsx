@@ -211,6 +211,27 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
   // *global* switch — "we can globally disable bamboo mcp but allow Jira
   // mcp" — right on the row, rather than requiring Edit -> uncheck Enabled
   // -> Save for what is otherwise a one-field, no-secret-touching change.
+  // A one-click adoption of the server's own reported `instructions` (most
+  // servers don't set one — arr-mcp does, as of this deployment) into the
+  // user-authored `description` column. Never automatic: overwriting a
+  // human's own wording on every reconnect the moment a server started
+  // reporting something would be surprising, so this is the only path that
+  // writes it.
+  async function useReportedInstructions(registry: McpRegistrySummary): Promise<void> {
+    if (!registry.reportedInstructions) return;
+    setBusy(true);
+    try {
+      await api.updateMcpRegistry(registry.id, { description: registry.reportedInstructions });
+      await load();
+      onChanged();
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not update the registry.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function toggleRegistryEnabled(registry: McpRegistrySummary, enabled: boolean): Promise<void> {
     setBusy(true);
     try {
@@ -308,6 +329,22 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
                 {r.description && (
                   <>
                     <span className="planner-row-meta">{r.description}</span>
+                    <br />
+                  </>
+                )}
+                {!r.description && r.reportedInstructions && (
+                  <>
+                    <span className="planner-row-meta">
+                      No description set. The server itself suggests: "{r.reportedInstructions}"{' '}
+                      <button
+                        type="button"
+                        className="planner-btn"
+                        disabled={busy}
+                        onClick={() => void useReportedInstructions(r)}
+                      >
+                        Use this as description
+                      </button>
+                    </span>
                     <br />
                   </>
                 )}
