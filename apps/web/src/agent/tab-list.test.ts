@@ -5,6 +5,7 @@ const tabA: OpenTab = { id: 't:a', route: { name: 'terminal', sessionId: 'a' } }
 const tabB: OpenTab = { id: 't:b', route: { name: 'terminal', sessionId: 'b' } };
 const tabC: OpenTab = { id: 'c:c', route: { name: 'chat', conversationId: 'c' } };
 const tabP: OpenTab = { id: 'p:p1', route: { name: 'planner-chat', chatId: 'p1' } };
+const tabP2: OpenTab = { id: 'p:p2', route: { name: 'planner-chat', chatId: 'p2' } };
 const tabS: OpenTab = { id: 's:settings', route: { name: 'settings' } };
 const tabCron: OpenTab = { id: 's:settings', route: { name: 'cron' } };
 const tabWebhooks: OpenTab = { id: 's:settings', route: { name: 'webhooks' } };
@@ -211,6 +212,15 @@ describe('tabListReducer: close', () => {
 
   it('closes a Pocket Agent chat tab, e.g. once its `PlannerChatPage` discovers the chat is gone', () => {
     expect(tabListReducer([tabA, tabP], { type: 'close', id: tabP.id })).toEqual([tabA]);
+  });
+
+  it('closes planner chat tabs when removed via the sidebar X or cleared in batch (PA-58)', () => {
+    // Single chat remove:
+    expect(tabListReducer([tabA, tabP, tabP2], { type: 'close', id: tabP.id })).toEqual([tabA, tabP2]);
+    // Batch clear (e.g. deleteAllChats for a workspace):
+    const afterFirst = tabListReducer([tabA, tabP, tabP2], { type: 'close', id: tabP.id });
+    const afterSecond = tabListReducer(afterFirst, { type: 'close', id: tabP2.id });
+    expect(afterSecond).toEqual([tabA]);
   });
 
   it('closes the settings tab, freeing the singleton slot for a later re-open', () => {

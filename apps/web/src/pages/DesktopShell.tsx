@@ -607,6 +607,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             // a preview one — nothing in this section currently produces the
             // second click that would ever "promote" a preview anyway.
             onOpenChat={(chatId) => openPermanentTab({ name: 'planner-chat', chatId })}
+            onCloseChat={(chatId) => closeTab(`p:${chatId}`)}
             onApiError={onApiError}
             activeChatId={route.name === 'planner-chat' ? route.chatId : null}
           />

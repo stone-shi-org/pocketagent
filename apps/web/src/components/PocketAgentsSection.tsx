@@ -14,6 +14,9 @@ interface Props {
       instead of running a second one alongside this section's). */
   refresh: () => Promise<void>;
   onOpenChat: (chatId: string) => void;
+  /** PA-58: closes the open tab for a removed chat, matching the auto-close
+      other session types execute on removal. */
+  onCloseChat?: (chatId: string) => void;
   onApiError: (error: unknown) => void;
   activeChatId?: string | null;
 }
@@ -37,6 +40,7 @@ export function PocketAgentsSection({
   chats,
   refresh,
   onOpenChat,
+  onCloseChat,
   onApiError,
   activeChatId,
 }: Props): JSX.Element | null {
@@ -89,8 +93,12 @@ export function PocketAgentsSection({
    * DB row; the transcript file on disk is left alone (see
    * `PlannerChatService.remove`'s doc comment), same "removing a chat never
    * deletes a transcript" discipline the project-chat tree's own "Remove"
-   * follows. */
+   * follows.
+   *
+   * PA-58: closes the open tab immediately so removing a chat does not leave
+   * an active/orphaned tab showing a deleted session. */
   const removeChat = (chatId: string): void => {
+    onCloseChat?.(chatId);
     void (async () => {
       try {
         await api.deletePlannerChat(chatId);
@@ -109,6 +117,11 @@ export function PocketAgentsSection({
   const deleteAllChats = (workspaceId: string): void => {
     setMenuFor(null);
     setBusy((prev) => new Set(prev).add(workspaceId));
+    // PA-58: close any open tabs belonging to the workspace's chats before clearing
+    const wsChats = chats.filter((c) => c.workspaceId === workspaceId);
+    for (const chat of wsChats) {
+      onCloseChat?.(chat.id);
+    }
     void (async () => {
       try {
         await api.deleteAllPlannerChats(workspaceId);
