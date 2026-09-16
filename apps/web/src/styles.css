@@ -5996,3 +5996,77 @@ button.chat-rate-limit-badge {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+
+.planner-context-preview-tokens {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+/* PA-59: "system prompt" / "conversation history" / "memory" / "tools"
+   groupings inside the same panel — a plain heading plus spacing rather
+   than a border, matching this app's "structure from weight and
+   whitespace, not borders and badges" convention for the home screen. */
+.planner-context-preview-group + .planner-context-preview-group {
+  margin-top: 10px;
+}
+
+.planner-context-preview-group-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.planner-context-preview-sections {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.planner-context-preview-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 3px 2px;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.planner-context-preview-section-head .chev {
+  flex: none;
+  color: var(--text-dim);
+}
+
+.planner-context-preview-section-label {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+}
+
+.planner-context-preview-section-tokens {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.planner-context-preview-section-text {
+  margin: 0 0 0 22px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.planner-context-preview-section-text.expanded {
+  white-space: pre-wrap;
+  font-family: inherit;
+}

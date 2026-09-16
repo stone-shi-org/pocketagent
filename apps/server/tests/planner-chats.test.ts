@@ -701,6 +701,93 @@ describe('planner chat routes over HTTP', () => {
     expect(result.content).not.toMatch(/disabled for this agent/);
   });
 
+  // ---- PA-59: context-preview reports system prompt / window / tool footprint
+
+  it('context-preview omits systemPrompt sections and reports zero tools when nothing is configured and every tool is disabled', async () => {
+    t = await createTestApp();
+    const chat = (await post(t, '/api/planner/chats', {})).json();
+    const globalNames: string[] = (await get(t, '/api/planner/tools')).json().tools.map(
+      (info: { name: string }) => info.name,
+    );
+    for (const name of globalNames) {
+      await patch(t, `/api/planner/tools/${name}`, { enabled: false });
+    }
+
+    const res = await get(t, `/api/planner/chats/${chat.id}/context-preview`);
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.systemPrompt).toEqual([]);
+    // `enabledTools` is `[]`; `JSON.stringify([])` is the 2-char string
+    // `"[]"`, which `estimateTokens` rounds up to 1 — not literally zero,
+    // since the estimator works on serialized text, not tool count.
+    expect(body.tools).toEqual({ enabledCount: 0, tokens: 1, mcpActive: false, skillsActive: false });
+    // No messages sent yet either, so `eventsToLlmMessages` also serializes
+    // to `"[]"` — same one-token floor, not literally zero.
+    expect(body.window.tokens).toBe(1);
+  });
+
+  it("context-preview reports the identity/about/toolsEnvironment sections with non-negative token counts, mirroring buildPersonaSystemMessage's own sections", async () => {
+    t = await createTestApp();
+    await patch(t, '/api/planner/settings', {
+      meInstruction: 'My name is Stone.',
+      toolsInstruction: 'BAMBOO_TOKEN holds the Bamboo CI token.',
+    });
+    const ws = (await post(t, '/api/planner/workspaces', { name: 'Coder' })).json();
+    await patch(t, `/api/planner/workspaces/${ws.id}`, {
+      identityPrompt: 'I am a coding assistant for this repo.',
+    });
+    const chat = (await post(t, '/api/planner/chats', { workspaceId: ws.id })).json();
+
+    const body = (await get(t, `/api/planner/chats/${chat.id}/context-preview`)).json();
+    const byId = Object.fromEntries(body.systemPrompt.map((s: { id: string; text: string }) => [s.id, s]));
+    expect(byId.identity).toMatchObject({ label: 'Who you are', text: 'I am a coding assistant for this repo.' });
+    expect(byId.about).toMatchObject({
+      label: 'About the person you are helping',
+      text: 'My name is Stone.',
+    });
+    expect(byId.toolsEnvironment).toMatchObject({
+      label: 'About their tools and environment',
+      text: 'BAMBOO_TOKEN holds the Bamboo CI token.',
+    });
+    for (const section of body.systemPrompt) {
+      expect(section.tokens).toBeGreaterThan(0);
+    }
+    // The catalog is enabled by default, so an "internal tools" section
+    // should also be present, and the tools footprint non-trivial.
+    expect(byId.internalTools).toBeDefined();
+    expect(body.tools.enabledCount).toBeGreaterThan(0);
+    expect(body.tools.tokens).toBeGreaterThan(0);
+  });
+
+  it('context-preview reports a per-memory token count on each candidate', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const ws = t.context.plannerWorkspaces.getDefault()!;
+    const { insertPlannerMemory } = await import('../src/planner/store.js');
+    insertPlannerMemory(t.db, {
+      id: 'mem-1',
+      workspaceId: ws.id,
+      tier: 'long',
+      content: 'The user prefers concise answers.',
+      importance: 5,
+      sourceChatId: null,
+      createdAt: Date.now(),
+      lastAccessedAt: Date.now(),
+    });
+    const chat = (await post(t, '/api/planner/chats', { workspaceId: ws.id, modelId: 'gpt-4o' })).json();
+    await sendMessage(t, chat.id, 'concise answers');
+
+    const body = (await get(t, `/api/planner/chats/${chat.id}/context-preview`)).json();
+    expect(body.memoryEnabled).toBe(true);
+    expect(body.candidates.length).toBeGreaterThan(0);
+    for (const c of body.candidates) {
+      expect(c.tokens).toBeGreaterThanOrEqual(0);
+    }
+    const match = body.candidates.find((c: { memory: { id: string } }) => c.memory.id === 'mem-1');
+    expect(match?.tokens).toBe(Math.ceil('The user prefers concise answers.'.length / 4));
+  });
+
   it('executes a read-only tool call immediately (no approval), streaming tool_use/tool_result, and persists them', async () => {
     const fetchImpl = vi
       .fn()

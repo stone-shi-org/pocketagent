@@ -67,6 +67,10 @@ export const PlannerMemoryPreviewEntry = z.object({
   score: z.number(),
   /** Whether this row made the top-K actually injected into the system message. */
   selected: z.boolean(),
+  /** PA-59: estimated tokens for `memory.content` — see `estimateTokens`'s
+      own doc comment (`apps/server/src/planner/token-estimate.ts`) for why
+      this is a display-only approximation, not a real accounting number. */
+  tokens: z.number().int(),
 });
 export type PlannerMemoryPreviewEntry = z.infer<typeof PlannerMemoryPreviewEntry>;
 
@@ -81,12 +85,47 @@ export const PlannerContextWindowStats = z.object({
   inWindowMessages: z.number().int(),
   foldedMessages: z.number().int(),
   windowLimit: z.number().int(),
+  /** PA-59: estimated tokens across the in-window messages, once converted
+      to the same OpenAI-shape messages a real turn would send — display
+      only, see `estimateTokens`'s doc comment. */
+  tokens: z.number().int(),
 });
 export type PlannerContextWindowStats = z.infer<typeof PlannerContextWindowStats>;
+
+/**
+ * PA-59: one independently-configurable piece of the persona system message
+ * `PlannerChatService`'s `personaSections` builds — `driveLoop` joins these
+ * into a single system message string for the real turn, but the preview
+ * panel wants each piece named and sized separately (identity vs. "about
+ * the person" vs. "about their tools" vs. a generated summary of the
+ * internal/meta-tool catalog), so a human can tell which one is worth
+ * trimming rather than staring at one undifferentiated blob.
+ */
+export const PlannerSystemPromptSection = z.object({
+  id: z.string(),
+  label: z.string(),
+  text: z.string(),
+  tokens: z.number().int(),
+});
+export type PlannerSystemPromptSection = z.infer<typeof PlannerSystemPromptSection>;
 
 export const PlannerContextPreviewResponse = z.object({
   memoryEnabled: z.boolean(),
   candidates: z.array(PlannerMemoryPreviewEntry),
   window: PlannerContextWindowStats,
+  /** PA-59: system-prompt sections that would actually be sent for this
+      chat's next turn — a section with nothing configured is omitted
+      entirely (mirroring `buildPersonaSystemMessage`'s own `null`-when-unset
+      behavior), never sent as an empty entry. */
+  systemPrompt: z.array(PlannerSystemPromptSection),
+  /** PA-59: the footprint of this chat's enabled tool catalog — sent to the
+      LLM as the `tools` JSON-schema array, not as system-prompt text, so it
+      is reported separately rather than folded into `systemPrompt`. */
+  tools: z.object({
+    enabledCount: z.number().int(),
+    tokens: z.number().int(),
+    mcpActive: z.boolean(),
+    skillsActive: z.boolean(),
+  }),
 });
 export type PlannerContextPreviewResponse = z.infer<typeof PlannerContextPreviewResponse>;

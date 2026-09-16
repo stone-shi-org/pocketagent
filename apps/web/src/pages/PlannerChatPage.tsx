@@ -117,6 +117,19 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
   const [contextPreview, setContextPreview] = useState<PlannerContextPreviewResponse | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
+  // PA-59: which system-prompt sections are expanded past their one-line
+  // collapsed view — a plain `Set` keyed by section id, mirroring `ToolCard`'s
+  // own per-item `open` convention but for several independent rows in one
+  // panel rather than one row's own single toggle.
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(() => new Set());
+  const toggleSection = useCallback((id: string) => {
+    setExpandedSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -444,31 +457,83 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
             <div className="spinner">Loading…</div>
           ) : contextPreview ? (
             <>
-              <p className="planner-context-preview-window">
-                {contextPreview.window.inWindowMessages} of{' '}
-                {contextPreview.window.inWindowMessages + contextPreview.window.foldedMessages} transcript
-                messages are in context (window: last {contextPreview.window.windowLimit} turns)
-                {contextPreview.window.foldedMessages > 0 &&
-                  ` — ${contextPreview.window.foldedMessages} older ones were folded into memory`}
-                .
-              </p>
-              {!contextPreview.memoryEnabled ? (
-                <p className="planner-context-preview-empty">Memory is turned off for this agent.</p>
-              ) : contextPreview.candidates.length === 0 ? (
-                <p className="planner-context-preview-empty">No saved memories matched this conversation.</p>
-              ) : (
-                <ul className="planner-context-preview-list">
-                  {contextPreview.candidates.map((c) => (
-                    <li
-                      key={c.memory.id}
-                      className={`planner-context-preview-item${c.selected ? ' selected' : ''}`}
-                    >
-                      <span className="planner-context-preview-score">{c.score.toFixed(2)}</span>
-                      <span className="planner-context-preview-content">{c.memory.content}</span>
-                    </li>
-                  ))}
-                </ul>
+              {contextPreview.systemPrompt.length > 0 && (
+                <div className="planner-context-preview-group">
+                  <p className="planner-context-preview-group-title">System prompt</p>
+                  <ul className="planner-context-preview-sections">
+                    {contextPreview.systemPrompt.map((section) => {
+                      const expanded = expandedSections.has(section.id);
+                      const firstLine = section.text.split('\n').find((line) => line.trim().length > 0) ?? section.text;
+                      return (
+                        <li key={section.id} className="planner-context-preview-section">
+                          <button
+                            type="button"
+                            className="planner-context-preview-section-head"
+                            onClick={() => toggleSection(section.id)}
+                            aria-expanded={expanded}
+                          >
+                            <span className="chev" aria-hidden="true">
+                              {expanded ? '▾' : '▸'}
+                            </span>
+                            <span className="planner-context-preview-section-label">{section.label}</span>
+                            <span className="planner-context-preview-section-tokens">~{section.tokens} tokens</span>
+                          </button>
+                          {expanded ? (
+                            <pre className="planner-context-preview-section-text expanded">{section.text}</pre>
+                          ) : (
+                            <p className="planner-context-preview-section-text">{firstLine}</p>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
               )}
+
+              <div className="planner-context-preview-group">
+                <p className="planner-context-preview-group-title">Conversation history</p>
+                <p className="planner-context-preview-window">
+                  {contextPreview.window.inWindowMessages} of{' '}
+                  {contextPreview.window.inWindowMessages + contextPreview.window.foldedMessages} transcript
+                  messages are in context (window: last {contextPreview.window.windowLimit} turns, ~
+                  {contextPreview.window.tokens} tokens)
+                  {contextPreview.window.foldedMessages > 0 &&
+                    ` — ${contextPreview.window.foldedMessages} older ones were folded into memory`}
+                  .
+                </p>
+              </div>
+
+              <div className="planner-context-preview-group">
+                <p className="planner-context-preview-group-title">Memory</p>
+                {!contextPreview.memoryEnabled ? (
+                  <p className="planner-context-preview-empty">Memory is turned off for this agent.</p>
+                ) : contextPreview.candidates.length === 0 ? (
+                  <p className="planner-context-preview-empty">No saved memories matched this conversation.</p>
+                ) : (
+                  <ul className="planner-context-preview-list">
+                    {contextPreview.candidates.map((c) => (
+                      <li
+                        key={c.memory.id}
+                        className={`planner-context-preview-item${c.selected ? ' selected' : ''}`}
+                      >
+                        <span className="planner-context-preview-score">{c.score.toFixed(2)}</span>
+                        <span className="planner-context-preview-content">{c.memory.content}</span>
+                        <span className="planner-context-preview-tokens">~{c.tokens} tokens</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <div className="planner-context-preview-group">
+                <p className="planner-context-preview-group-title">Tools</p>
+                <p className="planner-context-preview-window">
+                  {contextPreview.tools.enabledCount} tool{contextPreview.tools.enabledCount === 1 ? '' : 's'} enabled,
+                  ~{contextPreview.tools.tokens} tokens of schema
+                  {contextPreview.tools.mcpActive && ' — MCP active'}
+                  {contextPreview.tools.skillsActive && ' — skills active'}.
+                </p>
+              </div>
             </>
           ) : null}
         </div>

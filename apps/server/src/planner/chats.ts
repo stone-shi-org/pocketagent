@@ -4,6 +4,7 @@ import type {
   PlannerChat,
   PlannerContextPreviewResponse,
   PlannerMemory,
+  PlannerSystemPromptSection,
   PlannerToolApprovalChoice,
 } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
@@ -61,6 +62,7 @@ import type { SkillRegistryService } from './skills.js';
 import type { TelegramBotStore } from '../telegram/bots-store.js';
 import type { TelegramLinksStore } from '../telegram/links-store.js';
 import { TelegramClient } from '../telegram/client.js';
+import { estimateTokens } from './token-estimate.js';
 
 export class PlannerChatError extends Error {
   override readonly name = 'PlannerChatError';
@@ -485,8 +487,14 @@ export class PlannerChatService {
     const events = await readTranscriptEvents(workspacePath, chat.id);
     const turns = splitIntoTurns(events);
     const keepFrom = Math.max(0, turns.length - ROLLING_WINDOW_TURNS);
-    const inWindowMessages = turns.slice(keepFrom).flat().length;
+    const inWindowEvents = turns.slice(keepFrom).flat();
+    const inWindowMessages = inWindowEvents.length;
     const foldedMessages = turns.slice(0, keepFrom).flat().length;
+    // PA-59: converted through the same `eventsToLlmMessages` a real turn
+    // uses, then estimated as one JSON blob — a human comparing this number
+    // against what actually gets sent should be comparing like with like,
+    // not a raw transcript-text length against a serialized-messages length.
+    const windowTokens = estimateTokens(JSON.stringify(eventsToLlmMessages(inWindowEvents)));
 
     const memoryEnabled = this.memoryEnabledFor(chat.workspaceId);
     let candidates: PlannerContextPreviewResponse['candidates'] = [];
@@ -500,13 +508,50 @@ export class PlannerChatService {
         memory: r.memory,
         score: r.score,
         selected: index < MEMORY_INJECT_TOP_K,
+        tokens: estimateTokens(r.memory.content),
       }));
+    }
+
+    // PA-59: the same three persona pieces `buildPersonaSystemMessage` joins
+    // into one string for a real turn, kept apart here so the panel can show
+    // and size each independently — plus a fourth, generated section
+    // summarizing the enabled tool/meta-tool catalog, which has no prose
+    // system-prompt text today (tool info reaches the model only via the
+    // `tools` JSON-schema param) but is exactly the kind of "what's in
+    // context" a human asking this question wants to see.
+    const settings = readPlannerSettings(this.opts.db);
+    const workspace = chat.workspaceId ? this.opts.plannerWorkspaces.get(chat.workspaceId) : undefined;
+    const systemPrompt: PlannerSystemPromptSection[] = personaSections(workspace ?? null, settings).map((s) => ({
+      id: s.id,
+      label: s.label,
+      text: s.text,
+      tokens: estimateTokens(s.text),
+    }));
+    const enabledTools = this.toolsFor(chat.workspaceId);
+    if (enabledTools.length > 0) {
+      const summary = summarizeEnabledTools(enabledTools);
+      systemPrompt.push({
+        id: 'internalTools',
+        label: 'Tools & meta-tools',
+        text: summary,
+        tokens: estimateTokens(summary),
+      });
     }
 
     return {
       memoryEnabled,
       candidates,
-      window: { inWindowMessages, foldedMessages, windowLimit: ROLLING_WINDOW_TURNS },
+      window: { inWindowMessages, foldedMessages, windowLimit: ROLLING_WINDOW_TURNS, tokens: windowTokens },
+      systemPrompt,
+      tools: {
+        enabledCount: enabledTools.length,
+        // The actual footprint sent as the `tools` param, not the prose
+        // summary above — see `summarizeEnabledTools`'s own doc comment for
+        // why the two are reported separately.
+        tokens: estimateTokens(JSON.stringify(toOpenAiToolSpecs(enabledTools))),
+        mcpActive: enabledTools.some((t) => t.name === LIST_MCP_TOOLS_NAME),
+        skillsActive: enabledTools.some((t) => t.name === LIST_SKILLS_NAME),
+      },
     };
   }
 
@@ -1534,29 +1579,73 @@ function buildMemorySystemMessage(memories: readonly PlannerMemory[]): string {
   return `Relevant memories from earlier conversations with this agent:\n${lines.join('\n')}`;
 }
 
+/** One independently-configurable piece of the persona system message —
+    kept apart so `PlannerChatService.previewContext` (PA-59) can show and
+    size each piece separately; `buildPersonaSystemMessage` below joins them
+    back into the single string a real turn actually sends, so the two can
+    never drift on what a section's label or content is. */
+interface PersonaSection {
+  id: 'identity' | 'about' | 'toolsEnvironment';
+  label: string;
+  text: string;
+}
+
 /**
- * PA-45: combines this agent's own `identityPrompt` with the global `me`
- * (who the operator is) and `tools` (their environment) instructions into
- * one system message — `null` when all three are unset, so `driveLoop`
- * skips injecting anything at all rather than an empty/near-empty system
- * message. Each section is labelled so the model can tell "who I am" from
- * "who I'm talking to" from "what's in their environment" rather than
- * treating all three as one undifferentiated blob; a section with nothing
- * configured is simply omitted, not sent as an empty heading.
+ * PA-45: this agent's own `identityPrompt`, the global `me` (who the
+ * operator is) and `tools` (their environment) instructions — a section with
+ * nothing configured is simply omitted from the result, not returned as an
+ * empty entry.
+ */
+function personaSections(
+  workspace: PlannerWorkspaceRow | null,
+  settings: Pick<PlannerSettingsSnapshot, 'meInstruction' | 'toolsInstruction'>,
+): PersonaSection[] {
+  const sections: PersonaSection[] = [];
+  if (workspace?.identityPrompt) {
+    sections.push({ id: 'identity', label: 'Who you are', text: workspace.identityPrompt });
+  }
+  if (settings.meInstruction) {
+    sections.push({ id: 'about', label: 'About the person you are helping', text: settings.meInstruction });
+  }
+  if (settings.toolsInstruction) {
+    sections.push({ id: 'toolsEnvironment', label: 'About their tools and environment', text: settings.toolsInstruction });
+  }
+  return sections;
+}
+
+/**
+ * PA-45: combines `personaSections`' pieces into one system message — `null`
+ * when all three are unset, so `driveLoop` skips injecting anything at all
+ * rather than an empty/near-empty system message. Each section is labelled
+ * so the model can tell "who I am" from "who I'm talking to" from "what's in
+ * their environment" rather than treating all three as one undifferentiated
+ * blob.
  */
 function buildPersonaSystemMessage(
   workspace: PlannerWorkspaceRow | null,
   settings: Pick<PlannerSettingsSnapshot, 'meInstruction' | 'toolsInstruction'>,
 ): string | null {
-  const sections: string[] = [];
-  if (workspace?.identityPrompt) {
-    sections.push(`Who you are:\n${workspace.identityPrompt}`);
-  }
-  if (settings.meInstruction) {
-    sections.push(`About the person you are helping:\n${settings.meInstruction}`);
-  }
-  if (settings.toolsInstruction) {
-    sections.push(`About their tools and environment:\n${settings.toolsInstruction}`);
-  }
-  return sections.length > 0 ? sections.join('\n\n') : null;
+  const sections = personaSections(workspace, settings);
+  return sections.length > 0 ? sections.map((s) => `${s.label}:\n${s.text}`).join('\n\n') : null;
+}
+
+/**
+ * PA-59: a human-readable, no-LLM-call summary of the enabled tool/meta-tool
+ * catalog for the context-preview panel's "anything else in context?"
+ * section — there is no existing prose system-prompt text for this today
+ * (a tool's `description` reaches the model only via the `tools`
+ * JSON-schema param sent alongside the messages, never as system-prompt
+ * text), so this is a display-only stand-in rather than a section that
+ * mirrors something `driveLoop` actually sends. Grouped by `readOnly` since
+ * that is the one distinction this codebase's own approval gate cares
+ * about — a mutating tool is "subject to approval unless remembered/yolo'd,"
+ * a read-only one never is.
+ */
+function summarizeEnabledTools(tools: readonly PlannerToolDefinition[]): string {
+  const readOnly = tools.filter((t) => t.readOnly).map((t) => t.name);
+  const mutating = tools.filter((t) => !t.readOnly).map((t) => t.name);
+  const lines = [`${tools.length} tool${tools.length === 1 ? '' : 's'} enabled for this agent.`];
+  if (readOnly.length > 0) lines.push(`Read-only: ${readOnly.join(', ')}`);
+  if (mutating.length > 0) lines.push(`Mutating (subject to approval unless remembered/yolo'd): ${mutating.join(', ')}`);
+  return lines.join('\n');
 }
