@@ -838,6 +838,10 @@ describe('planner chat routes over HTTP', () => {
     const fetchImpl = vi.fn().mockImplementation(() => fakeToolCallResponse('list_workspaces', {}));
     t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
     await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    // Pin the cap explicitly rather than relying on the default (20) so this
+    // test stays fast and its assertion below stays exact regardless of what
+    // the default happens to be.
+    await patch(t, '/api/planner/settings', { maxToolIterations: 3 });
     const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
 
     const { res: turn, events } = await sendMessage(t, chat.id, 'loop forever');
@@ -847,7 +851,19 @@ describe('planner chat routes over HTTP', () => {
     const doneEvent = findEvent(events, 'turn_complete');
     expect(doneEvent).toMatchObject({ isError: true });
     // Capped, not unbounded.
-    expect(fetchImpl.mock.calls.length).toBeLessThanOrEqual(8);
+    expect(fetchImpl.mock.calls.length).toBeLessThanOrEqual(3);
+  });
+
+  it('maxToolIterations defaults to 20 and is configurable over the settings route', async () => {
+    t = await createTestApp();
+    const initial = (await get(t, '/api/planner/settings')).json();
+    expect(initial.maxToolIterations).toBe(20);
+
+    const updated = (await patch(t, '/api/planner/settings', { maxToolIterations: 5 })).json();
+    expect(updated.maxToolIterations).toBe(5);
+
+    const reread = (await get(t, '/api/planner/settings')).json();
+    expect(reread.maxToolIterations).toBe(5);
   });
 
   it('a second turn sends the full prior history to the LLM', async () => {

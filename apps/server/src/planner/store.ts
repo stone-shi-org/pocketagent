@@ -421,6 +421,18 @@ export const PLANNER_ME_INSTRUCTION_KEY = 'planner_me_instruction';
  */
 export const PLANNER_TOOLS_INSTRUCTION_KEY = 'planner_tools_instruction';
 
+/**
+ * How many tool-call iterations one turn may make before `driveLoop` gives
+ * up — see `PlannerSettingsDto.maxToolIterations`'s doc comment (protocol
+ * package) for the full rationale. 20 replaces what used to be a hardcoded
+ * `MAX_TOOL_ITERATIONS = 8` in `chats.ts`; stored as a string like every
+ * other `settings` row, parsed with `Number(...)` and clamped defensively in
+ * case a future migration or manual edit puts something out of range in the
+ * table.
+ */
+export const PLANNER_MAX_TOOL_ITERATIONS_KEY = 'planner_max_tool_iterations';
+export const DEFAULT_MAX_TOOL_ITERATIONS = 20;
+
 export interface PlannerSettingsSnapshot {
   baseUrl: string | null;
   hasApiKey: boolean;
@@ -438,6 +450,7 @@ export interface PlannerSettingsSnapshot {
   mcpEnabled: boolean;
   meInstruction: string | null;
   toolsInstruction: string | null;
+  maxToolIterations: number;
 }
 
 export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
@@ -459,7 +472,16 @@ export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
     mcpEnabled: readSetting(db, PLANNER_MCP_ENABLED_KEY) !== '0',
     meInstruction: readSetting(db, PLANNER_ME_INSTRUCTION_KEY) || null,
     toolsInstruction: readSetting(db, PLANNER_TOOLS_INSTRUCTION_KEY) || null,
+    maxToolIterations: readMaxToolIterations(db),
   };
+}
+
+function readMaxToolIterations(db: Db): number {
+  const raw = readSetting(db, PLANNER_MAX_TOOL_ITERATIONS_KEY);
+  if (raw === null) return DEFAULT_MAX_TOOL_ITERATIONS;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 200) return DEFAULT_MAX_TOOL_ITERATIONS;
+  return parsed;
 }
 
 export function writePlannerMcpEnabled(db: Db, enabled: boolean): void {
@@ -474,6 +496,14 @@ export function writePlannerMeInstruction(db: Db, text: string | null): void {
 /** PA-45: see `PLANNER_TOOLS_INSTRUCTION_KEY`'s own doc comment. */
 export function writePlannerToolsInstruction(db: Db, text: string | null): void {
   writeSetting(db, PLANNER_TOOLS_INSTRUCTION_KEY, text ?? '');
+}
+
+/** See `PLANNER_MAX_TOOL_ITERATIONS_KEY`'s own doc comment. The route's own
+    Zod schema (`UpdatePlannerSettingsRequest.maxToolIterations`) already
+    bounds `n` to `[1, 200]`; `readMaxToolIterations` clamps defensively on
+    the way back out regardless. */
+export function writePlannerMaxToolIterations(db: Db, n: number): void {
+  writeSetting(db, PLANNER_MAX_TOOL_ITERATIONS_KEY, String(n));
 }
 
 export function writePlannerBaseUrl(db: Db, baseUrl: string | null): void {

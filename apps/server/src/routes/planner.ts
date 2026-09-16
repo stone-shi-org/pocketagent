@@ -78,6 +78,7 @@ import {
   writePlannerEmbeddingApiKey,
   writePlannerEmbeddingBaseUrl,
   writePlannerEmbeddingModelId,
+  writePlannerMaxToolIterations,
   writePlannerMcpEnabled,
   writePlannerMeInstruction,
   writePlannerToolsInstruction,
@@ -379,6 +380,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       mcpEnabled,
       meInstruction,
       toolsInstruction,
+      maxToolIterations,
     } = parsed.data;
     if (baseUrl !== undefined) writePlannerBaseUrl(db, baseUrl);
     if (apiKey !== undefined) writePlannerApiKey(db, apiKey.length > 0 ? apiKey : null);
@@ -407,6 +409,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     // sent, null clears it" idiom as every field above.
     if (meInstruction !== undefined) writePlannerMeInstruction(db, meInstruction);
     if (toolsInstruction !== undefined) writePlannerToolsInstruction(db, toolsInstruction);
+    if (maxToolIterations !== undefined) writePlannerMaxToolIterations(db, maxToolIterations);
     const dto: PlannerSettingsDto = readPlannerSettings(db);
     return reply.send(dto);
   });

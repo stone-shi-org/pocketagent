@@ -303,6 +303,19 @@ export const PlannerSettingsDto = z.object({
    * `meInstruction` — same "global, not per-agent" reasoning.
    */
   toolsInstruction: z.string().nullable(),
+  /**
+   * How many tool-call iterations one turn may make before `driveLoop` gives
+   * up rather than looping forever — see `MAX_TOOL_ITERATIONS`'s original
+   * doc comment in `planner/chats.ts` for why a backstop exists at all: the
+   * Claude Agent SDK owns its own loop for a structured session, but nothing
+   * played that role here until this cap was added. Counted across the
+   * whole turn, including any iterations spent before/after a pause for
+   * approval. Configurable (default 20, previously a hardcoded 8) because a
+   * multi-step research turn can legitimately need more round-trips than a
+   * simple one, and the previous fixed value had no way to say so short of
+   * editing source.
+   */
+  maxToolIterations: z.number().int().min(1).max(200),
 });
 export type PlannerSettingsDto = z.infer<typeof PlannerSettingsDto>;
 
@@ -341,6 +354,8 @@ export const UpdatePlannerSettingsRequest = z.object({
   meInstruction: z.string().max(4000).nullable().optional(),
   /** PA-45: see `PlannerSettingsDto.toolsInstruction`'s doc comment. */
   toolsInstruction: z.string().max(4000).nullable().optional(),
+  /** See `PlannerSettingsDto.maxToolIterations`'s doc comment. */
+  maxToolIterations: z.number().int().min(1).max(200).optional(),
 });
 export type UpdatePlannerSettingsRequest = z.infer<typeof UpdatePlannerSettingsRequest>;
 

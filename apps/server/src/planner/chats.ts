@@ -78,8 +78,11 @@ export class PlannerChatError extends Error {
     guard against before — the Claude Agent SDK owns its own loop internally,
     so nothing here has ever needed a backstop like this one. Counted across
     the whole turn, including any iterations spent before/after a pause for
-    approval. */
-const MAX_TOOL_ITERATIONS = 8;
+    approval. The cap itself is `PlannerSettingsSnapshot.maxToolIterations`
+    (Settings page, "Tool safety" — default 20, was a hardcoded 8), read
+    fresh every iteration alongside the rest of `settings` in `driveLoop`
+    rather than cached on `this`, the same "read the flag live" discipline
+    `plannerYoloEnabled` and `globalSkipPermissions` already use. */
 
 const GIVE_UP_MESSAGE =
   'I made too many tool calls without reaching an answer — try narrowing your request, ' +
@@ -940,12 +943,12 @@ export class PlannerChatService {
     stats: PlannerTurnStats,
     signal?: AbortSignal,
   ): AsyncGenerator<AgentEvent> {
-    if (iteration >= MAX_TOOL_ITERATIONS) {
+    const settings = readPlannerSettings(this.opts.db);
+    if (iteration >= settings.maxToolIterations) {
       yield* this.finishTurn(chat, workspacePath, modelId, GIVE_UP_MESSAGE, true, stats);
       return;
     }
 
-    const settings = readPlannerSettings(this.opts.db);
     const events = await readTranscriptEvents(workspacePath, chat.id);
     const memoryEnabled = this.memoryEnabledFor(chat.workspaceId);
     const windowedEvents = await this.applyRollingWindow(chat, events, memoryEnabled);

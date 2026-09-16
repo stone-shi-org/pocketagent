@@ -711,6 +711,10 @@ describe('planner routes over HTTP', () => {
       // one.
       meInstruction: null,
       toolsInstruction: null,
+      // Was a hardcoded `MAX_TOOL_ITERATIONS = 8` in `chats.ts`; now a
+      // configurable setting (default 20) — see
+      // `PlannerSettingsDto.maxToolIterations`'s doc comment.
+      maxToolIterations: 20,
     });
   });
 

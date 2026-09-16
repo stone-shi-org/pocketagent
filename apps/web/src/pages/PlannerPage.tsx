@@ -85,6 +85,9 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   // agent's turn — see `PlannerSettingsDto.meInstruction`'s doc comment.
   const [meInstructionInput, setMeInstructionInput] = useState('');
   const [toolsInstructionInput, setToolsInstructionInput] = useState('');
+  // Mirrors `meInstructionInput`'s local-state-plus-save-on-blur shape —
+  // see `PlannerSettingsDto.maxToolIterations`'s doc comment.
+  const [maxToolIterationsInput, setMaxToolIterationsInput] = useState('20');
 
   const load = useCallback(async () => {
     try {
@@ -105,6 +108,7 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       setUrlFetchBaseUrlInput(se.urlFetchBaseUrl ?? '');
       setMeInstructionInput(se.meInstruction ?? '');
       setToolsInstructionInput(se.toolsInstruction ?? '');
+      setMaxToolIterationsInput(String(se.maxToolIterations));
       setTools(to.tools);
       setApprovals(ap.approvals);
       setError(null);
@@ -152,6 +156,21 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
     void withBusy(() =>
       api.updatePlannerSettings({ toolsInstruction: toolsInstructionInput.trim() || null }),
     );
+  };
+
+  // How many tool-call iterations one turn may make before it gives up
+  // rather than looping forever — see `PlannerSettingsDto.maxToolIterations`'s
+  // doc comment. Clamped client-side to the same `[1, 200]` range the server
+  // schema enforces so a bad value never round-trips as a 400; an unparsable
+  // or out-of-range value falls back to the last known-good setting instead
+  // of silently sending something the server would reject.
+  const saveMaxToolIterations = (): void => {
+    const parsed = Number(maxToolIterationsInput);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 200) {
+      setMaxToolIterationsInput(String(settings?.maxToolIterations ?? 20));
+      return;
+    }
+    void withBusy(() => api.updatePlannerSettings({ maxToolIterations: parsed }));
   };
 
   const saveApiKey = (): void => {
@@ -999,6 +1018,26 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
             remembered.
           </div>
         )}
+
+        <div className="planner-field" style={{ marginTop: 14, maxWidth: 160 }}>
+          <label htmlFor="planner-max-tool-iterations">Max tool calls per turn</label>
+          <input
+            id="planner-max-tool-iterations"
+            type="number"
+            min={1}
+            max={200}
+            step={1}
+            value={maxToolIterationsInput}
+            disabled={busy}
+            onChange={(e) => setMaxToolIterationsInput(e.target.value)}
+            onBlur={saveMaxToolIterations}
+          />
+        </div>
+        <p className="planner-row-meta" style={{ marginTop: 4 }}>
+          If a single turn makes this many tool-call round-trips without reaching a final answer,
+          it gives up rather than looping forever. Counted across the whole turn, including any
+          time spent paused for approval.
+        </p>
 
         <h3 style={{ marginTop: 14 }}>Remembered decisions</h3>
         {approvals.length === 0 && (
