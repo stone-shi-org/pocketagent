@@ -724,6 +724,9 @@ describe('planner chat routes over HTTP', () => {
     // No messages sent yet either, so `eventsToLlmMessages` also serializes
     // to `"[]"` — same one-token floor, not literally zero.
     expect(body.window.tokens).toBe(1);
+    // Nothing configured, nothing in the window, no memory candidates: the
+    // headline total is just the two one-token floors above.
+    expect(body.totalTokens).toBe(body.window.tokens + body.tools.tokens);
   });
 
   it("context-preview reports the identity/about/toolsEnvironment sections with non-negative token counts, mirroring buildPersonaSystemMessage's own sections", async () => {
@@ -757,6 +760,46 @@ describe('planner chat routes over HTTP', () => {
     expect(byId.internalTools).toBeDefined();
     expect(body.tools.enabledCount).toBeGreaterThan(0);
     expect(body.tools.tokens).toBeGreaterThan(0);
+    const systemPromptTokens = body.systemPrompt.reduce((sum: number, s: { tokens: number }) => sum + s.tokens, 0);
+    expect(body.totalTokens).toBe(systemPromptTokens + body.window.tokens + body.tools.tokens);
+  });
+
+  it('context-preview totalTokens counts only selected memory candidates, not the whole preview list', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const ws = t.context.plannerWorkspaces.getDefault()!;
+    const { insertPlannerMemory } = await import('../src/planner/store.js');
+    insertPlannerMemory(t.db, {
+      id: 'mem-selected',
+      workspaceId: ws.id,
+      tier: 'long',
+      content: 'The user prefers concise answers.',
+      importance: 5,
+      sourceChatId: null,
+      createdAt: Date.now(),
+      lastAccessedAt: Date.now(),
+    });
+    const chat = (await post(t, '/api/planner/chats', { workspaceId: ws.id, modelId: 'gpt-4o' })).json();
+    await sendMessage(t, chat.id, 'concise answers');
+
+    const body = (await get(t, `/api/planner/chats/${chat.id}/context-preview`)).json();
+    expect(body.candidates.length).toBeGreaterThan(0);
+    const selectedTokens = body.candidates
+      .filter((c: { selected: boolean }) => c.selected)
+      .reduce((sum: number, c: { tokens: number }) => sum + c.tokens, 0);
+    const unselectedTokens = body.candidates
+      .filter((c: { selected: boolean }) => !c.selected)
+      .reduce((sum: number, c: { tokens: number }) => sum + c.tokens, 0);
+    const systemPromptTokens = body.systemPrompt.reduce((sum: number, s: { tokens: number }) => sum + s.tokens, 0);
+    expect(body.totalTokens).toBe(systemPromptTokens + body.window.tokens + selectedTokens + body.tools.tokens);
+    if (unselectedTokens > 0) {
+      // Sanity check the exclusion actually matters for this fixture, not
+      // just that the arithmetic happens to work out with zero either way.
+      expect(body.totalTokens).not.toBe(
+        systemPromptTokens + body.window.tokens + selectedTokens + unselectedTokens + body.tools.tokens,
+      );
+    }
   });
 
   it('context-preview reports a per-memory token count on each candidate', async () => {

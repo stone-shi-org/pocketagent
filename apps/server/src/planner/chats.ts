@@ -585,6 +585,15 @@ export class PlannerChatService {
       });
     }
 
+    const toolsTokens = estimateTokens(JSON.stringify(toOpenAiToolSpecs(enabledTools)));
+    // PA-59: only the memory rows that would actually be injected count
+    // toward the total — the rest of `candidates` exists so a human can see
+    // what almost made the cut, and counting them would make the headline
+    // overstate what the next turn actually sends.
+    const selectedMemoryTokens = candidates.filter((c) => c.selected).reduce((sum, c) => sum + c.tokens, 0);
+    const systemPromptTokens = systemPrompt.reduce((sum, s) => sum + s.tokens, 0);
+    const totalTokens = systemPromptTokens + windowTokens + selectedMemoryTokens + toolsTokens;
+
     return {
       memoryEnabled,
       candidates,
@@ -595,10 +604,11 @@ export class PlannerChatService {
         // The actual footprint sent as the `tools` param, not the prose
         // summary above — see `summarizeEnabledTools`'s own doc comment for
         // why the two are reported separately.
-        tokens: estimateTokens(JSON.stringify(toOpenAiToolSpecs(enabledTools))),
+        tokens: toolsTokens,
         mcpActive: enabledTools.some((t) => t.name === LIST_MCP_TOOLS_NAME),
         skillsActive: enabledTools.some((t) => t.name === LIST_SKILLS_NAME),
       },
+      totalTokens,
     };
   }
 

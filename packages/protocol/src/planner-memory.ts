@@ -127,5 +127,13 @@ export const PlannerContextPreviewResponse = z.object({
     mcpActive: z.boolean(),
     skillsActive: z.boolean(),
   }),
+  /** PA-59: the headline number — estimated tokens across everything that
+      would actually be sent for this chat's next turn: every `systemPrompt`
+      section, the in-window history, only the *selected* memory candidates
+      (an unselected one is shown for context but never injected, so it must
+      not inflate the total), and the tool-schema footprint. Computed once
+      server-side rather than summed again in the client, so the headline and
+      the per-section numbers it adds up can never drift apart. */
+  totalTokens: z.number().int(),
 });
 export type PlannerContextPreviewResponse = z.infer<typeof PlannerContextPreviewResponse>;

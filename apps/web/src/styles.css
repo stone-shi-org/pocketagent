@@ -6146,9 +6146,22 @@ button.chat-rate-limit-badge {
   margin-bottom: 6px;
 }
 
+.planner-context-preview-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
 .planner-context-preview-title {
   font-weight: 600;
   color: var(--text);
+}
+
+.planner-context-preview-total {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-dim);
 }
 
 .planner-context-preview-close {

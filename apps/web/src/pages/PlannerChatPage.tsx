@@ -612,7 +612,12 @@ export function PlannerChatPage({
       {previewOpen && (
         <div className="planner-context-preview">
           <div className="planner-context-preview-header">
-            <span className="planner-context-preview-title">Context Preview</span>
+            <span className="planner-context-preview-heading">
+              <span className="planner-context-preview-title">Context Preview</span>
+              {contextPreview && (
+                <span className="planner-context-preview-total">~{contextPreview.totalTokens} tokens total</span>
+              )}
+            </span>
             <button
               type="button"
               className="planner-context-preview-close"
