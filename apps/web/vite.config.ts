@@ -20,7 +20,17 @@ const PUBLIC_HOST = process.env.VITE_PUBLIC_HOST;
 // it reflects the checkout that produced this bundle rather than drifting
 // while the dev server stays up. Falls back to 'unknown' outside a git
 // checkout (e.g. an extracted release tarball) instead of failing the build.
+//
+// `POCKETAGENT_BUILD_VERSION` wins when set, for two reasons (PA-64). A
+// container build has no `.git` — `.dockerignore` excludes it, correctly, so
+// the git probe below would report `unknown` for every published image. And
+// the server reads the same variable for `/health` and `HostInfo.version`
+// (PA-61's `apps/server/src/version.ts`), so honouring it here is what keeps
+// the bundle's stamp and the host's reported version one string instead of two
+// unrelated ones that a version-drift check then has to reconcile.
 function appVersion(): string {
+  const stamped = process.env.POCKETAGENT_BUILD_VERSION?.trim();
+  if (stamped) return stamped;
   try {
     const sha = execSync('git rev-parse HEAD', { stdio: ['ignore', 'pipe', 'ignore'] })
       .toString()

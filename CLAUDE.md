@@ -13,7 +13,43 @@ pnpm lint               # eslint
 pnpm typecheck          # tsc --noEmit across all packages
 pnpm test               # vitest run
 pnpm generate-token     # writes POCKETAGENT_AUTH_TOKEN into .env (mode 600)
+
+docker/build.sh         # backend image: thin | claude | all (PA-64)
+pnpm demo:docker        # the image's whole contract, against a real container
 ```
+
+**Docker is the deployment mechanism; `git pull && pnpm build` is the dev path** (PA-64).
+`docker/Dockerfile` is multi-stage and `docker/build.sh` is the entry point rather than a bare
+`docker build`, because it is what reads `docker/agent-versions.env` (one file pins the agent
+CLI versions for this repo and for CI) and what stamps `POCKETAGENT_BUILD_VERSION` into *both*
+the server and the web bundle — `apps/web/vite.config.ts` cannot fall back to `git rev-parse`
+inside a build context that correctly excludes `.git`. Three things about the image are
+load-bearing and easy to undo by accident:
+
+- **The runtime image preserves the repo layout under `/app`.** `REPO_ROOT` is
+  `resolve(dirname(import.meta.url), '../../../..')`, so `dist/config/` has to sit four levels
+  below the root. `pnpm deploy`'s flattened output silently re-points `REPO_ROOT` at `/`,
+  taking `.env` loading, the `webDistPath` default and the data-dir default with it.
+- **`/etc/profile.d/10-pocketagent-path.sh` is not redundant with `ENV PATH`.** Debian's
+  `/etc/profile` overwrites `PATH` unconditionally, and `exec_command` runs `$SHELL -lc`, so
+  without it an agent installed into the mounted prefix is invisible to exactly the surface
+  most likely to look for it. `docker-smoke.mjs` asserts the login-shell `PATH`.
+- **A pinned agent CLI goes in `/usr/local/bin`, never the default npm prefix.**
+  `NPM_CONFIG_PREFIX` points into `$HOME`, which is a *mount point* at run time, so an install
+  that lands there is hidden by the volume on first run. npm reads its env config
+  case-insensitively, so the inherited `NPM_CONFIG_PREFIX` beats a lowercase
+  `npm_config_prefix=…` on the command — hence `env -u NPM_CONFIG_PREFIX … --prefix
+  /usr/local`, plus a `test -x` that fails the build, because `claude --version` passes either
+  way and this shipped broken once.
+
+The entrypoint's own rule: **it never chowns a mounted volume.** It remaps the `pocketagent`
+account to `PUID`/`PGID` (so `git` can match the owner of a bind-mounted repo — a uid mismatch
+is not just untidy ownership, it makes git refuse the repository), chowns only paths still
+part of the image, and otherwise exits 78 naming the `chown` to run on the host. Two defaults
+differ from a bare-metal install and are disclosed in the README rather than quietly assumed:
+`HOST=0.0.0.0` (loopback in a namespace means unreachable, so the deliberate act moves to
+publishing the port) and `NODE_ENV=production`, which makes the auth cookie `Secure` and so
+breaks login over plain HTTP until `POCKETAGENT_COOKIE_SECURE=false`.
 
 **`packages/protocol` must be built before anything else works.** It is consumed as
 compiled output, not source, so `lint`, `typecheck`, and `test` each run `pnpm protocol`
@@ -86,6 +122,12 @@ node apps/server/dist/server.js & SRV=$!
 # ...
 kill "$SRV"
 ```
+
+`pnpm demo:docker` is the odd one out: it needs no running server and no `PA_BASE`, because it
+builds the image and starts its own container with a throwaway data root, HOME and git
+workspace. It is where PA-64's acceptance criteria live — a host-owned file written by a
+session, `git` inside the mount, the login-shell `PATH`, state surviving `docker restart`, the
+extension example, and that the auth token is in no image layer.
 
 **Rebuild then restart** before running a browser demo against a built server: the server
 caches `index.html` at boot, so a fresh bundle on disk is not the one being served, and the

@@ -1,0 +1,50 @@
+# Build context exclusions.
+#
+# The first entry is a security control, not hygiene: `.env` holds
+# POCKETAGENT_AUTH_TOKEN, which exchanges for a session, and a session is
+# terminal access as this user. A build context that includes it bakes the
+# master credential into an image layer, where `docker history` and anyone who
+# can pull the tag can read it back out. Nothing in the image build reads
+# `.env` — configuration arrives as container environment at run time.
+#
+# The globs are `**`-prefixed deliberately: unlike .gitignore, a bare `.env`
+# here matches only the context root, and `docker/.env` (which compose reads,
+# and which also holds the token) would sail straight into the image.
+**/.env
+**/.env.*
+!**/.env.example
+
+# node_modules is re-installed inside the image against its own libc, glibc
+# version and Node ABI. Copying the host's tree in would both bloat the context
+# by ~585 MB and risk the runtime stage resolving a host-built `.node` file
+# (see README's "Copying a build instead").
+node_modules/
+**/node_modules/
+
+# Build output. The image builds its own; a stale host `dist/` copied over the
+# fresh one is how you ship code you did not just compile.
+dist/
+**/dist/
+*.tsbuildinfo
+
+# Runtime state. `data/` is the default data root — the database, Pocket Agent
+# scratch workspaces and skills. It belongs on a mounted volume, never in a
+# layer.
+data/
+
+# Nested checkouts of this same repo, minted per cron run / webhook delivery.
+.worktrees/
+
+# Screenshots of real sessions (see .gitignore's reasoning — they can capture
+# account details).
+screenshots/
+codex*.png
+
+# Not needed to build, and `.git` in particular is large. Note this is why
+# `apps/web/vite.config.ts` cannot shell out to git for the version stamp
+# inside a build, and why POCKETAGENT_BUILD_VERSION is passed as a build arg.
+.git/
+.github/
+*.log
+.DS_Store
+coverage/

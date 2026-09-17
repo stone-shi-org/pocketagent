@@ -1,0 +1,96 @@
+# PocketAgent backend, thin image (PA-64).
+#
+#   cp docker/.env.example docker/.env     # then edit it
+#   docker compose -f docker/compose.yaml up -d
+#
+# Deliberately does NOT `env_file: ../.env`. The repo's own .env sets
+# HOST=127.0.0.1, which is correct for a bare-metal install and means
+# "unreachable" inside a container — it would override the image's 0.0.0.0 and
+# the server would start, log happily and answer nothing.
+
+services:
+  pocketagent:
+    image: registry.shifamily.com/homestack/pocketagent-server:latest
+
+    # Published to loopback only. This is where the "exposing it is a
+    # deliberate act" posture lives now that the process binds 0.0.0.0 inside
+    # its namespace: reaching this port is terminal access as the mapped user,
+    # so put Tailscale or a TLS reverse proxy in front rather than changing
+    # this to 0.0.0.0:8787.
+    ports:
+      - '127.0.0.1:8787:8787'
+
+    environment:
+      # Required, min 24 chars. Generate one *for this deployment*:
+      #   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+      POCKETAGENT_AUTH_TOKEN: ${POCKETAGENT_AUTH_TOKEN:?set POCKETAGENT_AUTH_TOKEN in docker/.env}
+
+      # Seeds the project-folder list on a *fresh* database only; the app owns
+      # it afterwards. Must be a path that exists inside the container, which
+      # is why it is the same string as the bind mount below.
+      POCKETAGENT_WORKSPACE_ROOTS: ${PA_WORKSPACE_ROOT:?set PA_WORKSPACE_ROOT in docker/.env}
+
+      # The host user who owns the mounted repositories. Anything an agent
+      # writes in them is written as this uid, and a mismatch also makes git
+      # refuse the repo outright ("detected dubious ownership").
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+
+      # NODE_ENV=production in the image makes the auth cookie Secure by
+      # default, and a browser silently discards a Secure cookie over plain
+      # HTTP — login then appears to succeed and immediately bounces back to
+      # the login screen. Set this to false for plain HTTP on a trusted
+      # tailnet/LAN; delete it once you terminate TLS in front.
+      POCKETAGENT_COOKIE_SECURE: 'false'
+
+      # A tmux server inside the container dies with the container, so the
+      # backend that survives a *server* restart buys nothing across a
+      # `docker restart`. `direct` is the realistic containerised backend.
+      POCKETAGENT_BACKEND: direct
+
+      # Uncomment when a reverse proxy terminates TLS in front of this, so
+      # rate limiting sees the real client IP.
+      # POCKETAGENT_TRUST_PROXY: 'true'
+      # POCKETAGENT_ALLOWED_ORIGINS: https://pocketagent.your-tailnet.ts.net
+
+      # Encrypts custom Claude provider API keys and Telegram bot tokens at
+      # rest. Unset simply disables those features; set-but-invalid is a boot
+      # error. Losing it greys out every stored provider.
+      #   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+      # POCKETAGENT_SETTINGS_ENC_KEY: ${POCKETAGENT_SETTINGS_ENC_KEY:-}
+
+    volumes:
+      # --- The volume contract. See README's "Running with Docker". ---------
+
+      # pocketagent.db (+ its WAL sidecars), planner-workspaces/,
+      # planner-skills/. Everything the app owns and must outlive the image.
+      - pocketagent-data:/data
+
+      # Agent CLI credentials and config (~/.claude, ~/.codex, ~/.config/...),
+      # the transcript stores PocketAgent reads (~/.claude/projects,
+      # ~/.gemini/antigravity-cli/brain, ~/.pi/agent/sessions), and the agent
+      # prefix ~/.npm-global/bin that on-demand installs land in.
+      #
+      # Nothing here is logged in yet on a fresh volume. PocketAgent holds no
+      # provider credentials of its own and cannot log in for you:
+      #   docker compose -f docker/compose.yaml exec pocketagent claude
+      - pocketagent-home:/home/pocketagent
+
+      # The operator's repositories, at a path BYTE-IDENTICAL to the host.
+      # Claude Code derives its transcript directory name from the cwd
+      # (~/.claude/projects/<encoded-cwd>/, `/` -> `-`, lossy and never
+      # inverted), so mounting /home/me/src at /workspace appears to work and
+      # makes every existing conversation undiscoverable — no error, just an
+      # empty history. Absolute cwds are persisted in the database too.
+      - ${PA_WORKSPACE_ROOT}:${PA_WORKSPACE_ROOT}
+
+    # server.ts's shutdown has no force-exit timer and the session shutdown
+    # loop can legitimately spend several seconds terminating PTYs, so give it
+    # more than the 10s default before SIGKILL.
+    stop_grace_period: 30s
+
+    restart: unless-stopped
+
+volumes:
+  pocketagent-data:
+  pocketagent-home:

@@ -29,6 +29,7 @@ or use private remote-control APIs. It launches `claude` exactly the way you wou
 - [Install](#install)
 - [Configuration](#configuration)
 - [Running](#running)
+- [Running with Docker](#running-with-docker)
 - [Deploying to another machine](#deploying-to-another-machine)
   - [The data root](#the-data-root)
 - [Two interfaces: native and terminal](#two-interfaces-native-and-terminal)
@@ -154,6 +155,7 @@ running keeps running.
 | `POCKETAGENT_CLAUDE_BIN` | `claude` | Claude Code executable, resolved on `PATH`. |
 | `POCKETAGENT_SETTINGS_ENC_KEY` | — | Base64 of 32 random bytes, encrypting each custom Claude provider's API key at rest. Unset disables that feature (it is not a boot error); set-but-invalid is. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
 | `POCKETAGENT_DEEPSEEK_*`, `POCKETAGENT_OMNIROUTE_*` | — | **Deprecated.** Read once on the first boot after upgrading, to import the old built-in variants as custom Claude providers, then never again. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
+| `POCKETAGENT_WEB_DIST` | `<checkout>/apps/web/dist` | Directory the frontend is served from. The container image sets it explicitly; a normal install never needs it. If it does not exist the API still runs and page requests get a plain 404. |
 | `POCKETAGENT_BUILD_VERSION` | `package.json`, then `0.0.0-dev` | Semver reported on `/health` and in the host list. Build identity, normally stamped by the image build rather than set by hand; a malformed value is ignored with a boot warning. |
 | `LOG_LEVEL` | `info` | |
 | `NODE_ENV` | `development` | |
@@ -213,7 +215,166 @@ Set `POCKETAGENT_BACKEND=tmux` and they survive restarts — see
 
 ---
 
+## Running with Docker
+
+This is the recommended way to deploy. It removes the native-toolchain and Node-version
+problem outright — no `build-essential`, no `pnpm rebuild` after a Node upgrade, no
+architecture-pinned `node_modules` to move. `git pull && pnpm build` remains the *development*
+path.
+
+```bash
+cp docker/.env.example docker/.env      # token, workspace root, your uid/gid
+docker compose -f docker/compose.yaml up -d
+```
+
+Then open <http://127.0.0.1:8787/>.
+
+The container ships no agent CLI in the default tag, so install one (or use the `-claude`
+tag) and **log it in** — PocketAgent holds no provider credentials of its own and cannot log
+in for you:
+
+```bash
+docker compose -f docker/compose.yaml exec --user "$(id -u):$(id -g)" pocketagent \
+    npm install -g @anthropic-ai/claude-code
+docker compose -f docker/compose.yaml exec --user "$(id -u):$(id -g)" pocketagent claude
+```
+
+**`--user` on every `exec` is not optional.** `docker exec` defaults to the image's user,
+which is root, because the entrypoint needs to start as root to remap the uid before dropping
+privileges. Without the flag, an interactive login writes root-owned credential files into
+your mounted `$HOME` and the server — which runs as *you* — then cannot read them.
+
+### Tags
+
+Agent CLIs release far faster than this app, so there is no per-agent tag matrix; it would be
+stale within days.
+
+| Tag | Contains |
+| --- | --- |
+| `:<semver>`, `:latest` | Node, git, tmux, bash, the server. **No agent CLIs.** |
+| `:<semver>-claude`, `:latest-claude` | The above plus a pinned `claude`. The common case. |
+| `:<semver>-all`, `:latest-all` | Plus pinned `codex`, `opencode` and `pi`, for air-gapped or byte-reproducible installs. |
+
+Pins live in `docker/agent-versions.env`. **`agy` is deliberately absent from `-all`**: it is
+distributed as a Google-published binary with no npm package, and the registry names that look
+right (`agy`, `antigravity-cli`) are unrelated 0.0.x placeholders, so pinning one would be a
+supply-chain hazard dressed up as completeness. Install it into the mounted agent prefix
+instead.
+
+"Thin" means *no agent CLIs on PATH*, not *small*. The image is ~900 MB, most of which is one
+of the server's own dependencies: `@anthropic-ai/claude-agent-sdk` ships a ~291 MB
+platform-specific binary.
+
+### The volume contract
+
+Stable, and meant to be extended against.
+
+| Container path | Selected by | Holds | Must match the host path? |
+| --- | --- | --- | --- |
+| `/data` | `POCKETAGENT_DATA_DIR` | `pocketagent.db`, `planner-workspaces/`, `planner-skills/` | No |
+| `/home/pocketagent` | `HOME` | agent CLI credentials and config, the transcript stores (`~/.claude/projects`, `~/.gemini/…`, `~/.pi/…`), **and the agent prefix** | No |
+| `$HOME/.npm-global` | `NPM_CONFIG_PREFIX` | agent CLIs installed on demand | No |
+| your repositories | `POCKETAGENT_WORKSPACE_ROOTS` | your code | **Yes** |
+
+The agent prefix needs no separate mount: it is inside `$HOME`, and
+`~/.npm-global/bin`, `~/.local/bin` and `~/.cargo/bin` are already on the agent-binary search
+path. They come *before* `/usr/local/bin` on `PATH`, so a CLI you install on demand overrides
+the one an image pinned — deliberately, since an explicit install should beat an image
+default, and it is also how you move off a pin without rebuilding.
+
+**Mount your repositories at the same absolute path they have on the host.** `-v
+/home/me/src:/home/me/src`, never `-v /home/me/src:/workspace`. The second one appears to work
+and makes every conversation you have already had undiscoverable — see
+[On containers](#on-containers) for why, and note it applies to the database's stored `cwd`
+values too, not only to transcripts.
+
+### Matching your user
+
+Everything an agent writes in a mounted repository is written as the container's uid.
+
+```yaml
+environment:
+  PUID: 1000      # id -u
+  PGID: 1000      # id -g
+```
+
+A mismatch is worse than untidy ownership: `git` refuses a repository whose owner it cannot
+match (`detected dubious ownership`), so `git status`, the diff views and every worktree
+operation fail as well.
+
+The entrypoint **never chowns a mounted volume** — that tree is yours. It chowns only paths
+that are still part of the image (which is what makes an *empty named volume* inherit the
+right owner; a bind mount keeps the host's), and if the data root or `$HOME` is not writable
+by the mapped user it refuses to start with exit 78 and prints the exact `chown` to run.
+
+`--user $(id -u):$(id -g)` works too, but is second class: the remap needs root, so with
+`--user` there is no passwd entry for your uid, which some tools want.
+
+### Two defaults that differ from a bare-metal install
+
+- **`HOST=0.0.0.0`.** Loopback inside a network namespace means *unreachable*, not *safe*, so
+  the deliberate act that the `127.0.0.1` default exists to force moves to publishing the
+  port. The compose file publishes `127.0.0.1:8787:8787`; put Tailscale or a TLS reverse proxy
+  in front rather than widening it. The server still warns at every boot that it is bound to a
+  non-loopback address — that warning is now always true and is left in place rather than
+  suppressed.
+- **`NODE_ENV=production`, so the auth cookie is `Secure`.** A browser silently discards a
+  `Secure` cookie over plain HTTP, so login appears to succeed and bounces straight back.
+  Over plain HTTP on a tailnet or LAN, set `POCKETAGENT_COOKIE_SECURE=false` (the compose file
+  does).
+
+### The tmux backend does not belong in a container
+
+Use `direct`, which is the default. The tmux backend exists to outlive a *server* restart, and
+it still does that inside the container — but the tmux server dies with the container, so it
+buys nothing across the restart people actually mean. Two related notes:
+
+- `POCKETAGENT_ADOPT_TMUX_SOCKET` (attaching to *your own* tmux) needs the host socket
+  bind-mounted (`/tmp/tmux-<uid>/<socket>`) and a matching uid. Possible; not recommended.
+- `POCKETAGENT_TMUX_SESSION_SCOPE_SLICE` is meaningless — there is no per-user systemd manager
+  to delegate to.
+
+Conversation liveness also becomes container-scoped: PocketAgent detects a running agent by
+reading `/proc`, so agents you started on the host are not seen.
+
+### Building and extending
+
+```bash
+docker/build.sh            # thin      -> :<version>, :latest
+docker/build.sh claude
+docker/build.sh all
+PA_PLATFORM=linux/arm64 PA_PUSH=1 docker/build.sh
+```
+
+Use `docker/build.sh`, not `docker build`: it is what reads `docker/agent-versions.env` and
+what stamps the version into both the server and the web bundle. One platform per invocation —
+the Agent SDK selects an architecture- and libc-specific package at install time, so a second
+architecture is a second real build, not a copy.
+
+`docker/extend.example.Dockerfile` is a working example of adding a tool:
+
+```dockerfile
+FROM registry.shifamily.com/homestack/pocketagent-server:latest
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+Do not add a `USER` instruction and do not override `ENTRYPOINT`: the container starts as root
+so the entrypoint can remap the uid, then drops privileges itself.
+
+`pnpm demo:docker` builds the image and checks the whole contract end to end — a session that
+writes a host-owned file, `git` inside the mount, the login-shell `PATH`, state surviving
+`docker restart`, the extension example, and that the token is in no image layer.
+
+---
+
 ## Deploying to another machine
+
+This is the from-source path. **For a deployment, prefer the container image** — it exists
+precisely to make this section unnecessary ([Running with Docker](#running-with-docker)).
+What follows is still what you want for development, and for a machine where you would rather
+not run a container runtime.
 
 **Build on the target.** Not because it is tidier, but because two dependencies leave you
 no choice: `node-pty` publishes prebuilt binaries for macOS and Windows and *not* for
@@ -301,22 +462,26 @@ path was always inside the checkout that served it.
 
 ### On containers
 
-Docker is the usual answer to "package it" and a poor fit here. The point of PocketAgent is
-to run agents against *your* filesystem with *your* CLI credentials, so a working container
-ends up mounting the host filesystem, the agent's config directory and the CLI itself —
-at which point the isolation it was bought for is gone, and tmux adoption and PTY handling
-have new ways to break. Worth it only if you specifically want a pinned, repeatable build
-toolchain.
+**There is a supported image — see [Running with Docker](#running-with-docker).** This section
+is the reference for *why* its volume contract looks the way it does, and it applies to any
+containerised deployment, including one you build yourself.
 
-If you do it anyway, `POCKETAGENT_DATA_DIR` on a mounted volume is the first half. The rest of
-what the process reads lives outside the checkout too, and none of it is configurable:
+Containers do not give you isolation here, and it is worth being clear that they were not
+adopted for it. The point of PocketAgent is to run agents against *your* filesystem with
+*your* CLI credentials, so a working container mounts your repositories, your agent config
+directory and your credentials; what it buys is a pinned, repeatable runtime — no C++
+toolchain, no Node ABI to match — not a security boundary. The agent can still do anything
+your user can, inside what you mounted.
+
+`POCKETAGENT_DATA_DIR` on a mounted volume is the first half. The rest of what the process
+reads lives outside the checkout too, and none of it is configurable:
 
 | Path | Read by | What to do |
 | --- | --- | --- |
 | `~/.claude/projects` | Claude Code transcript discovery | Mount `$HOME`. |
 | `~/.gemini/antigravity-cli/brain` | agy transcript discovery | Mount `$HOME`. |
 | `~/.pi/agent/sessions` | pi transcript discovery | Mount `$HOME`. |
-| `~/.local/bin`, `~/.cargo/bin`, `~/.npm-global/bin` | agent binary discovery | Nothing — install the agent CLIs in the image. |
+| `~/.local/bin`, `~/.cargo/bin`, `~/.npm-global/bin` | agent binary discovery | Nothing extra: they are inside `$HOME`. Pin the CLIs in the image (`-claude`/`-all`) or install them into the mounted prefix. |
 
 The three transcript directories are deliberately *not* configurable. They are other
 programs' private state and PocketAgent is only a reader; a setting pointing somewhere the
@@ -1164,6 +1329,26 @@ If you upgraded Node, native modules must be rebuilt: `pnpm rebuild`.
 because it is marked `Secure` but you are on plain `http://`. Set
 `POCKETAGENT_COOKIE_SECURE=false`, or serve over HTTPS (`tailscale serve`).
 
+**Docker: login appears to do nothing.** The same cause as above, but reached by default
+rather than by choice: the image sets `NODE_ENV=production`, so the cookie is `Secure`, and a
+browser discards a `Secure` cookie over plain HTTP. Set `POCKETAGENT_COOKIE_SECURE=false`
+(`docker/compose.yaml` already does) or terminate TLS in front.
+
+**Docker: `git` says "detected dubious ownership", or agent-written files are root-owned.**
+The container's uid does not match the owner of the mounted repository. Start it with
+`-e PUID=$(id -u) -e PGID=$(id -g)`. Note this breaks more than file ownership — git refuses
+the repository outright, so the diff views and every worktree operation fail too.
+
+**Docker: the container exits immediately with code 78.** The entrypoint refused a mount it
+will not silently chown. The message names the directory and the exact `chown` to run on the
+host; `docker logs <name>` has it.
+
+**Docker: an agent CLI you installed is gone after a restart.** It was installed outside the
+mounted prefix — most likely by a `docker exec` without `--user`, which runs as root and
+writes where the server (running as you) cannot read. Install with
+`docker exec --user "$(id -u):$(id -g)" …`, which lands in `$HOME/.npm-global/bin` on the
+mounted volume.
+
 **403 `forbidden_origin`.** The `Origin` header does not match. Behind a proxy, set
 `POCKETAGENT_ALLOWED_ORIGINS=https://your.domain`.
 
@@ -1307,6 +1492,20 @@ should have told you. Raise `OUTPUT_BUFFER_BYTES`, or press `^L` to redraw.
 22. **Webhook signing secrets are stored in plaintext.** HMAC verification needs the key
     material, so there is no way around it. They live in `pocketagent.db`, which is
     another reason not to point a webhook at this checkout.
+23. **The tmux backend is pointless in a container**, and the image does not pretend
+    otherwise. It outlives a *server* restart inside the container, but the tmux server dies
+    with the container, so it does not survive the restart that matters. Adopting the host's
+    tmux needs its socket bind-mounted plus a matching uid; `POCKETAGENT_TMUX_SESSION_SCOPE_SLICE`
+    has nothing to delegate to at all. Use `direct` — see [Running with Docker](#running-with-docker).
+24. **Conversation liveness is container-scoped.** PocketAgent spots a running agent by
+    reading `/proc`, so a containerised server cannot see agents you started on the host. It
+    reports them as finished conversations rather than live ones — a sharper version of
+    limitation 11.
+25. **The published image is amd64 only, and multi-arch is a per-platform build.** The Agent
+    SDK resolves an architecture- and libc-specific package at install time, so another
+    architecture needs its own real build (`PA_PLATFORM=linux/arm64 docker/build.sh`) rather
+    than one build retagged. Nothing about the Dockerfile prevents it; no arm64 tag is
+    published yet.
 
 ---
 

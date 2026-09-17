@@ -53,4 +53,17 @@ pnpm lint               # Run eslint lint checks across packages
 pnpm typecheck          # Run type checks across packages
 pnpm test               # Run all tests using vitest
 pnpm generate-token     # Generate secure auth token in .env
+docker/build.sh         # Build the backend image: thin | claude | all
+pnpm demo:docker        # Verify the image contract against a real container
 ```
+
+**Deployment is the container image** (`docker/`); `git pull && pnpm build` is the development
+path. Build through `docker/build.sh`, never a bare `docker build` — it is what reads
+`docker/agent-versions.env` and stamps `POCKETAGENT_BUILD_VERSION` into both the server and the
+web bundle. Three rules there are load-bearing: the runtime image must preserve the repo layout
+under `/app` (`REPO_ROOT` is computed by walking four levels up from `dist/config/`, so a
+flattened tree silently re-points it at `/`); a pinned agent CLI belongs in `/usr/local/bin`,
+never the default npm prefix, which lives inside the mounted `$HOME` and is hidden by the
+volume at run time; and the entrypoint **never chowns a mounted volume** — it remaps the
+container user to `PUID`/`PGID` and refuses to start with exit 78 when a mount is unwritable,
+naming the `chown` to run on the host.

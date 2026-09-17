@@ -1,0 +1,21 @@
+# Overlay that swaps the thin image for the one with a pinned `claude` CLI.
+#
+#   docker compose -f docker/compose.yaml -f docker/compose.claude.yaml up -d
+#
+# Everything else — volumes, ports, environment — comes from compose.yaml, so
+# there is one copy of the volume contract rather than two that can drift.
+#
+# The CLI still has to be logged in once, and that is the step people forget.
+# It writes its credentials into $HOME, which is a volume, so it survives:
+#
+#   docker compose -f docker/compose.yaml -f docker/compose.claude.yaml exec pocketagent claude
+#
+# Note the PATH ordering the image sets: $HOME/.npm-global/bin comes *before*
+# /usr/local/bin, so a newer `claude` installed on demand into the mounted
+# agent prefix takes precedence over this image's pin. That is deliberate — an
+# explicit install by the operator should win over an image default — and it is
+# also the only way to move off the pin without rebuilding.
+
+services:
+  pocketagent:
+    image: registry.shifamily.com/homestack/pocketagent-server:latest-claude
