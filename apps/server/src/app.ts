@@ -7,7 +7,8 @@ import websocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
 import { AUTH_COOKIE_NAME, LIMITS, SERVER_PROTOCOL_RANGE } from '@pocketagent/protocol';
 import type { Config } from './config/index.js';
-import { AuthService, isOriginAllowed } from './auth/index.js';
+import { AuthService, bearerTokenFrom, isOriginAllowed } from './auth/index.js';
+import { HubCredentialStore } from './auth/hub-credentials.js';
 import {
   deleteWorkspace,
   insertWorkspace,
@@ -99,8 +100,26 @@ export const REDACT_PATHS: readonly string[] = [
   'req.body',
 ];
 
-/** Routes reachable without a session cookie. Everything else is closed. */
-const PUBLIC_API_PATHS = new Set(['/health', '/api/auth/login', '/api/auth/me']);
+/**
+ * Routes reachable without a session cookie. Everything else is closed.
+ *
+ * This list is the static half of the unauthenticated surface and its value is
+ * that it is *exhaustive* — `grep PUBLIC_API_PATHS` plus `grep '/api/hooks/'`
+ * (the dynamic half, below) must together enumerate everything reachable
+ * without a credential this server issued. Two of the four entries do their own
+ * authentication inside the handler instead: `login` and `hub-bind` (PA-63)
+ * both take the master token in the body, both rate-limit it, and both run the
+ * same in-handler Origin check the gate below would have applied.
+ *
+ * It stays an **exact-string Set**. That is its safety property: turning it
+ * into a prefix set is how `/api/auth/logout` accidentally becomes public.
+ */
+const PUBLIC_API_PATHS = new Set([
+  '/health',
+  '/api/auth/login',
+  '/api/auth/me',
+  '/api/auth/hub-bind',
+]);
 
 /**
  * The one *dynamic* unauthenticated surface: inbound webhook deliveries.
@@ -233,6 +252,8 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   });
 
   const auth = new AuthService(db, config.authToken, config.sessionTtlMs);
+  // PA-63: the second credential class. See `auth/hub-credentials.ts`.
+  const hubCredentials = new HubCredentialStore(db);
   const workspaces = new WorkspaceRegistry(
     config.workspaceRoots,
     createWorkspaceStore({
@@ -572,6 +593,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const context: PocketContext = {
     config,
     auth,
+    hubCredentials,
     sessions,
     cron,
     webhooks,
@@ -694,12 +716,28 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
       }
     }
 
-    const session = auth.validateSession(request.cookies[AUTH_COOKIE_NAME]);
-    if (!session) {
-      return reply
-        .code(401)
-        .send({ error: { code: 'unauthorized', message: 'Authentication required.' } });
-    }
+    if (auth.validateSession(request.cookies[AUTH_COOKIE_NAME])) return;
+
+    // PA-63: a Hub presents a long-lived bearer credential instead of a cookie,
+    // and this is the *only* place that has to know it exists — which is the
+    // whole design: every route, including the WebSocket upgrade at `/api/ws`,
+    // is authenticated by this one hook, so a hub credential reaches all of
+    // them without a single route learning a second auth path.
+    //
+    // It sits below the Origin check on purpose. A Hub is not a browser and
+    // sends no Origin, which `isOriginAllowed` already permits, so the CSRF
+    // gate costs it nothing; what the ordering buys is that a *browser* holding
+    // a stolen hub token still cannot be driven cross-site.
+    //
+    // The master token is deliberately not accepted here. It authenticates
+    // `login` and `hub-bind` and nothing else: honouring it as a bearer would
+    // recreate exactly the permanent, unrevocable root credential this feature
+    // exists to stop a Hub from having to hold.
+    if (hubCredentials.validate(bearerTokenFrom(request.headers.authorization), request.ip)) return;
+
+    return reply
+      .code(401)
+      .send({ error: { code: 'unauthorized', message: 'Authentication required.' } });
   });
 
   // ---- Routes ---------------------------------------------------------------

@@ -59,6 +59,33 @@ export interface AuthSessionRow {
 }
 
 /**
+ * The `hub_credentials` table (PA-63).
+ *
+ * Note what is absent: any form of the token that could be presented back to
+ * this server. `token_sha256` is a one-way digest, and `token_prefix` is the
+ * leading characters kept deliberately in the clear so a list UI can identify
+ * a row. The backend only ever *verifies* a hub credential, never replays one,
+ * so there is nothing here for an encryption key to protect — unlike a custom
+ * Claude provider's API key or a Telegram bot token, both of which this process
+ * has to hand to somebody else in plaintext and therefore stores with
+ * `crypto/secret-box.ts`. A copied `pocketagent.db` yields no usable
+ * credential, which is the property PA-63 exists to create.
+ *
+ * There is no `expires_at`, unlike `auth_sessions`: a hub credential is
+ * long-lived by design and revocation is its entire lifecycle, so a sweep that
+ * silently deleted one would take a Hub offline with no operator action.
+ */
+export interface HubCredentialRow {
+  id: string;
+  label: string;
+  token_sha256: string;
+  token_prefix: string;
+  created_at: number;
+  last_seen_at: number | null;
+  last_seen_ip: string | null;
+}
+
+/**
  * The `custom_claude_providers` table (PA-28).
  *
  * A named constant rather than an inline migration string because it is used
@@ -1247,6 +1274,29 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX IF NOT EXISTS idx_sessions_planner_chat_id ON sessions (planner_chat_id);
   ALTER TABLE planner_chats ADD COLUMN parent_chat_id TEXT REFERENCES planner_chats(id) ON DELETE SET NULL;
   CREATE INDEX IF NOT EXISTS idx_planner_chats_parent ON planner_chats (parent_chat_id);
+  `,
+  // PA-63: hub credentials. See `HubCredentialRow`'s doc comment for why this
+  // table holds a digest rather than a secret-box ciphertext, and why it has no
+  // `expires_at`.
+  //
+  // `token_sha256` is UNIQUE because it is the lookup key on every
+  // bearer-authenticated request: one indexed equality per request is what lets
+  // revocation be a plain row delete that takes effect on the very next request
+  // with no cache to invalidate. The uniqueness constraint itself is belt and
+  // braces — a collision would mean a sha256 preimage — but it also makes an
+  // accidental double-insert of one token impossible to miss.
+  `
+  CREATE TABLE IF NOT EXISTS hub_credentials (
+    id           TEXT PRIMARY KEY,
+    label        TEXT NOT NULL,
+    token_sha256 TEXT NOT NULL UNIQUE,
+    token_prefix TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    last_seen_at INTEGER,
+    last_seen_ip TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_hub_credentials_created_at ON hub_credentials (created_at);
   `,
 ];
 

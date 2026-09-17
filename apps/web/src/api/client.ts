@@ -17,6 +17,7 @@ import type {
   HealthResponse,
   HostInfo,
   UpdateCronJobRequest,
+  HubCredentialListResponse,
   MeResponse,
   ProjectInfo,
   SessionInfo,
@@ -247,6 +248,21 @@ export function createApiClient(endpoint: HostEndpoint) {
     logout: () => request<{ ok: true }>('/api/auth/logout', { method: 'POST' }),
 
     me: () => request<MeResponse>('/api/auth/me'),
+
+    /**
+     * PA-63: bound hubs, and revoking one.
+     *
+     * There is deliberately no `bindHub` here. Binding is the *Hub's* own act,
+     * authenticated with the master token an operator pastes into the Hub
+     * once — a browser minting one would mean this app holding the master
+     * token again, which is the thing the feature removes. So the backend UI
+     * gets exactly the two halves the ticket asks for: visibility, and
+     * revocation.
+     */
+    listHubs: () => request<HubCredentialListResponse>('/api/auth/hubs'),
+
+    revokeHub: (id: string) =>
+      request<{ ok: true }>(`/api/auth/hubs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
     listSessions: () => request<{ sessions: SessionInfo[] }>('/api/sessions'),
 

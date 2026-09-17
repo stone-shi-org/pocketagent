@@ -5,6 +5,7 @@ import { Icon, type IconName } from '../components/Icon.js';
 import { CustomClaudeProvidersSection } from '../components/CustomClaudeProvidersSection.js';
 import { CodingAgentsSection } from '../components/CodingAgentsSection.js';
 import { TelegramSection } from '../components/TelegramSection.js';
+import { HubsSection } from '../components/HubsSection.js';
 import { getTerminalFontOverride, setTerminalFontOverride } from '../agent/terminal-font-pref.js';
 import { formatBuildInfo } from '../version.js';
 
@@ -358,6 +359,14 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
         desc="Claude Code driven against a third-party Anthropic-compatible endpoint."
       >
         <CustomClaudeProvidersSection onApiError={onApiError} />
+      </SectionCard>
+
+      <SectionCard
+        title="Hubs"
+        icon="laptop"
+        desc="Hubs bound to this backend, and revoking one. A Hub stores a credential minted here, never this server's access token."
+      >
+        <HubsSection onApiError={onApiError} />
       </SectionCard>
 
       <SectionCard

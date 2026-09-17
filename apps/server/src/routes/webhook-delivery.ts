@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { bearerTokenFrom } from '../auth/index.js';
 
 /**
  * Inbound webhook deliveries — the only unauthenticated route in this server.
@@ -76,7 +77,7 @@ export const webhookDeliveryRoutes: FastifyPluginAsync = async (app) => {
         signatureHeader: firstHeader(
           request.headers['x-hub-signature-256'] ?? request.headers['x-hub-signature'],
         ),
-        bearerToken: bearerFrom(firstHeader(request.headers.authorization)),
+        bearerToken: bearerTokenFrom(request.headers.authorization),
         // Kept only for correlating with Jira's own delivery log. It is a
         // header, therefore outside the signature, therefore attacker-mutable —
         // never a defence. Replay is stopped by the body hash.
@@ -118,10 +119,4 @@ export const webhookDeliveryRoutes: FastifyPluginAsync = async (app) => {
 function firstHeader(value: string | string[] | undefined): string | null {
   if (value === undefined) return null;
   return Array.isArray(value) ? (value[0] ?? null) : value;
-}
-
-function bearerFrom(header: string | null): string | null {
-  if (header === null) return null;
-  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
-  return match?.[1]?.trim() ?? null;
 }

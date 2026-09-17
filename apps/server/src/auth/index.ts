@@ -16,6 +16,24 @@ export function generateToken(bytes = 32): string {
   return crypto.randomBytes(bytes).toString('base64url');
 }
 
+/**
+ * Parse an `Authorization: Bearer <token>` header, or `null`.
+ *
+ * One definition, used by both things in this server that accept a bearer
+ * token: the request gate's hub credentials (PA-63) and a webhook whose sender
+ * cannot sign its payloads (`routes/webhook-delivery.ts`). They are unrelated
+ * credential classes, but "what counts as a Bearer header" must not be able to
+ * differ between two auth paths — a second copy is how one of them ends up
+ * accepting a form the other rejects.
+ */
+export function bearerTokenFrom(header: string | string[] | undefined): string | null {
+  if (header === undefined) return null;
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (raw === undefined) return null;
+  const match = /^Bearer\s+(.+)$/i.exec(raw.trim());
+  return match?.[1]?.trim() ?? null;
+}
+
 export interface AuthSession {
   id: string;
   expiresAt: number;

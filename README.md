@@ -41,6 +41,7 @@ or use private remote-control APIs. It launches `claude` exactly the way you wou
 - [Tidying the list](#tidying-the-list)
 - [Layouts](#layouts)
 - [Security model](#security-model)
+  - [Hub credentials](#hub-credentials)
   - [Continuing a chat on another provider](#continuing-a-chat-on-another-provider)
 - [How it works](#how-it-works)
 - [Development](#development)
@@ -535,9 +536,10 @@ What it does enforce:
 | Boundary | Implementation |
 | --- | --- |
 | Default reachability | Binds `127.0.0.1`; anything else is explicit and logs a warning. |
-| Authentication | Every route except `/health`, the login endpoints, and `POST /api/hooks/:slug` requires a valid session cookie — including the WebSocket upgrade. The one exception authenticates itself by HMAC over the raw request body; see [Inbound webhooks](#inbound-webhooks-and-what-they-change). |
+| Authentication | Every route except `/health`, the login endpoints, `POST /api/auth/hub-bind` and `POST /api/hooks/:slug` requires either a valid session cookie or a hub credential — including the WebSocket upgrade. `hub-bind` takes the access token in its body and is rate-limited like login; the delivery route authenticates itself by HMAC over the raw request body (see [Inbound webhooks](#inbound-webhooks-and-what-they-change)). |
 | Health disclosure | `/health` is unauthenticated on purpose, so a front server can tell whether a backend is usable before it holds a credential for it. It returns only `status`, `version`, `protocol` and `uptimeSeconds` — the semver does tell an unauthenticated caller which build is running, which is accepted; a commit SHA, build host, path or config value must go behind the cookie instead, and a test pins the field list so adding one is deliberate. |
 | Token handling | The master token is exchanged once at login for a random 32-byte session id in an `HttpOnly; SameSite=Strict` cookie. The token never reaches JavaScript, localStorage, or the URL. Comparison is constant-time. |
+| Hub credentials | A Hub authenticates with a named, revocable credential instead of storing this backend's access token — see [Hub credentials](#hub-credentials). Only `sha256(token)` is stored, so a copied database yields nothing presentable, and the access token is never accepted as a bearer token. |
 | Brute force | Login is rate-limited to 8 attempts/minute; other routes to 300/minute. |
 | CSRF | `SameSite=Strict` plus an explicit `Origin` check on every state-changing request and on the WebSocket handshake. |
 | Command execution | The browser picks an **agent id** from a server-side registry and a **cwd**. It cannot supply a command, arguments, or environment. Adapters return `argv[]` and are spawned without a shell. |
@@ -556,6 +558,45 @@ The optional terminal classifier emits advisory hints (`working`, `waiting_for_i
 `possible_approval_prompt`, `idle`) that drive a best-effort push notification when a
 terminal session goes quiet (see below). These hints **never** cause input to be sent and
 can never approve anything.
+
+### Hub credentials
+
+A Hub — one front end onto several PocketAgent backends — needs a credential for each backend
+it talks to. The obvious choice is the wrong one: if it stores five access tokens, then one
+compromised Hub is five machines rooted permanently, and the only remedy is editing five `.env`
+files by hand and re-pairing everything.
+
+So a backend mints credentials of its own instead:
+
+```bash
+# The Hub does this once, with the access token an operator pasted into it.
+curl -X POST http://127.0.0.1:8787/api/auth/hub-bind \
+  -H 'content-type: application/json' \
+  -d '{"token":"<POCKETAGENT_AUTH_TOKEN>","label":"kitchen hub"}'
+# => {"id":"…","label":"kitchen hub","token":"pah_…","createdAt":…}
+```
+
+The Hub keeps the `pah_…` token and discards the access token; from then on it sends
+`Authorization: Bearer pah_…` on every request, including the WebSocket upgrade. The backend
+lists what is bound under **Settings → Hubs** and revokes any of them there, which takes effect
+on the next request with no restart.
+
+Four properties are worth stating plainly, because each one is a deliberate choice:
+
+- **It is not a permissions model.** A hub credential is full access, exactly like a session.
+  What it buys is revocability and not having to write the root token down; restricting what a
+  Hub may *do* is a separate question that has not been answered yet.
+- **The access token is never a bearer token.** It authenticates `login` and `hub-bind`, and
+  nothing else. Accepting it as a bearer token would put back the unrevocable root credential
+  this exists to remove.
+- **The backend stores only a digest.** There is no reveal endpoint, and not because of a
+  policy — after the bind response there is nothing left to reveal. A Hub that loses its token
+  binds again, and the operator revokes the stale row.
+- **A Hub can revoke other hubs**, since it has full access. That is denial of service rather
+  than escalation: it cannot mint a replacement, because binding requires the access token.
+
+Binding requires no new configuration, and the credential is bound to no particular Hub
+implementation — `apps/hub` does not exist in this repository yet.
 
 ### Continuing a chat on another provider
 

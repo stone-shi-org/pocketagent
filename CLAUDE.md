@@ -279,7 +279,10 @@ slug distinguishable from a known one — a slug enumeration oracle. It has its 
 namespace rather than sitting under `/api/webhooks/`, because that path also holds management
 CRUD and an exemption that has to tell a slug from an `:id` is one bad `startsWith` from
 opening `DELETE /api/webhooks/:id` to the internet. `grep '/api/hooks/'` must therefore
-enumerate the entire unauthenticated surface, forever.
+enumerate the entire *dynamic* unauthenticated surface, forever — and `PUBLIC_API_PATHS`
+(`app.ts`) the entire static one, which PA-63 widened from three entries to four
+(`/api/auth/hub-bind`). That guarantee is worth something only while both lists are exhaustive,
+so a route added to either is a decision to state here, not a line of code.
 
 `routes/webhook-delivery.ts` is its own Fastify plugin scope for one reason: HMAC has to be
 computed over the exact bytes the sender signed, and Fastify's JSON parser hands back an object
@@ -898,6 +901,38 @@ and `terminal/event-buffer.ts` for structured events). Each stream also has an *
 seq numbers are only meaningful within one run, so a resume with a stale epoch forces a
 truncated full replay rather than splicing a corrupt ANSI stream.
 
+### Hub credentials (PA-63)
+
+The second credential class, and the first addition to `auth/` since the session cookie.
+`POCKETAGENT_AUTH_TOKEN` is the *root* credential — it exchanges for a session, and a session is
+terminal access as this user — so a Hub fronting five backends by storing five master tokens is
+five machines rooted permanently by one Hub compromise, with no revocation short of editing five
+`.env` files and re-pairing everything. `POST /api/auth/hub-bind` takes the master token once
+and returns a named, revocable credential; `GET /api/auth/hubs` and `DELETE /api/auth/hubs/:id`
+are the property the master token cannot offer, which is visibility and a way to cut one off.
+
+**It is not a permissions model, and saying so is part of the design** — a hub credential is
+full-access, exactly like a session, and narrowing what one may *do* was explicitly ruled out of
+scope on the ticket rather than forgotten. What follows from that is the one accepted cost: a
+Hub can revoke its siblings, because it can reach every route. That is denial of service, not
+escalation, and it still cannot *mint* — `hub-bind` takes the master token only, so a compromised
+Hub cannot give itself a credential that survives the revocation of the one it was holding.
+
+Three things make it cheap, and each is load-bearing rather than incidental. The check lives in
+`app.ts`'s **single** `onRequest` gate beside `validateSession`, so no route learns a second auth
+path and the WebSocket upgrade — a Hub proxying a terminal is the whole point — is covered for
+free. The carrier is `Authorization: Bearer`, which is *already* on `REDACT_PATHS`, so "nothing
+logs the credential" holds by construction rather than by a rule someone has to remember. And
+`hub_credentials` stores `sha256(token)` rather than a `crypto/secret-box.ts` ciphertext, which
+is a deliberate divergence from the ticket's own wording, approved on it: secret-box exists for
+secrets this process must read back in plaintext (a provider's `ANTHROPIC_AUTH_TOKEN`, a bot
+token it must send to Telegram), and the backend only ever *verifies* a hub credential. The
+**Hub** side is the one that must replay it, so secret-box is right there and lands with
+`apps/hub` (PA-66), which does not exist in this repository yet. Consequently there is no reveal
+route and not even a reveal *decision*: past the bind response there is nothing to reveal, and
+`token_prefix` — the leading characters kept in the clear — is what lets a list row be matched
+against the token in hand.
+
 ## Invariants
 
 These are load-bearing. Several were bugs first.
@@ -1151,6 +1186,23 @@ These are load-bearing. Several were bugs first.
   that possible, and `ConversationWatchConnection` had to be fixed to honour it: it shipped
   with no `PROTOCOL_MISMATCH` branch at all and reconnected forever on a backoff, invisibly,
   because a chat preview draws no connection state.
+- **A hub credential is a second principal, never a second root** (PA-63). `POST
+  /api/auth/hub-bind` is the only new way to obtain one, it takes the *master* token (rate-limited
+  and Origin-checked exactly as `login` is, since `PUBLIC_API_PATHS` skips the gate for both), and
+  what it returns is full-access — deliberately, because the win is revocability rather than
+  least-privilege. Four things hold it in place. The master token is **never** accepted as a
+  bearer credential, or the unrevocable root credential this removes would be straight back. The
+  gate is `app.ts`'s one `onRequest` hook, so every route including `/api/ws` accepts a hub
+  credential and none of them knows it exists. The stored form is `sha256(token)` and nothing
+  else — no ciphertext, no reveal route, so a copied `pocketagent.db` yields nothing presentable,
+  and an audit line (`hubId`/`label`, never the token) is not one step from recovering one.
+  And **validation reads the row on every request with no cache**, which is the whole reason
+  revocation is immediate with no restart: an in-memory roster would be a faster wrong answer,
+  the same "read the flag fresh" discipline `setGlobalSkipPermissions` follows. A hub credential
+  has no `expires_at` (revocation is its only lifecycle, so no sweep may delete one) and lives in
+  its own table, so nothing that clears sessions touches it. The accepted cost, stated because it
+  is a real one: a compromised Hub can revoke its siblings — denial of service, not escalation,
+  since it cannot mint. All of it is asserted in `apps/server/tests/hub-credentials.test.ts`.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.

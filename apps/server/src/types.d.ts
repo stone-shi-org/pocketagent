@@ -1,5 +1,6 @@
 import type { Config } from './config/index.js';
 import type { AuthService } from './auth/index.js';
+import type { HubCredentialStore } from './auth/hub-credentials.js';
 import type { SessionManager } from './sessions/manager.js';
 import type { WorkspaceRegistry } from './workspaces/index.js';
 import type { AgentRegistry } from './agents/registry.js';
@@ -28,6 +29,9 @@ import type { TelegramLinksStore } from './telegram/links-store.js';
 export interface PocketContext {
   config: Config;
   auth: AuthService;
+  /** PA-63: hub credentials — the second credential class, checked by the same
+      `onRequest` gate that checks a session cookie. */
+  hubCredentials: HubCredentialStore;
   sessions: SessionManager;
   cron: CronService;
   webhooks: WebhookService;
