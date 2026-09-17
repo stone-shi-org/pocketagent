@@ -120,12 +120,14 @@ export interface SkillRegistryServiceOptions {
   logger: FastifyBaseLogger;
 }
 
-/** Where the global skills root lives relative to the database, mirroring
-    `plannerWorkspacesRoot`'s own derivation in `app.ts` (a sibling of
-    `data/pocketagent.db`'s directory). Exported so `app.ts` and tests agree
-    on the same path without duplicating the `path.join` call. */
-export function resolvePlannerSkillsRoot(databasePath: string): string {
-  return path.join(path.dirname(databasePath), 'planner-skills');
+/** Where the global skills root lives inside the data root, mirroring
+    `plannerWorkspacesRoot`'s own derivation in `app.ts` (both are siblings of
+    `pocketagent.db`). Exported so `app.ts` and tests agree on the same path
+    without duplicating the `path.join` call. Takes `config.dataDir` rather
+    than the database path it used to take the dirname of — see that field's
+    own doc comment for why the root is named directly (PA-62). */
+export function resolvePlannerSkillsRoot(dataDir: string): string {
+  return path.join(dataDir, 'planner-skills');
 }
 
 /** `<source>:<slug>` — never ambiguous to split, because a slug never

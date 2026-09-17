@@ -30,6 +30,7 @@ or use private remote-control APIs. It launches `claude` exactly the way you wou
 - [Configuration](#configuration)
 - [Running](#running)
 - [Deploying to another machine](#deploying-to-another-machine)
+  - [The data root](#the-data-root)
 - [Two interfaces: native and terminal](#two-interfaces-native-and-terminal)
 - [Picking up work you started elsewhere](#picking-up-work-you-started-elsewhere)
 - [Scheduled jobs](#scheduled-jobs)
@@ -97,8 +98,9 @@ the server fails loudly with instructions instead. Tokens shorter than 24 charac
 rejected.
 
 To rotate: edit `POCKETAGENT_AUTH_TOKEN` in `.env` and restart. Existing browser sessions
-keep working until their cookies expire — to force everyone out, delete `data/pocketagent.db`
-(this also clears session history) or `DELETE FROM auth_sessions;`.
+keep working until their cookies expire — to force everyone out, delete `pocketagent.db` from
+your [data root](#the-data-root) (this also clears session history) or
+`DELETE FROM auth_sessions;`.
 
 ### Project folders
 
@@ -136,6 +138,7 @@ running keeps running.
 | `PORT` | `8787` | |
 | `POCKETAGENT_AUTH_TOKEN` | — | **Required.** Min 24 chars. |
 | `POCKETAGENT_WORKSPACE_ROOTS` | — | Optional. Seeds project folders on a fresh database only. |
+| `POCKETAGENT_DATA_DIR` | `<checkout>/data` | Where the database and the Pocket Agent scratch/skills directories live. Refused if it resolves inside a project folder. See [The data root](#the-data-root). |
 | `POCKETAGENT_SESSION_TTL_HOURS` | `720` | How long a browser stays signed in. |
 | `POCKETAGENT_COOKIE_SECURE` | auto | `Secure` cookie flag; defaults to on when `NODE_ENV=production`. |
 | `POCKETAGENT_ALLOWED_ORIGINS` | same-origin | Comma-separated Origin allowlist. |
@@ -240,7 +243,7 @@ Then wire up the service unit from [Running it as a service](#running-it-as-a-se
   the step that gets forgotten.
 - **A fresh access token.** Generate one there — do not copy `.env` across. One token on two
   hosts means one leak costs you both.
-- **A fresh database.** Do not copy `data/pocketagent.db`. It records sessions that
+- **A fresh database.** Do not copy `pocketagent.db`. It records sessions that
   reference process ids, tmux session names and paths belonging to the old machine, along
   with a project-folder list pointing at directories that may not exist here. Start empty
   and add folders from the app.
@@ -260,6 +263,41 @@ or against an older glibc, usually with a linker error rather than a clear one.
 If you later upgrade Node across a major version, the compiled `.node` files stop loading
 with an ABI mismatch. `pnpm rebuild` fixes it.
 
+### The data root
+
+Everything PocketAgent itself owns and writes lives under one directory:
+
+```
+<checkout>/data/
+├── pocketagent.db          # sessions, project folders, webhooks, cron jobs, secrets
+├── planner-workspaces/     # each Pocket Agent's scratch directory
+└── planner-skills/         # the global skills root
+```
+
+`POCKETAGENT_DATA_DIR` moves all three together. Unset, it is `<checkout>/data` — which is
+where every install had it before the variable existed, so leaving it alone changes nothing.
+
+You want it for one reason: the data root is the only thing that has to survive replacing the
+checkout. A container image contains the checkout, so without this the database dies with the
+image.
+
+Two things are worth knowing before you set it:
+
+- **It is refused if it resolves inside a project folder**, with an error at boot. The
+  database holds webhook signing secrets in plaintext and custom provider API keys
+  encrypted, and an agent working in that tree can rewrite or delete the lot — `git clean
+  -xfd` is enough. A project folder *inside* the data root is allowed: one volume holding
+  both your repos and the state is a reasonable layout, and the hazard does not run that way.
+  Only the folders seeded from `POCKETAGENT_WORKSPACE_ROOTS` are checked, so a folder you add
+  later from the app can still come to contain the data root and nothing will re-check it.
+- **Every boot logs the data root it opened** (`"data root"`, at `info`). If a server looks
+  like it has someone else's chats in it, read that line first.
+
+If you run the demo scripts (`pnpm demo:*` against a `PA_BASE` scratch server), point this at
+a throwaway directory outside every project folder. That is how a scratch server isolates
+itself now; previously the only way was to run it from a second checkout, because the database
+path was always inside the checkout that served it.
+
 ### On containers
 
 Docker is the usual answer to "package it" and a poor fit here. The point of PocketAgent is
@@ -268,6 +306,31 @@ ends up mounting the host filesystem, the agent's config directory and the CLI i
 at which point the isolation it was bought for is gone, and tmux adoption and PTY handling
 have new ways to break. Worth it only if you specifically want a pinned, repeatable build
 toolchain.
+
+If you do it anyway, `POCKETAGENT_DATA_DIR` on a mounted volume is the first half. The rest of
+what the process reads lives outside the checkout too, and none of it is configurable:
+
+| Path | Read by | What to do |
+| --- | --- | --- |
+| `~/.claude/projects` | Claude Code transcript discovery | Mount `$HOME`. |
+| `~/.gemini/antigravity-cli/brain` | agy transcript discovery | Mount `$HOME`. |
+| `~/.pi/agent/sessions` | pi transcript discovery | Mount `$HOME`. |
+| `~/.local/bin`, `~/.cargo/bin`, `~/.npm-global/bin` | agent binary discovery | Nothing — install the agent CLIs in the image. |
+
+The three transcript directories are deliberately *not* configurable. They are other
+programs' private state and PocketAgent is only a reader; a setting pointing somewhere the
+owning CLI never writes would fail as "no history" rather than as an error, which is worse
+than having no setting at all.
+
+**Mount every project folder at the same absolute path it has on the host.** This one is not
+obvious and it fails silently. Claude Code derives a transcript's directory name from the
+working directory (`~/.claude/projects/<encoded-cwd>/`, with `/` replaced by `-`), and that
+encoding is lossy and never inverted. A repo at `/home/you/src/app` on the host, mounted at
+`/workspace/app` in the container, produces an entirely different directory name — so every
+conversation you already had becomes undiscoverable, with an empty history and no error. The
+pi and agy stores key off session directories the same way, and the database itself records
+absolute `cwd` values on session and webhook rows, so a relocated workspace mount and a
+relocated data root can also invalidate each other.
 
 ---
 
@@ -504,7 +567,7 @@ directory rather than from which API it talked to, so the new turns append to th
 conversation the Anthropic turns are in.
 
 **Setting one up.** Generate an encryption key once, since the API key is stored encrypted in
-`data/pocketagent.db`:
+`pocketagent.db`:
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
@@ -618,9 +681,11 @@ server holding a Jira or GitHub token, or `~/.aws/credentials`. A successful inj
 webhook session can exfiltrate anything your machine can reach. Real isolation is a container,
 and that is a different piece of work.
 
-**Do not point a webhook at this checkout.** `data/pocketagent.db` holds webhook signing secrets
+**Do not point a webhook at this checkout.** `pocketagent.db` holds webhook signing secrets
 in plaintext — HMAC needs the key material, so there is no alternative — and an agent running
-with approvals bypassed inside this repository could read them.
+with approvals bypassed inside this repository could read them. Moving the database out with
+`POCKETAGENT_DATA_DIR` does not make this safe: the checkout still holds the `.env` with your
+access token in it.
 
 ---
 
@@ -1199,7 +1264,7 @@ should have told you. Raise `OUTPUT_BUFFER_BYTES`, or press `^L` to redraw.
     deliberate act, and the editor says what it means. See
     [Inbound webhooks](#inbound-webhooks-and-what-they-change).
 22. **Webhook signing secrets are stored in plaintext.** HMAC verification needs the key
-    material, so there is no way around it. They live in `data/pocketagent.db`, which is
+    material, so there is no way around it. They live in `pocketagent.db`, which is
     another reason not to point a webhook at this checkout.
 
 ---

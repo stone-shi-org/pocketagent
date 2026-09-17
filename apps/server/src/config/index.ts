@@ -78,6 +78,14 @@ const RawEnv = z.object({
   POCKETAGENT_WEB_DIST: z.string().optional(),
 
   /**
+   * App-owned data root (PA-62). Unset is `<REPO_ROOT>/data`, so an existing
+   * install is unaffected; set, it relocates the database and the planner's
+   * own scratch/skills roots together, which is what a container needs to put
+   * all mutable state on one mounted volume.
+   */
+  POCKETAGENT_DATA_DIR: z.string().optional(),
+
+  /**
    * Base64 of 32 raw bytes, encrypting the API key of every custom Claude
    * provider at rest (PA-28). See `crypto/secret-box.ts`.
    *
@@ -130,14 +138,31 @@ export interface Config {
   /** null means "accept any Origin" (only permitted outside production). */
   allowedOrigins: string[] | null;
   /**
-   * Always `<REPO_ROOT>/data/pocketagent.db` — not configurable. Unlike
-   * everything in `settings/fields.ts`, this can never move into the database
-   * it names (chicken-and-egg), and unlike `HOST`/`PORT` there's no boot-order
-   * reason it needs an env var either — the two moving parts (per-checkout
-   * isolation for demos/tests, per-machine persistence for a real deploy) are
-   * both already handled by *which checkout* this process runs from, so a
-   * second knob here only adds a way to point two different processes at the
-   * same file by accident.
+   * Every mutable, app-owned directory hangs off this one root (PA-62):
+   * `pocketagent.db`, `planner-workspaces/`, `planner-skills/`. It is
+   * `POCKETAGENT_DATA_DIR` when set and `<REPO_ROOT>/data` when not, and it
+   * can never move into the database it names (chicken-and-egg), which is why
+   * it is an env var rather than a row in `settings/fields.ts`.
+   *
+   * It exists as its own field, rather than being recovered from
+   * `path.dirname(databasePath)` the way the planner roots used to recover it,
+   * because a data root that is an implicit property of a filename is one
+   * `basename` change away from silently moving two unrelated directories.
+   */
+  dataDir: string;
+  /**
+   * `<dataDir>/pocketagent.db`.
+   *
+   * This was deliberately *not* configurable until PA-62, on the grounds that
+   * per-checkout isolation for demos and per-machine persistence for a deploy
+   * were both already answered by *which checkout* the process runs from, so a
+   * second knob only added a way to point two processes at one file by
+   * accident. A containerised backend cannot satisfy that — the checkout is in
+   * the image and the state has to outlive it — so the knob exists now, and
+   * what replaces the old structural guarantee is `resolveDataDir`'s refusal to
+   * put the data root inside a workspace root plus the boot log naming the root
+   * that was opened. Demo scripts isolate themselves by setting the variable;
+   * see CLAUDE.md.
    */
   databasePath: string;
   maxSessions: number;
@@ -257,6 +282,88 @@ function canonicalizeRoots(raw: string): string[] {
   return roots;
 }
 
+/**
+ * Absolute, symlink-resolved form of a path that does not necessarily exist
+ * yet — the data root is created on first boot (`openDatabase` mkdirs it), so
+ * it cannot be handed straight to `realpathSync` the way a workspace root can.
+ * Resolves the deepest ancestor that *does* exist and re-appends the rest, so
+ * a symlinked parent is still collapsed before containment is tested.
+ */
+function realpathUncreated(target: string): string {
+  const absolute = path.resolve(target);
+  let current = absolute;
+  const tail: string[] = [];
+  for (;;) {
+    let real: string;
+    try {
+      real = fs.realpathSync(current);
+    } catch {
+      const parent = path.dirname(current);
+      // Reached the filesystem root without finding anything that exists:
+      // nothing to resolve, so the plain absolute path is the best answer.
+      if (parent === current) return absolute;
+      tail.unshift(path.basename(current));
+      current = parent;
+      continue;
+    }
+    return tail.length > 0 ? path.join(real, ...tail) : real;
+  }
+}
+
+/**
+ * PA-62. Unset returns today's path and skips every check below, which is what
+ * makes an existing install bit-for-bit unaffected — and is load-bearing for a
+ * second reason: a dev checkout is very often itself inside a workspace root,
+ * so applying the containment refusal to the default would fail the boot of
+ * installs that have worked for months.
+ *
+ * An explicitly set root is checked, because making this configurable removed a
+ * structural guarantee (see `Config.databasePath`) and an env var that can be
+ * pointed anywhere should at least refuse the one place it must never go: a
+ * tree an agent is allowed to edit. `pocketagent.db` holds webhook signing
+ * secrets and encrypted provider keys, and an agent running `git clean -xfd`,
+ * or a worktree delete, would take it out — the same "app state does not live
+ * inside an agent-writable tree" rule `usage/probe-cwd.ts` records after the
+ * rate-limit poller filed 288 transcripts a day into a workspace.
+ *
+ * Known limit, deliberately not papered over: this sees only the roots *seeded*
+ * from the environment. The real folder list lives in the database and is
+ * managed from the UI, so a folder added later can still come to contain the
+ * data root, and nothing re-checks at that point.
+ */
+function resolveDataDir(raw: string | undefined, workspaceRoots: string[]): string {
+  const configured = raw?.trim();
+  if (!configured) return path.join(REPO_ROOT, 'data');
+
+  const expanded = configured.startsWith('~')
+    ? path.join(os.homedir(), configured.slice(1))
+    : configured;
+  const resolved = realpathUncreated(expanded);
+
+  if (resolved === '/') {
+    throw new ConfigError('POCKETAGENT_DATA_DIR refuses to use "/" as the data root.');
+  }
+
+  for (const root of workspaceRoots) {
+    const rel = path.relative(root, resolved);
+    const inside = rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    if (inside) {
+      throw new ConfigError(
+        `POCKETAGENT_DATA_DIR (${resolved}) is inside the workspace root ${root}.\n\n` +
+          `The data root holds pocketagent.db — webhook signing secrets and ` +
+          `encrypted provider API keys — plus the Pocket Agent scratch and skills ` +
+          `directories. An agent working in that tree can rewrite or delete all of ` +
+          `it. Point POCKETAGENT_DATA_DIR outside every workspace root.`,
+      );
+    }
+  }
+
+  // Note the reverse direction is allowed on purpose: a workspace root *inside*
+  // the data root is a plausible container layout (one volume at /data holding
+  // both repos and state), and the hazard above does not run that way.
+  return resolved;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = RawEnv.safeParse(env);
   if (!parsed.success) {
@@ -294,7 +401,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   const isProduction = e.NODE_ENV === 'production';
 
-  const databasePath = path.join(REPO_ROOT, 'data', 'pocketagent.db');
+  // Hoisted out of the returned object literal because `resolveDataDir` has to
+  // test the data root against these.
+  const workspaceRoots = canonicalizeRoots(rootsRaw);
+
+  const dataDir = resolveDataDir(e.POCKETAGENT_DATA_DIR, workspaceRoots);
+  const databasePath = path.join(dataDir, 'pocketagent.db');
 
   const webDistPath = e.POCKETAGENT_WEB_DIST
     ? path.resolve(e.POCKETAGENT_WEB_DIST)
@@ -317,8 +429,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port: e.PORT,
     logLevel: e.LOG_LEVEL,
     authToken: token,
-    workspaceRoots: canonicalizeRoots(rootsRaw),
+    workspaceRoots,
     allowedOrigins,
+    dataDir,
     databasePath,
     maxSessions: e.MAX_SESSIONS,
     outputBufferBytes: e.OUTPUT_BUFFER_BYTES,

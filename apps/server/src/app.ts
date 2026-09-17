@@ -140,10 +140,10 @@ export interface BuildAppOptions {
   piTranscripts?: PiTranscriptStore;
   /**
    * Injected in tests so each run gets an isolated directory instead of the
-   * real `<REPO_ROOT>/data/planner-workspaces` — `config.databasePath` is not
-   * test-aware (see its own doc comment: always `<REPO_ROOT>/data/pocketagent.db`),
-   * so without this override every test run would create real directories on
-   * the host next to the real database.
+   * real `<REPO_ROOT>/data/planner-workspaces` — a test builds its `Config`
+   * without setting `POCKETAGENT_DATA_DIR`, so `config.dataDir` is the real
+   * checkout's, and without this override every test run would create real
+   * directories on the host next to the real database.
    */
   plannerWorkspacesRoot?: string;
   /** Same reasoning as `plannerWorkspacesRoot`, one layer up: the global
@@ -249,6 +249,15 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // quietly stops working.
   if (VERSION_WARNING !== null) app.log.warn(VERSION_WARNING);
 
+  // PA-62: say which data root was opened, every boot. Before the root was
+  // configurable it was impossible to point a scratch server at the real
+  // database; now it is only *unlikely*, and this line is what turns a
+  // mispointed `POCKETAGENT_DATA_DIR` into something observable rather than a
+  // demo script quietly writing into the deployment's state. Logged whether or
+  // not the variable is set, since "which database am I using" is the question
+  // being answered and the default is as worth stating as an override.
+  app.log.info({ dataDir: config.dataDir }, 'data root');
+
   if (workspaces.getRoots().length === 0) {
     app.log.warn(
       'No project folders yet. Add one from the app, or set ' +
@@ -257,13 +266,13 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   }
 
   // PA-6 phase 1: the planner's own app-owned scratch/skills directories,
-  // sibling to `data/pocketagent.db` rather than a user-picked folder —
-  // deriving from `config.databasePath`'s directory rather than hardcoding
-  // `REPO_ROOT` again keeps this in sync if that ever changes, and the test
-  // override above is what keeps a test run from creating real directories
-  // next to the real database.
+  // siblings of `pocketagent.db` inside the data root rather than a user-picked
+  // folder. Naming `config.dataDir` (PA-62) rather than hardcoding `REPO_ROOT`
+  // is what makes `POCKETAGENT_DATA_DIR` move all of this mutable state onto one
+  // volume together, and the test override above is what keeps a test run from
+  // creating real directories next to the real database.
   const plannerWorkspacesRoot =
-    options.plannerWorkspacesRoot ?? path.join(path.dirname(config.databasePath), 'planner-workspaces');
+    options.plannerWorkspacesRoot ?? path.join(config.dataDir, 'planner-workspaces');
   const plannerWorkspaces = new PlannerWorkspaceRegistry(createPlannerWorkspaceStore(db));
   await plannerWorkspaces.ensureDefaultWorkspace(plannerWorkspacesRoot);
   // `plannerChats` itself is constructed further down, once `sessions`,
@@ -411,7 +420,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // is a sibling of `data/planner-workspaces`, derived from
   // `config.databasePath`'s directory for the same reason
   // `plannerWorkspacesRoot` is, just above.
-  const plannerSkillsRoot = options.plannerSkillsRoot ?? resolvePlannerSkillsRoot(config.databasePath);
+  const plannerSkillsRoot = options.plannerSkillsRoot ?? resolvePlannerSkillsRoot(config.dataDir);
   const skills = new SkillRegistryService({ db, plannerWorkspaces, workspaces, skillsRoot: plannerSkillsRoot, logger: app.log });
   // PA-38 round 2: the bundled `skill-creator` meta-skill, seeded once — see
   // that function's own doc comment for why this must run after the service

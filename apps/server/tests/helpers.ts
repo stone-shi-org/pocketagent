@@ -91,10 +91,12 @@ export async function createTestApp(
     ...configOverrides,
   });
   const db = existingDb ?? openDatabase(':memory:');
-  // `config.databasePath` always points at the real `<REPO_ROOT>/data/`
-  // (it is not test-aware, by design — see its doc comment), so without this
-  // override every test that boots an app would create real planner-workspace
-  // directories on the host next to the real database.
+  // A test builds its `Config` without setting `POCKETAGENT_DATA_DIR`, so
+  // `config.dataDir` is the real `<REPO_ROOT>/data/` — without this override
+  // every test that boots an app would create real planner-workspace
+  // directories on the host next to the real database. Setting the variable
+  // instead would work, but it must then point outside every workspace root
+  // (`resolveDataDir` refuses otherwise), so the explicit roots stay.
   const plannerWorkspacesRoot = path.join(ws.root, 'planner-workspaces');
   // Same reasoning as `plannerWorkspacesRoot`, one layer up: without this
   // override every test that boots an app would create real

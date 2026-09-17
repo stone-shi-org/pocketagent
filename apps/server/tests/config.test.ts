@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadConfig } from '../src/config/index.js';
+import os from 'node:os';
+import { REPO_ROOT, loadConfig } from '../src/config/index.js';
+import { resolvePlannerSkillsRoot } from '../src/planner/skills.js';
 import { makeWorkspace, TEST_TOKEN } from './helpers.js';
 
 function env(overrides: Record<string, string | undefined>): NodeJS.ProcessEnv {
@@ -105,5 +107,156 @@ describe('config', () => {
     } finally {
       ws.cleanup();
     }
+  });
+
+  describe('POCKETAGENT_DATA_DIR (PA-62)', () => {
+    it('unset reproduces the pre-PA-62 paths exactly', () => {
+      const config = loadConfig(env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN }));
+      expect(config.dataDir).toBe(path.join(REPO_ROOT, 'data'));
+      // The literal this replaced, spelled out rather than derived from
+      // `dataDir`, so a change to either side of the join fails here.
+      expect(config.databasePath).toBe(path.join(REPO_ROOT, 'data', 'pocketagent.db'));
+    });
+
+    it('set, it relocates the database and both planner roots together', () => {
+      const ws = makeWorkspace();
+      const target = path.join(ws.root, 'state');
+      try {
+        const config = loadConfig(
+          env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN, POCKETAGENT_DATA_DIR: target }),
+        );
+        expect(config.dataDir).toBe(target);
+        expect(config.databasePath).toBe(path.join(target, 'pocketagent.db'));
+        // The whole point of one root rather than one database path: the
+        // planner's scratch and skills directories are mutable app-owned state
+        // and have to land on the same mounted volume.
+        expect(resolvePlannerSkillsRoot(config.dataDir)).toBe(path.join(target, 'planner-skills'));
+      } finally {
+        ws.cleanup();
+      }
+    });
+
+    it('accepts a root that does not exist yet — first boot creates it', () => {
+      const ws = makeWorkspace();
+      const target = path.join(ws.root, 'not', 'there', 'yet');
+      try {
+        const config = loadConfig(
+          env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN, POCKETAGENT_DATA_DIR: target }),
+        );
+        expect(config.dataDir).toBe(target);
+      } finally {
+        ws.cleanup();
+      }
+    });
+
+    it('resolves symlinks in an existing ancestor before testing containment', () => {
+      const ws = makeWorkspace();
+      const link = path.join(path.dirname(ws.root), `link-${path.basename(ws.root)}`);
+      fs.symlinkSync(ws.root, link);
+      try {
+        const config = loadConfig(
+          env({
+            POCKETAGENT_AUTH_TOKEN: TEST_TOKEN,
+            POCKETAGENT_DATA_DIR: path.join(link, 'state'),
+          }),
+        );
+        // Collapsed to the real path, so a symlinked data root cannot sneak
+        // past the workspace-root refusal below.
+        expect(config.dataDir).toBe(path.join(ws.root, 'state'));
+      } finally {
+        fs.unlinkSync(link);
+        ws.cleanup();
+      }
+    });
+
+    it('expands a leading ~', () => {
+      const config = loadConfig(
+        env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN, POCKETAGENT_DATA_DIR: '~/pa-state' }),
+      );
+      expect(config.dataDir).toBe(path.join(fs.realpathSync(os.homedir()), 'pa-state'));
+    });
+
+    it('refuses a data root inside a workspace root', () => {
+      // An agent working in that tree can rewrite or delete the database, which
+      // holds webhook signing secrets and encrypted provider keys.
+      const ws = makeWorkspace();
+      try {
+        expect(() =>
+          loadConfig(
+            env({
+              POCKETAGENT_AUTH_TOKEN: TEST_TOKEN,
+              POCKETAGENT_WORKSPACE_ROOTS: ws.root,
+              POCKETAGENT_DATA_DIR: path.join(ws.project, 'state'),
+            }),
+          ),
+        ).toThrow(/is inside the workspace root/);
+      } finally {
+        ws.cleanup();
+      }
+    });
+
+    it('refuses a data root that is exactly a workspace root', () => {
+      const ws = makeWorkspace();
+      try {
+        expect(() =>
+          loadConfig(
+            env({
+              POCKETAGENT_AUTH_TOKEN: TEST_TOKEN,
+              POCKETAGENT_WORKSPACE_ROOTS: ws.root,
+              POCKETAGENT_DATA_DIR: ws.root,
+            }),
+          ),
+        ).toThrow(/is inside the workspace root/);
+      } finally {
+        ws.cleanup();
+      }
+    });
+
+    it('allows a workspace root inside the data root', () => {
+      // The reverse direction is a plausible container layout — one volume
+      // holding both the repos and the state — and the hazard does not run
+      // that way.
+      const ws = makeWorkspace();
+      try {
+        const config = loadConfig(
+          env({
+            POCKETAGENT_AUTH_TOKEN: TEST_TOKEN,
+            POCKETAGENT_WORKSPACE_ROOTS: ws.project,
+            POCKETAGENT_DATA_DIR: ws.root,
+          }),
+        );
+        expect(config.dataDir).toBe(ws.root);
+      } finally {
+        ws.cleanup();
+      }
+    });
+
+    it('never applies the refusal to the default, even when the checkout is inside a root', () => {
+      // A dev checkout very often sits inside a project folder, so applying the
+      // containment rule to the unset default would fail the boot of installs
+      // that have worked for months. This is the regression that would make
+      // PA-62 a breaking change rather than an additive one.
+      const config = loadConfig(
+        env({
+          POCKETAGENT_AUTH_TOKEN: TEST_TOKEN,
+          POCKETAGENT_WORKSPACE_ROOTS: path.dirname(REPO_ROOT),
+          POCKETAGENT_DATA_DIR: undefined,
+        }),
+      );
+      expect(config.dataDir).toBe(path.join(REPO_ROOT, 'data'));
+    });
+
+    it('treats an empty value as unset rather than as the process cwd', () => {
+      const config = loadConfig(
+        env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN, POCKETAGENT_DATA_DIR: '   ' }),
+      );
+      expect(config.dataDir).toBe(path.join(REPO_ROOT, 'data'));
+    });
+
+    it('refuses "/" as the data root', () => {
+      expect(() =>
+        loadConfig(env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN, POCKETAGENT_DATA_DIR: '/' })),
+      ).toThrow(/refuses to use "\/"/);
+    });
   });
 });

@@ -59,10 +59,17 @@ PA_DEEPSEEK_KEY=... pnpm demo:provider-ui        # provider CRUD, picker, disclo
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
 *scratch* server (`PA_BASE`) with a throwaway workspace root — they create files, start
-agents, and kill tmux servers. Never point them at the real database: `DATABASE_PATH` is not
-configurable (always `<checkout>/data/pocketagent.db` — see `Config.databasePath`), so the
-only way to get an isolated database for a scratch server is to run it from a second checkout
-rather than pointing an env var at a different file.
+agents, and kill tmux servers. **Never point them at the real database.** Until PA-62 that was
+structural: the path was always `<checkout>/data/pocketagent.db` and a second checkout was the
+only way to get an isolated one. A containerised backend cannot live with that (the checkout is
+in the image, the state has to outlive it), so `POCKETAGENT_DATA_DIR` now moves the whole data
+root — database, `planner-workspaces/`, `planner-skills/` — and **a scratch server isolates
+itself by setting it**, to a throwaway directory outside every workspace root. It is absent by
+default, so an existing install is unaffected and the old rule still holds wherever nobody sets
+it. Two things replace what the structure used to guarantee: `loadConfig` refuses a data root
+*inside* a workspace root (an agent working there can delete the database, which holds webhook
+signing secrets and encrypted provider API keys), and every boot logs the data root it opened —
+check that line first when a demo behaves as though it has someone else's state.
 
 **Kill a scratch server by pid, never by pattern.** `pkill -f dist/server.js` — or any
 pattern of that shape, `node apps/server`, `pnpm start` — matches the full argv of *every*
@@ -473,7 +480,7 @@ deliberately separate from `WorkspaceRegistry`: a project workspace is one of th
 code repositories, read-only from this server's point of view; a planner workspace — an
 "agent" in the UI — is app-owned scratch space the planner's own file tools may create, write
 and delete inside freely, the same ownership `data/pocketagent.db` already has. One `Pocket
-Agent` workspace is seeded once at `<repo>/data/planner-workspaces/default/` (the *directory*
+Agent` workspace is seeded once at `<dataDir>/planner-workspaces/default/` (the *directory*
 keeps its `default` name always; only the *display* name a user sees was renamed — a rename
 never touches the directory, see `PlannerWorkspaceRegistry.rename`), guarded by a settings
 flag so deliberately removing it does not silently resurrect it on the next boot — the same
@@ -1285,6 +1292,34 @@ stamps the semver that `/health` and `HostInfo.version` report (PA-61), falling 
 `package.json` and then `0.0.0-dev`. It is read from raw `process.env` for the same reason the
 legacy provider variables are — an operator does not choose their build number, and a
 deployment that overrode it by hand would be lying about which code is running.
+
+`POCKETAGENT_DATA_DIR` is the app-owned data root (PA-62) — `pocketagent.db`,
+`planner-workspaces/`, `planner-skills/`. Unset it is `<checkout>/data`, which is what keeps
+an existing install unaffected; it exists so a containerised backend can put every mutable
+directory on one mounted volume. It is refused if it resolves *inside* a workspace root, since
+an agent working in that tree could delete the database; the reverse (a project folder inside
+the data root) is allowed on purpose, because one volume holding both repos and state is a
+reasonable container layout. Only the roots *seeded* from the environment are checked — a
+folder added later from the UI can still come to contain the data root, and nothing re-checks.
+
+**Everything else the process reads outside the checkout is `$HOME`, and the rule is: if
+another binary owns the path, mount it rather than making it configurable.** The three
+transcript stores read other programs' private state — `~/.claude/projects`
+(`conversations/index.ts`), `~/.gemini/antigravity-cli/brain` (`conversations/agy.ts`),
+`~/.pi/agent/sessions` (`conversations/pi.ts`) — and a config knob there would only let this
+server look somewhere the owning CLI never writes, which fails as "no history" rather than as
+an error; each already takes a constructor override, which is how tests point at a fixture.
+`agents/registry.ts`'s `~/.local/bin`, `~/.cargo/bin`, `~/.npm-global/bin` are not a mount
+decision at all — they are PATH discovery for agent binaries, which belong in the image.
+
+**A workspace root must be mounted at the same absolute path it has on the host.** Claude Code
+derives a transcript directory name from the cwd (`~/.claude/projects/<encoded-cwd>/`, `/` →
+`-`, lossy and never inverted), so a repo mounted at a different path inside a container gets
+different encoded directory names and *every existing conversation silently becomes
+undiscoverable* — no error, just an empty history. The same applies to the pi and agy stores,
+and absolute `cwd` values are persisted in the database itself (session rows,
+`webhook_issue_sessions`), so a relocated data volume and a relocated workspace mount can break
+each other too.
 
 `.env` (gitignored) is required: `POCKETAGENT_AUTH_TOKEN` (min 24 chars, never
 auto-generated) and `POCKETAGENT_WORKSPACE_ROOTS` (no default — unset must never mean the
