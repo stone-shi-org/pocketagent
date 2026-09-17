@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { resolveHostEndpoint, type HostEndpoint } from '../api/host.js';
 
 export type Route =
   | { name: 'list' }
@@ -28,6 +29,72 @@ export type Route =
       see `PlannerAgentEditorPage`. Always an existing agent's id; creating a
       new one is still the quick inline form on `PlannerPage` itself. */
   | { name: 'planner-agent'; agentId: string };
+
+/**
+ * A parsed hash: which host, and which view on it (PA-60).
+ *
+ * `hostId` is kept as the raw string from the URL — `null` when the hash had
+ * no `#/h/<id>/` segment at all — rather than being eagerly resolved to a
+ * `HostEndpoint`. That distinction is load-bearing: a bare URL has to keep
+ * emitting bare hashes as the user navigates, and collapsing `null` into the
+ * default host's id here would start rewriting every existing bookmark to
+ * `#/h/local/...` on the first navigation.
+ */
+export interface HashLocation {
+  hostId: string | null;
+  route: Route;
+}
+
+/**
+ * Leading `#/h/<hostId>`, and only when a path separator or the end of the
+ * hash follows it — without that lookahead, a future top-level route starting
+ * with `h` (`#/hooks`, say, if it were ever shortened) would be eaten as a
+ * host segment.
+ */
+const HOST_SEGMENT = /^#\/h\/([^/?]+)(?=\/|$)/;
+
+/**
+ * Splits the optional host segment off the front, then hands the remainder to
+ * the existing route cascade untouched.
+ *
+ * Stripping the prefix *before* `parse` runs is what keeps the "detail route
+ * before the generic one" ordering inside it (`planner-agent` ahead of
+ * `planner-chat`, per CLAUDE.md) relevant to exactly the strings it was
+ * written for — the `h` prefix never enters that cascade, so it cannot
+ * reorder or shadow anything in it.
+ */
+export function parseLocation(hash: string): HashLocation {
+  const host = HOST_SEGMENT.exec(hash);
+  if (!host?.[1]) return { hostId: null, route: parse(hash) };
+
+  const rest = hash.slice(host[0].length);
+  return {
+    hostId: decodeURIComponent(host[1]),
+    route: parse(rest === '' || rest === '/' ? '#/' : `#${rest}`),
+  };
+}
+
+/** Inverse of `parseLocation`. A `null` host emits the pre-PA-60 hash exactly. */
+export function locationToHash(route: Route, hostId: string | null): string {
+  const tail = toHash(route);
+  if (hostId === null) return tail;
+  const prefix = `#/h/${encodeURIComponent(hostId)}`;
+  // `toHash` renders the list route as `#/`; a bare prefix is the tidier
+  // equivalent, and `parseLocation` reads both back as the same location.
+  return tail === '#/' ? prefix : `${prefix}${tail.slice(1)}`;
+}
+
+/**
+ * `locationToHash` for a caller with no `navigate` in scope, preserving
+ * whichever host the URL is currently on.
+ *
+ * Exists because a raw `window.location.hash = '#/...'` assignment silently
+ * drops the host segment, which typechecks and looks harmless right up until
+ * it drops the user onto a different machine's view of the same id.
+ */
+export function hashForCurrentHost(route: Route): string {
+  return locationToHash(route, parseLocation(window.location.hash).hostId);
+}
 
 function parse(hash: string): Route {
   const session = /^#\/s\/([^/?]+)/.exec(hash);
@@ -116,16 +183,20 @@ function toHash(route: Route): string {
  * and, more importantly, reloading the page on a phone lands back on the same
  * session instead of the session list.
  */
-export function useHashRoute(): [Route, (route: Route) => void] {
-  const [route, setRoute] = useState<Route>(() => parse(window.location.hash));
+export function useHashRoute(): [
+  Route,
+  (route: Route, opts?: { hostId?: string | null }) => void,
+  HostEndpoint,
+] {
+  const [location, setLocation] = useState<HashLocation>(() => parseLocation(window.location.hash));
 
   useEffect(() => {
-    const onChange = (): void => setRoute(parse(window.location.hash));
+    const onChange = (): void => setLocation(parseLocation(window.location.hash));
     window.addEventListener('hashchange', onChange);
     return () => window.removeEventListener('hashchange', onChange);
   }, []);
 
-  const navigate = useCallback((next: Route) => {
+  const navigate = useCallback((next: Route, opts?: { hostId?: string | null }) => {
     // Update state right away rather than waiting on `hashchange`, which the
     // browser fires as a separate, later task — not synchronously within this
     // call. A caller that reads its own props again in the same tick right
@@ -135,10 +206,21 @@ export function useHashRoute(): [Route, (route: Route) => void] {
     // `hashchange` listener still fires when the hash actually changes; it
     // just re-parses to the same route this already set, which is a harmless
     // no-op re-render.
-    setRoute(next);
-    const hash = toHash(next);
+    //
+    // The host is preserved unless the caller explicitly names one. Carrying
+    // it here rather than on every `Route` variant is deliberate: the
+    // alternative makes all 42 `navigate({ ... })` call sites responsible for
+    // threading a field they do not care about, and any one that forgot would
+    // silently teleport the user back to the default host while still
+    // typechecking. It is re-read from the URL rather than from state so that
+    // this stays a pure `useCallback` with no dependency on the current
+    // location — the hash is the authoritative copy either way.
+    const hostId =
+      opts && 'hostId' in opts ? (opts.hostId ?? null) : parseLocation(window.location.hash).hostId;
+    setLocation({ hostId, route: next });
+    const hash = locationToHash(next, hostId);
     if (window.location.hash !== hash) window.location.hash = hash;
   }, []);
 
-  return [route, navigate];
+  return [location.route, navigate, resolveHostEndpoint(location.hostId)];
 }

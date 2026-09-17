@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api, ApiError } from './client.js';
+import { api, ApiError, createApiClient } from './client.js';
+import { DEFAULT_HOST, hostEndpoint } from './host.js';
 
 function mockFetch(
   status: number,
@@ -99,5 +100,69 @@ describe('api.deleteSession', () => {
     await api.deleteSession('a/b');
     expect(calls[0]?.url).toBe('/api/sessions/a%2Fb');
     expect(calls[0]?.init?.method).toBe('DELETE');
+  });
+});
+
+// PA-60: the host is an explicit endpoint rather than the page's own origin.
+describe('createApiClient: host base path', () => {
+  it('emits byte-identical URLs for the default host', async () => {
+    const { calls } = mockFetch(200, { sessions: [] });
+    await createApiClient(DEFAULT_HOST).listSessions();
+    // The whole point of an empty base path: nothing about the wire changed.
+    expect(calls[0]?.url).toBe('/api/sessions');
+  });
+
+  it("is indistinguishable from the module-level `api` for the default host", async () => {
+    const { calls } = mockFetch(200, { sessions: [] });
+    await api.listSessions();
+    await createApiClient(DEFAULT_HOST).listSessions();
+    expect(calls[0]?.url).toBe(calls[1]?.url);
+  });
+
+  it('prefixes every request for a non-empty base path', async () => {
+    const { calls } = mockFetch(200, { sessions: [] });
+    const client = createApiClient(hostEndpoint('workbench-02', '/h/workbench-02'));
+    await client.listSessions();
+    expect(calls[0]?.url).toBe('/h/workbench-02/api/sessions');
+  });
+
+  it('keeps the base path in front of an encoded path segment', async () => {
+    const { calls } = mockFetch(200, { id: 'a/b' });
+    const client = createApiClient(hostEndpoint('h2', '/h/h2'));
+    await client.deleteSession('a/b');
+    expect(calls[0]?.url).toBe('/h/h2/api/sessions/a%2Fb');
+    expect(calls[0]?.init?.method).toBe('DELETE');
+  });
+
+  it('still authenticates same-origin, since a base path is a prefix not an origin', async () => {
+    const { calls } = mockFetch(200, { ok: true });
+    await createApiClient(hostEndpoint('h2', '/h/h2')).logout();
+    // A cross-origin base URL would have to switch to `credentials: 'include'`
+    // plus CORS; the path-prefix design is what keeps the cookie model intact.
+    expect(calls[0]?.init?.credentials).toBe('same-origin');
+  });
+
+  it('routes two clients independently from one module', async () => {
+    const { calls } = mockFetch(200, { sessions: [] });
+    await createApiClient(DEFAULT_HOST).listSessions();
+    await createApiClient(hostEndpoint('h2', '/h/h2')).listSessions();
+    expect(calls.map((c) => c.url)).toEqual(['/api/sessions', '/h/h2/api/sessions']);
+  });
+
+  it('prefixes the streamed planner endpoint too, which builds its own fetch', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        calls.push(url);
+        return { ok: true, status: 200, body: null } as unknown as Response;
+      }),
+    );
+    await createApiClient(hostEndpoint('h2', '/h/h2')).sendPlannerMessage(
+      'chat-1',
+      { content: 'hi' },
+      () => {},
+    );
+    expect(calls[0]).toBe('/h/h2/api/planner/chats/chat-1/messages');
   });
 });

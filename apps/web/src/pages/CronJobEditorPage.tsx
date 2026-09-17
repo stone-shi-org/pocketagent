@@ -16,6 +16,7 @@ import { Icon } from '../components/Icon.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import { formatAbsolute, formatCountdown, WEEKDAY_LABELS } from '../agent/cron-format.js';
 import { flattenProjects } from '../agent/search.js';
+import { hashForCurrentHost } from '../hooks/useHashRoute.js';
 import { SelectRowNative } from '../components/SelectRowNative.js';
 import { NumberRow, SectionCard, TextRow } from './SettingsPage.js';
 
@@ -323,7 +324,7 @@ export function CronJobEditorPage({
       const chatId = run.agentSessionId ?? run.sessionId?.replace(/^planner_/, '');
       if (chatId) {
         if (onOpenPlannerChat) onOpenPlannerChat(chatId);
-        else window.location.hash = `#/planner/${encodeURIComponent(chatId)}`;
+        else window.location.hash = hashForCurrentHost({ name: 'planner-chat', chatId });
         return;
       }
     }

@@ -803,6 +803,28 @@ server registering backs would not force a client rewrite. **No such front serve
 and building one concentrates credentials for every registered machine in one process —
 treat it as a design problem, not a feature request.
 
+**The client side of that shape is `HostEndpoint`** (`apps/web/src/api/host.ts`, PA-60). Before
+it, the origin *was* the host identity: `request()` fetched relative paths and `wsUrl()` read
+`window.location.host`, so "which backend am I talking to" was answered by the page's own URL
+and could only be changed by a full page load. An endpoint (id + base path) is threaded through
+`createApiClient` and both socket classes instead, and `useHashRoute` parses an optional
+`#/h/<hostId>/` prefix — stripped *before* the route cascade runs, so the "detail route before
+the generic one" ordering inside it is untouched. Still exactly one host: `DEFAULT_HOST`'s base
+path is empty, every emitted URL is byte-identical to before, and a hash with no host segment
+stays bare rather than being rewritten to `#/h/local/...`.
+
+Two things there are load-bearing. **A base *path*, not a base URL**: `credentials:
+'same-origin'` against an HttpOnly cookie survives a same-origin prefix untouched, whereas a
+cross-origin base URL would need `credentials: 'include'`, a credentialed CORS allowlist and
+`SameSite=None; Secure` — none of which the loopback-bind-over-plain-HTTP posture can provide.
+So a second host is reachable only through a same-origin reverse proxy, and that is a constraint
+the Hub inherits rather than one to lift by widening the type. And **the host rides alongside
+`Route`, not inside it**: putting `hostId` on all 14 variants would make every `navigate({ ... })`
+call site responsible for threading it, where one that forgot would silently move the user to
+another machine while still typechecking. `navigate` preserves the current host unless explicitly
+given one; a call site with no `navigate` in scope uses `hashForCurrentHost` rather than
+assigning `window.location.hash` by hand, which drops the segment.
+
 ### The composer's fourth row
 
 Reads `/api/projects`, not `/api/conversations`, so it shows exactly what the home screen
@@ -1154,6 +1176,14 @@ These are load-bearing. Several were bugs first.
   narrate what the code already says.
 - Frontend state is hand-rolled React (hash routing, no router or state library) and plain
   CSS in `apps/web/src/styles.css`. Keep it that way unless there is a real reason.
+- **Nothing reads `window.location` to reach the API or the WebSocket** (PA-60). Host identity
+  is a `HostEndpoint`, so a request goes through `api`/`createApiClient` and a socket takes its
+  endpoint from its options. The socket URL is deliberately *relative* (`<basePath>/api/ws`) so
+  the browser derives origin and `ws:`/`wss:` itself, exactly as it already does for `fetch` —
+  one rule for both transports instead of a hand-rolled scheme map that can disagree with the
+  page. The one remaining `window.location.origin` read is `SecretReveal.tsx`, which composes a
+  webhook's *delivery* URL for a human to paste into Jira; the server deliberately has no notion
+  of its own external origin, so that one stays.
 - **Two layouts, chosen by `matchMedia` in `hooks/useMediaQuery.ts` — never by user-agent
   sniffing.** `(min-width: 900px) and (pointer: fine)` gets `DesktopShell` (sidebar plus
   session pane); everything else gets the single-column phone pages. The list itself lives

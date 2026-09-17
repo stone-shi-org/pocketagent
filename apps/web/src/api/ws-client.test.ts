@@ -1,10 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { WsCloseCode, type ServerMessage, type SessionInfo } from '@pocketagent/protocol';
 import {
+  PROTOCOL_VERSION,
+  WsCloseCode,
+  type ServerMessage,
+  type SessionInfo,
+} from '@pocketagent/protocol';
+import {
+  ConversationWatchConnection,
   TerminalConnection,
   type ConnectionState,
   type TerminalConnectionHandlers,
 } from './ws-client.js';
+import { DEFAULT_HOST, hostEndpoint, type HostEndpoint } from './host.js';
 
 /** Minimal scriptable WebSocket stand-in. */
 class FakeSocket {
@@ -91,10 +98,11 @@ const SESSION: SessionInfo = {
   pendingApprovalsCount: 0,
 };
 
-function setup(handlers: TerminalConnectionHandlers = {}) {
+function setup(handlers: TerminalConnectionHandlers = {}, endpoint?: HostEndpoint) {
   FakeSocket.instances = [];
   const connection = new TerminalConnection({
     handlers,
+    ...(endpoint ? { endpoint } : {}),
     createSocket: (url) => new FakeSocket(url) as unknown as WebSocket,
     baseDelayMs: 100,
     maxDelayMs: 1000,
@@ -109,8 +117,12 @@ function setup(handlers: TerminalConnectionHandlers = {}) {
 
 beforeEach(() => {
   vi.useFakeTimers();
-  // The client builds its URL from window.location.
-  vi.stubGlobal('window', { location: { protocol: 'http:', host: 'localhost:8787' } });
+  // No `window` stub: PA-60 moved host identity out of `window.location` and
+  // into a `HostEndpoint`, and the socket URL is now relative. The `web`
+  // vitest project runs in the `node` environment, where `window` does not
+  // exist at all — so every test in this file passing is itself the assertion
+  // that nothing in `ws-client.ts` reaches for the page's location any more.
+  // Re-adding a stub here would hide exactly the regression it used to enable.
 });
 
 afterEach(() => {
@@ -678,5 +690,67 @@ describe('TerminalConnection: structured sessions', () => {
       },
       { type: 'prompt', sessionId: 'abc', text: 'no picture here' },
     ]);
+  });
+});
+
+// PA-60: the socket is addressed by endpoint, not by the page's origin.
+describe('socket URL: host base path', () => {
+  it('is a relative path so the browser derives scheme and origin', () => {
+    const { connection, socket } = setup();
+    connection.open('abc');
+    // Relative, and therefore identical in effect to the `ws(s)://<host>/api/ws`
+    // string this used to build by hand from `window.location`.
+    expect(socket().url).toBe(`/api/ws?v=${PROTOCOL_VERSION}`);
+  });
+
+  it('is unchanged by passing the default host explicitly', () => {
+    const { connection, socket } = setup({}, DEFAULT_HOST);
+    connection.open('abc');
+    expect(socket().url).toBe(`/api/ws?v=${PROTOCOL_VERSION}`);
+  });
+
+  it('prefixes the base path of a non-default host', () => {
+    const { connection, socket } = setup({}, hostEndpoint('workbench-02', '/h/workbench-02'));
+    connection.open('abc');
+    expect(socket().url).toBe(`/h/workbench-02/api/ws?v=${PROTOCOL_VERSION}`);
+  });
+
+  it('keeps the base path across a reconnect', () => {
+    const { connection, socket, socketCount } = setup(
+      {},
+      hostEndpoint('workbench-02', '/h/workbench-02'),
+    );
+    connection.open('abc');
+    socket().open();
+    socket().drop();
+    vi.advanceTimersByTime(1000);
+
+    expect(socketCount()).toBe(2);
+    expect(socket(1).url).toBe(`/h/workbench-02/api/ws?v=${PROTOCOL_VERSION}`);
+  });
+
+  it('applies to ConversationWatchConnection, the second socket client', () => {
+    // `wsUrl` has two callers; threading only `TerminalConnection` would leave
+    // this one addressing whatever origin served the page.
+    FakeSocket.instances = [];
+    const watch = new ConversationWatchConnection({
+      onRemoved: () => {},
+      endpoint: hostEndpoint('workbench-02', '/h/workbench-02'),
+      createSocket: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    watch.open('conv-1');
+    expect(FakeSocket.instances[0]?.url).toBe(
+      `/h/workbench-02/api/ws?v=${PROTOCOL_VERSION}`,
+    );
+  });
+
+  it('defaults ConversationWatchConnection to the serving host', () => {
+    FakeSocket.instances = [];
+    const watch = new ConversationWatchConnection({
+      onRemoved: () => {},
+      createSocket: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    watch.open('conv-1');
+    expect(FakeSocket.instances[0]?.url).toBe(`/api/ws?v=${PROTOCOL_VERSION}`);
   });
 });

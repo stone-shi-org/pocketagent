@@ -13,6 +13,7 @@ import {
   type SessionStatus,
   type TerminalHintKind,
 } from '@pocketagent/protocol';
+import { DEFAULT_HOST, hostUrl, type HostEndpoint } from './host.js';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 
@@ -69,6 +70,8 @@ export interface TerminalConnectionHandlers {
 
 export interface TerminalConnectionOptions {
   handlers: TerminalConnectionHandlers;
+  /** Which host to talk to. Defaults to the one that served this bundle. */
+  endpoint?: HostEndpoint;
   /** Injectable for tests. */
   createSocket?: (url: string) => WebSocket;
   /** Injectable for tests; must return a value in ms. */
@@ -82,9 +85,22 @@ export interface TerminalConnectionOptions {
 const DEFAULT_BASE_DELAY = 500;
 const DEFAULT_MAX_DELAY = 15_000;
 
-function wsUrl(): string {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${window.location.host}/api/ws?v=${PROTOCOL_VERSION}`;
+/**
+ * The socket URL for one host (PA-60).
+ *
+ * Deliberately *relative*, which is what removes the `window.location` read
+ * this used to open with: the `WebSocket` constructor resolves a relative URL
+ * against the document, deriving `wss:` from `https:` on its own, so the
+ * scheme mapping this function used to do by hand is now the browser's job and
+ * cannot disagree with the page. That also makes it symmetric with
+ * `request()` in `client.ts`, which has always fetched relative `/api/...`
+ * paths — one rule for both transports instead of two.
+ *
+ * With the default host's empty `basePath` the resolved URL is identical to
+ * the one the hand-built string produced.
+ */
+function wsUrl(endpoint: HostEndpoint): string {
+  return hostUrl(endpoint, `/api/ws?v=${PROTOCOL_VERSION}`);
 }
 
 /**
@@ -114,6 +130,7 @@ export class TerminalConnection {
   private peek = false;
 
   private readonly handlers: TerminalConnectionHandlers;
+  private readonly endpoint: HostEndpoint;
   private readonly createSocket: (url: string) => WebSocket;
   private readonly baseDelay: number;
   private readonly maxDelay: number;
@@ -121,6 +138,7 @@ export class TerminalConnection {
 
   constructor(options: TerminalConnectionOptions) {
     this.handlers = options.handlers;
+    this.endpoint = options.endpoint ?? DEFAULT_HOST;
     this.createSocket = options.createSocket ?? ((url) => new WebSocket(url));
     this.baseDelay = options.baseDelayMs ?? DEFAULT_BASE_DELAY;
     this.maxDelay = options.maxDelayMs ?? DEFAULT_MAX_DELAY;
@@ -168,7 +186,7 @@ export class TerminalConnection {
 
     let socket: WebSocket;
     try {
-      socket = this.createSocket(wsUrl());
+      socket = this.createSocket(wsUrl(this.endpoint));
     } catch {
       this.scheduleReconnect();
       return;
@@ -464,6 +482,7 @@ export class ConversationWatchConnection {
   private attempt = 0;
 
   private readonly onRemoved: (conversationId: string) => void;
+  private readonly endpoint: HostEndpoint;
   private readonly createSocket: (url: string) => WebSocket;
   private readonly baseDelay: number;
   private readonly maxDelay: number;
@@ -471,12 +490,15 @@ export class ConversationWatchConnection {
 
   constructor(options: {
     onRemoved: (conversationId: string) => void;
+    /** Which host to talk to. Defaults to the one that served this bundle. */
+    endpoint?: HostEndpoint;
     createSocket?: (url: string) => WebSocket;
     baseDelayMs?: number;
     maxDelayMs?: number;
     random?: () => number;
   }) {
     this.onRemoved = options.onRemoved;
+    this.endpoint = options.endpoint ?? DEFAULT_HOST;
     this.createSocket = options.createSocket ?? ((url) => new WebSocket(url));
     this.baseDelay = options.baseDelayMs ?? DEFAULT_BASE_DELAY;
     this.maxDelay = options.maxDelayMs ?? DEFAULT_MAX_DELAY;
@@ -495,7 +517,7 @@ export class ConversationWatchConnection {
 
     let socket: WebSocket;
     try {
-      socket = this.createSocket(wsUrl());
+      socket = this.createSocket(wsUrl(this.endpoint));
     } catch {
       this.scheduleReconnect();
       return;
