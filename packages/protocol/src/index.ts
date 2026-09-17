@@ -3,6 +3,7 @@ export * from './agent-events.js';
 export * from './session.js';
 export * from './custom-claude-providers.js';
 export * from './prompt-image.js';
+export * from './protocol-negotiation.js';
 export * from './ws.js';
 export * from './http.js';
 export * from './cron-expr.js';

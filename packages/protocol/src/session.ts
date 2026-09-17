@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { EffortLevel, ModelInfo, RateLimitEvent, SessionTransport } from './agent-events.js';
 import { CronJobSummary } from './cron.js';
 import { WebhookSummary } from './webhooks.js';
+import { ProtocolRange } from './protocol-negotiation.js';
 
 /**
  * Lifecycle of a server-owned PTY session.
@@ -374,7 +375,28 @@ export const HostInfo = z.object({
   id: z.string(),
   /** What to show in the header, e.g. `workbench-01`. */
   name: z.string(),
+  /**
+   * Real semver of the build running on this host, e.g. `0.4.2`. Stamped by
+   * the image build rather than written in source (PA-61) — a literal cannot
+   * express a compatibility relationship, and every host reporting `0.1.0`
+   * makes drift detection impossible.
+   */
   version: z.string(),
+  /**
+   * Wire-protocol versions this host accepts (PA-61).
+   *
+   * Sits beside `version` rather than replacing it because the two answer
+   * different questions and must be able to move independently: `version` is
+   * build identity, for humans and drift detection, while this is the
+   * machine-checkable compatibility gate. A patch release must not imply a
+   * protocol change, and conflating them is how "can this bundle talk to that
+   * host?" becomes unanswerable again.
+   *
+   * The host reports the *facts*; the client computes the verdict with
+   * `negotiateProtocol`. A server has no way to know which bundle a browser is
+   * running, so it must not be the one claiming compatibility.
+   */
+  protocol: ProtocolRange,
   /** False once a front server can report a back it cannot currently reach. */
   online: z.boolean(),
   /**

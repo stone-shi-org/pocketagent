@@ -9,6 +9,7 @@ import {
   ConversationWatchConnection,
   TerminalConnection,
   type ConnectionState,
+  type FatalClose,
   type TerminalConnectionHandlers,
 } from './ws-client.js';
 import { DEFAULT_HOST, hostEndpoint, type HostEndpoint } from './host.js';
@@ -20,7 +21,7 @@ class FakeSocket {
   readyState = 0;
   sent: string[] = [];
   onopen: (() => void) | null = null;
-  onclose: ((event: { code: number }) => void) | null = null;
+  onclose: ((event: { code: number; reason?: string }) => void) | null = null;
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
   closed = false;
@@ -47,9 +48,9 @@ class FakeSocket {
     this.onopen?.();
   }
 
-  drop(code = 1000): void {
+  drop(code = 1000, reason?: string): void {
     this.readyState = 3;
-    this.onclose?.({ code });
+    this.onclose?.({ code, ...(reason === undefined ? {} : { reason }) });
   }
 
   emit(message: ServerMessage): void {
@@ -234,17 +235,43 @@ describe('TerminalConnection: connection state', () => {
     // "Reconnecting…" forever with no way out, since the server says the same
     // thing again every time. `onFatal` must fire and reconnecting must stop
     // instead, so the UI can tell the user to reload rather than spin.
-    let fatal: string | null = null;
-    const { connection, socket, socketCount } = setup({ onFatal: (message) => (fatal = message) });
+    const fatals: FatalClose[] = [];
+    const { connection, socket, socketCount } = setup({ onFatal: (f) => fatals.push(f) });
     connection.open('abc');
 
     socket().drop(WsCloseCode.PROTOCOL_MISMATCH);
 
     expect(connection.getState()).toBe('disconnected');
-    expect(fatal).toMatch(/reload/i);
+    expect(fatals[0]?.message).toMatch(/reload/i);
+    // PA-61: the fatal names its host, which is what makes this a per-host
+    // state rather than a global one.
+    expect(fatals[0]?.hostId).toBe(DEFAULT_HOST.id);
 
     vi.advanceTimersByTime(10_000);
     expect(socketCount()).toBe(1);
+  });
+
+  it('does not tell you to reload when the mismatch is another host (PA-61)', () => {
+    // The pre-PA-61 wording was "This app was updated. Reload the page." —
+    // true for the host that served the bundle, and a dead end for any other:
+    // reloading re-fetches the same bundle from the same origin, so the
+    // lagging host still refuses. It has to name the host and the version
+    // range instead, which is the only thing a human can act on.
+    const fatals: FatalClose[] = [];
+    const endpoint = hostEndpoint('workbench-02', '/h/workbench-02');
+    const { connection, socket } = setup({ onFatal: (f) => fatals.push(f) }, endpoint);
+    connection.open('abc');
+
+    socket().drop(WsCloseCode.PROTOCOL_MISMATCH, 'server speaks protocol v9');
+
+    const fatal = fatals[0];
+    expect(fatal?.hostId).toBe('workbench-02');
+    expect(fatal?.message).toContain('workbench-02');
+    expect(fatal?.message).toContain('server speaks protocol v9');
+    expect(fatal?.message).not.toMatch(/reload/i);
+    // The criterion this exists for: one bad host must not read as the app
+    // being broken.
+    expect(fatal?.message).toMatch(/other hosts are unaffected/i);
   });
 
   it('does treat an ordinary close code as retriable, not fatal', () => {
@@ -742,6 +769,43 @@ describe('socket URL: host base path', () => {
     expect(FakeSocket.instances[0]?.url).toBe(
       `/h/workbench-02/api/ws?v=${PROTOCOL_VERSION}`,
     );
+  });
+
+  it('stops ConversationWatchConnection reconnecting on a protocol mismatch (PA-61)', () => {
+    // Regression: this class shipped with no mismatch branch at all, so a
+    // bundle the server refuses reconnected forever on a backoff — the same
+    // bug `TerminalConnection` already guards, and silent here because a chat
+    // preview draws no connection state. Version skew being the steady state
+    // behind a Hub turns it from a post-deploy blip into a permanent spin.
+    FakeSocket.instances = [];
+    const fatals: FatalClose[] = [];
+    const watch = new ConversationWatchConnection({
+      onRemoved: () => {},
+      onFatal: (f) => fatals.push(f),
+      createSocket: (url) => new FakeSocket(url) as unknown as WebSocket,
+      random: () => 0,
+    });
+    watch.open('conv-1');
+    FakeSocket.instances[0]?.drop(WsCloseCode.PROTOCOL_MISMATCH);
+
+    expect(fatals[0]?.reason).toBe('protocol_mismatch');
+    vi.advanceTimersByTime(60_000);
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
+  it('still retries ConversationWatchConnection on an ordinary close', () => {
+    // The guard above must not have turned every drop into a dead socket.
+    FakeSocket.instances = [];
+    const watch = new ConversationWatchConnection({
+      onRemoved: () => {},
+      createSocket: (url) => new FakeSocket(url) as unknown as WebSocket,
+      random: () => 0,
+    });
+    watch.open('conv-1');
+    FakeSocket.instances[0]?.drop(1006);
+
+    vi.advanceTimersByTime(1_000);
+    expect(FakeSocket.instances.length).toBeGreaterThan(1);
   });
 
   it('defaults ConversationWatchConnection to the serving host', () => {

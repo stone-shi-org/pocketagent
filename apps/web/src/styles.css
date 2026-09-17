@@ -1712,6 +1712,9 @@ input[type='number']::-webkit-outer-spin-button {
 .notice.inline { margin: 8px 0; border-radius: 8px; border: 1px solid; }
 .notice.inline.info { background: #eef4ff; border-color: #cbdcff; color: #0a4bbf; }
 .notice.inline.error { background: #fdeceb; border-color: #f6c9c6; color: #a3221a; }
+/* PA-61: a host this bundle cannot talk to. Warn rather than error on purpose —
+   every other host, and everything already on screen, still works. */
+.notice.inline.warn { background: #fdf3e3; border-color: #f0dcb8; color: var(--warn); }
 
 /* Output from a locally-resolved slash command (e.g. /usage) — a CLI-style
    readout, not assistant prose, so it gets its own quiet monospace block
@@ -2060,6 +2063,20 @@ button.chat-rate-limit-badge {
 
 .host-dot.offline {
   background: var(--border-strong);
+}
+
+/* PA-61: reachable but speaking a protocol version this bundle cannot use.
+   Distinct from `.offline` because the remedy is different — an upgrade, not
+   waiting for the machine to come back. */
+.host-dot.incompatible {
+  background: var(--warn);
+}
+
+.host-warn {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warn);
+  text-transform: lowercase;
 }
 
 /* Usage bars ---------------------------------------------------------------

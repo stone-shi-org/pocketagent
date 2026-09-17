@@ -14,6 +14,7 @@ import type {
   CronJob,
   CronJobRun,
   EffortLevel,
+  HealthResponse,
   HostInfo,
   UpdateCronJobRequest,
   MeResponse,
@@ -292,6 +293,17 @@ export function createApiClient(endpoint: HostEndpoint) {
       }),
 
     listHosts: () => request<{ hosts: HostInfo[] }>('/api/hosts'),
+
+    /**
+     * Unauthenticated version check (PA-61).
+     *
+     * Reachable before login — which is the point: `probeHost` calls it to
+     * decide whether a host is usable at all, and a host too old to talk to is
+     * not worth presenting a credential to. Callers must treat a rejection as
+     * "unreachable" rather than "incompatible"; `probeHost` is where that
+     * distinction is made.
+     */
+    health: () => request<HealthResponse>('/health'),
 
     getSession: (id: string) => request<SessionInfo>(`/api/sessions/${encodeURIComponent(id)}`),
 

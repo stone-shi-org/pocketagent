@@ -5,7 +5,7 @@ import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import websocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
-import { AUTH_COOKIE_NAME, LIMITS } from '@pocketagent/protocol';
+import { AUTH_COOKIE_NAME, LIMITS, SERVER_PROTOCOL_RANGE } from '@pocketagent/protocol';
 import type { Config } from './config/index.js';
 import { AuthService, isOriginAllowed } from './auth/index.js';
 import {
@@ -61,7 +61,7 @@ import { WebhookService } from './webhooks/index.js';
 import { PlannerWorkspaceRegistry } from './planner/workspaces.js';
 import { createPlannerWorkspaceStore, readPlannerSettings, revealPlannerEmbeddingApiKey } from './planner/store.js';
 import { PlannerChatService } from './planner/chats.js';
-import type { QueuedRunSummary } from '@pocketagent/protocol';
+import type { HealthResponse, QueuedRunSummary } from '@pocketagent/protocol';
 import { PlannerMemoryService, type PlannerMemoryEmbedConfig } from './planner/memory.js';
 import { SkillRegistryService, resolvePlannerSkillsRoot, seedDefaultSkills } from './planner/skills.js';
 import { McpRegistryService } from './planner/mcp/registry-service.js';
@@ -69,8 +69,15 @@ import { PlannerLlmClient } from './planner/llm-client.js';
 import { MemoryConsolidationService } from './planner/memory-consolidation.js';
 import type { PocketContext } from './types.js';
 import { PromptQueueService } from './sessions/prompt-queue.js';
+import { VERSION, VERSION_WARNING } from './version.js';
 
-export const VERSION = '0.1.0';
+/**
+ * Re-exported so `server.ts` and every existing importer keep their one import
+ * site; the resolution itself lives in `version.ts` because it reads the
+ * filesystem and raw `process.env`, neither of which belongs in the app
+ * builder. See `resolveServerVersion` for why it is not part of `Config`.
+ */
+export { VERSION };
 
 
 /**
@@ -236,6 +243,12 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
       delete: (path) => deleteWorkspace(db, path),
     }),
   );
+  // A bad build stamp is cosmetic, so `resolveServerVersion` falls back rather
+  // than throwing — but it must not do so silently, or a CI mistake ships a
+  // fleet of hosts all reporting the checkout's version and drift detection
+  // quietly stops working.
+  if (VERSION_WARNING !== null) app.log.warn(VERSION_WARNING);
+
   if (workspaces.getRoots().length === 0) {
     app.log.warn(
       'No project folders yet. Add one from the app, or set ' +
@@ -682,9 +695,24 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   // ---- Routes ---------------------------------------------------------------
   const startedAt = Date.now();
-  app.get('/health', async () => ({
+  /**
+   * The only unauthenticated *read* in the server (`PUBLIC_API_PATHS`), and
+   * deliberately still so: a Hub has to decide whether a backend is usable
+   * before it can present a credential to it.
+   *
+   * The return type is annotated rather than inferred so `HealthResponse` is
+   * actually load-bearing — the schema sat unused for long enough that its
+   * neighbour `ProjectListResponse` silently drifted from the route it
+   * describes, and the Hub is about to start parsing this one for real.
+   *
+   * `protocol` is what makes per-host negotiation possible (PA-61): a client
+   * reads it and decides for itself, since the server cannot know which bundle
+   * is asking. Nothing sensitive may be added here — see the schema's comment.
+   */
+  app.get('/health', async (): Promise<HealthResponse> => ({
     status: 'ok' as const,
     version: VERSION,
+    protocol: SERVER_PROTOCOL_RANGE,
     uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
   }));
 

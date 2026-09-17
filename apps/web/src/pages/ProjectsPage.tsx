@@ -8,6 +8,7 @@ import { ShellDialog } from '../components/ShellDialog.js';
 import { Icon } from '../components/Icon.js';
 import {
   HostChip,
+  HostCompatibilityNotice,
   ProjectList,
   SearchField,
   useProjects,
@@ -85,7 +86,7 @@ export function ProjectsPage({
       <header className="home-bar">
         <div className="home-title">
           <strong>Remote</strong>
-          <HostChip host={state.host} />
+          <HostChip host={state.host} compatibility={state.hostCompatibility} />
         </div>
         <span className="spacer" />
         <button
@@ -152,6 +153,11 @@ export function ProjectsPage({
             {state.error}
           </div>
         )}
+        {/* PA-61: above every category, never instead of one — an incompatible
+            host must leave the rest of the app fully usable. Same placement in
+            `DesktopShell`, since a surface in one layout and not the other is a
+            bug. */}
+        <HostCompatibilityNotice compatibility={state.hostCompatibility} />
         <PocketAgentsSection
           workspaces={plannerChats.workspaces}
           chats={plannerChats.chats}

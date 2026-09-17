@@ -6,7 +6,14 @@ import { AddProject } from '../components/AddProject.js';
 import { PushToggle } from '../components/PushToggle.js';
 import { RunningSessions } from '../components/RunningSessions.js';
 import { Icon } from '../components/Icon.js';
-import { HostChip, ProjectList, SearchField, allChats, useProjects } from '../components/ProjectList.js';
+import {
+  HostChip,
+  HostCompatibilityNotice,
+  ProjectList,
+  SearchField,
+  allChats,
+  useProjects,
+} from '../components/ProjectList.js';
 import { PocketAgentsSection } from '../components/PocketAgentsSection.js';
 import { ShellSection } from '../components/ShellSection.js';
 import { TabBar, type Tab } from '../components/TabBar.js';
@@ -492,7 +499,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
         <header className="sidebar-head">
           <div className="sidebar-brand">
             <strong>Remote</strong>
-            <HostChip host={state.host} />
+            <HostChip host={state.host} compatibility={state.hostCompatibility} />
             {/* Which exact build is running, at a glance — same string
                 Settings shows (`formatBuildInfo`), but visible without
                 opening a dialog. Desktop-only: the phone header's
@@ -597,6 +604,8 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
               {state.error}
             </div>
           )}
+          {/* PA-61 — see `ProjectsPage` for why this sits above the categories. */}
+          <HostCompatibilityNotice compatibility={state.hostCompatibility} />
           <PocketAgentsSection
             workspaces={plannerChats.workspaces}
             chats={plannerChats.chats}

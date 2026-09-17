@@ -15,7 +15,7 @@ import type {
   WebhookSummary,
   WebhookType,
 } from '@pocketagent/protocol';
-import { BambooWebhookFilter, JiraWebhookFilter } from '@pocketagent/protocol';
+import { BambooWebhookFilter, JiraWebhookFilter, SERVER_PROTOCOL_RANGE } from '@pocketagent/protocol';
 import type { ConversationStore } from '../conversations/index.js';
 import { describeJiraFilter } from '../webhooks/jira.js';
 import { describeBambooFilter } from '../webhooks/bamboo.js';
@@ -146,6 +146,10 @@ export class ProjectService {
       id: crypto.createHash('sha256').update(seed).digest('base64url').slice(0, 16),
       name: shortHostname(this.hostname),
       version: this.version,
+      // The range this build accepts on `/api/ws` (PA-61). Derived from the
+      // protocol constants rather than restated, so the advertisement cannot
+      // drift from what the handshake in `ws/index.ts` actually enforces.
+      protocol: SERVER_PROTOCOL_RANGE,
       online: true,
       codeServerBaseUrl: this.getCodeServerBaseUrl(),
     };

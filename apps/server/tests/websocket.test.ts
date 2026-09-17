@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import type { AddressInfo } from 'node:net';
-import { PROTOCOL_VERSION, type ServerMessage } from '@pocketagent/protocol';
+import { PROTOCOL_VERSION, SERVER_PROTOCOL_RANGE, type ServerMessage } from '@pocketagent/protocol';
 import { createTestApp, waitFor, sleep, type TestApp } from './helpers.js';
 
 interface Client {
@@ -34,7 +34,9 @@ describe('websocket terminal transport', () => {
     await t.cleanup();
   });
 
-  async function connect(options: { cookie?: string | null; version?: number } = {}): Promise<Client> {
+  async function connect(
+    options: { cookie?: string | null; version?: number | string } = {},
+  ): Promise<Client> {
     const cookie = options.cookie === undefined ? t.cookie : options.cookie;
     const version = options.version ?? PROTOCOL_VERSION;
     const ws = new WebSocket(`${baseUrl}/api/ws?v=${version}`, {
@@ -113,6 +115,59 @@ describe('websocket terminal transport', () => {
 
   it('refuses a protocol version it does not speak', async () => {
     const client = await connect({ version: 99 });
+    const code = await new Promise<number>((resolve) => client.ws.on('close', resolve));
+    expect(code).toBe(4001);
+  });
+
+  // PA-61: the handshake tests a *range* now. The cases below are the ones the
+  // ticket's acceptance criteria name, and they are worth pinning separately
+  // from the v99 case above because the failure modes differ: a naive range
+  // comparison starts *accepting* garbage (`Number('abc')` is NaN, which
+  // compares false against both bounds), while an off-by-one starts rejecting
+  // the exact version a coordinated upgrade lands on.
+  it('accepts every version inside its advertised range', async () => {
+    for (const version of [SERVER_PROTOCOL_RANGE.min, SERVER_PROTOCOL_RANGE.max]) {
+      const client = await connect({ version });
+      expect(client.ws.readyState).toBe(WebSocket.OPEN);
+      await client.close();
+    }
+  });
+
+  it('refuses a version below its floor', async () => {
+    const client = await connect({ version: SERVER_PROTOCOL_RANGE.min - 1 });
+    const code = await new Promise<number>((resolve) => client.ws.on('close', resolve));
+    expect(code).toBe(4001);
+  });
+
+  it('refuses a version above its ceiling', async () => {
+    const client = await connect({ version: SERVER_PROTOCOL_RANGE.max + 1 });
+    const code = await new Promise<number>((resolve) => client.ws.on('close', resolve));
+    expect(code).toBe(4001);
+  });
+
+  it('refuses a non-numeric version rather than treating it as in range', async () => {
+    // The equality check this replaced rejected `?v=abc` by accident; a range
+    // check has to reject it on purpose.
+    const client = await connect({ version: 'abc' });
+    const code = await new Promise<number>((resolve) => client.ws.on('close', resolve));
+    expect(code).toBe(4001);
+  });
+
+  it('names the range in the close reason, for the client to show a human', async () => {
+    const client = await connect({ version: SERVER_PROTOCOL_RANGE.max + 1 });
+    const reason = await new Promise<string>((resolve) =>
+      client.ws.on('close', (_code, buf) => resolve(buf.toString())),
+    );
+    expect(reason).toContain(`v${SERVER_PROTOCOL_RANGE.min}`);
+  });
+
+  it('advertises exactly the range it enforces', async () => {
+    // The bug this prevents is a client being told it is compatible and then
+    // closed on anyway: `/health` and the handshake must read one constant.
+    const res = await t.app.inject({ method: 'GET', url: '/health' });
+    expect(res.json().protocol).toEqual(SERVER_PROTOCOL_RANGE);
+    const outside = res.json().protocol.max + 1;
+    const client = await connect({ version: outside });
     const code = await new Promise<number>((resolve) => client.ws.on('close', resolve));
     expect(code).toBe(4001);
   });

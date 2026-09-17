@@ -3,6 +3,8 @@ import type { WebSocket } from 'ws';
 import {
   LIMITS,
   PROTOCOL_VERSION,
+  SERVER_PROTOCOL_RANGE,
+  isSupportedProtocolVersion,
   WsCloseCode,
   parseClientMessage,
   type AgentEvent,
@@ -62,6 +64,21 @@ const CLOSE_PROTOCOL_MISMATCH = WsCloseCode.PROTOCOL_MISMATCH;
 const CLOSE_UNAUTHORIZED = WsCloseCode.UNAUTHORIZED;
 const CLOSE_FLOOD = WsCloseCode.FLOOD;
 const CLOSE_BACKPRESSURE = WsCloseCode.BACKPRESSURE;
+
+/**
+ * Close reason for a version the socket will not accept.
+ *
+ * A WebSocket close reason is capped at 123 bytes, which this comfortably
+ * fits; the client shows it verbatim when the host is not the one that served
+ * the bundle, since in that case "reload the page" is the wrong advice and the
+ * numbers are all a human has to go on.
+ */
+function protocolMismatchReason(): string {
+  const { min, max } = SERVER_PROTOCOL_RANGE;
+  return min === max
+    ? `server speaks protocol v${min}`
+    : `server speaks protocol v${min}-v${max}`;
+}
 
 /**
  * If a client stops reading (phone asleep, tunnel wedged) the kernel buffer
@@ -182,11 +199,24 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
       return;
     }
 
+    // PA-61: a *range*, not an equality test. With one lockstep-deployed
+    // backend the two were the same thing; with a Hub fronting several
+    // independently-upgraded ones, version skew is the steady state, so a
+    // server has to be able to keep serving a bundle that is not its exact
+    // twin. The range is `SERVER_PROTOCOL_RANGE`, which is also what `/health`
+    // advertises — one constant, so a client cannot be told it is compatible
+    // and then closed on anyway.
+    //
+    // Today `min === max`, so this rejects precisely what the equality check
+    // rejected; see `PROTOCOL_MIN_SUPPORTED` for why widening the floor is a
+    // deliberate per-version decision rather than a free consequence of this
+    // change. The close reason names the whole range because the client puts it
+    // in front of a human, who needs to know which version to get to.
     const requestedVersion = Number(
       (request.query as Record<string, string | undefined>)?.v ?? PROTOCOL_VERSION,
     );
-    if (requestedVersion !== PROTOCOL_VERSION) {
-      ws.close(CLOSE_PROTOCOL_MISMATCH, `server speaks protocol v${PROTOCOL_VERSION}`);
+    if (!isSupportedProtocolVersion(requestedVersion)) {
+      ws.close(CLOSE_PROTOCOL_MISMATCH, protocolMismatchReason());
       return;
     }
 

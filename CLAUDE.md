@@ -845,7 +845,46 @@ an unhide has to be storable too — an explicit row always wins over `AUTO_HIDD
 
 `packages/protocol` is the single source of truth: Zod schemas for every HTTP body and
 WebSocket frame, shared by both sides. Bump `PROTOCOL_VERSION` in `ws.ts` when frames
-change; the client sends it as `?v=` and a mismatch is rejected at connect.
+change; the client sends it as `?v=` and a version outside the server's range is rejected
+at connect.
+
+**The handshake tests a range, and the range is deliberately narrow** (PA-61). With one
+lockstep-deployed backend, "the version I speak" and "the version I accept" were the same
+number and an equality check was right; with a Hub fronting several independently-upgraded
+backends, version skew is the *steady state*, so a lagging host has to be one unusable row
+rather than a dead app. `SERVER_PROTOCOL_RANGE` (`[PROTOCOL_MIN_SUPPORTED, PROTOCOL_VERSION]`)
+is what `/api/ws` enforces *and* what `/health` and `HostInfo.protocol` advertise — one
+constant, because a client told it was compatible and then closed on anyway is worse than
+one refused up front. `PROTOCOL_MIN_SUPPORTED` equals `PROTOCOL_VERSION` today, so the
+handshake is exactly as strict as the equality check it replaced: **widening the floor is a
+per-version decision, and the version history in `ws.ts` is the argument it has to beat** —
+v10 through v15 exist *specifically* to force an old bundle to reconnect, because an unknown
+enum value or discriminant fails the whole frame's Zod schema rather than being ignored. What
+PA-61 delivers is the mechanism, not a wider window.
+
+**The verdict is the client's, never the server's.** A host reports facts (`version`, a real
+semver from the build; `protocol`, the range) and `negotiateProtocol`
+(`packages/protocol/src/protocol-negotiation.ts`) decides — it lives in the protocol package
+for the same reason `cron-expr.ts` does, since the server, the browser and the Hub's own host
+list all need the same answer and a second copy guarantees the list eventually disagrees with
+what the handshake does. It is a point-in-interval test rather than a range intersection
+because a bundle speaks exactly one version and cannot choose to emit an older frame set on
+request. `describeIncompatibility` is the one place the sentence is worded, and the three
+reasons get genuinely different advice: a stale *bundle* is fixed by reloading, a stale *host*
+by upgrading that machine, and an `unreachable` one by neither. `CLOSE_PROTOCOL_MISMATCH`
+still stops reconnecting — retrying is "Reconnecting…" forever — but it now yields a
+`FatalClose` carrying the `hostId`, and `fatalCloseMessage` only says "reload the page" for
+the host that *served this bundle*: for any other host reloading re-fetches the same bundle
+from the same origin and changes nothing.
+
+`version` and `protocol` are independent on purpose. One is build identity, for humans and
+version-drift detection; the other is the machine-checkable gate. A patch release must not
+imply a protocol change, and conflating them is how "can this bundle talk to that host?"
+becomes unanswerable again — which is what the hardcoded `VERSION = '0.1.0'` made it.
+`resolveServerVersion` (`apps/server/src/version.ts`) reads `POCKETAGENT_BUILD_VERSION` →
+`package.json` → `0.0.0-dev`, from raw `process.env` rather than through `Config` because an
+operator does not *choose* their build number; a malformed stamp warns at boot rather than
+failing it.
 
 Output replay is byte-oriented with monotonic sequence numbers (`terminal/output-buffer.ts`,
 and `terminal/event-buffer.ts` for structured events). Each stream also has an **epoch**:
@@ -1086,6 +1125,25 @@ These are load-bearing. Several were bugs first.
   human prompt must never be silent (`prompt_queued`, replayed on attach), never be lost (it is
   persisted), and a full queue *sends* it rather than dropping it — the depth cap exists to bound
   a machine burst, and a person pressing send is not that.
+- **`/health` is the only unauthenticated *read*, and nothing sensitive may be added to it.**
+  It stays public because a Hub has to decide whether a backend is usable *before* it can
+  present a credential to it (PA-61) — so `version` and `protocol` are readable by anyone who
+  can reach the port, which is a deliberate decision rather than an oversight: the old
+  hardcoded `0.1.0` disclosed nothing, and a real semver tells a caller exactly which build,
+  and therefore which known bugs, they are looking at. That is the whole budget. A git SHA,
+  build host, Node version, path or config value belongs behind the cookie (`/api/hosts`, or
+  the settings snapshot), and `health.test.ts` asserts the response has exactly four keys so
+  adding a fifth is a decision someone has to make on purpose. `HealthResponse` is also now
+  load-bearing rather than decorative — the handler's return type is annotated with it and the
+  browser's probe parses it — because it sat unused long enough for its neighbour
+  `ProjectListResponse` to silently drift from the route it describes.
+- **A protocol mismatch is a per-host state, never a global fatal.** One incompatible host
+  must leave every other host, and everything already on screen, fully usable — so the
+  incompatibility renders as a notice above the three home-screen categories (both layouts)
+  plus a third `host-dot` state, never in place of the list. `FatalClose.hostId` is what makes
+  that possible, and `ConversationWatchConnection` had to be fixed to honour it: it shipped
+  with no `PROTOCOL_MISMATCH` branch at all and reconnected forever on a backoff, invisibly,
+  because a chat preview draws no connection state.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.
@@ -1221,6 +1279,12 @@ disables the feature rather than failing the boot; the old `POCKETAGENT_DEEPSEEK
 ignored forever. Rotating the encryption key without re-entering every provider's key greys them
 out — the README's security section says all of this out loud rather than leaving it to a
 variable name.
+
+`POCKETAGENT_BUILD_VERSION` is build identity rather than configuration: the image build
+stamps the semver that `/health` and `HostInfo.version` report (PA-61), falling back to
+`package.json` and then `0.0.0-dev`. It is read from raw `process.env` for the same reason the
+legacy provider variables are — an operator does not choose their build number, and a
+deployment that overrode it by hand would be lying about which code is running.
 
 `.env` (gitignored) is required: `POCKETAGENT_AUTH_TOKEN` (min 24 chars, never
 auto-generated) and `POCKETAGENT_WORKSPACE_ROOTS` (no default — unset must never mean the

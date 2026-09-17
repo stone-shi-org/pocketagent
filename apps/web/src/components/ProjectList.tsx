@@ -8,7 +8,13 @@ import type {
   QueuedRunSummary,
   ShellSessionSummary,
 } from '@pocketagent/protocol';
-import { describeCron, usesClaudeTranscripts } from '@pocketagent/protocol';
+import {
+  PROTOCOL_VERSION,
+  describeCron,
+  negotiateProtocol,
+  usesClaudeTranscripts,
+} from '@pocketagent/protocol';
+import { compatibilityState, type HostCompatibilityState } from '../api/negotiate.js';
 import { api, ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { filterProjects } from '../agent/search.js';
@@ -117,6 +123,18 @@ export interface ProjectsState {
    */
   shells: ShellSessionSummary[] | null;
   host: HostInfo | null;
+  /**
+   * Whether this bundle can actually talk to `host` (PA-61), and the sentence
+   * to show if it cannot. Null until the first response arrives, so nothing
+   * flashes a warning during the initial load.
+   *
+   * Derived from `host.protocol` — which `/api/projects` already carries —
+   * rather than from a second `/health` poll: this refresh runs every 5s on a
+   * phone, and one round trip that already contains the answer beats two.
+   * `probeHost` exists for the case this cannot cover, a host not currently
+   * serving a project list at all.
+   */
+  hostCompatibility: HostCompatibilityState | null;
   error: string | null;
   refresh: () => Promise<void>;
   open: (chat: ChatSummary, opts?: OpenChatOptions) => void;
@@ -165,6 +183,7 @@ export function useProjects(
   const [projects, setProjects] = useState<ProjectInfo[] | null>(null);
   const [shells, setShells] = useState<ShellSessionSummary[] | null>(null);
   const [host, setHost] = useState<HostInfo | null>(null);
+  const [hostCompatibility, setHostCompatibility] = useState<HostCompatibilityState | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -173,6 +192,12 @@ export function useProjects(
       setProjects(result.projects);
       setShells(result.shells);
       setHost(result.host);
+      setHostCompatibility(
+        compatibilityState(
+          result.host.name,
+          negotiateProtocol(PROTOCOL_VERSION, result.host.protocol),
+        ),
+      );
       setError(null);
     } catch (err) {
       onApiError(err);
@@ -521,6 +546,7 @@ export function useProjects(
     projects,
     shells,
     host,
+    hostCompatibility,
     error,
     refresh,
     open,
@@ -1536,15 +1562,58 @@ function ProjectSection({
   );
 }
 
-/** Header chip naming the machine these projects live on. */
-export function HostChip({ host }: { host: HostInfo | null }): JSX.Element | null {
+/**
+ * Header chip naming the machine these projects live on.
+ *
+ * The dot carries three states, not two (PA-61). "Incompatible" is deliberately
+ * distinct from "offline": an unreachable host may well be back in a second,
+ * whereas one outside the protocol range will keep refusing until somebody
+ * upgrades something, and conflating them sends the user to wait for a reboot
+ * that will not help. The chip is only ever a summary — `HostCompatibilityNotice`
+ * is what actually says which versions are involved, since a dot and a tooltip
+ * are not legible on a phone.
+ */
+export function HostChip({
+  host,
+  compatibility,
+}: {
+  host: HostInfo | null;
+  compatibility?: HostCompatibilityState | null;
+}): JSX.Element | null {
   if (!host) return null;
+  const incompatible = compatibility?.compatibility.compatible === false;
+  const dotClass = incompatible ? ' incompatible' : host.online ? '' : ' offline';
   return (
     <span className="host-chip">
-      <span className={`host-dot${host.online ? '' : ' offline'}`} aria-hidden="true" />
+      <span className={`host-dot${dotClass}`} aria-hidden="true" />
       <Icon name="terminal" />
       <span className="host-name">{host.name}</span>
+      {incompatible && <span className="host-warn">incompatible</span>}
     </span>
+  );
+}
+
+/**
+ * The legible half of a per-host incompatibility (PA-61).
+ *
+ * Rendered above the project list rather than in place of it, which is the
+ * acceptance criterion this component exists for: an incompatible host must not
+ * take the app down, so everything already loaded stays on screen and
+ * interactive. With several hosts this is one notice per bad host and the rest
+ * of the list is untouched.
+ *
+ * Returns null when the host is fine, so the common case adds no markup at all.
+ */
+export function HostCompatibilityNotice({
+  compatibility,
+}: {
+  compatibility: HostCompatibilityState | null;
+}): JSX.Element | null {
+  if (!compatibility || compatibility.message === null) return null;
+  return (
+    <div className="notice inline warn" role="status">
+      {compatibility.message}
+    </div>
   );
 }
 

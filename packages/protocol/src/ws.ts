@@ -9,11 +9,14 @@ import {
 } from './agent-events.js';
 import { PromptImage } from './prompt-image.js';
 import { LIMITS } from './limits.js';
+import type { ProtocolRange } from './protocol-negotiation.js';
 
 /**
- * Wire protocol version. The client sends it as a query parameter on the
- * WebSocket URL; the server rejects a mismatch with a close code rather than
- * trying to negotiate. Bump on any breaking frame change.
+ * Wire protocol version *this* build speaks. The client sends it as a query
+ * parameter on the WebSocket URL, and the server accepts it if it falls in
+ * `SERVER_PROTOCOL_RANGE`, closing with `PROTOCOL_MISMATCH` if it does not.
+ * Bump on any breaking frame change, and add a line below saying what broke —
+ * `PROTOCOL_MIN_SUPPORTED` cites this list as the reason it stays narrow.
  *
  * v2 added `epoch` to attach/session so a client cannot resume a sequence
  * number that belonged to a previous run of the output stream.
@@ -54,6 +57,54 @@ import { LIMITS } from './limits.js';
  * before it) only ever reaches a tab that attached to a *session*.
  */
 export const PROTOCOL_VERSION = 15;
+
+/**
+ * Oldest version the server still accepts on `/api/ws` (PA-61).
+ *
+ * Equal to `PROTOCOL_VERSION` today, so the handshake is exactly as strict as
+ * the equality check it replaced — a deliberate starting point, not an
+ * oversight. **Lowering this is a per-version decision, and the history above
+ * is the argument it has to beat.** Read v10 through v15: every one of those
+ * bumps exists *specifically* to force an older bundle to reconnect, because
+ * an unknown enum value or message discriminant fails the whole frame's Zod
+ * schema rather than being ignored, so an old client silently drops a push it
+ * cannot parse. A wide range here would reintroduce precisely those bugs,
+ * one per version it spans.
+ *
+ * So the floor may only move to a version `v` once every bump strictly after
+ * `v` is additive *and* ignorable — meaning a client on `v` still parses every
+ * frame the server can now send, rather than merely tolerating the new field
+ * when it happens to be absent. What PA-61 buys is the *mechanism* to say
+ * that: the range is reported on `/health`, negotiated per host, and a host
+ * outside it is one unusable row rather than a dead app.
+ */
+export const PROTOCOL_MIN_SUPPORTED = 15;
+
+/**
+ * What this server reports on `/health` and `HostInfo.protocol`.
+ *
+ * Derived from the two constants above so a bump cannot update the handshake
+ * and forget the advertisement — they would then disagree, and a client would
+ * be told it is compatible right up until the socket closed on it.
+ */
+export const SERVER_PROTOCOL_RANGE: ProtocolRange = {
+  min: PROTOCOL_MIN_SUPPORTED,
+  max: PROTOCOL_VERSION,
+};
+
+/**
+ * True when `version` is one this server will accept on the socket.
+ *
+ * Shared with the handshake rather than reimplemented there, and it guards the
+ * non-numeric case on purpose: the query parameter is a string from the wire,
+ * and `Number('abc')` is `NaN`, which compares `false` against both bounds.
+ * The equality check this replaced rejected that by accident; a naive range
+ * comparison would have started accepting it.
+ */
+export function isSupportedProtocolVersion(version: number): boolean {
+  if (!Number.isInteger(version)) return false;
+  return version >= PROTOCOL_MIN_SUPPORTED && version <= PROTOCOL_VERSION;
+}
 
 /**
  * WebSocket close codes the server uses for conditions the client must not

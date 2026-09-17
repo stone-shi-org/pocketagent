@@ -12,6 +12,7 @@ import {
 } from './session.js';
 import { EffortLevel, SessionTransport } from './agent-events.js';
 import { LIMITS } from './limits.js';
+import { ProtocolRange } from './protocol-negotiation.js';
 
 export const LoginRequest = z.object({
   token: z.string().min(1).max(512),
@@ -286,9 +287,28 @@ export const WorkspaceListResponse = z.object({
 });
 export type WorkspaceListResponse = z.infer<typeof WorkspaceListResponse>;
 
+/**
+ * `GET /health` — the one unauthenticated read in the server.
+ *
+ * Load-bearing rather than decorative since PA-61: the handler's return type is
+ * annotated with it, and `probeHost` in the browser parses responses through
+ * it, because the Hub decides whether a backend is usable from this payload
+ * alone. It sat here unused before that, which is how the adjacent
+ * `ProjectListResponse` came to omit a field the route actually returns.
+ *
+ * Nothing sensitive may be added here. `version` and `protocol` are disclosure
+ * enough to be a deliberate decision — an unauthenticated caller who can reach
+ * the port learns the exact build, i.e. which known bugs apply — and they are
+ * only here because a Hub has to read them *before* it can authenticate. A git
+ * SHA, build host, Node version or config detail would be a further step and
+ * belongs behind the cookie (`/api/hosts`, or the settings snapshot).
+ */
 export const HealthResponse = z.object({
   status: z.literal('ok'),
+  /** Real semver from the build. See `resolveServerVersion` server-side. */
   version: z.string(),
+  /** Wire-protocol versions this server accepts, for per-host negotiation. */
+  protocol: ProtocolRange,
   uptimeSeconds: z.number(),
 });
 export type HealthResponse = z.infer<typeof HealthResponse>;

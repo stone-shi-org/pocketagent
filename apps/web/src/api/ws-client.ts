@@ -17,6 +17,44 @@ import { DEFAULT_HOST, hostUrl, type HostEndpoint } from './host.js';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 
+/**
+ * A close this connection will not retry through (PA-61).
+ *
+ * `hostId` is what makes it a *per-host* state rather than a global fatal: a
+ * lagging backend must render as one unusable host, leaving every other host's
+ * connection untouched. `message` is pre-rendered rather than derived by each
+ * page, so the two layouts cannot word the same failure differently.
+ */
+export interface FatalClose {
+  readonly reason: 'protocol_mismatch';
+  /** The host that closed us — `HostEndpoint.id`. */
+  readonly hostId: string;
+  /** Ready to render. */
+  readonly message: string;
+}
+
+/**
+ * Turns a protocol-mismatch close into advice that is actually true.
+ *
+ * The distinction is load-bearing, and getting it wrong is the bug PA-61 was
+ * filed over. For the host that *served this bundle*, a skew means the page is
+ * stale and reloading genuinely fixes it — the original wording, kept because
+ * for a single-host deployment it is still exactly right. For any *other*
+ * host, reloading fetches the very same bundle from the very same origin and
+ * changes nothing: that host is lagging (or ahead) and must be upgraded, so
+ * telling the user to reload would send them round a loop forever. The
+ * server's own close reason is quoted when present because it names the
+ * version range, which is the only actionable detail in either case.
+ */
+export function fatalCloseMessage(endpoint: HostEndpoint, serverReason: string): string {
+  if (endpoint.basePath === '') {
+    return 'This app was updated. Reload the page to reconnect.';
+  }
+  const detail = serverReason.trim();
+  const suffix = detail === '' ? '' : ` (${detail})`;
+  return `Host ${endpoint.id} speaks a different protocol version than this app${suffix}. Other hosts are unaffected.`;
+}
+
 export interface TerminalConnectionHandlers {
   /** Live output. `seq` has already been de-duplicated and ordered. */
   onOutput?: (data: string, seq: number) => void;
@@ -53,8 +91,12 @@ export interface TerminalConnectionHandlers {
    * from `onError`, which is for a recoverable, server-sent `error` frame —
    * this fires on the close itself and reconnecting stops, since the server
    * would just say the same thing again.
+   *
+   * Receives a `FatalClose` rather than a bare string since PA-61: with more
+   * than one backend the interesting part is *which host* gave up, and the
+   * advice differs per host (see `fatalCloseMessage`).
    */
-  onFatal?: (message: string) => void;
+  onFatal?: (fatal: FatalClose) => void;
 
   // ---- Structured sessions ----
   /** One live agent event, already de-duplicated on `seq`. */
@@ -219,7 +261,11 @@ export class TerminalConnection {
       // rather than let this look identical to a transient drop.
       if (event.code === WsCloseCode.PROTOCOL_MISMATCH) {
         this.setState('disconnected');
-        this.handlers.onFatal?.('This app was updated. Reload the page to reconnect.');
+        this.handlers.onFatal?.({
+          reason: 'protocol_mismatch',
+          hostId: this.endpoint.id,
+          message: fatalCloseMessage(this.endpoint, event.reason ?? ''),
+        });
         return;
       }
       this.scheduleReconnect();
@@ -482,6 +528,7 @@ export class ConversationWatchConnection {
   private attempt = 0;
 
   private readonly onRemoved: (conversationId: string) => void;
+  private readonly onFatal?: (fatal: FatalClose) => void;
   private readonly endpoint: HostEndpoint;
   private readonly createSocket: (url: string) => WebSocket;
   private readonly baseDelay: number;
@@ -490,6 +537,13 @@ export class ConversationWatchConnection {
 
   constructor(options: {
     onRemoved: (conversationId: string) => void;
+    /**
+     * Same contract as `TerminalConnection`'s: a close retrying cannot fix.
+     * Optional because the only caller so far (`ChatPreviewPage`) has no
+     * connection UI of its own — but the *reconnect* must stop either way,
+     * which is why this is handled even with no handler attached.
+     */
+    onFatal?: (fatal: FatalClose) => void;
     /** Which host to talk to. Defaults to the one that served this bundle. */
     endpoint?: HostEndpoint;
     createSocket?: (url: string) => WebSocket;
@@ -498,6 +552,7 @@ export class ConversationWatchConnection {
     random?: () => number;
   }) {
     this.onRemoved = options.onRemoved;
+    this.onFatal = options.onFatal;
     this.endpoint = options.endpoint ?? DEFAULT_HOST;
     this.createSocket = options.createSocket ?? ((url) => new WebSocket(url));
     this.baseDelay = options.baseDelayMs ?? DEFAULT_BASE_DELAY;
@@ -549,9 +604,23 @@ export class ConversationWatchConnection {
       // `onclose` always follows; reconnect scheduling lives there.
     };
 
-    socket.onclose = () => {
+    socket.onclose = (event: CloseEvent) => {
       this.socket = null;
       if (this.closedByUser) return;
+      // Pre-existing bug, fixed under PA-61: this branch was missing entirely,
+      // so a bundle whose version the server refuses reconnected forever on a
+      // backoff — the exact failure `TerminalConnection`'s own fatal branch was
+      // added to prevent, and invisible here because a chat preview has no
+      // connection indicator. Version skew being the steady state behind a Hub
+      // turns that from a rare post-deploy blip into a permanent spin.
+      if (event.code === WsCloseCode.PROTOCOL_MISMATCH) {
+        this.onFatal?.({
+          reason: 'protocol_mismatch',
+          hostId: this.endpoint.id,
+          message: fatalCloseMessage(this.endpoint, event.reason ?? ''),
+        });
+        return;
+      }
       this.scheduleReconnect();
     };
   }

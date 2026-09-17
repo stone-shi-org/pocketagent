@@ -7,6 +7,7 @@ import type {
   ProjectInfo,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
+import { PROTOCOL_VERSION, negotiateProtocol } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
 import { SelectorRow, type SelectorOption } from '../components/SelectorRow.js';
 import { AddProject } from '../components/AddProject.js';
@@ -114,8 +115,22 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
     setBranchName('');
   }, [cwd]);
 
+  // PA-61: a third state, because starting a session on a host this bundle
+  // cannot hold a socket to would fail at the first frame rather than at
+  // creation — `detail` is the only place this picker can say so before the
+  // user commits to it. Ranked ahead of `online`: a reachable host that speaks
+  // the wrong protocol is still unusable, and reporting it as "online" would be
+  // the more misleading of the two.
+  const hostIncompatible =
+    host !== null && !negotiateProtocol(PROTOCOL_VERSION, host.protocol).compatible;
   const hostOptions: SelectorOption[] = host
-    ? [{ value: host.id, label: host.name, detail: host.online ? 'online' : 'unreachable' }]
+    ? [
+        {
+          value: host.id,
+          label: host.name,
+          detail: hostIncompatible ? 'incompatible' : host.online ? 'online' : 'unreachable',
+        },
+      ]
     : [];
 
   // A root's `name` is its full path, which is unreadable on a phone. Show the

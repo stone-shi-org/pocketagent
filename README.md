@@ -150,6 +150,7 @@ running keeps running.
 | `POCKETAGENT_CLAUDE_BIN` | `claude` | Claude Code executable, resolved on `PATH`. |
 | `POCKETAGENT_SETTINGS_ENC_KEY` | — | Base64 of 32 random bytes, encrypting each custom Claude provider's API key at rest. Unset disables that feature (it is not a boot error); set-but-invalid is. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
 | `POCKETAGENT_DEEPSEEK_*`, `POCKETAGENT_OMNIROUTE_*` | — | **Deprecated.** Read once on the first boot after upgrading, to import the old built-in variants as custom Claude providers, then never again. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
+| `POCKETAGENT_BUILD_VERSION` | `package.json`, then `0.0.0-dev` | Semver reported on `/health` and in the host list. Build identity, normally stamped by the image build rather than set by hand; a malformed value is ignored with a boot warning. |
 | `LOG_LEVEL` | `info` | |
 | `NODE_ENV` | `development` | |
 
@@ -472,6 +473,7 @@ What it does enforce:
 | --- | --- |
 | Default reachability | Binds `127.0.0.1`; anything else is explicit and logs a warning. |
 | Authentication | Every route except `/health`, the login endpoints, and `POST /api/hooks/:slug` requires a valid session cookie — including the WebSocket upgrade. The one exception authenticates itself by HMAC over the raw request body; see [Inbound webhooks](#inbound-webhooks-and-what-they-change). |
+| Health disclosure | `/health` is unauthenticated on purpose, so a front server can tell whether a backend is usable before it holds a credential for it. It returns only `status`, `version`, `protocol` and `uptimeSeconds` — the semver does tell an unauthenticated caller which build is running, which is accepted; a commit SHA, build host, path or config value must go behind the cookie instead, and a test pins the field list so adding one is deliberate. |
 | Token handling | The master token is exchanged once at login for a random 32-byte session id in an `HttpOnly; SameSite=Strict` cookie. The token never reaches JavaScript, localStorage, or the URL. Comparison is constant-time. |
 | Brute force | Login is rate-limited to 8 attempts/minute; other routes to 300/minute. |
 | CSRF | `SameSite=Strict` plus an explicit `Origin` check on every state-changing request and on the WebSocket handshake. |

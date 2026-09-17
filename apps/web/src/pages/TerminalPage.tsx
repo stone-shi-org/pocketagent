@@ -284,7 +284,9 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
           } else if (code === 'session_ended') setNotice(message);
         },
 
-        onFatal: setFatal,
+        // Only the message is rendered; `FatalClose`'s `hostId` matters to the
+        // host list, not to a page already scoped to one session's host.
+        onFatal: (f) => setFatal(f.message),
       },
     });
     connRef.current = connection;
