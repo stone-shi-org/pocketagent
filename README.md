@@ -30,6 +30,7 @@ or use private remote-control APIs. It launches `claude` exactly the way you wou
 - [Configuration](#configuration)
 - [Running](#running)
 - [Running with Docker](#running-with-docker)
+- [Running a Hub](#running-a-hub)
 - [Releases](#releases)
 - [Deploying to another machine](#deploying-to-another-machine)
   - [The data root](#the-data-root)
@@ -391,6 +392,136 @@ stamped version reaches both `/health` and the web bundle.
 
 ---
 
+## Running a Hub
+
+Optional, and only worth it once you have more than one machine. A **Hub**
+(`apps/hub`, image `pocketagent-hub`) is a single origin that fronts several
+backends: you sign in once to the Hub, and every machine bound to it is reachable
+from that one browser tab.
+
+```
+phone / desktop ──TLS──► Hub (one origin, SQLite, registry, credentials)
+                          ├── /h/dev01/api/*  ──► backend #1
+                          ├── /h/dev02/api/*  ──► backend #2  (+ WebSocket upgrade)
+                          └── /api/hub/*      ──► the host registry
+```
+
+**A backend needs no Hub-specific configuration.** Nothing about running one changes,
+and a backend reached directly with no Hub in front behaves exactly as it always has.
+The only thing a Hub needs from a backend is one `hub-bind` call, which you make from
+the Hub's own UI.
+
+### Why one origin instead of several
+
+The browser talks to exactly one origin and reaches each backend under a path prefix.
+That is not a stylistic choice: a frontend talking to N backend origins would need
+`SameSite=None; Secure` cookies, and Safari blocks third-party cookies outright — so
+the obvious cross-origin design fails silently on iPhone, which is the primary target.
+Path-routing keeps the existing `SameSite=Strict` HttpOnly cookie working unchanged,
+needs no CORS, makes the WebSocket a plain upgrade proxy, and leaves exactly one TLS
+certificate to manage.
+
+The consequence worth knowing: a backend is reachable through the Hub only as a
+same-origin path prefix, so "add a host" means registering a machine the Hub itself can
+reach, not pointing your browser at a second address.
+
+### Setting one up
+
+```bash
+# The Hub's own credential — NOT any backend's POCKETAGENT_AUTH_TOKEN.
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+# And a key to encrypt the backend credentials it will hold:
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+```
+
+```bash
+# docker/.env
+POCKETAGENT_HUB_AUTH_TOKEN=<the first value>
+POCKETAGENT_SETTINGS_ENC_KEY=<the second value>
+
+docker compose -f docker/compose.hub.yaml up -d
+```
+
+Then open the Hub, sign in, and for each machine: **add a host** (an id, a label and the
+backend's base URL as the Hub can reach it), then **bind** it by pasting that backend's
+`POCKETAGENT_AUTH_TOKEN` once. The Hub exchanges it for a scoped credential and discards
+it — see [Hub credentials](#hub-credentials) for why that matters and what it does not
+buy you.
+
+For development, run it from the checkout instead:
+
+```bash
+POCKETAGENT_HUB_AUTH_TOKEN=... POCKETAGENT_SETTINGS_ENC_KEY=... \
+  pnpm -F @pocketagent/hub dev
+```
+
+It is deliberately not part of `pnpm dev`: most work here is against a single backend,
+and a Hub with nothing registered has nothing to show.
+
+### Hub settings
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `POCKETAGENT_HUB_AUTH_TOKEN` | — | **Required.** The Hub's own operator credential, min 24 chars. Never a backend's token. |
+| `POCKETAGENT_SETTINGS_ENC_KEY` | — | **Required here.** Encrypts the stored backend credentials. Unlike on a backend, the Hub refuses to boot without it. |
+| `POCKETAGENT_HUB_HOST` | `127.0.0.1` | Bind address. Non-loopback logs a warning — this process reaches every bound backend. |
+| `POCKETAGENT_HUB_PORT` | `8788` | |
+| `POCKETAGENT_HUB_DATA_DIR` | `<checkout>/data/hub` | The registry database. Its own variable, not `POCKETAGENT_DATA_DIR`. |
+| `POCKETAGENT_HUB_SESSION_TTL_HOURS` | `720` | How long a Hub login lasts. |
+| `POCKETAGENT_HUB_LATEST_RELEASE` | unset | Newest release to compare hosts against, for the drift badge. Unset infers it from the hosts in the list. |
+| `POCKETAGENT_ALLOWED_ORIGINS`, `POCKETAGENT_COOKIE_SECURE`, `POCKETAGENT_TRUST_PROXY` | as for a backend | Set these on the **Hub**: it is the origin the browser talks to, and where TLS terminates. |
+
+### TLS
+
+The Hub is the only thing that should be published, so there is one certificate. In
+order of preference:
+
+1. **Tailscale Serve.** Keep the Hub on loopback and let Tailscale terminate TLS:
+   `tailscale serve --bg 8788`. Real HTTPS, no certificate management, and only your
+   tailnet can reach it.
+2. **Caddy or Traefik** in front, forwarding to `127.0.0.1:8788`. Forward the WebSocket
+   upgrade headers and use a long read timeout — terminals idle for a long time.
+
+Then set `POCKETAGENT_TRUST_PROXY=true` and `POCKETAGENT_ALLOWED_ORIGINS=https://your.domain`
+on the Hub. Over plain HTTP you must also set `POCKETAGENT_COOKIE_SECURE=false`, or login
+silently fails — the same trap a bare backend has.
+
+### Two things the Hub deliberately does not do
+
+**It does not proxy `/api/hooks/*`.** Inbound webhook deliveries are the only
+unauthenticated route in a backend, and the guarantee that `grep '/api/hooks/'` finds the
+whole unauthenticated surface is worth more than the convenience. Jira keeps delivering
+**straight to the backend**, so a machine that receives webhooks still needs its own
+reachable address. `/h/<id>/api/hooks/...` is refused by the Hub and never forwarded.
+
+**It does not look at your terminal traffic.** The WebSocket is spliced at the TCP level:
+the Hub has no WebSocket library at all on that path, so it does not buffer, inspect,
+transform or log a single frame. "Terminal I/O is never logged or persisted" holds in the
+Hub because there is no code there that could do it, not because it was asked nicely.
+
+It also does not merge anything. The Hub proxies; it does not aggregate. Every response
+you see came from one backend.
+
+### What a Hub costs you
+
+Worth reading before you run one, because none of it is hidden:
+
+- **It is one process that can reach every machine bound to it.** That is the trade the scoped
+  credentials make survivable rather than eliminate — nothing it holds is a master token, and
+  every credential is revocable from the machine it grants access to, under that machine's
+  **Settings → Hubs**.
+- **It is a single point of failure for *reaching* your backends**, though not for their state.
+  Each one stays directly usable with no Hub involved.
+- **An operator can extract a stored credential** by repointing a host's base URL and then
+  removing it, which sends the credential to whatever is listening. Not an escalation — the
+  same person holds the master token that minted it — but it does mean "the Hub never shows you
+  a credential" is a UI property, not a guarantee.
+- **Losing the Hub's data directory** loses the registry, and losing
+  `POCKETAGENT_SETTINGS_ENC_KEY` makes every stored credential undecryptable. Neither loses
+  access: re-add and re-bind each host, then revoke the orphaned credentials on each backend.
+
+---
+
 ## Releases
 
 ### Versioning
@@ -469,9 +600,12 @@ instead of naming the failure.
 The plan's one-time creation is manual (this Bamboo has no plan-creation REST API); the steps
 are at the top of `bamboo-specs.yaml`.
 
-**The Hub image (`pocketagent-hub`) is not built yet** — there is no `apps/hub` in the repo
-until PA-66 lands. The release driver builds the server's three targets; adding the hub is a
-second image in the same loop, not a second pipeline.
+The release driver builds **four** targets in one loop: the server's three (`thin`, `claude`,
+`all`) and the Hub (`hub`). The Hub publishes under its own image name, `pocketagent-hub`,
+rather than as a suffixed tag of the server's — an operator pulling
+`pocketagent-server:1.2.3-hub` would reasonably expect a backend. Both images are stamped with
+the same `POCKETAGENT_BUILD_VERSION`, which is what lets the version-drift check compare a Hub
+and a backend without knowing which is which.
 
 ---
 
@@ -916,7 +1050,8 @@ Four properties are worth stating plainly, because each one is a deliberate choi
   than escalation: it cannot mint a replacement, because binding requires the access token.
 
 Binding requires no new configuration, and the credential is bound to no particular Hub
-implementation — `apps/hub` does not exist in this repository yet.
+implementation. This repository ships one — see [Running a Hub](#running-a-hub) — but the
+exchange above is just an HTTP call, so anything that can make it can hold a credential.
 
 ### Continuing a chat on another provider
 
@@ -1669,11 +1804,14 @@ should have told you. Raise `OUTPUT_BUFFER_BYTES`, or press `^L` to redraw.
 12. **Attaching to your own tmux is a shared session, not a takeover.** Your prefix key is
     live from the browser, and the window follows whichever client attached most recently.
     A pane in a plain terminal (no tmux) cannot be attached to at all.
-13. **One host.** The header, the composer's host row and `GET /api/hosts` are shaped for
-    several machines, but a server only ever reports itself. Driving more than one needs a
-    front server that registers backs and proxies to them; that does not exist yet, and it
-    would concentrate credentials for every registered machine in one place, so it wants
-    designing rather than bolting on.
+13. **One host per backend; several only behind the Hub.** A backend only ever reports
+    itself from `GET /api/hosts`, deliberately — it has no business claiming to know about
+    its peers. Driving several machines from one browser needs the
+    [Hub](#running-a-hub), which does concentrate credentials in one process: that is a
+    real cost, accepted on the grounds that none of the credentials it holds is a root
+    credential and each is revocable from the machine it grants access to. The Hub is also
+    a single point of failure for *reaching* your backends, though not for their state —
+    each one is still directly usable with no Hub involved.
 14. **The home screen lists only directories with chats in them.** A configured workspace
     you have never used does not appear until you start something there; the composer's
     workspace row can still reach it.

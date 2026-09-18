@@ -1,38 +1,19 @@
-import crypto from 'node:crypto';
 import type { Db, AuthSessionRow } from '../db/index.js';
 
 /**
- * Constant-time comparison that does not leak length either. Hashing both sides
- * first gives two equal-length digests, so `timingSafeEqual` cannot throw and
- * the comparison time is independent of the candidate's length.
- */
-export function safeTokenEqual(expected: string, candidate: string): boolean {
-  const a = crypto.createHash('sha256').update(expected, 'utf8').digest();
-  const b = crypto.createHash('sha256').update(candidate, 'utf8').digest();
-  return crypto.timingSafeEqual(a, b);
-}
-
-export function generateToken(bytes = 32): string {
-  return crypto.randomBytes(bytes).toString('base64url');
-}
-
-/**
- * Parse an `Authorization: Bearer <token>` header, or `null`.
+ * PA-66 moved the primitives below into `packages/node-kit`, so `apps/hub` can
+ * use the identical constant-time compare, token generator, bearer parser and
+ * Origin policy without depending on this package (which would drag node-pty
+ * and the agent SDKs into a gateway image). They are re-exported from here
+ * because every existing import in this server names this path, and the move
+ * is only safe as a *pure* one — the existing suite is its regression guard.
  *
- * One definition, used by both things in this server that accept a bearer
- * token: the request gate's hub credentials (PA-63) and a webhook whose sender
- * cannot sign its payloads (`routes/webhook-delivery.ts`). They are unrelated
- * credential classes, but "what counts as a Bearer header" must not be able to
- * differ between two auth paths — a second copy is how one of them ends up
- * accepting a form the other rejects.
+ * `AuthService` deliberately stayed: a session store is bound to its own table
+ * in its own schema, and the Hub's sessions are not this server's.
  */
-export function bearerTokenFrom(header: string | string[] | undefined): string | null {
-  if (header === undefined) return null;
-  const raw = Array.isArray(header) ? header[0] : header;
-  if (raw === undefined) return null;
-  const match = /^Bearer\s+(.+)$/i.exec(raw.trim());
-  return match?.[1]?.trim() ?? null;
-}
+export { bearerTokenFrom, generateToken, isOriginAllowed, safeTokenEqual } from '@pocketagent/node-kit';
+
+import { generateToken, safeTokenEqual } from '@pocketagent/node-kit';
 
 export interface AuthSession {
   id: string;
@@ -91,37 +72,5 @@ export class AuthService {
 
   destroyAllSessions(): void {
     this.db.prepare('DELETE FROM auth_sessions').run();
-  }
-}
-
-/**
- * Cross-site WebSocket connections are not covered by SameSite cookies in every
- * browser/version combination, and `fetch` preflight does not apply to WS. So we
- * check `Origin` explicitly on both the REST mutations and the WS handshake.
- *
- * Returns true when the request should be allowed.
- */
-export function isOriginAllowed(
-  origin: string | undefined,
-  allowedOrigins: string[] | null,
-  host: string | undefined,
-): boolean {
-  // Non-browser clients (curl, tests, native apps) send no Origin. The cookie
-  // is still required, so this is not an authentication bypass.
-  if (origin === undefined) return true;
-
-  const normalized = origin.replace(/\/$/, '');
-
-  if (allowedOrigins && allowedOrigins.length > 0) {
-    return allowedOrigins.includes(normalized);
-  }
-
-  // Default policy: same-origin only. Compare the Origin's host against the
-  // Host header the request was routed to.
-  if (!host) return false;
-  try {
-    return new URL(normalized).host === host;
-  } catch {
-    return false;
   }
 }

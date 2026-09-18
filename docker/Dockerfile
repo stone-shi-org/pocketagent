@@ -62,7 +62,9 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
+COPY apps/hub/package.json apps/hub/
 COPY packages/protocol/package.json packages/protocol/
+COPY packages/node-kit/package.json packages/node-kit/
 
 # `allowBuilds` in pnpm-workspace.yaml is what permits node-pty,
 # better-sqlite3 and esbuild to run their build scripts; without the toolchain
@@ -184,13 +186,19 @@ COPY --from=prod-deps --chown=root:root /app/node_modules ./node_modules
 COPY --from=prod-deps --chown=root:root /app/apps/server/node_modules ./apps/server/node_modules
 COPY --from=prod-deps --chown=root:root /app/apps/web/node_modules ./apps/web/node_modules
 COPY --from=prod-deps --chown=root:root /app/packages/protocol/node_modules ./packages/protocol/node_modules
+# PA-66: `@pocketagent/node-kit` is a workspace dependency of the server, so
+# omitting it here is not a smaller image, it is a server that cannot resolve
+# `crypto/secret-box` at boot.
+COPY --from=prod-deps --chown=root:root /app/packages/node-kit/node_modules ./packages/node-kit/node_modules
 
 COPY --from=build --chown=root:root /app/package.json ./package.json
 COPY --from=build --chown=root:root /app/apps/server/package.json ./apps/server/package.json
 COPY --from=build --chown=root:root /app/packages/protocol/package.json ./packages/protocol/package.json
+COPY --from=build --chown=root:root /app/packages/node-kit/package.json ./packages/node-kit/package.json
 COPY --from=build --chown=root:root /app/apps/web/package.json ./apps/web/package.json
 
 COPY --from=build --chown=root:root /app/packages/protocol/dist ./packages/protocol/dist
+COPY --from=build --chown=root:root /app/packages/node-kit/dist ./packages/node-kit/dist
 COPY --from=build --chown=root:root /app/apps/server/dist ./apps/server/dist
 COPY --from=build --chown=root:root /app/apps/web/dist ./apps/web/dist
 
@@ -273,3 +281,138 @@ RUN test -n "${CODEX_VERSION}" && test -n "${OPENCODE_VERSION}" && test -n "${PI
     && /usr/local/bin/codex --version \
     && /usr/local/bin/opencode --version \
     && /usr/local/bin/pi --version
+
+# ---------------------------------------------------------------------------
+# hub-deps — production dependencies for the Hub alone
+# ---------------------------------------------------------------------------
+# Not `prod-deps`, and — the part that is easy to get wrong — **not `FROM deps`
+# either**. `prod-deps` holds the whole workspace's store: the Claude Agent SDK
+# alone is 291 MB and node-pty another 60, none of which a gateway has a code
+# path for. But layering a filtered install on top of `deps` does not help,
+# because `pnpm install --filter` does not garbage-collect packages an earlier
+# install already materialised in `node_modules/.pnpm` — measured, not assumed:
+# the image stayed at 796 MB until this stage started from a clean base.
+#
+# So: clean base, all manifests (the lockfile describes every workspace project
+# and `--frozen-lockfile` wants them present), and one filtered install.
+# `@pocketagent/hub...` resolves the Hub plus its workspace dependencies —
+# protocol and node-kit — and nothing else.
+#
+# On the toolchain base rather than the runtime one for the same reason
+# `prod-deps` is: better-sqlite3 is a native module, and the runtime image
+# deliberately has no compiler.
+FROM ${NODE_IMAGE} AS hub-deps
+
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+ENV PNPM_HOME=/pnpm
+ENV CI=true
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && corepack enable pnpm
+
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/server/package.json apps/server/
+COPY apps/web/package.json apps/web/
+COPY apps/hub/package.json apps/hub/
+COPY packages/protocol/package.json packages/protocol/
+COPY packages/node-kit/package.json packages/node-kit/
+
+RUN pnpm install --frozen-lockfile --prod --filter '@pocketagent/hub...'
+
+# `node-kit` has no runtime dependencies — it only uses `node:crypto` — so a
+# --prod install creates no directory for it and the COPY below would fail on
+# a missing path. Materialising an empty one keeps that COPY unconditional, so
+# the day node-kit gains a real dependency it is already carried rather than
+# silently absent at runtime.
+RUN mkdir -p packages/node-kit/node_modules
+
+# ---------------------------------------------------------------------------
+# hub-runtime — the gateway image (PA-66)
+# ---------------------------------------------------------------------------
+# A separate image rather than a second entrypoint on the backend one, because
+# the two have almost disjoint needs: the Hub forwards bytes and has no agent
+# CLI, no PTY, no tmux, no git and no workspace mount. It is emphatically
+# *not* a static nginx image either — the Hub has state (the registry and the
+# encrypted credentials), which is what the data volume below is for.
+#
+# It does ship `apps/web/dist`: behind a Hub, the Hub is the single origin the
+# browser talks to, so it serves the same bundle the backend would have.
+FROM ${NODE_IMAGE} AS hub-runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Same uid/gid convention as the backend image, so an operator who has already
+# matched PUID/PGID for their repositories does not meet a second scheme. The
+# Hub touches no bind mount of the operator's, so there is no entrypoint
+# remapping here — only its own data volume, which it may own outright.
+RUN userdel -r node 2>/dev/null || true \
+    && groupadd -g 1000 pocketagent \
+    && useradd -u 1000 -g 1000 -m -s /bin/bash pocketagent
+
+ENV NODE_ENV=production \
+    HOME=/home/pocketagent \
+    POCKETAGENT_HUB_PORT=8788 \
+    POCKETAGENT_HUB_DATA_DIR=/data \
+    POCKETAGENT_WEB_DIST=/app/apps/web/dist
+
+# Loopback inside a namespace means unreachable, so the deliberate act moves
+# to publishing the port — the same trade the backend image documents. It
+# matters more here: this process can reach every bound backend.
+ENV POCKETAGENT_HUB_HOST=0.0.0.0
+
+WORKDIR /app
+
+# The repo layout is preserved for the same reason the backend image preserves
+# it, with one fewer level: `apps/hub/dist/config.js` resolves the repo root as
+# `../../..`, so `dist/` must sit three levels below /app. Keeping the shape
+# identical between the two images means there is one layout rule to remember
+# rather than two, and `pnpm deploy`'s flattening would break this one too.
+COPY --from=hub-deps --chown=root:root /app/node_modules ./node_modules
+COPY --from=hub-deps --chown=root:root /app/apps/hub/node_modules ./apps/hub/node_modules
+COPY --from=hub-deps --chown=root:root /app/packages/protocol/node_modules ./packages/protocol/node_modules
+COPY --from=hub-deps --chown=root:root /app/packages/node-kit/node_modules ./packages/node-kit/node_modules
+
+COPY --from=build --chown=root:root /app/package.json ./package.json
+COPY --from=build --chown=root:root /app/apps/hub/package.json ./apps/hub/package.json
+COPY --from=build --chown=root:root /app/packages/protocol/package.json ./packages/protocol/package.json
+COPY --from=build --chown=root:root /app/packages/node-kit/package.json ./packages/node-kit/package.json
+COPY --from=build --chown=root:root /app/apps/web/package.json ./apps/web/package.json
+
+COPY --from=build --chown=root:root /app/packages/protocol/dist ./packages/protocol/dist
+COPY --from=build --chown=root:root /app/packages/node-kit/dist ./packages/node-kit/dist
+COPY --from=build --chown=root:root /app/apps/hub/dist ./apps/hub/dist
+COPY --from=build --chown=root:root /app/apps/web/dist ./apps/web/dist
+
+# Part of the image, so it is chowned here rather than at run time — the
+# backend entrypoint's "never chown a mounted volume" rule applies to a
+# *bind* mount whose owner the operator chose. This is a named volume the Hub
+# owns outright, and it holds nothing but the registry.
+RUN install -d -o pocketagent -g pocketagent /data
+
+ARG POCKETAGENT_BUILD_VERSION=0.0.0-dev
+ENV POCKETAGENT_BUILD_VERSION=${POCKETAGENT_BUILD_VERSION}
+
+USER pocketagent
+
+EXPOSE 8788
+
+# The Hub's own /health is public for the same reason the backend's is, and
+# carries the same four keys.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD node -e "fetch('http://127.0.0.1:'+(process.env.POCKETAGENT_HUB_PORT||8788)+'/health').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"
+
+# tini for the same PID-1 signal-forwarding reason, though the Hub spawns
+# nothing: it costs a few kilobytes and means `docker stop` is prompt.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "apps/hub/dist/server.js"]

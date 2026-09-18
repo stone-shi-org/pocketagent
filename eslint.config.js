@@ -48,7 +48,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['apps/server/scripts/**', 'scripts/**', '*.config.js', '*.config.ts'],
+    files: ['apps/server/scripts/**', 'apps/hub/scripts/**', 'scripts/**', '*.config.js', '*.config.ts'],
     languageOptions: { globals: globals.node },
     rules: { 'no-console': 'off' },
   },
@@ -75,8 +75,16 @@ export default tseslint.config(
       'apps/server/scripts/provider-ui-demo.mjs',
       'apps/server/scripts/agent-install-ui-demo.mjs',
       'apps/server/scripts/multi-host-ui-demo.mjs',
+      'apps/hub/scripts/hub-demo.mjs',
     ],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },
+  },
+  {
+    // The Hub and the shared Node package run under Node. There is no default
+    // Node-globals block in this config, so without this every `process`,
+    // `Buffer` and `console` in them is a `no-undef`.
+    files: ['apps/hub/src/**/*.ts', 'apps/hub/tests/**/*.ts', 'packages/node-kit/src/**/*.ts'],
+    languageOptions: { globals: globals.node },
   },
   {
     // Frontend source runs in the browser.

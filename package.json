@@ -9,7 +9,7 @@
   "packageManager": "pnpm@12.3.4",
   "scripts": {
     "dev": "pnpm protocol && concurrently -n server,web -c cyan,magenta \"pnpm -F @pocketagent/server dev\" \"pnpm -F @pocketagent/web dev\"",
-    "build": "pnpm -F @pocketagent/protocol build && pnpm -F @pocketagent/server build && pnpm -F @pocketagent/web build",
+    "build": "pnpm -F @pocketagent/protocol build && pnpm -F @pocketagent/node-kit build && pnpm -F @pocketagent/server build && pnpm -F @pocketagent/hub build && pnpm -F @pocketagent/web build",
     "start": "pnpm -F @pocketagent/server start",
     "test": "pnpm protocol && vitest run",
     "test:watch": "pnpm protocol && vitest",
@@ -17,7 +17,7 @@
     "lint:fix": "pnpm protocol && eslint . --fix",
     "typecheck": "pnpm protocol && pnpm -r typecheck",
     "//protocol": "The shared package is consumed as built output, not source, so it must be freshly built before anything typechecks, lints, tests, or runs against it. `dev` rebuilds it too (PA-31): without this, a protocol schema change (e.g. a new PATCH field) silently vanishes at runtime instead of erroring — zod strips an unrecognized key from a request body rather than rejecting it, so a stale dist/ here reads as a 200 that quietly did nothing.",
-    "protocol": "pnpm -F @pocketagent/protocol build",
+    "protocol": "pnpm -F @pocketagent/protocol build && pnpm -F @pocketagent/node-kit build",
     "generate-token": "node apps/server/scripts/generate-token.mjs",
     "//version": "PA-65. This root `version` is the repo's semver and the single source for /health, the web bundle's __APP_VERSION__ and the image tags; `version:set` keeps the other three package.json files identical to it, and release-tags.test.ts fails if they ever drift. A release is: `pnpm version:set X.Y.Z`, commit, `git tag X.Y.Z` (no 'v'), `./build.sh -p`.",
     "version:set": "node scripts/set-version.mjs",
@@ -38,6 +38,7 @@
     "demo:webhook-ui": "pnpm -F @pocketagent/server exec node scripts/webhook-ui-demo.mjs",
     "demo:deepseek-variant": "pnpm -F @pocketagent/server exec node scripts/deepseek-variant-demo.mjs",
     "demo:provider-ui": "pnpm -F @pocketagent/server exec node scripts/provider-ui-demo.mjs",
+    "demo:hub": "pnpm -F @pocketagent/hub exec node scripts/hub-demo.mjs",
     "demo:multi-host-ui": "pnpm -F @pocketagent/server exec node scripts/multi-host-ui-demo.mjs",
     "demo:agent-install-ui": "pnpm -F @pocketagent/server exec node scripts/agent-install-ui-demo.mjs"
   },

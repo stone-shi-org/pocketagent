@@ -19,6 +19,20 @@ export default defineConfig({
       },
       {
         test: {
+          name: 'hub',
+          root: './apps/hub',
+          environment: 'node',
+          include: ['tests/**/*.test.ts'],
+          // The proxy suites bind real sockets and open real SQLite handles —
+          // a splice cannot be exercised through `app.inject()` — so each file
+          // gets its own process for the same reason the server's do.
+          pool: 'forks',
+          testTimeout: 20_000,
+          hookTimeout: 20_000,
+        },
+      },
+      {
+        test: {
           name: 'web',
           root: './apps/web',
           environment: 'node',

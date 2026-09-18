@@ -1,0 +1,142 @@
+# PocketAgent Hub — the reference multi-host deployment (PA-66).
+#
+#   cp docker/.env.example docker/.env     # then edit it
+#   docker compose -f docker/compose.hub.yaml up -d
+#
+# The shape to notice is which port is published: **only the Hub's**. The
+# backends are on an internal network and are reached by the Hub, which is the
+# multi-host version of the standing "exposing this is a deliberate act"
+# posture — a backend grants terminal access as its user, so the number of
+# processes an attacker can reach should not grow with the number of machines
+# you own.
+#
+# ## Terminating TLS
+#
+# The Hub is the single origin the browser talks to, so there is exactly one
+# certificate to manage. Recommended, in order:
+#
+#   1. Tailscale Serve. Zero certificate management, and the tailnet is
+#      already the recommended answer for a single backend:
+#
+#        tailscale serve --bg 8788
+#        tailscale serve status    # prints the https://<host>.<tailnet>.ts.net URL
+#
+#      Leave POCKETAGENT_HUB_HOST bound to loopback on the host side (publish
+#      to 127.0.0.1 as below) and let Tailscale be the only thing in front.
+#
+#   2. Caddy or Traefik, terminating TLS and forwarding to 127.0.0.1:8788.
+#      Forward the WebSocket upgrade headers — a terminal is the whole point —
+#      and set a long read timeout, as the README's nginx example does.
+#
+# With TLS in front, set POCKETAGENT_TRUST_PROXY=true so rate limiting and the
+# audit IP see the real client, and leave POCKETAGENT_COOKIE_SECURE alone: the
+# image is NODE_ENV=production, so the cookie is already Secure, which is
+# correct once there is TLS. Over plain HTTP it must be set to false or login
+# silently fails — the same trap the backend image documents.
+
+services:
+  hub:
+    image: registry.shifamily.com/homestack/pocketagent-hub:latest
+
+    # Loopback only. See the note above: this process can reach every bound
+    # backend, so it is the last thing that should be on 0.0.0.0.
+    ports:
+      - '127.0.0.1:8788:8788'
+
+    environment:
+      # The Hub's *own* operator credential, and deliberately not any
+      # backend's POCKETAGENT_AUTH_TOKEN. Reusing one would make a paste into
+      # the Hub's login box also a root credential for that machine, which is
+      # exactly the concentration the scoped-credential design removes.
+      #   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+      POCKETAGENT_HUB_AUTH_TOKEN: ${POCKETAGENT_HUB_AUTH_TOKEN:?set POCKETAGENT_HUB_AUTH_TOKEN in docker/.env}
+
+      # Required here, unlike on a backend where it merely disables optional
+      # features: every backend credential the Hub holds is encrypted with
+      # this, so a Hub without one has nothing it can do. Losing it does not
+      # lose access — re-bind each host and revoke the orphaned credentials.
+      #   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+      POCKETAGENT_SETTINGS_ENC_KEY: ${POCKETAGENT_SETTINGS_ENC_KEY:?set POCKETAGENT_SETTINGS_ENC_KEY in docker/.env}
+
+      # Uncomment once TLS is terminated in front of this.
+      # POCKETAGENT_TRUST_PROXY: 'true'
+      # POCKETAGENT_ALLOWED_ORIGINS: https://pocketagent.your-tailnet.ts.net
+
+      # Required for plain HTTP on a trusted tailnet or LAN; delete it the
+      # moment TLS is in front.
+      # POCKETAGENT_COOKIE_SECURE: 'false'
+
+    volumes:
+      # The registry and the encrypted credentials. Small, but it is the only
+      # thing here that must outlive the image — losing it means re-adding and
+      # re-binding every host.
+      - pocketagent-hub-data:/data
+
+    networks: [pocketagent]
+    restart: unless-stopped
+
+  # --- Example backends -----------------------------------------------------
+  # Two, because one proves nothing about a Hub. Each is an ordinary backend
+  # with no Hub-specific configuration whatsoever: the only thing a Hub needs
+  # from a backend is one `hub-bind` call, made from the Hub's own UI after
+  # `docker compose up`. In particular neither needs POCKETAGENT_ALLOWED_ORIGINS
+  # — the Hub strips `Origin` before forwarding, so a proxied request arrives
+  # as a non-browser client.
+  #
+  # In a real deployment these live on other machines and are reached over the
+  # tailnet; they are here so the reference is runnable end to end. Note they
+  # publish no ports: the Hub reaches them by service name on the internal
+  # network, and nothing else can reach them at all.
+  #
+  # `/api/hooks/*` is the one thing this arrangement does NOT serve. The Hub
+  # refuses to proxy it (PA-66 hard constraint #1), so a backend that receives
+  # Jira webhooks needs its own reachable address — publish a port on that one
+  # backend, or reverse-proxy only `/api/hooks/*` to it.
+  dev01:
+    image: registry.shifamily.com/homestack/pocketagent-server:latest
+    environment:
+      POCKETAGENT_AUTH_TOKEN: ${PA_DEV01_TOKEN:?set PA_DEV01_TOKEN in docker/.env}
+      POCKETAGENT_WORKSPACE_ROOTS: ${PA_WORKSPACE_ROOT:?set PA_WORKSPACE_ROOT in docker/.env}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      POCKETAGENT_BACKEND: direct
+      # Plain HTTP on the internal network, terminated by the Hub's own TLS
+      # at the edge. This flag is about the *browser's* cookie, and the
+      # browser never talks to this service directly.
+      POCKETAGENT_COOKIE_SECURE: 'false'
+    volumes:
+      - pocketagent-dev01-data:/data
+      - pocketagent-dev01-home:/home/pocketagent
+      # Byte-identical to the host path, for the transcript-encoding reason
+      # the backend compose file explains at length.
+      - ${PA_WORKSPACE_ROOT}:${PA_WORKSPACE_ROOT}
+    stop_grace_period: 30s
+    networks: [pocketagent]
+    restart: unless-stopped
+
+  dev02:
+    image: registry.shifamily.com/homestack/pocketagent-server:latest
+    environment:
+      POCKETAGENT_AUTH_TOKEN: ${PA_DEV02_TOKEN:?set PA_DEV02_TOKEN in docker/.env}
+      POCKETAGENT_WORKSPACE_ROOTS: ${PA_WORKSPACE_ROOT:?set PA_WORKSPACE_ROOT in docker/.env}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      POCKETAGENT_BACKEND: direct
+      POCKETAGENT_COOKIE_SECURE: 'false'
+    volumes:
+      - pocketagent-dev02-data:/data
+      - pocketagent-dev02-home:/home/pocketagent
+      - ${PA_WORKSPACE_ROOT}:${PA_WORKSPACE_ROOT}
+    stop_grace_period: 30s
+    networks: [pocketagent]
+    restart: unless-stopped
+
+networks:
+  pocketagent:
+
+volumes:
+  pocketagent-hub-data:
+  pocketagent-dev01-data:
+  pocketagent-dev01-home:
+  pocketagent-dev02-data:
+  pocketagent-dev02-home:

@@ -59,6 +59,11 @@ export default defineConfig({
     proxy: {
       '/api': { target: API_TARGET, changeOrigin: false, ws: true },
       '/health': { target: API_TARGET, changeOrigin: false },
+      // PA-66. Only reached when POCKETAGENT_API points at a Hub rather than
+      // a backend; against a plain backend nothing ever requests `/h/...`, so
+      // this entry costs a single-host developer nothing. `ws: true` because
+      // a host-prefixed terminal is the whole point of the prefix.
+      '/h': { target: API_TARGET, changeOrigin: false, ws: true },
     },
   },
   build: {

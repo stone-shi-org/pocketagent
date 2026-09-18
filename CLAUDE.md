@@ -14,10 +14,11 @@ pnpm typecheck          # tsc --noEmit across all packages
 pnpm test               # vitest run
 pnpm generate-token     # writes POCKETAGENT_AUTH_TOKEN into .env (mode 600)
 
-docker/build.sh         # backend image: thin | claude | all (PA-64)
-pnpm demo:docker        # the image's whole contract, against a real container
+docker/build.sh         # images: thin | claude | all (PA-64) | hub (PA-66)
+pnpm demo:docker        # the backend image's whole contract, against a real container
+pnpm demo:hub           # PA-66's acceptance criteria: two real backends, a real Hub
 
-pnpm version:set 1.2.3  # the repo's semver, written to all four package.json files (PA-65)
+pnpm version:set 1.2.3  # the repo's semver, written to all six package.json files (PA-65, PA-66)
 ./test.sh               # CI: install --frozen-lockfile, vitest (JUnit XML), lint, typecheck
 ./build.sh -p           # CI: build every image target; publish only from a release tag
 ```
@@ -57,10 +58,12 @@ breaks login over plain HTTP until `POCKETAGENT_COOKIE_SECURE=false`.
 
 **A release is a tag, and the tag is the only thing that publishes** (PA-65). The root
 `package.json` `version` is the repo's semver and the single source for `/health`, the web
-bundle's `__APP_VERSION__` and the image tags; the other three `package.json` files are kept
-identical by `pnpm version:set` and a test fails if they drift — four numbers allowed to
+bundle's `__APP_VERSION__` and the image tags; the other five `package.json` files are kept
+identical by `pnpm version:set` and a test fails if they drift — numbers allowed to
 disagree would mean "the repo's version" depended on which file you opened, which is the
-ambiguity the old hardcoded `VERSION = '0.1.0'` created. `./build.sh` publishes only when HEAD
+ambiguity the old hardcoded `VERSION = '0.1.0'` created. It also matters across *components*
+since PA-66: a Hub and a backend cut from one release report the same string, which is what
+lets the version-drift check compare them without knowing which is which. `./build.sh` publishes only when HEAD
 carries a tag parsing as `1.2.3` (no `v`), and refuses when that tag disagrees with the
 committed version: one of the two is wrong, and guessing publishes an image whose `/health`
 contradicts its own tag. A commit with no release tag still builds every target — a broken
@@ -80,17 +83,22 @@ instead of aborting, because the parser globs `test-reports/*.xml` and a run tha
 creation is **manual** — this Bamboo has no plan-creation REST endpoint — so `bamboo-specs.yaml`
 is the reviewable definition plus the one-time UI steps, and the webhook URL in it is
 deliberately blank: `POST /api/hooks/:slug` is the only unauthenticated route here, so a
-committed slug is a published endpoint. `pocketagent-hub` is not built yet; there is no
-`apps/hub` until PA-66.
+committed slug is a published endpoint. `docker/build.sh` has a fourth target, `hub`, which builds
+`apps/hub` into a *separate image name* (`pocketagent-hub`) rather than a suffixed tag of
+the server's: `pocketagent-server:1.2.3-hub` would be actively misleading to anyone who
+pulled it. `scripts/release-tags.mjs` owns that table, so the tag matrix and the build
+driver cannot disagree about which image a target publishes.
 
 **`packages/protocol` must be built before anything else works.** It is consumed as
 compiled output, not source, so `lint`, `typecheck`, and `test` each run `pnpm protocol`
-first. When editing protocol types, run `pnpm protocol` (or a full `pnpm build`) before you
+first — which since PA-66 also builds `packages/node-kit`, the Node-only sibling holding the
+security primitives `apps/server` and `apps/hub` share. When editing protocol types, run `pnpm protocol` (or a full `pnpm build`) before you
 trust a typecheck in `apps/server` or `apps/web`.
 
 ### Running a single test
 
-Vitest is configured with two projects, `server` and `web`, from the root `vitest.config.ts`:
+Vitest is configured with three projects — `server`, `hub` and `web` — from the root
+`vitest.config.ts`:
 
 ```bash
 pnpm exec vitest run apps/server/tests/sessions.test.ts     # one file
@@ -100,13 +108,15 @@ pnpm test:watch
 ```
 
 Server tests run in `pool: 'forks'` with a 20s timeout: they spawn real PTYs, real tmux
-servers, and real SQLite handles, so each file needs its own process. `tmux-backend.test.ts`
+servers, and real SQLite handles, so each file needs its own process. The `hub` project does
+the same, for a related reason — its proxy suites bind real sockets, because a TCP splice
+cannot be exercised through `app.inject()`. `tmux-backend.test.ts`
 and `adopt.test.ts` skip themselves when `tmux` is not installed.
 
 ### Live demos
 
 The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
-decision. Sixteen demo scripts do, against a *running* server:
+decision. Seventeen demo scripts do; all but one run against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -123,6 +133,7 @@ PA_TOKEN=... pnpm demo:cron-ui           # scheduled jobs: picker, preview, tree
 PA_TOKEN=... pnpm demo:webhook-ui        # webhooks: secret panel, signed delivery, filtered row
 PA_DEEPSEEK_KEY=... pnpm demo:deepseek-variant   # cross-provider resume: one transcript, two providers
 PA_DEEPSEEK_KEY=... pnpm demo:provider-ui        # provider CRUD, picker, disclosure banner, "Continue as…"
+pnpm demo:hub             # PA-66: two real backends + a real Hub, started by the script
 PA_TOKEN=... pnpm demo:multi-host-ui     # multi-host: rail, sheet, aggregate home, deep links, both viewports
 PA_TOKEN=... pnpm demo:agent-install-ui  # agent setup dialog: four states, streamed install, phone viewport
 ```
@@ -157,7 +168,13 @@ node apps/server/dist/server.js & SRV=$!
 kill "$SRV"
 ```
 
-`pnpm demo:docker` is the odd one out: it needs no running server and no `PA_BASE`, because it
+`pnpm demo:hub` needs no running server either, and is where PA-66's acceptance criteria live:
+it starts two real backends and a real Hub with throwaway state, binds them through the actual
+`hub-bind` handshake, drives a terminal session and a reconnect-with-replay through the splice,
+and checks that `/h/<id>/api/hooks/*` is refused, that a dead backend does not affect its
+neighbour, and that a backend reached directly with no Hub behaves exactly as before.
+
+`pnpm demo:docker` is the other odd one out: it needs no running server and no `PA_BASE`, because it
 builds the image and starts its own container with a throwaway data root, HOME and git
 workspace. It is where PA-64's acceptance criteria live — a host-owned file written by a
 session, `git` inside the mount, the login-shell `PATH`, state surviving `docker restart`, the
@@ -957,10 +974,12 @@ rows sharing one `agentSessionId` and a session-keyed badge would vanish with th
 
 `HostInfo` is first-class, and `GET /api/hosts` on a backend still answers with exactly one
 entry: itself. A backend must not claim to know about its peers — the same reasoning that stops
-it asserting its own external origin — so the *list* of machines comes from somewhere else (see
-below). **The front server that would register several backs is PA-66 and does not exist yet**;
-building one concentrates credentials for every registered machine in one process, which is why
-PA-63's scoped, revocable hub credentials had to land first.
+it asserting its own external origin — so the *list* of machines comes from somewhere else: the
+Hub (PA-66, below). Building a front server **does** concentrate credentials for every
+registered machine in one process, which this repo previously recorded as a reason not to build
+one at all; that guidance was knowingly overruled on PA-66, and PA-63's scoped, revocable hub
+credentials are the mitigation that made it defensible — no credential the Hub holds is a root
+credential, and every one of them is revocable from the machine it grants access to.
 
 **Host is a grouping dimension on the home screen, not a mode** (PA-67). The client is
 host-parameterised (`HostEndpoint`, PA-60), so the aggregated "all hosts" home is the default
@@ -1089,6 +1108,104 @@ and `terminal/event-buffer.ts` for structured events). Each stream also has an *
 seq numbers are only meaningful within one run, so a resume with a stale epoch forces a
 truncated full replay rather than splicing a corrupt ANSI stream.
 
+### The Hub (PA-66)
+
+`apps/hub` is the third deployable and the only component that knows more than one backend
+exists. It is one origin: the browser loads the same `apps/web` bundle from it and reaches
+each backend under `/h/<hostId>/api/**`, with `/api/hub/*` for the registry and `/api/auth/*`
+for the Hub's own session.
+
+**One origin rather than CORS, and that is a constraint rather than a preference.** A frontend
+talking to N backend origins needs `SameSite=None; Secure` cookies and Safari blocks
+third-party cookies outright, so the obvious design fails silently on the primary target.
+Path-routing keeps the existing `SameSite=Strict` HttpOnly cookie unchanged, needs no CORS,
+makes WSS a plain upgrade proxy and leaves one TLS endpoint. It is the same conclusion
+`HostEndpoint`'s "a base *path*, not a base URL" comment reaches from the client side (PA-60) —
+the Hub inherits that constraint rather than lifting it.
+
+**The credential-concentration objection was overruled, not forgotten.** This file used to say
+a front server "concentrates credentials for every registered machine in one process — treat it
+as a design problem, not a feature request". PA-66 knowingly overrules it, and PA-63 is the
+mitigation that makes it defensible: the Hub never holds a master token (it exchanges one, once,
+per host and discards it), everything it does hold is full-access but *revocable from the
+backend side*, and `hub_hosts.credential_enc` is a `secret-box` ciphertext rather than a token
+in the clear. The accepted residual cost is real and worth stating: the Hub is one process that
+can reach every bound machine, and it is a single point of failure for *reaching* them — though
+not for their state, since each backend stays directly usable with no Hub involved.
+
+**`packages/node-kit` exists because of this ticket.** The Hub needs `secret-box` and the
+token/origin helpers, and reaching them through `@pocketagent/server` would drag node-pty, the
+Claude Agent SDK and the MCP SDK into a gateway image. So the primitives where two
+implementations drifting is a *security* bug moved into a Node-only leaf package that both
+services depend on; `apps/server` re-exports them from their original paths, which is what kept
+the move pure enough for the existing suite to be its regression guard. What deliberately did
+not move: `AuthService` (a session store is bound to its own table in its own schema — a Hub
+session grants "reach every bound host", a backend session grants "terminal access on this
+machine", and they must never be the same row) and `openDatabase` (the server's carries a long
+positional `MIGRATIONS` array plus `PRAGMA table_info` repair blocks that exist to heal branch
+drift in a schema with years of history; a schema whose first migration ships today must not
+inherit that scaffolding).
+
+**The proxy is a positive allowlist with an explicitly tested deny list**
+(`proxy/allowlist.ts`). Two shapes are proxied under a host prefix — `/h/<id>/api/**` and
+`/h/<id>/health` — and nothing else, because `hostUrl()` only ever asks a host for those two and
+a backend answers any other path with its own copy of the SPA shell. The deny list is the
+statable invariant below. Path handling **decides on the decoded path and forwards the raw
+one**: deciding on the raw string alone waves `/api/%68ooks/foo` straight through (a real bug,
+caught by `proxy-allowlist.test.ts` against the first cut), and forwarding a re-encoded path
+would corrupt a legitimate `%3A` in an agent id. `%25` is refused outright so "decode once" is
+the final word rather than one step of an unbounded loop.
+
+**One host is the *default* and is also mounted at the bare `/api/*` root.** Without it the Hub
+would serve a UI that cannot talk to anything: `DEFAULT_HOST.basePath` is `''`, so the
+unmodified bundle asks the Hub itself for `/api/projects`. With it, every existing browser demo
+can be pointed at the Hub and must behave identically — which is the broadest regression test
+the proxy has, and is why `HubHostEntry.isDefault` exists rather than the Hub picking one
+implicitly.
+
+**Occupancy of a host row is read per request; live sockets are tracked separately.** The
+registry row is re-read from SQLite on every proxied request with no cache — the same "read the
+row fresh" discipline `HubCredentialStore.validate` follows, and the reason removing or
+disabling a host takes effect with no restart. That is not sufficient for a WebSocket, which
+outlives the request that created it, so `SocketRegistry` holds the socket *handles* (and
+nothing about the traffic — no buffer, no byte counter, deliberately no foothold for
+inspection) so a removal can destroy them.
+
+**Health polling is one self-rescheduling loop per host**, modelled on `TelegramPollerService`
+rather than `CronService`'s shared tick, because one hung machine must not delay every other
+dot. It is unauthenticated — `/health` is public precisely so a Hub can judge a backend
+*before* it holds a credential — which is what makes "add by base URL, then bind" a two-step
+flow with visible progress. `negotiateProtocol` from `packages/protocol` renders the verdict;
+a second copy of that arithmetic is the thing `protocol-negotiation.ts` already forbids.
+
+**A backend's 401 becomes the Hub's 502.** `App.tsx` drops the whole app to the login screen on
+any 401, so passing one through would sign the operator out of every host because one
+credential was revoked. `host_credential_rejected` names the host instead.
+
+**Two accepted costs, stated because they are real.** The Hub will connect to any `http(s)`
+origin an operator registers, and `PATCH`ing a bound host's `base_url` and then deleting it
+sends the stored credential to whatever is listening — so an operator can recover a credential
+the API otherwise only ever shows as a 12-character prefix. That is not an escalation (the same
+operator holds the master token that minted it, and re-binding produces a fresh one), but it
+does defeat the "no reveal path" posture, so it is a known property rather than a hole to be
+surprised by. And `/h/<id>/health` is proxied even though `/health` is in the backend's
+`PUBLIC_API_PATHS` — a deliberate exception to the rule above, because the browser's own
+protocol negotiation needs the range and a version number is the one thing in that set with no
+security content. It still requires a Hub session, so the Hub is not an unauthenticated
+reachability scanner for whoever can reach the port.
+
+Packaging: a `hub-runtime` stage in the *same* `docker/Dockerfile`, a fourth `docker/build.sh`
+target, and a second **image name** (`pocketagent-hub`) rather than a tag suffix —
+`scripts/release-tags.mjs` grew a per-target `{ image, suffix }` table for it, because
+`pocketagent-server:1.2.3-hub` would be actively misleading to whoever pulled it. The image
+ships `apps/web/dist` (the Hub is the origin the browser loads from) and no agent CLI, no PTY
+and no git. Its dependencies come from a **`hub-deps` stage built on a clean base**, not from
+`prod-deps` and — the part that is easy to get wrong — not layered on `deps` either:
+`pnpm install --filter` does not garbage-collect what an earlier install already materialised
+in `node_modules/.pnpm`, so a filtered install on top of the shared stage still shipped the
+291 MB Claude Agent SDK and 60 MB of node-pty. Measured, not reasoned about — the image stayed
+at 796 MB until the stage started from scratch, and is 273 MB now.
+
 ### Hub credentials (PA-63)
 
 The second credential class, and the first addition to `auth/` since the session cookie.
@@ -1115,8 +1232,9 @@ logs the credential" holds by construction rather than by a rule someone has to 
 is a deliberate divergence from the ticket's own wording, approved on it: secret-box exists for
 secrets this process must read back in plaintext (a provider's `ANTHROPIC_AUTH_TOKEN`, a bot
 token it must send to Telegram), and the backend only ever *verifies* a hub credential. The
-**Hub** side is the one that must replay it, so secret-box is right there and lands with
-`apps/hub` (PA-66), which does not exist in this repository yet. Consequently there is no reveal
+**Hub** side is the one that must replay it, so secret-box is right there — and since PA-66 it
+is literally the same module, moved into `packages/node-kit` so both processes share one
+implementation. Consequently there is no reveal
 route and not even a reveal *decision*: past the bind response there is nothing to reveal, and
 `token_prefix` — the leading characters kept in the clear — is what lets a list row be matched
 against the token in hand.
@@ -1475,6 +1593,66 @@ These are load-bearing. Several were bugs first.
   its own table, so nothing that clears sessions touches it. The accepted cost, stated because it
   is a real one: a compromised Hub can revoke its siblings — denial of service, not escalation,
   since it cannot mint. All of it is asserted in `apps/server/tests/hub-credentials.test.ts`.
+- **The Hub never proxies a backend's unauthenticated surface, and `/api/hooks/*` is the
+  entry that matters** (PA-66). `PROXY_DENY_PREFIXES` (`apps/hub/src/proxy/allowlist.ts`)
+  covers every member of the backend's own `PUBLIC_API_PATHS` plus the dynamic `/api/hooks/`
+  prefix, so the statable rule is *nothing unauthenticated on a backend is reachable through
+  `/h/`*. Hooks is listed separately with its own reason because its reason is different and
+  larger: re-exposing it would break the standing guarantee that `grep '/api/hooks/'`
+  enumerates the whole dynamic unauthenticated surface, and would make the Hub inherit the
+  entire slug-enumeration-oracle design — one indistinguishable response for unknown slug,
+  disabled webhook and bad signature, HMAC over raw bytes, a dummy-key hash on the unknown
+  path. None of that is reimplemented in the Hub because none of it is reachable there: Jira
+  delivers straight to the backend. The check **decides on the decoded path and forwards the
+  raw one** — deciding on the raw string alone lets `/api/%68ooks/foo` through — and refuses
+  `%25`, a backslash or a dot segment outright rather than canonicalizing. Asserted in
+  `apps/hub/tests/proxy-allowlist.test.ts`, including that the backend is never *dialed*
+  rather than merely that the status is 404. A path check is only half of it, though: the
+  **body has to be framed explicitly** or the allowlist can be walked straight past. Stripping
+  the client's `content-length`/`transfer-encoding` (both per-hop, so stripping is right) and
+  piping the body leaves framing to Node, which does not add chunked encoding for `GET`,
+  `HEAD`, `DELETE`, `OPTIONS` or `TRACE` — so the body goes out unframed on a pooled keep-alive
+  socket and the backend reads it as the *next* request. A body of
+  `POST /api/hooks/evil HTTP/1.1…` then executes having passed through no deny list and
+  carrying no credential. `bodyFramingFor` (`proxy/headers.ts`) states the framing on every
+  request instead, and `proxy-headers.test.ts` reproduces the smuggle. The host id is likewise
+  parsed from *both* spellings and required to match, because taking it from the decoded path
+  and slicing the raw one with that offset desynchronises the path that was checked from the
+  path that is sent.
+- **The Hub is a dumb pipe for the WebSocket, as a property of the code rather than a rule**
+  (PA-66). "Terminal I/O is never logged or persisted" has to hold in a second process, so
+  `proxy/ws.ts` splices at the TCP level: it dials the backend with `node:http`, relays the raw
+  101 head, and `pipe()`s the two sockets. There is **no WebSocket library on that path** — no
+  frame parser, no `permessage-deflate` negotiation of its own (the extension header passes
+  through, so compression is agreed end to end and the Hub could not decompress a frame if it
+  tried), no buffering and nothing that could log one. What *is* rewritten is stated rather
+  than hidden: the handshake head, because the Hub must strip `Cookie`/`Origin` and attach the
+  host credential. Two mistakes here are silent and were both made and caught:
+  `clientSocket.unshift(upstreamHead)` instead of `upstreamSocket.unshift(upstreamHead)` sends
+  the backend's first frame back to the backend, and destroying the peer socket on `close`
+  rather than letting `pipe()` end it truncates the close frame — which turns PA-61's 4001
+  protocol mismatch into a 1006 and silently restores "reconnect forever". Both are asserted in
+  `apps/hub/tests/ws-splice.test.ts`, alongside byte identity for a 1 MB binary frame and a
+  compressed one.
+- **The Hub strips `Origin` upstream, so the CSRF boundary moves rather than disappearing**
+  (PA-66). `isOriginAllowed` falls back to comparing the Origin's host against the `Host` the
+  request was routed to, which for a proxied request is the backend's — so forwarding the
+  browser's Origin 403s every non-GET while every read keeps working, a failure that presents
+  as a permissions bug. Stripping it lands the request in the "no Origin, not a browser" branch
+  the backend's gate already documents as the Hub's case. The check itself is run by the Hub's
+  own single `onRequest` gate, which is where the ambient cookie actually is. `Cookie` is
+  stripped for the same one-way reason, and `Set-Cookie` is stripped on the way back.
+- **The Hub holds no root credential and answers to no bearer** (PA-66). A master token exists
+  in the bind request body, is spent on exactly one call to that backend, and is never
+  persisted — `bind.test.ts` scans every column of every row to prove it. What is stored is the
+  minted `pah_` credential as a `secret-box` ciphertext plus its prefix in the clear; a row that
+  will not decrypt (a rotated `POCKETAGENT_SETTINGS_ENC_KEY`) is **listed, marked unbound and
+  refused** rather than dropped from the list or dialed without a credential. The Hub itself
+  accepts only its own session cookie — it presents credentials and does not take them, so there
+  is no bearer path to front a Hub with, and `POCKETAGENT_HUB_AUTH_TOKEN` is deliberately a
+  different variable from any backend's `POCKETAGENT_AUTH_TOKEN`. Removing a host *attempts*
+  revocation on the backend and reports whether it worked, but never blocks on it: a machine
+  that is down is precisely when an operator most wants it gone.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.
@@ -1661,6 +1839,21 @@ an agent working in that tree could delete the database; the reverse (a project 
 the data root) is allowed on purpose, because one volume holding both repos and state is a
 reasonable container layout. Only the roots *seeded* from the environment are checked — a
 folder added later from the UI can still come to contain the data root, and nothing re-checks.
+
+**`POCKETAGENT_HUB_*` is read by `apps/hub` and by nothing else** (PA-66). A backend ignores
+every one of them, which is what keeps "a backend needs no Hub-specific configuration" true.
+Two are required and both refuse the boot when missing, with exit 78 like any other config
+error. `POCKETAGENT_HUB_AUTH_TOKEN` is the Hub's own operator credential and is deliberately a
+*different variable* from `POCKETAGENT_AUTH_TOKEN`: one name for both would mean a compose file
+could hand the Hub's login password the power of a backend master token, which is the exact
+concentration PA-63 exists to remove. `POCKETAGENT_SETTINGS_ENC_KEY` is shared by name with the
+backend but not by policy — there, unset disables an optional feature and booting anyway is
+right; on the Hub every stored backend credential depends on it, so unset is fatal rather than
+a failure deferred to the operator's first bind. `POCKETAGENT_HUB_DATA_DIR` is likewise its own
+variable rather than `POCKETAGENT_DATA_DIR`: one name for two unrelated schemas is a trap in
+the one deployment where it matters, a compose file running both. The Hub has no workspace
+roots, so PA-62's "refuse a data root inside a workspace root" check has nothing to check here
+and is absent rather than quietly dropped.
 
 **Everything else the process reads outside the checkout is `$HOME`, and the rule is: if
 another binary owns the path, mount it rather than making it configurable.** The three

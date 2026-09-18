@@ -9,7 +9,7 @@ import { z } from 'zod';
  * the same answer. The server decides which sockets to accept, the browser
  * decides whether a host is usable before it opens one, and the Hub polls
  * `/health` across every bound backend to draw the host list. A second copy of
- * this arithmetic in `apps/web` (or later in `apps/hub`) guarantees the host
+ * this arithmetic in `apps/web` or in `apps/hub` guarantees the host
  * list eventually disagrees with what the socket handshake actually does.
  *
  * Deliberately imports nothing but zod. `session.ts` needs it for `HostInfo`

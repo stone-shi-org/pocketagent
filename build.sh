@@ -32,8 +32,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$repo_root"
 
 registry="${PA_REGISTRY:-registry.shifamily.com/homestack}"
-image_name='pocketagent-server'
-targets=(thin claude all)
+# PA-66: the image name is per *target* now, not global — `hub` publishes
+# `pocketagent-hub` while the three server targets publish
+# `pocketagent-server`. `scripts/release-tags.mjs` owns that table so the tag
+# matrix and this driver cannot disagree about it.
+targets=(thin claude all hub)
 push=0
 dry_run=0
 
@@ -49,8 +52,8 @@ Usage: ./build.sh [-p] [-r REGISTRY] [-t TARGET] [--dry-run]
   -p, --push          Push to the registry. Requires a release tag on HEAD.
   -r, --registry REG  Registry and namespace (default: $PA_REGISTRY, else
                       registry.shifamily.com/homestack).
-  -t, --target T      Build one target only: thin | claude | all.
-                      Repeatable. Default: all three.
+  -t, --target T      Build one target only: thin | claude | all | hub.
+                      Repeatable. Default: all four.
       --dry-run       Print the plan and exit without building.
 EOF
 }
@@ -85,9 +88,15 @@ if [[ ${#explicit_targets[@]} -gt 0 ]]; then
 fi
 
 # An empty registry means "local image name with no registry prefix", which is
-# what a developer building for their own daemon wants. `${x:+…}` keeps the
-# slash out in that case rather than producing `/pocketagent-server`.
-image="${registry:+${registry}/}${image_name}"
+# what a developer building for their own daemon wants; `release-tags.mjs`
+# keeps the slash out in that case rather than producing `/pocketagent-server`.
+image_for() {
+    node -e '
+      import("./scripts/release-tags.mjs").then(({ imageForTarget }) => {
+        process.stdout.write(imageForTarget(process.argv[1], process.argv[2]));
+      });
+    ' "$1" "$registry"
+}
 
 # ---- Is this a release? -----------------------------------------------------
 
@@ -139,7 +148,9 @@ fi
 stamp_version="$release_version"
 
 declare -A planned_tags=()
+declare -A target_images=()
 for target in "${targets[@]}"; do
+    target_images["$target"]="$(image_for "$target")"
     if [[ -n "$release_version" ]]; then
         planned_tags["$target"]="$(node scripts/release-tags.mjs "$release_version" "$target" | tr '\n' ' ')"
     else
@@ -147,11 +158,10 @@ for target in "${targets[@]}"; do
     fi
 done
 
-echo "    image:    ${image}"
 echo "    targets:  ${targets[*]}"
 echo "    push:     $([[ "$push" == '1' ]] && echo yes || echo 'no (build only)')"
 for target in "${targets[@]}"; do
-    echo "    ${target}: ${planned_tags[$target]:-(local dev tags)}"
+    echo "    ${target}: ${target_images[$target]} ${planned_tags[$target]:-(local dev tags)}"
 done
 
 if [[ "$dry_run" == '1' ]]; then
@@ -166,7 +176,7 @@ trap 'rm -rf "$metadata_dir"' EXIT
 
 for target in "${targets[@]}"; do
     env_args=(
-        "PA_IMAGE=${image}"
+        "PA_IMAGE=${target_images[$target]}"
         "PA_PUSH=${push}"
         "PA_METADATA_FILE=${metadata_dir}/${target}.json"
     )
@@ -193,7 +203,7 @@ if [[ "$push" == '1' ]]; then
               process.stdout.write(meta["containerimage.digest"] ?? "");
             ' "${metadata_dir}/${target}.json")"
             for name in ${planned_tags[$target]}; do
-                echo "${image}:${name} ${digest}"
+                echo "${target_images[$target]}:${name} ${digest}"
             done
         done
     } >"$digest_file"

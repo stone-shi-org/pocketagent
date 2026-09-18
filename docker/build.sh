@@ -32,11 +32,15 @@ cd "$repo_root"
 # Tag suffix per target. `thin` is the Dockerfile stage `runtime`, because
 # "runtime" is what the stage *is* and "thin" is what the tag means.
 case "$target" in
-    thin)   stage=runtime; suffix='' ;;
-    claude) stage=claude;  suffix='-claude' ;;
-    all)    stage=all;     suffix='-all' ;;
+    thin)   stage=runtime;     suffix='' ;;
+    claude) stage=claude;      suffix='-claude' ;;
+    all)    stage=all;         suffix='-all' ;;
+    # PA-66. No suffix, because the Hub is a different *image name* rather
+    # than a variant of the server's — see TARGETS in scripts/release-tags.mjs,
+    # which owns that table so this switch and the tag matrix cannot disagree.
+    hub)    stage=hub-runtime; suffix='' ;;
     *)
-        echo "Unknown target '$target'. Use: thin | claude | all" >&2
+        echo "Unknown target '$target'. Use: thin | claude | all | hub" >&2
         exit 2
         ;;
 esac

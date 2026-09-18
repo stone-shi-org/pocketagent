@@ -11,7 +11,7 @@
  * `src/**`), which is also why importing plain `.mjs` here is fine.
  */
 import { describe, expect, it } from 'vitest';
-import { parseReleaseVersion, releaseTags } from '../../../scripts/release-tags.mjs';
+import { imageForTarget, parseReleaseVersion, releaseTags, TARGETS } from '../../../scripts/release-tags.mjs';
 import { readDeclaredVersions, VERSIONED_PACKAGES } from '../../../scripts/set-version.mjs';
 
 describe('parseReleaseVersion', () => {
@@ -96,6 +96,34 @@ describe('releaseTags', () => {
     // `build.sh` passes this through from its own argv, so a typo must fail
     // loudly instead of publishing an unsuffixed tag built from the wrong stage.
     expect(() => releaseTags({ version: '1.2.3', target: 'slim' })).toThrow(/unknown target/i);
+  });
+});
+
+describe('the hub is a second image, not a tag suffix (PA-66)', () => {
+  it('publishes pocketagent-hub under unsuffixed tags', () => {
+    expect(releaseTags({ version: '1.2.3', target: 'hub', image: 'reg/pocketagent-hub' })).toEqual([
+      'reg/pocketagent-hub:1.2.3',
+      'reg/pocketagent-hub:1.2',
+      'reg/pocketagent-hub:latest',
+    ]);
+  });
+
+  it('never puts the hub in the server image namespace', () => {
+    // `pocketagent-server:1.2.3-hub` would be actively misleading: an
+    // operator pulling it would reasonably expect a backend.
+    expect(imageForTarget('hub', 'reg')).toBe('reg/pocketagent-hub');
+    expect(imageForTarget('thin', 'reg')).toBe('reg/pocketagent-server');
+    for (const target of Object.keys(TARGETS)) {
+      expect(imageForTarget(target, '')).not.toContain('/');
+    }
+  });
+
+  it('still refuses an unknown target', () => {
+    expect(() => imageForTarget('nope', 'reg')).toThrow(/Unknown target/);
+  });
+
+  it('gives a prerelease hub only its own exact tag', () => {
+    expect(releaseTags({ version: '1.2.3-rc.1', target: 'hub', image: '' })).toEqual(['1.2.3-rc.1']);
   });
 });
 

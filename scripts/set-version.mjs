@@ -42,6 +42,8 @@ export const VERSIONED_PACKAGES = [
   'apps/server/package.json',
   'apps/web/package.json',
   'packages/protocol/package.json',
+  'packages/node-kit/package.json',
+  'apps/hub/package.json',
 ];
 
 /** Reads the declared version of each file above, keyed by its repo-relative path. */

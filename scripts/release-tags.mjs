@@ -13,14 +13,39 @@
  */
 
 /**
- * Tag suffix per build target. The keys are `docker/build.sh`'s own target
- * names, so the two cannot drift into disagreeing about what `-claude` means.
+ * What each build target publishes: which image, under which tag suffix.
+ *
+ * The keys are `docker/build.sh`'s own target names, so the two cannot drift
+ * into disagreeing about what `-claude` means.
+ *
+ * PA-66 turned this from a flat suffix map into a pair, because the Hub is a
+ * *different image*, not a variant of the server. `pocketagent-server:1.2.3-hub`
+ * would be actively misleading — an operator pulling it would reasonably
+ * expect a backend — and it would put a gateway and a machine-with-agent-CLIs
+ * in one tag namespace where `:latest` has to mean one of them.
  */
-export const TARGET_SUFFIXES = {
-  thin: '',
-  claude: '-claude',
-  all: '-all',
+export const TARGETS = {
+  thin: { image: 'pocketagent-server', suffix: '' },
+  claude: { image: 'pocketagent-server', suffix: '-claude' },
+  all: { image: 'pocketagent-server', suffix: '-all' },
+  hub: { image: 'pocketagent-hub', suffix: '' },
 };
+
+/** Back-compat view for anything that only wants the suffix. */
+export const TARGET_SUFFIXES = Object.fromEntries(
+  Object.entries(TARGETS).map(([name, spec]) => [name, spec.suffix]),
+);
+
+/** The image name a target publishes under, given a registry prefix. */
+export function imageForTarget(target, registry = '') {
+  const spec = TARGETS[target];
+  if (spec === undefined) {
+    throw new Error(
+      `Unknown target '${target}'. Expected one of: ${Object.keys(TARGETS).join(', ')}.`,
+    );
+  }
+  return registry ? `${registry}/${spec.image}` : spec.image;
+}
 
 /**
  * A release tag, exactly as the reporter specified it on PA-65: `1.2.3`, with
@@ -78,12 +103,13 @@ export function releaseTags({ version, target, image }) {
       `Not a release version: '${version}'. Expected 1.2.3 or 1.2.3-rc.1 (no 'v' prefix).`,
     );
   }
-  const suffix = TARGET_SUFFIXES[target];
-  if (suffix === undefined) {
+  const spec = TARGETS[target];
+  if (spec === undefined) {
     throw new Error(
-      `Unknown target '${target}'. Expected one of: ${Object.keys(TARGET_SUFFIXES).join(', ')}.`,
+      `Unknown target '${target}'. Expected one of: ${Object.keys(TARGETS).join(', ')}.`,
     );
   }
+  const suffix = spec.suffix;
 
   const names = [`${parsed.version}${suffix}`];
   if (parsed.prerelease === null) {
