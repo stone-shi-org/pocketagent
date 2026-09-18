@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { SessionInfo } from '@pocketagent/protocol';
 import { isTerminalStatus } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { AgentCard } from '../components/AgentCard.js';
 import { fleetSummary, groupFleet } from '../agent/fleet-groups.js';
 import { Icon } from '../components/Icon.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 const REFRESH_MS = 4000;
 
@@ -39,6 +40,7 @@ interface Props {
  * sidebar's own list is even mounted.
  */
 export function AgentsFleetPage({ onOpen, onApiError, onBack }: Props): JSX.Element {
+  const api = useHostApi();
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 

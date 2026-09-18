@@ -1,6 +1,6 @@
-import { Suspense, useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { ApiError } from './api/client.js';
-import { useHashRoute } from './hooks/useHashRoute.js';
+import { useHashRoute, type Route } from './hooks/useHashRoute.js';
 import { LoginPage } from './pages/LoginPage.js';
 import { ProjectsPage } from './pages/ProjectsPage.js';
 import { ComposerPage } from './pages/ComposerPage.js';
@@ -20,6 +20,10 @@ import {
   WebhooksPage,
 } from './lazy-pages.js';
 import { api } from './api/client.js';
+import { useHostDirectory } from './hosts/directory.js';
+import { HostProvider } from './hosts/HostContext.js';
+import { currentHostId, resolveSelection } from './hosts/selected-host.js';
+import { endpointFor, hostSegmentFor, type HostNav } from './hosts/HostNav.js';
 
 /** Shared fallback while a lazily-loaded page's chunk is still fetching —
     same spinner the auth check above uses, so there's no visual seam
@@ -32,8 +36,6 @@ type AuthState = 'checking' | 'anonymous' | 'authenticated';
 
 export function App(): JSX.Element {
   const [auth, setAuth] = useState<AuthState>('checking');
-  const [route, navigate] = useHashRoute();
-  const desktop = useIsDesktop();
 
   useEffect(() => {
     let cancelled = false;
@@ -50,20 +52,6 @@ export function App(): JSX.Element {
     };
   }, []);
 
-  /** Any 401 from anywhere in the app drops us back to the login screen. */
-  const handleApiError = useCallback((error: unknown) => {
-    if (error instanceof ApiError && error.isUnauthorized) setAuth('anonymous');
-  }, []);
-
-  const logout = useCallback(async () => {
-    try {
-      await api.logout();
-    } finally {
-      setAuth('anonymous');
-      navigate({ name: 'list' });
-    }
-  }, [navigate]);
-
   if (auth === 'checking') {
     return <div className="spinner">Loading…</div>;
   }
@@ -72,13 +60,79 @@ export function App(): JSX.Element {
     return <LoginPage onAuthenticated={() => setAuth('authenticated')} />;
   }
 
+  // The host directory only exists for a signed-in operator (its very first
+  // request is authenticated), and `useHostDirectory` owns timers — so it lives
+  // below the auth gate in its own component rather than being started and torn
+  // down around the login screen.
+  return <AuthenticatedApp onAnonymous={() => setAuth('anonymous')} />;
+}
+
+function AuthenticatedApp({ onAnonymous }: { onAnonymous: () => void }): JSX.Element {
+  const [route, navigate, , hashHostId] = useHashRoute();
+  const desktop = useIsDesktop();
+  const directory = useHostDirectory();
+
+  /** Any 401 from anywhere in the app drops us back to the login screen. */
+  const handleApiError = useCallback(
+    (error: unknown) => {
+      if (error instanceof ApiError && error.isUnauthorized) onAnonymous();
+    },
+    [onAnonymous],
+  );
+
+  const logout = useCallback(async () => {
+    try {
+      await api.logout();
+    } finally {
+      onAnonymous();
+      navigate({ name: 'list' }, { hostId: null });
+    }
+  }, [navigate, onAnonymous]);
+
+  const hosts = directory.hosts;
+  const selection = useMemo(
+    () => resolveSelection(hashHostId, route, hosts),
+    [hashHostId, route, hosts],
+  );
+
+  const nav = useMemo<HostNav>(
+    () => ({
+      selection,
+      hosts,
+      endpointFor: (hostId) => endpointFor(hosts, hostId),
+      goToHost: (hostId) =>
+        navigate(
+          { name: 'list' },
+          { hostId: hostId === null ? null : hostSegmentFor(hosts, hostId, { name: 'list' }) },
+        ),
+      openOn: (hostId, target) =>
+        navigate(target, { hostId: hostSegmentFor(hosts, hostId, target) }),
+    }),
+    [selection, hosts, navigate],
+  );
+
+  // Nothing host-scoped renders until the directory has published its list.
+  // That gate is what makes `resolveHostEndpoint`'s default-host fallback
+  // harmless: a `#/h/dev02/s/x` deep link never gets a frame in which `dev02`
+  // is unknown and its requests would quietly go to the wrong machine.
+  if (!directory.ready) {
+    return <div className="spinner">Loading…</div>;
+  }
+
+  if (selection.mode === 'unknown') {
+    return <UnknownHost hostId={selection.hostId} onAllHosts={() => nav.goToHost(null)} />;
+  }
+
   // Desktop keeps the list and the sessions on screen together, so the shell
   // owns the route and mounts every open tab itself (see `DesktopShell`'s own
-  // tab-strip state) rather than being handed a single resolved child.
+  // tab-strip state) rather than being handed a single resolved child. It also
+  // owns the host rail, which switches what the sidebar is about.
   if (desktop) {
     return (
       <DesktopShell
         route={route}
+        nav={nav}
+        directory={directory}
         onNavigate={navigate}
         onApiError={handleApiError}
         onLogout={logout}
@@ -86,12 +140,72 @@ export function App(): JSX.Element {
     );
   }
 
+  // The phone layout resolves one route at a time, so everything below the home
+  // screen is bound to exactly one host: the one the hash names, or the default
+  // one for a bare URL. `ProjectsPage` is the exception and wraps its own
+  // per-host providers, because the aggregated home shows several at once.
+  if (route.name === 'list') {
+    return (
+      <ProjectsPage
+        nav={nav}
+        directory={directory}
+        onOpen={(hostId, sessionId) => nav.openOn(hostId, { name: 'terminal', sessionId })}
+        onOpenChat={(hostId, conversationId) =>
+          nav.openOn(hostId, { name: 'chat', conversationId })
+        }
+        onCompose={(hostId, cwd) =>
+          nav.openOn(hostId, cwd ? { name: 'compose', cwd } : { name: 'compose' })
+        }
+        onOpenAgents={() => navigate({ name: 'agents' })}
+        onOpenSettings={() => navigate({ name: 'settings' })}
+        onOpenCron={() => navigate({ name: 'cron' })}
+        onOpenCronJob={(hostId, jobId) => nav.openOn(hostId, { name: 'cron-job', jobId })}
+        onOpenWebhooks={() => navigate({ name: 'webhooks' })}
+        onOpenWebhook={(hostId, webhookId) => nav.openOn(hostId, { name: 'webhook', webhookId })}
+        onOpenPlanner={() => navigate({ name: 'planner' })}
+        onOpenPlannerChat={(hostId, chatId) => nav.openOn(hostId, { name: 'planner-chat', chatId })}
+        onApiError={handleApiError}
+        onLogout={logout}
+      />
+    );
+  }
+
+  const hostId = currentHostId(selection, hosts);
+
+  return (
+    <HostProvider endpoint={nav.endpointFor(hostId)}>
+      <PhoneRoute
+        route={route}
+        navigate={navigate}
+        onApiError={handleApiError}
+      />
+    </HostProvider>
+  );
+}
+
+/**
+ * Everything the phone layout shows that is not the home screen.
+ *
+ * Split out of `App` only so it sits inside the `HostProvider` above: each of
+ * these pages fetches through `useHostApi()`, and the whole point is that a
+ * page reached via `#/h/dev02/...` talks to `dev02` without knowing that it is
+ * doing anything unusual.
+ */
+function PhoneRoute({
+  route,
+  navigate,
+  onApiError,
+}: {
+  route: Route;
+  navigate: (route: Route, opts?: { hostId?: string | null }) => void;
+  onApiError: (error: unknown) => void;
+}): JSX.Element {
   if (route.name === 'terminal') {
     return (
       <SessionRoute
         sessionId={route.sessionId}
         onBack={() => navigate({ name: 'list' })}
-        onApiError={handleApiError}
+        onApiError={onApiError}
         onResumed={(sessionId) => navigate({ name: 'terminal', sessionId })}
       />
     );
@@ -102,7 +216,7 @@ export function App(): JSX.Element {
       <ChatPreviewPage
         conversationId={route.conversationId}
         onBack={() => navigate({ name: 'list' })}
-        onApiError={handleApiError}
+        onApiError={onApiError}
         onStarted={(sessionId) => navigate({ name: 'terminal', sessionId })}
       />
     );
@@ -115,7 +229,7 @@ export function App(): JSX.Element {
         {...(route.cwd !== undefined ? { initialCwd: route.cwd } : {})}
         onBack={() => navigate({ name: 'list' })}
         onCreated={(sessionId) => navigate({ name: 'terminal', sessionId })}
-        onApiError={handleApiError}
+        onApiError={onApiError}
       />
     );
   }
@@ -126,7 +240,7 @@ export function App(): JSX.Element {
         <AgentsFleetPage
           onBack={() => navigate({ name: 'list' })}
           onOpen={(sessionId) => navigate({ name: 'terminal', sessionId })}
-          onApiError={handleApiError}
+          onApiError={onApiError}
         />
       </Suspense>
     );
@@ -135,7 +249,7 @@ export function App(): JSX.Element {
   if (route.name === 'settings') {
     return (
       <Suspense fallback={<PageFallback />}>
-        <SettingsPage onBack={() => navigate({ name: 'list' })} onApiError={handleApiError} />
+        <SettingsPage onBack={() => navigate({ name: 'list' })} onApiError={onApiError} />
       </Suspense>
     );
   }
@@ -146,7 +260,7 @@ export function App(): JSX.Element {
         <CronJobsPage
           onBack={() => navigate({ name: 'list' })}
           onOpenJob={(jobId) => navigate({ name: 'cron-job', jobId })}
-          onApiError={handleApiError}
+          onApiError={onApiError}
         />
       </Suspense>
     );
@@ -163,7 +277,7 @@ export function App(): JSX.Element {
           onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
           onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
           onOpenPlannerChat={(chatId) => navigate({ name: 'planner-chat', chatId })}
-          onApiError={handleApiError}
+          onApiError={onApiError}
         />
       </Suspense>
     );
@@ -178,7 +292,7 @@ export function App(): JSX.Element {
           onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
           onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
           onOpenPlannerChat={(chatId) => navigate({ name: 'planner-chat', chatId })}
-          onApiError={handleApiError}
+          onApiError={onApiError}
         />
       </Suspense>
     );
@@ -195,7 +309,7 @@ export function App(): JSX.Element {
           onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
           onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
           onOpenPlannerChat={(chatId) => navigate({ name: 'planner-chat', chatId })}
-          onApiError={handleApiError}
+          onApiError={onApiError}
         />
       </Suspense>
     );
@@ -207,7 +321,7 @@ export function App(): JSX.Element {
         <PlannerPage
           onBack={() => navigate({ name: 'list' })}
           onOpenAgent={(agentId) => navigate({ name: 'planner-agent', agentId })}
-          onApiError={handleApiError}
+          onApiError={onApiError}
         />
       </Suspense>
     );
@@ -221,7 +335,7 @@ export function App(): JSX.Element {
           agentId={route.agentId}
           onBack={() => navigate({ name: 'planner' })}
           onDone={() => navigate({ name: 'planner' })}
-          onApiError={handleApiError}
+          onApiError={onApiError}
         />
       </Suspense>
     );
@@ -236,27 +350,44 @@ export function App(): JSX.Element {
           onBack={() => navigate({ name: 'planner' })}
           onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
           onOpenPlannerChat={(chatId) => navigate({ name: 'planner-chat', chatId })}
-          onApiError={handleApiError}
+          onApiError={onApiError}
         />
       </Suspense>
     );
   }
 
+  // `list` is the only remaining route and its caller handles it (the
+  // aggregated home wraps its own per-host providers, so it cannot live inside
+  // this one). Unreachable, but a spinner is the right thing to show if a
+  // future route kind ever slips through.
+  return <PageFallback />;
+}
+
+/**
+ * A `#/h/<id>/...` link naming a host this browser does not know (PA-67).
+ *
+ * Rendered instead of silently substituting the default host, which is what
+ * PA-60's `resolveHostEndpoint` did while there was only one host to substitute
+ * — harmless then, actively dangerous now: every action taken on the page would
+ * land on a machine the URL did not name. A removed host's stale bookmark, or a
+ * link shared out of a Hub deployment into a standalone one, lands here.
+ */
+function UnknownHost({
+  hostId,
+  onAllHosts,
+}: {
+  hostId: string;
+  onAllHosts: () => void;
+}): JSX.Element {
   return (
-    <ProjectsPage
-      onOpen={(sessionId) => navigate({ name: 'terminal', sessionId })}
-      onOpenChat={(conversationId) => navigate({ name: 'chat', conversationId })}
-      onCompose={(cwd) => navigate(cwd ? { name: 'compose', cwd } : { name: 'compose' })}
-      onOpenAgents={() => navigate({ name: 'agents' })}
-      onOpenSettings={() => navigate({ name: 'settings' })}
-      onOpenCron={() => navigate({ name: 'cron' })}
-      onOpenCronJob={(jobId) => navigate({ name: 'cron-job', jobId })}
-      onOpenWebhooks={() => navigate({ name: 'webhooks' })}
-      onOpenWebhook={(webhookId) => navigate({ name: 'webhook', webhookId })}
-      onOpenPlanner={() => navigate({ name: 'planner' })}
-      onOpenPlannerChat={(chatId) => navigate({ name: 'planner-chat', chatId })}
-      onApiError={handleApiError}
-      onLogout={logout}
-    />
+    <div className="app">
+      <div className="empty">
+        No host called <code>{hostId}</code> is registered in this browser.
+        <br />
+        <button type="button" onClick={onAllHosts} style={{ marginTop: 16 }}>
+          All hosts
+        </button>
+      </div>
+    </div>
   );
 }

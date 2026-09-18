@@ -10,12 +10,13 @@ import type {
   TestPlannerUrlFetchResponse,
   TestPlannerWebSearchResponse,
 } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { Icon } from '../components/Icon.js';
 import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
 import { McpRegistriesSection } from '../components/McpRegistriesSection.js';
 import { SkillsSection } from '../components/SkillsSection.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
   onApiError: (error: unknown) => void;
@@ -36,6 +37,7 @@ interface Props {
  * "Projects" already draws between browsing chats and managing folders.
  */
 export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Element {
+  const api = useHostApi();
   const [workspaces, setWorkspaces] = useState<PlannerWorkspace[] | null>(null);
   const [models, setModels] = useState<PlannerModel[] | null>(null);
   const [settings, setSettings] = useState<PlannerSettingsDto | null>(null);

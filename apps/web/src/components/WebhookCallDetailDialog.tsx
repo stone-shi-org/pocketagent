@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { WebhookDeliveryDetail, WebhookHistoryEntry } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { formatRelative } from './StatusBadge.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 /** One `label: value` line — skipped entirely when `value` is null, so the dialog never shows "—". */
 function Fact({ label, value }: { label: string; value: string | number | null }): JSX.Element | null {
@@ -33,6 +34,7 @@ export function WebhookCallDetailDialog({
   onClose: () => void;
   onApiError: (error: unknown) => void;
 }): JSX.Element {
+  const api = useHostApi();
   const [detail, setDetail] = useState<WebhookDeliveryDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(entry.kind === 'delivery' && entry.webhookId !== null);

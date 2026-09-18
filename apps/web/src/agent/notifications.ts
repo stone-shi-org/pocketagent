@@ -1,4 +1,5 @@
 import { api } from '../api/client.js';
+import { DEFAULT_HOST_ID } from '../api/host.js';
 
 /**
  * Two notification paths, because they solve different problems:
@@ -36,8 +37,36 @@ export async function ensureNotificationPermission(): Promise<NotificationPermis
   }
 }
 
+/**
+ * Deep link for a notification, carrying the host when it is not the default
+ * one (PA-67).
+ *
+ * A local notification is raised by the pane that saw the event, so unlike a
+ * *server-sent* push it knows exactly which machine it is about — and without
+ * this, tapping "turn complete" for a session on `dev02` opened the same
+ * session id on the default host, which is either the wrong transcript or
+ * nothing at all. The default host stays bare, so single-host installs emit
+ * byte-identical URLs.
+ *
+ * Server-sent push is deliberately **not** fixed here: the backend composes
+ * that `url` itself and, behind a Hub, has no idea which host id the Hub filed
+ * it under. Teaching it would mean the subscription recording a link prefix —
+ * a protocol and server change that PA-67 raised as an open question rather
+ * than assumed. Push subscriptions are per-origin anyway (one per browser, per
+ * service worker), so they belong to the host that served this bundle.
+ */
+function sessionUrl(sessionId: string, hostId?: string): string {
+  const session = `/s/${encodeURIComponent(sessionId)}`;
+  if (hostId === undefined || hostId === DEFAULT_HOST_ID) return `/#${session}`;
+  return `/#/h/${encodeURIComponent(hostId)}${session}`;
+}
+
 /** Fire a local notification for a pending approval, if the tab is hidden. */
-export async function notifyApproval(title: string, sessionId: string): Promise<void> {
+export async function notifyApproval(
+  title: string,
+  sessionId: string,
+  hostId?: string,
+): Promise<void> {
   if (!notificationsSupported()) return;
   if (Notification.permission !== 'granted') return;
   if (document.visibilityState === 'visible') return;
@@ -49,7 +78,7 @@ export async function notifyApproval(title: string, sessionId: string): Promise<
       tag: `approval-${sessionId}`,
       // Approvals block the agent, so they should persist until acted on.
       requireInteraction: true,
-      data: { url: `/#/s/${encodeURIComponent(sessionId)}` },
+      data: { url: sessionUrl(sessionId, hostId) },
     };
     if (registration) await registration.showNotification('PocketAgent — approval needed', options);
     else new Notification('PocketAgent — approval needed', options);
@@ -66,7 +95,11 @@ export async function notifyApproval(title: string, sessionId: string): Promise<
  * `requireInteraction`; the notification can be dismissed by the OS/browser
  * like any other passive alert instead of insisting on being acted on.
  */
-export async function notifyTurnComplete(title: string, sessionId: string): Promise<void> {
+export async function notifyTurnComplete(
+  title: string,
+  sessionId: string,
+  hostId?: string,
+): Promise<void> {
   if (!notificationsSupported()) return;
   if (Notification.permission !== 'granted') return;
   if (document.visibilityState === 'visible') return;
@@ -76,7 +109,7 @@ export async function notifyTurnComplete(title: string, sessionId: string): Prom
     const options: NotificationOptions = {
       body: `${title} finished and is waiting for your next prompt.`,
       tag: `turn-complete-${sessionId}`,
-      data: { url: `/#/s/${encodeURIComponent(sessionId)}` },
+      data: { url: sessionUrl(sessionId, hostId) },
     };
     if (registration) await registration.showNotification('PocketAgent — turn complete', options);
     else new Notification('PocketAgent — turn complete', options);
@@ -94,7 +127,11 @@ export async function notifyTurnComplete(title: string, sessionId: string): Prom
  * heuristic, so this is worded as an observation ("looks like") rather than a
  * claim, matching the server-side push sent for the same case.
  */
-export async function notifyIdle(title: string, sessionId: string): Promise<void> {
+export async function notifyIdle(
+  title: string,
+  sessionId: string,
+  hostId?: string,
+): Promise<void> {
   if (!notificationsSupported()) return;
   if (Notification.permission !== 'granted') return;
   if (document.visibilityState === 'visible') return;
@@ -104,7 +141,7 @@ export async function notifyIdle(title: string, sessionId: string): Promise<void
     const options: NotificationOptions = {
       body: `${title} looks like it's waiting for you.`,
       tag: `idle-${sessionId}`,
-      data: { url: `/#/s/${encodeURIComponent(sessionId)}` },
+      data: { url: sessionUrl(sessionId, hostId) },
     };
     if (registration) await registration.showNotification('PocketAgent — session idle', options);
     else new Notification('PocketAgent — session idle', options);

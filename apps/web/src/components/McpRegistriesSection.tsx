@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { McpAuthKind, McpRegistrySummary, McpTransportKind, TestMcpRegistryResponse } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { Icon } from './Icon.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
   onApiError: (error: unknown) => void;
@@ -77,6 +78,7 @@ function formFor(registry: McpRegistrySummary): FormState {
  * with no reveal, and blank-on-edit meaning "keep the stored value".
  */
 export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Element {
+  const api = useHostApi();
   const [registries, setRegistries] = useState<McpRegistrySummary[] | null>(null);
   const [encryptionAvailable, setEncryptionAvailable] = useState(true);
   const [mcpEnabled, setMcpEnabledState] = useState(true);

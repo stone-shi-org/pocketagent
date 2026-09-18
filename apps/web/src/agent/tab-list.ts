@@ -26,6 +26,17 @@ export type TabRoute = Extract<
 
 export interface OpenTab {
   id: string;
+  /**
+   * Which host this tab's route belongs to (PA-67).
+   *
+   * Carried on the tab rather than inside `TabRoute` for the same reason the
+   * hash carries it alongside `Route` rather than inside every variant: a
+   * session id means nothing without a machine, but none of the ~42
+   * `navigate({ ... })` call sites should have to thread one. Here it is
+   * mandatory, because a tab without a host cannot be rendered — the pane has
+   * to know who to ask.
+   */
+  hostId: string;
   route: TabRoute;
   /** VS Code's name for the one tab a single click in the explorer reuses,
       rather than piling up a new tab per click — see `tabListReducer`'s
@@ -51,24 +62,32 @@ export function isTabRoute(route: Route): route is TabRoute {
 
 /**
  * Every admin-page route kind (`settings`/`cron`/`cron-job`/`webhooks`/
- * `webhook`/`planner`/`planner-agent`) maps to the same fixed sentinel id —
- * `s:settings`, kept as the literal string from before this generalized
- * beyond just Settings, so a tab already persisted under that id from an
- * older build restores into the same slot rather than orphaning it. That is
- * also what gives the whole group "only one tab, ever, showing whichever of
- * the seven you're currently on" for free: `openPermanent`/`sync` already
- * dedup by id, so navigating from Cron to Webhooks just updates the one
- * existing tab's route (see `sync`'s own comment on why it has to, unlike
- * every other tab kind) rather than opening a second tab.
+ * `webhook`/`planner`/`planner-agent`) maps to one sentinel id per host —
+ * `s:settings:<hostId>`. Within a host that gives the whole group "only one
+ * tab, ever, showing whichever of the seven you're currently on" for free:
+ * `openPermanent`/`sync` already dedup by id, so navigating from Cron to
+ * Webhooks just updates the one existing tab's route (see `sync`'s own comment
+ * on why it has to, unlike every other tab kind) rather than opening a second
+ * tab.
+ *
+ * **Every id is host-qualified since PA-67, and it has to be.** A cron job, a
+ * webhook and a Pocket Agent all belong to one machine, so a single global
+ * `s:settings` tab would show host B's jobs under a title that still said host
+ * A — and `t:<sessionId>` would collide outright for two hosts that happen to
+ * share a session id, silently rendering one machine's transcript in the
+ * other's tab. Both failures typecheck perfectly, which is why this is the
+ * riskiest change in the multi-host UI and why `tab-list.test.ts` pins it.
+ * Persisted ids from before PA-67 carry no host: `open-tabs-pref.ts` migrates
+ * them onto the default host at load rather than discarding the tab strip.
  */
-export function tabIdFor(route: TabRoute): string {
+export function tabIdFor(route: TabRoute, hostId: string): string {
   switch (route.name) {
     case 'terminal':
-      return `t:${route.sessionId}`;
+      return `t:${hostId}:${route.sessionId}`;
     case 'chat':
-      return `c:${route.conversationId}`;
+      return `c:${hostId}:${route.conversationId}`;
     case 'planner-chat':
-      return `p:${route.chatId}`;
+      return `p:${hostId}:${route.chatId}`;
     case 'settings':
     case 'cron':
     case 'cron-job':
@@ -76,15 +95,15 @@ export function tabIdFor(route: TabRoute): string {
     case 'webhook':
     case 'planner':
     case 'planner-agent':
-      return 's:settings';
+      return `s:settings:${hostId}`;
   }
 }
 
 export type TabListAction =
-  | { type: 'sync'; route: Route }
-  | { type: 'openPreview'; route: TabRoute }
-  | { type: 'openPermanent'; route: TabRoute }
-  | { type: 'replace'; id: string; route: TabRoute }
+  | { type: 'sync'; route: Route; hostId: string }
+  | { type: 'openPreview'; route: TabRoute; hostId: string }
+  | { type: 'openPermanent'; route: TabRoute; hostId: string }
+  | { type: 'replace'; id: string; route: TabRoute; hostId: string }
   | { type: 'close'; id: string }
   | { type: 'reorder'; orderedIds: string[] };
 
@@ -112,10 +131,12 @@ export function tabListReducer(tabs: OpenTab[], action: TabListAction): OpenTab[
   switch (action.type) {
     case 'sync': {
       if (!isTabRoute(action.route)) return tabs;
-      const id = tabIdFor(action.route);
+      const id = tabIdFor(action.route, action.hostId);
       const index = tabs.findIndex((t) => t.id === id);
       const existing = tabs[index];
-      if (index === -1 || !existing) return [...tabs, { id, route: action.route }];
+      if (index === -1 || !existing) {
+        return [...tabs, { id, hostId: action.hostId, route: action.route }];
+      }
       // A terminal/chat/planner-chat tab's own id already encodes the only
       // field its route carries, so re-syncing the same session/chat is
       // always a true no-op. The shared admin-page tab (PA-36 round 2) is
@@ -141,12 +162,14 @@ export function tabListReducer(tabs: OpenTab[], action: TabListAction): OpenTab[
       // chat replaces whichever tab is *currently* marked preview, in that
       // tab's own slot, rather than appending — there is only ever one
       // preview tab, exactly like VS Code's explorer.
-      const id = tabIdFor(action.route);
+      const id = tabIdFor(action.route, action.hostId);
       if (tabs.some((t) => t.id === id)) return tabs;
       const previewIndex = tabs.findIndex((t) => t.preview);
-      if (previewIndex === -1) return [...tabs, { id, route: action.route, preview: true }];
+      if (previewIndex === -1) {
+        return [...tabs, { id, hostId: action.hostId, route: action.route, preview: true }];
+      }
       const next = tabs.slice();
-      next[previewIndex] = { id, route: action.route, preview: true };
+      next[previewIndex] = { id, hostId: action.hostId, route: action.route, preview: true };
       return next;
     }
     case 'openPermanent': {
@@ -154,28 +177,28 @@ export function tabListReducer(tabs: OpenTab[], action: TabListAction): OpenTab[
       // One already open as *this strip's* preview tab is "kept" in place —
       // same slot, just no longer liable to be replaced by the next single
       // click elsewhere. Already open and not the preview tab: nothing to do.
-      const id = tabIdFor(action.route);
+      const id = tabIdFor(action.route, action.hostId);
       const index = tabs.findIndex((t) => t.id === id);
-      if (index === -1) return [...tabs, { id, route: action.route }];
+      if (index === -1) return [...tabs, { id, hostId: action.hostId, route: action.route }];
       if (!tabs[index]?.preview) return tabs;
       const next = tabs.slice();
-      next[index] = { id, route: action.route };
+      next[index] = { id, hostId: action.hostId, route: action.route };
       return next;
     }
     case 'replace': {
       // Replaces an existing tab (e.g. promoting a preview tab or superseded
       // session to a newly created session) in-place in its same slot,
       // cleared of the `preview` flag.
-      const newId = tabIdFor(action.route);
+      const newId = tabIdFor(action.route, action.hostId);
       const index = tabs.findIndex((t) => t.id === action.id);
       if (index === -1) {
         if (tabs.some((t) => t.id === newId)) return tabs;
-        return [...tabs, { id: newId, route: action.route }];
+        return [...tabs, { id: newId, hostId: action.hostId, route: action.route }];
       }
       const filtered = tabs.filter((t, i) => i === index || t.id !== newId);
       const filteredIndex = filtered.findIndex((t) => t.id === action.id);
       const next = filtered.slice();
-      next[filteredIndex] = { id: newId, route: action.route };
+      next[filteredIndex] = { id: newId, hostId: action.hostId, route: action.route };
       return next;
     }
     case 'close':

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AgentInfo, ConversationInfo, PromptImage } from '@pocketagent/protocol';
 import { usesClaudeTranscripts } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { applyEvents, emptyTranscript, type TranscriptItem } from '../agent/transcript.js';
 import { Transcript } from '../components/Transcript.js';
 import { PromptBox } from '../components/PromptBox.js';
@@ -9,6 +9,7 @@ import { PickerSheet, type SelectorOption } from '../components/SelectorRow.js';
 import { Icon } from '../components/Icon.js';
 import { setPendingPrompt } from '../agent/pending-prompt.js';
 import { ConversationWatchConnection } from '../api/ws-client.js';
+import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
 
 interface Props {
   conversationId: string;
@@ -32,6 +33,8 @@ interface Props {
  * the moment a prompt is actually sent from here.
  */
 export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted }: Props): JSX.Element {
+  const api = useHostApi();
+  const endpoint = useHostEndpoint();
   const [conversation, setConversation] = useState<ConversationInfo | null>(null);
   const [history, setHistory] = useState<TranscriptItem[]>([]);
   const [missing, setMissing] = useState(false);
@@ -91,11 +94,12 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
    */
   useEffect(() => {
     const watcher = new ConversationWatchConnection({
+      endpoint,
       onRemoved: () => setMissing(true),
     });
     watcher.open(conversationId);
     return () => watcher.close();
-  }, [conversationId]);
+  }, [conversationId, endpoint]);
 
   // Stable across renders so `Transcript` doesn't re-group turns on every one —
   // there is no live session here, so this transcript state never changes.

@@ -106,7 +106,7 @@ and `adopt.test.ts` skip themselves when `tmux` is not installed.
 ### Live demos
 
 The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
-decision. Fourteen demo scripts do, against a *running* server:
+decision. Fifteen demo scripts do, against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -123,6 +123,7 @@ PA_TOKEN=... pnpm demo:cron-ui           # scheduled jobs: picker, preview, tree
 PA_TOKEN=... pnpm demo:webhook-ui        # webhooks: secret panel, signed delivery, filtered row
 PA_DEEPSEEK_KEY=... pnpm demo:deepseek-variant   # cross-provider resume: one transcript, two providers
 PA_DEEPSEEK_KEY=... pnpm demo:provider-ui        # provider CRUD, picker, disclosure banner, "Continue as…"
+PA_TOKEN=... pnpm demo:multi-host-ui     # multi-host: rail, sheet, aggregate home, deep links, both viewports
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -881,11 +882,51 @@ point of listing it. Runs, in contrast, *are* chats: `ChatSummary.cronJobId` bad
 keyed on the **conversation** id because `representativeSessions` collapses several session
 rows sharing one `agentSessionId` and a session-keyed badge would vanish with the collapse.
 
-`HostInfo` is first-class with exactly one entry: this server. The header chip, the
-composer's host row and `GET /api/hosts` are all shaped for several machines so that a front
-server registering backs would not force a client rewrite. **No such front server exists**,
-and building one concentrates credentials for every registered machine in one process —
-treat it as a design problem, not a feature request.
+`HostInfo` is first-class, and `GET /api/hosts` on a backend still answers with exactly one
+entry: itself. A backend must not claim to know about its peers — the same reasoning that stops
+it asserting its own external origin — so the *list* of machines comes from somewhere else (see
+below). **The front server that would register several backs is PA-66 and does not exist yet**;
+building one concentrates credentials for every registered machine in one process, which is why
+PA-63's scoped, revocable hub credentials had to land first.
+
+**Host is a grouping dimension on the home screen, not a mode** (PA-67). The client is
+host-parameterised (`HostEndpoint`, PA-60), so the aggregated "all hosts" home is the default
+*list* view: one `HostGroup` heading per host, wrapping **the same three category components in
+the same order**. Nothing inside `PocketAgentsSection`, `ShellSection` or `ProjectList` knows a
+host exists, which is what keeps them shared between the layouts — and with one registered host
+the heading is not rendered at all, so a standalone install's home screen is byte-identical to
+the pre-PA-67 one. That is the property the whole feature is shaped around: `HostRail` (desktop)
+appears only when there is something to switch between, `HostSheet` (phone, opened from the
+header chip) is the same switcher without spending scarce width, and the rail is *chrome, not a
+category*, so it is a third grid column rather than anything inside the sidebar.
+
+The host list has two sources and exactly one is live, chosen once at boot and never merged
+(`hosts/directory.ts`): a **Hub** answering `GET /api/hub/hosts` (PA-66, whose registry types
+live in `packages/protocol/src/hub-registry.ts` so the two tickets cannot invent different
+shapes), or a **local** list in `localStorage` — the host that served the bundle plus whatever
+same-origin path prefixes this browser has been told about. The local source is not a stub: with
+a reverse proxy already publishing two backends on one origin it is a working registry, and it is
+what makes the feature reviewable and demoable a ticket ahead of the service. It also cannot
+become a hole — a registered host is a *base path*, and `normalizeBasePath` cannot produce an
+absolute URL, so a hand-edited value can only make same-origin requests that 404.
+
+**Polling is tiered, and no socket is ever opened for a merely-registered host**
+(`hosts/poll-policy.ts`). The single-host home already ran two 5 s pollers issuing three
+requests; repeating that per host is 3N requests every five seconds on a phone. So: the selected
+host and any host with an open tab poll at the old 5 s; an expanded but unwatched group polls at
+15 s; a collapsed group is not polled at all and still shows a dot and a running count, because
+those come from one cheap `GET /api/hosts` per host per 30 s (that is what
+`HostInfo.runningSessions` is for). A failing host backs off to a minute, and every probe has an
+8 s `AbortController` — `request()` itself stays timeout-free, but a poll that hangs forever is
+the "spinner that never resolves" an offline host must never become.
+
+**Tab identity is host-qualified, and that was the sharpest bug in the feature.** `tabIdFor`
+emits `t:<hostId>:<sessionId>` (and one admin-page singleton *per host*), because two machines
+can hand out the same session id and an unqualified id renders one host's transcript in the
+other's tab — a failure that typechecks perfectly. `open-tabs-pref` migrates a pre-PA-67 entry
+onto the default host rather than discarding the strip. Every tab panel stays mounted and is
+wrapped in its own `HostProvider`, which is what lets a live session on one machine keep
+streaming while the sidebar shows another.
 
 **The client side of that shape is `HostEndpoint`** (`apps/web/src/api/host.ts`, PA-60). Before
 it, the origin *was* the host identity: `request()` fetched relative paths and `wsUrl()` read
@@ -1367,6 +1408,16 @@ These are load-bearing. Several were bugs first.
   narrate what the code already says.
 - Frontend state is hand-rolled React (hash routing, no router or state library) and plain
   CSS in `apps/web/src/styles.css`. Keep it that way unless there is a real reason.
+- **Under `pages/` and `components/`, `api` comes from `useHostApi()` or not at all** (PA-67).
+  The module-level `api` client is bound to the host that served the bundle, so importing it in a
+  host-scoped surface silently reads and writes the wrong machine as soon as a second host is
+  registered — and it typechecks, lints, and behaves correctly in every single-host deployment,
+  which is every deployment until it isn't. `hosts/host-scoping.test.ts` enforces it by grepping
+  the source, with an allowlist that has to carry a reason; `LoginPage` is on it because
+  authenticating is per *origin*, which with a Hub in front is the Hub. Sockets take the same
+  endpoint through `useHostEndpoint()`, and endpoints are interned (`hostEndpoint`) because their
+  identity is a React dependency — a fresh object per status poll would reopen every live socket
+  every 30 seconds.
 - **Nothing reads `window.location` to reach the API or the WebSocket** (PA-60). Host identity
   is a `HostEndpoint`, so a request goes through `api`/`createApiClient` and a socket takes its
   endpoint from its options. The socket URL is deliberately *relative* (`<basePath>/api/ws`) so
@@ -1374,7 +1425,11 @@ These are load-bearing. Several were bugs first.
   one rule for both transports instead of a hand-rolled scheme map that can disagree with the
   page. The one remaining `window.location.origin` read is `SecretReveal.tsx`, which composes a
   webhook's *delivery* URL for a human to paste into Jira; the server deliberately has no notion
-  of its own external origin, so that one stays.
+  of its own external origin, so that one stays — but it is only valid for the host that served
+  the bundle. For any host reached through a path prefix, this origin is the *gateway's*, and a
+  Hub is forbidden from proxying `/api/hooks/*` at all, so composing a URL from it would be both
+  wrong and an invitation to try the one route that must stay unroutable. The panel says so and
+  asks for that backend's address instead, remembering it per host (PA-67).
 - **Two layouts, chosen by `matchMedia` in `hooks/useMediaQuery.ts` — never by user-agent
   sniffing.** `(min-width: 900px) and (pointer: fine)` gets `DesktopShell` (sidebar plus
   session pane); everything else gets the single-column phone pages. The list itself lives
@@ -1382,7 +1437,12 @@ These are load-bearing. Several were bugs first.
   like "tapping a finished chat resumes it as a branch". The same goes for the other two
   home-screen categories (`PocketAgentsSection`, `ShellSection`) and their order — both
   layouts render the same three components in the same sequence, and a category added to
-  one but not the other is a bug.
+  one but not the other is a bug. A **host** is a grouping level *above* those three, never a
+  fourth category and never a badge on a row (PA-67): the desktop expresses the switcher as a
+  rail and the phone as a sheet — different chrome, deliberately — but both render the same
+  `HostGroup` around the same three shared components. The one place a host *is* shown per row is
+  the desktop tab strip, and only while two hosts have tabs open, because two machines can have
+  identically-titled chats side by side.
 - **The theme is light, and `color-scheme` is pinned to it.** Everything reads from the
   token block at the top of `styles.css`; adding a raw hex outside it is how the palette
   rots. The one dark surface is the terminal (`--console`), because ANSI palettes are drawn

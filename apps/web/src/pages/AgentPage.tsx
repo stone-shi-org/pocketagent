@@ -10,7 +10,7 @@ import type {
   SessionStatus,
 } from '@pocketagent/protocol';
 import { isTerminalStatus, usesClaudeTranscripts } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { TerminalConnection, type ConnectionState } from '../api/ws-client.js';
 import {
   applyEvent,
@@ -29,6 +29,7 @@ import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
 import { Icon } from '../components/Icon.js';
 import { notifyApproval, notifyTurnComplete, ensureNotificationPermission } from '../agent/notifications.js';
 import { takePendingPrompt, setPendingPrompt } from '../agent/pending-prompt.js';
+import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
 
 interface Props {
   sessionId: string;
@@ -46,6 +47,8 @@ interface Props {
  * a terminal emulator.
  */
 export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): JSX.Element {
+  const api = useHostApi();
+  const endpoint = useHostEndpoint();
   const connRef = useRef<TerminalConnection | null>(null);
   /**
    * PA-40: set just before this tab's own `terminate()` fires its request,
@@ -109,6 +112,10 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
     // state read would have inside this same closure.
     let latestTitle: string | null = null;
     const conn = new TerminalConnection({
+      // The socket is bound to *this pane's* host, not to whichever host the
+      // sidebar is currently showing (PA-67) — that is what lets a session on
+      // one machine keep streaming while you browse another.
+      endpoint,
       handlers: {
         onConnectionState: setConnection,
         onAttached: (info) => {
@@ -151,12 +158,12 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           }
           if (event.kind === 'permission_request') {
             // Only fires when the tab is hidden; the sheet is enough otherwise.
-            void notifyApproval(event.title, sessionId);
+            void notifyApproval(event.title, sessionId, endpoint.id);
           }
           if (event.kind === 'turn_complete') {
             // Same tab-hidden gate as the approval alert above; a fully
             // detached client is covered by the server's own push instead.
-            void notifyTurnComplete(latestTitle ?? 'Session', sessionId);
+            void notifyTurnComplete(latestTitle ?? 'Session', sessionId, endpoint.id);
           }
         },
         onAgentReplay: (events, truncated) => {
@@ -635,6 +642,7 @@ function RateLimitOverlay({
   sessionId: string;
   onApiError: (error: unknown) => void;
 }): JSX.Element {
+  const api = useHostApi();
   const [open, setOpen] = useState(false);
   const [scheduling, setScheduling] = useState(false);
   const [error, setError] = useState<string | null>(null);

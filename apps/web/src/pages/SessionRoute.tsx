@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { api } from '../api/client.js';
 import { AgentPage } from './AgentPage.js';
 import { TerminalPage } from './TerminalPage.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 /**
  * Pick the renderer for a session.
@@ -21,6 +21,7 @@ export function SessionRoute({
   onApiError: (error: unknown) => void;
   onResumed: (sessionId: string) => void;
 }): JSX.Element {
+  const api = useHostApi();
   const [transport, setTransport] = useState<'terminal' | 'structured' | null>(null);
   const [missing, setMissing] = useState(false);
 

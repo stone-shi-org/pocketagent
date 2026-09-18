@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { DiscoveredSkill, PlannerSkillInfo } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { Icon } from './Icon.js';
 import { PlannerDirectoryPicker } from './PlannerDirectoryPicker.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
   onApiError: (error: unknown) => void;
@@ -30,6 +31,7 @@ interface Props {
  * workspace, not a global catalog action.
  */
 export function SkillsSection({ onApiError, onChanged }: Props): JSX.Element {
+  const api = useHostApi();
   const [skills, setSkills] = useState<PlannerSkillInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

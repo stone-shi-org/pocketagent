@@ -158,6 +158,7 @@ describe('ProjectService', () => {
   let projectsDir: string;
   let service: ProjectService;
   let db: ReturnType<typeof openDatabase>;
+  let workspaces: WorkspaceRegistry;
 
   const writeTranscript = (cwd: string, id: string, title: string): void => {
     const dir = path.join(projectsDir, encodeProjectDir(cwd));
@@ -176,7 +177,7 @@ describe('ProjectService', () => {
   beforeEach(() => {
     ws = makeWorkspace();
     projectsDir = fs.mkdtempSync('/tmp/pa-proj-');
-    const workspaces = new WorkspaceRegistry([ws.root]);
+    workspaces = new WorkspaceRegistry([ws.root]);
     db = openDatabase(':memory:');
     service = new ProjectService({
       workspaces,
@@ -206,6 +207,32 @@ describe('ProjectService', () => {
   it('gives the host an id that survives a restart', () => {
     expect(service.host().id).toBe(service.host().id);
     expect(service.host().id).not.toBe('');
+  });
+
+  it('omits the running-session count when no counter was wired in (PA-67)', () => {
+    // Absent means "this host does not report it", which the multi-host rail
+    // shows as no count. Reporting zero instead would claim nothing is running
+    // on a machine nobody asked.
+    expect(service.host().runningSessions).toBeUndefined();
+  });
+
+  it('reports the live session count when one is available (PA-67)', () => {
+    const counted = new ProjectService({
+      workspaces,
+      conversations: new ConversationStore({
+        projectsDir,
+        workspaces,
+        listRunningCwds: async () => [],
+      }),
+      db,
+      version: '9.9.9',
+      hostname: 'workbench-01.internal.example.com',
+      getRunningSessions: () => 3,
+    });
+    // Feeds `HostInfo.runningSessions`, which is what lets a *collapsed* host
+    // group's heading say "3 running" on one cheap status request instead of
+    // the full project-list poll.
+    expect(counted.host().runningSessions).toBe(3);
   });
 
   it('groups chats under the directory they happened in', async () => {

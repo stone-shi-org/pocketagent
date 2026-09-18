@@ -11,6 +11,18 @@ export interface Tab {
       click on a project-tree row lands here instead of opening a new tab.
       Shown in italics, same affordance VS Code uses. */
   preview: boolean;
+  /**
+   * Which machine this tab is on, or null to say nothing (PA-67).
+   *
+   * Set only when tabs from more than one host are open at once, which is the
+   * only time it carries information — and it is deliberately the *one* place
+   * in the app where a host is rendered per row. The home screen's rows must
+   * not do this (the standing "a chat is its title and, if running, a green
+   * dot" convention, resolved there by grouping under a heading instead), but
+   * a tab strip is chrome, and two hosts can genuinely have identically-titled
+   * chats open side by side with nothing else to tell them apart.
+   */
+  hostLabel?: string | null;
 }
 
 interface Props {
@@ -181,7 +193,9 @@ export function TabBar({
                     }}
                   >
                     {tab.live && <span className="live-dot" aria-label="running" />}
-                    <span className="tab-list-item-title">{tab.title}</span>
+                    <span className="tab-list-item-title">
+                      {tab.hostLabel ? `${tab.hostLabel} · ${tab.title}` : tab.title}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -215,6 +229,7 @@ export function TabBar({
             title={tab.title}
           >
             {tab.live && <span className="live-dot" aria-label="running" />}
+            {tab.hostLabel && <span className="tab-host">{tab.hostLabel}</span>}
             <span className="tab-title">{tab.title}</span>
             <button
               type="button"

@@ -113,8 +113,13 @@ try {
     return active.trim() === secondTitle;
   }, 20_000);
   check(switched, 'the highlight follows', secondTitle);
+  // The highlight comes from the route, which `navigate` sets synchronously,
+  // while the pane has to wait for `SessionRoute`'s own `getSession` before it
+  // can decide which renderer to mount. So this raced the fetch by a few
+  // milliseconds and was only ever passing on the timing of the poll above —
+  // assert the end state instead of the instant.
   check(
-    await page.locator('.workspace .terminal-page').isVisible(),
+    await until(() => page.locator('.workspace .terminal-page').isVisible(), 20_000),
     'and the pane shows the other session',
   );
 

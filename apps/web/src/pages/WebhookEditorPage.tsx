@@ -26,7 +26,7 @@ import {
   pocketAgentId,
   pocketAgentLabelSlug,
 } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { CopyButton } from '../components/CopyButton.js';
 import { Icon, type IconName } from '../components/Icon.js';
@@ -35,6 +35,7 @@ import { SelectRowNative } from '../components/SelectRowNative.js';
 import { formatRelative, WebhookStatusIcon } from '../components/StatusBadge.js';
 import { flattenProjects } from '../agent/search.js';
 import { NumberRow, SectionCard, TextRow } from './SettingsPage.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
   /** `'new'` for an unsaved webhook. */
@@ -123,6 +124,7 @@ export function WebhookEditorPage({
   onDone,
   onBack,
 }: Props): JSX.Element {
+  const api = useHostApi();
   /** Flips to the saved id after a create, without a remount. */
   const [savedId, setSavedId] = useState<string | null>(null);
   const id = savedId ?? webhookId;

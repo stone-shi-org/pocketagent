@@ -1691,6 +1691,24 @@ export class SessionManager {
     return this.attachCounts.get(id) ?? 0;
   }
 
+  /**
+   * Sessions currently `starting` or `running`, counted in memory (PA-67).
+   *
+   * Feeds `HostInfo.runningSessions`, which the multi-host host rail/sheet
+   * shows for hosts whose project list is not being polled. Counts `this.live`
+   * rather than querying `sessions`, and mirrors `busyTreeRoots`'s liveness
+   * test exactly: a row can be left `running` by a crash, but a live map
+   * entry cannot, so this is the same "occupancy is derived, never leased"
+   * discipline the run queue already relies on.
+   */
+  runningCount(): number {
+    let count = 0;
+    for (const session of this.live.values()) {
+      if (session.status === 'running' || session.status === 'starting') count += 1;
+    }
+    return count;
+  }
+
   /** Live sessions first, then recent history from SQLite. */
   list(limit = 50): SessionInfo[] {
     const infos: SessionInfo[] = [];

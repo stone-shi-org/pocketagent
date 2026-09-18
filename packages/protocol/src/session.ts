@@ -400,6 +400,25 @@ export const HostInfo = z.object({
   /** False once a front server can report a back it cannot currently reach. */
   online: z.boolean(),
   /**
+   * Sessions currently `starting` or `running` on this machine (PA-67).
+   *
+   * Here rather than behind a new counts route because it is exactly what this
+   * object is for — "anything that varies per machine belongs here" — and
+   * because of what reads it: the desktop host rail and the mobile host sheet
+   * want "N running" for hosts whose *full* project list is deliberately not
+   * being polled (a collapsed group costs one status request, not three data
+   * ones). An in-memory count over `SessionManager.live`, so adding it to the
+   * status tier costs nothing on either side.
+   *
+   * Optional, and that is load-bearing rather than lazy: with a Hub in front,
+   * a response can come from a host built before this field existed, and the
+   * browser does not validate responses (`request()` casts), so a field
+   * declared required would be `undefined` at runtime while typechecking
+   * clean. Absent means "this host does not report it", which the UI shows as
+   * no count rather than as zero.
+   */
+  runningSessions: z.number().int().nonnegative().optional(),
+  /**
    * Base URL of a code-server instance on this host (e.g. `https://host/code/`),
    * or null if none is configured. Null hides the "Open in code-server" action
    * in the client rather than the client guessing at a URL.

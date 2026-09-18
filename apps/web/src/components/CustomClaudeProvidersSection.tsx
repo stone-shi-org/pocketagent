@@ -4,9 +4,10 @@ import {
   type CustomClaudeProviderKind,
   type CustomClaudeProviderSummary,
 } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { Icon } from './Icon.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
   onApiError: (error: unknown) => void;
@@ -70,6 +71,7 @@ function formFor(provider: CustomClaudeProviderSummary): FormState {
  * provider re-enters the key or leaves the field blank to keep the stored one.
  */
 export function CustomClaudeProvidersSection({ onApiError }: Props): JSX.Element {
+  const api = useHostApi();
   const [providers, setProviders] = useState<CustomClaudeProviderSummary[] | null>(null);
   const [encryptionAvailable, setEncryptionAvailable] = useState(true);
   const [error, setError] = useState<string | null>(null);

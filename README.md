@@ -761,6 +761,22 @@ The desktop pane also drops the on-screen key bar — a real keyboard already ha
 Ctrl — and holds the transcript to a readable column while leaving the terminal full width,
 because a terminal is a character grid and constraining it just wastes the space.
 
+### More than one machine
+
+If you register a second host (⋯ → **Hosts…**), the home screen groups by machine instead of
+adding anything to a row: one heading per host, with the same three categories under each. The
+default view is **all hosts** at once; picking one narrows to it, and the URL says which
+(`#/h/dev02/s/<sessionId>` is shareable and survives a reload). Switching is a state swap, so a
+session running on one machine keeps streaming while you read another's chats.
+
+Desktop gets a rail of host tiles on the far left; a phone gets the same list as a sheet behind
+the header chip, because a permanent column is not worth the width for something you switch
+rarely. Either way, an offline or too-old host renders as a legible line in its own group and
+leaves every other host alone. With one host registered, none of this appears.
+
+A host is a **path prefix on this origin** — see limitation 26 for why, and for what still has
+to be true of your reverse proxy.
+
 ### Reconnect behaviour
 
 Every chunk of terminal output carries a sequence number. The client tracks the highest one
@@ -1596,6 +1612,22 @@ should have told you. Raise `OUTPUT_BUFFER_BYTES`, or press `^L` to redraw.
     architecture needs its own real build (`PA_PLATFORM=linux/arm64 docker/build.sh`) rather
     than one build retagged. Nothing about the Dockerfile prevents it; no arm64 tag is
     published yet.
+26. **A second host has to be reverse-proxied onto this origin, and the list of them is
+    per-browser until the Hub exists.** The UI is multi-host — an aggregated home, a host rail
+    on desktop, a host sheet on a phone, and `#/h/<hostId>/…` deep links — but a host is
+    addressed as a *path prefix* on the origin serving the app, because requests authenticate
+    with a `SameSite` HttpOnly cookie and a cross-origin backend would need
+    `SameSite=None; Secure` plus credentialed CORS, which the plain-HTTP-on-a-tailnet posture
+    cannot provide. So adding `dev02` at `/h/dev02` assumes something already proxies that
+    prefix to that machine, and hosts you add are remembered in *this browser* only. The
+    PocketAgent Hub replaces both halves — one origin that proxies every bound backend, and a
+    shared registry — and until then a host that nothing proxies simply shows as unreachable
+    in its own group, which is the intended degradation rather than a failure.
+27. **Web push notifications belong to the host that served the app.** A push subscription is
+    per-origin by construction (one per browser, per service worker), and the backend composes
+    the deep link in the payload itself — so a notification raised by another host links to the
+    right session id on the wrong machine. Notifications raised *in the browser* (approval
+    needed, turn complete, session idle) do carry their host.
 
 ---
 

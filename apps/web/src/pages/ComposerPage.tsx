@@ -8,7 +8,7 @@ import type {
   WorkspaceEntry,
 } from '@pocketagent/protocol';
 import { PROTOCOL_VERSION, negotiateProtocol } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { SelectorRow, type SelectorOption } from '../components/SelectorRow.js';
 import { AddProject } from '../components/AddProject.js';
 import { WorktreeDialog, type WorktreeChoice } from '../components/WorktreeDialog.js';
@@ -18,6 +18,7 @@ import { type Flavour, makeFlavour, parseFlavour } from '../agent/flavour.js';
 import { flattenProjects } from '../agent/search.js';
 import { resolveCurrentModel } from '../agent/transcript.js';
 import { formatRelative } from '../components/StatusBadge.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
   /** Preselects the workspace when composing from a project header. */
@@ -46,6 +47,7 @@ const ADD_WORKSPACE = '__add_workspace__';
  * same state any other chat is in the moment it goes idle waiting on you.
  */
 export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Props): JSX.Element {
+  const api = useHostApi();
   const [host, setHost] = useState<HostInfo | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);

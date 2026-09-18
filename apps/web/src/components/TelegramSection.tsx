@@ -5,9 +5,10 @@ import type {
   TelegramBotTestResult,
   TelegramLink,
 } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { Icon } from './Icon.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
   onApiError: (error: unknown) => void;
@@ -66,6 +67,7 @@ function blankPairingForm(workspaces: PlannerWorkspace[]): PairingFormState {
  * has no existence independent of the bot it belongs to.
  */
 export function TelegramSection({ onApiError }: Props): JSX.Element {
+  const api = useHostApi();
   const [bots, setBots] = useState<TelegramBotSummary[] | null>(null);
   const [encryptionAvailable, setEncryptionAvailable] = useState(true);
   const [workspaces, setWorkspaces] = useState<PlannerWorkspace[]>([]);

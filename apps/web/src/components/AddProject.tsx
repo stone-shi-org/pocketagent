@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { BrowseEntry, DiscoveredFolder } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { Icon } from './Icon.js';
 import { formatRelative } from './StatusBadge.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 type Tab = 'suggested' | 'browse';
 
@@ -26,6 +27,7 @@ export function AddProject({
   onAdded: (path: string) => void;
   onApiError: (error: unknown) => void;
 }): JSX.Element {
+  const api = useHostApi();
   const [tab, setTab] = useState<Tab>('suggested');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -126,6 +128,7 @@ function Suggested({
   busy: string | null;
   onApiError: (error: unknown) => void;
 }): JSX.Element {
+  const api = useHostApi();
   const [folders, setFolders] = useState<DiscoveredFolder[] | null>(null);
 
   useEffect(() => {
@@ -196,6 +199,7 @@ function Browser({
   busy: string | null;
   onApiError: (error: unknown) => void;
 }): JSX.Element {
+  const api = useHostApi();
   const [at, setAt] = useState<string | undefined>(undefined);
   const [state, setState] = useState<{
     path: string;

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { WebhookHistoryEntry } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { Icon } from './Icon.js';
 import { formatRelative, WebhookStatusIcon } from './StatusBadge.js';
 import { WebhookCallDetailDialog } from './WebhookCallDetailDialog.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
   /** Opens a `kind: 'delivery'` row's live or finished transcript. */
@@ -53,6 +54,7 @@ export function WebhookHistoryPanel({
   onOpenWebhook,
   onApiError,
 }: Props): JSX.Element {
+  const api = useHostApi();
   const [entries, setEntries] = useState<WebhookHistoryEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showNoise, setShowNoise] = useState(false);

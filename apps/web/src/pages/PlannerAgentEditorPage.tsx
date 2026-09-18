@@ -9,10 +9,11 @@ import {
   type PlannerModel,
   type PlannerWorkspace,
 } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
 import { formatRelative } from '../components/StatusBadge.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
   /** Always an existing agent's id — creating a new one is still
@@ -39,6 +40,7 @@ interface Props {
  * second step the others don't need.
  */
 export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: Props): JSX.Element {
+  const api = useHostApi();
   const [agent, setAgent] = useState<PlannerWorkspace | null>(null);
   const [models, setModels] = useState<PlannerModel[]>([]);
   const [tools, setTools] = useState<PlannerAgentToolInfo[] | null>(null);

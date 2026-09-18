@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { NewSessionDialog } from '../components/NewSessionDialog.js';
 import { HiddenProjects } from '../components/HiddenProjects.js';
 import { AddProject } from '../components/AddProject.js';
@@ -11,30 +11,39 @@ import {
   HostCompatibilityNotice,
   ProjectList,
   SearchField,
-  useProjects,
 } from '../components/ProjectList.js';
 import { UsageBar } from '../components/UsageBar.js';
 import { PocketAgentsSection } from '../components/PocketAgentsSection.js';
 import { ShellSection } from '../components/ShellSection.js';
-import { usePlannerChats } from '../agent/use-planner-chats.js';
+import { HostGroup } from '../components/HostGroup.js';
+import { HostSheet } from '../components/HostSheet.js';
+import { AddHostDialog } from '../components/AddHostDialog.js';
+import { HostProvider } from '../hosts/HostContext.js';
+import { useHostFleet } from '../hosts/useHostFleet.js';
+import { currentHostId, visibleHosts } from '../hosts/selected-host.js';
+import { loadCollapsedHosts, toggleCollapsedHost } from '../hosts/collapsed-pref.js';
+import type { HostDirectory } from '../hosts/directory.js';
+import type { HostNav } from '../hosts/HostNav.js';
 
 interface Props {
-  onOpen: (sessionId: string) => void;
+  nav: HostNav;
+  directory: HostDirectory;
+  onOpen: (hostId: string, sessionId: string) => void;
   /** A finished chat, opened to read before deciding to continue it. */
-  onOpenChat: (conversationId: string) => void;
-  onCompose: (cwd?: string) => void;
+  onOpenChat: (hostId: string, conversationId: string) => void;
+  onCompose: (hostId: string, cwd?: string) => void;
   onOpenAgents: () => void;
   onOpenSettings: () => void;
   onOpenCron: () => void;
   /** Opens one job's editor, from its row in the project tree. */
-  onOpenCronJob: (jobId: string) => void;
+  onOpenCronJob: (hostId: string, jobId: string) => void;
   onOpenWebhooks: () => void;
   /** Opens one webhook's editor, from its row in the project tree. */
-  onOpenWebhook: (webhookId: string) => void;
+  onOpenWebhook: (hostId: string, webhookId: string) => void;
   /** PA-6: opens the Pocket Agent settings page (LLM endpoint, agents, tools). */
   onOpenPlanner: () => void;
   /** PA-6: opens one Pocket Agent chat, from the home screen's own "Pocket Agents" section. */
-  onOpenPlannerChat: (chatId: string) => void;
+  onOpenPlannerChat: (hostId: string, chatId: string) => void;
   onApiError: (error: unknown) => void;
   onLogout: () => void;
 }
@@ -48,8 +57,17 @@ interface Props {
  * "what was I doing on this project", and a chat that has finished is still an
  * answer to that. So live sessions and finished conversations sit in one list,
  * distinguished by a dot rather than by being filed somewhere else.
+ *
+ * Since PA-67 there is one more grouping level above the three categories: the
+ * **host**. It is a heading, never a badge per row, so the "no metadata per
+ * row" convention survives — and with one registered host the heading is not
+ * rendered at all, which is what keeps a standalone install's home screen
+ * exactly as it was. The switcher is the header chip, which opens `HostSheet`;
+ * a permanent rail is the desktop's answer and would cost scarce width here.
  */
 export function ProjectsPage({
+  nav,
+  directory,
   onOpen,
   onOpenChat,
   onCompose,
@@ -64,29 +82,67 @@ export function ProjectsPage({
   onApiError,
   onLogout,
 }: Props): JSX.Element {
-  const state = useProjects(onOpen, onOpenChat, onApiError);
-  const plannerChats = usePlannerChats(onApiError);
   const [search, setSearch] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [showHidden, setShowHidden] = useState(false);
-  const [showAdd, setShowAdd] = useState(false);
-  const [showRunning, setShowRunning] = useState(false);
-  const [showShell, setShowShell] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState<string | null>(null);
+  const [showHidden, setShowHidden] = useState<string | null>(null);
+  const [showAdd, setShowAdd] = useState<string | null>(null);
+  const [showRunning, setShowRunning] = useState<string | null>(null);
+  const [showShell, setShowShell] = useState<string | null>(null);
+  const [showHostSheet, setShowHostSheet] = useState(false);
+  const [showAddHost, setShowAddHost] = useState(false);
+  const [collapsed, setCollapsed] = useState<string[]>(loadCollapsedHosts);
+
+  const hosts = directory.hosts;
+  const selected = nav.selection.mode === 'one' ? nav.selection.hostId : null;
+  const here = currentHostId(nav.selection, hosts);
+  const visible = useMemo(() => visibleHosts(nav.selection, hosts), [nav.selection, hosts]);
+  const singleHost = hosts.length <= 1;
+
+  const fleet = useHostFleet({
+    hosts,
+    poll: {
+      selectedHostId: selected,
+      collapsedHostIds: collapsed,
+      // The phone layout has no tab strip, so nothing forces a host onto the
+      // foreground tier beyond the one being looked at.
+      tabHostIds: [],
+      singleHost,
+    },
+    onOpen,
+    onOpenChat,
+    onApiError,
+  });
 
   // Counts shells too: they left `projects` when they became their own
   // category (PA-25), and a badge that stopped counting live terminals would
-  // read as "nothing running" with three of them open.
-  const runningCount =
-    (state.projects?.reduce((n, p) => n + p.chats.filter((c) => c.live).length, 0) ?? 0) +
-    (state.shells?.filter((s) => s.live).length ?? 0);
+  // read as "nothing running" with three of them open. Summed across every
+  // host on screen, since that is what the screen is showing.
+  const runningCount = visible.reduce((total, host) => {
+    const state = fleet.stateFor(host.endpoint.id);
+    return (
+      total +
+      (state.projects?.reduce((n, p) => n + p.chats.filter((c) => c.live).length, 0) ?? 0) +
+      (state.shells?.filter((s) => s.live).length ?? 0)
+    );
+  }, 0);
+
+  const hereState = fleet.stateFor(here);
 
   return (
     <div className="app projects-page">
       <header className="home-bar">
         <div className="home-title">
           <strong>Remote</strong>
-          <HostChip host={state.host} compatibility={state.hostCompatibility} />
+          {/* The chip is the switcher on a phone (PA-67). With one host it
+              still opens the sheet, which is the only way to add a second. */}
+          <HostChip
+            host={hereState.host}
+            record={hosts.find((candidate) => candidate.endpoint.id === here) ?? null}
+            compatibility={hereState.hostCompatibility}
+            allHosts={nav.selection.mode === 'all' && !singleHost}
+            onClick={() => setShowHostSheet(true)}
+          />
         </div>
         <span className="spacer" />
         <button
@@ -103,23 +159,28 @@ export function ProjectsPage({
             onClose={() => setMenuOpen(false)}
             onAdvanced={() => {
               setMenuOpen(false);
-              setShowAdvanced(true);
+              setShowAdvanced(here);
             }}
             onRefresh={() => {
               setMenuOpen(false);
-              void state.refresh();
+              void fleet.refreshAll();
+              directory.refresh();
             }}
             onHidden={() => {
               setMenuOpen(false);
-              setShowHidden(true);
+              setShowHidden(here);
             }}
             onRunning={() => {
               setMenuOpen(false);
-              setShowRunning(true);
+              setShowRunning(here);
+            }}
+            onHosts={() => {
+              setMenuOpen(false);
+              setShowHostSheet(true);
             }}
             onShell={() => {
               setMenuOpen(false);
-              setShowShell(true);
+              setShowShell(here);
             }}
             runningCount={runningCount}
             onAgents={() => {
@@ -148,43 +209,69 @@ export function ProjectsPage({
       </header>
 
       <div className="home-scroll">
-        {state.error && (
-          <div className="error-box" role="alert">
-            {state.error}
-          </div>
-        )}
-        {/* PA-61: above every category, never instead of one — an incompatible
-            host must leave the rest of the app fully usable. Same placement in
-            `DesktopShell`, since a surface in one layout and not the other is a
-            bug. */}
-        <HostCompatibilityNotice compatibility={state.hostCompatibility} />
-        <PocketAgentsSection
-          workspaces={plannerChats.workspaces}
-          chats={plannerChats.chats}
-          refresh={plannerChats.refresh}
-          onOpenChat={onOpenPlannerChat}
-          onApiError={onApiError}
-        />
-        {/* "Shell" sits between the other two categories (PA-25): a terminal is
-            more likely to be what you came back for than a project folder, but
-            Pocket Agents keeps the top spot it already had. */}
-        <ShellSection
-          state={state}
-          open={state.open}
-          onNewShell={() => setShowShell(true)}
-          search={search}
-        />
-        <ProjectList
-          state={state}
-          search={search}
-          onCompose={onCompose}
-          onAddProject={() => setShowAdd(true)}
-          onOpenCronJob={onOpenCronJob}
-          onOpenWebhook={onOpenWebhook}
-          onOpenPlannerChat={onOpenPlannerChat}
-          onApiError={onApiError}
-          emptyHint="Nothing here yet. Tap the compose button to start a chat."
-        />
+        {visible.map((host) => {
+          const hostId = host.endpoint.id;
+          const state = fleet.stateFor(hostId);
+          const planner = fleet.plannerFor(hostId);
+          return (
+            <HostProvider key={hostId} endpoint={host.endpoint}>
+              <HostGroup
+                host={host}
+                show={!singleHost}
+                collapsed={collapsed.includes(hostId)}
+                onToggle={() => setCollapsed((prev) => toggleCollapsedHost(prev, hostId))}
+                onSelect={() => nav.goToHost(hostId)}
+                actions={
+                  <button
+                    type="button"
+                    className="round-btn plain"
+                    onClick={() => onCompose(hostId)}
+                    aria-label={`New chat on ${host.label}`}
+                    title={`New chat on ${host.label}`}
+                  >
+                    <Icon name="compose" size={18} />
+                  </button>
+                }
+              >
+                {/* Per host, so one failing machine says so in its own group
+                    rather than above everybody's rows. */}
+                {state.error && (
+                  <div className="error-box" role="alert">
+                    {state.error}
+                  </div>
+                )}
+                <HostCompatibilityNotice compatibility={state.hostCompatibility} />
+                <PocketAgentsSection
+                  workspaces={planner.workspaces}
+                  chats={planner.chats}
+                  refresh={planner.refresh}
+                  onOpenChat={(chatId) => onOpenPlannerChat(hostId, chatId)}
+                  onApiError={onApiError}
+                />
+                {/* "Shell" sits between the other two categories (PA-25): a terminal is
+                    more likely to be what you came back for than a project folder, but
+                    Pocket Agents keeps the top spot it already had. */}
+                <ShellSection
+                  state={state}
+                  open={state.open}
+                  onNewShell={() => setShowShell(hostId)}
+                  search={search}
+                />
+                <ProjectList
+                  state={state}
+                  search={search}
+                  onCompose={(cwd) => onCompose(hostId, cwd)}
+                  onAddProject={() => setShowAdd(hostId)}
+                  onOpenCronJob={(jobId) => onOpenCronJob(hostId, jobId)}
+                  onOpenWebhook={(webhookId) => onOpenWebhook(hostId, webhookId)}
+                  onOpenPlannerChat={(chatId) => onOpenPlannerChat(hostId, chatId)}
+                  onApiError={onApiError}
+                  emptyHint="Nothing here yet. Tap the compose button to start a chat."
+                />
+              </HostGroup>
+            </HostProvider>
+          );
+        })}
       </div>
 
       <UsageBar />
@@ -195,7 +282,7 @@ export function ProjectsPage({
         <button
           type="button"
           className="round-btn plain"
-          onClick={() => setShowShell(true)}
+          onClick={() => setShowShell(here)}
           aria-label="Shell"
           title="Shell tmux sessions"
           style={{ width: 38, height: 38, flexShrink: 0 }}
@@ -205,58 +292,96 @@ export function ProjectsPage({
         <button
           type="button"
           className="compose-fab"
-          onClick={() => onCompose()}
+          onClick={() => onCompose(here)}
           aria-label="New chat"
         >
           <Icon name="compose" size={23} />
         </button>
       </div>
 
-      {showAdd && (
-        <AddProject
-          onClose={() => setShowAdd(false)}
-          onAdded={() => void state.refresh()}
-          onApiError={onApiError}
-        />
-      )}
-
-      {showHidden && (
-        <HiddenProjects
-          onClose={() => setShowHidden(false)}
-          onChanged={() => void state.refresh()}
-          onApiError={onApiError}
-        />
-      )}
-
-      {showRunning && (
-        <RunningSessions
-          onClose={() => setShowRunning(false)}
-          onOpen={onOpen}
-          onApiError={onApiError}
-        />
-      )}
-
-      {showAdvanced && (
-        <NewSessionDialog
-          onCancel={() => setShowAdvanced(false)}
-          onApiError={onApiError}
-          onCreated={(id) => {
-            setShowAdvanced(false);
-            onOpen(id);
+      {showHostSheet && (
+        <HostSheet
+          hosts={hosts}
+          selectedHostId={selected}
+          onSelectAll={() => nav.goToHost(null)}
+          onSelect={(hostId) => nav.goToHost(hostId)}
+          onAdd={() => setShowAddHost(true)}
+          onRemove={(hostId) => {
+            void directory.remove(hostId);
+            // A removed host cannot stay selected, or the very next render is
+            // the "no such host" screen for a host the user just deleted.
+            if (selected === hostId) nav.goToHost(null);
           }}
+          onClose={() => setShowHostSheet(false)}
+          canManage={directory.canManage}
         />
       )}
 
-      {showShell && (
-        <ShellDialog
-          onClose={() => setShowShell(false)}
-          onApiError={onApiError}
-          onCreated={(id) => {
-            setShowShell(false);
-            void state.refresh();
-            onOpen(id);
-          }}
-        />
+      {showAddHost && (
+        <AddHostDialog directory={directory} onClose={() => setShowAddHost(false)} />
+      )}
+
+      {/* Every dialog below acts on exactly one host, so each is mounted inside
+          that host's provider and its open-state *is* the host id. Reached
+          either from a host group's own row (unambiguous) or from the chrome,
+          which targets the current host. */}
+      {showAdd !== null && (
+        <HostProvider endpoint={nav.endpointFor(showAdd)}>
+          <AddProject
+            onClose={() => setShowAdd(null)}
+            onAdded={() => void fleet.refreshHost(showAdd)}
+            onApiError={onApiError}
+          />
+        </HostProvider>
+      )}
+
+      {showHidden !== null && (
+        <HostProvider endpoint={nav.endpointFor(showHidden)}>
+          <HiddenProjects
+            onClose={() => setShowHidden(null)}
+            onChanged={() => void fleet.refreshHost(showHidden)}
+            onApiError={onApiError}
+          />
+        </HostProvider>
+      )}
+
+      {showRunning !== null && (
+        <HostProvider endpoint={nav.endpointFor(showRunning)}>
+          <RunningSessions
+            onClose={() => setShowRunning(null)}
+            onOpen={(sessionId) => onOpen(showRunning, sessionId)}
+            onApiError={onApiError}
+          />
+        </HostProvider>
+      )}
+
+      {showAdvanced !== null && (
+        <HostProvider endpoint={nav.endpointFor(showAdvanced)}>
+          <NewSessionDialog
+            onCancel={() => setShowAdvanced(null)}
+            onApiError={onApiError}
+            onCreated={(id) => {
+              const hostId = showAdvanced;
+              setShowAdvanced(null);
+              onOpen(hostId, id);
+            }}
+          />
+        </HostProvider>
+      )}
+
+      {showShell !== null && (
+        <HostProvider endpoint={nav.endpointFor(showShell)}>
+          <ShellDialog
+            onClose={() => setShowShell(null)}
+            onApiError={onApiError}
+            onCreated={(id) => {
+              const hostId = showShell;
+              setShowShell(null);
+              void fleet.refreshHost(hostId);
+              onOpen(hostId, id);
+            }}
+          />
+        </HostProvider>
       )}
     </div>
   );
@@ -268,6 +393,7 @@ export function OverflowMenu({
   onRefresh,
   onHidden,
   onRunning,
+  onHosts,
   onShell,
   runningCount = 0,
   onAgents,
@@ -282,6 +408,16 @@ export function OverflowMenu({
   onRefresh: () => void;
   onHidden: () => void;
   onRunning: () => void;
+  /**
+   * Opens the host sheet (PA-67).
+   *
+   * The phone's header chip already opens it, but the desktop's own switcher
+   * is the rail — and the rail is hidden while there is only one host, which
+   * would otherwise leave a standalone desktop with no way to register a
+   * second one at all. Chrome that already exists, rather than a permanent
+   * column that earns its width only once it has something to switch between.
+   */
+  onHosts?: () => void;
   onShell?: () => void;
   /** Shown next to the menu item so a growing pile of live sessions is noticed before opening it. */
   runningCount?: number;
@@ -332,6 +468,11 @@ export function OverflowMenu({
         <button type="button" role="menuitem" onClick={onRunning}>
           Active sessions{runningCount > 0 ? ` (${runningCount})` : ''}…
         </button>
+        {onHosts && (
+          <button type="button" role="menuitem" onClick={onHosts}>
+            Hosts…
+          </button>
+        )}
         {onAgents && (
           <button type="button" role="menuitem" onClick={onAgents}>
             Agents…

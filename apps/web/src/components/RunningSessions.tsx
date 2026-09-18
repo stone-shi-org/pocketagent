@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { SessionInfo } from '@pocketagent/protocol';
 import { isTerminalStatus } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { formatRelative } from './StatusBadge.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 const REFRESH_MS = 4000;
 
@@ -27,6 +28,7 @@ export function RunningSessions({
   onOpen: (sessionId: string) => void;
   onApiError: (error: unknown) => void;
 }): JSX.Element {
+  const api = useHostApi();
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);

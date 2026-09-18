@@ -20,7 +20,8 @@
  */
 const KEY = 'pocketagent:open-tabs';
 
-export type StoredTabRoute =
+/** A stored tab's route, without the host — see `StoredTabRoute`. */
+export type StoredRouteShape =
   | { name: 'terminal'; sessionId: string }
   | { name: 'chat'; conversationId: string }
   | { name: 'planner-chat'; chatId: string }
@@ -32,7 +33,21 @@ export type StoredTabRoute =
   | { name: 'planner' }
   | { name: 'planner-agent'; agentId: string };
 
-function isStoredTabRoute(value: unknown): value is StoredTabRoute {
+/**
+ * A stored tab: its route, plus which host it was open on (PA-67).
+ *
+ * `hostId` is required here and *optional on disk*, which is the whole
+ * migration. Tabs written before PA-67 carry no host, and dropping them would
+ * mean every existing user losing their tab strip on upgrade for no reason a
+ * user could see — so a missing one is read as the default host, which is the
+ * only host those tabs could possibly have been open on. This validator is
+ * already the designated place where a shape change degrades gracefully rather
+ * than crashing the shell on boot, so the migration lives here rather than in
+ * `DesktopShell`.
+ */
+export type StoredTabRoute = StoredRouteShape & { hostId: string };
+
+function isStoredRouteShape(value: unknown): value is StoredRouteShape {
   if (!value || typeof value !== 'object') return false;
   const entry = value as Record<string, unknown>;
   if (entry.name === 'terminal') return typeof entry.sessionId === 'string' && entry.sessionId.length > 0;
@@ -48,13 +63,19 @@ function isStoredTabRoute(value: unknown): value is StoredTabRoute {
   return false;
 }
 
-export function loadOpenTabRoutes(): StoredTabRoute[] {
+export function loadOpenTabRoutes(defaultHostId: string): StoredTabRoute[] {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isStoredTabRoute);
+    return parsed.filter(isStoredRouteShape).map((route) => {
+      const hostId = (route as { hostId?: unknown }).hostId;
+      return {
+        ...route,
+        hostId: typeof hostId === 'string' && hostId.length > 0 ? hostId : defaultHostId,
+      };
+    });
   } catch {
     return [];
   }

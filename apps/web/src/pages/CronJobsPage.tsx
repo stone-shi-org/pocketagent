@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { CronJob } from '@pocketagent/protocol';
 import { describeCron } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import { formatCountdown } from '../agent/cron-format.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 const REFRESH_MS = 5000;
 
@@ -28,6 +29,7 @@ interface Props {
  * would go stale while being looked at.
  */
 export function CronJobsPage({ onOpenJob, onApiError, onBack }: Props): JSX.Element {
+  const api = useHostApi();
   const [jobs, setJobs] = useState<CronJob[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** Job ids with an action in flight, so a row cannot be double-fired. */

@@ -381,6 +381,10 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     version: VERSION,
     getCodeServerBaseUrl: () => config.codeServerBaseUrl,
     getQueuedWork: () => queuedWork(),
+    // `sessions` is constructed below and needs nothing from this service, so
+    // a closure is the only order that works; it is only ever called
+    // per-request, long after both exist.
+    getRunningSessions: () => sessions.runningCount(),
   });
   const worktrees = new WorktreeService({ workspaces });
 

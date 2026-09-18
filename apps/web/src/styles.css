@@ -63,6 +63,10 @@
   --radius: 12px;
   --radius-lg: 18px;
 
+  /* Desktop host rail (PA-67). A token because two places need the same
+     number: the grid column in `.desktop-shell` and the rail itself. */
+  --host-rail-width: 76px;
+
   /* Two elevations only. Anything more and cards start competing. */
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 5%), 0 1px 3px rgb(0 0 0 / 4%);
   --shadow-md: 0 10px 30px rgb(0 0 0 / 12%), 0 2px 8px rgb(0 0 0 / 6%);
@@ -2070,6 +2074,36 @@ button.chat-rate-limit-badge {
    waiting for the machine to come back. */
 .host-dot.incompatible {
   background: var(--warn);
+}
+
+/* PA-67: no probe has come back yet. Deliberately neither green nor grey —
+   claiming a host is up before asking is how a rail full of green dots stops
+   meaning anything, and claiming it is down is unfair for the first eight
+   seconds of a cold load. */
+.host-dot.unknown {
+  background: var(--border-strong);
+  opacity: 0.55;
+}
+
+/* The chip is a button on a phone (PA-67), where it opens the host sheet; it
+   must still look exactly like the static chip it replaced. */
+.host-chip.as-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+  min-height: 0;
+  /* `.home-title` is absolutely centred and deliberately click-through, so
+     that it never blocks the bar it floats over. A button inside it has to opt
+     back in — the same pattern `.approval-backdrop` and its sheet already use,
+     and without this the chip is visibly a button and completely untappable
+     (which is exactly how the multi-host demo caught it). */
+  pointer-events: auto;
+}
+
+.host-chip.as-button:hover .host-name {
+  color: var(--text);
 }
 
 .host-warn {
@@ -6320,4 +6354,184 @@ button.chat-rate-limit-badge {
 .planner-context-preview-section-text.expanded {
   white-space: pre-wrap;
   font-family: inherit;
+}
+
+
+/* Host rail, groups and sheet (PA-67) -------------------------------------
+   Multi-host chrome. The rail is a third grid column in `.desktop-shell`
+   rather than anything inside the sidebar, so the three shared home-screen
+   categories are untouched by it; the phone expresses the same switcher as a
+   bottom sheet (`.host-sheet`) and has no rail at all. */
+
+.host-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 6px;
+  padding-top: calc(10px + var(--safe-top));
+  overflow-y: auto;
+  background: var(--bg-elev-2);
+  border-right: 1px solid var(--border);
+}
+
+.host-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 8px 4px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  position: relative;
+}
+
+.host-tile:hover {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+
+.host-tile.active {
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+.host-tile-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* A hostname can contain dots and dashes; keep it left-to-right. */
+  unicode-bidi: plaintext;
+}
+
+/* Sessions running on a host whose full list is not being polled — the one
+   number the status tier carries (`HostInfo.runningSessions`). */
+.host-tile-count {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  min-width: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-align: center;
+}
+
+.host-tile.add {
+  color: var(--text-dim);
+}
+
+.host-group {
+  display: block;
+}
+
+.host-group-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 12px 4px;
+}
+
+.host-group-toggle,
+.host-group-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text);
+  font: inherit;
+}
+
+.host-group-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.host-group-summary {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-dim);
+}
+
+/* Indented so a host's categories read as belonging to its heading, which is
+   the whole reason the heading exists instead of a badge per row. */
+.host-group-body {
+  padding-left: 2px;
+  border-left: 2px solid var(--border);
+  margin-left: 12px;
+}
+
+.host-group-problem {
+  margin: 0 12px 10px;
+}
+
+.host-sheet-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.host-sheet-row .sheet-option {
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.host-sheet-problem {
+  flex-basis: 100%;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.host-sheet-remove {
+  flex: none;
+  align-self: center;
+}
+
+.host-dialog-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.host-dialog-actions > * {
+  flex: 1;
+  margin-top: 0;
+}
+
+/* Which machine a tab is on, shown only when tabs from more than one host are
+   open at once. The tab strip is chrome, so this is the one place a host is
+   rendered per row — the home screen groups instead, per its own "a chat is
+   its title and, if running, a green dot" convention. */
+.tab-host {
+  flex: none;
+  max-width: 68px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
 }

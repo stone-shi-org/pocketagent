@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { SessionInfo } from '@pocketagent/protocol';
 import { TerminalConnection } from '../api/ws-client.js';
-import { api } from '../api/client.js';
 import { agentAccentClass, agentIconName } from '../agent/agent-icon.js';
 import { lastPlainLines } from '../agent/strip-ansi.js';
 import { applyFleetEvent, applyFleetEvents, emptyFleetPreview, type FleetPreviewState } from '../agent/fleet-preview.js';
 import { stopAffordance, terminalKindTag } from '../agent/fleet-groups.js';
 import { Icon } from './Icon.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
+import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
 
 /** Only the last few KB matter for a five-line preview; no reason to grow forever. */
 const RAW_TAIL_CHARS = 4000;
@@ -35,6 +35,8 @@ interface Props {
  * elsewhere.
  */
 export function AgentCard({ session, onOpen, onApiError, onStopped }: Props): JSX.Element {
+  const api = useHostApi();
+  const endpoint = useHostEndpoint();
   const [rawTail, setRawTail] = useState('');
   const [preview, setPreview] = useState<FleetPreviewState>(emptyFleetPreview);
   const [confirmingStop, setConfirmingStop] = useState(false);
@@ -51,6 +53,7 @@ export function AgentCard({ session, onOpen, onApiError, onStopped }: Props): JS
     setFlashSeq(0);
 
     const conn = new TerminalConnection({
+      endpoint,
       handlers: {
         onReplay: (data) => {
           setRawTail((prev) => (prev + data).slice(-RAW_TAIL_CHARS));

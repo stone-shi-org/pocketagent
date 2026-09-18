@@ -11,7 +11,7 @@ import type {
   WorkspaceEntry,
 } from '@pocketagent/protocol';
 import { compileCronPreset, cronErrorFor, nextRuns, serverTimeZone } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import { formatAbsolute, formatCountdown, WEEKDAY_LABELS } from '../agent/cron-format.js';
@@ -19,6 +19,7 @@ import { flattenProjects } from '../agent/search.js';
 import { hashForCurrentHost } from '../hooks/useHashRoute.js';
 import { SelectRowNative } from '../components/SelectRowNative.js';
 import { NumberRow, SectionCard, TextRow } from './SettingsPage.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
   /** `'new'` for an unsaved job. */
@@ -60,6 +61,7 @@ export function CronJobEditorPage({
   onDone,
   onBack,
 }: Props): JSX.Element {
+  const api = useHostApi();
   const isNew = jobId === 'new';
 
   const [agents, setAgents] = useState<AgentInfo[]>([]);

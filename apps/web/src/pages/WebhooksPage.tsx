@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { Webhook } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import { WebhookHistoryPanel } from '../components/WebhookHistoryPanel.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 const REFRESH_MS = 5000;
 
@@ -47,6 +48,7 @@ export function WebhooksPage({
   onApiError,
   onBack,
 }: Props): JSX.Element {
+  const api = useHostApi();
   const [hooks, setHooks] = useState<Webhook[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** Webhook ids with an action in flight, so a row cannot be double-fired. */

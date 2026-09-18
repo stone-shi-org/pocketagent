@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { AgentUsageInfo, UsageWindowInfo } from '@pocketagent/protocol';
-import { api } from '../api/client.js';
 import { Icon } from './Icon.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 /**
  * The server refreshes its own cache every few minutes (one timer per agent
@@ -20,6 +20,7 @@ const POLL_MS = 60_000;
  * alert for — its bar just does not appear.
  */
 export function useUsage(): AgentUsageInfo[] | null {
+  const api = useHostApi();
   const [usage, setUsage] = useState<AgentUsageInfo[] | null>(null);
 
   const refresh = useCallback(async () => {

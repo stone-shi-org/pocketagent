@@ -24,24 +24,49 @@ describe('open tabs preference', () => {
   it('round-trips an ordered list of tab routes', () => {
     vi.stubGlobal('localStorage', fakeStorage());
     const routes = [
-      { name: 'terminal', sessionId: 's-1' },
-      { name: 'chat', conversationId: 'c-1' },
-      { name: 'planner-chat', chatId: 'p-1' },
-      { name: 'settings' },
-      { name: 'cron' },
-      { name: 'cron-job', jobId: 'j-1' },
-      { name: 'webhooks' },
-      { name: 'webhook', webhookId: 'w-1' },
-      { name: 'planner' },
-      { name: 'planner-agent', agentId: 'a-1' },
+      { name: 'terminal', sessionId: 's-1', hostId: 'local' },
+      { name: 'chat', conversationId: 'c-1', hostId: 'local' },
+      { name: 'planner-chat', chatId: 'p-1', hostId: 'dev02' },
+      { name: 'settings', hostId: 'local' },
+      { name: 'cron', hostId: 'dev02' },
+      { name: 'cron-job', jobId: 'j-1', hostId: 'local' },
+      { name: 'webhooks', hostId: 'local' },
+      { name: 'webhook', webhookId: 'w-1', hostId: 'local' },
+      { name: 'planner', hostId: 'local' },
+      { name: 'planner-agent', agentId: 'a-1', hostId: 'local' },
     ] as const;
     saveOpenTabRoutes([...routes]);
-    expect(loadOpenTabRoutes()).toEqual(routes);
+    expect(loadOpenTabRoutes('local')).toEqual(routes);
+  });
+
+  it('migrates a pre-PA-67 entry with no host onto the default host', () => {
+    // Tabs written before hosts existed must survive the upgrade: dropping
+    // them would empty the strip on first load, for a reason no user could
+    // see, and the only host those tabs could have been open on is this one.
+    const storage = fakeStorage();
+    vi.stubGlobal('localStorage', storage);
+    storage.setItem(
+      'pocketagent:open-tabs',
+      JSON.stringify([
+        { name: 'terminal', sessionId: 's-1' },
+        { name: 'settings' },
+        { name: 'chat', conversationId: 'c-1', hostId: 'dev02' },
+        { name: 'planner-chat', chatId: 'p-1', hostId: '' },
+      ]),
+    );
+    expect(loadOpenTabRoutes('local')).toEqual([
+      { name: 'terminal', sessionId: 's-1', hostId: 'local' },
+      { name: 'settings', hostId: 'local' },
+      // An explicit host is preserved as-is.
+      { name: 'chat', conversationId: 'c-1', hostId: 'dev02' },
+      // An empty one is not a host, so it migrates too.
+      { name: 'planner-chat', chatId: 'p-1', hostId: 'local' },
+    ]);
   });
 
   it('returns nothing before anything has been saved', () => {
     vi.stubGlobal('localStorage', fakeStorage());
-    expect(loadOpenTabRoutes()).toEqual([]);
+    expect(loadOpenTabRoutes('local')).toEqual([]);
   });
 
   it('drops malformed entries instead of failing the whole list', () => {
@@ -63,10 +88,10 @@ describe('open tabs preference', () => {
         null,
       ]),
     );
-    expect(loadOpenTabRoutes()).toEqual([
-      { name: 'terminal', sessionId: 's-1' },
-      { name: 'settings' },
-      { name: 'planner-agent', agentId: 'a-1' },
+    expect(loadOpenTabRoutes('local')).toEqual([
+      { name: 'terminal', sessionId: 's-1', hostId: 'local' },
+      { name: 'settings', hostId: 'local' },
+      { name: 'planner-agent', agentId: 'a-1', hostId: 'local' },
     ]);
   });
 
@@ -74,14 +99,14 @@ describe('open tabs preference', () => {
     const storage = fakeStorage();
     vi.stubGlobal('localStorage', storage);
     storage.setItem('pocketagent:open-tabs', '{not json');
-    expect(loadOpenTabRoutes()).toEqual([]);
+    expect(loadOpenTabRoutes('local')).toEqual([]);
   });
 
   it('treats a non-array JSON value as no tabs', () => {
     const storage = fakeStorage();
     vi.stubGlobal('localStorage', storage);
     storage.setItem('pocketagent:open-tabs', JSON.stringify({ name: 'terminal', sessionId: 's-1' }));
-    expect(loadOpenTabRoutes()).toEqual([]);
+    expect(loadOpenTabRoutes('local')).toEqual([]);
   });
 
   it('degrades to "nothing remembered" rather than throwing when storage is unavailable', () => {
@@ -89,7 +114,9 @@ describe('open tabs preference', () => {
     // plain-Node test environment (and the same shape a browser's private
     // mode throwing on every access would take).
     vi.stubGlobal('localStorage', undefined);
-    expect(() => saveOpenTabRoutes([{ name: 'terminal', sessionId: 's-1' }])).not.toThrow();
-    expect(loadOpenTabRoutes()).toEqual([]);
+    expect(() =>
+      saveOpenTabRoutes([{ name: 'terminal', sessionId: 's-1', hostId: 'local' }]),
+    ).not.toThrow();
+    expect(loadOpenTabRoutes('local')).toEqual([]);
   });
 });

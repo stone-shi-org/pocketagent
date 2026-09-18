@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { isTerminalStatus, type AdoptableTarget, type SessionInfo } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 const REFRESH_MS = 4000;
 
@@ -11,6 +12,7 @@ interface Props {
 }
 
 export function ShellDialog({ onClose, onCreated, onApiError }: Props): JSX.Element {
+  const api = useHostApi();
   const [targets, setTargets] = useState<AdoptableTarget[] | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { HubCredentialSummary } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
   onApiError: (error: unknown) => void;
@@ -26,6 +27,7 @@ interface Props {
  * operator can actually need answered here.
  */
 export function HubsSection({ onApiError }: Props): JSX.Element {
+  const api = useHostApi();
   const [hubs, setHubs] = useState<HubCredentialSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

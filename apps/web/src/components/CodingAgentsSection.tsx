@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { AgentInfo } from '@pocketagent/protocol';
 import { isCustomClaudeProviderId } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
   onApiError: (error: unknown) => void;
@@ -37,6 +38,7 @@ interface Props {
  * the last explicit refresh are what is actually knowable without guessing.
  */
 export function CodingAgentsSection({ onApiError }: Props): JSX.Element {
+  const api = useHostApi();
   const [agentsList, setAgentsList] = useState<AgentInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);

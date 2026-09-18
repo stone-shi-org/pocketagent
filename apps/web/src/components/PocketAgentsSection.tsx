@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { PlannerChat, PlannerWorkspace } from '@pocketagent/protocol';
-import { api } from '../api/client.js';
 import { Icon } from './Icon.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
   /** `null` while the first load is still in flight — see `usePlannerChats`. */
@@ -44,6 +44,7 @@ export function PocketAgentsSection({
   onApiError,
   activeChatId,
 }: Props): JSX.Element | null {
+  const api = useHostApi();
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState<Set<string>>(() => new Set());
   // Which workspace's "..." menu is open, keyed by workspace id — same

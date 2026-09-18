@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ProjectInfo } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { flattenProjects } from '../agent/search.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 /**
  * The way back from hiding something.
@@ -19,6 +20,7 @@ export function HiddenProjects({
   onChanged: () => void;
   onApiError: (error: unknown) => void;
 }): JSX.Element {
+  const api = useHostApi();
   const [hidden, setHidden] = useState<ProjectInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);

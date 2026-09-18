@@ -108,6 +108,16 @@ export interface ProjectServiceOptions {
    * existing construction keeps working and simply reports none.
    */
   getQueuedWork?: () => Map<string, QueuedRunSummary[]>;
+  /**
+   * Live session count for `HostInfo.runningSessions` (PA-67).
+   *
+   * A getter for the same reason `getQueuedWork` is one, plus a sequencing
+   * one: `app.ts` builds this service *before* `SessionManager` (which needs
+   * nothing from it), so the only way to read a live count is a closure
+   * evaluated per request. Optional, so every existing construction — and
+   * every test — keeps working and simply reports no count.
+   */
+  getRunningSessions?: () => number;
 }
 
 export class ProjectService {
@@ -120,6 +130,7 @@ export class ProjectService {
   private readonly getCodeServerBaseUrl: () => string | null;
   private readonly gitStatus: GitStatusTracker;
   private readonly getQueuedWork: () => Map<string, QueuedRunSummary[]>;
+  private readonly getRunningSessions: (() => number) | null;
 
   constructor(options: ProjectServiceOptions) {
     this.workspaces = options.workspaces;
@@ -131,6 +142,7 @@ export class ProjectService {
     this.getCodeServerBaseUrl = options.getCodeServerBaseUrl ?? (() => null);
     this.gitStatus = new GitStatusTracker(options.gitStatusTtlMs);
     this.getQueuedWork = options.getQueuedWork ?? ((): Map<string, QueuedRunSummary[]> => new Map());
+    this.getRunningSessions = options.getRunningSessions ?? null;
   }
 
   /**
@@ -151,6 +163,10 @@ export class ProjectService {
       // drift from what the handshake in `ws/index.ts` actually enforces.
       protocol: SERVER_PROTOCOL_RANGE,
       online: true,
+      // Omitted rather than zero when no counter was wired in: the field means
+      // "this host reports a count", and a construction without one (a test,
+      // or a future embedding) should not claim nothing is running.
+      ...(this.getRunningSessions ? { runningSessions: this.getRunningSessions() } : {}),
       codeServerBaseUrl: this.getCodeServerBaseUrl(),
     };
   }

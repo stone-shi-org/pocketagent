@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ChatSummary,
   DeleteRemoteBranchRequest,
@@ -8,14 +8,10 @@ import type {
   QueuedRunSummary,
   ShellSessionSummary,
 } from '@pocketagent/protocol';
-import {
-  PROTOCOL_VERSION,
-  describeCron,
-  negotiateProtocol,
-  usesClaudeTranscripts,
-} from '@pocketagent/protocol';
-import { compatibilityState, type HostCompatibilityState } from '../api/negotiate.js';
-import { api, ApiError } from '../api/client.js';
+import { describeCron, usesClaudeTranscripts } from '@pocketagent/protocol';
+import { hostDotClass, type HostStatus } from '../hosts/host-status.js';
+import type { HostCompatibilityState } from '../api/negotiate.js';
+import { ApiError, type ApiClient } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { filterProjects } from '../agent/search.js';
 import { formatCountdown } from '../agent/cron-format.js';
@@ -23,8 +19,7 @@ import { formatRelative } from './StatusBadge.js';
 import { DeleteWorktreeFlow } from './DeleteWorktreeFlow.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { isMissingAdoptTargetError } from './RecreateShellDialog.js';
-
-const REFRESH_MS = 5000;
+import { useHostApi } from '../hosts/HostContext.js';
 
 /** Chats shown per project before a "show more" row appears. */
 const CHAT_PAGE_SIZE = 5;
@@ -113,6 +108,17 @@ export interface OpenChatOptions {
   preview?: boolean;
 }
 
+/**
+ * One host's chat list, and everything that can be done to it.
+ *
+ * The phone screen and the desktop sidebar render the same list from this same
+ * shape, which is what stops the two layouts drifting on rules like "tapping a
+ * finished chat resumes it as a branch" — two copies of that is one too many.
+ * Since PA-67 there is one of these *per host*, built by `useHostFleet` from
+ * `projectActions` below, and the components that consume it did not have to
+ * change: a host is a grouping dimension above this shape, not a field inside
+ * it.
+ */
 export interface ProjectsState {
   projects: ProjectInfo[] | null;
   /**
@@ -161,67 +167,55 @@ export interface ProjectsState {
   /**
    * Cancel a queued webhook delivery, or move it to the front of its line
    * (PA-11). Swallow-then-`refresh()` like the rest, so the row goes at once
-   * rather than up to `REFRESH_MS` later.
+   * rather than up to a poll interval later (`hosts/poll-policy.ts`).
    */
   resolveQueued: (item: QueuedRunSummary, action: 'cancel' | 'front') => Promise<void>;
 }
 
 /**
- * Loading, polling and opening — everything about the chat list except how it
- * looks.
+ * Everything a `ProjectsState` can *do*, separated from where its data came
+ * from.
  *
- * Split out because the phone screen and the desktop sidebar show the same list
- * and must not drift: two copies of "tapping a finished chat resumes it as a
- * branch" is one copy too many for a rule with that much behind it.
+ * Extracted from `useProjects` in PA-67, and the extraction is the point. The
+ * home screen now renders one chat list *per host*, which means one of these
+ * per host — and a hook cannot be called in a loop whose length is a runtime
+ * value. The bodies below were already written against nothing but an API
+ * client plus `refresh`/`setError`, so lifting them out of `useCallback` into a
+ * plain factory makes them reusable by `useHostFleet`'s per-host façades
+ * without a second copy of rules like "tapping a finished chat resumes it as a
+ * branch" — which is what `useProjects`' own doc comment said the
+ * hook/component split existed to prevent in the first place.
  */
-export function useProjects(
-  onOpen: (sessionId: string, opts?: OpenChatOptions) => void,
-  onOpenChat: (conversationId: string, opts?: OpenChatOptions) => void,
-  onApiError: (error: unknown) => void,
-  onReplaceSession?: (oldSessionId: string, newSessionId: string) => void,
-): ProjectsState {
-  const [projects, setProjects] = useState<ProjectInfo[] | null>(null);
-  const [shells, setShells] = useState<ShellSessionSummary[] | null>(null);
-  const [host, setHost] = useState<HostInfo | null>(null);
-  const [hostCompatibility, setHostCompatibility] = useState<HostCompatibilityState | null>(null);
-  const [error, setError] = useState<string | null>(null);
+export type ProjectActions = Omit<
+  ProjectsState,
+  'projects' | 'shells' | 'host' | 'hostCompatibility' | 'error' | 'refresh'
+>;
 
-  const refresh = useCallback(async () => {
-    try {
-      const result = await api.listProjects();
-      setProjects(result.projects);
-      setShells(result.shells);
-      setHost(result.host);
-      setHostCompatibility(
-        compatibilityState(
-          result.host.name,
-          negotiateProtocol(PROTOCOL_VERSION, result.host.protocol),
-        ),
-      );
-      setError(null);
-    } catch (err) {
-      onApiError(err);
-      setError(err instanceof ApiError ? err.message : 'Could not load projects.');
-      // A transient failure on this 5s poll (a proxy hiccup, a momentary
-      // network blip) used to blank `projects` to `[]` unconditionally,
-      // wiping every already-loaded chat and, with it, every open desktop
-      // tab's title — DesktopShell falls back to the raw session/
-      // conversation id for anything not in the current list. Keep whatever
-      // was last loaded successfully instead; only fall back to an empty
-      // list if nothing has ever loaded, so the sidebar's "Loading…" state
-      // (gated on `projects === null`) doesn't spin forever when the very
-      // first request fails.
-      setProjects((prev) => prev ?? []);
-      setShells((prev) => prev ?? []);
-    }
-  }, [onApiError]);
+export interface ProjectActionsDeps {
+  /** The host these actions address. */
+  client: ApiClient;
+  /** Re-reads this host's list; every mutating action ends by awaiting it. */
+  refresh: () => Promise<void>;
+  /** Shows a message on this host's own rows, never another host's. */
+  setError: (message: string | null) => void;
+  onApiError: (error: unknown) => void;
+  onOpen: (sessionId: string, opts?: OpenChatOptions) => void;
+  onOpenChat: (conversationId: string, opts?: OpenChatOptions) => void;
+  onReplaceSession?: ((oldSessionId: string, newSessionId: string) => void) | undefined;
+  /** Latest list for this host, read by `newTmuxSession`'s live-session check. */
+  projects: ProjectInfo[] | null;
+}
 
-  useEffect(() => {
-    void refresh();
-    const timer = setInterval(() => void refresh(), REFRESH_MS);
-    return () => clearInterval(timer);
-  }, [refresh]);
-
+export function projectActions({
+  client,
+  refresh,
+  setError,
+  onApiError,
+  onOpen,
+  onOpenChat,
+  onReplaceSession,
+  projects,
+}: ProjectActionsDeps): ProjectActions {
   /**
    * Open a chat.
    *
@@ -252,17 +246,14 @@ export function useProjects(
    * that page's own `resumeAndSend` already resumes any agent generically
    * from `SessionInfo.agentSessionId`.
    */
-  const open = useCallback(
-    (chat: ChatSummary, opts?: OpenChatOptions) => {
-      const claudeFamily = chat.agent !== null && usesClaudeTranscripts(chat.agent);
-      if (chat.sessionId && (chat.live || !claudeFamily || !chat.conversationId)) {
-        onOpen(chat.sessionId, opts);
-        return;
-      }
-      if (chat.conversationId) onOpenChat(chat.conversationId, opts);
-    },
-    [onOpen, onOpenChat],
-  );
+  const open = (chat: ChatSummary, opts?: OpenChatOptions): void => {
+    const claudeFamily = chat.agent !== null && usesClaudeTranscripts(chat.agent);
+    if (chat.sessionId && (chat.live || !claudeFamily || !chat.conversationId)) {
+      onOpen(chat.sessionId, opts);
+      return;
+    }
+    if (chat.conversationId) onOpenChat(chat.conversationId, opts);
+  };
 
   /**
    * Drop a chat from the list.
@@ -272,22 +263,19 @@ export function useProjects(
    * from a terminal. Running chats are refused by the server rather than killed
    * out from under whatever they are doing.
    */
-  const removeChat = useCallback(
-    async (chat: ChatSummary) => {
-      try {
-        await api.removeChat({
-          ...(chat.sessionId ? { sessionId: chat.sessionId } : {}),
-          ...(chat.conversationId ? { conversationId: chat.conversationId } : {}),
-        });
-      } catch (err) {
-        onApiError(err);
-        setError(err instanceof ApiError ? err.message : 'Could not remove that chat.');
-      } finally {
-        await refresh();
-      }
-    },
-    [onApiError, refresh],
-  );
+  const removeChat = async (chat: ChatSummary): Promise<void> => {
+    try {
+      await client.removeChat({
+        ...(chat.sessionId ? { sessionId: chat.sessionId } : {}),
+        ...(chat.conversationId ? { conversationId: chat.conversationId } : {}),
+      });
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not remove that chat.');
+    } finally {
+      await refresh();
+    }
+  };
 
   /**
    * A queued delivery, cancelled or bumped to the front.
@@ -296,75 +284,66 @@ export function useProjects(
    * belongs to a chat and is resolved over that chat's WebSocket instead, where
    * the "send anyway" escape hatch lives.
    */
-  const resolveQueued = useCallback(
-    async (item: QueuedRunSummary, action: 'cancel' | 'front') => {
-      if (item.kind !== 'webhook' || item.webhookId === null) return;
-      try {
-        await api.resolveQueuedDelivery(item.webhookId, item.id, action);
-      } catch (err) {
-        onApiError(err);
-        setError(err instanceof ApiError ? err.message : 'Could not update the queue.');
-      } finally {
-        await refresh();
-      }
-    },
-    [onApiError, refresh],
-  );
+  const resolveQueued = async (
+    item: QueuedRunSummary,
+    action: 'cancel' | 'front',
+  ): Promise<void> => {
+    if (item.kind !== 'webhook' || item.webhookId === null) return;
+    try {
+      await client.resolveQueuedDelivery(item.webhookId, item.id, action);
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not update the queue.');
+    } finally {
+      await refresh();
+    }
+  };
 
-  const clearFinished = useCallback(
-    async (project: ProjectInfo) => {
-      try {
-        await api.clearFinished(project.cwd);
-      } catch (err) {
-        onApiError(err);
-        setError(err instanceof ApiError ? err.message : 'Could not clear that project.');
-      } finally {
-        await refresh();
-      }
-    },
-    [onApiError, refresh],
-  );
+  const clearFinished = async (project: ProjectInfo): Promise<void> => {
+    try {
+      await client.clearFinished(project.cwd);
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not clear that project.');
+    } finally {
+      await refresh();
+    }
+  };
 
   /** Same action for the Shell category, which has no directory to name. */
-  const clearFinishedShells = useCallback(async () => {
+  const clearFinishedShells = async (): Promise<void> => {
     try {
-      await api.clearFinishedShells();
+      await client.clearFinishedShells();
     } catch (err) {
       onApiError(err);
       setError(err instanceof ApiError ? err.message : 'Could not clear finished shells.');
     } finally {
       await refresh();
     }
-  }, [onApiError, refresh]);
+  };
 
-  const hideProject = useCallback(
-    async (cwd: string) => {
-      try {
-        await api.hideProject(cwd);
-      } catch (err) {
-        onApiError(err);
-        setError(err instanceof ApiError ? err.message : 'Could not hide that project.');
-      } finally {
-        await refresh();
-      }
-    },
-    [onApiError, refresh],
-  );
+  const hideProject = async (cwd: string): Promise<void> => {
+    try {
+      await client.hideProject(cwd);
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not hide that project.');
+    } finally {
+      await refresh();
+    }
+  };
 
   /** Stop treating a folder as a project. Nothing on disk changes. */
-  const removeProject = useCallback(
-    async (cwd: string) => {
-      try {
-        await api.removeWorkspace(cwd);
-      } catch (err) {
-        onApiError(err);
-        setError(err instanceof ApiError ? err.message : 'Could not remove that folder.');
-      } finally {
-        await refresh();
-      }
-    },
-    [onApiError, refresh],
-  );
+  const removeProject = async (cwd: string): Promise<void> => {
+    try {
+      await client.removeWorkspace(cwd);
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not remove that folder.');
+    } finally {
+      await refresh();
+    }
+  };
 
   /**
    * Deletes a linked git worktree and its local branch. Deliberately does
@@ -374,29 +353,25 @@ export function useProjects(
    * than a generic banner. The flow component calls `refresh()` itself once
    * it reaches a resting state, whichever path that turns out to be.
    */
-  const deleteWorktree = useCallback((cwd: string) => api.deleteWorktree(cwd), []);
+  const deleteWorktree = (cwd: string): Promise<DeleteWorktreeResponse> =>
+    client.deleteWorktree(cwd);
 
   /** Follow-up to `deleteWorktree`; same propagate-don't-swallow reasoning. */
-  const deleteRemoteBranch = useCallback(
-    (body: DeleteRemoteBranchRequest) => api.deleteRemoteBranch(body).then(() => undefined),
-    [],
-  );
+  const deleteRemoteBranch = (body: DeleteRemoteBranchRequest): Promise<void> =>
+    client.deleteRemoteBranch(body).then(() => undefined);
 
-  const detachChat = useCallback(
-    async (chat: ChatSummary) => {
-      if (chat.sessionId) {
-        try {
-          await api.deleteSession(chat.sessionId);
-        } catch (err) {
-          onApiError(err);
-          setError(err instanceof ApiError ? err.message : 'Could not detach that session.');
-        } finally {
-          await refresh();
-        }
+  const detachChat = async (chat: ChatSummary): Promise<void> => {
+    if (chat.sessionId) {
+      try {
+        await client.deleteSession(chat.sessionId);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not detach that session.');
+      } finally {
+        await refresh();
       }
-    },
-    [onApiError, refresh],
-  );
+    }
+  };
 
   /**
    * Re-attach to the tmux pane behind a finished Shell chat, in place —
@@ -409,77 +384,79 @@ export function useProjects(
    * one. `cwd` here is a placeholder: `POST /api/sessions` overwrites it with
    * the resolved target's real directory before doing anything else.
    */
-  const reattachChat = useCallback(
-    async (chat: ChatSummary) => {
-      if (!chat.adoptTargetId) return;
-      try {
-        const created = await api.createSession({
-          agent: 'shell',
-          cwd: ADOPTED_CWD_PLACEHOLDER,
-          cols: 80,
-          rows: 24,
-          transport: 'terminal',
-          adoptTargetId: chat.adoptTargetId,
-        });
-        if (onReplaceSession && chat.sessionId) {
-          onReplaceSession(chat.sessionId, created.id);
-        } else {
-          onOpen(created.id);
-        }
-      } catch (err) {
-        if (isMissingAdoptTargetError(err)) {
-          throw err;
-        }
-        onApiError(err);
-        setError(err instanceof ApiError ? err.message : 'Could not re-attach to that tmux session.');
-      } finally {
-        await refresh();
+  const reattachChat = async (chat: ChatSummary): Promise<void> => {
+    if (!chat.adoptTargetId) return;
+    try {
+      const created = await client.createSession({
+        agent: 'shell',
+        cwd: ADOPTED_CWD_PLACEHOLDER,
+        cols: 80,
+        rows: 24,
+        transport: 'terminal',
+        adoptTargetId: chat.adoptTargetId,
+      });
+      if (onReplaceSession && chat.sessionId) {
+        onReplaceSession(chat.sessionId, created.id);
+      } else {
+        onOpen(created.id);
       }
-    },
-    [onApiError, onOpen, onReplaceSession, refresh],
-  );
+    } catch (err) {
+      if (isMissingAdoptTargetError(err)) {
+        throw err;
+      }
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not re-attach to that tmux session.');
+    } finally {
+      await refresh();
+    }
+  };
 
   /**
    * Recreate a missing tmux session and attach to it, replacing the old
    * dead session row in place (PA-48).
    */
-  const recreateAndAttachChat = useCallback(
-    async (chat: ChatSummary, sessionName: string, cwd: string) => {
-      try {
-        let target = (await api.listAdoptable(true)).targets.find((t) => t.sessionName === sessionName);
-        if (!target) {
-          try {
-            target = await api.createAdoptableSession(sessionName, cwd);
-          } catch (err) {
-            if (err instanceof ApiError && err.status === 409) {
-              target = (await api.listAdoptable(true)).targets.find((t) => t.sessionName === sessionName);
-            }
-            if (!target) throw err;
+  const recreateAndAttachChat = async (
+    chat: ChatSummary,
+    sessionName: string,
+    cwd: string,
+  ): Promise<void> => {
+    try {
+      let target = (await client.listAdoptable(true)).targets.find(
+        (t) => t.sessionName === sessionName,
+      );
+      if (!target) {
+        try {
+          target = await client.createAdoptableSession(sessionName, cwd);
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 409) {
+            target = (await client.listAdoptable(true)).targets.find(
+              (t) => t.sessionName === sessionName,
+            );
           }
+          if (!target) throw err;
         }
-        const created = await api.createSession({
-          agent: 'shell',
-          cwd: target.cwd,
-          cols: target.cols,
-          rows: target.rows,
-          transport: 'terminal',
-          adoptTargetId: target.id,
-        });
-        if (onReplaceSession && chat.sessionId) {
-          onReplaceSession(chat.sessionId, created.id);
-        } else {
-          onOpen(created.id);
-        }
-      } catch (err) {
-        onApiError(err);
-        setError(err instanceof ApiError ? err.message : 'Could not recreate tmux session.');
-        throw err;
-      } finally {
-        await refresh();
       }
-    },
-    [onApiError, onOpen, onReplaceSession, refresh],
-  );
+      const created = await client.createSession({
+        agent: 'shell',
+        cwd: target.cwd,
+        cols: target.cols,
+        rows: target.rows,
+        transport: 'terminal',
+        adoptTargetId: target.id,
+      });
+      if (onReplaceSession && chat.sessionId) {
+        onReplaceSession(chat.sessionId, created.id);
+      } else {
+        onOpen(created.id);
+      }
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not recreate tmux session.');
+      throw err;
+    } finally {
+      await refresh();
+    }
+  };
 
   /**
    * "New tmux session" from a project's three-dot menu: a real, human-visible
@@ -494,61 +471,54 @@ export function useProjects(
    * opens that instead of spawning a second attaching client — rather than
    * erroring or leaving an orphaned attach process behind.
    */
-  const newTmuxSession = useCallback(
-    async (project: ProjectInfo) => {
-      const name = tmuxNameFor(project.name);
-      try {
-        let target = (await api.listAdoptable(true)).targets.find((t) => t.sessionName === name);
+  const newTmuxSession = async (project: ProjectInfo): Promise<void> => {
+    const name = tmuxNameFor(project.name);
+    try {
+      let target = (await client.listAdoptable(true)).targets.find((t) => t.sessionName === name);
 
-        if (!target) {
-          try {
-            target = await api.createAdoptableSession(name, project.cwd);
-          } catch (err) {
-            // Lost a race with another tab (or another poll of this same
-            // action) creating the same name between the list above and this
-            // call — the session it made is exactly as good as the one this
-            // call would have made, so look it up instead of failing.
-            if (err instanceof ApiError && err.status === 409) {
-              target = (await api.listAdoptable(true)).targets.find((t) => t.sessionName === name);
-            }
-            if (!target) throw err;
+      if (!target) {
+        try {
+          target = await client.createAdoptableSession(name, project.cwd);
+        } catch (err) {
+          // Lost a race with another tab (or another poll of this same
+          // action) creating the same name between the list above and this
+          // call — the session it made is exactly as good as the one this
+          // call would have made, so look it up instead of failing.
+          if (err instanceof ApiError && err.status === 409) {
+            target = (await client.listAdoptable(true)).targets.find(
+              (t) => t.sessionName === name,
+            );
           }
+          if (!target) throw err;
         }
-
-        const live = allChats(projects ?? []).find(
-          (chat) => chat.live && chat.adoptTargetId === target!.id,
-        );
-        if (live?.sessionId) {
-          onOpen(live.sessionId);
-          return;
-        }
-
-        const created = await api.createSession({
-          agent: 'shell',
-          cwd: ADOPTED_CWD_PLACEHOLDER,
-          cols: 80,
-          rows: 24,
-          transport: 'terminal',
-          adoptTargetId: target.id,
-        });
-        onOpen(created.id);
-      } catch (err) {
-        onApiError(err);
-        setError(err instanceof ApiError ? err.message : 'Could not start that tmux session.');
-      } finally {
-        await refresh();
       }
-    },
-    [onApiError, onOpen, projects, refresh],
-  );
+
+      const live = allChats(projects ?? []).find(
+        (chat) => chat.live && chat.adoptTargetId === target!.id,
+      );
+      if (live?.sessionId) {
+        onOpen(live.sessionId);
+        return;
+      }
+
+      const created = await client.createSession({
+        agent: 'shell',
+        cwd: ADOPTED_CWD_PLACEHOLDER,
+        cols: 80,
+        rows: 24,
+        transport: 'terminal',
+        adoptTargetId: target.id,
+      });
+      onOpen(created.id);
+    } catch (err) {
+      onApiError(err);
+      setError(err instanceof ApiError ? err.message : 'Could not start that tmux session.');
+    } finally {
+      await refresh();
+    }
+  };
 
   return {
-    projects,
-    shells,
-    host,
-    hostCompatibility,
-    error,
-    refresh,
     open,
     removeChat,
     detachChat,
@@ -778,6 +748,7 @@ function ProjectSection({
   onOpenPlannerChat,
   onApiError,
 }: ProjectSectionProps): JSX.Element {
+  const api = useHostApi();
   const [limitMenuFor, setLimitMenuFor] = useState<string | null>(null);
   const [continuationFor, setContinuationFor] = useState<string | null>(null);
   const [continuationError, setContinuationError] = useState<string | null>(null);
@@ -1575,21 +1546,70 @@ function ProjectSection({
  */
 export function HostChip({
   host,
+  record,
   compatibility,
+  allHosts,
+  onClick,
 }: {
   host: HostInfo | null;
+  /**
+   * The registry's own view of this host (PA-67), which exists before — and
+   * without — a successful response.
+   *
+   * Load-bearing rather than cosmetic: `host` is `null` until a project list
+   * comes back, so a chip driven by that alone *disappears* on an unreachable
+   * host. On a phone the chip is the host switcher, so that left the user
+   * stranded on a machine that is not answering with no way to switch back.
+   * The multi-host demo caught it; the record is what keeps the label, the dot
+   * and the tap target present regardless.
+   */
+  record?: { label: string; status: HostStatus } | null;
   compatibility?: HostCompatibilityState | null;
+  /**
+   * True in the aggregated view, where no single host is "the" host (PA-67).
+   * The chip then names the view rather than a machine, because showing one
+   * host's name above every host's chats is worse than showing none.
+   */
+  allHosts?: boolean;
+  /**
+   * Makes the chip the phone layout's host switcher (PA-67). Omitted on
+   * desktop, where `HostRail` is the switcher and a second one in the sidebar
+   * brand would be two affordances for one action.
+   */
+  onClick?: () => void;
 }): JSX.Element | null {
-  if (!host) return null;
+  if (!host && !record && !allHosts) return null;
   const incompatible = compatibility?.compatibility.compatible === false;
-  const dotClass = incompatible ? ' incompatible' : host.online ? '' : ' offline';
+  // The record's verdict wins where there is one: it is the same derivation the
+  // rail, the sheet and the group heading all show, so the four cannot
+  // disagree about one machine.
+  const dotClass = record
+    ? hostDotClass(record.status).replace('host-dot', '')
+    : incompatible
+      ? ' incompatible'
+      : host === null || host.online
+        ? ''
+        : ' offline';
+  const name = allHosts ? 'All hosts' : (host?.name ?? record?.label ?? '');
+  const body = (
+    <>
+      {!allHosts && <span className={`host-dot${dotClass}`} aria-hidden="true" />}
+      <Icon name={allHosts ? 'agents' : 'terminal'} />
+      <span className="host-name">{name}</span>
+      {!allHosts && incompatible && <span className="host-warn">incompatible</span>}
+    </>
+  );
+  if (!onClick) return <span className="host-chip">{body}</span>;
   return (
-    <span className="host-chip">
-      <span className={`host-dot${dotClass}`} aria-hidden="true" />
-      <Icon name="terminal" />
-      <span className="host-name">{host.name}</span>
-      {incompatible && <span className="host-warn">incompatible</span>}
-    </span>
+    <button
+      type="button"
+      className="host-chip as-button"
+      onClick={onClick}
+      aria-label="Switch host"
+      title="Switch host"
+    >
+      {body}
+    </button>
   );
 }
 

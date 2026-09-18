@@ -3,7 +3,7 @@ import type { SessionInfo, SessionStatus, TerminalHintKind } from '@pocketagent/
 import { isTerminalStatus } from '@pocketagent/protocol';
 import type { Terminal } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { TerminalConnection, type ConnectionState } from '../api/ws-client.js';
 import { createTerminal } from '../terminal/create-terminal.js';
 import { MobileKeyBar, ctrlSequence } from '../components/MobileKeyBar.js';
@@ -17,6 +17,7 @@ import {
   isMissingAdoptTargetError,
   RecreateShellDialog,
 } from '../components/RecreateShellDialog.js';
+import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
 
 interface Props {
   sessionId: string;
@@ -45,6 +46,8 @@ function hasStoredTakeOver(info: SessionInfo): boolean {
 }
 
 export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props): JSX.Element {
+  const api = useHostApi();
+  const endpoint = useHostEndpoint();
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -168,6 +171,8 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
     };
 
     const connection = new TerminalConnection({
+      // Bound to this pane's own host — see `AgentPage` for why.
+      endpoint,
       handlers: {
         onConnectionState: setConnection,
 
@@ -264,7 +269,7 @@ export function TerminalPage({ sessionId, onBack, onApiError, onResumed }: Props
             // side; a fully detached client is covered by the server's own
             // push instead. `checkIdle` on the server only emits this once
             // per quiet stretch, so this does not fire on every poll.
-            void notifyIdle(latestTitle ?? 'Session', sessionId);
+            void notifyIdle(latestTitle ?? 'Session', sessionId, endpoint.id);
           }
         },
 

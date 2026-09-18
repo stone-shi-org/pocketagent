@@ -187,6 +187,16 @@ export function useHashRoute(): [
   Route,
   (route: Route, opts?: { hostId?: string | null }) => void,
   HostEndpoint,
+  /**
+   * The raw host segment, `null` when the hash has none (PA-67).
+   *
+   * Returned alongside the resolved endpoint because the two answer different
+   * questions and only one of them can be answered by an address: "no segment"
+   * is what tells the aggregated home apart from one host's own home, and
+   * `resolveHostEndpoint` deliberately collapses both onto the default host.
+   * `resolveSelection` is what reads this.
+   */
+  string | null,
 ] {
   const [location, setLocation] = useState<HashLocation>(() => parseLocation(window.location.hash));
 
@@ -222,5 +232,5 @@ export function useHashRoute(): [
     if (window.location.hash !== hash) window.location.hash = hash;
   }, []);
 
-  return [location.route, navigate, resolveHostEndpoint(location.hostId)];
+  return [location.route, navigate, resolveHostEndpoint(location.hostId), location.hostId];
 }

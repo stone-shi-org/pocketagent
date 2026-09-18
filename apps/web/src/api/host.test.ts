@@ -1,10 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_HOST,
   DEFAULT_HOST_ID,
   hostEndpoint,
   hostUrl,
+  listKnownHosts,
   normalizeBasePath,
+  publishKnownHosts,
+  resetKnownHosts,
   resolveHostEndpoint,
 } from './host.js';
 
@@ -63,8 +66,45 @@ describe('resolveHostEndpoint', () => {
    * `ProjectService.host()` and unknowable to this bundle before a response
    * arrives. Falling back is what makes that link shape work at all, and with
    * one host there is no other machine it could wrongly address.
+   *
+   * Since PA-67 that fallback is only half the answer: it still yields an
+   * address, because every caller needs one, but whether the id names anything
+   * is `resolveSelection`'s decision and an unknown one renders a "no such
+   * host" screen rather than quietly using this endpoint.
    */
   it('falls back to the default host for an id it cannot know', () => {
     expect(resolveHostEndpoint('aGkgdGhlcmUK')).toEqual(DEFAULT_HOST);
+  });
+});
+
+describe('publishKnownHosts (PA-67)', () => {
+  afterEach(() => {
+    resetKnownHosts();
+  });
+
+  it('resolves a published host to its own prefix', () => {
+    const dev02 = hostEndpoint('dev02', '/h/dev02');
+    publishKnownHosts([DEFAULT_HOST, dev02]);
+    expect(resolveHostEndpoint('dev02')).toBe(dev02);
+    expect(listKnownHosts()).toEqual([DEFAULT_HOST, dev02]);
+  });
+
+  it('resolves an alias to the host it names', () => {
+    publishKnownHosts([DEFAULT_HOST], new Map([['sha-of-hostname', DEFAULT_HOST_ID]]));
+    expect(resolveHostEndpoint('sha-of-hostname')).toBe(DEFAULT_HOST);
+  });
+
+  it('always keeps the default host addressable', () => {
+    // A registry that could omit the host serving this bundle would leave a
+    // bare `#/` route with nothing to fetch from.
+    publishKnownHosts([hostEndpoint('dev02', '/h/dev02')]);
+    expect(listKnownHosts()[0]).toBe(DEFAULT_HOST);
+  });
+
+  it('interns endpoints, because their identity is a React dependency', () => {
+    // A fresh object per status poll would re-create every host's API client
+    // and reopen every live socket every 30 seconds.
+    expect(hostEndpoint('dev02', '/h/dev02')).toBe(hostEndpoint('dev02', 'h/dev02/'));
+    expect(hostEndpoint(DEFAULT_HOST_ID, '')).toBe(DEFAULT_HOST);
   });
 });

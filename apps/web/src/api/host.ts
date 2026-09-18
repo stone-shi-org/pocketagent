@@ -69,9 +69,30 @@ export function normalizeBasePath(raw: string): string {
   return withLeading.replace(/\/{2,}/g, '/').replace(/\/+$/, '');
 }
 
+/**
+ * Every endpoint object ever built, keyed by its own two fields.
+ *
+ * Interned rather than freshly allocated, because endpoint *identity* is load
+ * bearing in the React tree (PA-67): a `HostEndpoint` is a `HostProvider`
+ * prop, a `useMemo` dependency in that provider, and a dependency of effects
+ * that open WebSockets. The host directory rebuilds its records on every status
+ * poll, so a new object each time would re-create every host's API client and
+ * tear down and reopen a live terminal socket every 30 seconds — a reconnect
+ * storm with no visible cause. Two endpoints with the same id and prefix are
+ * the same address, so they may as well be the same object.
+ */
+const interned = new Map<string, HostEndpoint>();
+
 /** Builds a `HostEndpoint`, normalizing `basePath` so callers cannot skew it. */
 export function hostEndpoint(id: string, basePath: string): HostEndpoint {
-  return { id, basePath: normalizeBasePath(basePath) };
+  const normalized = normalizeBasePath(basePath);
+  if (normalized === '' && id === DEFAULT_HOST_ID) return DEFAULT_HOST;
+  const key = `${id} ${normalized}`;
+  const existing = interned.get(key);
+  if (existing) return existing;
+  const created: HostEndpoint = { id, basePath: normalized };
+  interned.set(key, created);
+  return created;
 }
 
 /**
@@ -88,28 +109,82 @@ export function hostUrl(endpoint: HostEndpoint, path: string): string {
 /**
  * Every host this client can currently address.
  *
- * Exactly one, and there is deliberately no way to add to it yet: registering
- * a second host is the multi-host UI ticket's job, and shipping the mechanism
- * early would mean shipping an unreachable code path with no UI to exercise
- * it.
+ * Mutable module state, and deliberately so. `useHashRoute` has to turn
+ * `#/h/<id>/s/x` into an address during its *first* render, before any response
+ * has arrived, so this cannot be a promise or a React value — and the two
+ * sources that populate it differ in kind: the local registry
+ * (`hosts/registry.ts`) reads `localStorage` synchronously, so in the
+ * standalone deployment the list is already correct on that first render,
+ * while a Hub's list arrives over the network and `App` holds host-scoped
+ * children back until it has.
+ *
+ * `hosts/directory.ts` is the only writer (`publishKnownHosts`). Nothing else
+ * may add to it: a second writer would mean two answers to "where is host X",
+ * which is the one question this module exists to answer once.
  */
-const KNOWN_HOSTS: readonly HostEndpoint[] = [DEFAULT_HOST];
+let knownHosts: readonly HostEndpoint[] = [DEFAULT_HOST];
+
+/**
+ * Ids that name a host other than by its routing id — in practice a backend's
+ * own `HostInfo.id`. See `HostRecord.aliases` for why this exists at all.
+ */
+let hostAliases: ReadonlyMap<string, string> = new Map();
+
+/**
+ * Publishes the resolved host list for the router to read (PA-67).
+ *
+ * Called from `HostDirectory` on every list change, including the first. The
+ * default host is always present: it is the one that served this bundle, and a
+ * registry that could omit it would leave a bare `#/` route unaddressable.
+ */
+export function publishKnownHosts(
+  hosts: readonly HostEndpoint[],
+  aliases: ReadonlyMap<string, string> = new Map(),
+): void {
+  knownHosts = hosts.some((host) => host.basePath === '') ? hosts : [DEFAULT_HOST, ...hosts];
+  hostAliases = aliases;
+}
+
+/** Test seam: forget everything published, back to the single default host. */
+export function resetKnownHosts(): void {
+  knownHosts = [DEFAULT_HOST];
+  hostAliases = new Map();
+}
+
+/** Every currently addressable host, in registry order. */
+export function listKnownHosts(): readonly HostEndpoint[] {
+  return knownHosts;
+}
 
 /**
  * Resolves a host id out of a hash route to something addressable.
  *
- * An unrecognised id falls back to the default host rather than erroring, and
- * that is the behaviour the acceptance criteria actually require: the id in a
- * `#/h/<hostId>/...` bookmark will normally be the server's *own*
- * `HostInfo.id`, which is a sha256 this module cannot predict (see
- * `DEFAULT_HOST_ID`), so treating "not in the list" as fatal would break the
- * one link shape the ticket asks to support. With a single host every id
- * either names it or names nothing, so there is no case where falling back
- * silently talks to the wrong machine. Once the Hub can report several hosts,
- * this is the single place that has to start distinguishing "the default host,
- * spelled differently" from "a host I have never heard of".
+ * An id that names nothing still resolves to the default host, because this
+ * function's return type is an address and every caller needs one — but that is
+ * no longer where the decision is made. PA-60 shipped this fallback as the
+ * whole answer, with a comment saying that once several hosts could be
+ * reported, this became the place that has to tell "the default host, spelled
+ * differently" from "a host I have never heard of". Both halves of that now
+ * exist, and they are split deliberately:
+ *
+ * - *Spelled differently* is handled here, via `hostAliases`: a bookmark
+ *   carrying the backend's own sha256 `HostInfo.id` resolves to the default
+ *   host because it genuinely is that host.
+ * - *Never heard of* is handled by `resolveSelection` (`hosts/selected-host.ts`),
+ *   which reports `unknown` so `App` can render a legible "no such host"
+ *   screen. It renders that **instead of** any host-scoped subtree, which is
+ *   what guarantees the fallback address below is never actually fetched from:
+ *   silently talking to the wrong machine is the failure this ticket had to
+ *   remove, not preserve.
  */
 export function resolveHostEndpoint(hostId: string | null): HostEndpoint {
   if (hostId === null) return DEFAULT_HOST;
-  return KNOWN_HOSTS.find((host) => host.id === hostId) ?? DEFAULT_HOST;
+  const direct = knownHosts.find((host) => host.id === hostId);
+  if (direct) return direct;
+  const aliased = hostAliases.get(hostId);
+  if (aliased !== undefined) {
+    const target = knownHosts.find((host) => host.id === aliased);
+    if (target) return target;
+  }
+  return DEFAULT_HOST;
 }

@@ -12,8 +12,18 @@ import {
   ProjectList,
   SearchField,
   allChats,
-  useProjects,
 } from '../components/ProjectList.js';
+import { HostRail } from '../components/HostRail.js';
+import { HostGroup } from '../components/HostGroup.js';
+import { HostSheet } from '../components/HostSheet.js';
+import { AddHostDialog } from '../components/AddHostDialog.js';
+import { HostProvider } from '../hosts/HostContext.js';
+import { useHostFleet } from '../hosts/useHostFleet.js';
+import { currentHostId, visibleHosts } from '../hosts/selected-host.js';
+import { loadCollapsedHosts, toggleCollapsedHost } from '../hosts/collapsed-pref.js';
+import type { HostDirectory } from '../hosts/directory.js';
+import type { HostNav } from '../hosts/HostNav.js';
+import { DEFAULT_HOST_ID } from '../api/host.js';
 import { PocketAgentsSection } from '../components/PocketAgentsSection.js';
 import { ShellSection } from '../components/ShellSection.js';
 import { TabBar, type Tab } from '../components/TabBar.js';
@@ -34,9 +44,13 @@ import {
 } from '../lazy-pages.js';
 import { SessionRoute } from './SessionRoute.js';
 import { ChatPreviewPage } from './ChatPreviewPage.js';
-import { loadOpenTabRoutes, saveOpenTabRoutes, type StoredTabRoute } from '../agent/open-tabs-pref.js';
+import {
+  loadOpenTabRoutes,
+  saveOpenTabRoutes,
+  type StoredRouteShape,
+  type StoredTabRoute,
+} from '../agent/open-tabs-pref.js';
 import { fallbackAfterClose, isTabRoute, tabIdFor, tabListReducer, type TabRoute } from '../agent/tab-list.js';
-import { usePlannerChats } from '../agent/use-planner-chats.js';
 import {
   clampSidebarWidth,
   DEFAULT_SIDEBAR_WIDTH,
@@ -48,7 +62,10 @@ import { ShellDialog } from '../components/ShellDialog.js';
 
 interface Props {
   route: Route;
-  onNavigate: (route: Route) => void;
+  /** Host selection, and how to navigate carrying one (PA-67). */
+  nav: HostNav;
+  directory: HostDirectory;
+  onNavigate: (route: Route, opts?: { hostId?: string | null }) => void;
   onApiError: (error: unknown) => void;
   onLogout: () => void;
 }
@@ -84,7 +101,7 @@ function storedToRoute(stored: StoredTabRoute): TabRoute {
   }
 }
 
-function routeToStored(route: TabRoute): StoredTabRoute {
+function routeToStored(route: TabRoute): StoredRouteShape {
   switch (route.name) {
     case 'terminal':
       return { name: 'terminal', sessionId: route.sessionId };
@@ -181,38 +198,64 @@ function utilityTabTitle(route: UtilityTabRoute): string {
  * Which layout you get is decided by viewport width and pointer type, never by
  * sniffing the user agent. See `useMediaQuery`.
  */
-export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props): JSX.Element {
+export function DesktopShell({
+  route,
+  nav,
+  directory,
+  onNavigate,
+  onApiError,
+  onLogout,
+}: Props): JSX.Element {
   const [search, setSearch] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [showHidden, setShowHidden] = useState(false);
-  const [showAdd, setShowAdd] = useState(false);
-  const [showRunning, setShowRunning] = useState(false);
-  const [showShell, setShowShell] = useState(false);
+  // Each dialog's open-state is the *host id* it acts on, not a boolean
+  // (PA-67): every one of them adds a project folder, lists tmux sessions or
+  // creates a session on exactly one machine, and it can be opened either from
+  // the chrome (meaning the current host) or from a host group's own row.
+  const [showAdvanced, setShowAdvanced] = useState<string | null>(null);
+  const [showHidden, setShowHidden] = useState<string | null>(null);
+  const [showAdd, setShowAdd] = useState<string | null>(null);
+  const [showRunning, setShowRunning] = useState<string | null>(null);
+  const [showShell, setShowShell] = useState<string | null>(null);
+  const [showHostSheet, setShowHostSheet] = useState(false);
+  const [showAddHost, setShowAddHost] = useState(false);
+  const [collapsed, setCollapsed] = useState<string[]>(loadCollapsedHosts);
+
+  const hosts = directory.hosts;
+  const selectedHostId = nav.selection.mode === 'one' ? nav.selection.hostId : null;
+  /** The host the chrome's own actions apply to — see `currentHostId`. */
+  const here = currentHostId(nav.selection, hosts);
+  const visible = useMemo(() => visibleHosts(nav.selection, hosts), [nav.selection, hosts]);
+  const singleHost = hosts.length <= 1;
 
   const [tabs, dispatch] = useReducer(tabListReducer, undefined, () =>
-    loadOpenTabRoutes().map((stored) => {
+    // A tab persisted before PA-67 carries no host and is migrated onto the
+    // default one — see `loadOpenTabRoutes`.
+    loadOpenTabRoutes(DEFAULT_HOST_ID).map((stored) => {
       const tabRoute = storedToRoute(stored);
-      return { id: tabIdFor(tabRoute), route: tabRoute };
+      return { id: tabIdFor(tabRoute, stored.hostId), hostId: stored.hostId, route: tabRoute };
     }),
   );
 
   // Computed synchronously during render — not in an effect — so navigating to
   // a session shows its tab immediately, with no one-frame flash of the
   // welcome pane while an effect catches up.
-  const openTabs = useMemo(() => tabListReducer(tabs, { type: 'sync', route }), [tabs, route]);
+  const openTabs = useMemo(
+    () => tabListReducer(tabs, { type: 'sync', route, hostId: here }),
+    [tabs, route, here],
+  );
 
   // Reconcile the persisted reducer state once the merge above actually added
   // a tab (or a close/reorder below has run).
   useEffect(() => {
-    if (openTabs !== tabs) dispatch({ type: 'sync', route });
-  }, [openTabs, tabs, route]);
+    if (openTabs !== tabs) dispatch({ type: 'sync', route, hostId: here });
+  }, [openTabs, tabs, route, here]);
 
   useEffect(() => {
-    saveOpenTabRoutes(tabs.map((t) => routeToStored(t.route)));
+    saveOpenTabRoutes(tabs.map((t) => ({ ...routeToStored(t.route), hostId: t.hostId })));
   }, [tabs]);
 
-  const activeTabId = isTabRoute(route) ? tabIdFor(route) : null;
+  const activeTabId = isTabRoute(route) ? tabIdFor(route, here) : null;
 
   // Mirrors of the two pieces of state `closeTab` needs to reason about,
   // updated on every render *and* eagerly by `closeTab` itself. Plain render
@@ -230,6 +273,21 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
   openTabsRef.current = openTabs;
   const routeRef = useRef(route);
   routeRef.current = route;
+  // Same-tick-correctness mirror for the current host, for exactly the reason
+  // the two above exist: `closeTab` may run twice before a render commits, and
+  // the second call must compute tab ids against the host the first one left
+  // the route on.
+  const hereRef = useRef(here);
+  hereRef.current = here;
+
+  /** Navigate to a route on a specific host, preserving tab semantics. */
+  const navOn = useCallback(
+    (hostId: string, target: Route) => {
+      hereRef.current = hostId;
+      nav.openOn(hostId, target);
+    },
+    [nav],
+  );
 
   /** Removes a tab from the strip only — never an API call, so the session
       underneath keeps running exactly as it would if the strip did not exist. */
@@ -238,20 +296,25 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
       const current = openTabsRef.current;
       if (!current.some((t) => t.id === id)) return;
 
-      const activeId = isTabRoute(routeRef.current) ? tabIdFor(routeRef.current) : null;
+      const activeId = isTabRoute(routeRef.current) ? tabIdFor(routeRef.current, hereRef.current) : null;
       const next = tabListReducer(current, { type: 'close', id });
       openTabsRef.current = next;
       dispatch({ type: 'close', id });
 
       if (activeId === id) {
-        // Same "closing a tab focuses a neighbor" affordance as a browser.
+        // Same "closing a tab focuses a neighbor" affordance as a browser. The
+        // neighbour may live on another host, so the fallback navigation
+        // carries that tab's own host rather than the current one — otherwise
+        // closing the last tab of host A lands on host B's route under host
+        // A's URL.
         const fallback = fallbackAfterClose(current, id);
         const fallbackRoute = fallback ? fallback.route : ({ name: 'list' } as const);
         routeRef.current = fallbackRoute;
-        onNavigate(fallbackRoute);
+        if (fallback) navOn(fallback.hostId, fallback.route);
+        else onNavigate(fallbackRoute);
       }
     },
-    [onNavigate],
+    [onNavigate, navOn],
   );
 
   const reorderTabs = useCallback((orderedIds: string[]) => {
@@ -289,101 +352,134 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
       for the same reason — a second click before this one's render commits
       must still see the tab this one just opened, not a stale empty list. */
   const openPreviewTab = useCallback(
-    (tabRoute: TabRoute) => {
-      openTabsRef.current = tabListReducer(openTabsRef.current, { type: 'openPreview', route: tabRoute });
-      dispatch({ type: 'openPreview', route: tabRoute });
+    (hostId: string, tabRoute: TabRoute) => {
+      openTabsRef.current = tabListReducer(openTabsRef.current, { type: 'openPreview', route: tabRoute, hostId });
+      dispatch({ type: 'openPreview', route: tabRoute, hostId });
       routeRef.current = tabRoute;
-      onNavigate(tabRoute);
+      navOn(hostId, tabRoute);
     },
-    [onNavigate],
+    [navOn],
   );
 
   /** A double click: "keeps" the tab open for good, same slot, immune to
       being replaced by the next single click elsewhere in the tree. */
   const openPermanentTab = useCallback(
-    (tabRoute: TabRoute) => {
-      openTabsRef.current = tabListReducer(openTabsRef.current, { type: 'openPermanent', route: tabRoute });
-      dispatch({ type: 'openPermanent', route: tabRoute });
+    (hostId: string, tabRoute: TabRoute) => {
+      openTabsRef.current = tabListReducer(openTabsRef.current, { type: 'openPermanent', route: tabRoute, hostId });
+      dispatch({ type: 'openPermanent', route: tabRoute, hostId });
       routeRef.current = tabRoute;
-      onNavigate(tabRoute);
+      navOn(hostId, tabRoute);
     },
-    [onNavigate],
+    [navOn],
   );
 
   /** Replaces an existing tab in place with a new route (e.g. promoting a preview
       tab or superseded session to a newly created session). */
   const replaceTab = useCallback(
-    (id: string, tabRoute: TabRoute) => {
-      openTabsRef.current = tabListReducer(openTabsRef.current, { type: 'replace', id, route: tabRoute });
-      dispatch({ type: 'replace', id, route: tabRoute });
+    (id: string, hostId: string, tabRoute: TabRoute) => {
+      openTabsRef.current = tabListReducer(openTabsRef.current, { type: 'replace', id, route: tabRoute, hostId });
+      dispatch({ type: 'replace', id, route: tabRoute, hostId });
       routeRef.current = tabRoute;
-      onNavigate(tabRoute);
+      navOn(hostId, tabRoute);
     },
-    [onNavigate],
+    [navOn],
   );
 
   const onReplaceSession = useCallback(
-    (oldSessionId: string, newSessionId: string) => {
-      const oldTabId = `t:${oldSessionId}`;
+    (hostId: string, oldSessionId: string, newSessionId: string) => {
+      // Built through `tabIdFor` rather than by hand: the id format is
+      // host-qualified since PA-67, and a second copy of the formula here is
+      // exactly how a session gets promoted into a tab that does not exist.
+      const oldTabId = tabIdFor({ name: 'terminal', sessionId: oldSessionId }, hostId);
       const tabRoute: TabRoute = { name: 'terminal', sessionId: newSessionId };
-      replaceTab(oldTabId, tabRoute);
+      replaceTab(oldTabId, hostId, tabRoute);
     },
     [replaceTab],
   );
-
-  // PA-36: the same data `PocketAgentsSection` polls for the sidebar's own
-  // "Pocket Agents" rows, lifted here too so the tab strip's planner-chat
-  // titles (`chatById` below) come from one shared poller rather than a
-  // second one running alongside the section's — see `usePlannerChats`'s
-  // own doc comment.
-  const plannerChats = usePlannerChats(onApiError);
 
   // Single click from the sidebar previews; double click keeps. Anything
   // that opens a chat some other way (compose, resuming from a chat preview,
   // the tab-list dropdown, Agents fleet) calls `onNavigate` directly and
   // always lands as a normal permanent tab via the plain `sync` merge below.
-  const state = useProjects(
-    (sessionId, opts) => {
-      const tabRoute: TabRoute = { name: 'terminal', sessionId };
-      if (opts?.preview) openPreviewTab(tabRoute);
-      else openPermanentTab(tabRoute);
+  //
+  // One fleet, every host (PA-67): a tab keeps streaming while you browse
+  // another machine, so the poller cannot be scoped to the host currently
+  // selected — `tabHostIds` below is what puts a background tab's host on the
+  // foreground tier.
+  const tabHostIds = useMemo(() => [...new Set(openTabs.map((tab) => tab.hostId))], [openTabs]);
+
+  const fleet = useHostFleet({
+    hosts,
+    poll: {
+      selectedHostId,
+      collapsedHostIds: collapsed,
+      tabHostIds,
+      singleHost,
     },
-    (conversationId, opts) => {
+    onOpen: (hostId, sessionId, opts) => {
+      const tabRoute: TabRoute = { name: 'terminal', sessionId };
+      if (opts?.preview) openPreviewTab(hostId, tabRoute);
+      else openPermanentTab(hostId, tabRoute);
+    },
+    onOpenChat: (hostId, conversationId, opts) => {
       const tabRoute: TabRoute = { name: 'chat', conversationId };
-      if (opts?.preview) openPreviewTab(tabRoute);
-      else openPermanentTab(tabRoute);
+      if (opts?.preview) openPreviewTab(hostId, tabRoute);
+      else openPermanentTab(hostId, tabRoute);
     },
     onApiError,
     onReplaceSession,
-  );
+  });
+
+  /** The host the chrome reads from: whichever one `here` names. */
+  const hereState = fleet.stateFor(here);
 
   // Title and live status for the tab strip come from the same polled project
-  // list the sidebar already renders from — no separate fetch per tab.
+  // lists the sidebar already renders from — no separate fetch per tab. Keyed
+  // by *tab id*, which is host-qualified, so two hosts' identically-titled
+  // chats (or identical session ids) cannot overwrite each other's entry.
   const chatById = useMemo(() => {
     const map = new Map<string, { title: string; live: boolean }>();
-    // Shells are folded in alongside the project tree's own chats. They left
-    // `projects` when they became their own category (PA-25), and a shell is
-    // very much tabbable — without this every open terminal tab decayed to
-    // its raw session id, which is the exact failure `knownTitles` below
-    // exists to soften and has no reason to be hit deliberately.
-    const rows = [...allChats(state.projects ?? []), ...(state.shells ?? [])];
-    for (const chat of rows) {
-      if (chat.sessionId) map.set(`t:${chat.sessionId}`, { title: chat.title, live: chat.live });
-      if (chat.conversationId) map.set(`c:${chat.conversationId}`, { title: chat.title, live: chat.live });
-    }
-    // A planner chat has no "live" concept at all — see `PlannerChat`'s own
-    // doc comment: a turn runs over a one-way SSE response, not a process
-    // anything can observe as "still running" — so this is always `false`,
-    // same as `PocketAgentsSection`'s own rows render no live dot either.
-    // Unlike `state.projects` (bounded to the 60 most recently touched
-    // conversations), `listPlannerChats()` returns every chat, so a planner
-    // tab's title never ages out of this map the way an old project chat's
-    // can — see `knownTitles` below for that case.
-    for (const chat of plannerChats.chats) {
-      map.set(`p:${chat.id}`, { title: chat.title ?? 'Untitled chat', live: false });
+    for (const host of hosts) {
+      const hostId = host.endpoint.id;
+      const state = fleet.stateFor(hostId);
+      const planner = fleet.plannerFor(hostId);
+      // Shells are folded in alongside the project tree's own chats. They left
+      // `projects` when they became their own category (PA-25), and a shell is
+      // very much tabbable — without this every open terminal tab decayed to
+      // its raw session id, which is the exact failure `knownTitles` below
+      // exists to soften and has no reason to be hit deliberately.
+      const rows = [...allChats(state.projects ?? []), ...(state.shells ?? [])];
+      for (const chat of rows) {
+        if (chat.sessionId) {
+          map.set(tabIdFor({ name: 'terminal', sessionId: chat.sessionId }, hostId), {
+            title: chat.title,
+            live: chat.live,
+          });
+        }
+        if (chat.conversationId) {
+          map.set(tabIdFor({ name: 'chat', conversationId: chat.conversationId }, hostId), {
+            title: chat.title,
+            live: chat.live,
+          });
+        }
+      }
+      // A planner chat has no "live" concept at all — see `PlannerChat`'s own
+      // doc comment: a turn runs over a one-way SSE response, not a process
+      // anything can observe as "still running" — so this is always `false`,
+      // same as `PocketAgentsSection`'s own rows render no live dot either.
+      // Unlike `state.projects` (bounded to the 60 most recently touched
+      // conversations), `listPlannerChats()` returns every chat, so a planner
+      // tab's title never ages out of this map the way an old project chat's
+      // can — see `knownTitles` below for that case.
+      for (const chat of planner.chats) {
+        map.set(tabIdFor({ name: 'planner-chat', chatId: chat.id }, hostId), {
+          title: chat.title ?? 'Untitled chat',
+          live: false,
+        });
+      }
     }
     return map;
-  }, [state.projects, state.shells, plannerChats.chats]);
+  }, [hosts, fleet]);
 
   // Every title/live pair this tab bar has ever seen for a given id, kept
   // around after `chatById` stops carrying it. `ProjectService.list` only
@@ -402,6 +498,14 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
     for (const [id, entry] of chatById) knownTitles.current.set(id, entry);
   }, [chatById]);
 
+  // Only informative once two hosts have tabs open at the same time; before
+  // that a label on every tab is noise repeating what the rail already says.
+  const showTabHosts = tabHostIds.length > 1;
+  const hostLabelFor = (hostId: string): string | null => {
+    if (!showTabHosts) return null;
+    return hosts.find((host) => host.endpoint.id === hostId)?.label ?? hostId;
+  };
+
   const tabsForBar: Tab[] = openTabs.map((tab) => {
     // The shared admin-page tab (settings/cron/webhooks/planner and each
     // one's own detail route, PA-36 round 2) has a fixed title per
@@ -409,10 +513,24 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
     // it is special-cased before that lookup rather than needing a fake
     // row injected into that map.
     if (isUtilityTabRoute(tab.route)) {
-      return { id: tab.id, title: utilityTabTitle(tab.route), live: false, preview: tab.preview ?? false };
+      return {
+        id: tab.id,
+        title: utilityTabTitle(tab.route),
+        live: false,
+        preview: tab.preview ?? false,
+        hostLabel: hostLabelFor(tab.hostId),
+      };
     }
     const found = chatById.get(tab.id) ?? knownTitles.current.get(tab.id);
-    if (found) return { id: tab.id, title: found.title, live: found.live, preview: tab.preview ?? false };
+    if (found) {
+      return {
+        id: tab.id,
+        title: found.title,
+        live: found.live,
+        preview: tab.preview ?? false,
+        hostLabel: hostLabelFor(tab.hostId),
+      };
+    }
     // Never seen at all — a tab restored from `open-tabs-pref` whose chat had
     // already aged out of the poll window before this tab bar ever mounted
     // (or, for a planner chat, whose chat was deleted outright — see the
@@ -432,15 +550,22 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
       title: fallback,
       live: tab.route.name === 'terminal',
       preview: tab.preview ?? false,
+      hostLabel: hostLabelFor(tab.hostId),
     };
   });
 
   const activeSessionId = route.name === 'terminal' ? route.sessionId : null;
   const activeConversationId = route.name === 'chat' ? route.conversationId : null;
-  // Shells count too — see the same fix in `ProjectsPage` (PA-25).
-  const runningCount =
-    (state.projects?.reduce((n, p) => n + p.chats.filter((c) => c.live).length, 0) ?? 0) +
-    (state.shells?.filter((s) => s.live).length ?? 0);
+  // Shells count too — see the same fix in `ProjectsPage` (PA-25). Summed
+  // across the hosts on screen, which is what the badge is about.
+  const runningCount = visible.reduce((total, host) => {
+    const hostState = fleet.stateFor(host.endpoint.id);
+    return (
+      total +
+      (hostState.projects?.reduce((n, p) => n + p.chats.filter((c) => c.live).length, 0) ?? 0) +
+      (hostState.shells?.filter((s) => s.live).length ?? 0)
+    );
+  }, 0);
 
   const [sidebarWidth, setSidebarWidth] = useState<number>(getSidebarWidthPref);
   const [isResizing, setIsResizing] = useState(false);
@@ -481,11 +606,33 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
     setSidebarWidthPref(DEFAULT_SIDEBAR_WIDTH);
   }, []);
 
+  // The rail is chrome, not a category, so it is a *third grid column* rather
+  // than anything inside the sidebar — which is what lets the three shared
+  // home-screen categories stay identical to the phone's, in the same order,
+  // with a host switcher that the phone expresses as a sheet instead. Hidden
+  // entirely with a single host: a 56px column holding one tile is clutter,
+  // and its absence is half of what keeps a standalone desktop unchanged.
+  const showRail = !singleHost || directory.source === 'hub';
+
   return (
     <div
-      className="desktop-shell"
-      style={{ gridTemplateColumns: `${sidebarWidth}px minmax(0, 1fr)` }}
+      className={`desktop-shell${showRail ? ' with-rail' : ''}`}
+      style={{
+        gridTemplateColumns: showRail
+          ? `var(--host-rail-width) ${sidebarWidth}px minmax(0, 1fr)`
+          : `${sidebarWidth}px minmax(0, 1fr)`,
+      }}
     >
+      {showRail && (
+        <HostRail
+          hosts={hosts}
+          selectedHostId={selectedHostId}
+          onSelectAll={() => nav.goToHost(null)}
+          onSelect={(hostId) => nav.goToHost(hostId)}
+          onAdd={() => setShowAddHost(true)}
+          canManage={directory.canManage}
+        />
+      )}
       <aside className="sidebar">
         <div
           className={`sidebar-resizer${isResizing ? ' resizing' : ''}`}
@@ -499,7 +646,15 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
         <header className="sidebar-head">
           <div className="sidebar-brand">
             <strong>Remote</strong>
-            <HostChip host={state.host} compatibility={state.hostCompatibility} />
+            {/* No `onClick`: the rail is the desktop switcher, and a second
+                affordance for the same action in the brand line is one too
+                many. */}
+            <HostChip
+              host={hereState.host}
+              record={hosts.find((candidate) => candidate.endpoint.id === here) ?? null}
+              compatibility={hereState.hostCompatibility}
+              allHosts={nav.selection.mode === 'all' && !singleHost}
+            />
             {/* Which exact build is running, at a glance — same string
                 Settings shows (`formatBuildInfo`), but visible without
                 opening a dialog. Desktop-only: the phone header's
@@ -522,32 +677,39 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
               onClose={() => setMenuOpen(false)}
               onAdvanced={() => {
                 setMenuOpen(false);
-                setShowAdvanced(true);
+                setShowAdvanced(here);
               }}
               onRefresh={() => {
                 setMenuOpen(false);
-                void state.refresh();
+                void fleet.refreshAll();
+                directory.refresh();
               }}
               onHidden={() => {
                 setMenuOpen(false);
-                setShowHidden(true);
+                setShowHidden(here);
               }}
               onRunning={() => {
                 setMenuOpen(false);
-                setShowRunning(true);
+                setShowRunning(here);
+              }}
+              onHosts={() => {
+                setMenuOpen(false);
+                setShowHostSheet(true);
               }}
               onShell={() => {
                 setMenuOpen(false);
-                setShowShell(true);
+                setShowShell(here);
               }}
               runningCount={runningCount}
               onSettings={() => {
                 setMenuOpen(false);
                 // PA-36: Settings is a singleton tab — `openPermanentTab`
-                // dedups by `tabIdFor`'s fixed `'s:settings'` id, so opening
-                // it again from here just switches to the one already open
-                // rather than adding a second.
-                openPermanentTab({ name: 'settings' });
+                // dedups by `tabIdFor`'s id, so opening it again from here
+                // just switches to the one already open rather than adding a
+                // second. Since PA-67 that id is per host, because a cron job
+                // or a webhook belongs to one machine and one global admin tab
+                // would show the wrong one's rows under the right title.
+                openPermanentTab(here, { name: 'settings' });
               }}
               onCron={() => {
                 setMenuOpen(false);
@@ -570,7 +732,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
           <button
             type="button"
             className="new-chat-btn"
-            onClick={() => onNavigate({ name: 'compose' })}
+            onClick={() => nav.openOn(here, { name: 'compose' })}
           >
             <Icon name="compose" size={18} />
             New chat
@@ -578,7 +740,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
           <button
             type="button"
             className="shell-nav-btn"
-            onClick={() => setShowShell(true)}
+            onClick={() => setShowShell(here)}
           >
             <Icon name="agent-shell" size={16} />
             Shell
@@ -599,50 +761,86 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
         </div>
 
         <div className="sidebar-scroll">
-          {state.error && (
-            <div className="error-box" role="alert">
-              {state.error}
-            </div>
-          )}
-          {/* PA-61 — see `ProjectsPage` for why this sits above the categories. */}
-          <HostCompatibilityNotice compatibility={state.hostCompatibility} />
-          <PocketAgentsSection
-            workspaces={plannerChats.workspaces}
-            chats={plannerChats.chats}
-            refresh={plannerChats.refresh}
-            // PA-36: a Pocket Agent chat row has no click/double-click
-            // distinction of its own today (unlike `ProjectList`'s chat
-            // rows), so this always opens a normal permanent tab rather than
-            // a preview one — nothing in this section currently produces the
-            // second click that would ever "promote" a preview anyway.
-            onOpenChat={(chatId) => openPermanentTab({ name: 'planner-chat', chatId })}
-            onCloseChat={(chatId) => closeTab(`p:${chatId}`)}
-            onApiError={onApiError}
-            activeChatId={route.name === 'planner-chat' ? route.chatId : null}
-          />
-          {/* Between the other two categories, same order as the phone page
-              (PA-25) — the two layouts must not disagree about where a
-              category lives. */}
-          <ShellSection
-            state={state}
-            open={state.open}
-            onNewShell={() => setShowShell(true)}
-            activeSessionId={activeSessionId}
-            search={search}
-          />
-          <ProjectList
-            state={state}
-            search={search}
-            onCompose={(cwd) => onNavigate({ name: 'compose', cwd })}
-            onAddProject={() => setShowAdd(true)}
-            activeSessionId={activeSessionId}
-            activeConversationId={activeConversationId}
-            onOpenCronJob={(jobId) => onNavigate({ name: 'cron-job', jobId })}
-            onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
-            onOpenPlannerChat={(chatId) => openPermanentTab({ name: 'planner-chat', chatId })}
-            onApiError={onApiError}
-            emptyHint="Nothing here yet. Start a chat to see it listed."
-          />
+          {visible.map((host) => {
+            const hostId = host.endpoint.id;
+            const hostState = fleet.stateFor(hostId);
+            const planner = fleet.plannerFor(hostId);
+            // The active highlight only applies to the host the route is on:
+            // two hosts can share a session id, and highlighting both rows
+            // would claim the other machine's chat is the one on screen.
+            const activeHere = hostId === here;
+            return (
+              <HostProvider key={hostId} endpoint={host.endpoint}>
+                <HostGroup
+                  host={host}
+                  show={!singleHost}
+                  collapsed={collapsed.includes(hostId)}
+                  onToggle={() => setCollapsed((prev) => toggleCollapsedHost(prev, hostId))}
+                  onSelect={() => nav.goToHost(hostId)}
+                  actions={
+                    <button
+                      type="button"
+                      className="round-btn plain"
+                      onClick={() => nav.openOn(hostId, { name: 'compose' })}
+                      aria-label={`New chat on ${host.label}`}
+                      title={`New chat on ${host.label}`}
+                    >
+                      <Icon name="compose" size={16} />
+                    </button>
+                  }
+                >
+                  {hostState.error && (
+                    <div className="error-box" role="alert">
+                      {hostState.error}
+                    </div>
+                  )}
+                  {/* PA-61 — see `ProjectsPage` for why this sits above the categories. */}
+                  <HostCompatibilityNotice compatibility={hostState.hostCompatibility} />
+                  <PocketAgentsSection
+                    workspaces={planner.workspaces}
+                    chats={planner.chats}
+                    refresh={planner.refresh}
+                    // PA-36: a Pocket Agent chat row has no click/double-click
+                    // distinction of its own today (unlike `ProjectList`'s chat
+                    // rows), so this always opens a normal permanent tab rather than
+                    // a preview one — nothing in this section currently produces the
+                    // second click that would ever "promote" a preview anyway.
+                    onOpenChat={(chatId) => openPermanentTab(hostId, { name: 'planner-chat', chatId })}
+                    onCloseChat={(chatId) =>
+                      closeTab(tabIdFor({ name: 'planner-chat', chatId }, hostId))
+                    }
+                    onApiError={onApiError}
+                    activeChatId={
+                      activeHere && route.name === 'planner-chat' ? route.chatId : null
+                    }
+                  />
+                  {/* Between the other two categories, same order as the phone page
+                      (PA-25) — the two layouts must not disagree about where a
+                      category lives. */}
+                  <ShellSection
+                    state={hostState}
+                    open={hostState.open}
+                    onNewShell={() => setShowShell(hostId)}
+                    activeSessionId={activeHere ? activeSessionId : null}
+                    search={search}
+                  />
+                  <ProjectList
+                    state={hostState}
+                    search={search}
+                    onCompose={(cwd) => nav.openOn(hostId, { name: 'compose', cwd })}
+                    onAddProject={() => setShowAdd(hostId)}
+                    activeSessionId={activeHere ? activeSessionId : null}
+                    activeConversationId={activeHere ? activeConversationId : null}
+                    onOpenCronJob={(jobId) => nav.openOn(hostId, { name: 'cron-job', jobId })}
+                    onOpenWebhook={(webhookId) => nav.openOn(hostId, { name: 'webhook', webhookId })}
+                    onOpenPlannerChat={(chatId) => openPermanentTab(hostId, { name: 'planner-chat', chatId })}
+                    onApiError={onApiError}
+                    emptyHint="Nothing here yet. Start a chat to see it listed."
+                  />
+                </HostGroup>
+              </HostProvider>
+            );
+          })}
         </div>
 
         <UsageBar />
@@ -655,7 +853,11 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             activeId={activeTabId}
             onSelect={(id) => {
               const tab = openTabs.find((t) => t.id === id);
-              if (tab) onNavigate(tab.route);
+              // Selecting a tab on another host switches the selected host
+              // with it — that is what makes "a live session on host A keeps
+              // streaming while you browse host B" reachable in both
+              // directions rather than a one-way trip.
+              if (tab) navOn(tab.hostId, tab.route);
             }}
             onClose={closeTab}
             onReorder={reorderTabs}
@@ -667,10 +869,13 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
         {openTabs.length > 0 && (
           <div className={`tab-panels${activeTabId === null ? ' collapsed' : ''}`}>
             {openTabs.map((tab) => (
-              <div
-                key={tab.id}
-                className={`tab-panel${tab.id === activeTabId ? '' : ' inactive'}`}
-              >
+              /* Every panel stays mounted (only the active one is visible),
+                 and each is bound to its own host — which is what keeps a live
+                 session on host A streaming while the sidebar shows host B:
+                 the pane's client and socket come from this provider, not from
+                 whichever host is currently selected. */
+              <HostProvider key={tab.id} endpoint={nav.endpointFor(tab.hostId)}>
+                <div className={`tab-panel${tab.id === activeTabId ? '' : ' inactive'}`}>
                 {tab.route.name === 'terminal' ? (
                   <SessionRoute
                     sessionId={tab.route.sessionId}
@@ -679,7 +884,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                     onResumed={(sessionId) => {
                       // PA-46: "promoting" a preview/dead session to a live session replaces
                       // the superseded tab in place with the live one.
-                      replaceTab(tab.id, { name: 'terminal', sessionId });
+                      replaceTab(tab.id, tab.hostId, { name: 'terminal', sessionId });
                     }}
                   />
                 ) : tab.route.name === 'chat' ? (
@@ -690,7 +895,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                     onStarted={(sessionId) => {
                       // PA-36 / PA-46: "promoting" a preview to a live session replaces
                       // the preview tab in place with the live one.
-                      replaceTab(tab.id, { name: 'terminal', sessionId });
+                      replaceTab(tab.id, tab.hostId, { name: 'terminal', sessionId });
                     }}
                   />
                 ) : tab.route.name === 'planner-chat' ? (
@@ -703,8 +908,8 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                       chatId={tab.route.chatId}
                       active={tab.id === activeTabId}
                       onBack={() => closeTab(tab.id)}
-                      onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
-                      onOpenPlannerChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
+                      onOpenSession={(sessionId) => nav.openOn(tab.hostId, { name: 'terminal', sessionId })}
+                      onOpenPlannerChat={(chatId) => nav.openOn(tab.hostId, { name: 'planner-chat', chatId })}
                       onApiError={onApiError}
                     />
                   </Suspense>
@@ -725,7 +930,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                   <Suspense fallback={<PageFallback />}>
                     <CronJobsPage
                       onBack={() => closeTab(tab.id)}
-                      onOpenJob={(jobId) => onNavigate({ name: 'cron-job', jobId })}
+                      onOpenJob={(jobId) => nav.openOn(tab.hostId, { name: 'cron-job', jobId })}
                       onApiError={onApiError}
                     />
                   </Suspense>
@@ -734,14 +939,14 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                     <CronJobEditorPage
                       key={tab.route.jobId}
                       jobId={tab.route.jobId}
-                      onBack={() => onNavigate({ name: 'cron' })}
+                      onBack={() => nav.openOn(tab.hostId, { name: 'cron' })}
                       onDone={() => {
-                        void state.refresh();
-                        onNavigate({ name: 'cron' });
+                        void fleet.refreshHost(tab.hostId);
+                        nav.openOn(tab.hostId, { name: 'cron' });
                       }}
-                      onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
-                      onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
-                      onOpenPlannerChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
+                      onOpenSession={(sessionId) => nav.openOn(tab.hostId, { name: 'terminal', sessionId })}
+                      onOpenChat={(conversationId) => nav.openOn(tab.hostId, { name: 'chat', conversationId })}
+                      onOpenPlannerChat={(chatId) => nav.openOn(tab.hostId, { name: 'planner-chat', chatId })}
                       onApiError={onApiError}
                     />
                   </Suspense>
@@ -749,10 +954,10 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                   <Suspense fallback={<PageFallback />}>
                     <WebhooksPage
                       onBack={() => closeTab(tab.id)}
-                      onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
-                      onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
-                      onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
-                      onOpenPlannerChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
+                      onOpenWebhook={(webhookId) => nav.openOn(tab.hostId, { name: 'webhook', webhookId })}
+                      onOpenSession={(sessionId) => nav.openOn(tab.hostId, { name: 'terminal', sessionId })}
+                      onOpenChat={(conversationId) => nav.openOn(tab.hostId, { name: 'chat', conversationId })}
+                      onOpenPlannerChat={(chatId) => nav.openOn(tab.hostId, { name: 'planner-chat', chatId })}
                       onApiError={onApiError}
                     />
                   </Suspense>
@@ -761,14 +966,14 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                     <WebhookEditorPage
                       key={tab.route.webhookId}
                       webhookId={tab.route.webhookId}
-                      onBack={() => onNavigate({ name: 'webhooks' })}
+                      onBack={() => nav.openOn(tab.hostId, { name: 'webhooks' })}
                       onDone={() => {
-                        void state.refresh();
-                        onNavigate({ name: 'webhooks' });
+                        void fleet.refreshHost(tab.hostId);
+                        nav.openOn(tab.hostId, { name: 'webhooks' });
                       }}
-                      onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
-                      onOpenChat={(conversationId) => onNavigate({ name: 'chat', conversationId })}
-                      onOpenPlannerChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
+                      onOpenSession={(sessionId) => nav.openOn(tab.hostId, { name: 'terminal', sessionId })}
+                      onOpenChat={(conversationId) => nav.openOn(tab.hostId, { name: 'chat', conversationId })}
+                      onOpenPlannerChat={(chatId) => nav.openOn(tab.hostId, { name: 'planner-chat', chatId })}
                       onApiError={onApiError}
                     />
                   </Suspense>
@@ -776,7 +981,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                   <Suspense fallback={<PageFallback />}>
                     <PlannerPage
                       onBack={() => closeTab(tab.id)}
-                      onOpenAgent={(agentId) => onNavigate({ name: 'planner-agent', agentId })}
+                      onOpenAgent={(agentId) => nav.openOn(tab.hostId, { name: 'planner-agent', agentId })}
                       onApiError={onApiError}
                     />
                   </Suspense>
@@ -785,93 +990,130 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                     <PlannerAgentEditorPage
                       key={tab.route.agentId}
                       agentId={tab.route.agentId}
-                      onBack={() => onNavigate({ name: 'planner' })}
+                      onBack={() => nav.openOn(tab.hostId, { name: 'planner' })}
                       onDone={() => {
-                        void state.refresh();
-                        onNavigate({ name: 'planner' });
+                        void fleet.refreshHost(tab.hostId);
+                        nav.openOn(tab.hostId, { name: 'planner' });
                       }}
                       onApiError={onApiError}
                     />
                   </Suspense>
                 )}
-              </div>
+                </div>
+              </HostProvider>
             ))}
           </div>
         )}
 
         {route.name === 'compose' ? (
-          <ComposerPage
-            // Keyed on cwd so picking a different project's "new chat" while the
-            // composer is already open remounts it instead of reusing the old
-            // instance's `cwd` state (composer and list are on screen together
-            // here, unlike the mobile flow).
-            key={route.cwd ?? ''}
-            {...(route.cwd !== undefined ? { initialCwd: route.cwd } : {})}
-            onBack={() => onNavigate({ name: 'list' })}
-            onCreated={(sessionId) => {
-              void state.refresh();
-              onNavigate({ name: 'terminal', sessionId });
-            }}
-            onApiError={onApiError}
-          />
-        ) : route.name === 'agents' ? (
-          <Suspense fallback={<PageFallback />}>
-            <AgentsFleetPage
-              onOpen={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+          <HostProvider endpoint={nav.endpointFor(here)}>
+            <ComposerPage
+              // Keyed on cwd *and host* so picking a different project's "new
+              // chat" — or the same directory on another machine — remounts
+              // instead of reusing the old instance's `cwd` state (composer
+              // and list are on screen together here, unlike the mobile flow).
+              key={`${here}:${route.cwd ?? ''}`}
+              {...(route.cwd !== undefined ? { initialCwd: route.cwd } : {})}
+              onBack={() => onNavigate({ name: 'list' })}
+              onCreated={(sessionId) => {
+                void fleet.refreshHost(here);
+                nav.openOn(here, { name: 'terminal', sessionId });
+              }}
               onApiError={onApiError}
             />
-          </Suspense>
+          </HostProvider>
+        ) : route.name === 'agents' ? (
+          <HostProvider endpoint={nav.endpointFor(here)}>
+            <Suspense fallback={<PageFallback />}>
+              <AgentsFleetPage
+                onOpen={(sessionId) => nav.openOn(here, { name: 'terminal', sessionId })}
+                onApiError={onApiError}
+              />
+            </Suspense>
+          </HostProvider>
         ) : activeTabId === null ? (
-          <WelcomePane onCompose={() => onNavigate({ name: 'compose' })} />
+          <WelcomePane onCompose={() => nav.openOn(here, { name: 'compose' })} />
         ) : null}
       </main>
 
-      {showAdd && (
-        <AddProject
-          onClose={() => setShowAdd(false)}
-          onAdded={() => void state.refresh()}
-          onApiError={onApiError}
-        />
-      )}
-
-      {showHidden && (
-        <HiddenProjects
-          onClose={() => setShowHidden(false)}
-          onChanged={() => void state.refresh()}
-          onApiError={onApiError}
-        />
-      )}
-
-      {showRunning && (
-        <RunningSessions
-          onClose={() => setShowRunning(false)}
-          onOpen={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
-          onApiError={onApiError}
-        />
-      )}
-
-      {showAdvanced && (
-        <NewSessionDialog
-          onCancel={() => setShowAdvanced(false)}
-          onApiError={onApiError}
-          onCreated={(id) => {
-            setShowAdvanced(false);
-            void state.refresh();
-            onNavigate({ name: 'terminal', sessionId: id });
+      {showHostSheet && (
+        <HostSheet
+          hosts={hosts}
+          selectedHostId={selectedHostId}
+          onSelectAll={() => nav.goToHost(null)}
+          onSelect={(hostId) => nav.goToHost(hostId)}
+          onAdd={() => setShowAddHost(true)}
+          onRemove={(hostId) => {
+            void directory.remove(hostId);
+            if (selectedHostId === hostId) nav.goToHost(null);
           }}
+          onClose={() => setShowHostSheet(false)}
+          canManage={directory.canManage}
         />
       )}
 
-      {showShell && (
-        <ShellDialog
-          onClose={() => setShowShell(false)}
-          onApiError={onApiError}
-          onCreated={(id) => {
-            setShowShell(false);
-            void state.refresh();
-            onNavigate({ name: 'terminal', sessionId: id });
-          }}
-        />
+      {showAddHost && (
+        <AddHostDialog directory={directory} onClose={() => setShowAddHost(false)} />
+      )}
+
+      {showAdd !== null && (
+        <HostProvider endpoint={nav.endpointFor(showAdd)}>
+          <AddProject
+            onClose={() => setShowAdd(null)}
+            onAdded={() => void fleet.refreshHost(showAdd)}
+            onApiError={onApiError}
+          />
+        </HostProvider>
+      )}
+
+      {showHidden !== null && (
+        <HostProvider endpoint={nav.endpointFor(showHidden)}>
+          <HiddenProjects
+            onClose={() => setShowHidden(null)}
+            onChanged={() => void fleet.refreshHost(showHidden)}
+            onApiError={onApiError}
+          />
+        </HostProvider>
+      )}
+
+      {showRunning !== null && (
+        <HostProvider endpoint={nav.endpointFor(showRunning)}>
+          <RunningSessions
+            onClose={() => setShowRunning(null)}
+            onOpen={(sessionId) => nav.openOn(showRunning, { name: 'terminal', sessionId })}
+            onApiError={onApiError}
+          />
+        </HostProvider>
+      )}
+
+      {showAdvanced !== null && (
+        <HostProvider endpoint={nav.endpointFor(showAdvanced)}>
+          <NewSessionDialog
+            onCancel={() => setShowAdvanced(null)}
+            onApiError={onApiError}
+            onCreated={(id) => {
+              const hostId = showAdvanced;
+              setShowAdvanced(null);
+              void fleet.refreshHost(hostId);
+              nav.openOn(hostId, { name: 'terminal', sessionId: id });
+            }}
+          />
+        </HostProvider>
+      )}
+
+      {showShell !== null && (
+        <HostProvider endpoint={nav.endpointFor(showShell)}>
+          <ShellDialog
+            onClose={() => setShowShell(null)}
+            onApiError={onApiError}
+            onCreated={(id) => {
+              const hostId = showShell;
+              setShowShell(null);
+              void fleet.refreshHost(hostId);
+              nav.openOn(hostId, { name: 'terminal', sessionId: id });
+            }}
+          />
+        </HostProvider>
       )}
     </div>
   );

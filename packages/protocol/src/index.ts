@@ -15,6 +15,7 @@ export * from './planner-memory.js';
 export * from './mcp-registry.js';
 export * from './telegram.js';
 export * from './hub.js';
+export * from './hub-registry.js';
 
 /** Name of the HttpOnly cookie holding the server-side session id. */
 export const AUTH_COOKIE_NAME = 'pocketagent_sid';

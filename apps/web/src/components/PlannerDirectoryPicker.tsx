@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { BrowseEntry } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { Icon } from './Icon.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 /**
  * Pick an existing directory (or create a new one) on the host for a Pocket
@@ -23,6 +24,7 @@ export function PlannerDirectoryPicker({
   onPick: (path: string, opts?: { create?: boolean }) => void;
   onApiError: (error: unknown) => void;
 }): JSX.Element {
+  const api = useHostApi();
   const [at, setAt] = useState<string | undefined>(undefined);
   const [state, setState] = useState<{
     path: string;

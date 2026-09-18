@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { SettingsResponse, UpdateSettingsRequest } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { Icon, type IconName } from '../components/Icon.js';
 import { CustomClaudeProvidersSection } from '../components/CustomClaudeProvidersSection.js';
 import { CodingAgentsSection } from '../components/CodingAgentsSection.js';
@@ -8,6 +8,7 @@ import { TelegramSection } from '../components/TelegramSection.js';
 import { HubsSection } from '../components/HubsSection.js';
 import { getTerminalFontOverride, setTerminalFontOverride } from '../agent/terminal-font-pref.js';
 import { formatBuildInfo } from '../version.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 type Settings = SettingsResponse['settings'];
 
@@ -38,6 +39,7 @@ interface Props {
  * one — see `settings/fields.ts` for exactly why each one is or isn't live.
  */
 export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
+  const api = useHostApi();
   const [data, setData] = useState<SettingsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<Set<string>>(new Set());

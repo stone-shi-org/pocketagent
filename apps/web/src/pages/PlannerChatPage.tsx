@@ -10,11 +10,12 @@ import type {
   SessionInfo,
   SlashCommandInfo,
 } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { Transcript } from '../components/Transcript.js';
 import { PromptBox } from '../components/PromptBox.js';
 import { applyEvent, applyEvents, emptyTranscript, type TranscriptState } from '../agent/transcript.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 const PLANNER_SLASH_COMMANDS: SlashCommandInfo[] = [
   {
@@ -156,6 +157,7 @@ export function PlannerChatPage({
   onOpenPlannerChat,
   onApiError,
 }: Props): JSX.Element {
+  const api = useHostApi();
   const [chat, setChat] = useState<PlannerChat | null>(null);
   const [models, setModels] = useState<PlannerModel[]>([]);
   const [transcript, setTranscript] = useState<TranscriptState | null>(null);

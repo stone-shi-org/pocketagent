@@ -2,9 +2,21 @@ import { useEffect, useState } from 'react';
 import { copyText } from '../agent/clipboard.js';
 import { CopyButton } from './CopyButton.js';
 import { Icon } from './Icon.js';
+import { useHostEndpoint } from '../hosts/HostContext.js';
 
 /** Where a viewer's own origin override is remembered. Not server state. */
 const ORIGIN_KEY = 'pocketagent.webhookOrigin';
+
+/**
+ * One override per host (PA-67).
+ *
+ * Each backend has its own external address, so a single shared override would
+ * paste one machine's URL under another's webhook. The default host keeps the
+ * bare key, so an override saved before this existed is still found.
+ */
+function originKeyFor(hostId: string, basePath: string): string {
+  return basePath === '' ? ORIGIN_KEY : `${ORIGIN_KEY}:${hostId}`;
+}
 
 /**
  * The endpoint panel: the URL to paste into Jira, and the secret to sign with.
@@ -52,24 +64,39 @@ export function SecretReveal({
   onReveal: () => Promise<void>;
   onRotate: () => Promise<void>;
 }): JSX.Element {
+  const endpoint = useHostEndpoint();
+  const originKey = originKeyFor(endpoint.id, endpoint.basePath);
   const [override, setOverride] = useState<string>(
-    () => window.localStorage.getItem(ORIGIN_KEY) ?? '',
+    () => window.localStorage.getItem(originKey) ?? '',
   );
   const [editingOrigin, setEditingOrigin] = useState(false);
   const [confirmingRotate, setConfirmingRotate] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (override.trim() === '') window.localStorage.removeItem(ORIGIN_KEY);
-    else window.localStorage.setItem(ORIGIN_KEY, override.trim());
-  }, [override]);
+    if (override.trim() === '') window.localStorage.removeItem(originKey);
+    else window.localStorage.setItem(originKey, override.trim());
+  }, [override, originKey]);
 
   const browserOrigin = window.location.origin;
+  // A webhook belongs to *this pane's* host, and a delivery goes straight to
+  // that machine — never through a Hub, which is forbidden from proxying
+  // `/api/hooks/*` at all (PA-66's first hard constraint, so that
+  // `grep '/api/hooks/'` keeps enumerating the whole unauthenticated surface).
+  // So for any host reached through a path prefix, this browser's own origin is
+  // the *Hub's*, which is the one URL that is guaranteed not to work — and
+  // offering `<hub>/h/<id>/api/hooks/...` would invite someone to try exactly
+  // the route that must stay unroutable. There is nothing here that can know a
+  // remote backend's external origin (it does not know its own), so the panel
+  // says so and asks, instead of composing a plausible lie.
+  const remoteHost = endpoint.basePath !== '';
   const chosen =
     override.trim() !== ''
       ? { origin: override.trim().replace(/\/+$/, ''), why: 'from your override below' }
-      : { origin: browserOrigin, why: 'as this browser reached the server' };
-  const url = `${chosen.origin}${deliveryPath}`;
+      : remoteHost
+        ? { origin: '', why: `not known for ${endpoint.id} — set it below` }
+        : { origin: browserOrigin, why: 'as this browser reached the server' };
+  const url = chosen.origin === '' ? deliveryPath : `${chosen.origin}${deliveryPath}`;
 
   const act = async (fn: () => Promise<void>): Promise<void> => {
     setBusy(true);
@@ -98,7 +125,14 @@ export function SecretReveal({
             {editingOrigin ? 'Hide' : 'Change'}
           </button>
         </p>
-        {override.trim() !== '' && override.trim() !== browserOrigin && (
+        {remoteHost && override.trim() === '' && (
+          <p className="transport-hint">
+            Deliveries reach <code>{endpoint.id}</code> directly, not through the origin this
+            browser is using — that gateway deliberately does not forward webhook deliveries.
+            Enter the address Jira can reach <code>{endpoint.id}</code> on.
+          </p>
+        )}
+        {override.trim() !== '' && override.trim() !== browserOrigin && !remoteHost && (
           <p className="transport-hint">
             This browser reached the server at <code>{browserOrigin}</code>, which is different.
           </p>

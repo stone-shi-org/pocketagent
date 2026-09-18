@@ -7,9 +7,10 @@ import type {
   SessionTransport,
   WorkspaceEntry,
 } from '@pocketagent/protocol';
-import { api, ApiError } from '../api/client.js';
+import { ApiError } from '../api/client.js';
 import { flattenProjects } from '../agent/search.js';
 import { formatRelative } from './StatusBadge.js';
+import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
   onCreated: (sessionId: string) => void;
@@ -20,6 +21,7 @@ interface Props {
 type Mode = 'new' | 'resume' | 'adopt';
 
 export function NewSessionDialog({ onCreated, onCancel, onApiError }: Props): JSX.Element {
+  const api = useHostApi();
   const [mode, setMode] = useState<Mode>('new');
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
