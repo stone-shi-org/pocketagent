@@ -36,6 +36,37 @@ export function createCodexAdapter(bin: string): AgentAdapter {
       return { command: bin, args: [] };
     },
 
+    bin,
+
+    /**
+     * `codex login status` prints one line ("Logged in using ChatGPT") in
+     * ~0.1s, locally. Text rather than JSON, so the matching below is
+     * deliberately narrow and falls through to `unknown`.
+     *
+     * Not `codex doctor --json`, which reports far more but performs DNS, a
+     * WSS handshake to the provider and an HTTP reachability probe — that is a
+     * diagnostic, not a cheap local check, and it would make this probe fail
+     * on a host with no outbound network even while signed in.
+     */
+    authProbe: {
+      args: ['login', 'status'],
+      interpret({ stdout, stderr, timedOut }) {
+        if (timedOut) return { state: 'unknown', detail: 'codex login status did not respond in time.' };
+        const text = `${stdout}\n${stderr}`.trim();
+        // "not logged in" has to be tested first: it contains "logged in".
+        if (/\bnot\s+logged\s+in\b/i.test(text) || /\bnot\s+authenticated\b/i.test(text)) {
+          return { state: 'signed-out', detail: 'Not signed in. Run `codex login` in a shell session on this host.' };
+        }
+        if (/\blogged\s+in\b/i.test(text)) {
+          return { state: 'ready', detail: text.split('\n')[0]?.trim().slice(0, 200) ?? 'Signed in' };
+        }
+        return {
+          state: 'unknown',
+          detail: text === '' ? 'codex login status printed nothing.' : text.slice(0, 200),
+        };
+      },
+    },
+
     isAvailable() {
       return resolveExecutable(bin) !== null;
     },

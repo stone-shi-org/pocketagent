@@ -374,6 +374,14 @@ export const RuntimeSettings = z.object({
   opencodeBin: z.string().min(1),
   codexBin: z.string().min(1),
   piBin: z.string().min(1),
+  /**
+   * PA-68: where `POST /api/agents/install` writes. Must be a directory
+   * `agents/registry.ts` searches, or an install succeeds and stays invisible
+   * — `GET /api/agents/installable` reports `prefixDetectable: false` rather
+   * than letting the UI offer one that cannot work. In the container image
+   * this is the mounted agent prefix, so an install survives a restart.
+   */
+  agentInstallPrefix: z.string().min(1),
   webDistPath: z.string().min(1),
   backend: z.enum(['direct', 'tmux']),
   tmuxBin: z.string().min(1),

@@ -345,12 +345,24 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
           busy={busy('piBin')}
           onChange={(v) => saveDebounced('piBin', v)}
         />
+        {/* PA-68. Kept in this section rather than next to "Coding Agents"
+            because it belongs with the other five paths: it is where an
+            on-demand install writes, and it only works if it is a directory
+            `agents/registry.ts` already searches — which is why the setup
+            dialog refuses to offer an install when it is not. */}
+        <TextRow
+          label="Agent install prefix"
+          restart={restart.has('agentInstallPrefix')}
+          value={settings.agentInstallPrefix}
+          busy={busy('agentInstallPrefix')}
+          onChange={(v) => saveDebounced('agentInstallPrefix', v)}
+        />
       </SectionCard>
 
       <SectionCard
         title="Coding Agents"
         icon="code"
-        desc="Availability and model catalog for each coding agent CLI, as last observed."
+        desc="Whether each coding agent CLI is installed and signed in, its model catalog as last observed, and on-demand installation."
       >
         <CodingAgentsSection onApiError={onApiError} />
       </SectionCard>

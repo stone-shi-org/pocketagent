@@ -38,7 +38,8 @@
     "demo:webhook-ui": "pnpm -F @pocketagent/server exec node scripts/webhook-ui-demo.mjs",
     "demo:deepseek-variant": "pnpm -F @pocketagent/server exec node scripts/deepseek-variant-demo.mjs",
     "demo:provider-ui": "pnpm -F @pocketagent/server exec node scripts/provider-ui-demo.mjs",
-    "demo:multi-host-ui": "pnpm -F @pocketagent/server exec node scripts/multi-host-ui-demo.mjs"
+    "demo:multi-host-ui": "pnpm -F @pocketagent/server exec node scripts/multi-host-ui-demo.mjs",
+    "demo:agent-install-ui": "pnpm -F @pocketagent/server exec node scripts/agent-install-ui-demo.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

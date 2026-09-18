@@ -3,6 +3,8 @@ import path from 'node:path';
 import Fastify, { LogController, type FastifyInstance, type FastifyReply } from 'fastify';
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
+import { AgentInstallService, type InstallRunner } from './agents/install.js';
+import { agentInstallRoutes } from './routes/agent-install.js';
 import websocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
 import { AUTH_COOKIE_NAME, LIMITS, SERVER_PROTOCOL_RANGE } from '@pocketagent/protocol';
@@ -200,6 +202,13 @@ export interface BuildAppOptions {
       practice this never fires in a test unless the test itself creates a
       `telegram_bots` row, since an empty bot list polls nothing. */
   telegramFetch?: typeof fetch;
+  /**
+   * PA-68: injected so a test never runs a real `npm install`. The same
+   * injection seam `plannerLlmFetch`/`telegramFetch` use, and for a sharper
+   * version of the same reason — this one would fetch and execute a package
+   * from the public registry.
+   */
+  agentInstallRunner?: InstallRunner;
   /** Injected in tests to make the poller's reconcile tick fast enough to
       assert against without a real 10s wait. */
   telegramReconcileIntervalMs?: number;
@@ -522,6 +531,19 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     }),
   ]);
 
+  // PA-68. Constructed here rather than lazily in the route because it owns
+  // in-flight install jobs: a service rebuilt per request could not attach a
+  // second stream to an install already running. `installPrefix` is a closure
+  // over the live config so the setting applies to the next install without a
+  // restart, which is what `live: true` in `settings/fields.ts` promises.
+  const agentInstall = new AgentInstallService({
+    db,
+    agents,
+    installPrefix: () => config.agentInstallPrefix,
+    ...(options.agentInstallRunner ? { runner: options.agentInstallRunner } : {}),
+    logger: app.log,
+  });
+
   const cron = new CronService({
     db,
     sessions,
@@ -612,6 +634,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     plannerSkillsRoot,
     ...(options.plannerLlmFetch ? { plannerLlmFetch: options.plannerLlmFetch } : {}),
     agents,
+    agentInstall,
     customClaudeProviders,
     telegramBots,
     telegramLinks,
@@ -769,6 +792,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   await app.register(authRoutes);
   await app.register(sessionRoutes);
+  await app.register(agentInstallRoutes);
   await app.register(worktreeRoutes);
   await app.register(cronRoutes);
   await app.register(customClaudeProviderRoutes);

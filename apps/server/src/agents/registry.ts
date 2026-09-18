@@ -56,6 +56,19 @@ export class AgentRegistry {
   }
 
   /**
+   * The adapters themselves, in `list()`'s order.
+   *
+   * `list()` returns the browser-facing projection, which deliberately drops
+   * the server-internal fields (`structuredKind`, `requiresAttendedUse`,
+   * `authProbe`). PA-68's authentication probe needs one of those, so it needs
+   * the adapters rather than their projection — kept read-only, and in the
+   * same order, so a caller iterating this sees the picker's ordering too.
+   */
+  listAdapters(): readonly AgentAdapter[] {
+    return this.ordered();
+  }
+
+  /**
    * Insert or replace a user-managed Claude provider (PA-28), live.
    *
    * This is the one dynamic part of an otherwise static registry, and it is
@@ -107,7 +120,17 @@ export class AgentRegistry {
    */
   list(): Omit<
     AgentInfo,
-    'defaultModel' | 'defaultEffort' | 'cachedModels' | 'lastRefreshAt' | 'lastRefreshOk' | 'lastRefreshError'
+    | 'defaultModel'
+    | 'defaultEffort'
+    | 'cachedModels'
+    | 'lastRefreshAt'
+    | 'lastRefreshOk'
+    | 'lastRefreshError'
+    | 'setupState'
+    | 'setupDetail'
+    | 'lastInstallAt'
+    | 'lastInstallOk'
+    | 'lastInstallError'
   >[] {
     return this.ordered().map((a) => ({
       id: a.id,
@@ -120,6 +143,7 @@ export class AgentRegistry {
       forcesSkipPermissions: a.forcesSkipPermissions ?? false,
       staticModels: a.staticModels ?? [],
       providerDisclosure: a.providerDisclosure ?? null,
+      binOverridden: isExplicitPath(a.bin),
     }));
   }
 
@@ -163,19 +187,56 @@ export function createDefaultRegistry(options: RegistryOptions): AgentRegistry {
   return registry;
 }
 
+/**
+ * Whether a configured executable names an explicit path rather than a bare
+ * name to be resolved.
+ *
+ * The distinction is load-bearing for PA-68 rather than cosmetic: an explicit
+ * path takes the early return in `resolveExecutable` below, so none of the
+ * fallback directories — including the on-demand install prefix — is ever
+ * consulted for that agent. An install would then succeed and stay invisible.
+ * Shared with `AgentRegistry.list`'s `binOverridden` so the rule is stated
+ * once. `undefined` (an adapter that declares no `bin`) is not an override.
+ */
+export function isExplicitPath(bin: string | undefined): boolean {
+  if (bin === undefined) return false;
+  const expanded = bin.startsWith('~') ? path.join(os.homedir(), bin.slice(1)) : bin;
+  return expanded.includes('/') || expanded.includes(path.sep);
+}
+
+/**
+ * Directories searched after `PATH` for a bare executable name.
+ *
+ * Exported because PA-68's install prefix has to be one of these or an install
+ * lands somewhere this server never looks — `GET /api/agents/installable`
+ * reports that as `prefixDetectable: false` instead of offering an install
+ * that cannot work, and the setup dialog says so.
+ *
+ * `~/.opencode/bin` is here because opencode's own installer puts the binary
+ * there and nothing else does: without it a host with a perfectly working
+ * `opencode` reports the agent as missing, which was true on the development
+ * machine while this was being written. `~/.bun/bin` and `~/.deno/bin` are
+ * deliberately absent — no agent here installs to either, and this list should
+ * grow on evidence rather than on speculation about package managers.
+ */
+export function agentBinSearchDirs(): string[] {
+  const home = os.homedir();
+  return [
+    path.join(home, '.local', 'bin'),
+    path.join(home, '.cargo', 'bin'),
+    path.join(home, '.npm-global', 'bin'),
+    path.join(home, '.opencode', 'bin'),
+  ];
+}
+
 /** Resolve a bare name against PATH and standard user bin dirs, or validate an absolute path. */
 export function resolveExecutable(bin: string): string | null {
   const expanded = bin.startsWith('~') ? path.join(os.homedir(), bin.slice(1)) : bin;
-  if (expanded.includes('/') || expanded.includes(path.sep)) {
+  if (isExplicitPath(bin)) {
     return isExecutable(expanded) ? path.resolve(expanded) : null;
   }
   const pathEnv = process.env.PATH ?? '';
-  const searchDirs = [
-    ...pathEnv.split(path.delimiter).filter(Boolean),
-    path.join(os.homedir(), '.local', 'bin'),
-    path.join(os.homedir(), '.cargo', 'bin'),
-    path.join(os.homedir(), '.npm-global', 'bin'),
-  ];
+  const searchDirs = [...pathEnv.split(path.delimiter).filter(Boolean), ...agentBinSearchDirs()];
   for (const dir of searchDirs) {
     const candidate = path.join(dir, expanded);
     if (isExecutable(candidate)) return candidate;

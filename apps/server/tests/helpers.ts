@@ -9,6 +9,7 @@ import type { AgyTranscriptStore } from '../src/conversations/agy.js';
 import type { PiTranscriptStore } from '../src/conversations/pi.js';
 import type { PocketContext } from '../src/types.js';
 import type { AgentAdapter } from '../src/agents/types.js';
+import type { InstallRunner } from '../src/agents/install.js';
 
 export const TEST_TOKEN = 'test-token-that-is-long-enough-1234567890';
 
@@ -84,6 +85,8 @@ export async function createTestApp(
   /** Injected so a Telegram poll loop / `send_telegram_message` tool call
       never makes a real network call either. */
   telegramFetch?: typeof fetch,
+  /** PA-68: injected so no test ever runs a real `npm install -g`. */
+  agentInstallRunner?: InstallRunner,
 ): Promise<TestApp> {
   const ws = makeWorkspace();
   const config = makeConfig({
@@ -111,6 +114,7 @@ export async function createTestApp(
     plannerSkillsRoot,
     ...(plannerLlmFetch ? { plannerLlmFetch } : {}),
     ...(telegramFetch ? { telegramFetch } : {}),
+    ...(agentInstallRunner ? { agentInstallRunner } : {}),
     // Fast enough for a test to assert against without a real 10s wait,
     // slow enough not to spin the CPU during tests that never touch Telegram.
     telegramReconcileIntervalMs: 200,

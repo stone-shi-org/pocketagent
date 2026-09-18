@@ -1298,6 +1298,29 @@ export const MIGRATIONS: readonly string[] = [
 
   CREATE INDEX IF NOT EXISTS idx_hub_credentials_created_at ON hub_credentials (created_at);
   `,
+  // PA-68: on-demand agent installation. Six columns, two groups, and they are
+  // separate for the same reason `last_refresh_*` is separate from
+  // `updated_at`: each answers a different question and one must not overwrite
+  // the other's answer.
+  //
+  // `last_auth_*` caches the sign-in probe, because it cannot run on
+  // `GET /api/agents` — that route recomputes `available` synchronously per
+  // request and six components fetch it on mount, so probing inline would
+  // spawn N CLIs per page load. Null means "never probed", which
+  // `deriveSetupState` renders as `unknown` rather than guessing.
+  //
+  // `last_install_*` records the outcome of an install so "install failure
+  // surfaces the real error" survives a page reload. The install *log* is
+  // deliberately not stored anywhere — it is process output, which this app
+  // never persists — so this is the error string only.
+  `
+  ALTER TABLE agent_defaults ADD COLUMN last_auth_at INTEGER;
+  ALTER TABLE agent_defaults ADD COLUMN last_auth_state TEXT;
+  ALTER TABLE agent_defaults ADD COLUMN last_auth_detail TEXT;
+  ALTER TABLE agent_defaults ADD COLUMN last_install_at INTEGER;
+  ALTER TABLE agent_defaults ADD COLUMN last_install_ok INTEGER;
+  ALTER TABLE agent_defaults ADD COLUMN last_install_error TEXT;
+  `,
 ];
 
 /**
@@ -1427,6 +1450,30 @@ export function openDatabase(databasePath: string): Db {
   );
   if (issueSessionColumns.size > 0 && !issueSessionColumns.has('agent')) {
     db.exec('ALTER TABLE webhook_issue_sessions ADD COLUMN agent TEXT');
+  }
+  // PA-68, the same hazard again and for the same reason: this migration was
+  // appended on a feature branch, so a database checkpointed by a sibling
+  // branch with the same migration count skips it forever. `recordAgentAuthProbe`
+  // and `recordAgentInstall` name these columns unconditionally, so a miss
+  // would 500 the Refresh action and every install rather than degrade quietly
+  // — exactly PA-21's failure mode. Probed idempotently, one column at a time,
+  // because a half-applied migration is the state this repair exists to fix.
+  const agentDefaultColumns = new Set(
+    (db.prepare('PRAGMA table_info(agent_defaults)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (agentDefaultColumns.size > 0) {
+    for (const [name, ddl] of [
+      ['last_auth_at', 'ALTER TABLE agent_defaults ADD COLUMN last_auth_at INTEGER'],
+      ['last_auth_state', 'ALTER TABLE agent_defaults ADD COLUMN last_auth_state TEXT'],
+      ['last_auth_detail', 'ALTER TABLE agent_defaults ADD COLUMN last_auth_detail TEXT'],
+      ['last_install_at', 'ALTER TABLE agent_defaults ADD COLUMN last_install_at INTEGER'],
+      ['last_install_ok', 'ALTER TABLE agent_defaults ADD COLUMN last_install_ok INTEGER'],
+      ['last_install_error', 'ALTER TABLE agent_defaults ADD COLUMN last_install_error TEXT'],
+    ] as const) {
+      if (!agentDefaultColumns.has(name)) db.exec(ddl);
+    }
   }
   // PA-28, same positional-migration hazard once more: a database whose
   // checkpoint already sat at or past this migration's index (see the two
@@ -1619,6 +1666,18 @@ export interface AgentDefaultsRow {
   last_refresh_ok: number | null;
   /** Set only when `last_refresh_ok` is 0. */
   last_refresh_error: string | null;
+  /** PA-68. See `recordAgentAuthProbe`. Null until a probe has ever run. */
+  last_auth_at: number | null;
+  /** `'ready' | 'signed-out' | 'unknown'`, or null when never probed. */
+  last_auth_state: string | null;
+  /** The probe's own words, kept so `unknown` and `signed-out` are legible. */
+  last_auth_detail: string | null;
+  /** PA-68. See `recordAgentInstall`. Null until an install has been attempted. */
+  last_install_at: number | null;
+  /** 1/0/null, mirroring `last_install_at`'s "never attempted" null. */
+  last_install_ok: number | null;
+  /** The real install error, set only when `last_install_ok` is 0. */
+  last_install_error: string | null;
 }
 
 export function readAgentDefaults(db: Db, agentId: string): AgentDefaultsRow | null {
@@ -1679,6 +1738,77 @@ export function recordAgentRefresh(
          last_refresh_at = excluded.last_refresh_at,
          last_refresh_ok = excluded.last_refresh_ok,
          last_refresh_error = excluded.last_refresh_error`,
+  ).run(
+    agentId,
+    existing?.model ?? null,
+    existing?.effort ?? null,
+    existing?.models_json ?? null,
+    existing?.updated_at ?? Date.now(),
+    Date.now(),
+    result.ok ? 1 : 0,
+    result.ok ? null : result.error,
+  );
+}
+
+/**
+ * Cache one authentication probe's answer (PA-68).
+ *
+ * Read-modify-write for the same reason `recordAgentRefresh` is: only this
+ * group of columns is touched, so a probe never blanks a model catalog a live
+ * session populated, and a refresh never blanks a probe result.
+ *
+ * `detail` is stored even for `ready` because that is the string the UI shows
+ * ("Signed in (claude.ai, enterprise)"), and for `unknown` it is the only
+ * thing that makes the state actionable rather than mysterious.
+ */
+export function recordAgentAuthProbe(
+  db: Db,
+  agentId: string,
+  result: { state: string; detail: string | null },
+): void {
+  const existing = readAgentDefaults(db, agentId);
+  db.prepare(
+    `INSERT INTO agent_defaults
+       (agent_id, model, effort, models_json, updated_at, last_auth_at, last_auth_state, last_auth_detail)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET
+         last_auth_at = excluded.last_auth_at,
+         last_auth_state = excluded.last_auth_state,
+         last_auth_detail = excluded.last_auth_detail`,
+  ).run(
+    agentId,
+    existing?.model ?? null,
+    existing?.effort ?? null,
+    existing?.models_json ?? null,
+    existing?.updated_at ?? Date.now(),
+    Date.now(),
+    result.state,
+    result.detail,
+  );
+}
+
+/**
+ * Record the outcome of one install attempt (PA-68).
+ *
+ * The error is persisted but the log is not: a failed install has to stay
+ * legible after the operator navigates away — otherwise "install failure
+ * surfaces the real error" only holds while the SSE stream is open — but the
+ * full npm output is process output, and this app does not store that.
+ */
+export function recordAgentInstall(
+  db: Db,
+  agentId: string,
+  result: { ok: true } | { ok: false; error: string },
+): void {
+  const existing = readAgentDefaults(db, agentId);
+  db.prepare(
+    `INSERT INTO agent_defaults
+       (agent_id, model, effort, models_json, updated_at, last_install_at, last_install_ok, last_install_error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET
+         last_install_at = excluded.last_install_at,
+         last_install_ok = excluded.last_install_ok,
+         last_install_error = excluded.last_install_error`,
   ).run(
     agentId,
     existing?.model ?? null,

@@ -37,6 +37,8 @@ export function createPiAdapter(bin: string): AgentAdapter {
       return { command: bin, args: [] };
     },
 
+    bin,
+
     isAvailable() {
       return resolveExecutable(bin) !== null;
     },

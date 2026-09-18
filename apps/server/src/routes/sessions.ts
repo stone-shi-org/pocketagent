@@ -15,6 +15,7 @@ import { CronServiceError } from '../cron/index.js';
 import { readSessionHistory } from '../sessions/history.js';
 import { WorkspaceError } from '../workspaces/index.js';
 import { readAgentDefaults } from '../db/index.js';
+import { deriveSetupState, refreshAgentAuthStates } from '../agents/auth-probe.js';
 import { resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
@@ -60,6 +61,21 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
             ? null
             : cached.last_refresh_ok === 1,
           lastRefreshError: cached?.last_refresh_error ?? null,
+          // PA-68. Derived here rather than stored, because `available` is
+          // recomputed per request and must win: a cached `ready` for an agent
+          // whose binary has since been deleted has to read as
+          // `not-installed`, never as ready. `deriveSetupState` is the one
+          // place that rule lives, shared with the install service so a
+          // freshly finished install and the next list agree.
+          ...deriveSetupState(agent.available, {
+            state: cached?.last_auth_state ?? null,
+            detail: cached?.last_auth_detail ?? null,
+          }),
+          lastInstallAt: cached?.last_install_at ?? null,
+          lastInstallOk: cached?.last_install_ok === null || cached?.last_install_ok === undefined
+            ? null
+            : cached.last_install_ok === 1,
+          lastInstallError: cached?.last_install_error ?? null,
         };
       }),
     };
@@ -80,7 +96,14 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
    * on each row is where that surfaces.
    */
   app.post('/api/agents/refresh', async () => {
-    await sessions.refreshAgentCatalogs();
+    // PA-68 folds the authentication probe into the same explicit action
+    // rather than adding a second button or a background poller. The two are
+    // independent (a model catalog says nothing about credentials — see
+    // `probeClaudeModels`, which deliberately never sends a turn), they answer
+    // the same question an operator is asking when they press Refresh, and
+    // running them together keeps `GET /api/agents` free of subprocesses.
+    // Both are best-effort per agent and neither can fail this route.
+    await Promise.all([sessions.refreshAgentCatalogs(), refreshAgentAuthStates(db, agents)]);
     return listAgentsWithCache();
   });
 

@@ -142,6 +142,7 @@ running keeps running.
 | `POCKETAGENT_AUTH_TOKEN` | — | **Required.** Min 24 chars. |
 | `POCKETAGENT_WORKSPACE_ROOTS` | — | Optional. Seeds project folders on a fresh database only. |
 | `POCKETAGENT_DATA_DIR` | `<checkout>/data` | Where the database and the Pocket Agent scratch/skills directories live. Refused if it resolves inside a project folder. See [The data root](#the-data-root). |
+| `POCKETAGENT_AGENT_INSTALL_PREFIX` | `~/.npm-global` | Where **Set up agents** installs an agent CLI. Must be a directory the server searches for agent binaries. See [Installing agents](#installing-agents). |
 | `POCKETAGENT_SESSION_TTL_HOURS` | `720` | How long a browser stays signed in. |
 | `POCKETAGENT_COOKIE_SECURE` | auto | `Secure` cookie flag; defaults to on when `NODE_ENV=production`. |
 | `POCKETAGENT_ALLOWED_ORIGINS` | same-origin | Comma-separated Origin allowlist. |
@@ -1337,9 +1338,53 @@ export function createCodexAdapter(bin: string): AgentAdapter {
 }
 ```
 
-Register it in `apps/server/src/agents/registry.ts`. It appears in the UI automatically,
-greyed out if the executable is not on `PATH`. Nothing else in the codebase is
+Register it in `apps/server/src/agents/registry.ts`. It appears in the UI automatically, and
+its row reports whether the executable is present. Nothing else in the codebase is
 agent-specific.
+
+Two optional fields are worth adding if the CLI supports them. `bin` declares the configured
+executable, which is what lets the UI warn when it is pinned to an absolute path (that bypasses
+the install prefix). `authProbe` declares how to ask the CLI whether it is signed in — argv plus
+a pure `interpret` function. If the CLI has no non-interactive way to answer, leave it out: the
+row then reports *Sign-in unknown*, which is the honest answer and is handled everywhere.
+
+To make an agent installable from the UI, add it to `apps/server/src/agents/catalog.ts` with a
+pinned npm version, add its id to `INSTALLABLE_AGENT_IDS` in
+`packages/protocol/src/agent-install.ts`, and add the matching pin to
+`docker/agent-versions.env` — a test fails if those last two disagree. An agent with no npm
+package should stay out of the catalog rather than acquire a `curl | sh` install path; see the
+note about `agy` in either file.
+
+### Installing agents
+
+The thin container image ships no agent CLIs, so a freshly deployed backend can run nothing
+until one is installed. **Settings → Coding Agents → Set up agents…** lists what this host has,
+what state each one is in, and offers to install the missing ones. Install runs on the backend
+and streams npm's output as it goes.
+
+Each row is one of four states, and the distinction matters:
+
+| State | Meaning |
+| --- | --- |
+| **Not installed** | No such executable on this host. Installable unless it has no npm package. |
+| **Not signed in** | Installed, and the CLI reports it has no credentials. Open a Shell session on that host and sign in — there is no way to do it from here, and the dialog says so rather than pretending. |
+| **Sign-in unknown** | Installed, but the CLI cannot be asked non-interactively. Not an error; it may work, including via an environment variable this server cannot see. |
+| **Ready** | Installed and signed in. |
+
+Three properties are deliberate. The browser sends only an **id from the server's own catalog** —
+never a package name, version or registry — because installing is arbitrary code execution as the
+server's user (`npm install` runs the package's install scripts); versions are pinned for the
+same reason. There is **no auto-install**: choosing an uninstalled agent in the composer opens
+this dialog rather than fetching anything, so a mistyped id cannot install a package. And the
+install **is not tied to the browser** — closing the dialog leaves it running, and reopening
+attaches to it and replays the log, because a half-installed package tree is worse than either
+outcome.
+
+Installs land in `POCKETAGENT_AGENT_INSTALL_PREFIX` (default `~/.npm-global`), which must be a
+directory the server searches for agent binaries — otherwise an install would succeed and the
+binary would never be found, so the dialog refuses to offer one and tells you to fix the setting.
+In the container image that path is inside the mounted `$HOME`, which is what makes an installed
+agent **survive a restart** with nothing extra to mount.
 
 ### Layout
 
@@ -1464,6 +1509,22 @@ the upgrade. See the nginx snippet above. Check `/health` still responds.
 **"Claude Code executable not found."** `claude` is not on the `PATH` of the *server*
 process. Systemd user services get a minimal environment — set an absolute path:
 `POCKETAGENT_CLAUDE_BIN=/home/me/.local/bin/claude`.
+
+Since PA-68 there is a second answer: if `claude` is not installed on that host at all,
+**Settings → Coding Agents → Set up agents…** will install it. Note the two fixes pull in
+opposite directions — setting an absolute path makes the server stop searching the install
+prefix, so an agent whose binary is pinned that way cannot be installed from the UI and the
+dialog says so rather than offering a button that appears to do nothing. Pick one: an absolute
+path, *or* a bare name plus the install prefix.
+
+**"Ready" / "Not signed in" / "Sign-in unknown" on an agent row.** These are three different
+things. *Not signed in* means the CLI is installed and told us it has no credentials — open a
+Shell session on that host and sign in. *Sign-in unknown* means the CLI has no way to answer the
+question non-interactively (`agy` has no such subcommand; opencode only prints a decorated
+table), so the state is genuinely unknown rather than bad — the agent may well work, including
+when it is authenticated by an environment variable this server cannot see. It is deliberately
+not shown as a tick, because claiming an agent is ready and then failing its first session is
+the failure this replaced.
 
 **A third-party provider variant fails with `502 Stream ended before producing a non-ping
 SSE event`.** The message is the gateway's, not PocketAgent's, and it hides the real cause —

@@ -119,4 +119,63 @@ export interface AgentAdapter {
    * out the option in the UI; session start re-checks and fails loudly.
    */
   isAvailable?(): boolean;
+
+  /**
+   * The configured executable, as written — a bare name to resolve against
+   * PATH and the install prefix, or an explicit path (PA-68).
+   *
+   * Every adapter already closes over this for `isAvailable`; declaring it
+   * makes it readable, which two callers need. `AgentRegistry.list` reports
+   * `binOverridden` from it, because an explicit path means `resolveExecutable`
+   * never looks in the install prefix and so an on-demand install would
+   * silently appear to do nothing. And `AgentInstallService` re-resolves it
+   * after an install to confirm the binary actually landed somewhere this
+   * server will find, rather than trusting npm's exit code — which is the
+   * mistake `docker/Dockerfile`'s own `test -x` exists to catch, having
+   * shipped broken once.
+   */
+  bin?: string;
+
+  /**
+   * How to ask this CLI whether it is signed in, or undefined when it cannot
+   * be asked (PA-68).
+   *
+   * Declarative rather than a method that spawns, so the interpretation — the
+   * part that is actually specific and actually breaks when a CLI changes its
+   * output — is a pure function a unit test can drive with recorded output
+   * instead of a real credentialed CLI.
+   *
+   * Undefined is the honest answer for several of these: `agy` has no
+   * auth/login/status subcommand at all, and `opencode auth list` emits
+   * ANSI-decorated box drawing with no JSON option. Those report `unknown`
+   * rather than a guess — see `AgentSetupState`.
+   */
+  authProbe?: AgentAuthProbe;
+}
+
+/** Outcome of one authentication probe. Never "not installed" — that is decided before probing. */
+export interface AgentAuthResult {
+  state: 'ready' | 'signed-out' | 'unknown';
+  /** The CLI's own words where possible, so a failure is legible rather than generic. */
+  detail: string | null;
+}
+
+export interface AgentAuthProbe {
+  /** argv after the executable. Must be read-only and must not need a TTY. */
+  args: string[];
+  /**
+   * Pure. Given what the probe printed, decide the state.
+   *
+   * Must tolerate anything: a CLI that changed its output format has to
+   * degrade to `unknown` with the text it did print, never to `ready` (which
+   * would recreate the cryptic-first-session failure this feature exists to
+   * prevent) and never to `signed-out` (which would nag an operator who is
+   * authenticated through an environment variable).
+   */
+  interpret(result: {
+    stdout: string;
+    stderr: string;
+    code: number | null;
+    timedOut: boolean;
+  }): AgentAuthResult;
 }

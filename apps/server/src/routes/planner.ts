@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { openSseStream } from './sse.js';
 import {
   CALL_MCP_TOOL_NAME,
   CreatePlannerChatRequest,
@@ -148,6 +149,7 @@ function mapChatError(reply: FastifyReply, err: unknown): FastifyReply | never {
  * turn a promise rejection into.
  */
 async function streamPlannerEvents(
+  request: FastifyRequest,
   reply: FastifyReply,
   generator: AsyncGenerator<AgentEvent>,
 ): Promise<void> {
@@ -159,29 +161,28 @@ async function streamPlannerEvents(
     return;
   }
 
-  reply.hijack();
-  reply.raw.writeHead(200, {
-    'content-type': 'text/event-stream',
-    'cache-control': 'no-store',
-    connection: 'keep-alive',
-  });
-
-  const write = (event: AgentEvent): void => {
-    reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
-  };
+  // No heartbeat and no disconnect handler, deliberately — see
+  // `openSseStream`'s doc comment. A chat turn is short and the browser is
+  // watching it; adding either here as a side effect of PA-68 extracting this
+  // writer would change behaviour this path has shipped and been tested with.
+  const stream = openSseStream(request, reply);
 
   try {
-    if (!first.done) write(first.value);
+    if (!first.done) stream.write(first.value);
     for await (const event of generator) {
-      write(event);
+      stream.write(event);
     }
   } catch (err) {
     // Not expected in normal operation (see this function's doc comment),
     // but if something still throws mid-stream there is no status left to
     // change — a final in-band notice is the only way left to say so.
-    write({ kind: 'notice', level: 'error', text: `Unexpected error: ${(err as Error).message}` });
+    stream.write({
+      kind: 'notice',
+      level: 'error',
+      text: `Unexpected error: ${(err as Error).message}`,
+    } satisfies AgentEvent);
   }
-  reply.raw.end();
+  stream.end();
 }
 
 /**
@@ -1113,7 +1114,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
         ...(parsed.data.image ? { image: parsed.data.image } : {}),
       },
     );
-    await streamPlannerEvents(reply, generator);
+    await streamPlannerEvents(request, reply, generator);
   });
 
   /**
@@ -1134,6 +1135,6 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
     const generator = app.pocket.plannerChats.resolveApproval(id, approvalId, parsed.data.decision);
-    await streamPlannerEvents(reply, generator);
+    await streamPlannerEvents(request, reply, generator);
   });
 };

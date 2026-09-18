@@ -39,6 +39,8 @@ export function createAgyAdapter(bin: string): AgentAdapter {
       return { command: bin, args: [] };
     },
 
+    bin,
+
     isAvailable() {
       return resolveExecutable(bin) !== null;
     },

@@ -106,7 +106,7 @@ and `adopt.test.ts` skip themselves when `tmux` is not installed.
 ### Live demos
 
 The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
-decision. Fifteen demo scripts do, against a *running* server:
+decision. Sixteen demo scripts do, against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -124,6 +124,7 @@ PA_TOKEN=... pnpm demo:webhook-ui        # webhooks: secret panel, signed delive
 PA_DEEPSEEK_KEY=... pnpm demo:deepseek-variant   # cross-provider resume: one transcript, two providers
 PA_DEEPSEEK_KEY=... pnpm demo:provider-ui        # provider CRUD, picker, disclosure banner, "Continue as…"
 PA_TOKEN=... pnpm demo:multi-host-ui     # multi-host: rail, sheet, aggregate home, deep links, both viewports
+PA_TOKEN=... pnpm demo:agent-install-ui  # agent setup dialog: four states, streamed install, phone viewport
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -246,6 +247,78 @@ a `legacy_claude_providers_migrated` settings flag so it never runs again. Flag-
 provider does not resurrect it. With no encryption key the import is *deferred* and the flag is
 **not** written — consuming the one-shot with nothing to encrypt with would mean it silently never
 happens.
+
+### On-demand agent installation (PA-68)
+
+What makes the thin image usable: it ships no agent CLIs, so a freshly bound backend can run
+nothing until one is installed. `agents/catalog.ts` declares what may be installed,
+`agents/install.ts` does it, `routes/agent-install.ts` exposes it, and the whole id-only posture
+is the "browser never supplies an executable or argv" invariant — see the invariants list, which
+is where the security reasoning lives rather than here.
+
+**Detection really was nearly free; the third state was not.** `resolveExecutable` already
+searched `~/.local/bin`, `~/.cargo/bin` and `~/.npm-global/bin`, so pointing the install prefix at
+one of those needs no detection code at all — and the container image already sets
+`NPM_CONFIG_PREFIX=$HOME/.npm-global`, mounts `$HOME` and puts that prefix *first* on PATH, so
+`config.agentInstallPrefix` defaults to the same directory and the bare-metal default agrees with
+the image by construction rather than by a second decision. (`~/.opencode/bin` was added to that
+search list in the same work: opencode's own installer puts the binary there and nothing else
+does, so a host with a perfectly working `opencode` reported it missing.)
+
+What was *not* free is that **installed is not authenticated**. `AgentSetupState` has four values,
+not the three the ticket asked for, and the fourth is the interesting one. Only some of these CLIs
+can be asked non-interactively and cheaply — `claude auth status` answers JSON in ~0.2s,
+`codex login status` a line of text in ~0.1s, and `agy` has no such subcommand at all — so
+`unknown` is a real answer rather than a gap. Rounding it to `ready` would recreate exactly the
+"sees claude ✓, first session fails cryptically" failure the feature exists to prevent, and
+rounding it to `signed-out` would nag an operator authenticated through `ANTHROPIC_API_KEY` (a
+real third path: opencode reads `HF_TOKEN` the same way), which is also why reading a credential
+file is the wrong probe in both directions. `AgentAdapter.authProbe` is therefore *declarative* —
+argv plus a pure `interpret` — so the part that actually breaks when a CLI changes its output is
+a function a unit test drives with recorded output instead of a real credentialed CLI.
+
+**The probe is cached and never runs on a GET.** `GET /api/agents` recomputes `available`
+synchronously on every request and is fetched on mount by six components, so spawning a CLI there
+would turn a cheap list into N subprocesses per page load. Results live in `agent_defaults`'s
+`last_auth_*` columns beside `last_refresh_*`, refreshed by the existing Settings "Refresh" button
+and immediately after an install — so the state half adds **no new routes**, and `deriveSetupState`
+is the single place the rule lives, with `available` winning outright (a cached `ready` for a
+binary since deleted must read `not-installed`). Deliberately *not* reused: `usage/claude-source.ts`
+already makes an authenticated call, but it exists for only three of five agents, conflates a
+missing binary with a signed-out one, and `claude -p /usage` is a headless agent invocation that
+files a transcript — the whole reason `usage/probe-cwd.ts` exists.
+
+**An install is a job; the SSE stream is only a view of it.** The existing
+`streamPlannerEvents` has no heartbeat, no disconnect handling and no abort, which a 30-second
+chat turn can afford and a multi-minute install cannot: a phone locking its screen or a proxy
+idle timeout would otherwise abort an install halfway through a package tree, or leave it writing
+to a dead socket forever. So `AgentInstallService` owns the work, the response subscribes to it,
+closing the stream detaches without cancelling, and re-`POST`ing the same id attaches to the
+install already in flight and replays its log from `afterSeq` — the same sequence-numbered
+`OutputBuffer` a terminal session uses, which already reports its own eviction. This is
+`RunExecutor`'s "the drain is the pump, not the sensor" split. `routes/sse.ts` is the one SSE
+writer both routes now share; the heartbeat and close handler are opt-in so the planner's stream
+keeps its tested behaviour, with `x-accel-buffering: no` the one unconditional change (nginx
+buffers proxied responses by default, which defeats SSE for both).
+
+Two things the install does that npm's exit code does not cover. The prefix must be a directory
+`resolveExecutable` actually searches, or an install succeeds and stays invisible — so
+`prefixDetectable` refuses up front rather than letting the UI offer it. And success is confirmed
+by re-resolving the binary (`verifyInstalled`), because a zero exit into the wrong prefix is
+exactly what `docker/Dockerfile`'s own `test -x` exists to catch, having shipped broken once; a
+binary that resolves from *outside* the prefix is not a failure but is logged, since it means an
+older copy earlier on PATH will run and the operator's upgrade silently did nothing.
+
+Timeouts: the installer is bounded at 10 minutes and one install runs at a time (a second for a
+different agent is refused, not queued — `RunQueue` keys on working trees and an install has
+none). A subprocess timeout here is *not* a breach of the standing no-decay rule: that rule is
+about an approval, which is a decision a human has not made yet, whereas a wedged `npm install`
+is nobody's decision and holds the only install slot.
+
+Known limitation: the catalog's pins are duplicated from `docker/agent-versions.env` rather than
+read from it, because the runtime image does not ship `docker/`. `agent-install.test.ts` parses
+that file and fails when the two disagree — the same drift guard PA-65 uses for the four
+`package.json` versions.
 
 ### Process backends — where the process lives
 
@@ -1327,7 +1400,24 @@ These are load-bearing. Several were bugs first.
   granted, and it is logged. `GET /api/browse` is read-only and can see any directory the
   server's user can; that is a deliberate widening and the cost of picking any folder.
 - **The browser never supplies an executable or argv.** Adoption and resume both take their
-  `cwd` from the server-validated target.
+  `cwd` from the server-validated target. **PA-68 extends this to installing one**, which is the
+  sharpest case yet: `POST /api/agents/install` takes an id out of a closed set and nothing else
+  — never a package name, version, registry or URL. The id set lives in
+  `packages/protocol/src/agent-install.ts` precisely so the request schema can be a `z.enum`, so
+  an arbitrary package is refused by *request validation* rather than by a handler check a future
+  refactor could drop; `agents/catalog.ts` is the only thing that turns an id into an argv, and it
+  is a frozen table with pinned versions and no create/edit route. Worth being exact about what
+  that buys, because an enum reads like a safety proof and is not one: `npm install` runs the
+  package's own `postinstall` scripts as the server's user and `--ignore-scripts` breaks these
+  CLIs, so an install is arbitrary code execution *by design*. The id check bounds **which**
+  package runs, not what it may do. The real boundary is the pinned catalog plus a human
+  deliberately pressing the button — which is why versions are pinned rather than floating, why
+  the installer is argv-only with no shell anywhere, why no unattended trigger and no planner tool
+  can reach `AgentInstallService`, and why there is no lazy auto-install on session start (a typo
+  in an agent id must never become a package installation; the composer offers the setup dialog
+  instead). `agy` is deliberately absent from the catalog: it has no npm package and the registry
+  names that look right are unrelated placeholders, so pinning one would be a supply-chain hazard
+  dressed up as completeness — the same call `docker/agent-versions.env` already made.
 - **A third-party provider variant is disclosed, and is unattended only by explicit
   per-provider opt-in** (PA-19; the opt-in is PA-28). This is an override of the *attended-use*
   rule, not of the approval rule — `skipPermissions` is untouched by it, and a provider running
@@ -1495,8 +1585,12 @@ transcript stores read other programs' private state — `~/.claude/projects`
 `~/.pi/agent/sessions` (`conversations/pi.ts`) — and a config knob there would only let this
 server look somewhere the owning CLI never writes, which fails as "no history" rather than as
 an error; each already takes a constructor override, which is how tests point at a fixture.
-`agents/registry.ts`'s `~/.local/bin`, `~/.cargo/bin`, `~/.npm-global/bin` are not a mount
-decision at all — they are PATH discovery for agent binaries, which belong in the image.
+`agents/registry.ts`'s `~/.local/bin`, `~/.cargo/bin`, `~/.npm-global/bin`, `~/.opencode/bin` are
+not a mount decision at all — they are PATH discovery for agent binaries. Those belong in the
+image, *except* the one an operator installs on demand (PA-68):
+`POCKETAGENT_AGENT_INSTALL_PREFIX` defaults to `~/.npm-global`, which is inside `$HOME` and so
+already on the documented volume, which is what makes an installed agent survive a container
+restart with nothing extra to mount.
 
 **A workspace root must be mounted at the same absolute path it has on the host.** Claude Code
 derives a transcript directory name from the cwd (`~/.claude/projects/<encoded-cwd>/`, `/` →

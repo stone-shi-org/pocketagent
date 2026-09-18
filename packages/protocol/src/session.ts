@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { EffortLevel, ModelInfo, RateLimitEvent, SessionTransport } from './agent-events.js';
+import { AgentSetupState } from './agent-install.js';
 import { CronJobSummary } from './cron.js';
 import { WebhookSummary } from './webhooks.js';
 import { ProtocolRange } from './protocol-negotiation.js';
@@ -309,6 +310,50 @@ export const AgentInfo = z.object({
   lastRefreshOk: z.boolean().nullable(),
   /** The error from that refresh, set only when `lastRefreshOk` is false. */
   lastRefreshError: z.string().nullable(),
+  /**
+   * PA-68: installed-and-authenticated state, which `available` alone cannot
+   * express — see `AgentSetupState` for why there are four values and why
+   * `unknown` is a real one.
+   *
+   * Derived fresh on every read from `available` plus the *cached* result of
+   * the last authentication probe, never by probing inline: `available` is
+   * already recomputed synchronously per request (six components fetch this
+   * list on mount) and spawning a CLI there would turn a cheap list into N
+   * subprocesses per page load. The probe runs on the explicit "Refresh"
+   * action and immediately after an install, exactly like `lastRefreshAt`.
+   */
+  setupState: AgentSetupState,
+  /**
+   * Human-readable reason behind `setupState` — the probe's own words where it
+   * has any ("Logged in using ChatGPT", "no credentials configured"), or why
+   * the state is `unknown`. Null when there is nothing to add.
+   */
+  setupDetail: z.string().nullable(),
+  /**
+   * True when this agent's configured binary is an explicit path rather than a
+   * bare name to resolve.
+   *
+   * `resolveExecutable` returns early for anything containing a separator and
+   * never consults the install prefix, so on such a host an on-demand install
+   * lands somewhere the server will not look — and the README actively tells
+   * operators to set an absolute path as the fix for "executable not found".
+   * The browser cannot work this out (it never sees `claudeBin`), so the
+   * server says it and the setup dialog discloses it instead of offering an
+   * install that would appear to do nothing.
+   */
+  binOverridden: z.boolean(),
+  /** When an install of this agent was last attempted from the UI, or null. */
+  lastInstallAt: z.number().nullable(),
+  /** Whether that install succeeded. Null alongside `lastInstallAt`. */
+  lastInstallOk: z.boolean().nullable(),
+  /**
+   * The real error from that install, set only when `lastInstallOk` is false.
+   * The full log is deliberately not persisted (it is process output, which
+   * this app never stores), but the failure has to survive a page reload or
+   * "install failure surfaces the real error" would only hold while the stream
+   * was open.
+   */
+  lastInstallError: z.string().nullable(),
 });
 export type AgentInfo = z.infer<typeof AgentInfo>;
 

@@ -4,6 +4,7 @@ import type { HubCredentialStore } from './auth/hub-credentials.js';
 import type { SessionManager } from './sessions/manager.js';
 import type { WorkspaceRegistry } from './workspaces/index.js';
 import type { AgentRegistry } from './agents/registry.js';
+import type { AgentInstallService } from './agents/install.js';
 import type { CustomClaudeProviderStore } from './agents/custom-providers-store.js';
 import type { ProcessBackend } from './backends/index.js';
 import type { Db } from './db/index.js';
@@ -60,6 +61,8 @@ export interface PocketContext {
       builds a client directly rather than through either service. */
   plannerLlmFetch?: typeof fetch;
   agents: AgentRegistry;
+  /** PA-68: on-demand agent CLI installation — see `agents/install.ts`. */
+  agentInstall: AgentInstallService;
   /** PA-28: user-managed Claude Code provider variants, kept in sync with `agents`. */
   customClaudeProviders: CustomClaudeProviderStore;
   /** PA-53: Telegram bots (secret-backed rows) and their Telegram-id -> Pocket

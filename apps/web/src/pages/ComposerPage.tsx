@@ -15,6 +15,8 @@ import { WorktreeDialog, type WorktreeChoice } from '../components/WorktreeDialo
 import { Icon } from '../components/Icon.js';
 import { effortLabel } from '../components/PromptBox.js';
 import { type Flavour, makeFlavour, parseFlavour } from '../agent/flavour.js';
+import { setupStateOf } from '../agent/agent-setup.js';
+import { AgentSetupDialog } from '../components/AgentSetupDialog.js';
 import { flattenProjects } from '../agent/search.js';
 import { resolveCurrentModel } from '../agent/transcript.js';
 import { formatRelative } from '../components/StatusBadge.js';
@@ -58,6 +60,8 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
 
   const [cwd, setCwd] = useState(initialCwd ?? '');
   const [flavour, setFlavour] = useState<Flavour | ''>('');
+  /** Non-null while the PA-68 agent setup dialog is open, naming the agent that opened it. */
+  const [setupAgentId, setSetupAgentId] = useState<string | null>(null);
   const [resumeId, setResumeId] = useState<string>(NEW_CHAT);
   /** 'main' is today's behaviour: run in the workspace directory as-is. Only
       meaningful for a fresh chat — resuming always runs where the original did. */
@@ -150,6 +154,22 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
     { value: ADD_WORKSPACE, label: 'Add workspace…', detail: 'browse or create a folder' },
   ];
 
+  /**
+   * PA-68: a missing agent stays selectable and opens the setup dialog instead
+   * of creating a session.
+   *
+   * It used to be `disabled`, which was honest but a dead end — the operator
+   * could see that `claude` was not installed and had nowhere to go from
+   * there. The ticket's rule is "if a session requests a missing agent, prompt
+   * — do not install", so this only *offers*: nothing is fetched until a
+   * button inside the dialog is pressed, and a mistyped or idly-tapped row
+   * still cannot install a package.
+   *
+   * An agent that is installed but not signed in is left fully selectable. It
+   * may well work (the CLI can be authenticated by an environment variable
+   * this server cannot see), and refusing to start it on the strength of a
+   * probe would be worse than letting it fail with its own error.
+   */
   const flavourOptions: SelectorOption[] = useMemo(
     () =>
       agents.flatMap((agent) =>
@@ -157,11 +177,12 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
           value: makeFlavour(agent.id, transport),
           label: `${agent.displayName} · ${transport === 'structured' ? 'native' : 'terminal'}`,
           detail: !agent.available
-            ? 'not installed'
-            : transport === 'structured'
-              ? 'chat, tool cards, tap to approve'
-              : 'exact CLI, keystrokes',
-          disabled: !agent.available,
+            ? 'not installed — tap to set up'
+            : setupStateOf(agent) === 'signed-out'
+              ? 'installed, not signed in'
+              : transport === 'structured'
+                ? 'chat, tool cards, tap to approve'
+                : 'exact CLI, keystrokes',
         })),
       ),
     [agents],
@@ -431,7 +452,16 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
                 ariaLabel="Agent and interface"
                 value={flavour}
                 options={flavourOptions}
-                onChange={(v) => setFlavour(v as Flavour)}
+                onChange={(v) => {
+                  const next = v as Flavour;
+                  setFlavour(next);
+                  // Selecting an agent this host does not have opens the setup
+                  // dialog rather than creating a session that would fail with
+                  // `agent_unavailable`. Still just a prompt: nothing installs
+                  // until a button in that dialog is pressed.
+                  const chosen = agents.find((a) => a.id === parseFlavour(next).agentId);
+                  if (chosen !== undefined && !chosen.available) setSetupAgentId(chosen.id);
+                }}
               />
             )}
             {/* Hidden until this agent has actually run once — there is no
@@ -544,6 +574,19 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
             ? 'Already running — this opens the live session.'
             : `Resuming as ${picked.chat.agentDisplayName} — a new branch; the original transcript is left untouched.`}
         </p>
+      )}
+
+      {setupAgentId !== null && (
+        <AgentSetupDialog
+          focusAgentId={setupAgentId}
+          onApiError={onApiError}
+          // Re-read the agent list so a just-installed agent stops reading
+          // "not installed" in the row that opened this.
+          onChanged={() => {
+            void api.listAgents().then((a) => setAgents(a.agents)).catch(onApiError);
+          }}
+          onClose={() => setSetupAgentId(null)}
+        />
       )}
 
       <div className="composer-dock">

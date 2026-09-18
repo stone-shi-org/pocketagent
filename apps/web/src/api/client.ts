@@ -9,6 +9,9 @@ import type {
   DeleteWorktreeResponse,
   DiscoveredFolder,
   AgentInfo,
+  AgentInstallEvent,
+  InstallableAgentId,
+  InstallableAgentListResponse,
   ConversationInfo,
   CreateCronJobRequest,
   CronJob,
@@ -164,11 +167,11 @@ async function requestAt<T>(
  * is answered *before* the route ever switches into streaming mode — see
  * `streamPlannerEvents`'s own doc comment server-side.
  */
-async function streamPlannerEventsAt(
+async function streamSseAt<T>(
   endpoint: HostEndpoint,
   path: string,
   body: unknown,
-  onEvent: (event: AgentEvent) => void,
+  onEvent: (event: T) => void,
 ): Promise<void> {
   const response = await fetch(hostUrl(endpoint, path), {
     method: 'POST',
@@ -208,7 +211,7 @@ async function streamPlannerEventsAt(
       if (frame.length > 0) {
         const jsonText = frame.startsWith('data:') ? frame.slice(5).trim() : frame;
         try {
-          onEvent(JSON.parse(jsonText) as AgentEvent);
+          onEvent(JSON.parse(jsonText) as T);
         } catch {
           // A malformed frame is dropped rather than aborting the rest of
           // the stream — the turn already in flight server-side keeps going
@@ -236,7 +239,7 @@ export function createApiClient(endpoint: HostEndpoint) {
     path: string,
     body: unknown,
     onEvent: (event: AgentEvent) => void,
-  ): Promise<void> => streamPlannerEventsAt(endpoint, path, body, onEvent);
+  ): Promise<void> => streamSseAt<AgentEvent>(endpoint, path, body, onEvent);
 
   return {
     login: (token: string) =>
@@ -424,6 +427,44 @@ export function createApiClient(endpoint: HostEndpoint) {
      * and answers with the same shape `listAgents` does.
      */
     refreshAgents: () => request<{ agents: AgentInfo[] }>('/api/agents/refresh', { method: 'POST' }),
+
+    // ---- On-demand agent installation (PA-68) ---------------------------------
+
+    /**
+     * The server-declared catalog of installable agents. Read-only
+     * disclosure: the ids it returns are the *only* values `installAgent`
+     * accepts, and the package name and pinned version are shown so an
+     * operator can see what they are agreeing to run.
+     */
+    listInstallableAgents: () =>
+      request<InstallableAgentListResponse>('/api/agents/installable'),
+
+    /**
+     * Install one catalogued agent, streaming npm's output as it arrives.
+     *
+     * Takes an `InstallableAgentId`, never a package name — the type is the
+     * client-side half of the server's `z.enum`, so "the browser never
+     * supplies an executable or argv" is visible here rather than only
+     * enforced on arrival.
+     *
+     * `afterSeq` resumes a view of an install already in flight: re-calling
+     * this for an agent whose install is still running attaches to it and
+     * replays the log from that point rather than starting a second one. The
+     * returned promise settles when the stream ends, which is *not*
+     * necessarily when the install ends — abandoning the stream leaves the
+     * install running server-side, deliberately.
+     */
+    installAgent: (
+      id: InstallableAgentId,
+      onEvent: (event: AgentInstallEvent) => void,
+      afterSeq = 0,
+    ) =>
+      streamSseAt<AgentInstallEvent>(
+        endpoint,
+        `/api/agents/install?afterSeq=${afterSeq}`,
+        { id },
+        onEvent,
+      ),
 
     // ---- Custom Claude providers (PA-28) ---------------------------------------
     //

@@ -19,6 +19,8 @@ export function createShellAdapter(shellPath: string): AgentAdapter {
       return { command: shellPath, args: ['-i'] };
     },
 
+    bin: shellPath,
+
     isAvailable() {
       return resolveExecutable(shellPath) !== null;
     },
