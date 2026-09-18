@@ -64,6 +64,22 @@ configurable (always `<checkout>/data/pocketagent.db` — see `Config.databasePa
 only way to get an isolated database for a scratch server is to run it from a second checkout
 rather than pointing an env var at a different file.
 
+**Kill a scratch server by pid, never by pattern.** `pkill -f dist/server.js` — or any
+pattern of that shape, `node apps/server`, `pnpm start` — matches the full argv of *every*
+process this user owns in *every* checkout, including the production unit, whose `ExecStart`
+is `node apps/server/dist/server.js`. That is exactly how prod went down on 2026-09-17: an
+agent finished a browser verification and ran that pattern to clean up its own server.
+Because pkill sends SIGTERM, the graceful shutdown path runs and the process exits 0, so the
+journal shows nothing but a clean stop and it does not read as an incident at all. The unit
+is `Restart=always`, so it does come back — but every live session is still interrupted and
+every unattended run in flight still dies with it. Record the pid instead:
+
+```bash
+node apps/server/dist/server.js & SRV=$!
+# ...
+kill "$SRV"
+```
+
 **Rebuild then restart** before running a browser demo against a built server: the server
 caches `index.html` at boot, so a fresh bundle on disk is not the one being served, and the
 page loads blank with a 404 for the old asset.
