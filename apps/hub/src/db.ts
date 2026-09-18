@@ -20,6 +20,26 @@ export interface HubHostRow {
   created_at: number;
 }
 
+export interface HubTemplateRow {
+  id: string;
+  kind: string;
+  name: string;
+  description: string;
+  revision: number;
+  payload_json: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface HubProvisioningRow {
+  template_id: string;
+  host_id: string;
+  remote_id: string | null;
+  template_revision: number;
+  provisioned_at: number;
+  last_result: string;
+}
+
 export interface HubSessionRow {
   id: string;
   created_at: number;
@@ -70,6 +90,60 @@ export const HUB_MIGRATIONS: readonly string[] = [
     user_agent   TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_hub_sessions_expires_at ON hub_sessions (expires_at);
+  `,
+  // 1 — PA-70. Templates, and the ledger of what was provisioned where.
+  `
+  -- payload_json holds one kind's payload, validated against that kind's
+  -- own schema by parseTemplatePayload on write *and* on read: a text
+  -- column edited by hand must not be able to reach an outbound request to
+  -- somebody else's machine unvalidated.
+  --
+  -- There is deliberately **no secret column here, of any kind** — not a
+  -- plaintext one and not a secret-box ciphertext. A template declares the
+  -- shape of what it needs and the value arrives per run in a request body,
+  -- so "no secret value is ever stored in a template" is a property of the
+  -- schema rather than a rule someone has to keep remembering. The cost is
+  -- that re-provisioning asks for the key again; the alternative was this
+  -- process holding every upstream credential the fleet uses, none of which
+  -- PocketAgent can revoke.
+  --
+  -- revision is bumped on every edit and is the entire mechanism behind
+  -- "editing a template does not silently change already-provisioned hosts":
+  -- the ledger below keeps the revision it actually sent, and the difference
+  -- is displayed rather than acted on.
+  CREATE TABLE IF NOT EXISTS hub_templates (
+    id           TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    revision     INTEGER NOT NULL DEFAULT 1,
+    payload_json TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_hub_templates_created_at ON hub_templates (created_at);
+
+  -- What this Hub put where. A *cache* of its own past actions rather than
+  -- history, which is why both foreign keys CASCADE: a row that outlives its
+  -- template or its host describes nothing actionable, and the resource it
+  -- names still exists on that backend regardless — the backend's own audit
+  -- log is the durable record, which is the half that survives this Hub being
+  -- compromised or rebuilt.
+  --
+  -- Keyed on (template, host) because one template instantiates at most once
+  -- per host: a second copy on the same machine is a new template, not a
+  -- second provisioning, and allowing two rows here would make "is this
+  -- already provisioned?" ambiguous exactly where it must not be.
+  CREATE TABLE IF NOT EXISTS hub_provisionings (
+    template_id       TEXT NOT NULL REFERENCES hub_templates (id) ON DELETE CASCADE,
+    host_id           TEXT NOT NULL REFERENCES hub_hosts (id) ON DELETE CASCADE,
+    remote_id         TEXT,
+    template_revision INTEGER NOT NULL,
+    provisioned_at    INTEGER NOT NULL,
+    last_result       TEXT NOT NULL,
+    PRIMARY KEY (template_id, host_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_hub_provisionings_host ON hub_provisionings (host_id);
   `,
 ];
 

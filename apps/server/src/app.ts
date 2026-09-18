@@ -176,6 +176,22 @@ export interface BuildAppOptions {
   /** Injected in tests so a planner chat turn never makes a real network call. */
   plannerLlmFetch?: typeof fetch;
   /**
+   * Where log lines go, instead of the configured transport.
+   *
+   * Injected in tests for the one thing that cannot be asserted any other way:
+   * PA-70 requires that a configuration change made by a Hub is *logged*, and
+   * an audit trail is deliberately not state — putting it in a table would
+   * make it something a compromised Hub could also rewrite. So the only
+   * observable is the log line, and the test helper's `LOG_LEVEL: 'silent'`
+   * plus the `pino/file` transport (a worker thread writing to fd 1) leaves
+   * nothing to read. Passing a stream also raises the level to `info`, since a
+   * silent logger would emit nothing into it — and `info` rather than `warn`
+   * because `auditConfigChange` deliberately logs an operator's own change at
+   * the quieter level (see its doc comment), and a test has to be able to read
+   * both halves of that split.
+   */
+  loggerStream?: NodeJS.WritableStream;
+  /**
    * Extra agent adapters, registered after the defaults.
    *
    * Injected in tests, which otherwise have exactly one adapter whose binary
@@ -244,15 +260,22 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   const app = Fastify({
     logger: {
-      level: config.logLevel,
+      level: options.loggerStream ? 'info' : config.logLevel,
       // Terminal traffic is never logged. Only lifecycle events are.
       redact: {
         paths: [...REDACT_PATHS],
         censor: '[redacted]',
       },
-      transport: config.isProduction
-        ? undefined
-        : { target: 'pino/file', options: { destination: 1 } },
+      // The redact list above applies either way, which is the point of
+      // putting the test seam here rather than around it: a test reading the
+      // audit trail reads it through the same censor production does.
+      ...(options.loggerStream
+        ? { stream: options.loggerStream }
+        : {
+            transport: config.isProduction
+              ? undefined
+              : { target: 'pino/file', options: { destination: 1 } },
+          }),
     },
     trustProxy: config.trustProxy,
     bodyLimit: 1024 * 1024,
@@ -768,7 +791,20 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     // `login` and `hub-bind` and nothing else: honouring it as a bearer would
     // recreate exactly the permanent, unrevocable root credential this feature
     // exists to stop a Hub from having to hold.
-    if (hubCredentials.validate(bearerTokenFrom(request.headers.authorization), request.ip)) return;
+    //
+    // PA-70: the identity is *kept* rather than discarded, because the ticket
+    // requires every provisioning action to be logged on both sides and the
+    // backend's log is the more important of the two — it is the only record
+    // that survives a compromise of the Hub that wrote it. This is the one
+    // place a principal is resolved, so `hubPrincipal` being set means exactly
+    // "a hub credential authenticated this request"; a cookie session leaves it
+    // undefined, which is what lets an audit line distinguish the two without
+    // any route learning a second auth path.
+    const hub = hubCredentials.validate(bearerTokenFrom(request.headers.authorization), request.ip);
+    if (hub !== null) {
+      request.hubPrincipal = hub;
+      return;
+    }
 
     return reply
       .code(401)

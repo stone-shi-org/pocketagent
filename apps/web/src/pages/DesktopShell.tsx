@@ -35,6 +35,8 @@ import {
   AgentsFleetPage,
   CronJobEditorPage,
   CronJobsPage,
+  HubTemplateEditorPage,
+  HubTemplatesPage,
   PlannerAgentEditorPage,
   PlannerChatPage,
   PlannerPage,
@@ -143,6 +145,13 @@ function isUtilityTabRoute(route: TabRoute): route is UtilityTabRoute {
     route.name === 'planner' ||
     route.name === 'planner-agent'
   );
+}
+
+/** The two Hub-scoped routes, which are panes rather than tabs (PA-70). */
+function isHubTemplateRoute(
+  route: Route,
+): route is { name: 'hub-templates' } | { name: 'hub-template'; templateId: string } {
+  return route.name === 'hub-templates' || route.name === 'hub-template';
 }
 
 /**
@@ -1031,6 +1040,33 @@ export function DesktopShell({
               />
             </Suspense>
           </HostProvider>
+        ) : isHubTemplateRoute(route) && directory.source === 'hub' ? (
+          /* PA-70. A full pane like `compose` and the fleet view rather than a
+             tab, and deliberately *not* inside a `HostProvider`: a template
+             belongs to the Hub, and putting it in the per-host admin tab —
+             whose id is host-qualified since PA-67 — would file it under a
+             machine it is not about. */
+          <Suspense fallback={<PageFallback />}>
+            {route.name === 'hub-templates' ? (
+              <HubTemplatesPage
+                onOpenTemplate={(templateId) =>
+                  onNavigate({ name: 'hub-template', templateId }, { hostId: null })
+                }
+                onApiError={onApiError}
+              />
+            ) : (
+              <HubTemplateEditorPage
+                key={route.templateId}
+                templateId={route.templateId}
+                onCreated={(templateId) =>
+                  onNavigate({ name: 'hub-template', templateId }, { hostId: null })
+                }
+                onBack={() => onNavigate({ name: 'hub-templates' }, { hostId: null })}
+                onDone={() => onNavigate({ name: 'hub-templates' }, { hostId: null })}
+                onApiError={onApiError}
+              />
+            )}
+          </Suspense>
         ) : activeTabId === null ? (
           <WelcomePane onCompose={() => nav.openOn(here, { name: 'compose' })} />
         ) : null}

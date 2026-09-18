@@ -8,6 +8,7 @@ import {
   CreatePlannerWorkspaceRequest,
   LIST_MCP_TOOLS_NAME,
   PlannerMemoryTier,
+  ImportPlannerSkillRequest,
   RegisterPlannerSkillRequest,
   SetPlannerAgentMcpRegistryRequest,
   SetPlannerAgentSkillRequest,
@@ -52,6 +53,7 @@ import { PlannerChatError } from '../planner/chats.js';
 import { PlannerLlmClient, PlannerLlmError } from '../planner/llm-client.js';
 import { PLANNER_TOOLS, postJsonToIntegration } from '../planner/tools.js';
 import { SkillRegistryError, type SkillSummary } from '../planner/skills.js';
+import { auditConfigChange } from './shared.js';
 import {
   deleteAllPlannerModels,
   deletePlannerModel,
@@ -219,6 +221,14 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
           'planner agent pointed at an existing directory; its tools may now freely modify it',
         );
       }
+      auditConfigChange(request, 'pocket agent created', {
+        workspace: row.id,
+        name: row.name,
+        // Whether this agent's tools got trust over a directory a human
+        // named, rather than app-owned scratch space. A Hub provisioning a
+        // template can never set this — the template schema has no `path`.
+        userChosenPath: !!parsed.data.path,
+      });
       return reply.code(201).send(row);
     } catch (err) {
       return mapWorkspaceError(reply, err);
@@ -268,6 +278,10 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       if (parsed.data.identityPrompt !== undefined) {
         row = app.pocket.plannerWorkspaces.setIdentityPrompt(id, parsed.data.identityPrompt);
       }
+      auditConfigChange(request, 'pocket agent updated', {
+        workspace: id,
+        fields: Object.keys(parsed.data),
+      });
       return reply.send(row);
     } catch (err) {
       return mapWorkspaceError(reply, err);
@@ -304,6 +318,10 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       createdAt: Date.now(),
     };
     insertPlannerModel(db, row);
+    auditConfigChange(request, 'planner model added to the catalog', {
+      model: row.id,
+      modelId: row.modelId,
+    });
     return reply.code(201).send(row);
   });
 
@@ -416,6 +434,13 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     if (maxSubagentSpawnsPerTurn !== undefined) {
       writePlannerMaxSubagentSpawnsPerTurn(db, maxSubagentSpawnsPerTurn);
     }
+    // PA-70: the planner endpoint is the one *singleton* a Hub can provision,
+    // so this line matters more than the others — it records a change that
+    // repoints the LLM endpoint every Pocket Agent chat on this host uses.
+    // Field names only: four of them are API keys.
+    auditConfigChange(request, 'planner settings updated', {
+      fields: Object.keys(parsed.data),
+    });
     const dto: PlannerSettingsDto = readPlannerSettings(db);
     return reply.send(dto);
   });
@@ -714,6 +739,42 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     try {
       const summary = await app.pocket.skills.registerGlobalSkill(parsed.data.path);
       const globalDisabled = readGlobalDisabledSkillNames(app.pocket.db);
+      auditConfigChange(request, 'global skill registered', {
+        skill: summary.id,
+        name: summary.name,
+      });
+      return reply.code(201).send(toGlobalSkillInfo(summary, globalDisabled));
+    } catch (err) {
+      return mapSkillError(reply, err);
+    }
+  });
+
+  /**
+   * PA-70: register a global skill from its *content*.
+   *
+   * The route above takes a directory on this machine, which is exactly what a
+   * Hub provisioning a fleet cannot supply — so this is the one new backend
+   * surface that ticket adds, and `ImportPlannerSkillRequest`'s own doc
+   * comment carries the reasoning for accepting a body at all.
+   *
+   * It is a sibling path rather than a flag on the route above because the two
+   * take disjoint inputs: a request carrying both a path and a body, or
+   * neither, would have to be refused by a runtime check that a `z.union`
+   * expresses worse than two routes do.
+   */
+  app.post('/api/planner/skills/import', async (request, reply) => {
+    const parsed = ImportPlannerSkillRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    try {
+      const summary = await app.pocket.skills.importGlobalSkill(parsed.data);
+      const globalDisabled = readGlobalDisabledSkillNames(app.pocket.db);
+      auditConfigChange(request, 'global skill imported from content', {
+        skill: summary.id,
+        name: summary.name,
+        overwrote: parsed.data.overwrite === true,
+      });
       return reply.code(201).send(toGlobalSkillInfo(summary, globalDisabled));
     } catch (err) {
       return mapSkillError(reply, err);

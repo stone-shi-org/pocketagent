@@ -1,6 +1,6 @@
 import type { Config } from './config/index.js';
 import type { AuthService } from './auth/index.js';
-import type { HubCredentialStore } from './auth/hub-credentials.js';
+import type { HubCredentialIdentity, HubCredentialStore } from './auth/hub-credentials.js';
 import type { SessionManager } from './sessions/manager.js';
 import type { WorkspaceRegistry } from './workspaces/index.js';
 import type { AgentRegistry } from './agents/registry.js';
@@ -92,5 +92,20 @@ export interface PocketContext {
 declare module 'fastify' {
   interface FastifyInstance {
     pocket: PocketContext;
+  }
+
+  interface FastifyRequest {
+    /**
+     * PA-70: set by `app.ts`'s single auth gate when a *hub credential*
+     * authenticated this request, and left undefined for a cookie session.
+     *
+     * It exists so a mutation can name who made it. PA-63 deliberately kept
+     * the gate the only thing that knows hub credentials exist, and this does
+     * not weaken that: no route consults it to *decide* anything — a hub
+     * credential is full-access exactly like a session, by that ticket's own
+     * design — it is read only by audit lines, which is the one question a
+     * route legitimately has about its caller.
+     */
+    hubPrincipal?: HubCredentialIdentity;
   }
 }

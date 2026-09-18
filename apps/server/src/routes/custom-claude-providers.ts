@@ -4,6 +4,7 @@ import {
   UpdateCustomClaudeProviderRequest,
   type CustomClaudeProviderListResponse,
 } from '@pocketagent/protocol';
+import { auditConfigChange } from './shared.js';
 import { CustomClaudeProviderError } from '../agents/custom-providers-store.js';
 
 /**
@@ -47,7 +48,17 @@ export const customClaudeProviderRoutes: FastifyPluginAsync = async (app) => {
       });
     }
     try {
-      return reply.code(201).send(store.create(parsed.data));
+      const created = store.create(parsed.data);
+      auditConfigChange(request, 'custom claude provider created', {
+        provider: created.id,
+        name: parsed.data.name,
+        baseUrl: parsed.data.baseUrl,
+        // PA-28's attended-use opt-in. Worth naming on its own rather than
+        // leaving it inside a field list: with it on, this provider may run
+        // scheduled jobs and inbound webhooks unattended.
+        allowUnattended: parsed.data.allowUnattended === true,
+      });
+      return reply.code(201).send(created);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -66,7 +77,16 @@ export const customClaudeProviderRoutes: FastifyPluginAsync = async (app) => {
         });
       }
       try {
-        return reply.send(store.update(request.params.id, parsed.data));
+        const updated = store.update(request.params.id, parsed.data);
+        auditConfigChange(request, 'custom claude provider updated', {
+          provider: request.params.id,
+          // Field *names* only — `apiKey` is one of them.
+          fields: Object.keys(parsed.data),
+          ...(parsed.data.allowUnattended === undefined
+            ? {}
+            : { allowUnattended: parsed.data.allowUnattended }),
+        });
+        return reply.send(updated);
       } catch (err) {
         return mapError(reply, err);
       }

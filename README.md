@@ -502,6 +502,49 @@ Hub because there is no code there that could do it, not because it was asked ni
 It also does not merge anything. The Hub proxies; it does not aggregate. Every response
 you see came from one backend.
 
+### Provisioning from a Hub
+
+A Hub can also define configuration once and instantiate it on any bound host — a Pocket
+Agent, an MCP registry, a skill, a custom Claude provider, or the Pocket Agent LLM endpoint
+and its model catalog. Everything else stays per-host.
+
+The model is **templates you instantiate, not continuous sync.** A template is provisioned
+onto a host and then diverges freely: editing the template afterwards changes nothing on any
+host that already has it, and the Hub simply shows those hosts as behind ("dev01 has r3, this
+template is r5"). There is no reconciliation loop, deliberately — one that silently overwrote a
+local change would fight the per-host editor every one of these resources already has, and is a
+much bigger decision than "provision a new machine quickly".
+
+Three things to know before using it:
+
+- **A template never contains a secret.** It declares the *shape* of what it needs — a provider
+  API key, an MCP bearer token, the planner LLM key — and you fill that in per host when you
+  instantiate. The Hub stores none of it: there is no column it could go in, and the value only
+  exists for the one request that carries it to that backend. The cost is that re-provisioning
+  asks again, which is deliberate: the alternative is a Hub holding every upstream credential
+  your fleet uses, none of which PocketAgent can revoke for you.
+- **Re-provisioning is always an explicit, confirmed overwrite.** Without the confirmation a
+  host that already has the template is skipped and nothing is written. And the confirmation
+  only ever replaces what *this Hub* provisioned — a same-named agent or a same-slug skill
+  somebody created on that machine is reported as a conflict and left alone.
+- **A planner-endpoint template replaces host-wide settings**, so it needs the confirmation even
+  the first time: it repoints the LLM endpoint every Pocket Agent chat on that machine talks to.
+
+A template carries no filesystem paths, so each host creates its own directories under its own
+`POCKETAGENT_DATA_DIR` — which is what lets one template serve machines with different layouts.
+
+Every provisioning action is logged **on both sides**: once by the Hub, and once by the
+receiving backend, whose line names the Hub that made the change (`by: "hub:<label>"`, at
+`warn`, so it survives a deployment running at `LOG_LEVEL=warn`). The backend's copy is the one
+that still exists if the Hub is ever compromised.
+
+Webhooks and scheduled jobs are deliberately **not** provisionable. A webhook's slug, HMAC
+secret and delivery URL point at exactly one host, so cloning it to three would leave one real
+and two dead; and a nightly cron job cloned to three machines runs three times.
+
+`pnpm demo:provision` exercises all of this against two real backends and a real Hub it starts
+itself.
+
 ### What a Hub costs you
 
 Worth reading before you run one, because none of it is hidden:
@@ -510,6 +553,12 @@ Worth reading before you run one, because none of it is hidden:
   credentials make survivable rather than eliminate — nothing it holds is a master token, and
   every credential is revocable from the machine it grants access to, under that machine's
   **Settings → Hubs**.
+- **With provisioning, that reach includes writing configuration.** A compromised Hub can create
+  Pocket Agents, MCP registries, providers and skills on every bound host. The mitigations are
+  the ones already listed — revocable per-host credentials, no master tokens — plus the fact
+  that both sides log every provisioning action, so the receiving machine keeps its own record
+  of what changed and which Hub changed it. It is not eliminated, and it is the reason to bind
+  only Hubs you run.
 - **It is a single point of failure for *reaching* your backends**, though not for their state.
   Each one stays directly usable with no Hub involved.
 - **An operator can extract a stored credential** by repointing a host's base URL and then

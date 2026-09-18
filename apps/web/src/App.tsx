@@ -12,6 +12,8 @@ import {
   AgentsFleetPage,
   CronJobEditorPage,
   CronJobsPage,
+  HubTemplateEditorPage,
+  HubTemplatesPage,
   PlannerAgentEditorPage,
   PlannerChatPage,
   PlannerPage,
@@ -137,6 +139,47 @@ function AuthenticatedApp({ onAnonymous }: { onAnonymous: () => void }): JSX.Ele
         onApiError={handleApiError}
         onLogout={logout}
       />
+    );
+  }
+
+  // PA-70: the Hub's config templates are not one host's anything — they talk
+  // to the origin that served this bundle — so they are resolved here, above
+  // the `HostProvider` every other non-home route is wrapped in, and in both
+  // layouts (`DesktopShell` has the same pair in its own pane). Rendered only
+  // when a Hub is answering: on a standalone install there is no template API,
+  // and a hand-typed `#/hub/templates` gets the home screen rather than a page
+  // whose every request would 404.
+  if (route.name === 'hub-templates' || route.name === 'hub-template') {
+    // Rendered rather than redirected, for the reason `UnknownHost` is: a
+    // `navigate` during render is a side effect in the wrong phase, and a
+    // silent bounce to the home screen leaves a shared link looking broken
+    // instead of explaining itself.
+    if (directory.source !== 'hub') {
+      return <NoHub onHome={() => nav.goToHost(null)} />;
+    }
+    return (
+      <Suspense fallback={<PageFallback />}>
+        {route.name === 'hub-templates' ? (
+          <HubTemplatesPage
+            onOpenTemplate={(templateId) =>
+              navigate({ name: 'hub-template', templateId }, { hostId: null })
+            }
+            onBack={() => navigate({ name: 'settings' })}
+            onApiError={handleApiError}
+          />
+        ) : (
+          <HubTemplateEditorPage
+            key={route.templateId}
+            templateId={route.templateId}
+            onCreated={(templateId) =>
+              navigate({ name: 'hub-template', templateId }, { hostId: null })
+            }
+            onBack={() => navigate({ name: 'hub-templates' }, { hostId: null })}
+            onDone={() => navigate({ name: 'hub-templates' }, { hostId: null })}
+            onApiError={handleApiError}
+          />
+        )}
+      </Suspense>
     );
   }
 
@@ -361,6 +404,27 @@ function PhoneRoute({
   // this one). Unreachable, but a spinner is the right thing to show if a
   // future route kind ever slips through.
   return <PageFallback />;
+}
+
+/**
+ * `#/hub/templates` on an install with no Hub in front of it (PA-70).
+ *
+ * The surface exists in this bundle because the Hub serves this same bundle
+ * (PA-66), so the route is reachable on a backend too — where there is no
+ * template API to talk to. Saying so beats a page of failed requests.
+ */
+function NoHub({ onHome }: { onHome: () => void }): JSX.Element {
+  return (
+    <div className="app">
+      <div className="empty">
+        Config templates live on a PocketAgent Hub, and this app is not being served by one.
+        <br />
+        <button type="button" onClick={onHome} style={{ marginTop: 16 }}>
+          Home
+        </button>
+      </div>
+    </div>
+  );
 }
 
 /**

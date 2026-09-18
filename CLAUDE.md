@@ -116,7 +116,7 @@ and `adopt.test.ts` skip themselves when `tmux` is not installed.
 ### Live demos
 
 The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
-decision. Seventeen demo scripts do; all but one run against a *running* server:
+decision. Eighteen demo scripts do; all but three run against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -134,6 +134,7 @@ PA_TOKEN=... pnpm demo:webhook-ui        # webhooks: secret panel, signed delive
 PA_DEEPSEEK_KEY=... pnpm demo:deepseek-variant   # cross-provider resume: one transcript, two providers
 PA_DEEPSEEK_KEY=... pnpm demo:provider-ui        # provider CRUD, picker, disclosure banner, "Continue as…"
 pnpm demo:hub             # PA-66: two real backends + a real Hub, started by the script
+pnpm demo:provision       # PA-70: templates provisioned onto two real backends, checked on each
 PA_TOKEN=... pnpm demo:multi-host-ui     # multi-host: rail, sheet, aggregate home, deep links, both viewports
 PA_TOKEN=... pnpm demo:agent-install-ui  # agent setup dialog: four states, streamed install, phone viewport
 ```
@@ -173,6 +174,13 @@ it starts two real backends and a real Hub with throwaway state, binds them thro
 `hub-bind` handshake, drives a terminal session and a reconnect-with-replay through the splice,
 and checks that `/h/<id>/api/hooks/*` is refused, that a dead backend does not affect its
 neighbour, and that a backend reached directly with no Hub behaves exactly as before.
+
+`pnpm demo:provision` is the third that starts its own processes, and it is where PA-70's
+acceptance criteria live: two real backends plus a Hub, bound through the real handshake, then a
+Pocket Agent, a provider and a skill template provisioned onto both — with every result checked
+against *each backend's own API* rather than through the Hub, since "the Hub believes it worked"
+is what a demo must not accept as evidence. It also reads each backend's stdout, because the
+backend's own audit line naming the Hub is a deliverable rather than a side effect.
 
 `pnpm demo:docker` is the other odd one out: it needs no running server and no `PA_BASE`, because it
 builds the image and starts its own container with a throwaway data root, HOME and git
@@ -1206,6 +1214,81 @@ in `node_modules/.pnpm`, so a filtered install on top of the shared stage still 
 291 MB Claude Agent SDK and 60 MB of node-pty. Measured, not reasoned about — the image stayed
 at 796 MB until the stage started from scratch, and is 273 MB now.
 
+### Hub config templates and provisioning (PA-70)
+
+Define a Pocket Agent, an MCP registry, a skill, a provider or a planner endpoint once, and
+instantiate it onto any bound host. `apps/hub/src/templates/` holds all of it —
+`store.ts` (`hub_templates` plus the provisioning ledger), `kinds.ts` (payload → backend
+calls), `provisioner.ts` (the run) — alongside `routes/templates.ts` and
+`packages/protocol/src/hub-templates.ts`.
+
+**Provisioning is the Hub being an API client, not a new contract.** Every path `kinds.ts`
+emits already exists on a backend and is already validated there: `POST
+/api/planner/workspaces` plus its `/tools` follow-ups, `POST /api/mcp-registries`, `POST
+/api/custom-claude-providers`, `PATCH /api/planner/settings` with `POST /api/planner/models`.
+That is the same rule PA-56 recorded for the planner's settings tools — *the same validation
+the route does, never a second copy* — and a `POST /api/provision` taking five resource kinds
+would have been five re-implementations of five validators, the first of which to drift would
+have drifted silently on every bound host at once. It also gets "logged on both sides" for
+free, because each of those routes writes its own audit line.
+
+**A template is instantiated and then diverges freely.** No reconciliation, no desired state:
+editing one bumps `hub_templates.revision` and touches nothing, and the ledger keeps whichever
+revision each host actually received so the UI can say "dev01 has r3, this is r5". Showing
+that is the obligation the no-sync model takes on in exchange for never correcting drift —
+without it, "which hosts are behind?" is unanswerable. A drift-correcting loop would also fight
+the per-host editors that already exist for every one of these resources.
+
+**Two classes of hole, not one.** *Secret-shaped* holes (a provider key, an MCP token, the
+planner LLM key) are declared by the template and filled per run; see the invariant below for
+why nothing is stored. *Host-shaped* holes are the ones this ticket discovered:
+`planner_workspaces.path` is `UNIQUE`, absolute, and since PA-62 lives under that host's own
+`POCKETAGENT_DATA_DIR`, so a template carries no `path` at all — the fields are **absent from
+the schema**, not rejected at runtime. Carrying one would be wrong on every machine but the one
+it was typed on, and carrying it as an optional override would let a single Hub action grant an
+agent's `write_file`/`exec_command`/`rmdir` tools full trust over arbitrary directories across
+a fleet. The general rule: a template field is portable only if its *value* means the same thing
+on every host. Absolute paths and host-local minted ids (`global:<slug>`, `mcp:<slug>-<hex>`)
+do not qualify; tool names do, and so — surprisingly — does `defaultModelId`, which is the
+provider's own model *name* rather than a `planner_models` row id.
+
+**"Already provisioned" is a ledger answer, never a name match.** No backend table constrains a
+Pocket Agent's, a registry's or a provider's name, so two may legitimately share one — matching
+on names could therefore overwrite something a human made on that machine, which is exactly the
+implicit overwrite the ticket forbids. `hub_provisionings` is keyed `(template, host)` and holds
+the `remote_id`; a row whose id no longer resolves on the host is *dropped* and the run creates
+afresh, because that is the deleted-by-hand case and patching a vanished id would strand the
+template forever. Skills are the one kind where the host does enforce uniqueness (the slug is a
+directory name), so a pre-existing skill at that slug is a **`conflict`** that no `overwrite`
+flag replaces.
+
+**Nothing is written until the host has answered a read.** Every run starts with a `GET` of the
+target collection: a `404` is `unsupported` (that build has no such route) and the host is never
+written to, a `401`/`403` becomes "rebind this host" rather than "provisioning failed" — the
+same translation PA-66 makes for a proxied 401. Feature detection is deliberately a *probe*
+rather than a version comparison, because a backport, a dev build or `0.0.0-dev` makes a semver
+a lie about which routes exist; PA-69's drift badge stays advisory. Hosts are done one at a time
+so a partial run reads in order, and one dead host fails alone.
+
+`planner-endpoint` is the only **singleton** kind and the only one that is never a create: every
+host already has one planner endpoint, and repointing it changes what every existing Pocket Agent
+chat on that machine talks to. So it requires the overwrite confirmation *even the first time*,
+it replaces the model catalog wholesale only when the template carries one (`models: []` means
+"leave the host's own list alone"), and it never carries `yoloEnabled` — a template is not a way
+to turn an approval gate off across a fleet.
+
+Skills needed the one new backend route, `POST /api/planner/skills/import`: the existing `POST
+/api/planner/skills` takes a filesystem path *on the receiving host*, and no protocol type
+carried a skill's body at all. v1 provisions global skills only, one `SKILL.md`, no auxiliary
+files — a template that silently dropped them would be worse than one that refuses.
+
+Deliberately out of scope, each for a reason on the ticket: **webhooks** (a slug, an HMAC secret
+and a delivery URL Jira points at one host — cloning to three means one is real and two are dead
+config), **cron jobs** (three machines run the nightly job three times) and
+**`planner_tool_approvals`** (a record of a *decision made*, so templating one would manufacture
+consent nobody gave on that host). Known limitation: a per-host secret is re-entered on every
+re-provisioning, which is the deliberate cost of the invariant below.
+
 ### Hub credentials (PA-63)
 
 The second credential class, and the first addition to `auth/` since the session cookie.
@@ -1653,6 +1736,42 @@ These are load-bearing. Several were bugs first.
   different variable from any backend's `POCKETAGENT_AUTH_TOKEN`. Removing a host *attempts*
   revocation on the backend and reports whether it worked, but never blocks on it: a machine
   that is down is precisely when an operator most wants it gone.
+- **A template never carries a secret, and the Hub never stores one** (PA-70). The template
+  tables have **no column a secret could go in** — not a plaintext one and not a
+  `secret-box` ciphertext — so "no secret value is ever stored in a template" is a property of
+  the schema rather than a rule someone has to keep remembering, and
+  `apps/hub/tests/templates-secrets.test.ts` proves it by scanning every column of every row.
+  A template declares its *secret-shaped holes*; the values arrive in one instantiate request
+  body (redacted wholesale by the Hub's pino config, which is what makes `req.body` on
+  `REDACT_PATHS` load-bearing rather than decorative), reach one outbound call each, and are
+  gone when the response returns. The rejected alternative was storing the filled holes
+  encrypted per `(template, host)` so re-provisioning is one click: that moves the Hub from
+  "holds a revocable credential per host" to "holds every upstream key the fleet uses" — none of
+  them revocable from this product — and makes one `POCKETAGENT_SETTINGS_ENC_KEY` the only thing
+  between a Hub compromise and every third-party account behind it. The accepted cost is
+  re-typing a key on re-provisioning, which is already the shape both editors use (blank keeps
+  the stored one). Provisioning is also **logged on both sides**: the Hub writes one line per
+  host per run, and the backend writes its own through `auditConfigChange` naming
+  `hub:<label>` — that second one is the record that survives a compromise of the Hub that
+  wrote the first, which is the threat the ticket's own security note names. The *level*
+  depends on the principal: a Hub's change is `warn`, so it survives a deployment running at
+  `LOG_LEVEL=warn`, while the same change made by a browser session is `info` — the agent
+  editor auto-saves on every field change, and a `warn` per keystroke would bury the remote
+  lines under local ones. Neither line ever carries a secret or a request body; they carry ids,
+  names and field *names* only, the same "an audit line must not be one step away from
+  recovering a credential" rule provider mutations already follow.
+- **A template is provisioned, never synchronised, and an overwrite is always confirmed**
+  (PA-70). There is no reconciliation loop anywhere: editing a template bumps its revision and
+  writes to no host, and `hub_provisionings` keeps the revision each host actually received so
+  staleness is *displayed* rather than corrected. Re-provisioning without an explicit
+  `overwrite` is `skipped` and writes **nothing**; with it, the ledger's own `remote_id` is
+  patched in place rather than a duplicate created. What `overwrite` never does is replace
+  something this Hub did not put there — that is a `conflict` regardless of the flag, because
+  no backend table constrains these resources' names and a name match could otherwise destroy
+  work a human did on that machine. And nothing is written before a `GET` of the target
+  collection has succeeded, so a build without the route is `unsupported` rather than
+  half-provisioned. All four are asserted in `apps/hub/tests/templates-*.test.ts` and
+  demonstrated end to end by `pnpm demo:provision`.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.

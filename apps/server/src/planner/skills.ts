@@ -529,6 +529,75 @@ export class SkillRegistryService {
   }
 
   /**
+   * PA-70: register a *global* skill from its content, under a caller-supplied
+   * slug — `POST /api/planner/skills/import`, which exists so a Hub can
+   * provision a skill onto a host whose filesystem it knows nothing about.
+   *
+   * Three deliberate differences from its two neighbours here.
+   * `registerGlobalSkill` takes a path on this machine, which a remote caller
+   * cannot supply; this takes bytes. `writeWorkspaceSkill` derives the slug
+   * from the name and lands in one agent's `.skills/`; this takes the slug
+   * verbatim and lands in the global catalog, because the caller's own ledger
+   * keys on `global:<slug>` and a slug re-derived here could differ from the
+   * one it recorded. And `copyIntoGlobalCatalog` auto-suffixes a colliding
+   * slug (`-2`, `-3`, ...) to make a human's import succeed; this refuses
+   * outright unless `overwrite` is set, because a provisioning run that
+   * quietly created `release-notes-2` on one host and `release-notes` on
+   * another would leave a fleet that looks uniform and is not.
+   *
+   * The slug is re-validated here rather than trusted from the route's schema:
+   * it becomes a directory name, so this is the containment check, and it must
+   * hold for every caller including the one that arrives next year.
+   */
+  async importGlobalSkill(opts: {
+    slug: string;
+    name: string;
+    description: string;
+    body: string;
+    overwrite?: boolean;
+  }): Promise<SkillSummary> {
+    const slug = opts.slug.trim();
+    if (!isValidSkillSlug(slug)) {
+      throw new SkillRegistryError(
+        'A skill slug is lowercase letters, digits and hyphens.',
+        'invalid',
+        400,
+      );
+    }
+    const name = opts.name.trim();
+    const description = opts.description.trim();
+    const body = opts.body.trim();
+    if (!name) throw new SkillRegistryError('A skill needs a name.', 'invalid', 400);
+    if (!description) throw new SkillRegistryError('A skill needs a description.', 'invalid', 400);
+    if (!body) throw new SkillRegistryError('A skill needs a body.', 'invalid', 400);
+
+    const dir = path.join(this.skillsRoot, slug);
+    const existing = await fsp.stat(dir).catch(() => null);
+    if (existing && opts.overwrite !== true) {
+      throw new SkillRegistryError(
+        `A global skill named "${slug}" already exists. Confirm an overwrite to replace it.`,
+        'invalid',
+        409,
+      );
+    }
+
+    await fsp.mkdir(dir, { recursive: true });
+    const frontmatter = `---\nname: ${yamlScalar(name)}\ndescription: ${yamlScalar(description)}\n---\n`;
+    await fsp.writeFile(path.join(dir, 'SKILL.md'), `${frontmatter}${body}\n`, 'utf8');
+
+    this.refresh();
+    const summary = this.get(mintSkillId('global', slug));
+    if (!summary) {
+      throw new SkillRegistryError('Wrote the skill, but it could not be re-read.', 'invalid', 500);
+    }
+    this.logger.info(
+      { skill: summary.id, overwrote: existing !== null },
+      'Global skill imported from content',
+    );
+    return summary;
+  }
+
+  /**
    * PA-38 round 2: "You can have a UI, globally scan and user can choose to
    * import" — scans every *project* workspace's own `.claude/skills/`
    * (Claude Code's convention) and `.agents/skills/` (the newer cross-tool

@@ -7,6 +7,7 @@ import { CodingAgentsSection } from '../components/CodingAgentsSection.js';
 import { TelegramSection } from '../components/TelegramSection.js';
 import { HostAdminSection } from '../components/HostAdminSection.js';
 import { HubsSection } from '../components/HubsSection.js';
+import { HubTemplatesSection } from '../components/HubTemplatesSection.js';
 import { getTerminalFontOverride, setTerminalFontOverride } from '../agent/terminal-font-pref.js';
 import { formatBuildInfo } from '../version.js';
 import { useHostApi } from '../hosts/HostContext.js';
@@ -383,6 +384,10 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
       >
         <HubsSection onApiError={onApiError} />
       </SectionCard>
+
+      {/* PA-70. Renders nothing — not even the card — unless this origin is a
+          Hub, so a standalone install's Settings page is unchanged. */}
+      <HubTemplatesSection />
 
       <SectionCard
         title="This Host"

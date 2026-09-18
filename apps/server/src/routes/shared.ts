@@ -1,4 +1,4 @@
-import type { FastifyReply } from 'fastify';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import { WorkspaceError, type WorkspaceRegistry } from '../workspaces/index.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import { parsePocketAgentId } from '@pocketagent/protocol';
@@ -91,4 +91,42 @@ export function webhookAgentProblem(
       : null;
   }
   return structuredAgentProblem(agents, id, 'triggered by a webhook');
+}
+
+/**
+ * PA-70: one audit line for a configuration mutation, naming the principal.
+ *
+ * Shared by the five resources a Hub can provision (Pocket Agents, MCP
+ * registries, custom Claude providers, global skills, and the planner
+ * endpoint) so they cannot drift into five slightly different log shapes, and
+ * modelled on the line `POST /api/workspaces/add` already writes: it names the
+ * *consequence* rather than the call.
+ *
+ * **The level depends on the principal, and that is the point.** A change made
+ * by a Hub is logged at `warn`, because that is what survives a deployment
+ * running at `LOG_LEVEL=warn` — exactly the deployment whose operator will
+ * later want to know that something remote reconfigured their machine. The
+ * same change made by a browser session is `info`: it is the operator doing it
+ * themselves, in front of the editor, and `PlannerAgentEditorPage` auto-saves
+ * on every field change, so a `warn` per keystroke would bury the lines that
+ * matter under the ones that do not.
+ *
+ * `by` is `hub:<label>` or `session`, so one grep answers "what did a Hub
+ * change here". The fields are ids and names only: never a secret, never the
+ * request body — an audit line must not be one step away from recovering a
+ * credential.
+ */
+export function auditConfigChange(
+  request: FastifyRequest,
+  event: string,
+  details: Record<string, unknown> = {},
+): void {
+  const hub = request.hubPrincipal;
+  const fields = {
+    ...details,
+    by: hub ? `hub:${hub.label}` : 'session',
+    ...(hub ? { hubId: hub.id } : {}),
+  };
+  if (hub) request.log.warn(fields, event);
+  else request.log.info(fields, event);
 }

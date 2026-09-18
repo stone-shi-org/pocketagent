@@ -6618,3 +6618,253 @@ button.chat-rate-limit-badge {
   font-size: 10px;
   font-weight: 700;
 }
+
+/* ---- Hub config templates (PA-70) ----
+   The list borrows `.cron-page`/`.cron-row`'s shape deliberately — a template
+   list is the same "one saved spec per row, tap to edit" screen a scheduled
+   job's list is — and the editor is built from `SettingsPage`'s card/row
+   vocabulary like `CronJobEditorPage`'s. What follows is only what neither has
+   a shape for: a kind picker, the per-host ledger line, a host checkbox list
+   and the per-host result rows. */
+
+.hub-tpl-page {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.hub-tpl-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.hub-tpl-head h2 {
+  font-size: 20px;
+  margin: 0;
+}
+
+.hub-tpl-sub {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 4px 0 0;
+  line-height: 1.45;
+  max-width: 62ch;
+}
+
+.hub-tpl-empty {
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1.5;
+  padding: 24px 4px;
+}
+
+/* One card per kind rather than a `<select>`: the kind cannot be changed after
+   the template exists, so the blurb explaining each one has to be readable at
+   the moment of choosing rather than after. */
+.hub-tpl-kinds {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.hub-tpl-kind {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-start;
+  text-align: left;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.hub-tpl-kind:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-elev);
+}
+
+.hub-tpl-kind-name {
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+.hub-tpl-kind-blurb {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.hub-tpl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.hub-tpl-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-start;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 12px 4px;
+  cursor: pointer;
+  color: inherit;
+}
+
+.hub-tpl-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 15px;
+  font-weight: 550;
+}
+
+.hub-tpl-row-icon {
+  color: var(--text-dim);
+}
+
+.hub-tpl-meta {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.hub-tpl-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+/* The ledger, one chip per host this Hub has written to. */
+.hub-tpl-hosts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 2px;
+  font-size: 12.5px;
+}
+
+.hub-tpl-host {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.hub-tpl-host.dim {
+  color: var(--text-dim);
+}
+
+.hub-tpl-rev {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.hub-tpl-outcome {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: lowercase;
+}
+
+/* Three tones, matching `outcomeTone`: `skipped`/`conflict` are warnings
+   rather than errors, because nothing was written and that is the requested
+   behaviour without a confirmed overwrite. */
+.hub-tpl-outcome--ok { color: var(--ok); }
+.hub-tpl-outcome--warn { color: var(--warn); }
+.hub-tpl-outcome--danger { color: var(--danger); }
+
+/* Advisory, never blocking: the template moved on and this host did not, which
+   is the no-sync model being shown rather than corrected. */
+.hub-tpl-stale {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--warn);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* ---- The instantiate flow ---- */
+
+.hub-tpl-hostpick {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+}
+
+.hub-tpl-hostpick-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.hub-tpl-hostpick-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.hub-tpl-hole {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 0 0;
+}
+
+.hub-tpl-results {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+}
+
+.hub-tpl-result {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  background: var(--bg-elev-2);
+}
+
+.hub-tpl-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.hub-tpl-items {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 12.5px;
+}
+
+.hub-tpl-items li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hub-tpl-items li.ok {
+  color: var(--text-dim);
+}
+
+.hub-tpl-items li.warn {
+  color: var(--warn);
+}

@@ -49,3 +49,13 @@ export const PlannerChatPage = lazy(() =>
 export const PlannerAgentEditorPage = lazy(() =>
   import('./pages/PlannerAgentEditorPage.js').then((m) => ({ default: m.PlannerAgentEditorPage })),
 );
+
+/** PA-70. Rendered only where the host directory's source is `hub`, so on a
+    standalone install these chunks are never fetched at all. */
+export const HubTemplatesPage = lazy(() =>
+  import('./pages/HubTemplatesPage.js').then((m) => ({ default: m.HubTemplatesPage })),
+);
+
+export const HubTemplateEditorPage = lazy(() =>
+  import('./pages/HubTemplateEditorPage.js').then((m) => ({ default: m.HubTemplateEditorPage })),
+);

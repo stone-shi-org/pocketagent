@@ -87,6 +87,9 @@ export async function createTestApp(
   telegramFetch?: typeof fetch,
   /** PA-68: injected so no test ever runs a real `npm install -g`. */
   agentInstallRunner?: InstallRunner,
+  /** PA-70: injected so a test can read the audit trail — see
+      `BuildAppOptions.loggerStream` for why the log is the only observable. */
+  loggerStream?: NodeJS.WritableStream,
 ): Promise<TestApp> {
   const ws = makeWorkspace();
   const config = makeConfig({
@@ -115,6 +118,7 @@ export async function createTestApp(
     ...(plannerLlmFetch ? { plannerLlmFetch } : {}),
     ...(telegramFetch ? { telegramFetch } : {}),
     ...(agentInstallRunner ? { agentInstallRunner } : {}),
+    ...(loggerStream ? { loggerStream } : {}),
     // Fast enough for a test to assert against without a real 10s wait,
     // slow enough not to spin the CPU during tests that never touch Telegram.
     telegramReconcileIntervalMs: 200,

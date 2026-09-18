@@ -28,7 +28,20 @@ export type Route =
   /** One agent's own editor (name, default model, tool subset, directory) —
       see `PlannerAgentEditorPage`. Always an existing agent's id; creating a
       new one is still the quick inline form on `PlannerPage` itself. */
-  | { name: 'planner-agent'; agentId: string };
+  | { name: 'planner-agent'; agentId: string }
+  /**
+   * The Hub's config templates (PA-70) — see `HubTemplatesPage`.
+   *
+   * Never carries a host segment, and that is the point: a template lives on
+   * the Hub and describes something to *send* to a machine, so `#/h/<id>/`
+   * in front of it would claim it belonged to one. Its callers navigate with
+   * `{ hostId: null }` for that reason.
+   */
+  | { name: 'hub-templates' }
+  /** One template's editor and its instantiate flow. `newTemplateId(kind)`
+      for an unsaved one — the kind cannot be changed later, so it has to be
+      chosen before the form exists and rides in this segment. */
+  | { name: 'hub-template'; templateId: string };
 
 /**
  * A parsed hash: which host, and which view on it (PA-60).
@@ -140,6 +153,17 @@ function parse(hash: string): Route {
 
   if (/^#\/planner$/.exec(hash)) return { name: 'planner' };
 
+  // Before the bare `#/hub/templates` check, same detail-before-generic
+  // ordering as `cronJob` above. `HOST_SEGMENT` cannot eat the `#/hub/` prefix
+  // — it requires a `/` straight after `h` — so these two never enter the
+  // cascade with anything stripped off the front.
+  const hubTemplate = /^#\/hub\/templates\/([^/?]+)/.exec(hash);
+  if (hubTemplate?.[1]) {
+    return { name: 'hub-template', templateId: decodeURIComponent(hubTemplate[1]) };
+  }
+
+  if (/^#\/hub\/templates$/.exec(hash)) return { name: 'hub-templates' };
+
   if (/^#\/agents$/.exec(hash)) return { name: 'agents' };
 
   if (/^#\/settings$/.exec(hash)) return { name: 'settings' };
@@ -173,6 +197,10 @@ function toHash(route: Route): string {
       return `#/planner/${encodeURIComponent(route.chatId)}`;
     case 'planner-agent':
       return `#/planner/agent/${encodeURIComponent(route.agentId)}`;
+    case 'hub-templates':
+      return '#/hub/templates';
+    case 'hub-template':
+      return `#/hub/templates/${encodeURIComponent(route.templateId)}`;
     default:
       return '#/';
   }

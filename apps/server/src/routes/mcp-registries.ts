@@ -5,6 +5,7 @@ import {
   type McpRegistryListResponse,
 } from '@pocketagent/protocol';
 import { McpRegistryError } from '../planner/mcp/registry-service.js';
+import { auditConfigChange } from './shared.js';
 
 /**
  * PA-37: CRUD for MCP registries, plus the "Test connection" / "Refresh
@@ -60,6 +61,11 @@ export const mcpRegistryRoutes: FastifyPluginAsync = async (app) => {
     // just folded into the row this response reflects, the same
     // `lastError`/`toolCount` fields "Test connection" itself would set.
     await service.checkConnection(created.id);
+    auditConfigChange(request, 'mcp registry created; this host may now connect to it', {
+      registry: created.id,
+      name: parsed.data.name,
+      url: parsed.data.url,
+    });
     return reply.code(201).send(service.get(created.id));
   });
 
@@ -71,7 +77,13 @@ export const mcpRegistryRoutes: FastifyPluginAsync = async (app) => {
       });
     }
     try {
-      return reply.send(service.update(request.params.id, parsed.data));
+      const updated = service.update(request.params.id, parsed.data);
+      auditConfigChange(request, 'mcp registry updated', {
+        registry: request.params.id,
+        // Which fields moved, never their values: one of them is a secret.
+        fields: Object.keys(parsed.data),
+      });
+      return reply.send(updated);
     } catch (err) {
       return mapError(reply, err);
     }

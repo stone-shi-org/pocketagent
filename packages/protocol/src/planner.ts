@@ -713,6 +713,44 @@ export const RegisterPlannerSkillRequest = z.object({
 export type RegisterPlannerSkillRequest = z.infer<typeof RegisterPlannerSkillRequest>;
 
 /**
+ * PA-70: registers a global skill from its *content* rather than from a path
+ * on this machine.
+ *
+ * The route above cannot serve a remote caller: it names a directory on the
+ * receiving host, which a Hub provisioning a fleet cannot know and must not
+ * guess, and nothing else in this protocol carries a skill's body at all
+ * (`PlannerSkillInfo` is metadata; `write_skill` is a planner tool, not a
+ * route). So this is the one genuinely new backend surface PA-70 adds.
+ *
+ * `slug` is explicit rather than derived from `name` on arrival, because the
+ * Hub's provisioning ledger keys on `global:<slug>`: a slug re-derived per
+ * host could differ — a colliding directory gets a `-2` suffix — and the Hub
+ * would then be unable to find what it provisioned in order to overwrite it.
+ *
+ * Worth being exact about what this accepts, since a skill body is
+ * instructions an agent will later follow. It is *data the model reads*, not a
+ * package this server executes, so it is not the same class of thing as
+ * `POST /api/agents/install` (whose whole posture is an id from a closed set).
+ * But it is consequential enough to be an authenticated, logged write whose
+ * target is a slug with no path component, landing only in the app-owned
+ * skills root.
+ */
+export const ImportPlannerSkillRequest = z.object({
+  slug: z
+    .string()
+    .min(1)
+    .max(80)
+    .regex(/^[a-z0-9-]+$/, { message: 'A skill slug is lowercase letters, digits and hyphens.' }),
+  name: z.string().min(1).max(128),
+  description: z.string().min(1).max(2000),
+  body: z.string().min(1).max(100_000),
+  /** Replace an existing skill with this slug. Absent means refuse, so a
+      re-run never silently rewrites something a human edited. */
+  overwrite: z.boolean().optional(),
+});
+export type ImportPlannerSkillRequest = z.infer<typeof ImportPlannerSkillRequest>;
+
+/**
  * PA-38: one agent's own view of the skill catalog — `PlannerAgentToolInfo`'s
  * exact shape, one layer up. `enabled` is the *effective* state for this
  * agent (global AND per-agent); `disabledGlobally` greys out a checkbox the

@@ -653,3 +653,76 @@ describe('bundled skill-creator meta-skill (PA-38 round 2)', () => {
     expect(t.context.skills.get('global:skill-creator')).toBeUndefined();
   });
 });
+
+/**
+ * PA-70: `POST /api/planner/skills/import` — the one new backend surface that
+ * ticket adds, because `POST /api/planner/skills` names a directory on this
+ * machine and a Hub provisioning a fleet has no way to know one.
+ */
+describe('importing a global skill from content', () => {
+  let t: TestApp;
+  afterEach(() => t?.cleanup());
+
+  const body = {
+    slug: 'release-notes',
+    name: 'Release notes',
+    description: 'How to write release notes here.',
+    body: 'Use the changelog.',
+  };
+
+  const post = (payload: unknown) =>
+    t.app.inject({
+      method: 'POST',
+      url: '/api/planner/skills/import',
+      headers: authHeaders(t.cookie),
+      payload,
+    });
+
+  it('writes SKILL.md under the requested slug and lists it', async () => {
+    t = await createTestApp();
+    const response = await post(body);
+    expect(response.statusCode).toBe(201);
+    expect(response.json().id).toBe('global:release-notes');
+
+    // The slug is honoured verbatim rather than re-derived from the name: the
+    // caller's own ledger keys on `global:<slug>`, so a host that invented a
+    // different one would be unfindable later.
+    const raw = await fs.readFile(
+      path.join(t.context.plannerSkillsRoot, 'release-notes', 'SKILL.md'),
+      'utf8',
+    );
+    expect(raw).toContain('name: Release notes');
+    expect(raw).toContain('Use the changelog.');
+    expect(t.context.skills.get('global:release-notes')?.name).toBe('Release notes');
+  });
+
+  it('refuses a colliding slug unless an overwrite is confirmed', async () => {
+    t = await createTestApp();
+    await post(body);
+
+    const refused = await post({ ...body, body: 'Something else.' });
+    expect(refused.statusCode).toBe(409);
+    // Unlike `registerGlobalSkill`, this never auto-suffixes to `-2`: a
+    // provisioning run that quietly created `release-notes-2` on one host and
+    // `release-notes` on another leaves a fleet that looks uniform and is not.
+    expect(t.context.skills.listGlobalSkills().filter((s) => s.slug.startsWith('release-notes'))).toHaveLength(1);
+
+    const confirmed = await post({ ...body, body: 'Something else.', overwrite: true });
+    expect(confirmed.statusCode).toBe(201);
+    const raw = await fs.readFile(
+      path.join(t.context.plannerSkillsRoot, 'release-notes', 'SKILL.md'),
+      'utf8',
+    );
+    expect(raw).toContain('Something else.');
+  });
+
+  it('rejects a slug that is not a safe directory name', async () => {
+    t = await createTestApp();
+    for (const slug of ['../escape', 'Has Caps', 'with/slash', 'has:colon']) {
+      const response = await post({ ...body, slug });
+      // Refused by request validation, so the containment question never
+      // reaches the filesystem at all.
+      expect(response.statusCode).toBe(400);
+    }
+  });
+});

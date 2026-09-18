@@ -51,7 +51,8 @@ export type IconName =
   | 'agent-opencode'
   | 'agent-pi'
   | 'agent-shell'
-  | 'agent-generic';
+  | 'agent-generic'
+  | 'template';
 
 interface Props {
   name: IconName;
@@ -201,6 +202,18 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <rect x="9" y="9" width="11" height="11" rx="2.2" />
       <path d="M15 6.5A2.5 2.5 0 0 0 12.5 4H6.5A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15" />
+    </>
+  ),
+
+  // A card with a second one behind it and a plus: "one definition, copied
+  // onto more than one machine". Distinct from `copy`, which is the clipboard
+  // action everywhere else in this app.
+  template: (
+    <>
+      <rect x="3.5" y="7" width="12" height="13" rx="2.2" />
+      <path d="M7 4h11a2.2 2.2 0 0 1 2.2 2.2v11" />
+      <path d="M9.5 13.5h6" />
+      <path d="M12.5 10.5v6" />
     </>
   ),
 

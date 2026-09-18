@@ -15,6 +15,9 @@ import { HealthPoller } from './registry/health.js';
 import { HostRegistry } from './registry/store.js';
 import { hubAuthRoutes } from './routes/auth.js';
 import { hubHostRoutes } from './routes/hosts.js';
+import { hubTemplateRoutes } from './routes/templates.js';
+import { Provisioner } from './templates/provisioner.js';
+import { TemplateStore } from './templates/store.js';
 import { resolveProxyTarget } from './proxy/allowlist.js';
 import { proxyHttp } from './proxy/http.js';
 import { SocketRegistry } from './proxy/sockets.js';
@@ -63,6 +66,9 @@ export interface HubContext {
   readonly registry: HostRegistry;
   readonly health: HealthPoller;
   readonly sockets: SocketRegistry;
+  /** PA-70: config templates, and the ledger of what was provisioned where. */
+  readonly templates: TemplateStore;
+  readonly provisioner: Provisioner;
   readonly fetchImpl: typeof fetch;
 }
 
@@ -114,8 +120,20 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
   const sockets = new SocketRegistry();
   const health = new HealthPoller({ registry, fetchImpl, log: app.log });
   const auth = new HubAuthService(db, config.authToken, config.sessionTtlMs);
+  const templates = new TemplateStore(db);
+  const provisioner = new Provisioner({ registry, store: templates, fetchImpl, log: app.log });
 
-  const context: HubContext = { config, db, auth, registry, health, sockets, fetchImpl };
+  const context: HubContext = {
+    config,
+    db,
+    auth,
+    registry,
+    health,
+    sockets,
+    templates,
+    provisioner,
+    fetchImpl,
+  };
   app.decorate('hub', context);
 
   await app.register(cookie);
@@ -197,6 +215,7 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
 
   await app.register(hubAuthRoutes);
   await app.register(hubHostRoutes);
+  await app.register(hubTemplateRoutes);
 
   // ---- The proxy ------------------------------------------------------------
   /**

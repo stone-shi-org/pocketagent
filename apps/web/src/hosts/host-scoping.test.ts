@@ -30,6 +30,18 @@ const ALLOWED = new Map<string, string>([
     'pages/LoginPage.tsx',
     'Authenticates to this origin. With a Hub in front that *is* the Hub, and single sign-on means there is no per-host login to scope.',
   ],
+  [
+    'pages/HubTemplatesPage.tsx',
+    'PA-70: reads `/api/hub/templates` on the Hub origin, which is not a host. A host-scoped client would ask a backend for a template API it deliberately does not have — the same exemption `LoginPage` carries, for the same "this is about the origin, not the machine" reason.',
+  ],
+  [
+    'pages/HubTemplateEditorPage.tsx',
+    'PA-70: same Hub origin as the list page. Its one write that reaches a backend goes there through the Hub, which holds the per-host credential — this page never talks to a host directly, and must not be able to.',
+  ],
+  [
+    'components/HubTemplatesSection.tsx',
+    'PA-70: the Settings entry point to the above. Its single `GET /api/hub/templates` is also the gate that decides whether a Hub is answering at all, so it is Hub-origin by definition.',
+  ],
 ]);
 
 const ROOT = new URL('..', import.meta.url).pathname;
