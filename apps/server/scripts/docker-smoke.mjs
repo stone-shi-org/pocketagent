@@ -23,10 +23,18 @@
  * both removed on exit. It never touches the real database — the container
  * gets its own data root, which is what POCKETAGENT_DATA_DIR is for (PA-62).
  *
+ * It also carries PA-65's release criteria, because they are the same build:
+ * that the version stamped at build time is what `/health` reports and what
+ * the *web bundle* carries, and that neither is ever `unknown`. Those two
+ * halves are stamped by different mechanisms — an `ENV` the server reads at
+ * boot, and a Vite `define` frozen into the JS — so one can regress while the
+ * other still looks right.
+ *
  * Environment:
  *   PA_SMOKE_PORT=18787   host port to publish on
  *   PA_SMOKE_KEEP=1       leave the container and temp dirs behind to poke at
  *   PA_SMOKE_SKIP_BUILD=1 reuse the existing :latest rather than rebuilding
+ *   PA_SMOKE_VERSION      the semver to stamp (default 9.9.9-smoke)
  */
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -135,15 +143,45 @@ console.log(`  host uid   ${HOST_UID}:${HOST_GID}`);
 console.log(`  scratch    ${tmp}`);
 
 heading('Build the thin image');
+// A deliberately fake *release-shaped* version (PA-65), so the whole
+// tag -> stamp -> /health -> web bundle chain is exercised rather than just
+// "something was stamped". It is a prerelease of a version that will never
+// exist, so a local image can never be mistaken for a published release.
+const STAMP = process.env.PA_SMOKE_VERSION ?? '9.9.9-smoke';
 if (process.env.PA_SMOKE_SKIP_BUILD === '1') {
   ok('skipped (PA_SMOKE_SKIP_BUILD=1)');
 } else {
-  run('docker/build.sh', [], { cwd: REPO, stdio: ['ignore', 'inherit', 'inherit'] });
-  ok('docker/build.sh');
+  run('docker/build.sh', [], {
+    cwd: REPO,
+    stdio: ['ignore', 'inherit', 'inherit'],
+    env: { ...process.env, PA_VERSION: STAMP },
+  });
+  ok('docker/build.sh', `stamped ${STAMP}`);
 }
 {
   const size = run('docker', ['image', 'inspect', '-f', '{{.Size}}', `${IMAGE}:latest`]);
   ok('image present', `${(Number(size) / 1e9).toFixed(2)} GB`);
+}
+
+// What this image actually claims to be. Read back from the image rather than
+// assumed from STAMP, so the skip-build path stays honest: it asserts the
+// image's own stamp reaches both halves, whatever that stamp happens to be.
+const imageStamp = (() => {
+  const env = JSON.parse(run('docker', ['image', 'inspect', '-f', '{{json .Config.Env}}', `${IMAGE}:latest`]));
+  const entry = env.find((e) => e.startsWith('POCKETAGENT_BUILD_VERSION='));
+  return entry === undefined ? '' : entry.slice('POCKETAGENT_BUILD_VERSION='.length);
+})();
+
+heading('The build version is stamped into the image, and is tagged under it');
+{
+  check(imageStamp !== '' && imageStamp !== '0.0.0-dev', 'POCKETAGENT_BUILD_VERSION set', imageStamp);
+  if (process.env.PA_SMOKE_SKIP_BUILD !== '1') {
+    check(imageStamp === STAMP, 'the stamp is the version we asked for', imageStamp);
+    // The image tag and the stamped version are one identity, which is the
+    // whole point of PA-65: `:1.2.3` must not be able to report `1.2.2`.
+    const tagged = tryRun('docker', ['image', 'inspect', '-f', '{{.Id}}', `${IMAGE}:${STAMP}`]);
+    check(tagged.status === 0, `tagged :${STAMP} as well as :latest`);
+  }
 }
 
 heading('The master token is not in any image layer');
@@ -228,6 +266,10 @@ let health;
     'POCKETAGENT_BUILD_VERSION was stamped into the image',
     health?.version,
   );
+  // PA-65 AC 1 and 2: the running server reports exactly the version the image
+  // was built with — never `unknown`, and never the package.json fallback.
+  check(health?.version === imageStamp, '/health reports the stamped semver', health?.version);
+  check(health?.version !== 'unknown', '/health is never `unknown`');
   check(Array.isArray(health?.protocol) || typeof health?.protocol === 'object', 'protocol range advertised');
 }
 
@@ -239,6 +281,22 @@ heading('The web bundle is served by the same process, with no Hub');
   const asset = html.match(/src="([^"]+\.js)"/)?.[1];
   const assetRes = asset ? await fetch(`${BASE}${asset}`) : null;
   check(assetRes?.status === 200, 'hashed bundle asset served', asset);
+
+  // The other half of the version stamp, and the one PA-65 scope item 2 is
+  // about: `__APP_VERSION__` is a Vite `define`, frozen into the JS at build
+  // time. Inside a build context that (correctly) excludes `.git`, the old
+  // `git rev-parse` path returned `unknown` for every published image, so the
+  // UI's own footer could not say what it was running. Grepping the built
+  // assets rather than the one entry chunk we happen to have fetched: which
+  // chunk the string lands in is a bundler decision, not a contract.
+  const stamped = inContainer(
+    `grep -rl -- '${imageStamp}' /app/apps/web/dist/assets 2>/dev/null | head -1`,
+  );
+  check(stamped.stdout !== '', 'the web bundle carries the same version', stamped.stdout);
+  const unknown = inContainer(
+    `grep -rl -- 'APP_VERSION="unknown"' /app/apps/web/dist/assets 2>/dev/null | head -1`,
+  );
+  check(unknown.stdout === '', 'no asset reports the version as `unknown`');
 }
 
 heading('It runs as the host uid, not root');

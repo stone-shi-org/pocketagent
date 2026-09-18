@@ -30,6 +30,7 @@ or use private remote-control APIs. It launches `claude` exactly the way you wou
 - [Configuration](#configuration)
 - [Running](#running)
 - [Running with Docker](#running-with-docker)
+- [Releases](#releases)
 - [Deploying to another machine](#deploying-to-another-machine)
   - [The data root](#the-data-root)
 - [Two interfaces: native and terminal](#two-interfaces-native-and-terminal)
@@ -251,9 +252,13 @@ stale within days.
 
 | Tag | Contains |
 | --- | --- |
-| `:<semver>`, `:latest` | Node, git, tmux, bash, the server. **No agent CLIs.** |
-| `:<semver>-claude`, `:latest-claude` | The above plus a pinned `claude`. The common case. |
-| `:<semver>-all`, `:latest-all` | Plus pinned `codex`, `opencode` and `pi`, for air-gapped or byte-reproducible installs. |
+| `:<semver>`, `:<major>.<minor>`, `:latest` | Node, git, tmux, bash, the server. **No agent CLIs.** |
+| `:<semver>-claude`, `:<major>.<minor>-claude`, `:latest-claude` | The above plus a pinned `claude`. The common case. |
+| `:<semver>-all`, `:<major>.<minor>-all`, `:latest-all` | Plus pinned `codex`, `opencode` and `pi`, for air-gapped or byte-reproducible installs. |
+
+`:<major>.<minor>` is the "give me patches of the minor I qualified" subscription and `:latest`
+is the unpinned default; both move, and only a **stable** release moves them — see
+[Releases](#releases). Neither is a substitute for pinning by digest.
 
 Pins live in `docker/agent-versions.env`. **`agy` is deliberately absent from `-all`**: it is
 distributed as a Google-published binary with no npm package, and the registry names that look
@@ -365,7 +370,92 @@ so the entrypoint can remap the uid, then drops privileges itself.
 
 `pnpm demo:docker` builds the image and checks the whole contract end to end — a session that
 writes a host-owned file, `git` inside the mount, the login-shell `PATH`, state surviving
-`docker restart`, the extension example, and that the token is in no image layer.
+`docker restart`, the extension example, that the token is in no image layer, and that the
+stamped version reaches both `/health` and the web bundle.
+
+---
+
+## Releases
+
+### Versioning
+
+The **root `package.json` `version` is the repo's semver**, and it is the single source for
+three things that used to disagree: the server's `/health` version, the web bundle's
+`__APP_VERSION__`, and the image tags. The other three `package.json` files are kept identical
+to it — they are private and nothing resolves them as dependencies, so a version there is
+build identity rather than dependency semantics, and four numbers allowed to drift would mean
+"the repo's version" depended on which file you opened.
+
+```bash
+pnpm version:set 1.2.3     # writes all four package.json files
+```
+
+A test asserts they match, so a hand-edit of one fails the suite rather than shipping a server
+that contradicts its own image tag.
+
+### Cutting one
+
+```bash
+pnpm version:set 1.2.3
+git commit -am 'Release 1.2.3'
+git tag 1.2.3              # no `v` prefix
+./build.sh -p              # build all three targets and publish
+```
+
+`./build.sh` refuses to push unless HEAD carries a tag that parses as a release version, and
+refuses if that tag disagrees with the committed version — one of the two is wrong, and
+guessing which would publish an image whose `/health` contradicts its own tag. A commit with
+no release tag still builds all three targets (so a broken `Dockerfile` fails on the commit
+that broke it) and publishes nothing, which is what lets `:latest` mean "the most recent
+release" rather than "whatever built last night".
+
+**A prerelease moves nothing.** `1.2.3-rc.1` publishes only its own exact tags: no
+`:1.2`, no `:latest`. Those two are what an operator gets when they have *not* pinned, so a
+release candidate reaching them would ship an unfinished build to precisely the people who
+never asked to test one.
+
+### Pinning by digest
+
+`./build.sh -p` writes `release-digests.txt` and CI publishes it as a build artifact:
+
+```
+registry.shifamily.com/homestack/pocketagent-server:1.2.3 sha256:...
+registry.shifamily.com/homestack/pocketagent-server:1.2.3-claude sha256:...
+```
+
+A deployment that pins `@sha256:...` gets the image that was tested; one that pins `:1.2` gets
+whatever the next patch release moves that tag to.
+
+### What "reproducible" does and does not mean here
+
+Rebuilding the same tag gives you the same **semver, the same dependency tree** (the build
+installs with `--frozen-lockfile`) and the same pinned agent CLI versions from
+`docker/agent-versions.env`. It does **not** give a byte-identical image, and nothing here
+claims it does: the web bundle embeds a build timestamp for display, the base image is
+referenced by tag, and three native modules are compiled during the build. Pin by digest when
+you need "the exact image that was tested" — that is what the digest list is for.
+
+### CI
+
+One Bamboo plan, defined in `bamboo-specs.yaml`, whose job is two scripts:
+
+```bash
+./test.sh      # install --frozen-lockfile, vitest (JUnit XML), lint, typecheck
+./build.sh -p  # build all targets; publish only from a release tag
+```
+
+Both are runnable locally and are where all the logic lives — the Bamboo job itself is a
+checkout, one script task and a JUnit parser, matching every other plan on that server.
+`test.sh` runs the tests *first* and never aborts early: the parser globs
+`test-reports/*.xml`, and a run that died before vitest would report "no test results found"
+instead of naming the failure.
+
+The plan's one-time creation is manual (this Bamboo has no plan-creation REST API); the steps
+are at the top of `bamboo-specs.yaml`.
+
+**The Hub image (`pocketagent-hub`) is not built yet** — there is no `apps/hub` in the repo
+until PA-66 lands. The release driver builds the server's three targets; adding the hub is a
+second image in the same loop, not a second pipeline.
 
 ---
 

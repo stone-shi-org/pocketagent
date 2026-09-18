@@ -16,6 +16,10 @@ pnpm generate-token     # writes POCKETAGENT_AUTH_TOKEN into .env (mode 600)
 
 docker/build.sh         # backend image: thin | claude | all (PA-64)
 pnpm demo:docker        # the image's whole contract, against a real container
+
+pnpm version:set 1.2.3  # the repo's semver, written to all four package.json files (PA-65)
+./test.sh               # CI: install --frozen-lockfile, vitest (JUnit XML), lint, typecheck
+./build.sh -p           # CI: build every image target; publish only from a release tag
 ```
 
 **Docker is the deployment mechanism; `git pull && pnpm build` is the dev path** (PA-64).
@@ -50,6 +54,34 @@ differ from a bare-metal install and are disclosed in the README rather than qui
 `HOST=0.0.0.0` (loopback in a namespace means unreachable, so the deliberate act moves to
 publishing the port) and `NODE_ENV=production`, which makes the auth cookie `Secure` and so
 breaks login over plain HTTP until `POCKETAGENT_COOKIE_SECURE=false`.
+
+**A release is a tag, and the tag is the only thing that publishes** (PA-65). The root
+`package.json` `version` is the repo's semver and the single source for `/health`, the web
+bundle's `__APP_VERSION__` and the image tags; the other three `package.json` files are kept
+identical by `pnpm version:set` and a test fails if they drift — four numbers allowed to
+disagree would mean "the repo's version" depended on which file you opened, which is the
+ambiguity the old hardcoded `VERSION = '0.1.0'` created. `./build.sh` publishes only when HEAD
+carries a tag parsing as `1.2.3` (no `v`), and refuses when that tag disagrees with the
+committed version: one of the two is wrong, and guessing publishes an image whose `/health`
+contradicts its own tag. A commit with no release tag still builds every target — a broken
+Dockerfile should fail on the commit that broke it — and pushes nothing, which is what lets
+`:latest` mean "the most recent release" rather than "whatever built last night". **A
+prerelease moves nothing**: `1.2.3-rc.1` publishes its own exact tags and never `:1.2` or
+`:latest`, because those two are what an operator gets when they have *not* pinned. The tag
+matrix lives in `scripts/release-tags.mjs` rather than in bash, because the prerelease rule is
+a decision and a decision deserves a test.
+
+Everything CI does is `./test.sh` then `./build.sh -p`, both runnable locally: the Bamboo job
+is a checkout, one script task and a JUnit parser, which is the shape every other plan on that
+server has, and it keeps the logic in the repo where it can be diffed. Two details are
+load-bearing rather than stylistic. `test.sh` runs vitest **first** and collects failures
+instead of aborting, because the parser globs `test-reports/*.xml` and a run that died in
+`lint` would report "no test results found" instead of naming anything. And the plan's
+creation is **manual** — this Bamboo has no plan-creation REST endpoint — so `bamboo-specs.yaml`
+is the reviewable definition plus the one-time UI steps, and the webhook URL in it is
+deliberately blank: `POST /api/hooks/:slug` is the only unauthenticated route here, so a
+committed slug is a published endpoint. `pocketagent-hub` is not built yet; there is no
+`apps/hub` until PA-66.
 
 **`packages/protocol` must be built before anything else works.** It is consumed as
 compiled output, not source, so `lint`, `typecheck`, and `test` each run `pnpm protocol`

@@ -17,3 +17,11 @@ screenshots/
 # Design references pasted in while working. Same reason as above — they are
 # screenshots of a real session, so keep `git add -A` from publishing them.
 codex*.png
+
+# CI artifacts (PA-65). `test-reports/` is the JUnit XML Bamboo's parser task
+# globs; `release-digests.txt` is the per-release digest list `./build.sh -p`
+# writes and Bamboo publishes as an artifact. Both are regenerated per build
+# and describe one machine's run, so committing either would only ever be
+# stale.
+test-reports/
+release-digests.txt

@@ -1,0 +1,153 @@
+---
+# Bamboo plan for building and publishing the PocketAgent images (PA-65).
+#
+# ## Read this before touching the plan in the Bamboo UI
+#
+# This file is the reviewable definition of the plan. It is written in the same
+# YAML Specs v2 dialect as the one other spec-managed plan on this Bamboo
+# (live-stt), and for the same reason: **there is no project- or plan-creation
+# endpoint in this Bamboo instance's REST API**, so the plan cannot be created
+# by a script. The one-time setup is manual, in the UI:
+#
+#   1. Administration -> Linked Repositories -> add this repo as
+#      `github-agents-remote-control`.
+#   2. On that linked repository, enable "Scan for YAML Specs" so this file
+#      becomes authoritative and later edits arrive as commits rather than as
+#      undiffable UI changes.
+#   3. Confirm the `build-server` agent still advertises
+#      `system.docker.executable` (it does today; it is the only agent).
+#   4. Create the PocketAgent webhook in this app's own Settings and paste its
+#      delivery path into `notifications` below. It is left blank on purpose —
+#      see the comment there.
+#
+# Until step 2 is done, this file documents intent and the live plan is
+# whatever the UI says. That gap is the thing to close first, not to work
+# around.
+#
+# ## Why the job is two scripts and nothing else
+#
+# Every plan on this server is `checkout -> one Script task -> JUnit parser`,
+# with all logic in the repo. Keeping that shape means a reviewer can read
+# `test.sh` and `build.sh` in a diff instead of screenshotting a job
+# configuration, and it is why there is no `docker` command anywhere in this
+# file.
+version: 2
+
+plan:
+  project-key: PA
+  key: PA
+  name: pocketagent-docker-image
+  description: >-
+    Builds the PocketAgent backend image on every change, and publishes the
+    tag matrix plus image digests when HEAD carries a release tag (PA-65).
+
+stages:
+  - Default Stage:
+      jobs:
+        - Default Job
+
+Default Job:
+  key: JOB1
+  tasks:
+    - checkout:
+        description: Checkout Default Repository
+        force-clean-build: false
+    - script:
+        description: Test, then build and publish
+        interpreter: SHELL
+        scripts:
+          - |-
+            set -uo pipefail
+
+            # Tests first, and never behind `set -e`: test.sh collects its own
+            # failures so the JUnit XML below always exists. See test.sh.
+            ./test.sh
+            test_status=$?
+
+            # Reclaim space *before* building. Three image targets at
+            # 0.9/1.1/2.0 GB land on one shared build agent that has already
+            # failed a build with "no space left on device" (LIV-LIV-35), and
+            # that failure takes every other project's plan down with it.
+            docker builder prune -af || true
+            docker image prune -f || true
+
+            if [ $test_status -ne 0 ]; then
+              echo "Tests failed; not building images."
+              exit $test_status
+            fi
+
+            # `-p` is load-bearing: without it this pushes nothing and the
+            # build still goes green. build.sh itself refuses to push unless
+            # HEAD carries a release tag, so a branch build is a build-only
+            # verification and only a tagged commit publishes.
+            ./build.sh -p
+            build_status=$?
+
+            # Leave the agent clean for the next plan whatever happened above.
+            docker image prune -f || true
+
+            exit $build_status
+    - test-parser:
+        type: junit
+        description: Parse vitest results
+        ignore-time: false
+        test-results:
+          - 'test-reports/*.xml'
+
+  artifacts:
+    # So a deployment can pin `@sha256:...` rather than a tag that moves under
+    # it. Written only by a pushing build, so a branch build simply produces no
+    # artifact rather than an empty or misleading one.
+    - name: release-digests
+      location: .
+      pattern: release-digests.txt
+      shared: true
+      required: false
+
+  requirements:
+    # Stated rather than inherited. Every existing plan relies on there being
+    # exactly one agent that happens to have docker; naming the capability
+    # means a second agent without it cannot silently pick this job up and fail
+    # every build.
+    - system.docker.executable
+
+  # `pnpm install --frozen-lockfile` compiles node-pty and better-sqlite3 from
+  # source through node-gyp, which needs python3, make and a C compiler on the
+  # agent. The agent advertises docker, git, node and JDK but *no* Python
+  # capability, so if this job fails in `pnpm install`, that is the first thing
+  # to check — the toolchain is present on the current agent but nothing
+  # declares it, so nothing protects it either.
+
+triggers:
+  - polling:
+      period: 180
+
+branches:
+  # Off, like every other plan here. The release trigger is a tag on the
+  # default branch, not a branch build, and plan branches would multiply the
+  # image builds on the one shared agent for no gain.
+  create: manually
+  delete: never
+
+notifications:
+  - events:
+      - plan-failed
+    recipients:
+      # Paste the delivery path of a `bamboo`-type webhook created in this
+      # app's Settings, e.g.
+      #   https://agents.local.shifamily.com/api/hooks/<slug>
+      #
+      # Deliberately blank in the repo. `POST /api/hooks/:slug` is the only
+      # unauthenticated route in this server, so a committed slug is a
+      # published endpoint anyone who can reach the host may POST to — and the
+      # HMAC secret is what stops that mattering. A slug in git is a free half
+      # of that pair. Fill it in the UI (or in a local copy of this file) and
+      # keep it out of commits.
+      - webhook:
+          name: Notify Pocket Agent
+          url: ''
+
+labels: []
+
+other:
+  concurrent-build-plugin: system-default

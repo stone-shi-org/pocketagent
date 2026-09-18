@@ -17,6 +17,12 @@
 #   PA_VERSION    semver to stamp     (default: apps/server/package.json version + git sha)
 #   PA_PLATFORM   buildx --platform   (default: the host's own architecture)
 #   PA_PUSH=1     push instead of loading into the local daemon
+#   PA_TAGS       tag names to apply  (default: "<version><suffix> latest<suffix>")
+#   PA_METADATA_FILE  write buildx --metadata-file here, for the pushed digest
+#
+# The last two exist for the release driver, `./build.sh` at the repo root
+# (PA-65): a release publishes three tags per target rather than this script's
+# local-dev pair, and pins by digest rather than by any of them.
 set -euo pipefail
 
 target="${1:-thin}"
@@ -66,9 +72,26 @@ args=(
     --file docker/Dockerfile
     --target "$stage"
     --build-arg "POCKETAGENT_BUILD_VERSION=${PA_VERSION}"
-    --tag "${image}:${tag_version}${suffix}"
-    --tag "${image}:latest${suffix}"
 )
+
+# Tag names, not full refs: the image name stays in exactly one place, so a
+# caller overriding the tag set cannot accidentally publish the right tags to
+# the wrong repository.
+if [[ -n "${PA_TAGS:-}" ]]; then
+    read -r -a tag_names <<<"${PA_TAGS}"
+else
+    tag_names=("${tag_version}${suffix}" "latest${suffix}")
+fi
+for name in "${tag_names[@]}"; do
+    args+=(--tag "${image}:${name}")
+done
+
+if [[ -n "${PA_METADATA_FILE:-}" ]]; then
+    # buildx writes `containerimage.digest` here, which is the only place the
+    # pushed digest is available as data rather than as a line of push output
+    # that has to be scraped.
+    args+=(--metadata-file "${PA_METADATA_FILE}")
+fi
 
 # Only the targets that install a CLI need the pins, but passing them always is
 # harmless and keeps the invocation uniform.
@@ -93,5 +116,8 @@ else
     args+=(--load)
 fi
 
-echo "==> ${image}:${tag_version}${suffix}  (stage: ${stage}, stamped ${PA_VERSION})"
+echo "==> ${image} (stage: ${stage}, stamped ${PA_VERSION})"
+for name in "${tag_names[@]}"; do
+    echo "      :${name}"
+done
 exec docker buildx build "${args[@]}" .

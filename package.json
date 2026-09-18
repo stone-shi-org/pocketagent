@@ -19,6 +19,8 @@
     "//protocol": "The shared package is consumed as built output, not source, so it must be freshly built before anything typechecks, lints, tests, or runs against it. `dev` rebuilds it too (PA-31): without this, a protocol schema change (e.g. a new PATCH field) silently vanishes at runtime instead of erroring — zod strips an unrecognized key from a request body rather than rejecting it, so a stale dist/ here reads as a 200 that quietly did nothing.",
     "protocol": "pnpm -F @pocketagent/protocol build",
     "generate-token": "node apps/server/scripts/generate-token.mjs",
+    "//version": "PA-65. This root `version` is the repo's semver and the single source for /health, the web bundle's __APP_VERSION__ and the image tags; `version:set` keeps the other three package.json files identical to it, and release-tags.test.ts fails if they ever drift. A release is: `pnpm version:set X.Y.Z`, commit, `git tag X.Y.Z` (no 'v'), `./build.sh -p`.",
+    "version:set": "node scripts/set-version.mjs",
     "//docker": "PA-64. `docker/build.sh` is the entry point rather than a bare `docker build` because it is what reads docker/agent-versions.env (the single source of truth for the pinned agent CLI versions, shared with CI) and what stamps POCKETAGENT_BUILD_VERSION into both the server and the web bundle.",
     "docker:build": "docker/build.sh",
     "demo:docker": "pnpm -F @pocketagent/server exec node scripts/docker-smoke.mjs",

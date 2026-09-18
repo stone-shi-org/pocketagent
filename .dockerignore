@@ -48,3 +48,8 @@ codex*.png
 *.log
 .DS_Store
 coverage/
+
+# CI artifacts (PA-65). Nothing in the image build reads them, and a stale
+# digest list or test report inside a layer is just misleading.
+test-reports/
+release-digests.txt

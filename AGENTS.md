@@ -55,6 +55,9 @@ pnpm test               # Run all tests using vitest
 pnpm generate-token     # Generate secure auth token in .env
 docker/build.sh         # Build the backend image: thin | claude | all
 pnpm demo:docker        # Verify the image contract against a real container
+pnpm version:set 1.2.3   # Set the repo semver in all four package.json files
+./test.sh               # CI entry: install, vitest (JUnit XML), lint, typecheck
+./build.sh -p           # CI entry: build every target; publish only from a release tag
 ```
 
 **Deployment is the container image** (`docker/`); `git pull && pnpm build` is the development
@@ -67,3 +70,14 @@ never the default npm prefix, which lives inside the mounted `$HOME` and is hidd
 volume at run time; and the entrypoint **never chowns a mounted volume** — it remaps the
 container user to `PUID`/`PGID` and refuses to start with exit 78 when a mount is unwritable,
 naming the `chown` to run on the host.
+
+**A release is a tag.** The root `package.json` `version` is the repo's semver and the single
+source for `/health`, the web bundle's `__APP_VERSION__` and the image tags; `pnpm version:set`
+keeps the other three files identical and a test fails if they drift. `./build.sh` publishes
+only when HEAD carries a tag parsing as `1.2.3` (no `v` prefix) and refuses when that tag
+disagrees with the committed version — publishing an image whose `/health` contradicts its own
+tag is the failure the whole pipeline exists to prevent. A prerelease publishes its exact tags
+only and never moves `:<major>.<minor>` or `:latest`. CI is `./test.sh` then `./build.sh -p`;
+`test.sh` deliberately runs the tests first and collects failures rather than aborting, because
+Bamboo's parser globs `test-reports/*.xml` and an early exit reports "no test results found"
+instead of naming the failure.
