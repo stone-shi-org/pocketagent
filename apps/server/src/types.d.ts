@@ -26,6 +26,7 @@ import type { McpRegistryService } from './planner/mcp/registry-service.js';
 import type { SkillRegistryService } from './planner/skills.js';
 import type { TelegramBotStore } from './telegram/bots-store.js';
 import type { TelegramLinksStore } from './telegram/links-store.js';
+import type { AdminService } from './admin/index.js';
 
 export interface PocketContext {
   config: Config;
@@ -34,6 +35,8 @@ export interface PocketContext {
       `onRequest` gate that checks a session cookie. */
   hubCredentials: HubCredentialStore;
   sessions: SessionManager;
+  /** PA-69: is it safe to stop, and the seam through which we ask to. */
+  admin: AdminService;
   cron: CronService;
   webhooks: WebhookService;
   /** PA-11: a human's follow-up prompts waiting on a busy working tree. */

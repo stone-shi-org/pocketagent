@@ -8,6 +8,8 @@ import type {
   DeleteRemoteBranchRequest,
   DeleteWorktreeResponse,
   DiscoveredFolder,
+  DrainStateResponse,
+  RestartAcceptedResponse,
   AgentInfo,
   AgentInstallEvent,
   InstallableAgentId,
@@ -312,6 +314,37 @@ export function createApiClient(endpoint: HostEndpoint) {
       }),
 
     listHosts: () => request<{ hosts: HostInfo[] }>('/api/hosts'),
+
+    /**
+     * What restarting this host would cost, right now (PA-69).
+     *
+     * Read-only and safe to poll: the whole reason it exists is that the POST
+     * below cannot be used to *look*, since on a host with nothing running it
+     * would restart the server instead of answering a question.
+     */
+    getDrainState: () => request<DrainStateResponse>('/api/admin/drain-state'),
+
+    /**
+     * Ask this host to drain and exit so its supervisor restarts it.
+     *
+     * Throws `ApiError` rather than swallowing it, the same way
+     * `deleteWorktree` does and for the same reason: the caller branches on
+     * the code. `drain_blocked` (409) means work is in flight and the UI
+     * re-reads `getDrainState` for the list — `ApiError` deliberately carries
+     * only a code and a message, so the blockers in the 409 body are for a
+     * `curl` caller rather than for us. `restart_unsupported` (501) means this
+     * process has no supervisor and will not exit.
+     *
+     * There is deliberately no parameter naming a version, image or artifact,
+     * and there must never be one: the update source is fixed at deploy time.
+     * `force` is the only input, and it means "interrupt work that is still
+     * running", the same override `force` has on a queued prompt.
+     */
+    restartServer: (force: boolean) =>
+      request<RestartAcceptedResponse>('/api/admin/restart', {
+        method: 'POST',
+        body: JSON.stringify({ force }),
+      }),
 
     /**
      * Unauthenticated version check (PA-61).

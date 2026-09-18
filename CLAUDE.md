@@ -1121,6 +1121,74 @@ route and not even a reveal *decision*: past the bind response there is nothing 
 `token_prefix` — the leading characters kept in the clear — is what lets a list row be matched
 against the token in hand.
 
+### Version drift and drain-then-exit restart (PA-69)
+
+The safe shape of "the frontend can upgrade the backend": **the frontend detects and reports,
+a supervisor applies.** The server never downloads or replaces its own code, and no request can
+name what to install — `RestartRequest` carries one boolean and `admin-restart.test.ts` asserts
+the schema has no other key, because a server that could be told which image to run would turn
+"restart this host" into a grant strictly larger than the terminal access this app already
+hands out, and one that survives every later revocation.
+
+**The exit status is deliberately non-zero, and that is the load-bearing detail.** The ticket
+assumed `Restart=always`; this repo's README recommends `Restart=on-failure` and production
+uses it, under which a clean `exit(0)` is a *successful* exit that systemd correctly ignores —
+so `POST /api/admin/restart` would have been a remote off switch on every deployment following
+our own documentation. `RESTART_EXIT_CODE` is 75 (`EX_TEMPFAIL`, beside the 78 `EX_CONFIG`
+already used for a bad config), which restarts under every supervisor policy that restarts at
+all. The cost is one misleading "failed" line in the journal, so the drain logs why first.
+
+`AdminService` (`admin/index.ts`) decides; `server.ts` acts. The split exists because
+`buildApp` is what every test calls, so a `process.exit` reachable from it would kill the
+runner: the *act* is a hook installed after construction (`setRestartHook`), the same
+after-construction wiring `PlannerChatService.attachRunServices` uses. No hook means the route
+answers 501 rather than pretending — a server that drains into no supervisor stays down until
+somebody reaches the machine, which is the one failure here an operator cannot undo remotely.
+The hook waits `RESPONSE_FLUSH_GRACE_MS` before closing, because `app.close()` tears down the
+HTTP server and a 202 written after that reaches nobody.
+
+**Occupancy is asked of two sources, because only one of them is a session.**
+`SessionManager.midTurnSessions` shares its predicate — now the module-level `isMidTurn` — with
+`busyTreeRoots`, so a drain and the run queue cannot disagree about what "busy" means; a drain
+that was stricter would refuse forever, and one that was laxer would exit cleanly mid-turn.
+`PlannerChatService.inFlightTurns` is the other, and it closes a real gap: a Pocket Agent turn
+has no session, no cwd and no worktree (exactly why `RunQueue` never keys on one), so a check
+consulting only the session manager would report "nothing in the way" and then destroy a live
+webhook- or Telegram-driven turn with nobody watching. Its `activeTurns` map is a *count*
+incremented past the synchronous preconditions and released in a `finally`; over-counting
+refuses a clean restart, which `force` escapes, while under-counting silently kills work, so
+the error direction is chosen. A turn parked on an approval blocks too, from `pendingTurns` —
+sharper than for a session, since that map is in-memory only, so restarting does not pause the
+turn and let someone answer later, it destroys the approval outright.
+
+What is deliberately **not** a blocker, each because the work is in no danger: a queued webhook
+delivery (`queued_spec_json`) and a queued human prompt (`session_prompt_queue`) are persisted
+and left alone by the boot sweeps, so counting them would refuse a restart to protect work that
+resumes anyway; and a terminal session, which has no end-of-turn signal, so an idle shell would
+otherwise block every restart forever.
+
+`GET /api/admin/drain-state` exists because the POST cannot be used to *look*: on a host with
+nothing running, asking what is blocking would restart the server. The 409 carries `blockers`
+for a `curl` caller, while the browser re-reads drain-state, since `ApiError` deliberately
+carries only a code and a message.
+
+**Drift is advisory; protocol incompatibility is blocking; they must stay distinguishable.**
+`version-drift.ts` lives in the protocol package beside `protocol-negotiation.ts` and for the
+identical reason — the browser's host list and `apps/hub`'s own will both draw this badge, and
+a second copy of semver comparison is a second set of prerelease edge cases. `hostVersionStatus`
+is the single place their precedence is decided (incompatible wins), because an unusable host
+has a problem an "update available" badge would bury. Build metadata is ignored per semver §11,
+which matters concretely: CI stamps a git sha there, so two hosts on one release must not read
+as drifting. `0.0.0-dev` sorts below every real release by construction, which is why
+`resolveServerVersion` chose it.
+
+"Latest known release" has two sources: `HubHostListResponse.latestRelease` when a Hub reports
+one, else `latestKnownVersion` over the hosts in the list — *evidence*, not authority, so a
+standalone install and a uniformly-stale fleet both report no drift. That is honest, and the
+alternative is this app querying a release feed on the internet. `withVersionDrift` fills
+`HostRecord.drift` in a second pass, because drift is a property of the list and
+`hostRecordFor` sees one host.
+
 ## Invariants
 
 These are load-bearing. Several were bugs first.
@@ -1374,6 +1442,22 @@ These are load-bearing. Several were bugs first.
   that possible, and `ConversationWatchConnection` had to be fixed to honour it: it shipped
   with no `PROTOCOL_MISMATCH` branch at all and reconnected forever on a backoff, invisibly,
   because a chat preview draws no connection state.
+- **The server never replaces its own code, and no request may name what to install** (PA-69).
+  A process that replaces itself has no supervisor left to replace it, so `POST
+  /api/admin/restart` only ever *drains and exits* and something outside starts it again on
+  whatever image its unit already pointed at. `RestartRequest` has exactly one field, `force`,
+  and a test asserts that — the update source is fixed at deploy time, and a UI that could name
+  an image would be a larger and less revocable grant than terminal access. Three things hold
+  the rest of it up. The exit status is **non-zero** (`RESTART_EXIT_CODE`, 75), because
+  `Restart=on-failure` — the README's own unit, and production's — ignores a clean exit, so
+  `exit(0)` would make this a remote off switch; with no restart hook installed the route
+  answers 501 instead of exiting into nothing. A restart **refuses by default while anything is
+  mid-turn and names it**, asking both `SessionManager.midTurnSessions` (sharing `isMidTurn`
+  with the run queue, so the two cannot disagree) and `PlannerChatService.inFlightTurns` (a
+  Pocket Agent turn has no session and is invisible to the first). And there is **no timeout**:
+  a blocked request keeps refusing until the work ends or a human passes `force`, which is the
+  same single override `force` has on a queued prompt and the same no-decay rule every approval
+  path here follows. Asserted in `apps/server/tests/admin-restart.test.ts`.
 - **A hub credential is a second principal, never a second root** (PA-63). `POST
   /api/auth/hub-bind` is the only new way to obtain one, it takes the *master* token (rate-limited
   and Origin-checked exactly as `login` is, since `PUBLIC_API_PATHS` skips the gate for both), and

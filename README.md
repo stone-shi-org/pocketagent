@@ -42,6 +42,7 @@ or use private remote-control APIs. It launches `claude` exactly the way you wou
 - [Copying a message](#copying-a-message)
 - [Tidying the list](#tidying-the-list)
 - [Layouts](#layouts)
+- [Restarting a host](#restarting-a-host)
 - [Security model](#security-model)
   - [Hub credentials](#hub-credentials)
   - [Continuing a chat on another provider](#continuing-a-chat-on-another-provider)
@@ -214,6 +215,20 @@ loginctl enable-linger "$USER"     # keep it running when you are logged out
 With the default `direct` backend, restarting the service **kills every running session**.
 Set `POCKETAGENT_BACKEND=tmux` and they survive restarts — see
 [Process backends](#process-backends).
+
+A note on the restart policy, because it interacts with
+[Restarting a host](#restarting-a-host). When asked to restart over the API the server drains
+and exits with status **75**, deliberately non-zero, so that `on-failure` *and* `always` both
+bring it back — a clean `exit(0)` is a *successful* exit, which `on-failure` correctly ignores,
+and the endpoint would then be a remote off switch. The only policy that cannot work is
+`Restart=no` (the default if you omit the line), and there the endpoint refuses to exit at all
+rather than taking the host down. Docker's `always`, `unless-stopped` and `on-failure` all
+behave the same way.
+
+Independently of that, `Restart=always` is the safer choice: a `SIGTERM` from anywhere — a
+stray `pkill -f dist/server.js` aimed at a scratch server in another checkout matches this one
+too — is a graceful shutdown that exits `0`, which `on-failure` will not restart, and the
+journal shows nothing but a clean stop.
 
 ---
 
@@ -777,6 +792,39 @@ leaves every other host alone. With one host registered, none of this appears.
 
 A host is a **path prefix on this origin** — see limitation 26 for why, and for what still has
 to be true of your reverse proxy.
+
+When one host is running an older build than another, its row says so — a quiet `update` badge
+on the host heading, the whole sentence in the tile's tooltip or on the sheet row
+("`stone-dev01` is on 1.4.2, 1.5.0 available"). "Behind" and "too old to talk to" stay separate
+states: a lagging host still works, and one whose wire protocol this bundle cannot negotiate
+says *that* instead, because it needs upgrading before it can be used at all rather than
+whenever convenient.
+
+Nothing here downloads or installs anything. With no Hub, "the latest version" simply means the
+newest build any registered host reports, so a single host — or a fleet that is uniformly stale
+— reports no drift at all. That is deliberate: the alternative is this server phoning a release
+feed on the internet to ask.
+
+### Restarting a host
+
+Settings → **This Host** shows the build it is running and a **Restart** button. The server's
+only role is picking a safe moment to stop: it drains, exits, and whatever supervises it starts
+it again **on whatever image that unit points at**. There is no version picker and no upgrade
+button, and the API has no field for naming an image, tag or digest — the update source is
+fixed at deploy time, in your compose file or systemd unit. "Upgrade this host from a browser"
+would otherwise mean "run an arbitrary image on that host".
+
+By default it **refuses while anything is mid-turn** and names what: a session whose agent is
+working, or one parked on an approval only you can answer, or a Pocket Agent chat mid-turn.
+There is no timeout — a blocked request keeps refusing until the work finishes or you press
+**Restart anyway**, which interrupts it and says exactly what it is interrupting. Queued
+webhook deliveries and queued prompts are never blockers: they are on disk and resume
+afterwards.
+
+What survives is the same as for any other restart: terminal sessions on the tmux backend are
+re-adopted, and everything running under the agent SDK — agent chats, cron runs, webhook
+deliveries — ends and shows as **interrupted**, whichever backend is configured. Sessions are
+not silently listed as live afterwards.
 
 ### Reconnect behaviour
 

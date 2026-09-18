@@ -5,6 +5,7 @@ import { Icon, type IconName } from '../components/Icon.js';
 import { CustomClaudeProvidersSection } from '../components/CustomClaudeProvidersSection.js';
 import { CodingAgentsSection } from '../components/CodingAgentsSection.js';
 import { TelegramSection } from '../components/TelegramSection.js';
+import { HostAdminSection } from '../components/HostAdminSection.js';
 import { HubsSection } from '../components/HubsSection.js';
 import { getTerminalFontOverride, setTerminalFontOverride } from '../agent/terminal-font-pref.js';
 import { formatBuildInfo } from '../version.js';
@@ -381,6 +382,14 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
         desc="Hubs bound to this backend, and revoking one. A Hub stores a credential minted here, never this server's access token."
       >
         <HubsSection onApiError={onApiError} />
+      </SectionCard>
+
+      <SectionCard
+        title="This Host"
+        icon="laptop"
+        desc="The build this host is running, and asking it to drain and restart. The image it comes back on is fixed by its unit, never chosen here."
+      >
+        <HostAdminSection onApiError={onApiError} />
       </SectionCard>
 
       <SectionCard

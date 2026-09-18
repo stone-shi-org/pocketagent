@@ -1,9 +1,14 @@
 import {
   PROTOCOL_VERSION,
   describeIncompatibility,
+  describeVersionDrift,
+  detectVersionDrift,
+  hostVersionStatus,
+  latestKnownVersion,
   negotiateProtocol,
   type HostCompatibility,
   type HostInfo,
+  type VersionDrift,
 } from '@pocketagent/protocol';
 import { DEFAULT_HOST_ID, type HostEndpoint } from '../api/host.js';
 
@@ -76,6 +81,20 @@ export interface HostRecord {
   readonly isDefault: boolean;
   /** False for the host serving this bundle, which cannot be un-registered. */
   readonly canRemove: boolean;
+  /**
+   * Where this host's build sits against the newest one we know of (PA-69).
+   *
+   * On the record rather than derived in each renderer because a record is the
+   * one already-decided shape all three surfaces read — the same rule the
+   * interface's own doc comment states for status. It cannot be filled by
+   * `hostRecordFor`, though, which sees one host: "the latest known version"
+   * is a property of the whole list, so `withVersionDrift` does a second pass
+   * once every record exists.
+   *
+   * Defaults to `unknown`, which is also the honest answer for a standalone
+   * install: one host compared against itself is not evidence of anything.
+   */
+  readonly drift: VersionDrift;
 }
 
 /** Whether `id` names this record, by its routing id or by an alias. */
@@ -163,7 +182,54 @@ export function hostRecordFor(entry: {
     aliases: info && info.id !== entry.endpoint.id ? [info.id] : [],
     isDefault: entry.isDefault ?? entry.endpoint.id === DEFAULT_HOST_ID,
     canRemove: entry.canRemove ?? entry.endpoint.basePath !== '',
+    // Filled by `withVersionDrift` below, which is the only thing that can:
+    // drift needs the whole list, and this function sees one host.
+    drift: detectVersionDrift(info?.version ?? null, null),
   };
+}
+
+/**
+ * Fills in `drift` across a whole list of records (PA-69).
+ *
+ * `hubLatestRelease` is what a Hub reports it knows exists
+ * (`HubHostListResponse.latestRelease`) and wins when present. Without it the
+ * fallback is the newest version any listed host reports, which is *evidence*
+ * rather than authority: a fleet where every host is equally stale reports no
+ * drift at all, and a standalone install reports none ever. Both are honest —
+ * nothing here has seen a newer build — and both are strongly preferable to
+ * the alternative, which is this app phoning a release feed on the internet to
+ * find out.
+ *
+ * Offline hosts are included in the comparison basis on purpose: the last
+ * version a host reported is still evidence that that version exists, and
+ * dropping it would make a fleet's drift flicker as hosts go up and down.
+ */
+export function withVersionDrift(
+  records: readonly HostRecord[],
+  hubLatestRelease?: string | null,
+): HostRecord[] {
+  const latest =
+    hubLatestRelease ?? latestKnownVersion(records.map((record) => record.version));
+  return records.map((record) => ({
+    ...record,
+    drift: detectVersionDrift(record.version, latest),
+  }));
+}
+
+/**
+ * The drift sentence for one host, or null when there is nothing to say.
+ *
+ * Wraps `hostVersionStatus` so that the precedence rule — an incompatible host
+ * reports its incompatibility, not an advisory "update available" — is applied
+ * here, once, rather than in each of the three surfaces. That precedence is
+ * the acceptance criterion: "behind" and "protocol-incompatible" have to stay
+ * distinguishable, and an unusable host has a blocking problem that a badge
+ * about versions would bury.
+ */
+export function hostDriftMessage(record: HostRecord): string | null {
+  if (record.compatibility === null) return null;
+  if (hostVersionStatus(record.compatibility, record.drift) !== 'behind') return null;
+  return describeVersionDrift(record.label, record.drift);
 }
 
 /** Short text beside a dot: "3 running", "offline", "v-mismatch", "…". */

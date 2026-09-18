@@ -1,5 +1,10 @@
 import { Icon } from './Icon.js';
-import { hostDotClass, hostStatusSummary, type HostRecord } from '../hosts/host-status.js';
+import {
+  hostDotClass,
+  hostDriftMessage,
+  hostStatusSummary,
+  type HostRecord,
+} from '../hosts/host-status.js';
 
 /**
  * A host heading, wrapping that host's three home-screen categories (PA-67).
@@ -49,6 +54,7 @@ export function HostGroup({
   if (!show) return <>{children}</>;
 
   const unusable = host.status === 'offline' || host.status === 'incompatible';
+  const drift = hostDriftMessage(host);
 
   return (
     <section className={`host-group${collapsed ? ' collapsed' : ''}`}>
@@ -69,6 +75,15 @@ export function HostGroup({
           <span className={hostDotClass(host.status)} aria-hidden="true" />
           <span className="host-name">{host.label}</span>
           <span className="host-group-summary">{hostStatusSummary(host)}</span>
+          {/* PA-69: drift is advisory, so it rides on the host row as a quiet
+              badge rather than as a notice competing with the unusable
+              branch below. `hostDriftMessage` returns null for an
+              incompatible host, so the two can never both speak. */}
+          {drift !== null && (
+            <span className="host-group-update" title={drift}>
+              update
+            </span>
+          )}
         </button>
         {actions}
       </div>

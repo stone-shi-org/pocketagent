@@ -12,7 +12,12 @@ import {
   publishKnownHosts,
   type HostEndpoint,
 } from '../api/host.js';
-import { hostRecordFor, type HostProbe, type HostRecord } from './host-status.js';
+import {
+  hostRecordFor,
+  withVersionDrift,
+  type HostProbe,
+  type HostRecord,
+} from './host-status.js';
 import { backoffMs, isDue, PROBE_TIMEOUT_MS, STATUS_MS } from './poll-policy.js';
 import {
   addLocalHost,
@@ -135,7 +140,10 @@ async function probeHostInfo(endpoint: HostEndpoint): Promise<HostProbe> {
 }
 
 /** One probe of the Hub's registry, to decide which source is live. */
-async function probeHubRegistry(): Promise<HubHostEntry[] | null> {
+async function probeHubRegistry(): Promise<{
+  hosts: HubHostEntry[];
+  latestRelease: string | null;
+} | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
   try {
@@ -146,7 +154,11 @@ async function probeHubRegistry(): Promise<HubHostEntry[] | null> {
     });
     if (!response.ok) return null;
     const parsed = HubHostListResponse.safeParse(await response.json());
-    return parsed.success ? parsed.data.hosts : null;
+    if (!parsed.success) return null;
+    // PA-69: a Hub that tracks releases tells us the newest one, which beats
+    // inferring it from the hosts we happen to see. Optional on the wire, so
+    // absent simply means we fall back to that inference.
+    return { hosts: parsed.data.hosts, latestRelease: parsed.data.latestRelease ?? null };
   } catch {
     return null;
   } finally {
@@ -198,27 +210,38 @@ export function useHostDirectory(): HostDirectory {
   const [source, setSource] = useState<HostSource | null>(null);
   const [local, setLocal] = useState<LocalHostEntry[]>(() => loadLocalHosts());
   const [hubHosts, setHubHosts] = useState<HubHostEntry[]>([]);
+  const [hubLatestRelease, setHubLatestRelease] = useState<string | null>(null);
   const [probes, setProbes] = useState<Record<string, HostProbe>>({});
   const metaRef = useRef<Record<string, { lastAttemptAt: number; failures: number }>>({});
+
+  /**
+   * Stores a registry read. One helper rather than four call sites setting two
+   * pieces of state each, so a future third field cannot be picked up by some
+   * of them and missed by the rest.
+   */
+  const applyRegistry = useCallback(
+    (registry: { hosts: HubHostEntry[]; latestRelease: string | null } | null): boolean => {
+      if (!registry) return false;
+      setHubHosts(registry.hosts);
+      setHubLatestRelease(registry.latestRelease);
+      return true;
+    },
+    [],
+  );
 
   // Decide the source once. A backend answers `/api/hub/hosts` with a JSON 404
   // (the not-found handler only serves the SPA shell *outside* `/api/`), so
   // "did not parse" is the same as "no Hub" and needs no version sniffing.
   useEffect(() => {
     let cancelled = false;
-    void probeHubRegistry().then((hosts) => {
+    void probeHubRegistry().then((registry) => {
       if (cancelled) return;
-      if (hosts) {
-        setHubHosts(hosts);
-        setSource('hub');
-      } else {
-        setSource('local');
-      }
+      setSource(applyRegistry(registry) ? 'hub' : 'local');
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [applyRegistry]);
 
   const entries = useMemo<Entry[]>(() => {
     if (source === 'hub') return entriesFromHub(hubHosts);
@@ -274,28 +297,32 @@ export function useHostDirectory(): HostDirectory {
   useEffect(() => {
     if (source !== 'hub') return;
     const timer = setInterval(() => {
-      void probeHubRegistry().then((hosts) => {
-        if (hosts) setHubHosts(hosts);
-      });
+      void probeHubRegistry().then(applyRegistry);
     }, STATUS_MS);
     return () => clearInterval(timer);
-  }, [source]);
+  }, [source, applyRegistry]);
 
   const hosts = useMemo<HostRecord[]>(
     () =>
-      entries.map((entry) =>
-        hostRecordFor({
-          endpoint: entry.endpoint,
-          label: entry.label,
-          probe: probes[entry.endpoint.id],
-          isDefault: entry.isDefault,
-          canRemove: entry.canRemove,
-          ...(entry.disabledReason === undefined
-            ? {}
-            : { forced: { status: 'offline' as const, message: entry.disabledReason } }),
-        }),
+      // PA-69: drift is a property of the list, not of one host, so it is
+      // filled in a second pass over records that already exist. One place
+      // computes it and all three surfaces read `record.drift`.
+      withVersionDrift(
+        entries.map((entry) =>
+          hostRecordFor({
+            endpoint: entry.endpoint,
+            label: entry.label,
+            probe: probes[entry.endpoint.id],
+            isDefault: entry.isDefault,
+            canRemove: entry.canRemove,
+            ...(entry.disabledReason === undefined
+              ? {}
+              : { forced: { status: 'offline' as const, message: entry.disabledReason } }),
+          }),
+        ),
+        hubLatestRelease,
       ),
-    [entries, probes],
+    [entries, probes, hubLatestRelease],
   );
 
   // Publish for the router, which resolves `#/h/<id>/...` synchronously during
@@ -322,8 +349,7 @@ export function useHostDirectory(): HostDirectory {
             body: JSON.stringify({ id: entry.id, label: entry.label, baseUrl: entry.basePath }),
           });
           if (!response.ok) return 'The Hub refused that host.';
-          const hosts = await probeHubRegistry();
-          if (hosts) setHubHosts(hosts);
+          applyRegistry(await probeHubRegistry());
           return null;
         } catch {
           return 'Could not reach the Hub.';
@@ -334,7 +360,7 @@ export function useHostDirectory(): HostDirectory {
       setLocal(addLocalHost(entry, local));
       return null;
     },
-    [source, local],
+    [source, local, applyRegistry],
   );
 
   const remove = useCallback(
@@ -346,8 +372,7 @@ export function useHostDirectory(): HostDirectory {
             credentials: 'same-origin',
           });
           if (!response.ok) return 'The Hub refused to remove that host.';
-          const hosts = await probeHubRegistry();
-          if (hosts) setHubHosts(hosts);
+          applyRegistry(await probeHubRegistry());
           return null;
         } catch {
           return 'Could not reach the Hub.';
@@ -356,7 +381,7 @@ export function useHostDirectory(): HostDirectory {
       setLocal(removeLocalHost(hostId, local));
       return null;
     },
-    [source, local],
+    [source, local, applyRegistry],
   );
 
   return {

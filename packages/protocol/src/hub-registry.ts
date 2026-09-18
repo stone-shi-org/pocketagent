@@ -121,6 +121,24 @@ export type HubHostEntry = z.infer<typeof HubHostEntry>;
 
 export const HubHostListResponse = z.object({
   hosts: z.array(HubHostEntry),
+  /**
+   * The newest release the Hub knows exists, for PA-69's drift badge — e.g.
+   * `1.5.0` while a host still reports `1.4.2`.
+   *
+   * Optional, and nullable when present, because a Hub that has no release
+   * feed configured genuinely does not know. In that case the browser falls
+   * back to `latestKnownVersion` over the hosts it can see, which is evidence
+   * rather than authority: a fleet where every host is equally stale reports
+   * no drift, which is honest — nothing has seen a newer build. Declared here
+   * rather than invented later for the same reason the rest of this module is:
+   * it is a contract between two tickets, and a shape invented twice
+   * eventually disagrees.
+   *
+   * Deliberately *not* where an upgrade would be triggered from. This is a
+   * version number to compare against and nothing else; naming an artifact to
+   * install is the one thing PA-69 forbids end to end.
+   */
+  latestRelease: z.string().nullable().optional(),
 });
 export type HubHostListResponse = z.infer<typeof HubHostListResponse>;
 

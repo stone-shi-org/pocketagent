@@ -6477,6 +6477,20 @@ button.chat-rate-limit-badge {
   text-align: center;
 }
 
+/* PA-69: "a newer build exists". Deliberately a plain dot rather than the
+   count badge's filled pill — drift is advisory and must not compete with
+   `.host-tile-count`, which says something is happening right now. Sits below
+   the count so both can show at once. */
+.host-tile-update {
+  position: absolute;
+  top: 22px;
+  right: 8px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
 .host-tile.add {
   color: var(--text-dim);
 }
@@ -6522,6 +6536,17 @@ button.chat-rate-limit-badge {
   color: var(--text-dim);
 }
 
+/* PA-69: one lowercase word on the host row, in the accent rather than the
+   warn colour — a lagging host still works, and amber here would read as the
+   protocol-incompatible state it has to stay distinguishable from. The whole
+   sentence is in the `title`. */
+.host-group-update {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: lowercase;
+}
+
 /* Indented so a host's categories read as belonging to its heading, which is
    the whole reason the heading exists instead of a badge per row. */
 .host-group-body {
@@ -6550,6 +6575,14 @@ button.chat-rate-limit-badge {
   flex-basis: 100%;
   font-size: 11.5px;
   color: var(--text-dim);
+}
+
+/* The informational sibling of `.host-sheet-problem`: same wrapped line, but
+   this one is not a problem, so it never borrows the warn palette. */
+.host-sheet-note {
+  flex-basis: 100%;
+  font-size: 11.5px;
+  color: var(--accent);
 }
 
 .host-sheet-remove {

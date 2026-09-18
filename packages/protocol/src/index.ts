@@ -5,6 +5,7 @@ export * from './agent-install.js';
 export * from './custom-claude-providers.js';
 export * from './prompt-image.js';
 export * from './protocol-negotiation.js';
+export * from './version-drift.js';
 export * from './ws.js';
 export * from './http.js';
 export * from './cron-expr.js';
@@ -17,6 +18,7 @@ export * from './mcp-registry.js';
 export * from './telegram.js';
 export * from './hub.js';
 export * from './hub-registry.js';
+export * from './admin.js';
 
 /** Name of the HttpOnly cookie holding the server-side session id. */
 export const AUTH_COOKIE_NAME = 'pocketagent_sid';

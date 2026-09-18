@@ -4,6 +4,7 @@ import Fastify, { LogController, type FastifyInstance, type FastifyReply } from 
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import { AgentInstallService, type InstallRunner } from './agents/install.js';
+import { adminRoutes } from './routes/admin.js';
 import { agentInstallRoutes } from './routes/agent-install.js';
 import websocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
@@ -55,6 +56,7 @@ import { webhookRoutes } from './routes/webhooks.js';
 import { plannerRoutes } from './routes/planner.js';
 import { mcpRegistryRoutes } from './routes/mcp-registries.js';
 import { telegramRoutes } from './routes/telegram.js';
+import { AdminService } from './admin/index.js';
 import { TelegramBotStore } from './telegram/bots-store.js';
 import { TelegramLinksStore } from './telegram/links-store.js';
 import { TelegramBridge } from './telegram/bridge.js';
@@ -616,11 +618,17 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     return merged;
   };
 
+  // PA-69: drain/restart. Constructed after `sessions` and `plannerChats`
+  // because it reads live work from both; the *act* of exiting is a hook
+  // `server.ts` installs afterwards, so a test app can never exit the runner.
+  const admin = new AdminService({ sessions, plannerChats, logger: app.log });
+
   const context: PocketContext = {
     config,
     auth,
     hubCredentials,
     sessions,
+    admin,
     cron,
     webhooks,
     promptQueue,
@@ -793,6 +801,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(authRoutes);
   await app.register(sessionRoutes);
   await app.register(agentInstallRoutes);
+  await app.register(adminRoutes);
   await app.register(worktreeRoutes);
   await app.register(cronRoutes);
   await app.register(customClaudeProviderRoutes);

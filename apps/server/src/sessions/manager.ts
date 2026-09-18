@@ -63,6 +63,51 @@ export type StructuredLikeSession = StructuredSession | AgySession | OpencodeSes
  */
 export type ManagedSession = PtySession | StructuredLikeSession;
 
+/**
+ * A session whose turn is in progress, so `busySince` is known to be set.
+ *
+ * The intersection is what lets `isMidTurn` be a type predicate: every caller
+ * of it goes on to read `busySince`, and without this each of them would have
+ * to re-check a null the predicate has already ruled out.
+ */
+type MidTurnManagedSession = ManagedSession & { readonly busySince: number };
+
+/**
+ * The single definition of "this session is mid-turn", shared by the run
+ * queue's occupancy check (`busyTreeRoots`) and PA-69's drain check
+ * (`midTurnSessions`).
+ *
+ * Three conditions, each load-bearing and each recorded elsewhere in this
+ * file's own comments:
+ *
+ * - **Structured only.** A PTY has no end-of-turn signal, only the
+ *   classifier's advisory idle hint, so counting one would mean a queue that
+ *   never drains — and, for a drain, a restart that can never be clean on a
+ *   host with an idle shell open.
+ * - **`busySince` is set.** Stamped when a prompt goes in, cleared on
+ *   `turn_complete`. So a session that is alive but waiting for its *next*
+ *   prompt is not busy, while one parked on an unanswered approval still is —
+ *   it is genuinely still working, which is the standing no-decay rule.
+ * - **Still starting or running.** An exited session holds nothing.
+ */
+function isMidTurn(session: ManagedSession): session is MidTurnManagedSession {
+  if (session.transport !== 'structured') return false;
+  if (session.busySince === null) return false;
+  return session.status === 'running' || session.status === 'starting';
+}
+
+/** One live session that is mid-turn — see `SessionManager.midTurnSessions`. */
+export interface MidTurnSession {
+  id: string;
+  title: string;
+  agentDisplayName: string;
+  cwd: string;
+  /** Epoch ms the turn started. Never null: `isMidTurn` has ruled that out. */
+  busySince: number;
+  /** True when the turn is parked on a decision only a human can make. */
+  awaitingApproval: boolean;
+}
+
 export class SessionError extends Error {
   override readonly name = 'SessionError';
   constructor(
@@ -535,12 +580,43 @@ export class SessionManager {
     const roots: string[] = [];
     for (const session of this.live.values()) {
       if (exceptSessionId !== undefined && session.id === exceptSessionId) continue;
-      if (session.transport !== 'structured') continue;
-      if (session.busySince === null) continue;
-      if (session.status !== 'running' && session.status !== 'starting') continue;
+      if (!isMidTurn(session)) continue;
       roots.push(treeRootOf(session.spec.cwd));
     }
     return roots;
+  }
+
+  /**
+   * Live sessions that are mid-turn right now, described well enough to name
+   * in a UI (PA-69).
+   *
+   * Shares `isMidTurn` with `busyTreeRoots` rather than re-testing the same
+   * three conditions, which is not tidiness: "what counts as busy" is a single
+   * load-bearing rule in this app, and a drain that disagreed with the run
+   * queue about it would either refuse while every tree is genuinely free or —
+   * far worse — exit cleanly while an agent is working, having reported
+   * nothing in the way.
+   *
+   * `awaitingApproval` splits the one case an operator most needs to tell
+   * apart: a turn parked on an unanswered approval is still counted as busy
+   * (see `isMidTurn`), but the thing blocking it is *them*, not the agent, so
+   * the answer may be to go and answer it rather than to force a restart.
+   */
+  midTurnSessions(): MidTurnSession[] {
+    const busy: MidTurnSession[] = [];
+    for (const session of this.live.values()) {
+      if (!isMidTurn(session)) continue;
+      busy.push({
+        id: session.id,
+        title: this.displayTitle(session),
+        agentDisplayName: session.spec.agentDisplayName,
+        cwd: session.spec.cwd,
+        busySince: session.busySince,
+        awaitingApproval:
+          session.transport === 'structured' && session.pendingPermissions().length > 0,
+      });
+    }
+    return busy;
   }
 
   /** Attach the manager's own listeners to a session. */

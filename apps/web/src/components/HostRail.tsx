@@ -1,5 +1,10 @@
 import { Icon } from './Icon.js';
-import { hostDotClass, hostStatusSummary, type HostRecord } from '../hosts/host-status.js';
+import {
+  hostDotClass,
+  hostDriftMessage,
+  hostStatusSummary,
+  type HostRecord,
+} from '../hosts/host-status.js';
 
 /**
  * The desktop host switcher: a narrow rail of tiles left of the sidebar (PA-67).
@@ -48,7 +53,9 @@ export function HostRail({
         <span className="host-tile-label">All</span>
       </button>
 
-      {hosts.map((host) => (
+      {hosts.map((host) => {
+        const drift = hostDriftMessage(host);
+        return (
         <button
           key={host.endpoint.id}
           type="button"
@@ -58,15 +65,21 @@ export function HostRail({
           // The tooltip carries the whole sentence for a host that cannot be
           // used; the tile itself only has room for a dot and a word, and a
           // phone-sized truth ("version") is not an explanation.
-          title={host.message ?? `${host.label} — ${hostStatusSummary(host)}`}
+          // PA-69: the drift sentence joins the same tooltip, because it is
+          // exactly the case the tile has no room to spell out. It cannot
+          // collide with `host.message`: a host with a message is offline or
+          // incompatible, and `hostDriftMessage` is null for both.
+          title={host.message ?? drift ?? `${host.label} — ${hostStatusSummary(host)}`}
         >
           <span className={hostDotClass(host.status)} aria-hidden="true" />
           <span className="host-tile-label">{host.label}</span>
           {host.runningSessions !== null && host.runningSessions > 0 && (
             <span className="host-tile-count">{host.runningSessions}</span>
           )}
+          {drift !== null && <span className="host-tile-update" aria-hidden="true" />}
         </button>
-      ))}
+        );
+      })}
 
       {canManage && (
         <button type="button" className="host-tile add" onClick={onAdd} title="Add a host">

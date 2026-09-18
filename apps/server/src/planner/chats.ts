@@ -199,6 +199,22 @@ export interface PlannerChatServiceOptions {
  * batch only needs to remember *which* call is still waiting and where in
  * the tool-iteration budget the turn was.
  */
+/**
+ * One Pocket Agent turn a restart would destroy — see
+ * `PlannerChatService.inFlightTurns` (PA-69).
+ *
+ * Deliberately not the protocol's own `DrainBlocker`: this service knows
+ * nothing about drains, and shaping the wire type is `AdminService`'s job.
+ */
+export interface InFlightPlannerTurn {
+  chatId: string;
+  /** The chat's title, or something recognisable when it has none yet. */
+  title: string;
+  /** Which Pocket Agent it belongs to, when the chat still resolves. */
+  workspaceName: string | null;
+  reason: 'mid_turn' | 'awaiting_approval';
+}
+
 interface PendingPlannerTurn {
   chatId: string;
   workspaceId: string | null;
@@ -358,11 +374,6 @@ export class PlannerChatService {
    */
   private readonly spawnsThisTurnByChat = new Map<string, number>();
   /**
-   * PA-76: Active turns currently in flight, keyed by chat id.
-   * Enforces single-turn-in-flight concurrency guard and mailbox queuing.
-   */
-  private readonly activeTurns = new Set<string>();
-  /**
    * PA-76: Active wake turns, keyed by chat id.
    */
   private readonly activeWakeTurns = new Set<string>();
@@ -398,6 +409,80 @@ export class PlannerChatService {
    * PA-78: Per-turn poll check state for short-circuiting unchanged repeat calls (status and output).
    */
   private readonly turnPollChecksByChat = new Map<string, Map<string, TurnPollRecord>>();
+
+  /**
+   * PA-69: how many turns are being driven right now, per chat id.
+   *
+   * A Pocket Agent turn is invisible to `SessionManager.busySince` — it has no
+   * session, no cwd and no worktree, which is exactly why the run queue
+   * deliberately never keys on one — so a drain check that consulted only the
+   * session manager would report "nothing is in the way" and then destroy a
+   * turn mid-flight. For a webhook- or Telegram-driven chat there is nobody
+   * watching to notice.
+   *
+   * A *count* rather than a boolean because nothing stops two `sendMessage`
+   * calls overlapping on one chat, and a boolean would then be cleared by
+   * whichever finished first.
+   *
+   * Incremented after the synchronous precondition checks and cleared in a
+   * `finally`, so an in-flight failure releases it too. The one way to leak an
+   * entry is a caller that abandons the generator without draining or closing
+   * it; a `for await` loop that breaks or throws calls `.return()` and so runs
+   * the `finally`. That error direction is the safe one on purpose: an
+   * over-count refuses a restart that would have been clean, which `force`
+   * escapes, while an under-count silently kills work.
+   *
+   * PA-76's single-turn-in-flight guard reads the same map through `isBusy`:
+   * a chat is busy while it has any entry here, so the concurrency guard and
+   * the drain check cannot disagree about what "a turn is running" means.
+   */
+  private readonly activeTurns = new Map<string, number>();
+
+  /** Marks a turn as running; returns the release callback for a `finally`. */
+  private beginTurn(chatId: string): () => void {
+    this.activeTurns.set(chatId, (this.activeTurns.get(chatId) ?? 0) + 1);
+    return () => {
+      const remaining = (this.activeTurns.get(chatId) ?? 1) - 1;
+      if (remaining > 0) this.activeTurns.set(chatId, remaining);
+      else this.activeTurns.delete(chatId);
+    };
+  }
+
+  /**
+   * Turns that a restart would destroy, described well enough to name in a UI
+   * (PA-69).
+   *
+   * Two sources, both genuinely in progress and neither recoverable across a
+   * restart. `activeTurns` is a turn being driven right now. `pendingTurns` is
+   * one parked on an unanswered approval, which counts for the same reason a
+   * structured session parked on one still holds its working tree: it is
+   * *genuinely still running*, and the standing rule is that an undecided
+   * approval never decays. Here it is sharper than for a session — the pending
+   * map is in-memory only, so a restart does not pause that turn and let a
+   * human answer later, it loses the approval outright and the chat is stuck
+   * mid-turn forever.
+   *
+   * A chat that is somehow in both states is reported once, as
+   * `awaiting_approval`, because that is the one an operator can act on.
+   */
+  inFlightTurns(): InFlightPlannerTurn[] {
+    const byChat = new Map<string, InFlightPlannerTurn>();
+    const describe = (chatId: string, reason: 'mid_turn' | 'awaiting_approval'): void => {
+      const chat = this.get(chatId);
+      // A chat deleted mid-turn still has a turn to report, so fall back to
+      // the id rather than dropping the blocker on the floor.
+      byChat.set(chatId, {
+        chatId,
+        title: chat?.title ?? chat?.workspaceName ?? chatId,
+        workspaceName: chat?.workspaceName ?? null,
+        reason,
+      });
+    };
+    for (const chatId of this.activeTurns.keys()) describe(chatId, 'mid_turn');
+    // Second, so it wins for a chat that appears in both.
+    for (const pending of this.pendingTurns.values()) describe(pending.chatId, 'awaiting_approval');
+    return [...byChat.values()];
+  }
 
   /**
    * PA-56: `webhooks`/`cron`, for `read_settings`/`update_webhook`/
@@ -1050,7 +1135,7 @@ export class PlannerChatService {
       this.wakeActionBudgetByChat.set(id, maxSpawns);
     }
 
-    this.activeTurns.add(chat.id);
+    const endTurn = this.beginTurn(chat.id);
     this.turnStartedAtByChat.set(chat.id, Date.now());
     this.turnPollChecksByChat.set(chat.id, new Map());
     try {
@@ -1072,7 +1157,7 @@ export class PlannerChatService {
 
       yield* this.driveLoop(chat, workspacePath, modelId, 0, EMPTY_TURN_STATS, opts.signal);
     } finally {
-      this.activeTurns.delete(chat.id);
+      endTurn();
       this.activeWakeTurns.delete(chat.id);
       if (!this.isBusy(chat.id)) {
         this.turnStartedAtByChat.delete(chat.id);
@@ -1101,7 +1186,11 @@ export class PlannerChatService {
       throw new PlannerChatError('No pending approval with that id for this chat.', 'not_found');
     }
     this.pendingTurns.delete(approvalId);
-    this.activeTurns.add(chatId);
+    // The turn was already in flight — parked, but in flight — so it moves
+    // from `pendingTurns` (deleted above) to `activeTurns` here, and PA-69's
+    // drain check sees it continuously across the handover rather than
+    // briefly reading as idle in between.
+    const endTurn = this.beginTurn(chatId);
     try {
       const chat = this.requireChat(chatId);
       const workspacePath = this.workspacePathFor(chat);
@@ -1168,7 +1257,7 @@ export class PlannerChatService {
         pending.stats,
       );
     } finally {
-      this.activeTurns.delete(chatId);
+      endTurn();
       if (!this.isBusy(chatId)) {
         this.turnStartedAtByChat.delete(chatId);
         this.turnPollChecksByChat.delete(chatId);

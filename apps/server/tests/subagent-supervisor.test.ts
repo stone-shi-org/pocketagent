@@ -296,7 +296,7 @@ describe('PA-76: SubagentSupervisor and Mailbox', () => {
     const chat = t.context.plannerChats.create({ title: 'Parent Chat' });
 
     // Mock an active turn on parent chat so incoming mailbox messages are queued
-    (t.context.plannerChats as any).activeTurns.add(chat.id);
+    const endMockTurn = (t.context.plannerChats as any).beginTurn(chat.id) as () => void;
 
     // Enqueue two subagent completion messages
     (t.context.plannerChats as any).enqueueMailbox(chat.id, {
@@ -324,7 +324,7 @@ describe('PA-76: SubagentSupervisor and Mailbox', () => {
     expect(wakePrompt).toContain('Task 2 finished research.');
 
     // Cleanup mock turn
-    (t.context.plannerChats as any).activeTurns.delete(chat.id);
+    endMockTurn();
   });
 
   it('drainMailbox restores messages if wake turn fails (Item 8)', async () => {
@@ -496,7 +496,7 @@ describe('PA-76: Concurrency guard and SSE endpoint over HTTP', () => {
     const chat = t.context.plannerChats.create({ title: 'Test Chat' });
 
     // Mark chat as busy
-    (t.context.plannerChats as any).activeTurns.add(chat.id);
+    const endMockTurn = (t.context.plannerChats as any).beginTurn(chat.id) as () => void;
 
     const res = await t.app.inject({
       method: 'POST',
@@ -509,7 +509,7 @@ describe('PA-76: Concurrency guard and SSE endpoint over HTTP', () => {
     expect(res.json().error.code).toBe('busy');
 
     // Clean up
-    (t.context.plannerChats as any).activeTurns.delete(chat.id);
+    endMockTurn();
   });
 
   it('GET /api/planner/chats/:id/events connects to SSE stream', async () => {

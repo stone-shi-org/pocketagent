@@ -1,4 +1,5 @@
 import { buildApp, VERSION } from './app.js';
+import { RESTART_EXIT_CODE } from './admin/index.js';
 import { loadConfig, ConfigError } from './config/index.js';
 
 async function main(): Promise<void> {
@@ -45,20 +46,51 @@ async function main(): Promise<void> {
   }
 
   let shuttingDown = false;
-  const shutdown = async (signal: string): Promise<void> => {
+  const shutdown = async (signal: string, exitCode = 0): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
-    app.log.info({ signal }, 'shutting down; terminating PTY sessions');
+    app.log.info({ signal, exitCode }, 'shutting down; terminating PTY sessions');
     try {
       await app.close();
     } finally {
-      process.exit(0);
+      process.exit(exitCode);
     }
   };
 
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
+  // PA-69: `POST /api/admin/restart`. The decision about whether stopping is
+  // safe is `AdminService`'s; this is only the act, and it lives here because
+  // `buildApp` is what every test calls — a `process.exit` reachable from it
+  // would kill the test runner.
+  context.admin.setRestartHook(({ forced }) => {
+    // The 202 has been written to the socket but not necessarily flushed, and
+    // `app.close()` tears the HTTP server down. Without this grace an operator
+    // gets a dropped connection and cannot tell "accepted" from "refused" from
+    // "already gone" — which, for the one action whose whole purpose is to stop
+    // the process, is the difference between a confirmation and a mystery.
+    setTimeout(() => {
+      app.log.warn(
+        { forced, exitCode: RESTART_EXIT_CODE },
+        // Said out loud because the exit status is deliberately non-zero: the
+        // journal will show this unit as "failed", and the next line an
+        // operator reads should explain why rather than look like a crash.
+        // Non-zero is what makes `Restart=on-failure` — this repo's own
+        // recommended unit, and what production uses — actually restart it.
+        'draining for a requested restart; exiting non-zero so the supervisor restarts us',
+      );
+      void shutdown('api-restart', RESTART_EXIT_CODE);
+    }, RESPONSE_FLUSH_GRACE_MS);
+  });
 }
+
+/**
+ * Long enough for a 202 to reach the client, short enough that an operator
+ * does not wonder whether the request worked. The response is small and the
+ * caller is usually on the same machine or a tailnet.
+ */
+const RESPONSE_FLUSH_GRACE_MS = 250;
 
 main().catch((err) => {
   process.stderr.write(`PocketAgent failed to start: ${err instanceof Error ? err.stack : err}\n`);

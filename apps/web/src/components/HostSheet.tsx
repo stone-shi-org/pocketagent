@@ -1,6 +1,11 @@
 import { useEffect } from 'react';
 import { Icon } from './Icon.js';
-import { hostDotClass, hostStatusSummary, type HostRecord } from '../hosts/host-status.js';
+import {
+  hostDotClass,
+  hostDriftMessage,
+  hostStatusSummary,
+  type HostRecord,
+} from '../hosts/host-status.js';
 
 /**
  * The phone host switcher: a bottom sheet behind the header chip (PA-67).
@@ -78,7 +83,9 @@ export function HostSheet({
             <span>All hosts</span>
           </button>
 
-          {hosts.map((host) => (
+          {hosts.map((host) => {
+            const drift = hostDriftMessage(host);
+            return (
             <div key={host.endpoint.id} className="host-sheet-row">
               <button
                 type="button"
@@ -94,6 +101,10 @@ export function HostSheet({
                 {/* The full sentence, not a tooltip: a phone has no hover, so
                     an unusable host has to explain itself in place. */}
                 {host.message && <span className="host-sheet-problem">{host.message}</span>}
+                {/* Same reasoning one line up, and mutually exclusive with it:
+                    a phone cannot hover, so drift says its whole sentence
+                    here rather than hiding in a `title`. */}
+                {drift !== null && <span className="host-sheet-note">{drift}</span>}
               </button>
               {canManage && host.canRemove && (
                 <button
@@ -107,7 +118,8 @@ export function HostSheet({
                 </button>
               )}
             </div>
-          ))}
+            );
+          })}
 
           {canManage && (
             <button
