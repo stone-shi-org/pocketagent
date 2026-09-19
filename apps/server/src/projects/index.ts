@@ -311,6 +311,11 @@ export class ProjectService {
         session.plannerChatId ??
         plannerChatBySession.get(session.id) ??
         null;
+      // PA-75: Subagent sessions spawned by a planner chat belong to their
+      // parent planner session, not to the project directory they happen to run
+      // in. They are accessed from the planner chat itself and are excluded from
+      // project chat lists so they don't appear as foreign human chats in projects.
+      if (plannerChatId !== null) continue;
       push(
         byCwd,
         session.cwd,
@@ -321,7 +326,7 @@ export class ProjectService {
           session.agentSessionId
             ? (webhookByConversation.get(session.agentSessionId) ?? null)
             : null,
-          plannerChatId,
+          null,
         ),
       );
     }
@@ -364,6 +369,7 @@ export class ProjectService {
       // Removed from the list by the user. The transcript is still on disk and
       // still resumable from a terminal; it just stops being offered here.
       if (removedChats.has(conversation.id)) continue;
+      if (plannerChatByConversation.has(conversation.id)) continue;
       push(byCwd, conversation.cwd, {
         id: conversation.id,
         sessionId: null,
@@ -383,7 +389,7 @@ export class ProjectService {
         adoptTargetId: null,
         cronJobId: cronByConversation.get(conversation.id) ?? null,
         webhookId: webhookByConversation.get(conversation.id) ?? null,
-        plannerChatId: plannerChatByConversation.get(conversation.id) ?? null,
+        plannerChatId: null,
         rateLimit: null,
       });
     }
@@ -456,8 +462,6 @@ export class ProjectService {
       const hidden = isHidden(cwd, visibility);
       if (hidden && !includeHidden) continue;
       chats.sort((a, b) => compareByRecency(chatSortKey(a), chatSortKey(b)));
-      const regularChats = chats.filter((c) => c.plannerChatId === null);
-      const subagentChats = chats.filter((c) => c.plannerChatId !== null);
       const isRepo = await isGitRepo(cwd);
       const exists = isRepo || (await pathExists(cwd));
       const mainRepoCwd = await findMainRepoCwd(cwd);
@@ -472,8 +476,8 @@ export class ProjectService {
         gitStatus: isRepo ? await this.gitStatus.get(cwd) : null,
         hidden,
         isWorkspace: added.has(cwd),
-        chats: regularChats,
-        subagents: subagentChats,
+        chats,
+        subagents: [],
         cronJobs: cronByCwd.get(cwd) ?? [],
         webhooks: webhookByCwd.get(cwd) ?? [],
         // PA-27: the same "one chat, not two" rule `resumedFrom` applies above

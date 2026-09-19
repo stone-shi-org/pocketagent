@@ -160,8 +160,9 @@ export function PocketAgentsSection({
         const isCollapsed = collapsed.has(ws.id);
         const wsChats = chats.filter((c) => c.workspaceId === ws.id);
         const mainChats = wsChats.filter((c) => !c.parentChatId);
-        const subagentChats = wsChats.filter((c) => !!c.parentChatId);
-        const isSubagentsExpanded = !subagentsCollapsed.has(ws.id);
+        const mainChatIds = new Set(mainChats.map((c) => c.id));
+        const orphanSubagentChats = wsChats.filter((c) => c.parentChatId && !mainChatIds.has(c.parentChatId));
+        const isOrphanSubagentsExpanded = !subagentsCollapsed.has(ws.id);
         return (
           <div key={ws.id}>
             <div className="project-head">
@@ -220,35 +221,91 @@ export function PocketAgentsSection({
               <div className="project-empty">No chats yet</div>
             )}
             {!isCollapsed &&
-              mainChats.map((chat) => (
-                <div key={chat.id} className="chat-line">
-                  <button
-                    type="button"
-                    className={`chat-row${activeChatId === chat.id ? ' active' : ''}`}
-                    onClick={() => onOpenChat(chat.id)}
-                    title={chat.title ?? 'Untitled chat'}
-                  >
-                    <span className="chat-title">{chat.title ?? 'Untitled chat'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="chat-remove"
-                    onClick={() => removeChat(chat.id)}
-                    aria-label={`Delete ${chat.title ?? 'Untitled chat'}`}
-                    title="Delete chat"
-                  >
-                    <Icon name="close" size={14} />
-                  </button>
-                </div>
-              ))}
-            {!isCollapsed && subagentChats.length > 0 && (
+              mainChats.map((chat) => {
+                const children = wsChats.filter((c) => c.parentChatId === chat.id);
+                const isChildrenExpanded = !subagentsCollapsed.has(chat.id);
+                return (
+                  <div key={chat.id} className="planner-chat-group">
+                    <div className="chat-line">
+                      <button
+                        type="button"
+                        className={`chat-row${activeChatId === chat.id ? ' active' : ''}`}
+                        onClick={() => onOpenChat(chat.id)}
+                        title={chat.title ?? 'Untitled chat'}
+                      >
+                        <span className="chat-title">{chat.title ?? 'Untitled chat'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="chat-remove"
+                        onClick={() => removeChat(chat.id)}
+                        aria-label={`Delete ${chat.title ?? 'Untitled chat'}`}
+                        title="Delete chat"
+                      >
+                        <Icon name="close" size={14} />
+                      </button>
+                    </div>
+                    {children.length > 0 && (
+                      <div className="subagents-group nested-parent-subagents">
+                        <div className="subagents-head project-head">
+                          <button
+                            type="button"
+                            className="project-name subagents-toggle"
+                            onClick={() => toggleSubagents(chat.id)}
+                            aria-expanded={isChildrenExpanded}
+                            title="Subagents started by this chat"
+                          >
+                            <span className="project-icon">
+                              <Icon name="agent-generic" className="folder" />
+                            </span>
+                            <span className="project-label">Subagents</span>
+                            <Icon
+                              name="chevron-down"
+                              className={`project-caret${isChildrenExpanded ? '' : ' closed'}`}
+                            />
+                            <span className="project-count">{children.length}</span>
+                          </button>
+                        </div>
+                        {isChildrenExpanded &&
+                          children.map((sub) => (
+                            <div key={sub.id} className="chat-line nested-subagent-line">
+                              <button
+                                type="button"
+                                className={`chat-row${activeChatId === sub.id ? ' active' : ''}`}
+                                onClick={() => onOpenChat(sub.id)}
+                                title={sub.title ?? 'Untitled chat'}
+                              >
+                                <span className="chat-title">
+                                  <span className="chat-planner-badge" title="Subagent chat">
+                                    <Icon name="agent-generic" size={13} />
+                                  </span>
+                                  {sub.title ?? 'Untitled chat'}
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                className="chat-remove"
+                                onClick={() => removeChat(sub.id)}
+                                aria-label={`Delete ${sub.title ?? 'Untitled chat'}`}
+                                title="Delete chat"
+                              >
+                                <Icon name="close" size={14} />
+                              </button>
+                            </div>
+                          ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            {!isCollapsed && orphanSubagentChats.length > 0 && (
               <div className="subagents-group">
                 <div className="subagents-head project-head">
                   <button
                     type="button"
                     className="project-name subagents-toggle"
                     onClick={() => toggleSubagents(ws.id)}
-                    aria-expanded={isSubagentsExpanded}
+                    aria-expanded={isOrphanSubagentsExpanded}
                     title="Subagents started by a planner chat"
                   >
                     <span className="project-icon">
@@ -257,13 +314,13 @@ export function PocketAgentsSection({
                     <span className="project-label">Subagents</span>
                     <Icon
                       name="chevron-down"
-                      className={`project-caret${isSubagentsExpanded ? '' : ' closed'}`}
+                      className={`project-caret${isOrphanSubagentsExpanded ? '' : ' closed'}`}
                     />
-                    <span className="project-count">{subagentChats.length}</span>
+                    <span className="project-count">{orphanSubagentChats.length}</span>
                   </button>
                 </div>
-                {isSubagentsExpanded &&
-                  subagentChats.map((chat) => (
+                {isOrphanSubagentsExpanded &&
+                  orphanSubagentChats.map((chat) => (
                     <div key={chat.id} className="chat-line">
                       <button
                         type="button"

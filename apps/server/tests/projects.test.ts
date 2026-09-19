@@ -236,7 +236,7 @@ describe('ProjectService', () => {
     });
   });
 
-  it('groups planner subagents into project.subagents with provenance, separate from human chats (PA-75)', async () => {
+  it('excludes planner subagents from project chats (PA-75)', async () => {
     const plannerChatId = 'pc-123';
     db.prepare('INSERT INTO planner_chats (id, workspace_name, title, created_at, last_activity_at) VALUES (?, ?, ?, ?, ?)').run(
       plannerChatId,
@@ -258,11 +258,10 @@ describe('ProjectService', () => {
     ]);
 
     expect(project.chats.map((c) => c.id)).toEqual(['human-chat']);
-    expect(project.subagents.map((c) => c.id)).toEqual(['subagent-sess']);
-    expect(project.subagents[0].plannerChatId).toBe(plannerChatId);
+    expect(project.subagents).toEqual([]);
   });
 
-  it('resolves plannerChatId for disk-only conversations if matched by conversation id (PA-75)', async () => {
+  it('excludes planner subagents with disk-only conversations from project chats (PA-75)', async () => {
     const plannerChatId = 'pc-456';
     db.prepare('INSERT INTO planner_chats (id, workspace_name, title, created_at, last_activity_at) VALUES (?, ?, ?, ?, ?)').run(
       plannerChatId,
@@ -282,8 +281,7 @@ describe('ProjectService', () => {
     const [project] = await service.list([]);
 
     expect(project.chats.map((c) => c.id)).toEqual([]);
-    expect(project.subagents.map((c) => c.id)).toEqual(['conv-subagent']);
-    expect(project.subagents[0].plannerChatId).toBe(plannerChatId);
+    expect(project.subagents).toEqual([]);
   });
 
   it('carries a live session limit refusal into its chat row', async () => {
@@ -1349,12 +1347,6 @@ describe('removing and hiding over HTTP', () => {
     return (project?.chats ?? []) as { id: string; live: boolean }[];
   };
 
-  const subagentsIn = async (cwd: string) => {
-    const res = await t.app.inject({ method: 'GET', url: '/api/projects', headers: headers() });
-    const project = res.json().projects.find((p: { cwd: string }) => p.cwd === cwd);
-    return (project?.subagents ?? []) as { id: string; live: boolean; plannerChatId: string | null }[];
-  };
-
   it('refuses to remove a running session rather than orphaning it', async () => {
     const id = await startSession();
     const res = await t.app.inject({
@@ -1421,41 +1413,6 @@ describe('removing and hiding over HTTP', () => {
     const ids = (await chatsIn(t.projectDir)).map((c) => c.id);
     expect(ids).toContain(running);
     expect(ids).not.toContain(finished);
-  });
-
-  it('clears finished subagents via /api/projects/clear-finished (PA-75)', async () => {
-    const plannerChatId = 'pc-sub-clear';
-    t.context.db.prepare('INSERT INTO planner_chats (id, workspace_name, title, created_at, last_activity_at) VALUES (?, ?, ?, ?, ?)').run(
-      plannerChatId,
-      'Default',
-      'Planner',
-      1000,
-      1000,
-    );
-    const subagent = await t.context.sessions.create({
-      agent: 'claude',
-      cwd: t.projectDir,
-      cols: 0,
-      rows: 0,
-      transport: 'structured',
-      title: 'Subagent chat',
-      plannerChatId,
-    });
-
-    expect((await subagentsIn(t.projectDir)).map((s) => s.id)).toContain(subagent.id);
-
-    await t.app.inject({ method: 'DELETE', url: `/api/sessions/${subagent.id}`, headers: headers() });
-    await waitFor(async () => (await subagentsIn(t.projectDir)).some((s) => !s.live));
-
-    const res = await t.app.inject({
-      method: 'POST',
-      url: '/api/projects/clear-finished',
-      headers: headers(),
-      payload: { cwd: t.projectDir },
-    });
-    expect(res.statusCode).toBe(200);
-
-    expect((await subagentsIn(t.projectDir)).map((s) => s.id)).not.toContain(subagent.id);
   });
 
   it('refuses to hide a project with a live session, same as removing one', async () => {
