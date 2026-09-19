@@ -145,6 +145,21 @@ export const HUB_MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX IF NOT EXISTS idx_hub_provisionings_host ON hub_provisionings (host_id);
   `,
+  // 2 — PA-73. Web push: Hub owns VAPID keypair and browser push subscriptions.
+  `
+  CREATE TABLE IF NOT EXISTS hub_push_keys (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    public_key  TEXT NOT NULL,
+    private_key TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS hub_push_subscriptions (
+    endpoint   TEXT PRIMARY KEY,
+    p256dh     TEXT NOT NULL,
+    auth       TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  `,
 ];
 
 export function openHubDatabase(databasePath: string): HubDb {

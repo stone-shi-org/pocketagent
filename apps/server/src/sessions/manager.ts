@@ -4,6 +4,7 @@ import type {
   AgentEvent,
   EffortLevel,
   ModelInfo,
+  PushPayload,
   SessionInfo,
   SessionStatus,
   SessionTransport,
@@ -736,6 +737,28 @@ export class SessionManager {
     const timer = this.approvalTimers.get(sessionId);
     if (timer) clearTimeout(timer);
     this.approvalTimers.delete(sessionId);
+  }
+
+  /**
+   * Pending approval payloads across all active structured sessions.
+   *
+   * Used by `GET /api/push/events` to replay hanging approvals to a freshly
+   * connected Hub, so a Hub restart or brief network blip does not leave an
+   * operator unaware of an agent waiting on a decision.
+   */
+  getPendingApprovals(): PushPayload[] {
+    const payloads: PushPayload[] = [];
+    for (const session of this.live.values()) {
+      if (session.transport === 'structured' && session.pendingPermissions().length > 0) {
+        payloads.push({
+          title: 'PocketAgent — approval needed',
+          body: `${session.spec.title} is waiting for your decision.`,
+          url: `/#/s/${encodeURIComponent(session.id)}`,
+          tag: `approval-${session.id}`,
+        });
+      }
+    }
+    return payloads;
   }
 
   /**

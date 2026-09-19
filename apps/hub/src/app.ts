@@ -16,6 +16,9 @@ import { HostRegistry } from './registry/store.js';
 import { hubAuthRoutes } from './routes/auth.js';
 import { hubHostRoutes } from './routes/hosts.js';
 import { hubTemplateRoutes } from './routes/templates.js';
+import { hubPushRoutes } from './routes/push.js';
+import { HubPushService } from './push/service.js';
+import { PushNotificationRelay } from './push/relay.js';
 import { Provisioner } from './templates/provisioner.js';
 import { TemplateStore } from './templates/store.js';
 import { resolveProxyTarget } from './proxy/allowlist.js';
@@ -70,6 +73,9 @@ export interface HubContext {
   readonly templates: TemplateStore;
   readonly provisioner: Provisioner;
   readonly fetchImpl: typeof fetch;
+  /** PA-73: Hub Web Push service and bound backend notification relay. */
+  readonly push: HubPushService;
+  readonly pushRelay: PushNotificationRelay;
 }
 
 declare module 'fastify' {
@@ -86,6 +92,8 @@ export interface BuildHubOptions {
   readonly serveStatic?: boolean;
   /** Disabled in tests that assert on the registry without a live poller. */
   readonly startHealthPoller?: boolean;
+  /** Disabled in tests that assert without a live push relay. */
+  readonly startPushRelay?: boolean;
 }
 
 export interface BuiltHub {
@@ -122,6 +130,9 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
   const auth = new HubAuthService(db, config.authToken, config.sessionTtlMs);
   const templates = new TemplateStore(db);
   const provisioner = new Provisioner({ registry, store: templates, fetchImpl, log: app.log });
+  const push = new HubPushService(db, app.log);
+  push.init(config.pushContact);
+  const pushRelay = new PushNotificationRelay({ registry, pushService: push, fetchImpl, log: app.log });
 
   const context: HubContext = {
     config,
@@ -133,6 +144,8 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
     templates,
     provisioner,
     fetchImpl,
+    push,
+    pushRelay,
   };
   app.decorate('hub', context);
 
@@ -216,6 +229,7 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
   await app.register(hubAuthRoutes);
   await app.register(hubHostRoutes);
   await app.register(hubTemplateRoutes);
+  await app.register(hubPushRoutes);
 
   // ---- The proxy ------------------------------------------------------------
   /**
@@ -359,9 +373,11 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
   // sweep lands within a moment and the list simply reads "never checked"
   // until it does.
   if (options.startHealthPoller !== false) void health.start();
+  if (options.startPushRelay !== false) void pushRelay.start();
 
   app.addHook('onClose', async () => {
     health.stop();
+    pushRelay.stop();
     sockets.closeAll();
     if (ownsDb) db.close();
   });

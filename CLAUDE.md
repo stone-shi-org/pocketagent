@@ -1322,6 +1322,39 @@ route and not even a reveal *decision*: past the bind response there is nothing 
 `token_prefix` — the leading characters kept in the clear — is what lets a list row be matched
 against the token in hand.
 
+### Hub Web Push fan-out (PA-73)
+
+The browser's service worker registration is per-origin: a browser visiting the Hub connects
+to the Hub's origin, not to individual backend hosts. Having each backend manage its own
+push subscriptions and VAPID keys meant only the default backend or whichever host matched the
+origin could deliver notifications, leaving multi-host setups without notifications for background
+approvals or session updates.
+
+**Option A architecture: The Hub owns push subscriptions and relays notifications.**
+- **The Hub owns the VAPID keypair and subscription store:** `apps/hub` generates and persists
+  its own VAPID keys in `hub_push_keys` and stores client push subscriptions in `hub_push_subscriptions`
+  (migration #2). The browser registers for push via the Hub's native `/api/push/*` routes (`/api/push/key`,
+  `/api/push/subscribe`, `/api/push/unsubscribe`, `/api/push/status`, `/api/push/test`).
+- **Backends expose a push events stream:** `GET /api/push/events` on `apps/server` provides an
+  authenticated Server-Sent Events (SSE) stream (protected by bearer token or `pah_` hub credential).
+  To ensure notifications are not missed across reconnections or Hub restarts, connecting clients
+  receive an immediate replay of all currently pending approvals, followed by live broadcasts.
+  A 15-second heartbeat comment keeps proxy connections alive.
+- **Push Notification Relay:** In `apps/hub/src/push/relay.ts`, `PushNotificationRelay` maintains
+  persistent SSE connections to all bound backends using their encrypted host credentials.
+  When an event is received from a backend:
+  - Deep links (`url`) are rewritten from `/#/s/<sessionId>` to `/#/h/<hostId>/s/<sessionId>` so clicking
+    the notification navigates directly to the relevant session on that host.
+  - Notification tags are namespaced as `<hostId>-<tag>` to avoid accidental collision or dismissal
+    across different hosts.
+  - Notification titles are prefixed with `[<hostLabel>]` so the operator immediately recognizes which
+    machine needs attention.
+  - Connection health per host (`connected`, `reconnecting`, `unsupported`, `unauthorized`, `unbound`,
+    `disabled`) is reported by `GET /api/push/status`. The UI's `PushToggle` component displays a warning
+    badge if any bound host is offline or unsupported, ensuring push gaps are never silent.
+- **Backward compatibility:** In standalone deployments without a Hub, `apps/server` continues to handle
+  VAPID keys and push subscriptions via its existing `/api/push/*` endpoints.
+
 ### Version drift and drain-then-exit restart (PA-69)
 
 The safe shape of "the frontend can upgrade the backend": **the frontend detects and reports,
@@ -1772,6 +1805,17 @@ These are load-bearing. Several were bugs first.
   collection has succeeded, so a build without the route is `unsupported` rather than
   half-provisioned. All four are asserted in `apps/hub/tests/templates-*.test.ts` and
   demonstrated end to end by `pnpm demo:provision`.
+- **Web Push fan-out is owned by the Hub; the backend exposes an SSE push events stream**
+  (PA-73). Browser push subscriptions are scoped to an origin, so a multi-host setup fronted
+  by a Hub cannot have the browser subscribe to each backend directly. The Hub owns the VAPID
+  keypair and browser push subscriptions (`hub_push_subscriptions`). Backends provide an
+  authenticated SSE stream `GET /api/push/events` that replays pending approvals upon connection
+  and broadcasts new ones. `PushNotificationRelay` maintains connections to each bound host,
+  rewriting deep links to `/#/h/<hostId>/s/...`, namespacing notification tags (`<hostId>-`),
+  prefixing titles (`[<label>]`), and tracking per-host push stream health. Disconnected or
+  unauthorized hosts are reported at `GET /api/push/status` and surfaced as warning badges in
+  the UI rather than silently dropping notifications. Crucially, terminal I/O is never sent or
+  stored over this mechanism — only high-level approval/message notification metadata.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.

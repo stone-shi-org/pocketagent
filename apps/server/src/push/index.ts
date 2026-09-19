@@ -1,12 +1,8 @@
 import webpush from 'web-push';
+import type { PushPayload } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 
-export interface PushPayload {
-  title: string;
-  body: string;
-  url: string;
-  tag?: string;
-}
+export type { PushPayload };
 
 interface SubscriptionRow {
   endpoint: string;
@@ -30,11 +26,24 @@ interface SubscriptionRow {
 export class PushService {
   private publicKey: string | null = null;
   private enabled = false;
+  private readonly listeners = new Set<(payload: PushPayload) => void>();
 
   constructor(
     private readonly db: Db,
     private readonly logger?: { warn: (o: object, m?: string) => void; info: (o: object, m?: string) => void },
   ) {}
+
+  /**
+   * PA-73: Subscribe a listener for push notification events.
+   *
+   * Used by `GET /api/push/events` to stream notifications to bound Hubs.
+   */
+  subscribeEvents(listener: (payload: PushPayload) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
 
   init(contact: string): void {
     this.db.exec(`
@@ -111,6 +120,14 @@ export class PushService {
 
   /** Deliver to every subscription, pruning any the push service rejects. */
   async send(payload: PushPayload): Promise<{ sent: number; pruned: number }> {
+    for (const listener of this.listeners) {
+      try {
+        listener(payload);
+      } catch (err) {
+        this.logger?.warn({ err }, 'push event listener threw');
+      }
+    }
+
     if (!this.enabled) return { sent: 0, pruned: 0 };
 
     const rows = this.db

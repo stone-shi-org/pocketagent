@@ -32,6 +32,7 @@ export function makeHubConfig(overrides: Partial<HubConfig> = {}): HubConfig {
     trustProxy: false,
     webDistPath: '/nonexistent-web-dist',
     latestRelease: null,
+    pushContact: 'mailto:pocketagent@localhost',
     ...overrides,
   };
 }
@@ -79,6 +80,12 @@ export async function createTestHub(
   });
   const setCookie = login.headers.get('set-cookie') ?? '';
   const cookie = setCookie.split(';')[0] ?? '';
+
+  const origClose = app.close.bind(app);
+  app.close = async () => {
+    app.server.closeAllConnections?.();
+    return origClose();
+  };
 
   return {
     app,

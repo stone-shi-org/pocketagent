@@ -140,6 +140,12 @@ export async function createTestApp(
   const setCookie = login.cookies[0];
   const cookie = setCookie ? `${setCookie.name}=${setCookie.value}` : '';
 
+  const origClose = app.close.bind(app);
+  app.close = async () => {
+    app.server.closeAllConnections?.();
+    return origClose();
+  };
+
   return {
     app,
     context,

@@ -57,6 +57,11 @@ export const PROXY_DENY_PREFIXES: readonly { prefix: string; why: string }[] = [
     prefix: '/api/auth/me',
     why: 'answered by the Hub from its own session',
   },
+  {
+    // PA-73: push subscriptions belong to the Hub origin, not individual backends.
+    prefix: '/api/push/',
+    why: 'push notifications are managed by the Hub origin and fanned out from bound hosts',
+  },
 ];
 
 export type ProxyTarget =
@@ -171,6 +176,7 @@ export function resolveProxyTarget(rawUrl: string): ProxyTarget {
   if (decoded === '/health') return { kind: 'hub' };
   if (decoded.startsWith('/api/hub/') || decoded === '/api/hub') return { kind: 'hub' };
   if (decoded.startsWith('/api/auth/')) return { kind: 'hub' };
+  if (decoded.startsWith('/api/push/') || decoded === '/api/push') return { kind: 'hub' };
 
   if (decoded.startsWith('/api/')) {
     // PA-66 D6b: the default host is mounted at the bare root as well, so an

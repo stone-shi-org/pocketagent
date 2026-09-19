@@ -42,6 +42,7 @@ const RawEnv = z.object({
   POCKETAGENT_TRUST_PROXY: z.string().optional(),
   POCKETAGENT_WEB_DIST: z.string().optional(),
   POCKETAGENT_HUB_LATEST_RELEASE: z.string().optional(),
+  POCKETAGENT_HUB_PUSH_CONTACT: z.string().default('mailto:pocketagent@localhost'),
 });
 
 export interface HubConfig {
@@ -63,6 +64,7 @@ export interface HubConfig {
   readonly webDistPath: string;
   /** Advertised as `HubHostListResponse.latestRelease`; null when unconfigured. */
   readonly latestRelease: string | null;
+  readonly pushContact: string;
 }
 
 const MIN_TOKEN_LENGTH = 24;
@@ -166,5 +168,6 @@ export function loadHubConfig(env: NodeJS.ProcessEnv = process.env): HubConfig {
       ? path.resolve(e.POCKETAGENT_WEB_DIST.trim())
       : path.join(REPO_ROOT, 'apps/web/dist'),
     latestRelease: e.POCKETAGENT_HUB_LATEST_RELEASE?.trim() || null,
+    pushContact: e.POCKETAGENT_HUB_PUSH_CONTACT.trim(),
   };
 }

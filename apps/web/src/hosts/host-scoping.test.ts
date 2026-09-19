@@ -42,6 +42,10 @@ const ALLOWED = new Map<string, string>([
     'components/HubTemplatesSection.tsx',
     'PA-70: the Settings entry point to the above. Its single `GET /api/hub/templates` is also the gate that decides whether a Hub is answering at all, so it is Hub-origin by definition.',
   ],
+  [
+    'components/PushToggle.tsx',
+    'PA-73: reads /api/push/status on the origin that served this bundle (Hub or standalone server). Push subscriptions and service workers belong to the origin, never to an individual host.',
+  ],
 ]);
 
 const ROOT = new URL('..', import.meta.url).pathname;

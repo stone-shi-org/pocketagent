@@ -25,6 +25,7 @@ import type {
   HubCredentialListResponse,
   MeResponse,
   ProjectInfo,
+  PushStatusResponse,
   SessionInfo,
   SettingsResponse,
   ShellSessionSummary,
@@ -645,7 +646,7 @@ export function createApiClient(endpoint: HostEndpoint) {
 
     pushPublicKey: () => request<{ publicKey: string | null }>('/api/push/key'),
 
-    pushStatus: () => request<{ enabled: boolean; subscriptions: number }>('/api/push/status'),
+    pushStatus: () => request<PushStatusResponse>('/api/push/status'),
 
     pushSubscribe: (subscription: Record<string, unknown>) =>
       request<{ ok: true }>('/api/push/subscribe', {

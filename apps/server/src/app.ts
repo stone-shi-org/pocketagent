@@ -887,7 +887,8 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     });
   }
 
-  app.addHook('onClose', async () => {
+  app.addHook('onClose', async (instance) => {
+    instance.server.closeAllConnections?.();
     usage.stop();
     // Before `sessions.shutdown()`: no new run may be started into a manager
     // that is already tearing down.

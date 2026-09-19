@@ -80,6 +80,7 @@ export function openSseStream(
     // and harmless when no proxy is present.
     'x-accel-buffering': 'no',
   });
+  reply.raw.flushHeaders?.();
 
   let closed = false;
   let heartbeat: NodeJS.Timeout | undefined;
@@ -91,17 +92,18 @@ export function openSseStream(
     }
   };
 
-  if (options.onClose !== undefined || options.heartbeatMs !== undefined) {
-    // `close` on the raw request fires for a client that navigated away, lost
-    // its network, or was cut off by a proxy — all indistinguishable here, and
-    // all meaning the same thing: stop writing.
-    request.raw.on('close', () => {
-      if (closed) return;
-      closed = true;
-      stop();
-      options.onClose?.();
-    });
-  }
+  // `close` on the raw request fires for a client that navigated away, lost
+  // its network, or was cut off by a proxy — all indistinguishable here, and
+  // all meaning the same thing: stop writing and tear down the socket.
+  request.raw.on('close', () => {
+    if (closed) return;
+    closed = true;
+    stop();
+    options.onClose?.();
+    if (!reply.raw.destroyed) {
+      reply.raw.destroy();
+    }
+  });
 
   if (options.heartbeatMs !== undefined) {
     heartbeat = setInterval(() => {
@@ -120,7 +122,9 @@ export function openSseStream(
       stop();
       if (closed) return;
       closed = true;
-      reply.raw.end();
+      if (!reply.raw.destroyed) {
+        reply.raw.end();
+      }
     },
     get closed(): boolean {
       return closed || reply.raw.destroyed;

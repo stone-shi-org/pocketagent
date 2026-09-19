@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
+import { openSseStream } from './sse.js';
 
 const SubscribeBody = z.object({
   subscription: z.record(z.unknown()),
@@ -10,7 +11,15 @@ const UnsubscribeBody = z.object({
 });
 
 export const pushRoutes: FastifyPluginAsync = async (app) => {
-  const { push } = app.pocket;
+  const { push, sessions } = app.pocket;
+
+  const activeStreams = new Set<ReturnType<typeof openSseStream>>();
+  app.addHook('onClose', async () => {
+    for (const stream of activeStreams) {
+      stream.end();
+    }
+    activeStreams.clear();
+  });
 
   /** The VAPID public key the browser needs to create a subscription. */
   app.get('/api/push/key', async () => ({
@@ -55,5 +64,37 @@ export const pushRoutes: FastifyPluginAsync = async (app) => {
       tag: 'pocketagent-test',
     });
     return reply.send(result);
+  });
+
+  /**
+   * PA-73: Stream push events to an authenticated Hub.
+   *
+   * Backends behind a Hub deliver notification events (approvals, turn
+   * completions, idle alerts) over this SSE stream. The Hub rewrites deep links
+   * to carry the host ID and fans out push messages using the Hub origin's VAPID
+   * key.
+   *
+   * Pending approvals are replayed immediately upon connection so a Hub restart
+   * never drops an unanswered approval.
+   */
+  app.get('/api/push/events', async (request, reply) => {
+    const stream = openSseStream(request, reply, {
+      heartbeatMs: 15_000,
+      onClose: () => {
+        activeStreams.delete(stream);
+        unsubscribe();
+      },
+    });
+    activeStreams.add(stream);
+
+    const unsubscribe = push.subscribeEvents((payload) => {
+      stream.write(payload);
+    });
+
+    // Replay currently pending approvals on connect.
+    const pending = sessions.getPendingApprovals();
+    for (const payload of pending) {
+      stream.write(payload);
+    }
   });
 };

@@ -32,7 +32,7 @@ function baseUrlProblem(raw: string): string | null {
 }
 
 export const hubHostRoutes: FastifyPluginAsync = async (app) => {
-  const { registry, health, sockets, config } = app.hub;
+  const { registry, health, sockets, config, pushRelay } = app.hub;
 
   app.get('/api/hub/hosts', async (_request, reply) => {
     const body: HubHostListResponse = {
@@ -74,6 +74,7 @@ export const hubHostRoutes: FastifyPluginAsync = async (app) => {
     // which reads as "the host I just added is broken" at exactly the moment
     // someone is checking whether they typed the URL right.
     await health.reconcile();
+    await pushRelay.reconcile();
     return reply.send({ host: registry.entryFor(registry.getRow(parsed.data.id)!) });
   });
 
@@ -102,6 +103,7 @@ export const hubHostRoutes: FastifyPluginAsync = async (app) => {
     }
     request.log.info({ hostId: request.params.id }, 'host updated');
     await health.reconcile();
+    await pushRelay.reconcile();
     return reply.send({ host: registry.entryFor(registry.getRow(request.params.id)!) });
   });
 
@@ -191,6 +193,7 @@ export const hubHostRoutes: FastifyPluginAsync = async (app) => {
       'host bound',
     );
     await health.reconcile();
+    await pushRelay.reconcile();
     return reply.send({ host: registry.entryFor(registry.getRow(request.params.id)!) });
   });
 
@@ -224,6 +227,7 @@ export const hubHostRoutes: FastifyPluginAsync = async (app) => {
             },
           );
           revokedOnBackend = response.ok;
+          await response.text().catch(() => {});
         } finally {
           clearTimeout(timer);
         }
@@ -240,6 +244,7 @@ export const hubHostRoutes: FastifyPluginAsync = async (app) => {
       'host removed',
     );
     await health.reconcile();
+    await pushRelay.reconcile();
     return reply.send({ ok: true, revokedOnBackend });
   });
 };
