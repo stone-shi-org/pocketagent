@@ -313,7 +313,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     return (match?.chats.some((chat) => chat.live) || match?.subagents.some((chat) => chat.live)) ?? false;
   }
 
-  /** One entry until a front server can register others. */
+  /** On a backend, always answers with itself; the Hub (PA-66) provides the multi-host registry. */
   app.get('/api/hosts', async () => ({ hosts: [projects.host()] }));
 
   app.get('/api/workspaces', async () => ({ workspaces: await workspaces.list() }));

@@ -412,7 +412,7 @@ export function ComposerPage({ initialCwd, onBack, onCreated, onApiError }: Prop
               value={host?.id ?? ''}
               options={hostOptions}
               onChange={() => {
-                /* one host until a front server registers others */
+                /* host switching is driven by the route prefix (#/h/<hostId>/) and host rail/sheet */
               }}
             />
             {/* With zero workspaces, `workspaceOptions` holds only the sentinel

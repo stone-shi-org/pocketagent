@@ -410,10 +410,9 @@ export type ConversationInfo = z.infer<typeof ConversationInfo>;
 /**
  * A machine that PocketAgent can run agents on.
  *
- * There is exactly one today — the server you are talking to — but the concept
- * is first-class from the start so that a front server fronting several backs
- * does not require the client to be rewritten. Anything that varies per machine
- * belongs here rather than in a global response field.
+ * On a backend, GET /api/hosts answers with itself. When fronted by a Hub
+ * (PA-66), multiple bound backends are registered and addressed under #/h/<hostId>/.
+ * Anything that varies per machine belongs here rather than in a global response field.
  */
 export const HostInfo = z.object({
   /** Stable across restarts; opaque to the client. */
@@ -442,7 +441,7 @@ export const HostInfo = z.object({
    * running, so it must not be the one claiming compatibility.
    */
   protocol: ProtocolRange,
-  /** False once a front server can report a back it cannot currently reach. */
+  /** False when a registered backend cannot currently be reached. */
   online: z.boolean(),
   /**
    * Sessions currently `starting` or `running` on this machine (PA-67).

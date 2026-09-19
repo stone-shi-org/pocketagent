@@ -152,12 +152,20 @@ running keeps running.
 | `MAX_SESSIONS` | `10` | Concurrent live PTYs. |
 | `OUTPUT_BUFFER_BYTES` | `2097152` | Per-session replay buffer. |
 | `SESSION_IDLE_TIMEOUT` | `0` | Seconds idle **and** unattached before auto-kill. `0` disables. |
-| `POCKETAGENT_BACKEND` | `direct` | `direct` or `tmux`. See [Process backends](#process-backends). |
+| `POCKETAGENT_BACKEND` | `direct` | `direct` or `tmux`. In containers, use `direct`. See [Process backends](#process-backends). |
 | `POCKETAGENT_TMUX_BIN` | `tmux` | tmux executable. |
 | `POCKETAGENT_TMUX_SOCKET` | `pocketagent` | Private tmux socket name. |
+| `POCKETAGENT_ADOPT_TMUX_SOCKET` | unset | Foreign tmux socket to adopt existing user panes from. |
+| `POCKETAGENT_GLOBAL_SKIP_PERMISSIONS` | `false` | **Dangerous:** Boot-time seed to globally bypass tool approvals. |
 | `POCKETAGENT_SHELL` | `$SHELL` | Shell for the `shell` agent. |
 | `POCKETAGENT_CLAUDE_BIN` | `claude` | Claude Code executable, resolved on `PATH`. |
+| `POCKETAGENT_AGY_BIN` | `agy` | Google Antigravity CLI executable, resolved on `PATH`. |
+| `POCKETAGENT_OPENCODE_BIN` | `opencode` | Opencode CLI executable, resolved on `PATH`. |
+| `POCKETAGENT_CODEX_BIN` | `codex` | OpenAI Codex CLI executable, resolved on `PATH`. |
+| `POCKETAGENT_PI_BIN` | `pi` | Pi CLI binary, resolved on `PATH`. |
 | `POCKETAGENT_SETTINGS_ENC_KEY` | — | Base64 of 32 random bytes, encrypting each custom Claude provider's API key at rest. Unset disables that feature (it is not a boot error); set-but-invalid is. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
+| `POCKETAGENT_PUSH_CONTACT` | `mailto:pocketagent@localhost` | VAPID contact email/URI for Web Push notifications. |
+| `POCKETAGENT_CODE_SERVER_URL` | unset | Base URL for code-server deep links. |
 | `POCKETAGENT_DEEPSEEK_*`, `POCKETAGENT_OMNIROUTE_*` | — | **Deprecated.** Read once on the first boot after upgrading, to import the old built-in variants as custom Claude providers, then never again. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
 | `POCKETAGENT_WEB_DIST` | `<checkout>/apps/web/dist` | Directory the frontend is served from. The container image sets it explicitly; a normal install never needs it. If it does not exist the API still runs and page requests get a plain 404. |
 | `POCKETAGENT_BUILD_VERSION` | `package.json`, then `0.0.0-dev` | Semver reported on `/health` and in the host list. Build identity, normally stamped by the image build rather than set by hand; a malformed value is ignored with a boot warning. |
@@ -475,6 +483,7 @@ and a Hub with nothing registered has nothing to show.
 | `POCKETAGENT_HUB_DATA_DIR` | `<checkout>/data/hub` | The registry database. Its own variable, not `POCKETAGENT_DATA_DIR`. |
 | `POCKETAGENT_HUB_SESSION_TTL_HOURS` | `720` | How long a Hub login lasts. |
 | `POCKETAGENT_HUB_LATEST_RELEASE` | unset | Newest release to compare hosts against, for the drift badge. Unset infers it from the hosts in the list. |
+| `POCKETAGENT_HUB_PUSH_CONTACT` | `mailto:pocketagent@localhost` | VAPID contact claim for Hub-managed Web Push relay (PA-73). |
 | `POCKETAGENT_ALLOWED_ORIGINS`, `POCKETAGENT_COOKIE_SECURE`, `POCKETAGENT_TRUST_PROXY` | as for a backend | Set these on the **Hub**: it is the origin the browser talks to, and where TLS terminates. |
 
 ### TLS

@@ -983,11 +983,13 @@ rows sharing one `agentSessionId` and a session-keyed badge would vanish with th
 `HostInfo` is first-class, and `GET /api/hosts` on a backend still answers with exactly one
 entry: itself. A backend must not claim to know about its peers — the same reasoning that stops
 it asserting its own external origin — so the *list* of machines comes from somewhere else: the
-Hub (PA-66, below). Building a front server **does** concentrate credentials for every
-registered machine in one process, which this repo previously recorded as a reason not to build
-one at all; that guidance was knowingly overruled on PA-66, and PA-63's scoped, revocable hub
-credentials are the mitigation that made it defensible — no credential the Hub holds is a root
-credential, and every one of them is revocable from the machine it grants access to.
+Hub (PA-66, below). The Hub is exactly that front server. This was a **knowing reversal** of the
+previous posture ("No such front server exists... treat it as a design problem, not a feature request").
+The mitigation that made it defensible is scoped hub credentials (PA-63): no master tokens are stored
+on the Hub (exchanged once at bind time and discarded), and credentials are full-access but
+individually revocable per host from the backend side (`Settings → Hubs`). What remains true and
+accepted is that a Hub compromise can still write configuration to every bound host (e.g. provisioning
+templates, LLM endpoint replacement, or revoking sibling credentials).
 
 **Host is a grouping dimension on the home screen, not a mode** (PA-67). The client is
 host-parameterised (`HostEndpoint`, PA-60), so the aggregated "all hosts" home is the default
@@ -1139,7 +1141,10 @@ per host and discards it), everything it does hold is full-access but *revocable
 backend side*, and `hub_hosts.credential_enc` is a `secret-box` ciphertext rather than a token
 in the clear. The accepted residual cost is real and worth stating: the Hub is one process that
 can reach every bound machine, and it is a single point of failure for *reaching* them — though
-not for their state, since each backend stays directly usable with no Hub involved.
+not for their state, since each backend stays directly usable with no Hub involved. Furthermore,
+what remains true is that a Hub compromise can still write configuration to every bound host
+(create Pocket Agents, MCP registries, providers, skills, and repoint LLM endpoints; or revoke
+sibling credentials), though it cannot mint new credentials or bypass per-host audit logging.
 
 **`packages/node-kit` exists because of this ticket.** The Hub needs `secret-box` and the
 token/origin helpers, and reaching them through `@pocketagent/server` would drag node-pty, the
@@ -1955,9 +1960,10 @@ These are load-bearing. Several were bugs first.
   one but not the other is a bug. A **host** is a grouping level *above* those three, never a
   fourth category and never a badge on a row (PA-67): the desktop expresses the switcher as a
   rail and the phone as a sheet — different chrome, deliberately — but both render the same
-  `HostGroup` around the same three shared components. The one place a host *is* shown per row is
-  the desktop tab strip, and only while two hosts have tabs open, because two machines can have
-  identically-titled chats side by side.
+  `HostGroup` around the same three shared components. The host rail is chrome rather than a
+  category, so the "both layouts render the same three categories" rule is unaffected. The one
+  place a host *is* shown per row is the desktop tab strip, and only while two hosts have tabs open,
+  because two machines can have identically-titled chats side by side.
 - **The theme is light, and `color-scheme` is pinned to it.** Everything reads from the
   token block at the top of `styles.css`; adding a raw hex outside it is how the palette
   rots. The one dark surface is the terminal (`--console`), because ANSI palettes are drawn
