@@ -88,6 +88,8 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   // Mirrors `meInstructionInput`'s local-state-plus-save-on-blur shape —
   // see `PlannerSettingsDto.maxToolIterations`'s doc comment.
   const [maxToolIterationsInput, setMaxToolIterationsInput] = useState('20');
+  // PA-74: see `PlannerSettingsDto.maxSubagentSpawnsPerTurn`'s doc comment.
+  const [maxSubagentSpawnsPerTurnInput, setMaxSubagentSpawnsPerTurnInput] = useState('3');
 
   const load = useCallback(async () => {
     try {
@@ -109,6 +111,7 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       setMeInstructionInput(se.meInstruction ?? '');
       setToolsInstructionInput(se.toolsInstruction ?? '');
       setMaxToolIterationsInput(String(se.maxToolIterations));
+      setMaxSubagentSpawnsPerTurnInput(String(se.maxSubagentSpawnsPerTurn ?? 3));
       setTools(to.tools);
       setApprovals(ap.approvals);
       setError(null);
@@ -171,6 +174,18 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       return;
     }
     void withBusy(() => api.updatePlannerSettings({ maxToolIterations: parsed }));
+  };
+
+  // PA-74: How many subagents a single turn may spawn before refusing further
+  // spawns — see `PlannerSettingsDto.maxSubagentSpawnsPerTurn`'s doc comment.
+  // Clamped client-side to `[1, 50]`.
+  const saveMaxSubagentSpawnsPerTurn = (): void => {
+    const parsed = Number(maxSubagentSpawnsPerTurnInput);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 50) {
+      setMaxSubagentSpawnsPerTurnInput(String(settings?.maxSubagentSpawnsPerTurn ?? 3));
+      return;
+    }
+    void withBusy(() => api.updatePlannerSettings({ maxSubagentSpawnsPerTurn: parsed }));
   };
 
   const saveApiKey = (): void => {
@@ -1037,6 +1052,25 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
           If a single turn makes this many tool-call round-trips without reaching a final answer,
           it gives up rather than looping forever. Counted across the whole turn, including any
           time spent paused for approval.
+        </p>
+
+        <div className="planner-field" style={{ marginTop: 14, maxWidth: 160 }}>
+          <label htmlFor="planner-max-subagent-spawns-per-turn">Max subagent spawns per turn</label>
+          <input
+            id="planner-max-subagent-spawns-per-turn"
+            type="number"
+            min={1}
+            max={50}
+            step={1}
+            value={maxSubagentSpawnsPerTurnInput}
+            disabled={busy}
+            onChange={(e) => setMaxSubagentSpawnsPerTurnInput(e.target.value)}
+            onBlur={saveMaxSubagentSpawnsPerTurn}
+          />
+        </div>
+        <p className="planner-row-meta" style={{ marginTop: 4 }}>
+          Maximum subagents (Pocket Agent chats or coding agents) a single turn may spawn before
+          refusing further spawns. Stops a runaway or confused agent from repeatedly spawning subagents.
         </p>
 
         <h3 style={{ marginTop: 14 }}>Remembered decisions</h3>

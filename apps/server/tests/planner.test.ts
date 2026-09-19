@@ -715,6 +715,8 @@ describe('planner routes over HTTP', () => {
       // configurable setting (default 20) — see
       // `PlannerSettingsDto.maxToolIterations`'s doc comment.
       maxToolIterations: 20,
+      // PA-74: configurable spawn cap per turn (default 3).
+      maxSubagentSpawnsPerTurn: 3,
     });
   });
 

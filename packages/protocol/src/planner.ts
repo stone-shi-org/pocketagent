@@ -316,6 +316,12 @@ export const PlannerSettingsDto = z.object({
    * editing source.
    */
   maxToolIterations: z.number().int().min(1).max(200),
+  /**
+   * PA-74: Maximum subagents (Pocket Agent chats or coding agents) a single
+   * turn may spawn before refusing further spawns. Configurable (default 3)
+   * to stop runaway spawn loops within a single turn.
+   */
+  maxSubagentSpawnsPerTurn: z.number().int().min(1).max(50),
 });
 export type PlannerSettingsDto = z.infer<typeof PlannerSettingsDto>;
 
@@ -356,6 +362,8 @@ export const UpdatePlannerSettingsRequest = z.object({
   toolsInstruction: z.string().max(4000).nullable().optional(),
   /** See `PlannerSettingsDto.maxToolIterations`'s doc comment. */
   maxToolIterations: z.number().int().min(1).max(200).optional(),
+  /** See `PlannerSettingsDto.maxSubagentSpawnsPerTurn`'s doc comment. */
+  maxSubagentSpawnsPerTurn: z.number().int().min(1).max(50).optional(),
 });
 export type UpdatePlannerSettingsRequest = z.infer<typeof UpdatePlannerSettingsRequest>;
 

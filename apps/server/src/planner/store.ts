@@ -433,6 +433,14 @@ export const PLANNER_TOOLS_INSTRUCTION_KEY = 'planner_tools_instruction';
 export const PLANNER_MAX_TOOL_ITERATIONS_KEY = 'planner_max_tool_iterations';
 export const DEFAULT_MAX_TOOL_ITERATIONS = 20;
 
+/**
+ * PA-74: Maximum subagents a single turn may spawn before refusing further
+ * spawns. Stored as a string in settings, parsed with Number(...) and
+ * clamped defensively in [1, 50].
+ */
+export const PLANNER_MAX_SUBAGENT_SPAWNS_PER_TURN_KEY = 'planner_max_subagent_spawns_per_turn';
+export const DEFAULT_MAX_SUBAGENT_SPAWNS_PER_TURN = 3;
+
 export interface PlannerSettingsSnapshot {
   baseUrl: string | null;
   hasApiKey: boolean;
@@ -451,6 +459,7 @@ export interface PlannerSettingsSnapshot {
   meInstruction: string | null;
   toolsInstruction: string | null;
   maxToolIterations: number;
+  maxSubagentSpawnsPerTurn: number;
 }
 
 export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
@@ -473,6 +482,7 @@ export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
     meInstruction: readSetting(db, PLANNER_ME_INSTRUCTION_KEY) || null,
     toolsInstruction: readSetting(db, PLANNER_TOOLS_INSTRUCTION_KEY) || null,
     maxToolIterations: readMaxToolIterations(db),
+    maxSubagentSpawnsPerTurn: readMaxSubagentSpawnsPerTurn(db),
   };
 }
 
@@ -481,6 +491,14 @@ function readMaxToolIterations(db: Db): number {
   if (raw === null) return DEFAULT_MAX_TOOL_ITERATIONS;
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 200) return DEFAULT_MAX_TOOL_ITERATIONS;
+  return parsed;
+}
+
+function readMaxSubagentSpawnsPerTurn(db: Db): number {
+  const raw = readSetting(db, PLANNER_MAX_SUBAGENT_SPAWNS_PER_TURN_KEY);
+  if (raw === null) return DEFAULT_MAX_SUBAGENT_SPAWNS_PER_TURN;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 50) return DEFAULT_MAX_SUBAGENT_SPAWNS_PER_TURN;
   return parsed;
 }
 
@@ -504,6 +522,11 @@ export function writePlannerToolsInstruction(db: Db, text: string | null): void 
     the way back out regardless. */
 export function writePlannerMaxToolIterations(db: Db, n: number): void {
   writeSetting(db, PLANNER_MAX_TOOL_ITERATIONS_KEY, String(n));
+}
+
+/** PA-74: see `PLANNER_MAX_SUBAGENT_SPAWNS_PER_TURN_KEY`'s own doc comment. */
+export function writePlannerMaxSubagentSpawnsPerTurn(db: Db, n: number): void {
+  writeSetting(db, PLANNER_MAX_SUBAGENT_SPAWNS_PER_TURN_KEY, String(n));
 }
 
 export function writePlannerBaseUrl(db: Db, baseUrl: string | null): void {

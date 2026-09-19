@@ -79,6 +79,7 @@ import {
   writePlannerEmbeddingBaseUrl,
   writePlannerEmbeddingModelId,
   writePlannerMaxToolIterations,
+  writePlannerMaxSubagentSpawnsPerTurn,
   writePlannerMcpEnabled,
   writePlannerMeInstruction,
   writePlannerToolsInstruction,
@@ -381,6 +382,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       meInstruction,
       toolsInstruction,
       maxToolIterations,
+      maxSubagentSpawnsPerTurn,
     } = parsed.data;
     if (baseUrl !== undefined) writePlannerBaseUrl(db, baseUrl);
     if (apiKey !== undefined) writePlannerApiKey(db, apiKey.length > 0 ? apiKey : null);
@@ -410,6 +412,9 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     if (meInstruction !== undefined) writePlannerMeInstruction(db, meInstruction);
     if (toolsInstruction !== undefined) writePlannerToolsInstruction(db, toolsInstruction);
     if (maxToolIterations !== undefined) writePlannerMaxToolIterations(db, maxToolIterations);
+    if (maxSubagentSpawnsPerTurn !== undefined) {
+      writePlannerMaxSubagentSpawnsPerTurn(db, maxSubagentSpawnsPerTurn);
+    }
     const dto: PlannerSettingsDto = readPlannerSettings(db);
     return reply.send(dto);
   });

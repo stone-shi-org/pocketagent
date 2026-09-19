@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '@pocketagent/protocol';
 import {
   MAX_SUBAGENT_SPAWN_DEPTH,
+  MAX_SUBAGENT_SPAWNS_PER_TURN,
   PLANNER_TOOLS,
   TOOL_INTEGRATION_DISABLED,
   findPlannerTool,
@@ -37,6 +38,10 @@ const SUBAGENTS_UNAVAILABLE: PlannerToolDeps['subagents'] = {
   },
   pocketAgentChatStatus: async () => ({ status: 'gone', summary: 'subagents stub not configured for this test' }),
   pocketAgentEnabledTools: () => [],
+  findLiveCodingSubagent: () => null,
+  recordCodingSubagent: () => {},
+  spawnsThisTurn: () => 0,
+  recordSpawn: () => {},
 };
 
 /** PA-53: `send_telegram_message`'s default stub — no pairings, and a `send`
@@ -1272,6 +1277,122 @@ describe('start_subagent_session', () => {
       prompt: 'do a subtask',
     });
     expect(result).toMatch(/Could not start subagent session/);
+  });
+
+  it('refuses a coding_agent spawn past the depth limit', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('start_subagent_session')!;
+    const result = await tool.execute(depsFor(t, undefined, { spawnDepth: MAX_SUBAGENT_SPAWN_DEPTH }), {
+      kind: 'coding_agent',
+      path: t.projectDir,
+      agent: 'claude',
+      prompt: 'do a subtask',
+    });
+    expect(result).toMatch(/depth limit/);
+  });
+
+  it('returns existing handle and status when chat already has a live coding subagent in the working tree', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('start_subagent_session')!;
+    const result = JSON.parse(
+      await tool.execute(
+        depsFor(t, undefined, {
+          subagents: {
+            ...SUBAGENTS_UNAVAILABLE,
+            findLiveCodingSubagent: (treeRoot) => {
+              expect(treeRoot).toBe(t.projectDir);
+              return { id: 'existing-subagent-1', status: 'running' };
+            },
+          },
+        }),
+        {
+          kind: 'coding_agent',
+          path: t.projectDir,
+          agent: 'claude',
+          prompt: 'another task in same tree',
+        },
+      ),
+    );
+    expect(result).toMatchObject({
+      kind: 'coding_agent',
+      id: 'existing-subagent-1',
+      status: 'running',
+    });
+    expect(result.message).toContain('already has an active subagent session');
+    expect(result.message).toContain('get_subagent_status');
+  });
+
+  it('refuses a coding_agent spawn when the working tree is currently busy with another session', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('start_subagent_session')!;
+    // Simulate busy tree in sessions.busyTreeRoots()
+    const origBusy = t.context.sessions.busyTreeRoots.bind(t.context.sessions);
+    t.context.sessions.busyTreeRoots = () => [t.projectDir];
+    try {
+      const result = await tool.execute(depsFor(t), {
+        kind: 'coding_agent',
+        path: t.projectDir,
+        agent: 'claude',
+        prompt: 'do a task',
+      });
+      expect(result).toMatch(/currently busy with another running session/);
+      expect(result).toContain(t.projectDir);
+    } finally {
+      t.context.sessions.busyTreeRoots = origBusy;
+    }
+  });
+
+  it('refuses subagent spawn when per-turn spawn cap is reached', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('start_subagent_session')!;
+    const codingResult = await tool.execute(
+      depsFor(t, undefined, {
+        subagents: {
+          ...SUBAGENTS_UNAVAILABLE,
+          spawnsThisTurn: () => MAX_SUBAGENT_SPAWNS_PER_TURN,
+        },
+      }),
+      {
+        kind: 'coding_agent',
+        path: t.projectDir,
+        agent: 'claude',
+        prompt: 'do a task',
+      },
+    );
+    expect(codingResult).toMatch(/already spawned 3 subagent\(s\) this turn/);
+
+    const pocketResult = await tool.execute(
+      depsFor(t, undefined, {
+        subagents: {
+          ...SUBAGENTS_UNAVAILABLE,
+          spawnsThisTurn: () => MAX_SUBAGENT_SPAWNS_PER_TURN,
+        },
+      }),
+      {
+        kind: 'pocket_agent',
+        workspaceId: t.context.plannerWorkspaces.getDefault()!.id,
+        prompt: 'do a task',
+      },
+    );
+    expect(pocketResult).toMatch(/already spawned 3 subagent\(s\) this turn/);
+
+    // Respects configured maxSubagentSpawnsPerTurn
+    const customResult = await tool.execute(
+      depsFor(t, undefined, {
+        maxSubagentSpawnsPerTurn: 5,
+        subagents: {
+          ...SUBAGENTS_UNAVAILABLE,
+          spawnsThisTurn: () => 5,
+        },
+      }),
+      {
+        kind: 'coding_agent',
+        path: t.projectDir,
+        agent: 'claude',
+        prompt: 'do a task',
+      },
+    );
+    expect(customResult).toMatch(/already spawned 5 subagent\(s\) this turn \(limit is 5\)/);
   });
 });
 

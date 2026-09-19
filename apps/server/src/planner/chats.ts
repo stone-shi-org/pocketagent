@@ -36,7 +36,15 @@ import {
   writePlannerLastModelId,
   type PlannerSettingsSnapshot,
 } from './store.js';
-import { CALL_MCP_TOOL_NAME, LIST_MCP_TOOLS_NAME, LIST_SKILLS_NAME, USE_SKILL_NAME, type PromptImage } from '@pocketagent/protocol';
+import {
+  CALL_MCP_TOOL_NAME,
+  LIST_MCP_TOOLS_NAME,
+  LIST_SKILLS_NAME,
+  USE_SKILL_NAME,
+  isTerminalStatus,
+  type PromptImage,
+} from '@pocketagent/protocol';
+import { treeRootOf } from '../git/worktree-paths.js';
 import { resolveApprovalStatus, rememberDecisionIfAsked } from './approval.js';
 import { appendTranscriptEvent, clearTranscriptEvents, readTranscriptEvents } from './transcript.js';
 import {
@@ -298,6 +306,16 @@ export class PlannerChatService {
    * gates *starting a new* subagent chat, never resuming an old one.
    */
   private readonly spawnDepthByChat = new Map<string, number>();
+  /**
+   * PA-74: Coding-agent subagent sessions spawned by a chat, keyed by chat id.
+   * Used to prevent duplicate agents in the same working tree and clean up on chat deletion.
+   */
+  private readonly subagentSessionsByChat = new Map<string, Set<string>>();
+  /**
+   * PA-74: Number of subagents (pocket or coding) spawned during the current turn,
+   * keyed by chat id. Reset at the start of a turn and cleaned up on completion.
+   */
+  private readonly spawnsThisTurnByChat = new Map<string, number>();
 
   /**
    * PA-56: `webhooks`/`cron`, for `read_settings`/`update_webhook`/
@@ -426,6 +444,22 @@ export class PlannerChatService {
     // never spawn or be spawned into again, so its depth entry would just
     // leak for the life of the process otherwise.
     this.spawnDepthByChat.delete(id);
+    // PA-74: terminate any live subagent sessions this chat spawned, and clean up tracking.
+    const subagents = this.subagentSessionsByChat.get(id);
+    if (subagents) {
+      for (const sessionId of subagents) {
+        const info = this.opts.sessions.find(sessionId);
+        if (info && !isTerminalStatus(info.status)) {
+          try {
+            this.opts.sessions.terminate(sessionId);
+          } catch (err) {
+            this.opts.logger?.warn({ err, sessionId, chatId: id }, 'failed to terminate subagent session on chat deletion');
+          }
+        }
+      }
+      this.subagentSessionsByChat.delete(id);
+    }
+    this.spawnsThisTurnByChat.delete(id);
     return deletePlannerChat(this.opts.db, id);
   }
 
@@ -764,6 +798,7 @@ export class PlannerChatService {
     opts: { modelId?: string; image?: PromptImage; signal?: AbortSignal } = {},
   ): AsyncGenerator<AgentEvent> {
     const chat = this.requireChat(id);
+    this.spawnsThisTurnByChat.set(id, 0);
     const modelId = this.resolveModelId(chat, opts.modelId);
     const workspacePath = this.workspacePathFor(chat);
 
@@ -901,6 +936,7 @@ export class PlannerChatService {
     });
     updatePlannerChat(this.opts.db, chat.id, { lastModelId: modelId, lastActivityAt: Date.now() });
     writePlannerLastModelId(this.opts.db, modelId);
+    this.spawnsThisTurnByChat.delete(chat.id);
   }
 
   /**
@@ -1184,8 +1220,13 @@ export class PlannerChatService {
               this.startSubagentChatForTool(chat.id, workspaceId, prompt),
             pocketAgentChatStatus: (chatId: string) => this.subagentChatStatusForTool(chatId),
             pocketAgentEnabledTools: (workspaceId: string) => this.toolsFor(workspaceId).map((t) => t.name),
+            findLiveCodingSubagent: (treeRoot: string) => this.findLiveCodingSubagentForChat(chat.id, treeRoot),
+            recordCodingSubagent: (sessionId: string) => this.recordCodingSubagentForChat(chat.id, sessionId),
+            spawnsThisTurn: () => this.spawnsThisTurnForChat(chat.id),
+            recordSpawn: () => this.recordSpawnForChat(chat.id),
           },
           spawnDepth: this.spawnDepthOf(chat.id),
+          maxSubagentSpawnsPerTurn: settings.maxSubagentSpawnsPerTurn,
           telegram: {
             links:
               this.opts.telegramLinks
@@ -1346,6 +1387,60 @@ export class PlannerChatService {
       };
     }
     return { status: 'running', summary: '(still working on its assigned task)' };
+  }
+
+  /**
+   * PA-74: Backs `PlannerSubagentDeps.findLiveCodingSubagent`. Checks whether
+   * `chatId` already started a live coding-agent session in the working tree
+   * rooted at `treeRoot`. Terminal sessions are pruned on the fly.
+   */
+  private findLiveCodingSubagentForChat(
+    chatId: string,
+    treeRoot: string,
+  ): { id: string; status: 'running' | 'idle' } | null {
+    const set = this.subagentSessionsByChat.get(chatId);
+    if (!set) return null;
+    for (const sessionId of set) {
+      const info = this.opts.sessions.find(sessionId);
+      if (!info || isTerminalStatus(info.status)) {
+        set.delete(sessionId);
+        continue;
+      }
+      if (treeRootOf(info.cwd) === treeRoot) {
+        return { id: info.id, status: info.busy ? 'running' : 'idle' };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * PA-74: Backs `PlannerSubagentDeps.recordCodingSubagent`. Records a
+   * coding-agent session started by `chatId`.
+   */
+  private recordCodingSubagentForChat(chatId: string, sessionId: string): void {
+    let set = this.subagentSessionsByChat.get(chatId);
+    if (!set) {
+      set = new Set();
+      this.subagentSessionsByChat.set(chatId, set);
+    }
+    set.add(sessionId);
+  }
+
+  /**
+   * PA-74: Backs `PlannerSubagentDeps.spawnsThisTurn`. Reads how many subagents
+   * have been spawned during the chat's current turn.
+   */
+  private spawnsThisTurnForChat(chatId: string): number {
+    return this.spawnsThisTurnByChat.get(chatId) ?? 0;
+  }
+
+  /**
+   * PA-74: Backs `PlannerSubagentDeps.recordSpawn`. Increments the spawn count
+   * for the chat's current turn.
+   */
+  private recordSpawnForChat(chatId: string): void {
+    const current = this.spawnsThisTurnByChat.get(chatId) ?? 0;
+    this.spawnsThisTurnByChat.set(chatId, current + 1);
   }
 
   /**

@@ -866,6 +866,18 @@ describe('planner chat routes over HTTP', () => {
     expect(reread.maxToolIterations).toBe(5);
   });
 
+  it('maxSubagentSpawnsPerTurn defaults to 3 and is configurable over the settings route', async () => {
+    t = await createTestApp();
+    const initial = (await get(t, '/api/planner/settings')).json();
+    expect(initial.maxSubagentSpawnsPerTurn).toBe(3);
+
+    const updated = (await patch(t, '/api/planner/settings', { maxSubagentSpawnsPerTurn: 7 })).json();
+    expect(updated.maxSubagentSpawnsPerTurn).toBe(7);
+
+    const reread = (await get(t, '/api/planner/settings')).json();
+    expect(reread.maxSubagentSpawnsPerTurn).toBe(7);
+  });
+
   it('a second turn sends the full prior history to the LLM', async () => {
     const fetchImpl = vi
       .fn()
@@ -1352,5 +1364,98 @@ describe('planner chat routes over HTTP', () => {
     const chatCEvents = (await waitForChatDone(t, chatC)) as Array<{ kind: string; content?: unknown }>;
     const chatCToolResult = chatCEvents.find((e) => e.kind === 'tool_result');
     expect(String(chatCToolResult?.content)).toMatch(/depth limit/);
+  });
+
+  it('prevents duplicate coding_agent subagent spawns into the same working tree and returns existing handle with status', async () => {
+    let callCount = 0;
+    const fetchImpl = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string) as {
+        messages: Array<{ role: string; content: string | null }>;
+      };
+      const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+      const hasToolResult = body.messages.some((m) => m.role === 'tool');
+      if (lastUser?.content === 'spawn subagent' && !hasToolResult && callCount === 0) {
+        callCount++;
+        return fakeToolCallResponse('start_subagent_session', {
+          kind: 'coding_agent',
+          path: t.projectDir,
+          agent: 'claude',
+          prompt: 'first task',
+        });
+      }
+      if (lastUser?.content === 'spawn subagent' && hasToolResult && callCount === 1) {
+        callCount++;
+        // Second tool call in the same turn into the same working tree!
+        return fakeToolCallResponse('start_subagent_session', {
+          kind: 'coding_agent',
+          path: t.projectDir,
+          agent: 'claude',
+          prompt: 'second task in same tree',
+        });
+      }
+      return fakeCompletionResponse('all done');
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const { res, events } = await sendMessage(t, chat.id, 'spawn subagent');
+    expect(res.statusCode).toBe(200);
+
+    const toolResults = events.filter((e) => e.kind === 'tool_result');
+    expect(toolResults.length).toBe(2);
+
+    const firstResult = JSON.parse(String(toolResults[0]!.content));
+    expect(firstResult).toMatchObject({ kind: 'coding_agent' });
+    const firstSessionId = firstResult.id;
+
+    // Second call should NOT have created a new session — should return the existing session id!
+    const secondResult = JSON.parse(String(toolResults[1]!.content));
+    expect(secondResult).toMatchObject({
+      kind: 'coding_agent',
+      id: firstSessionId,
+    });
+    expect(secondResult.message).toContain('already has an active subagent session');
+    expect(secondResult.message).toContain('get_subagent_status');
+  });
+
+  it('terminates live coding_agent subagents when the owning planner chat is deleted', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string) as {
+        messages: Array<{ role: string; content: string | null }>;
+      };
+      const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+      const hasToolResult = body.messages.some((m) => m.role === 'tool');
+      if (lastUser?.content === 'spawn subagent' && !hasToolResult) {
+        return fakeToolCallResponse('start_subagent_session', {
+          kind: 'coding_agent',
+          path: t.projectDir,
+          agent: 'claude',
+          prompt: 'task',
+        });
+      }
+      return fakeCompletionResponse('spawned');
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const { events } = await sendMessage(t, chat.id, 'spawn subagent');
+    const toolResult = events.find((e) => e.kind === 'tool_result')!;
+    const spawnedId = (JSON.parse(String(toolResult.content)) as { id: string }).id;
+
+    // Subagent session should exist and be alive
+    const sessionBefore = t.context.sessions.find(spawnedId);
+    expect(sessionBefore).toBeDefined();
+
+    // Delete the planner chat
+    const delRes = await del(t, `/api/planner/chats/${chat.id}`);
+    expect(delRes.statusCode).toBe(204);
+
+    // Subagent session should now be terminated / in terminal status
+    const sessionAfter = t.context.sessions.find(spawnedId);
+    expect(sessionAfter?.status).toBe('killed');
   });
 });

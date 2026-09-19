@@ -21,6 +21,7 @@ import { readSessionHistory, type SessionHistoryDeps } from '../sessions/history
 import { stripAnsi } from '../terminal/classifier.js';
 import type { WorktreeService } from '../git/worktree.js';
 import { WorktreeError } from '../git/worktree.js';
+import { treeRootOf } from '../git/worktree-paths.js';
 import { buildChildEnv } from '../sessions/env.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type { PlannerWorkspaceRegistry } from './workspaces.js';
@@ -228,6 +229,11 @@ export interface PlannerToolDeps {
    */
   spawnDepth: number;
   /**
+   * PA-74: Configurable cap on how many subagents may be spawned during a
+   * single turn. Falls back to `MAX_SUBAGENT_SPAWNS_PER_TURN` if unset.
+   */
+  maxSubagentSpawnsPerTurn?: number;
+  /**
    * PA-53: `send_telegram_message`'s own view of the world — every currently
    * paired Telegram id (across every configured bot) it may address, and how
    * to actually deliver to one. Rebuilt fresh per call by
@@ -285,6 +291,23 @@ export interface PlannerSubagentDeps {
    * Synchronous — `toolsFor` touches no I/O — unlike the two methods above.
    */
   pocketAgentEnabledTools(workspaceId: string): string[];
+  /**
+   * PA-74: Find any live coding-agent subagent session already started by this
+   * chat for the working tree rooted at `treeRoot`.
+   */
+  findLiveCodingSubagent?(treeRoot: string): { id: string; status: 'running' | 'idle' } | null;
+  /**
+   * PA-74: Record a coding-agent subagent session started by this chat.
+   */
+  recordCodingSubagent?(sessionId: string, cwd: string): void;
+  /**
+   * PA-74: How many subagents (pocket or coding) have been spawned in the current turn.
+   */
+  spawnsThisTurn?(): number;
+  /**
+   * PA-74: Record that a subagent was spawned during the current turn.
+   */
+  recordSpawn?(): void;
 }
 
 /** One `get_subagent_status` answer for a `pocket_agent` handle. `'gone'`
@@ -301,6 +324,10 @@ export interface SubagentChatStatus {
     "the model choosing to call something is not this server's decision to
     trust unchecked" posture the disabled-tool checks already take. */
 export const MAX_SUBAGENT_SPAWN_DEPTH = 2;
+
+/** PA-74: Maximum subagents (pocket or coding) a chat can spawn in a single turn.
+    Stops a confused turn from looping on start_subagent_session and exhausting MAX_SESSIONS. */
+export const MAX_SUBAGENT_SPAWNS_PER_TURN = 3;
 
 /** PA-31: one third-party HTTP integration's live config — see
     `PlannerToolDeps.webSearch`/`.urlFetch`. */
@@ -1048,8 +1075,10 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       'Call list_subagents first to see what is configured. Returns a handle immediately — the ' +
       'subagent keeps working after this call returns, so poll get_subagent_status (for a coding ' +
       'agent, list_sessions/read_session_output work too) to learn when it is done. Starting another ' +
-      `Pocket Agent chat is refused past a depth of ${MAX_SUBAGENT_SPAWN_DEPTH} hops from a human, to ` +
-      'stop an unbounded chain of agents spawning agents.',
+      `subagent is refused past a depth of ${MAX_SUBAGENT_SPAWN_DEPTH} hops from a human, to ` +
+      'stop an unbounded chain of agents spawning agents. Only one live subagent session may be started ' +
+      'per working tree; if one already exists in the target tree, its existing handle and status are ' +
+      `returned. Up to ${MAX_SUBAGENT_SPAWNS_PER_TURN} subagents may be spawned per turn.`,
     parameters: {
       type: 'object',
       properties: {
@@ -1076,19 +1105,31 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       const prompt = String(args.prompt ?? '').trim();
       if (!prompt) return 'No task prompt provided.';
 
+      if (deps.spawnDepth >= MAX_SUBAGENT_SPAWN_DEPTH) {
+        const target = args.kind === 'pocket_agent' ? 'another Pocket Agent chat' : 'another subagent session';
+        return (
+          `Refusing: this chat is already ${deps.spawnDepth} subagent hop(s) from a human; starting ` +
+          `${target} would exceed the depth limit of ${MAX_SUBAGENT_SPAWN_DEPTH}.`
+        );
+      }
+
+      const maxSpawns = deps.maxSubagentSpawnsPerTurn ?? MAX_SUBAGENT_SPAWNS_PER_TURN;
+      const spawnsThisTurn = deps.subagents.spawnsThisTurn ? deps.subagents.spawnsThisTurn() : 0;
+      if (spawnsThisTurn >= maxSpawns) {
+        return (
+          `Refusing: already spawned ${spawnsThisTurn} subagent(s) this turn ` +
+          `(limit is ${maxSpawns}). Poll get_subagent_status to wait for existing subagents to finish.`
+        );
+      }
+
       if (args.kind === 'pocket_agent') {
-        if (deps.spawnDepth >= MAX_SUBAGENT_SPAWN_DEPTH) {
-          return (
-            `Refusing: this chat is already ${deps.spawnDepth} subagent hop(s) from a human; starting ` +
-            `another Pocket Agent chat would exceed the depth limit of ${MAX_SUBAGENT_SPAWN_DEPTH}.`
-          );
-        }
         const workspaceId = String(args.workspaceId ?? '');
         if (!deps.plannerWorkspaces.get(workspaceId)) {
           return `No Pocket Agent workspace found with id ${workspaceId}. Check list_subagents.`;
         }
         try {
           const { chatId } = await deps.subagents.startPocketAgentChat(workspaceId, prompt);
+          deps.subagents.recordSpawn?.();
           return JSON.stringify({
             kind: 'pocket_agent',
             id: chatId,
@@ -1108,6 +1149,30 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       } catch (err) {
         return `Cannot resolve ${requestedPath}: ${(err as Error).message}`;
       }
+
+      const treeRoot = treeRootOf(cwd);
+
+      // PA-74: Return existing live subagent session handle if this chat already started one in this working tree.
+      const existing = deps.subagents.findLiveCodingSubagent ? deps.subagents.findLiveCodingSubagent(treeRoot) : null;
+      if (existing) {
+        return JSON.stringify({
+          kind: 'coding_agent',
+          id: existing.id,
+          status: existing.status,
+          message:
+            `This chat already has an active subagent session (${existing.id}) in ${treeRoot} ` +
+            `(status: ${existing.status}). Use get_subagent_status to check on its progress or read its output.`,
+        });
+      }
+
+      // PA-74: Consult RunQueue's occupancy check — refuse if another session is mid-turn in this working tree.
+      if (deps.sessions.busyTreeRoots().includes(treeRoot)) {
+        return (
+          `Working tree "${treeRoot}" is currently busy with another running session. ` +
+          `Try again later or use get_subagent_status to check on running tasks.`
+        );
+      }
+
       try {
         const session = await deps.sessions.create({
           agent: agentId,
@@ -1119,6 +1184,8 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         if (!('prompt' in session)) {
           return `${agentId} could not be started as a structured session that can receive a task.`;
         }
+        deps.subagents.recordCodingSubagent?.(session.id, cwd);
+        deps.subagents.recordSpawn?.();
         const sent = (session as StructuredLikeSession).prompt(prompt);
         return JSON.stringify({
           kind: 'coding_agent',
