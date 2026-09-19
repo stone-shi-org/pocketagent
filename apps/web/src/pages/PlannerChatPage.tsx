@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   AgentEvent,
   ModelInfo,
@@ -73,6 +73,26 @@ function toModelInfos(models: PlannerModel[]): ModelInfo[] {
 }
 
 /**
+ * PA-76: generates a deduplication key for agent events when both the POST
+ * stream (active turn) and GET SSE stream (observer) deliver events for the
+ * same chat. `text_delta` is excluded from deduplication since it is only sent
+ * on the active HTTP stream, not via SSE.
+ */
+function eventKey(event: AgentEvent): string | null {
+  if (event.kind === 'text_delta') return null;
+  if ('id' in event && typeof event.id === 'string' && event.id) {
+    return `${event.kind}:${event.id}`;
+  }
+  if (event.kind === 'turn_complete') {
+    return `turn_complete:${event.completedAt ?? `${event.durationMs}_${event.inputTokens}_${event.outputTokens}`}`;
+  }
+  if (event.kind === 'notice') {
+    return `notice:${event.level}:${event.text}`;
+  }
+  return null;
+}
+
+/**
  * PA-6: one Pocket Agent chat, rendered as an exact mirror of a structured
  * session's own chat UI — literally the same `Transcript`/`PromptBox`
  * components, fed the same `AgentEvent` union through the same `applyEvent`
@@ -112,6 +132,7 @@ export function PlannerChatPage({
   const [subagents, setSubagents] = useState<SessionInfo[]>([]);
   const [plannerSubagents, setPlannerSubagents] = useState<PlannerChat[]>([]);
   const [sending, setSending] = useState(false);
+  const seenEventKeys = useRef<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   // PA-36: this page had no "gone" detection at all before — a deleted chat
   // silently rendered as `chat === null` / "Untitled chat" with an empty
@@ -193,6 +214,11 @@ export function PlannerChatPage({
       setChat(found);
       setMissing(found === null);
       setModels(modelList);
+      seenEventKeys.current.clear();
+      for (const ev of events) {
+        const k = eventKey(ev);
+        if (k) seenEventKeys.current.add(k);
+      }
       setTranscript(applyEvents(emptyTranscript(), events));
       setSubagents(subagentData.subagents ?? []);
       setPlannerSubagents(subagentData.plannerChats ?? []);
@@ -264,25 +290,58 @@ export function PlannerChatPage({
 
   /** Folds one streamed event into the live transcript — same reducer a
       structured session's WebSocket events go through. */
-  const onStreamEvent = (event: AgentEvent): void => {
-    setTranscript((prev) => applyEvent(prev ?? emptyTranscript(), event));
-    if (event.kind === 'turn_complete') {
-      void refreshSubagents();
-    }
-  };
+  const onStreamEvent = useCallback(
+    (event: AgentEvent): void => {
+      const key = eventKey(event);
+      if (key) {
+        if (seenEventKeys.current.has(key)) return;
+        seenEventKeys.current.add(key);
+      }
+      setTranscript((prev) => applyEvent(prev ?? emptyTranscript(), event));
+      if (event.kind === 'user_prompt') {
+        setChat((prev) => (prev ? { ...prev, busy: true } : null));
+      } else if (event.kind === 'turn_complete') {
+        setSending(false);
+        setChat((prev) => (prev ? { ...prev, busy: false } : null));
+        void refreshSubagents();
+        void (async () => {
+          try {
+            const { chats } = await api.listPlannerChats();
+            const found = chats.find((c) => c.id === chatId);
+            if (found) setChat(found);
+          } catch {
+            // ignore
+          }
+        })();
+      }
+    },
+    [chatId, refreshSubagents],
+  );
+
+  useEffect(() => {
+    const unsubscribe = api.subscribePlannerChatEvents(chatId, onStreamEvent);
+    return () => {
+      unsubscribe();
+    };
+  }, [chatId, onStreamEvent]);
+
+  const pending = transcript?.pending[0] ?? null;
+  const isChatBusy = sending || (chat?.busy ?? false) || (transcript?.busy ?? false);
+  const disabled = isChatBusy || pending !== null;
 
   /** `PromptBox.onSend` is synchronous by contract (see its own props doc):
       a `true` return clears the composer immediately, matching how a real
       session's prompt clears on submit rather than waiting for a reply. */
   const handleSend = (content: string, image?: PromptImage): boolean => {
     const trimmed = content.trim();
-    if ((!trimmed && !image) || sending) return false;
+    if ((!trimmed && !image) || isChatBusy || pending !== null) return false;
 
     // Handle slash commands without sending to LLM:
     if (!image && (trimmed === '/clear' || trimmed === '/reset')) {
       void (async () => {
         try {
           await api.clearPlannerChatHistory(chatId);
+          seenEventKeys.current.clear();
           setTranscript({
             ...emptyTranscript(),
             items: [
@@ -421,9 +480,6 @@ export function PlannerChatPage({
       }
     })();
   };
-
-  const pending = transcript?.pending[0] ?? null;
-  const disabled = sending || pending !== null;
 
   return (
     <div className="planner-chat-page">
@@ -722,7 +778,7 @@ export function PlannerChatPage({
         models={toModelInfos(models)}
         currentModel={chat?.lastModelId ?? null}
         onSetModel={changeModel}
-        busy={transcript?.busy ?? false}
+        busy={isChatBusy}
       />
     </div>
   );

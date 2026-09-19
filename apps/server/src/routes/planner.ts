@@ -115,7 +115,7 @@ function mapWorkspaceError(reply: FastifyReply, err: unknown): FastifyReply | ne
 
 function mapChatError(reply: FastifyReply, err: unknown): FastifyReply | never {
   if (err instanceof PlannerChatError) {
-    const status = err.code === 'not_found' ? 404 : err.code === 'not_configured' ? 409 : 400;
+    const status = err.code === 'not_found' ? 404 : err.code === 'not_configured' || err.code === 'busy' ? 409 : 400;
     return reply.code(status).send({ error: { code: err.code, message: err.message } });
   }
   if (err instanceof PlannerLlmError) {
@@ -1044,6 +1044,51 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     } catch (err) {
       return mapChatError(reply, err);
     }
+  });
+
+  /**
+   * PA-76: Subscribe-only SSE stream for chat events, backed by
+   * PlannerChatService.observe(). Surfaces background turns (cron, webhooks,
+   * Telegram, subagent wake) live in the UI without requiring page reloads.
+   */
+  app.get('/api/planner/chats/:id/events', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const chat = app.pocket.plannerChats.get(id);
+    if (!chat) return notFound(reply, 'Chat not found.');
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-store',
+      connection: 'keep-alive',
+    });
+
+    const write = (event: AgentEvent): void => {
+      try {
+        reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+      } catch {
+        // connection closed
+      }
+    };
+
+    const unsubscribe = app.pocket.plannerChats.observe(id, (event) => {
+      write(event);
+    });
+
+    reply.raw.write(': connected\n\n');
+
+    const heartbeat = setInterval(() => {
+      try {
+        reply.raw.write(': ping\n\n');
+      } catch {
+        // connection closed
+      }
+    }, 15000);
+
+    request.raw.on('close', () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
   });
 
   /**

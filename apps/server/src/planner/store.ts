@@ -642,6 +642,7 @@ function chatFromDbRow(row: PlannerChatDbRow): PlannerChat {
     lastActivityAt: row.last_activity_at,
     skipToolApprovalsEnabled: row.skip_tool_approvals === 1,
     parentChatId: row.parent_chat_id ?? null,
+    busy: false,
   };
 }
 

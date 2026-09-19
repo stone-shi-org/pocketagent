@@ -132,6 +132,10 @@ export const SessionInfo = z.object({
    * `start_subagent_session`, or null/undefined when started by a human or trigger.
    */
   plannerChatId: z.string().nullable().optional(),
+  /**
+   * PA-76: number of tool approvals currently pending a decision from a human.
+   */
+  pendingApprovalsCount: z.number().int().nonnegative().default(0),
 });
 export type SessionInfo = z.infer<typeof SessionInfo>;
 

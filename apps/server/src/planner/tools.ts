@@ -310,13 +310,21 @@ export interface PlannerSubagentDeps {
    * PA-74: Record that a subagent was spawned during the current turn.
    */
   recordSpawn?(): void;
+  /**
+   * PA-76: Cached status for a coding-agent subagent from SubagentSupervisor.
+   */
+  codingAgentStatus?(id: string): SubagentChatStatus | null;
+  /**
+   * PA-76: Whether the spawn budget for wake-driven turns has been exhausted.
+   */
+  wakeBudgetExhausted?(): boolean;
 }
 
-/** One `get_subagent_status` answer for a `pocket_agent` handle. `'gone'`
-    covers both an unknown id and a chat since deleted — indistinguishable to
+/** One `get_subagent_status` answer for a subagent handle. `'gone'`
+    covers both an unknown id and a chat/session since deleted — indistinguishable to
     a caller, and both mean "nothing left to check on". */
 export interface SubagentChatStatus {
-  status: 'running' | 'paused_for_approval' | 'done' | 'error' | 'gone';
+  status: 'running' | 'paused_for_approval' | 'done' | 'error' | 'idle' | 'exited' | 'gone';
   summary: string;
 }
 
@@ -384,9 +392,49 @@ const SEARCH_TIMEOUT_MS = 20_000;
     this long is a sign the search needs narrowing, not more room. */
 const MAX_SEARCH_RESULTS = 300;
 
-function truncate(text: string, max: number): string {
+/** Exported for direct unit testing — keeps the tail so conclusions/results aren't lost (PA-76). */
+export function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
-  return `${text.slice(0, max)}\n…(truncated, ${text.length - max} more characters)`;
+  return `…(truncated, ${text.length - max} earlier characters)\n${text.slice(-max)}`;
+}
+
+/** PA-76: Trailer appended to subagent prompts asking for a structured result summary. */
+export const SUBAGENT_RESULT_TRAILER =
+  '\n\nWhen you have completed your task, please end your final message with a `## RESULT` section covering:\n' +
+  '- What changed\n' +
+  '- What was verified\n' +
+  '- What could not be done or remains open';
+
+/**
+ * PA-76: Extracts the content under a `## RESULT` section if present.
+ * Exported for direct unit testing.
+ */
+export function extractResultSummary(text: string): string | null {
+  const resultTagMatch = text.match(/<result>([\s\S]*?)<\/result>/i);
+  const tagContent = resultTagMatch?.[1]?.trim();
+  if (tagContent) return tagContent;
+  const match = text.match(/(?:^|\n)##\s+RESULT\b[^\n]*(?:\r?\n([\s\S]*))?$/i);
+  if (!match) return null;
+  const result = (match[1] ?? '').trim();
+  return result.length > 0 ? result : null;
+}
+
+/**
+ * PA-76: Returns the subagent's own last message summary:
+ * Prefers the content of `## RESULT` from the last assistant message;
+ * falls back to the full last assistant message;
+ * falls back to `summarizeEvents` only if no assistant text event exists.
+ * Exported for direct unit testing.
+ */
+export function lastMessageSummary(events: readonly AgentEvent[]): string {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i]!;
+    if (ev.kind === 'text') {
+      const result = extractResultSummary(ev.text);
+      return truncate(result ?? ev.text, MAX_TOOL_RESULT_CHARS);
+    }
+  }
+  return truncate(summarizeEvents(events), MAX_TOOL_RESULT_CHARS);
 }
 
 /** Exported for direct unit testing — see `tests/planner-tools.test.ts`. */
@@ -451,6 +499,33 @@ async function sessionOutputSummary(deps: PlannerToolDeps, sessionId: string): P
     return 'This session has no readable transcript yet (it has not resumed or produced a conversation).';
   }
   return truncate(summarizeEvents(events), MAX_TOOL_RESULT_CHARS);
+}
+
+/**
+ * PA-76: Returns the last-message summary for a coding subagent session.
+ */
+async function sessionLastResultSummary(deps: PlannerToolDeps, sessionId: string): Promise<string> {
+  const live = deps.sessions.get(sessionId);
+  if (live) {
+    if (live.transport === 'terminal') {
+      const raw = live.buffer.replayAfter(0).data;
+      const text = stripAnsi(raw).trim();
+      if (text.length === 0) return '(no terminal output yet)';
+      return truncate(text, MAX_TOOL_RESULT_CHARS);
+    }
+    const buffered = live.buffer.replayAfter(0).events.map((e) => e.event);
+    const { events: priorEvents } = await readSessionHistory(deps.historyDeps, sessionId);
+    const allEvents = [...priorEvents, ...buffered];
+    if (allEvents.length === 0) {
+      return 'This session has no readable transcript yet (it has not resumed or produced a conversation).';
+    }
+    return lastMessageSummary(allEvents);
+  }
+  const { conversationId, events } = await readSessionHistory(deps.historyDeps, sessionId);
+  if (!conversationId || events.length === 0) {
+    return 'This session has no readable transcript yet (it has not resumed or produced a conversation).';
+  }
+  return lastMessageSummary(events);
 }
 
 function isWithinTrustedRoot(deps: PlannerToolDeps, real: string): boolean {
@@ -865,11 +940,24 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         const result = await deps.subagents.pocketAgentChatStatus(id);
         return truncate(JSON.stringify(result), MAX_TOOL_RESULT_CHARS);
       }
+      const cached = deps.subagents.codingAgentStatus?.(id);
+      if (cached) {
+        return truncate(JSON.stringify(cached), MAX_TOOL_RESULT_CHARS);
+      }
       const info = deps.sessions.find(id);
       if (!info) return JSON.stringify({ status: 'gone', summary: `No session found with id ${id}.` });
       if (isTerminalStatus(info.status)) {
         return truncate(
-          JSON.stringify({ status: 'exited', sessionStatus: info.status, summary: await sessionOutputSummary(deps, id) }),
+          JSON.stringify({ status: 'exited', sessionStatus: info.status, summary: await sessionLastResultSummary(deps, id) }),
+          MAX_TOOL_RESULT_CHARS,
+        );
+      }
+      if (info.pendingApprovalsCount > 0) {
+        return truncate(
+          JSON.stringify({
+            status: 'paused_for_approval',
+            summary: `Waiting on a human to approve ${info.pendingApprovalsCount} tool call(s) — open this session in the Pocket Agent UI to answer.`,
+          }),
           MAX_TOOL_RESULT_CHARS,
         );
       }
@@ -877,7 +965,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         return JSON.stringify({ status: 'running', summary: 'Still working on its assigned task.' });
       }
       return truncate(
-        JSON.stringify({ status: 'idle', summary: await sessionOutputSummary(deps, id) }),
+        JSON.stringify({ status: 'idle', summary: await sessionLastResultSummary(deps, id) }),
         MAX_TOOL_RESULT_CHARS,
       );
     },
@@ -1124,13 +1212,22 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         );
       }
 
+      if (deps.subagents.wakeBudgetExhausted?.()) {
+        return (
+          'Refusing: subagent spawn budget for wake-driven turns has been exhausted. ' +
+          'Poll get_subagent_status to wait for existing subagents to finish.'
+        );
+      }
+
+      const promptWithTrailer = prompt.includes(SUBAGENT_RESULT_TRAILER) ? prompt : prompt + SUBAGENT_RESULT_TRAILER;
+
       if (args.kind === 'pocket_agent') {
         const workspaceId = String(args.workspaceId ?? '');
         if (!deps.plannerWorkspaces.get(workspaceId)) {
           return `No Pocket Agent workspace found with id ${workspaceId}. Check list_subagents.`;
         }
         try {
-          const { chatId } = await deps.subagents.startPocketAgentChat(workspaceId, prompt);
+          const { chatId } = await deps.subagents.startPocketAgentChat(workspaceId, promptWithTrailer);
           deps.subagents.recordSpawn?.();
           return JSON.stringify({
             kind: 'pocket_agent',
@@ -1189,7 +1286,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         }
         deps.subagents.recordCodingSubagent?.(session.id, cwd);
         deps.subagents.recordSpawn?.();
-        const sent = (session as StructuredLikeSession).prompt(prompt);
+        const sent = (session as StructuredLikeSession).prompt(promptWithTrailer);
         return JSON.stringify({
           kind: 'coding_agent',
           id: session.id,

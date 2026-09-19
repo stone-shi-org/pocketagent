@@ -1231,7 +1231,7 @@ describe('start_subagent_session', () => {
           subagents: {
             startPocketAgentChat: async (workspaceId, prompt) => {
               expect(workspaceId).toBe(t.context.plannerWorkspaces.getDefault()!.id);
-              expect(prompt).toBe('do a subtask');
+              expect(prompt).toContain('do a subtask');
               return { chatId: 'new-chat-id' };
             },
             pocketAgentChatStatus: async () => ({ status: 'gone', summary: '' }),

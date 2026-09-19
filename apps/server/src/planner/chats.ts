@@ -59,13 +59,15 @@ import {
 } from './llm-client.js';
 import {
   MAX_SUBAGENT_SPAWN_DEPTH,
+  MAX_SUBAGENT_SPAWNS_PER_TURN,
   PLANNER_TOOLS,
   findPlannerTool,
-  summarizeEvents,
+  lastMessageSummary,
   toOpenAiToolSpecs,
   type PlannerToolDefinition,
   type SubagentChatStatus,
 } from './tools.js';
+import { SubagentSupervisor, type MailboxMessage } from './supervisor.js';
 import type { McpRegistryService } from './mcp/registry-service.js';
 import type { SkillRegistryService } from './skills.js';
 import type { TelegramBotStore } from '../telegram/bots-store.js';
@@ -77,7 +79,7 @@ export class PlannerChatError extends Error {
   override readonly name = 'PlannerChatError';
   constructor(
     message: string,
-    readonly code: 'not_found' | 'invalid' | 'not_configured',
+    readonly code: 'not_found' | 'invalid' | 'not_configured' | 'busy',
   ) {
     super(message);
   }
@@ -249,6 +251,24 @@ function addUsage(stats: PlannerTurnStats, usage: PlannerLlmUsage | null): Plann
 }
 
 /**
+ * PA-76: Formats one or more queued mailbox messages into a single prompt that wakes
+ * the parent chat. Coalesces multiple subagent completions into one turn.
+ */
+export function buildWakePrompt(messages: MailboxMessage[]): string {
+  if (messages.length === 1) {
+    const m = messages[0]!;
+    const label = m.kind === 'coding_agent' ? 'Coding subagent' : 'Pocket agent subagent';
+    return `[Subagent Notification]\n${label} "${m.subagentId}" has finished with status: ${m.status}.\n\nResult:\n${m.summary}`;
+  }
+  const lines: string[] = ['[Subagent Notifications]', `${messages.length} subagents have finished:\n`];
+  for (const m of messages) {
+    const label = m.kind === 'coding_agent' ? 'Coding subagent' : 'Pocket agent subagent';
+    lines.push(`- ${label} "${m.subagentId}" (${m.status}):\n${m.summary}\n`);
+  }
+  return lines.join('\n');
+}
+
+/**
  * PA-6: planner chat CRUD and the turn loop.
  *
  * The loop is now a streaming one: `sendMessage`/`resolveApproval` are async
@@ -317,6 +337,27 @@ export class PlannerChatService {
    * keyed by chat id. Reset at the start of a turn and cleaned up on completion.
    */
   private readonly spawnsThisTurnByChat = new Map<string, number>();
+  /**
+   * PA-76: Active turns currently in flight, keyed by chat id.
+   * Enforces single-turn-in-flight concurrency guard and mailbox queuing.
+   */
+  private readonly activeTurns = new Set<string>();
+  /**
+   * PA-76: Active wake turns, keyed by chat id.
+   */
+  private readonly activeWakeTurns = new Set<string>();
+  /**
+   * PA-76: Mailbox of completed subagent outcomes waiting to wake the parent chat.
+   */
+  private readonly mailboxByChat = new Map<string, MailboxMessage[]>();
+  /**
+   * PA-76: Decrementing subagent spawn budget across wake-driven turns for a chat.
+   */
+  private readonly wakeSpawnBudgetByChat = new Map<string, number>();
+  /**
+   * PA-76: Coordinates subagent completion and approval notifications.
+   */
+  private readonly supervisor: SubagentSupervisor;
 
   /**
    * PA-56: `webhooks`/`cron`, for `read_settings`/`update_webhook`/
@@ -336,6 +377,18 @@ export class PlannerChatService {
 
   constructor(private readonly opts: PlannerChatServiceOptions) {
     this.tools = opts.tools ?? PLANNER_TOOLS;
+    this.supervisor = new SubagentSupervisor({
+      sessions: opts.sessions,
+      historyDeps: opts.historyDeps,
+      getPlannerChatHistory: (chatId) => this.history(chatId),
+      observePlannerChat: (chatId, listener) => this.observe(chatId, listener),
+      enqueueMailbox: (chatId, message) => this.enqueueMailbox(chatId, message),
+      logger: opts.logger,
+    });
+  }
+
+  dispose(): void {
+    this.supervisor.dispose();
   }
 
   /** See `runServices`'s own doc comment. */
@@ -374,16 +427,82 @@ export class PlannerChatService {
     }
   }
 
+  private decorate(chat: PlannerChat): PlannerChat {
+    return {
+      ...chat,
+      busy: this.isBusy(chat.id),
+    };
+  }
+
+  /**
+   * PA-76: Backs server-side running state signal for PlannerChat and composer.
+   * True if an active turn is currently in-flight or waiting on an approval.
+   */
+  isBusy(chatId: string): boolean {
+    if (this.activeTurns.has(chatId)) return true;
+    for (const pending of this.pendingTurns.values()) {
+      if (pending.chatId === chatId) return true;
+    }
+    return false;
+  }
+
+  private isWakeTurnActive(chatId: string): boolean {
+    return this.activeWakeTurns.has(chatId);
+  }
+
+  /**
+   * PA-76: Enqueues a completed subagent outcome to the parent chat's mailbox.
+   * If the parent chat is currently idle, immediately drains the mailbox.
+   */
+  enqueueMailbox(chatId: string, message: MailboxMessage): void {
+    const chat = readPlannerChat(this.opts.db, chatId);
+    if (!chat) return;
+    let list = this.mailboxByChat.get(chatId);
+    if (!list) {
+      list = [];
+      this.mailboxByChat.set(chatId, list);
+    }
+    list.push(message);
+    if (!this.isBusy(chatId)) {
+      void this.drainMailbox(chatId);
+    }
+  }
+
+  /**
+   * PA-76: Coalesces queued mailbox messages and wakes the parent chat.
+   */
+  private async drainMailbox(chatId: string): Promise<void> {
+    if (this.isBusy(chatId)) return;
+    const messages = this.mailboxByChat.get(chatId);
+    if (!messages || messages.length === 0) return;
+    this.mailboxByChat.delete(chatId);
+
+    const wakePrompt = buildWakePrompt(messages);
+    this.opts.logger?.warn?.({ chatId, count: messages.length }, 'draining subagent mailbox to wake planner chat');
+
+    const turn = this.sendMessage(chatId, wakePrompt, { isWake: true });
+    (async () => {
+      try {
+        for await (const _event of turn) {
+          // drain events (they are emitted to observers via emit)
+        }
+      } catch (err) {
+        this.opts.logger?.warn?.({ err, chatId }, 'wake turn failed');
+      }
+    })();
+  }
+
   list(workspaceId?: string): PlannerChat[] {
-    return readPlannerChats(this.opts.db, workspaceId);
+    return readPlannerChats(this.opts.db, workspaceId).map((c) => this.decorate(c));
   }
 
   get(id: string): PlannerChat | null {
-    return readPlannerChat(this.opts.db, id);
+    const chat = readPlannerChat(this.opts.db, id);
+    return chat ? this.decorate(chat) : null;
   }
 
   listByParentChatId(parentChatId: string): PlannerChat[] {
-    return readPlannerChatsByParentId(this.opts.db, parentChatId);
+    return readPlannerChatsByParentId(this.opts.db, parentChatId).map((c) => this.decorate(c));
   }
 
   create(input: {
@@ -421,6 +540,7 @@ export class PlannerChatService {
       lastActivityAt: now,
       skipToolApprovalsEnabled: input.skipToolApprovals === true,
       parentChatId: input.parentChatId ?? null,
+      busy: false,
     };
     insertPlannerChat(this.opts.db, chat);
     return chat;
@@ -470,6 +590,10 @@ export class PlannerChatService {
       this.subagentSessionsByChat.delete(id);
     }
     this.spawnsThisTurnByChat.delete(id);
+    this.activeTurns.delete(id);
+    this.activeWakeTurns.delete(id);
+    this.mailboxByChat.delete(id);
+    this.wakeSpawnBudgetByChat.delete(id);
     return deletePlannerChat(this.opts.db, id);
   }
 
@@ -505,6 +629,7 @@ export class PlannerChatService {
     for (const [pendingId, pending] of this.pendingTurns) {
       if (pending.chatId === id) this.pendingTurns.delete(pendingId);
     }
+    this.mailboxByChat.delete(id);
     const workspacePath = this.workspacePathFor(chat);
     await clearTranscriptEvents(workspacePath, chat.id);
     updatePlannerChat(this.opts.db, chat.id, { lastActivityAt: Date.now() });
@@ -815,28 +940,49 @@ export class PlannerChatService {
   async *sendMessage(
     id: string,
     content: string,
-    opts: { modelId?: string; image?: PromptImage; signal?: AbortSignal } = {},
+    opts: { modelId?: string; image?: PromptImage; signal?: AbortSignal; isWake?: boolean } = {},
   ): AsyncGenerator<AgentEvent> {
     const chat = this.requireChat(id);
-    this.spawnsThisTurnByChat.set(id, 0);
-    const modelId = this.resolveModelId(chat, opts.modelId);
-    const workspacePath = this.workspacePathFor(chat);
-
-    if (chat.title === null) {
-      const title = deriveChatTitle(content || (opts.image ? 'Image prompt' : ''));
-      if (title) updatePlannerChat(this.opts.db, chat.id, { title });
+    if (this.isBusy(id)) {
+      throw new PlannerChatError('A turn is already in flight for this chat.', 'busy');
     }
 
-    const userEvent: AgentEvent = {
-      kind: 'user_prompt',
-      id: crypto.randomUUID(),
-      text: content,
-      ...(opts.image ? { image: opts.image } : {}),
-    };
-    await appendTranscriptEvent(workspacePath, chat.id, userEvent);
-    yield userEvent;
+    const settings = readPlannerSettings(this.opts.db);
+    const maxSpawns = settings.maxSubagentSpawnsPerTurn ?? MAX_SUBAGENT_SPAWNS_PER_TURN;
+    if (opts.isWake) {
+      this.activeWakeTurns.add(id);
+      this.spawnsThisTurnByChat.set(id, 0);
+    } else {
+      this.spawnsThisTurnByChat.set(id, 0);
+      this.wakeSpawnBudgetByChat.set(id, maxSpawns);
+    }
 
-    yield* this.driveLoop(chat, workspacePath, modelId, 0, EMPTY_TURN_STATS, opts.signal);
+    this.activeTurns.add(chat.id);
+    try {
+      const modelId = this.resolveModelId(chat, opts.modelId);
+      const workspacePath = this.workspacePathFor(chat);
+
+      if (chat.title === null) {
+        const title = deriveChatTitle(content || (opts.image ? 'Image prompt' : ''));
+        if (title) updatePlannerChat(this.opts.db, chat.id, { title });
+      }
+
+      const userEvent: AgentEvent = {
+        kind: 'user_prompt',
+        id: crypto.randomUUID(),
+        text: content,
+        ...(opts.image ? { image: opts.image } : {}),
+      };
+      yield* this.emit(workspacePath, chat.id, userEvent);
+
+      yield* this.driveLoop(chat, workspacePath, modelId, 0, EMPTY_TURN_STATS, opts.signal);
+    } finally {
+      this.activeTurns.delete(chat.id);
+      this.activeWakeTurns.delete(chat.id);
+      if (!this.isBusy(chat.id)) {
+        void this.drainMailbox(chat.id);
+      }
+    }
   }
 
   /**
@@ -858,70 +1004,78 @@ export class PlannerChatService {
       throw new PlannerChatError('No pending approval with that id for this chat.', 'not_found');
     }
     this.pendingTurns.delete(approvalId);
-    const chat = this.requireChat(chatId);
-    const workspacePath = this.workspacePathFor(chat);
-    const call = pending.toolCalls[pending.index]!;
-    const tool = this.resolveEnabledTool(pending.workspaceId, call.function.name);
-    // PA-37: same real-identity resolution `processToolCalls` used to decide
-    // to pause in the first place — recomputed here (deterministically, from
-    // the same unchanged `call`) rather than threaded through
-    // `PendingPlannerTurn`, so "remember" persists against the underlying MCP
-    // tool, never the wrapper's own name.
-    const mcpIdentity = this.effectiveMcpToolIdentity(pending.workspaceId, call);
-    const gateName = mcpIdentity?.name ?? call.function.name;
+    this.activeTurns.add(chatId);
+    try {
+      const chat = this.requireChat(chatId);
+      const workspacePath = this.workspacePathFor(chat);
+      const call = pending.toolCalls[pending.index]!;
+      const tool = this.resolveEnabledTool(pending.workspaceId, call.function.name);
+      // PA-37: same real-identity resolution `processToolCalls` used to decide
+      // to pause in the first place — recomputed here (deterministically, from
+      // the same unchanged `call`) rather than threaded through
+      // `PendingPlannerTurn`, so "remember" persists against the underlying MCP
+      // tool, never the wrapper's own name.
+      const mcpIdentity = this.effectiveMcpToolIdentity(pending.workspaceId, call);
+      const gateName = mcpIdentity?.name ?? call.function.name;
 
-    if (choice !== 'allow_once') {
-      rememberDecisionIfAsked(this.opts.db, choice, gateName, pending.workspaceId);
+      if (choice !== 'allow_once') {
+        rememberDecisionIfAsked(this.opts.db, choice, gateName, pending.workspaceId);
+      }
+
+      if (choice === 'deny' || !tool) {
+        yield* this.emit(workspacePath, chat.id, {
+          kind: 'permission_resolved',
+          id: approvalId,
+          decision: 'deny',
+          message: null,
+        });
+        yield* this.emit(workspacePath, chat.id, {
+          kind: 'tool_result',
+          id: crypto.randomUUID(),
+          toolUseId: call.id,
+          content: choice === 'deny' ? 'Denied by the user.' : this.toolUnavailableMessage(pending.workspaceId, call.function.name),
+          truncated: false,
+          isError: true,
+        });
+      } else {
+        yield* this.emit(workspacePath, chat.id, {
+          kind: 'permission_resolved',
+          id: approvalId,
+          // `PermissionDecision` has no `allow_workspace`/`allow_global` of its
+          // own (that finer grain is a planner-only concept the shared union
+          // does not need) — the reducer only ever reads `decision === 'deny'`
+          // to flip a tool card's `denied` flag, so collapsing every allow
+          // variant to `'allow'` here is lossless for rendering. `message`
+          // carries the scope for a human reading the raw event.
+          decision: 'allow',
+          message: scopeMessage(choice),
+        });
+        const resultText = await this.executeTool(tool, call.function.arguments, chat);
+        yield* this.emit(workspacePath, chat.id, {
+          kind: 'tool_result',
+          id: crypto.randomUUID(),
+          toolUseId: call.id,
+          content: resultText,
+          truncated: false,
+          isError: false,
+        });
+      }
+
+      yield* this.processToolCalls(
+        chat,
+        workspacePath,
+        pending.modelId,
+        pending.toolCalls,
+        pending.index + 1,
+        pending.iteration,
+        pending.stats,
+      );
+    } finally {
+      this.activeTurns.delete(chatId);
+      if (!this.isBusy(chatId)) {
+        void this.drainMailbox(chatId);
+      }
     }
-
-    if (choice === 'deny' || !tool) {
-      yield* this.emit(workspacePath, chat.id, {
-        kind: 'permission_resolved',
-        id: approvalId,
-        decision: 'deny',
-        message: null,
-      });
-      yield* this.emit(workspacePath, chat.id, {
-        kind: 'tool_result',
-        id: crypto.randomUUID(),
-        toolUseId: call.id,
-        content: choice === 'deny' ? 'Denied by the user.' : this.toolUnavailableMessage(pending.workspaceId, call.function.name),
-        truncated: false,
-        isError: true,
-      });
-    } else {
-      yield* this.emit(workspacePath, chat.id, {
-        kind: 'permission_resolved',
-        id: approvalId,
-        // `PermissionDecision` has no `allow_workspace`/`allow_global` of its
-        // own (that finer grain is a planner-only concept the shared union
-        // does not need) — the reducer only ever reads `decision === 'deny'`
-        // to flip a tool card's `denied` flag, so collapsing every allow
-        // variant to `'allow'` here is lossless for rendering. `message`
-        // carries the scope for a human reading the raw event.
-        decision: 'allow',
-        message: scopeMessage(choice),
-      });
-      const resultText = await this.executeTool(tool, call.function.arguments, chat);
-      yield* this.emit(workspacePath, chat.id, {
-        kind: 'tool_result',
-        id: crypto.randomUUID(),
-        toolUseId: call.id,
-        content: resultText,
-        truncated: false,
-        isError: false,
-      });
-    }
-
-    yield* this.processToolCalls(
-      chat,
-      workspacePath,
-      pending.modelId,
-      pending.toolCalls,
-      pending.index + 1,
-      pending.iteration,
-      pending.stats,
-    );
   }
 
   /** Persist then yield — every event this service produces goes through here, so the two never drift apart. */
@@ -1242,8 +1396,28 @@ export class PlannerChatService {
             pocketAgentEnabledTools: (workspaceId: string) => this.toolsFor(workspaceId).map((t) => t.name),
             findLiveCodingSubagent: (treeRoot: string) => this.findLiveCodingSubagentForChat(chat.id, treeRoot),
             recordCodingSubagent: (sessionId: string) => this.recordCodingSubagentForChat(chat.id, sessionId),
+            codingAgentStatus: (sessionId: string) => this.supervisor.getOutcome('coding_agent', sessionId),
             spawnsThisTurn: () => this.spawnsThisTurnForChat(chat.id),
-            recordSpawn: () => this.recordSpawnForChat(chat.id),
+            recordSpawn: () => {
+              this.recordSpawnForChat(chat.id);
+              if (this.isWakeTurnActive(chat.id)) {
+                const budget = this.wakeSpawnBudgetByChat.get(chat.id) ?? 0;
+                this.wakeSpawnBudgetByChat.set(chat.id, Math.max(0, budget - 1));
+              }
+            },
+            wakeBudgetExhausted: () => {
+              if (this.isWakeTurnActive(chat.id)) {
+                const budget = this.wakeSpawnBudgetByChat.get(chat.id) ?? 0;
+                if (budget <= 0) {
+                  this.opts.logger?.warn?.(
+                    { chatId: chat.id },
+                    'subagent spawn budget for wake-driven turns exhausted',
+                  );
+                  return true;
+                }
+              }
+              return false;
+            },
           },
           spawnDepth: this.spawnDepthOf(chat.id),
           maxSubagentSpawnsPerTurn: settings.maxSubagentSpawnsPerTurn,
@@ -1363,6 +1537,7 @@ export class PlannerChatService {
 
     const child = this.create({ workspaceId, parentChatId: callerChatId });
     this.spawnDepthByChat.set(child.id, callerDepth + 1);
+    this.supervisor.trackPocketSubagent(child.id, callerChatId);
 
     const turn = this.sendMessage(child.id, prompt);
     try {
@@ -1393,13 +1568,16 @@ export class PlannerChatService {
    * would see.
    */
   private async subagentChatStatusForTool(chatId: string): Promise<SubagentChatStatus> {
+    const cached = this.supervisor.getOutcome('pocket_agent', chatId);
+    if (cached) return cached;
+
     const chat = this.get(chatId);
     if (!chat) return { status: 'gone', summary: `No subagent chat found with id ${chatId}.` };
     const events = await this.history(chatId);
     const last = events[events.length - 1];
     if (!last) return { status: 'running', summary: '(just started, no output yet)' };
     if (last.kind === 'turn_complete') {
-      return { status: last.isError ? 'error' : 'done', summary: summarizeEvents(events) };
+      return { status: last.isError ? 'error' : 'done', summary: lastMessageSummary(events) };
     }
     if (last.kind === 'permission_request') {
       return {
@@ -1445,6 +1623,7 @@ export class PlannerChatService {
       this.subagentSessionsByChat.set(chatId, set);
     }
     set.add(sessionId);
+    this.supervisor.trackCodingSubagent(sessionId, chatId);
   }
 
   /**

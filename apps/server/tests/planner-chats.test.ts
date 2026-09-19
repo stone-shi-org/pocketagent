@@ -1374,7 +1374,7 @@ describe('planner chat routes over HTTP', () => {
       };
       const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
       const hasToolResult = body.messages.some((m) => m.role === 'tool');
-      if (lastUser?.content === 'continue the chain' && !hasToolResult) {
+      if (lastUser?.content?.startsWith('continue the chain') && !hasToolResult) {
         return fakeToolCallResponse('start_subagent_session', {
           kind: 'pocket_agent',
           workspaceId,

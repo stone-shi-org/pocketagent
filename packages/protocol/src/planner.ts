@@ -464,6 +464,10 @@ export const PlannerChat = z.object({
    * PlannerChat id that created this subagent chat via `start_subagent_session`.
    */
   parentChatId: z.string().nullable().optional(),
+  /**
+   * PA-76: true when a turn is currently executing or waiting for a decision on this chat.
+   */
+  busy: z.boolean().default(false),
 });
 export type PlannerChat = z.infer<typeof PlannerChat>;
 

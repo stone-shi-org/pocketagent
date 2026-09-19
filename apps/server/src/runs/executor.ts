@@ -7,6 +7,7 @@ import type { WorktreeService } from '../git/worktree.js';
 import { WorktreeError } from '../git/worktree.js';
 import type { PlannerChatService } from '../planner/chats.js';
 import { PlannerChatError } from '../planner/chats.js';
+import type { AgentEvent } from '@pocketagent/protocol';
 
 /**
  * The worktree → session → prompt composite, shared by every trigger that
@@ -517,14 +518,20 @@ export class RunExecutor {
     this.inFlight.set(runId, sink);
     let settled = false;
 
+    const cleanup = (): void => {
+      session.off('event', onEvent);
+      session.off('exit', onExit);
+    };
+
     const settle = (status: 'succeeded' | 'failed', error: string | null): void => {
       if (settled) return;
       settled = true;
+      cleanup();
       this.inFlight.delete(runId);
       sink.onSettled(status, error);
     };
 
-    session.on('event', (_seq, event) => {
+    const onEvent = (_seq: number, event: AgentEvent): void => {
       if (event.kind === 'session_started' && event.agentSessionId) {
         sink.onAgentSessionId(event.agentSessionId);
       }
@@ -534,11 +541,14 @@ export class RunExecutor {
           event.isError ? 'The agent reported an error.' : null,
         );
       }
-    });
+    };
 
-    session.on('exit', () => {
+    const onExit = (): void => {
       settle('failed', 'The session ended before its turn completed.');
-    });
+    };
+
+    session.on('event', onEvent);
+    session.on('exit', onExit);
   }
 
   /**

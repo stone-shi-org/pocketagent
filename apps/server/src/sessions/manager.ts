@@ -467,6 +467,51 @@ export class SessionManager {
   }
 
   /**
+   * PA-76: Called when a structured session turn finishes.
+   * Backs SubagentSupervisor and other consumers needing session-specific completion signals.
+   */
+  private readonly sessionTurnCompleteListeners = new Set<(sessionId: string) => void>();
+
+  /** Subscribe to "a structured session finished its turn". Returns an unsubscribe. */
+  onSessionTurnComplete(listener: (sessionId: string) => void): () => void {
+    this.sessionTurnCompleteListeners.add(listener);
+    return () => this.sessionTurnCompleteListeners.delete(listener);
+  }
+
+  private notifySessionTurnComplete(sessionId: string): void {
+    for (const listener of this.sessionTurnCompleteListeners) {
+      try {
+        listener(sessionId);
+      } catch (err) {
+        this.opts.logger?.warn({ err, sessionId }, 'session-turn-complete listener threw');
+      }
+    }
+  }
+
+  /**
+   * PA-76: Called when pending permissions change on a session.
+   */
+  private readonly sessionPermissionChangeListeners = new Set<
+    (sessionId: string, pendingCount: number) => void
+  >();
+
+  /** Subscribe to "pending permissions count changed on a session". Returns an unsubscribe. */
+  onSessionPermissionChange(listener: (sessionId: string, pendingCount: number) => void): () => void {
+    this.sessionPermissionChangeListeners.add(listener);
+    return () => this.sessionPermissionChangeListeners.delete(listener);
+  }
+
+  private notifySessionPermissionChange(sessionId: string, pendingCount: number): void {
+    for (const listener of this.sessionPermissionChangeListeners) {
+      try {
+        listener(sessionId, pendingCount);
+      } catch (err) {
+        this.opts.logger?.warn({ err, sessionId, pendingCount }, 'session-permission-change listener threw');
+      }
+    }
+  }
+
+  /**
    * Working trees with a live session mid-turn right now.
    *
    * This is the run queue's whole notion of "occupied", and it is derived on
@@ -579,6 +624,7 @@ export class SessionManager {
    * device where the user can read them behind authentication.
    */
   private onPermissionChange(sessionId: string, pendingCount: number): void {
+    this.notifySessionPermissionChange(sessionId, pendingCount);
     this.clearApprovalTimer(sessionId);
     if (pendingCount === 0) return;
 
@@ -635,6 +681,7 @@ export class SessionManager {
     // about *push notifications*, and letting them skip this would make the
     // queue depend on whether notifications happen to be configured.
     this.notifyTreeIdle(session.spec.cwd);
+    this.notifySessionTurnComplete(session.id);
 
     const push = this.opts.push;
     if (!push?.isEnabled()) return;
@@ -1787,6 +1834,12 @@ export class SessionManager {
       // removed cannot leave a stale claim on an old row.
       plannerChatId: session.plannerChatId ?? null,
       providerDisclosure: this.opts.agents.get(session.spec.agent)?.providerDisclosure ?? null,
+      pendingApprovalsCount:
+        session.transport === 'structured' &&
+        'pendingPermissions' in session &&
+        typeof session.pendingPermissions === 'function'
+          ? session.pendingPermissions().length
+          : 0,
     };
   }
 
@@ -1833,6 +1886,7 @@ export class SessionManager {
       plannerChatId: row.planner_chat_id ?? null,
       skipPermissionsEnabled: row.skip_permissions === 1,
       providerDisclosure: this.opts.agents.get(row.agent)?.providerDisclosure ?? null,
+      pendingApprovalsCount: 0,
     };
   }
 

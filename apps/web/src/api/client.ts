@@ -820,6 +820,71 @@ export const api = {
   sendPlannerMessage: (id: string, body: PlannerSendMessageRequest, onEvent: (event: AgentEvent) => void) =>
     streamPlannerEvents(`/api/planner/chats/${encodeURIComponent(id)}/messages`, body, onEvent),
 
+  /**
+   * Subscribes to live SSE events for a planner chat (e.g. background turns
+   * triggered by subagent completions). Returns an unsubscribe function.
+   */
+  subscribePlannerChatEvents: (
+    id: string,
+    onEvent: (event: AgentEvent) => void,
+    onError?: (err: unknown) => void,
+  ): (() => void) => {
+    const controller = new AbortController();
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    const connect = async () => {
+      if (controller.signal.aborted) return;
+      try {
+        const response = await fetch(`/api/planner/chats/${encodeURIComponent(id)}/events`, {
+          method: 'GET',
+          credentials: 'same-origin',
+          headers: { accept: 'text/event-stream' },
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new ApiError(`Failed to subscribe to chat events (${response.status})`, response.status, 'bad_response');
+        }
+        const reader = response.body?.getReader();
+        if (!reader) return;
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (!controller.signal.aborted) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let boundary = buffer.indexOf('\n\n');
+          while (boundary >= 0) {
+            const frame = buffer.slice(0, boundary).trim();
+            buffer = buffer.slice(boundary + 2);
+            if (frame.length > 0 && !frame.startsWith(':')) {
+              const jsonText = frame.startsWith('data:') ? frame.slice(5).trim() : frame;
+              try {
+                onEvent(JSON.parse(jsonText) as AgentEvent);
+              } catch {
+                // Ignore malformed frame
+              }
+            }
+            boundary = buffer.indexOf('\n\n');
+          }
+        }
+      } catch (err: unknown) {
+        if (controller.signal.aborted) return;
+        onError?.(err);
+      } finally {
+        if (!controller.signal.aborted) {
+          reconnectTimeout = setTimeout(connect, 3000);
+        }
+      }
+    };
+
+    void connect();
+
+    return () => {
+      controller.abort();
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    };
+  },
+
   /** Resolves a turn paused on an unanswered `permission_request`. */
   resolvePlannerApproval: (
     id: string,
