@@ -43,6 +43,11 @@ export interface SessionRow {
    * the same pane into one chat instead of a new row every time.
    */
   adopt_target_id: string | null;
+  /**
+   * PA-75: the Pocket Agent chat that created this session via
+   * `start_subagent_session`, or null for human-started / trigger-started sessions.
+   */
+  planner_chat_id: string | null;
 }
 
 export interface AuthSessionRow {
@@ -1232,6 +1237,15 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE mcp_registries ADD COLUMN reported_instructions TEXT;
   `,
+  // PA-75: provenance for planner-spawned subagents. Links a coding-agent
+  // session back to the Pocket Agent chat that created it via
+  // `start_subagent_session`. ON DELETE SET NULL keeps the session row when
+  // the planner chat is deleted, reverting it to an ordinary chat in its
+  // project folder.
+  `
+  ALTER TABLE sessions ADD COLUMN planner_chat_id TEXT REFERENCES planner_chats(id) ON DELETE SET NULL;
+  CREATE INDEX IF NOT EXISTS idx_sessions_planner_chat_id ON sessions (planner_chat_id);
+  `,
 ];
 
 /**
@@ -1432,6 +1446,18 @@ export function openDatabase(databasePath: string): Db {
   }
   if (mcpRegistryColumns.size > 0 && !mcpRegistryColumns.has('reported_instructions')) {
     db.exec('ALTER TABLE mcp_registries ADD COLUMN reported_instructions TEXT');
+  }
+  // PA-75, same positional-migration hazard: probe sessions.planner_chat_id
+  // so any checkpoint that passed this count before the migration landed
+  // still gains the provenance column.
+  const sessionColumns = new Set(
+    (db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (sessionColumns.size > 0 && !sessionColumns.has('planner_chat_id')) {
+    db.exec('ALTER TABLE sessions ADD COLUMN planner_chat_id TEXT REFERENCES planner_chats(id) ON DELETE SET NULL');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_planner_chat_id ON sessions (planner_chat_id)');
   }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
@@ -1838,6 +1864,36 @@ export function readCronRunConversationIds(db: Db): Map<string, string> {
     )
     .all() as { agent_session_id: string; job_id: string }[];
   return new Map(rows.map((r) => [r.agent_session_id, r.job_id]));
+}
+
+/**
+ * PA-75: which conversations were spawned by a Pocket Agent chat, for the
+ * home screen's badge and collapsible Subagents grouping. Keyed on the
+ * conversation id for the same `representativeSessions` collapse reason
+ * `readCronRunConversationIds` uses.
+ */
+export function readPlannerChatConversationIds(db: Db): Map<string, string> {
+  const rows = db
+    .prepare(
+      `SELECT agent_session_id, planner_chat_id FROM sessions
+        WHERE agent_session_id IS NOT NULL AND planner_chat_id IS NOT NULL`,
+    )
+    .all() as { agent_session_id: string; planner_chat_id: string }[];
+  return new Map(rows.map((r) => [r.agent_session_id, r.planner_chat_id]));
+}
+
+/**
+ * PA-75: which sessions were spawned by a Pocket Agent chat, keyed by session
+ * id as a fallback for sessions whose agent_session_id has not yet been recorded.
+ */
+export function readPlannerChatSessionIds(db: Db): Map<string, string> {
+  const rows = db
+    .prepare(
+      `SELECT id, planner_chat_id FROM sessions
+        WHERE planner_chat_id IS NOT NULL`,
+    )
+    .all() as { id: string; planner_chat_id: string }[];
+  return new Map(rows.map((r) => [r.id, r.planner_chat_id]));
 }
 
 // ---------------------------------------------------------------------------

@@ -1394,6 +1394,37 @@ describe('start_subagent_session', () => {
     );
     expect(customResult).toMatch(/already spawned 5 subagent\(s\) this turn \(limit is 5\)/);
   });
+
+  it('passes plannerChatId to sessions.create and preserves provenance (PA-75)', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('start_subagent_session')!;
+    const plannerChatId = 'test-planner-chat-provenance';
+    t.context.db.prepare(
+      'INSERT INTO planner_chats (id, workspace_name, title, created_at, last_activity_at) VALUES (?, ?, ?, ?, ?)'
+    ).run(plannerChatId, 'Default', 'Planner Chat', 1000, 1000);
+
+    const raw = await tool.execute(
+      depsFor(t, undefined, {
+        plannerChatId,
+      }),
+      {
+        kind: 'coding_agent',
+        path: t.projectDir,
+        agent: 'claude',
+        prompt: 'investigate bug',
+      },
+    );
+    const result = JSON.parse(raw);
+    expect(result.kind).toBe('coding_agent');
+    expect(result.id).toBeDefined();
+
+    const sess = t.context.sessions.get(result.id);
+    expect(sess).toBeDefined();
+    expect(sess?.plannerChatId).toBe(plannerChatId);
+
+    const listed = t.context.sessions.listByPlannerChatId(plannerChatId);
+    expect(listed.map((s) => s.id)).toContain(result.id);
+  });
 });
 
 /**

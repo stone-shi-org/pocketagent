@@ -1097,3 +1097,78 @@ describe('planner routes over HTTP', () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+describe('GET /api/planner/chats/:id/subagents (PA-75)', () => {
+  let t: TestApp;
+  beforeEach(async () => {
+    t = await createTestApp();
+  });
+  afterEach(async () => {
+    await t.cleanup();
+  });
+
+  it('returns empty list when no subagents exist for chat', async () => {
+    const chat = (
+      await t.app.inject({
+        method: 'POST',
+        url: '/api/planner/chats',
+        headers: authHeaders(t.cookie),
+        payload: {},
+      })
+    ).json();
+
+    const res = await t.app.inject({
+      method: 'GET',
+      url: `/api/planner/chats/${chat.id}/subagents`,
+      headers: authHeaders(t.cookie),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ subagents: [] });
+  });
+
+  it('returns subagents associated with this planner chat id', async () => {
+    const chat = (
+      await t.app.inject({
+        method: 'POST',
+        url: '/api/planner/chats',
+        headers: authHeaders(t.cookie),
+        payload: {},
+      })
+    ).json();
+
+    // Create a subagent session pointing to this chat
+    const session = await t.context.sessions.create({
+      agent: 'claude',
+      cwd: t.projectDir,
+      cols: 0,
+      rows: 0,
+      transport: 'structured',
+      title: 'Subagent Session',
+      plannerChatId: chat.id,
+    });
+
+    // Create another session without planner chat
+    await t.context.sessions.create({
+      agent: 'claude',
+      cwd: t.projectDir,
+      cols: 0,
+      rows: 0,
+      transport: 'structured',
+      title: 'Other Session',
+    });
+
+    const res = await t.app.inject({
+      method: 'GET',
+      url: `/api/planner/chats/${chat.id}/subagents`,
+      headers: authHeaders(t.cookie),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const subagents = res.json().subagents;
+    expect(subagents).toHaveLength(1);
+    expect(subagents[0].id).toBe(session.id);
+    expect(subagents[0].plannerChatId).toBe(chat.id);
+  });
+});
+

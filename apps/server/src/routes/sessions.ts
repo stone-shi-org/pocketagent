@@ -181,7 +181,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       if (p.cwd !== cwd) {
         removedSessions += sessions.forgetFinishedIn(p.cwd);
       }
-      for (const chat of p.chats) {
+      for (const chat of [...p.chats, ...p.subagents]) {
         if (chat.live) continue;
         if (chat.conversationId) {
           sessions.hideChat(chat.conversationId);
@@ -287,7 +287,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
   async function hasLiveChatAt(cwd: string): Promise<boolean> {
     const known = await projects.list(sessions.list(), true);
     const match = known.find((p) => p.cwd === cwd) ?? known.flatMap((p) => p.worktrees).find((w) => w.cwd === cwd);
-    return match?.chats.some((chat) => chat.live) ?? false;
+    return (match?.chats.some((chat) => chat.live) || match?.subagents.some((chat) => chat.live)) ?? false;
   }
 
   /** One entry until a front server can register others. */

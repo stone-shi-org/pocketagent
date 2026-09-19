@@ -1018,6 +1018,13 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
+  app.get('/api/planner/chats/:id/subagents', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const chat = app.pocket.plannerChats.get(id);
+    if (!chat) return notFound(reply, 'Chat not found.');
+    return { subagents: app.pocket.sessions.listByPlannerChatId(id) };
+  });
+
   /**
    * PA-29: a read-only "as if a turn were about to run" preview of the
    * memory ranking and rolling-window trimming the next real turn would

@@ -21,6 +21,7 @@ function chat(title: string): ChatSummary {
     cronJobId: null,
     webhookId: null,
     rateLimit: null,
+    plannerChatId: null,
   };
 }
 
@@ -35,6 +36,7 @@ function project(name: string, titles: string[], worktrees: ProjectInfo[] = []):
     hidden: false,
     isWorkspace: true,
     chats: titles.map(chat),
+    subagents: [],
     cronJobs: [],
     webhooks: [],
     queued: [],

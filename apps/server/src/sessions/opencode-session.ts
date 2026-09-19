@@ -43,6 +43,11 @@ export interface OpencodeSessionSpec {
    * browser, the same shape as `StructuredSession`'s `bypassPermissions`.
    */
   skipPermissions?: boolean;
+  /**
+   * PA-75: the Pocket Agent chat that created this session via
+   * `start_subagent_session`, or null for human/trigger sessions.
+   */
+  plannerChatId?: string | null;
 }
 
 interface CreatedSession {
@@ -63,6 +68,7 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
   readonly transport = 'structured' as const;
   readonly id: string;
   readonly spec: OpencodeSessionSpec;
+  readonly plannerChatId: string | null;
   readonly buffer: EventBuffer;
   readonly epoch: string;
 
@@ -91,6 +97,7 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
     super();
     this.id = spec.id;
     this.spec = spec;
+    this.plannerChatId = spec.plannerChatId ?? null;
     this.buffer = new EventBuffer(spec.eventBufferBytes);
     this.epoch = epoch ?? crypto.randomBytes(8).toString('base64url');
     this._opencodeSessionId = spec.resumeAgentSessionId ?? null;

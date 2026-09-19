@@ -625,11 +625,12 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
             state={state}
             search={search}
             onCompose={(cwd) => onNavigate({ name: 'compose', cwd })}
-          onAddProject={() => setShowAdd(true)}
+            onAddProject={() => setShowAdd(true)}
             activeSessionId={activeSessionId}
             activeConversationId={activeConversationId}
             onOpenCronJob={(jobId) => onNavigate({ name: 'cron-job', jobId })}
             onOpenWebhook={(webhookId) => onNavigate({ name: 'webhook', webhookId })}
+            onOpenPlannerChat={(chatId) => openPermanentTab({ name: 'planner-chat', chatId })}
             onApiError={onApiError}
             emptyHint="Nothing here yet. Start a chat to see it listed."
           />
@@ -692,6 +693,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                     <PlannerChatPage
                       chatId={tab.route.chatId}
                       onBack={() => closeTab(tab.id)}
+                      onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
                       onApiError={onApiError}
                     />
                   </Suspense>

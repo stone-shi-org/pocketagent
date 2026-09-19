@@ -51,6 +51,11 @@ export interface PiSessionSpec {
    * a choice PocketAgent is making on the user's behalf.
    */
   skipPermissions: true;
+  /**
+   * PA-75: the Pocket Agent chat that created this session via
+   * `start_subagent_session`, or null for human/trigger sessions.
+   */
+  plannerChatId?: string | null;
 }
 
 interface CommandResponse {
@@ -77,6 +82,7 @@ export class PiSession extends EventEmitter<StructuredSessionEvents> {
   readonly transport = 'structured' as const;
   readonly id: string;
   readonly spec: PiSessionSpec;
+  readonly plannerChatId: string | null;
   readonly buffer: EventBuffer;
   readonly epoch: string;
 
@@ -104,6 +110,7 @@ export class PiSession extends EventEmitter<StructuredSessionEvents> {
     super();
     this.id = spec.id;
     this.spec = spec;
+    this.plannerChatId = spec.plannerChatId ?? null;
     this.buffer = new EventBuffer(spec.eventBufferBytes);
     this.epoch = epoch ?? crypto.randomBytes(8).toString('base64url');
     this.piSessionId = spec.resumeAgentSessionId ?? crypto.randomUUID();

@@ -109,6 +109,11 @@ export interface CreateSessionInput {
    */
   model?: string;
   effort?: EffortLevel | null;
+  /**
+   * PA-75: the Pocket Agent chat that created this session via
+   * `start_subagent_session`, or null/undefined when started directly.
+   */
+  plannerChatId?: string;
   /** Attach to an already-running tmux pane instead of starting a process. */
   adopt?: {
     command: string;
@@ -765,6 +770,7 @@ export class SessionManager {
             ? { resumeAgentSessionId: input.resumeAgentSessionId }
             : {}),
           ...(model !== undefined ? { model } : {}),
+          ...(input.plannerChatId ? { plannerChatId: input.plannerChatId } : {}),
         });
       }
 
@@ -782,6 +788,7 @@ export class SessionManager {
             ? { resumeAgentSessionId: input.resumeAgentSessionId }
             : {}),
           ...(model !== undefined ? { model } : {}),
+          ...(input.plannerChatId ? { plannerChatId: input.plannerChatId } : {}),
           skipPermissions,
         });
       }
@@ -801,6 +808,7 @@ export class SessionManager {
             : {}),
           ...(model !== undefined ? { model } : {}),
           ...(effort !== undefined ? { effort } : {}),
+          ...(input.plannerChatId ? { plannerChatId: input.plannerChatId } : {}),
           skipPermissions,
         });
       }
@@ -820,6 +828,7 @@ export class SessionManager {
             : {}),
           ...(model !== undefined ? { model } : {}),
           ...(effort !== undefined ? { effort } : {}),
+          ...(input.plannerChatId ? { plannerChatId: input.plannerChatId } : {}),
         });
       }
 
@@ -838,6 +847,7 @@ export class SessionManager {
         ...(input.forkSession !== undefined ? { forkSession: input.forkSession } : {}),
         ...(model !== undefined ? { model } : {}),
         ...(effort !== undefined ? { effort } : {}),
+        ...(input.plannerChatId ? { plannerChatId: input.plannerChatId } : {}),
         skipPermissions,
       });
     }
@@ -863,6 +873,7 @@ export class SessionManager {
         adopted: input.adopt !== undefined,
         adoptTargetId: input.adopt?.targetId ?? null,
         adoptSessionName: input.adopt?.sessionName ?? null,
+        plannerChatId: input.plannerChatId ?? null,
         skipPermissions,
       },
       // Adoption always runs the attach client as our own child: the thing we
@@ -914,6 +925,7 @@ export class SessionManager {
     skipPermissions?: boolean;
     model?: string;
     effort?: EffortLevel | null;
+    plannerChatId?: string | null;
   }): Promise<StructuredSession> {
     const session = new StructuredSession({
       id: args.id,
@@ -939,6 +951,7 @@ export class SessionManager {
       skipPermissions: args.skipPermissions === true,
       ...(args.model !== undefined ? { model: args.model } : {}),
       ...(args.effort !== undefined ? { effort: args.effort } : {}),
+      plannerChatId: args.plannerChatId ?? null,
     });
 
     this.insertRow(session, args.createdAt);
@@ -991,6 +1004,7 @@ export class SessionManager {
     env: Record<string, string>;
     resumeAgentSessionId?: string;
     model?: string;
+    plannerChatId?: string | null;
   }): Promise<AgySession> {
     const session = new AgySession({
       id: args.id,
@@ -1007,6 +1021,7 @@ export class SessionManager {
         ? { resumeAgentSessionId: args.resumeAgentSessionId }
         : {}),
       ...(args.model !== undefined ? { model: args.model } : {}),
+      plannerChatId: args.plannerChatId ?? null,
       skipPermissions: true,
     });
 
@@ -1058,6 +1073,7 @@ export class SessionManager {
     resumeAgentSessionId?: string;
     model?: string;
     effort?: EffortLevel | null;
+    plannerChatId?: string | null;
   }): Promise<PiSession> {
     const session = new PiSession({
       id: args.id,
@@ -1075,6 +1091,7 @@ export class SessionManager {
         : {}),
       ...(args.model !== undefined ? { model: args.model } : {}),
       ...(args.effort !== undefined ? { effort: args.effort } : {}),
+      plannerChatId: args.plannerChatId ?? null,
       skipPermissions: true,
     });
 
@@ -1151,6 +1168,7 @@ export class SessionManager {
     env: Record<string, string>;
     resumeAgentSessionId?: string;
     model?: string;
+    plannerChatId?: string | null;
     skipPermissions?: boolean;
   }): Promise<OpencodeSession> {
     const server = this.getOrCreateOpencodeServer(args.executable, args.env);
@@ -1168,6 +1186,7 @@ export class SessionManager {
           ? { resumeAgentSessionId: args.resumeAgentSessionId }
           : {}),
         ...(args.model !== undefined ? { model: args.model } : {}),
+        plannerChatId: args.plannerChatId ?? null,
         skipPermissions: args.skipPermissions === true,
       },
       server,
@@ -1333,6 +1352,7 @@ export class SessionManager {
     resumeAgentSessionId?: string;
     model?: string;
     effort?: EffortLevel | null;
+    plannerChatId?: string | null;
     skipPermissions?: boolean;
   }): Promise<CodexSession> {
     const server = this.getOrCreateCodexServer(args.executable, args.env);
@@ -1351,6 +1371,7 @@ export class SessionManager {
         ...(args.resumeAgentSessionId
           ? { resumeAgentSessionId: args.resumeAgentSessionId }
           : {}),
+        plannerChatId: args.plannerChatId ?? null,
         skipPermissions: args.skipPermissions === true,
       },
       server,
@@ -1635,6 +1656,35 @@ export class SessionManager {
     });
   }
 
+  /** Sessions spawned by a specific planner chat. */
+  listByPlannerChatId(plannerChatId: string): SessionInfo[] {
+    const infos: SessionInfo[] = [];
+    const seen = new Set<string>();
+
+    for (const session of this.live.values()) {
+      if (session.plannerChatId === plannerChatId) {
+        infos.push(this.toInfo(session));
+        seen.add(session.id);
+      }
+    }
+
+    const rows = this.opts.db
+      .prepare('SELECT * FROM sessions WHERE planner_chat_id = ? ORDER BY created_at DESC')
+      .all(plannerChatId) as SessionRow[];
+
+    for (const row of rows) {
+      if (seen.has(row.id)) continue;
+      infos.push(this.rowToInfo(row));
+    }
+
+    return infos.sort((a, b) => {
+      const aAlive = a.status === 'running' || a.status === 'starting';
+      const bAlive = b.status === 'running' || b.status === 'starting';
+      if (aAlive !== bAlive) return aAlive ? -1 : 1;
+      return b.createdAt - a.createdAt;
+    });
+  }
+
   find(id: string): SessionInfo | null {
     const session = this.live.get(id);
     if (session) return this.toInfo(session);
@@ -1713,6 +1763,7 @@ export class SessionManager {
       // so it must follow the adapter's current configuration. Nothing is
       // stored, which also means a variant that is later reconfigured or
       // removed cannot leave a stale claim on an old row.
+      plannerChatId: session.plannerChatId ?? null,
       providerDisclosure: this.opts.agents.get(session.spec.agent)?.providerDisclosure ?? null,
     };
   }
@@ -1757,6 +1808,7 @@ export class SessionManager {
       adopted: row.adopt_target_id !== null,
       adoptTargetId: row.adopt_target_id,
       adoptSessionName: row.adopt_target_id ? extractSessionNameFromArgsJson(row.args_json) : null,
+      plannerChatId: row.planner_chat_id ?? null,
       skipPermissionsEnabled: row.skip_permissions === 1,
       providerDisclosure: this.opts.agents.get(row.agent)?.providerDisclosure ?? null,
     };
@@ -1769,8 +1821,8 @@ export class SessionManager {
            (id, title, agent, command, args_json, cwd, env_keys_json, status, pid,
             cols, rows, exit_code, exit_signal, created_at, started_at, ended_at,
             last_activity_at, backend, external_id, transport, agent_session_id,
-            skip_permissions, adopt_target_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            skip_permissions, adopt_target_id, planner_chat_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         session.id,
@@ -1797,6 +1849,7 @@ export class SessionManager {
         session.agentSessionId,
         session.spec.skipPermissions === true ? 1 : 0,
         session.transport === 'terminal' ? session.spec.adoptTargetId ?? null : null,
+        session.plannerChatId ?? null,
       );
   }
 

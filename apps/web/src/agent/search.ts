@@ -26,6 +26,7 @@ function filterSections(projects: ProjectInfo[], needle: string): ProjectInfo[] 
       continue;
     }
     const chats = project.chats.filter((c) => c.title.toLowerCase().includes(needle));
+    const subagents = (project.subagents ?? []).filter((c) => c.title.toLowerCase().includes(needle));
     // Specs are searchable too, and they have to be: a project whose only
     // contents are a scheduled job or a webhook would otherwise vanish from a
     // search that matched its name, which is precisely when you are looking for
@@ -44,12 +45,13 @@ function filterSections(projects: ProjectInfo[], needle: string): ProjectInfo[] 
     const worktrees = filterSections(project.worktrees, needle);
     if (
       chats.length > 0 ||
+      subagents.length > 0 ||
       cronJobs.length > 0 ||
       webhooks.length > 0 ||
       queued.length > 0 ||
       worktrees.length > 0
     ) {
-      out.push({ ...project, chats, cronJobs, webhooks, queued, worktrees });
+      out.push({ ...project, chats, subagents, cronJobs, webhooks, queued, worktrees });
     }
   }
   return out;

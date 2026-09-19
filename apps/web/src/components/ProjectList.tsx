@@ -91,7 +91,7 @@ function tmuxNameFor(projectName: string): string {
 export function allChats(projects: ProjectInfo[]): ChatSummary[] {
   const out: ChatSummary[] = [];
   for (const project of projects) {
-    out.push(...project.chats, ...allChats(project.worktrees));
+    out.push(...project.chats, ...(project.subagents ?? []), ...allChats(project.worktrees));
   }
   return out;
 }
@@ -554,6 +554,8 @@ interface ListProps {
   onOpenCronJob?: (jobId: string) => void;
   /** Opens a webhook's editor. Omitted where webhook rows are not wanted. */
   onOpenWebhook?: (webhookId: string) => void;
+  /** Opens a planner chat. Omitted where planner navigation is handled by hash fallback. */
+  onOpenPlannerChat?: (chatId: string) => void;
   /** Only reached by `DeleteWorktreeFlow`, for a failure outside its own handled rejections. */
   onApiError: (error: unknown) => void;
 }
@@ -569,9 +571,11 @@ export function ProjectList({
   onAddProject,
   onOpenCronJob,
   onOpenWebhook,
+  onOpenPlannerChat,
   onApiError,
 }: ListProps): JSX.Element {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [collapsedSubagents, setCollapsedSubagents] = useState<Set<string>>(() => new Set());
   const [expandedDeleted, setExpandedDeleted] = useState<Set<string>>(() => new Set());
   // Keyed by the *parent's* cwd, exactly as `expandedDeleted` is. Open by
   // default: a queue is a thing waiting to happen, and hiding it behind a
@@ -590,6 +594,14 @@ export function ProjectList({
 
   const toggle = (cwd: string): void =>
     setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(cwd)) next.delete(cwd);
+      else next.add(cwd);
+      return next;
+    });
+
+  const toggleSubagents = (cwd: string): void =>
+    setCollapsedSubagents((prev) => {
       const next = new Set(prev);
       if (next.has(cwd)) next.delete(cwd);
       else next.add(cwd);
@@ -626,6 +638,8 @@ export function ProjectList({
     searching,
     collapsed,
     toggle,
+    collapsedSubagents,
+    toggleSubagents,
     expandedDeleted,
     toggleDeleted,
     collapsedQueued,
@@ -641,6 +655,7 @@ export function ProjectList({
     activeConversationId,
     onOpenCronJob,
     onOpenWebhook,
+    onOpenPlannerChat,
     onApiError,
   };
 
@@ -681,6 +696,8 @@ interface ProjectSectionProps {
   searching: boolean;
   collapsed: Set<string>;
   toggle: (cwd: string) => void;
+  collapsedSubagents: Set<string>;
+  toggleSubagents: (cwd: string) => void;
   expandedDeleted: Set<string>;
   toggleDeleted: (cwd: string) => void;
   collapsedQueued: Set<string>;
@@ -696,6 +713,7 @@ interface ProjectSectionProps {
   activeConversationId?: string | null;
   onOpenCronJob?: (jobId: string) => void;
   onOpenWebhook?: (webhookId: string) => void;
+  onOpenPlannerChat?: (chatId: string) => void;
   onApiError: (error: unknown) => void;
 }
 
@@ -714,6 +732,8 @@ function ProjectSection({
   searching,
   collapsed,
   toggle,
+  collapsedSubagents,
+  toggleSubagents,
   expandedDeleted,
   toggleDeleted,
   collapsedQueued,
@@ -729,6 +749,7 @@ function ProjectSection({
   activeConversationId,
   onOpenCronJob,
   onOpenWebhook,
+  onOpenPlannerChat,
   onApiError,
 }: ProjectSectionProps): JSX.Element {
   const [limitMenuFor, setLimitMenuFor] = useState<string | null>(null);
@@ -740,6 +761,7 @@ function ProjectSection({
   // A search that hid a folder's other chats should not also hide the ones it
   // matched, so collapsing is ignored while searching.
   const isCollapsed = !searching && collapsed.has(project.cwd);
+  const isSubagentsExpanded = searching || !collapsedSubagents.has(project.cwd);
   // Inverted state, unlike `expandedDeleted`: the queue is open unless someone
   // closed it, because work waiting on this directory is information rather
   // than clutter — a queue nobody notices is the support question this whole
@@ -824,7 +846,7 @@ function ProjectSection({
           <Icon name="chevron-down" className={`project-caret${isCollapsed ? ' closed' : ''}`} />
           {isCollapsed && (
             <span className="project-count">
-              {isVirtualWebhooks ? project.webhooks.length : project.chats.length}
+              {isVirtualWebhooks ? project.webhooks.length : project.chats.length + (project.subagents?.length ?? 0)}
             </span>
           )}
           {/* Shown even when expanded, and even when collapsed alongside the
@@ -919,6 +941,7 @@ function ProjectSection({
           yet" directly above a visible webhook row. */}
       {!isCollapsed &&
         project.chats.length === 0 &&
+        (project.subagents?.length ?? 0) === 0 &&
         project.cronJobs.length === 0 &&
         project.webhooks.length === 0 &&
         project.queued.length === 0 && <div className="project-empty">No chats yet</div>}
@@ -1076,6 +1099,7 @@ function ProjectSection({
                         cronJobId: null,
                         webhookId: null,
                         rateLimit: null,
+                        plannerChatId: null,
                       });
                     } else if (onOpenWebhook && item.webhookId !== null) {
                       onOpenWebhook(item.webhookId);
@@ -1205,6 +1229,29 @@ function ProjectSection({
                           aria-label="Started by a webhook"
                         />
                       )}
+                      {chat.plannerChatId !== null && (
+                        <span
+                          className="chat-planner-badge"
+                          role="button"
+                          tabIndex={0}
+                          aria-label="Spawned by a planner chat"
+                          title="Spawned by a planner chat. Open planner chat."
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (onOpenPlannerChat) onOpenPlannerChat(chat.plannerChatId!);
+                            else window.location.hash = `#/planner/${encodeURIComponent(chat.plannerChatId!)}`;
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.stopPropagation();
+                              if (onOpenPlannerChat) onOpenPlannerChat(chat.plannerChatId!);
+                              else window.location.hash = `#/planner/${encodeURIComponent(chat.plannerChatId!)}`;
+                            }
+                          }}
+                        >
+                          <Icon name="agent-generic" size={13} />
+                        </span>
+                      )}
                       {chat.title}
                     </span>
                   </button>
@@ -1263,6 +1310,92 @@ function ProjectSection({
         );
       })()}
 
+      {/* PA-75: Collapsible Subagents group */}
+      {!isCollapsed && project.subagents && project.subagents.length > 0 && (
+        <div className="subagents-group">
+          <div className="subagents-head project-head">
+            <button
+              type="button"
+              className="project-name subagents-toggle"
+              onClick={() => toggleSubagents(project.cwd)}
+              aria-expanded={isSubagentsExpanded}
+              title="Subagents started by a planner chat"
+            >
+              <span className="project-icon">
+                <Icon name="agent-generic" className="folder" />
+              </span>
+              <span className="project-label">Subagents</span>
+              <Icon
+                name="chevron-down"
+                className={`project-caret${isSubagentsExpanded ? '' : ' closed'}`}
+              />
+              <span className="project-count">{project.subagents.length}</span>
+            </button>
+          </div>
+          {isSubagentsExpanded &&
+            project.subagents.map((chat) => (
+              <div key={chat.id} className={`chat-line${chat.live ? ' live' : ''}`}>
+                <button
+                  type="button"
+                  className={[
+                    'chat-row',
+                    chat.live ? 'live' : '',
+                    (activeSessionId && chat.sessionId === activeSessionId) ||
+                    (activeConversationId && chat.conversationId === activeConversationId)
+                      ? 'active'
+                      : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  data-chat-id={chat.id}
+                  onClick={() => open(chat, { preview: true })}
+                  onDoubleClick={() => open(chat, { preview: false })}
+                  title={chat.title}
+                >
+                  <span className="chat-title">
+                    {chat.live && <span className="live-dot" aria-label="running" />}
+                    {chat.plannerChatId !== null && (
+                      <span
+                        className="chat-planner-badge"
+                        role="button"
+                        tabIndex={0}
+                        aria-label="Spawned by a planner chat"
+                        title="Spawned by a planner chat. Open planner chat."
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (onOpenPlannerChat) onOpenPlannerChat(chat.plannerChatId!);
+                          else window.location.hash = `#/planner/${encodeURIComponent(chat.plannerChatId!)}`;
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.stopPropagation();
+                            if (onOpenPlannerChat) onOpenPlannerChat(chat.plannerChatId!);
+                            else window.location.hash = `#/planner/${encodeURIComponent(chat.plannerChatId!)}`;
+                          }
+                        }}
+                      >
+                        <Icon name="agent-generic" size={13} />
+                      </span>
+                    )}
+                    {chat.title}
+                  </span>
+                </button>
+                {!chat.live && (
+                  <button
+                    type="button"
+                    className="chat-remove"
+                    onClick={() => void state.removeChat(chat)}
+                    aria-label={`Remove ${chat.title} from the list`}
+                    title="Remove from list"
+                  >
+                    <Icon name="close" size={14} />
+                  </button>
+                )}
+              </div>
+            ))}
+        </div>
+      )}
+
       {/* Collapsing a project hides its worktrees along with its own chats —
           the two are one card, not siblings. */}
       {!isCollapsed &&
@@ -1283,6 +1416,8 @@ function ProjectSection({
                   searching={searching}
                   collapsed={collapsed}
                   toggle={toggle}
+                  collapsedSubagents={collapsedSubagents}
+                  toggleSubagents={toggleSubagents}
                   expandedDeleted={expandedDeleted}
                   toggleDeleted={toggleDeleted}
                   collapsedQueued={collapsedQueued}
@@ -1299,6 +1434,7 @@ function ProjectSection({
                   onApiError={onApiError}
                   {...(onOpenCronJob ? { onOpenCronJob } : {})}
                   {...(onOpenWebhook ? { onOpenWebhook } : {})}
+                  {...(onOpenPlannerChat ? { onOpenPlannerChat } : {})}
                 />
               ))}
 
@@ -1345,6 +1481,8 @@ function ProjectSection({
                         searching={searching}
                         collapsed={collapsed}
                         toggle={toggle}
+                        collapsedSubagents={collapsedSubagents}
+                        toggleSubagents={toggleSubagents}
                         expandedDeleted={expandedDeleted}
                         toggleDeleted={toggleDeleted}
                         collapsedQueued={collapsedQueued}
@@ -1361,6 +1499,7 @@ function ProjectSection({
                         onApiError={onApiError}
                         {...(onOpenCronJob ? { onOpenCronJob } : {})}
                         {...(onOpenWebhook ? { onOpenWebhook } : {})}
+                        {...(onOpenPlannerChat ? { onOpenPlannerChat } : {})}
                       />
                     ))}
                   {confirmingDeleteAllDeleted && (

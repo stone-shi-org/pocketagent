@@ -64,6 +64,7 @@ import type {
   UpdatePlannerChatRequest,
   DeleteAllPlannerChatsResponse,
   PlannerChatHistoryResponse,
+  PlannerChatSubagentsResponse,
   PlannerContextPreviewResponse,
   PlannerSendMessageRequest,
   PlannerToolApprovalChoice,
@@ -801,6 +802,9 @@ export const api = {
 
   plannerChatHistory: (id: string) =>
     request<PlannerChatHistoryResponse>(`/api/planner/chats/${encodeURIComponent(id)}/history`),
+
+  listPlannerChatSubagents: (id: string) =>
+    request<PlannerChatSubagentsResponse>(`/api/planner/chats/${encodeURIComponent(id)}/subagents`),
 
   clearPlannerChatHistory: (id: string) =>
     request<void>(`/api/planner/chats/${encodeURIComponent(id)}/history`, { method: 'DELETE' }),

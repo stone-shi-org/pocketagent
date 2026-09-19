@@ -47,6 +47,11 @@ export interface CodexSessionSpec {
    * PocketAgent choosing not to use it — not a limit of the CLI.
    */
   skipPermissions?: boolean;
+  /**
+   * PA-75: the Pocket Agent chat that created this session via
+   * `start_subagent_session`, or null for human/trigger sessions.
+   */
+  plannerChatId?: string | null;
 }
 
 interface PendingApproval {
@@ -85,6 +90,7 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
   readonly transport = 'structured' as const;
   readonly id: string;
   readonly spec: CodexSessionSpec;
+  readonly plannerChatId: string | null;
   readonly buffer: EventBuffer;
   readonly epoch: string;
 
@@ -120,6 +126,7 @@ export class CodexSession extends EventEmitter<StructuredSessionEvents> {
     super();
     this.id = spec.id;
     this.spec = spec;
+    this.plannerChatId = spec.plannerChatId ?? null;
     this.buffer = new EventBuffer(spec.eventBufferBytes);
     this.epoch = epoch ?? crypto.randomBytes(8).toString('base64url');
     this._threadId = spec.resumeAgentSessionId ?? null;

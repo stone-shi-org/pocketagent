@@ -228,6 +228,8 @@ export interface PlannerToolDeps {
    * create a brand-new, unattached conversation.
    */
   spawnDepth: number;
+  /** PA-75: the calling planner chat id, for subagent provenance. */
+  plannerChatId?: string | null;
   /**
    * PA-74: Configurable cap on how many subagents may be spawned during a
    * single turn. Falls back to `MAX_SUBAGENT_SPAWNS_PER_TURN` if unset.
@@ -1180,6 +1182,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
           cols: 0,
           rows: 0,
           transport: 'structured',
+          ...(deps.plannerChatId ? { plannerChatId: deps.plannerChatId } : {}),
         });
         if (!('prompt' in session)) {
           return `${agentId} could not be started as a structured session that can receive a task.`;

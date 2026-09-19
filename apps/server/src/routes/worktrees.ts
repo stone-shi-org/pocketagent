@@ -103,7 +103,7 @@ export const worktreeRoutes: FastifyPluginAsync = async (app) => {
       for (const project of await projects.list(sessions.list(), true)) {
         const matching = [project, ...project.worktrees].find((p) => p.cwd === worktreeCwd);
         if (matching) {
-          for (const chat of matching.chats) {
+          for (const chat of [...matching.chats, ...matching.subagents]) {
             if (chat.conversationId) sessions.hideChat(chat.conversationId);
           }
         }

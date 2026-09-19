@@ -33,6 +33,8 @@ import {
   readHiddenChats,
   readProjectVisibility,
   setProjectVisibility,
+  readPlannerChatConversationIds,
+  readPlannerChatSessionIds,
   type Db,
 } from '../db/index.js';
 
@@ -278,6 +280,11 @@ export class ProjectService {
       webhookByCwd.set(targetCwd, list);
     }
 
+    // PA-75: Provenance for planner-spawned subagents. Keyed on conversation id
+    // and session id.
+    const plannerChatByConversation = readPlannerChatConversationIds(this.db);
+    const plannerChatBySession = readPlannerChatSessionIds(this.db);
+
     // A non-forked resume keeps writing to the same transcript, but
     // `SessionManager.create` still mints a brand-new session row every time
     // (finished rows are kept, not reused) — so resuming the same chat
@@ -299,6 +306,11 @@ export class ProjectService {
       const liveConversation = session.agentSessionId
         ? conversationById.get(session.agentSessionId)
         : undefined;
+      const plannerChatId =
+        (session.agentSessionId ? plannerChatByConversation.get(session.agentSessionId) : null) ??
+        session.plannerChatId ??
+        plannerChatBySession.get(session.id) ??
+        null;
       push(
         byCwd,
         session.cwd,
@@ -309,6 +321,7 @@ export class ProjectService {
           session.agentSessionId
             ? (webhookByConversation.get(session.agentSessionId) ?? null)
             : null,
+          plannerChatId,
         ),
       );
     }
@@ -370,6 +383,7 @@ export class ProjectService {
         adoptTargetId: null,
         cronJobId: cronByConversation.get(conversation.id) ?? null,
         webhookId: webhookByConversation.get(conversation.id) ?? null,
+        plannerChatId: plannerChatByConversation.get(conversation.id) ?? null,
         rateLimit: null,
       });
     }
@@ -393,6 +407,7 @@ export class ProjectService {
           hidden: false,
           isWorkspace: true,
           chats: [],
+          subagents: [],
           cronJobs: [],
           webhooks: virtualWebhooks,
           // A routed webhook's queue belongs to the directory it is waiting on,
@@ -441,6 +456,8 @@ export class ProjectService {
       const hidden = isHidden(cwd, visibility);
       if (hidden && !includeHidden) continue;
       chats.sort((a, b) => compareByRecency(chatSortKey(a), chatSortKey(b)));
+      const regularChats = chats.filter((c) => c.plannerChatId === null);
+      const subagentChats = chats.filter((c) => c.plannerChatId !== null);
       const isRepo = await isGitRepo(cwd);
       const exists = isRepo || (await pathExists(cwd));
       const mainRepoCwd = await findMainRepoCwd(cwd);
@@ -455,7 +472,8 @@ export class ProjectService {
         gitStatus: isRepo ? await this.gitStatus.get(cwd) : null,
         hidden,
         isWorkspace: added.has(cwd),
-        chats,
+        chats: regularChats,
+        subagents: subagentChats,
         cronJobs: cronByCwd.get(cwd) ?? [],
         webhooks: webhookByCwd.get(cwd) ?? [],
         // PA-27: the same "one chat, not two" rule `resumedFrom` applies above
@@ -558,6 +576,7 @@ function chatFromSession(
   transcriptTitle?: string,
   cronJobId: string | null = null,
   webhookId: string | null = null,
+  plannerChatId: string | null = null,
 ): ChatSummary {
   return {
     id: session.id,
@@ -565,6 +584,7 @@ function chatFromSession(
     conversationId: session.agentSessionId,
     cronJobId,
     webhookId,
+    plannerChatId: plannerChatId ?? session.plannerChatId ?? null,
     title: transcriptTitle ?? session.title,
     agent: session.agent,
     agentDisplayName: session.agentDisplayName,
@@ -607,9 +627,11 @@ function compareByRecency(a: { busy: boolean; ts: number }, b: { busy: boolean; 
  * already sorted by `chatSortKey`, so only the first of each needs checking.
  */
 function projectSortKey(project: ProjectInfo): { busy: boolean; ts: number } {
-  const tops = [project.chats[0], ...project.worktrees.map((w) => w.chats[0])].filter(
-    (c): c is ChatSummary => c !== undefined,
-  );
+  const tops = [
+    project.chats[0],
+    project.subagents[0],
+    ...project.worktrees.flatMap((w) => [w.chats[0], w.subagents[0]]),
+  ].filter((c): c is ChatSummary => c !== undefined);
   if (tops.length === 0) return { busy: false, ts: 0 };
   return tops.map(chatSortKey).reduce((best, k) => (compareByRecency(k, best) < 0 ? k : best));
 }

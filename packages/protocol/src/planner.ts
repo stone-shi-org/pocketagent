@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { LIMITS } from './limits.js';
 import { AgentEvent } from './agent-events.js';
 import { PromptImage } from './prompt-image.js';
+import { SessionInfo } from './session.js';
 
 /**
  * PA-6, phase 1 (foundation): the planner — an LLM chat (any OpenAI-compatible
@@ -830,3 +831,9 @@ export function pocketAgentLabelSlug(name: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
 }
+
+export const PlannerChatSubagentsResponse = z.object({
+  subagents: z.array(SessionInfo),
+});
+export type PlannerChatSubagentsResponse = z.infer<typeof PlannerChatSubagentsResponse>;
+

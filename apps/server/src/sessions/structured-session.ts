@@ -107,6 +107,11 @@ export interface StructuredSessionSpec {
    * with untouched.
    */
   effort?: EffortLevel | null;
+  /**
+   * PA-75: the Pocket Agent chat that created this session via
+   * `start_subagent_session`, or null for human/trigger sessions.
+   */
+  plannerChatId?: string | null;
 }
 
 export interface StructuredSessionEvents {
@@ -136,6 +141,7 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   readonly transport = 'structured' as const;
   readonly id: string;
   readonly spec: StructuredSessionSpec;
+  readonly plannerChatId: string | null;
   readonly buffer: EventBuffer;
   readonly epoch: string;
 
@@ -178,6 +184,7 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
     super();
     this.id = spec.id;
     this.spec = spec;
+    this.plannerChatId = spec.plannerChatId ?? null;
     this.buffer = new EventBuffer(spec.eventBufferBytes);
     this.epoch = epoch ?? crypto.randomBytes(8).toString('base64url');
     this._agentSessionId = spec.resumeAgentSessionId ?? null;

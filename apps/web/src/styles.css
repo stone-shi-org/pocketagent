@@ -2400,6 +2400,25 @@ button.chat-rate-limit-badge {
   border-left: 1px solid var(--border);
 }
 
+/* PA-75: Collapsible subagents group under projects */
+.subagents-group {
+  margin-top: 2px;
+  margin-left: 11px;
+  padding-left: 15px;
+  border-left: 1px solid var(--border);
+}
+
+.subagents-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.subagents-toggle {
+  opacity: 0.85;
+}
+
 .queued-line {
   display: flex;
   align-items: center;
@@ -3115,6 +3134,15 @@ button.chat-rate-limit-badge {
 }
 
 .sidebar .deleted-worktrees-group .project-name {
+  font-size: 13.5px;
+}
+
+.sidebar .subagents-group {
+  margin-left: 9px;
+  padding-left: 12px;
+}
+
+.sidebar .subagents-group .project-name {
   font-size: 13.5px;
 }
 
@@ -5390,6 +5418,26 @@ button.chat-rate-limit-badge {
   flex: none;
 }
 
+/* PA-75: Planner chat badge on subagent sessions */
+.chat-planner-badge {
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 5px;
+  vertical-align: -2px;
+  flex: none;
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 1px;
+  transition: color 0.15s, background-color 0.15s;
+}
+
+.chat-planner-badge:hover {
+  color: var(--accent);
+  background-color: var(--bg-hover, rgba(255, 255, 255, 0.08));
+}
+
 /* "Pocket Agents" (PA-6) — parallel to the project list above it on the home
    screen; a top border is enough separation since `.section-heading` already
    carries its own vertical rhythm. */
@@ -5862,6 +5910,108 @@ button.chat-rate-limit-badge {
   padding: 4px 8px;
   background: var(--bg);
   color: var(--text);
+}
+
+/* PA-75: Subagents list in planner chat page */
+.planner-subagents-panel {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+  background: var(--bg-elev-1);
+  flex: none;
+}
+
+.planner-subagents-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.planner-subagents-count {
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 10px;
+  background: var(--border);
+  color: var(--text);
+}
+
+.planner-subagents-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.planner-subagent-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  text-decoration: none;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+  max-width: 320px;
+}
+
+.planner-subagent-card:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+  border-color: var(--border-strong);
+}
+
+.planner-subagent-card.live {
+  border-color: rgba(46, 160, 67, 0.4);
+}
+
+.planner-subagent-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.dead-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex: 0 0 auto;
+  opacity: 0.5;
+}
+
+.planner-subagent-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.planner-subagent-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planner-subagent-cwd {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planner-subagent-arrow {
+  color: var(--text-dim);
+  flex: none;
+  margin-left: 4px;
 }
 
 /* PA-6: the inline stand-in for `ApprovalSheet` — see `PlannerChatPage`'s

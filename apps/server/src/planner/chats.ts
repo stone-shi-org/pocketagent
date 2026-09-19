@@ -1227,6 +1227,7 @@ export class PlannerChatService {
           },
           spawnDepth: this.spawnDepthOf(chat.id),
           maxSubagentSpawnsPerTurn: settings.maxSubagentSpawnsPerTurn,
+          plannerChatId: chat.id,
           telegram: {
             links:
               this.opts.telegramLinks

@@ -127,6 +127,11 @@ export const SessionInfo = z.object({
   busySince: z.number().int().nullable(),
   /** The most recent provider usage refusal observed by this live session. */
   rateLimit: RateLimitEvent.nullable(),
+  /**
+   * PA-75: the Pocket Agent chat that spawned this session via
+   * `start_subagent_session`, or null/undefined when started by a human or trigger.
+   */
+  plannerChatId: z.string().nullable().optional(),
 });
 export type SessionInfo = z.infer<typeof SessionInfo>;
 
@@ -438,6 +443,14 @@ export const ChatSummary = z.object({
    * fact about the conversation, never a count.
    */
   webhookId: z.string().nullable(),
+  /**
+   * PA-75: set when this chat was started by a Pocket Agent chat via
+   * `start_subagent_session`, so the row carries a subagent badge instead of
+   * reading as a human chat. Keyed from the conversation id for the same
+   * `representativeSessions` reason `cronJobId` and `webhookId` are. Tapping
+   * navigates to `#/planner/<chatId>`.
+   */
+  plannerChatId: z.string().nullable(),
   /** Carried from the representative live session for an actionable row badge. */
   rateLimit: RateLimitEvent.nullable(),
 });
@@ -589,6 +602,12 @@ export interface ProjectInfo {
    * the client draws nothing when it is empty.
    */
   queued: QueuedRunSummary[];
+  /**
+   * PA-75: coding-agent sessions started by a Pocket Agent chat in this
+   * directory. Kept in a collapsible group under the project rather than mixed
+   * into human chats, while still counted toward occupancy and contention.
+   */
+  subagents: ChatSummary[];
   worktrees: ProjectInfo[];
   /** True when this worktree or directory no longer exists on disk. */
   isDeleted?: boolean;
@@ -609,6 +628,7 @@ export const ProjectInfo: z.ZodType<ProjectInfo> = z.lazy(() =>
     cronJobs: z.array(CronJobSummary),
     webhooks: z.array(WebhookSummary),
     queued: z.array(QueuedRunSummary),
+    subagents: z.array(ChatSummary),
     worktrees: z.array(ProjectInfo),
     isDeleted: z.boolean().optional(),
   }),

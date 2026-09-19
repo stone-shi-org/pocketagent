@@ -7,6 +7,7 @@ import type {
   PlannerModel,
   PlannerToolApprovalChoice,
   PromptImage,
+  SessionInfo,
   SlashCommandInfo,
 } from '@pocketagent/protocol';
 import { api, ApiError } from '../api/client.js';
@@ -45,6 +46,7 @@ const PLANNER_SLASH_COMMANDS: SlashCommandInfo[] = [
 interface Props {
   chatId: string;
   onBack: () => void;
+  onOpenSession?: (sessionId: string) => void;
   onApiError: (error: unknown) => void;
 }
 
@@ -96,10 +98,11 @@ function toModelInfos(models: PlannerModel[]): ModelInfo[] {
  * two, since `PermissionDecision` has no workspace/global concept of its
  * own. A full drag/minimize `ApprovalSheet` mirror is future scope.
  */
-export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Element {
+export function PlannerChatPage({ chatId, onBack, onOpenSession, onApiError }: Props): JSX.Element {
   const [chat, setChat] = useState<PlannerChat | null>(null);
   const [models, setModels] = useState<PlannerModel[]>([]);
   const [transcript, setTranscript] = useState<TranscriptState | null>(null);
+  const [subagents, setSubagents] = useState<SessionInfo[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // PA-36: this page had no "gone" detection at all before — a deleted chat
@@ -131,18 +134,29 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
     });
   }, []);
 
+  const refreshSubagents = useCallback(async () => {
+    try {
+      const { subagents: list } = await api.listPlannerChatSubagents(chatId);
+      setSubagents(list);
+    } catch {
+      // ignore
+    }
+  }, [chatId]);
+
   const load = useCallback(async () => {
     try {
-      const [{ chats }, { models: modelList }, { events }] = await Promise.all([
+      const [{ chats }, { models: modelList }, { events }, { subagents: subagentList }] = await Promise.all([
         api.listPlannerChats(),
         api.listPlannerModels(),
         api.plannerChatHistory(chatId),
+        api.listPlannerChatSubagents(chatId).catch(() => ({ subagents: [] })),
       ]);
       const found = chats.find((c) => c.id === chatId) ?? null;
       setChat(found);
       setMissing(found === null);
       setModels(modelList);
       setTranscript(applyEvents(emptyTranscript(), events));
+      setSubagents(subagentList);
       setError(null);
     } catch (err) {
       onApiError(err);
@@ -208,6 +222,9 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
       structured session's WebSocket events go through. */
   const onStreamEvent = (event: AgentEvent): void => {
     setTranscript((prev) => applyEvent(prev ?? emptyTranscript(), event));
+    if (event.kind === 'turn_complete') {
+      void refreshSubagents();
+    }
   };
 
   /** `PromptBox.onSend` is synchronous by contract (see its own props doc):
@@ -308,6 +325,7 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
         );
       } finally {
         setSending(false);
+        void refreshSubagents();
       }
     })();
     return true;
@@ -326,6 +344,7 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
         setError(err instanceof ApiError ? err.message : 'Could not record that decision.');
       } finally {
         setSending(false);
+        void refreshSubagents();
       }
     })();
   };
@@ -407,6 +426,50 @@ export function PlannerChatPage({ chatId, onBack, onApiError }: Props): JSX.Elem
       {error && (
         <div className="error-box" role="alert">
           {error}
+        </div>
+      )}
+
+      {subagents.length > 0 && (
+        <div className="planner-subagents-panel" aria-label="Subagents spawned by this chat">
+          <div className="planner-subagents-header">
+            <Icon name="agent-generic" size={13} />
+            <span className="planner-subagents-title">Subagents</span>
+            <span className="planner-subagents-count">{subagents.length}</span>
+          </div>
+          <div className="planner-subagents-list">
+            {subagents.map((subagent) => {
+              const live = subagent.status === 'running' || subagent.status === 'starting';
+              return (
+                <a
+                  key={subagent.id}
+                  href={`#/s/${encodeURIComponent(subagent.id)}`}
+                  className={`planner-subagent-card${live ? ' live' : ''}`}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    if (onOpenSession) {
+                      onOpenSession(subagent.id);
+                    } else {
+                      window.location.hash = `#/s/${encodeURIComponent(subagent.id)}`;
+                    }
+                  }}
+                  title={`${subagent.title} (${subagent.workspaceLabel || subagent.cwd})`}
+                >
+                  <span className="planner-subagent-status">
+                    {live ? (
+                      <span className="live-dot" aria-label="running" />
+                    ) : (
+                      <span className="dead-dot" aria-label="finished" />
+                    )}
+                  </span>
+                  <div className="planner-subagent-info">
+                    <span className="planner-subagent-name">{subagent.title}</span>
+                    <span className="planner-subagent-cwd">{subagent.workspaceLabel || subagent.cwd}</span>
+                  </div>
+                  <Icon name="chevron-right" size={12} className="planner-subagent-arrow" />
+                </a>
+              );
+            })}
+          </div>
         </div>
       )}
 

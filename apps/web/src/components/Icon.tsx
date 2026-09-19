@@ -13,6 +13,7 @@ export type IconName =
   | 'folder'
   | 'chevron-down'
   | 'chevron-left'
+  | 'chevron-right'
   | 'compose'
   | 'edit'
   | 'code'
@@ -91,6 +92,8 @@ const PATHS: Record<IconName, JSX.Element> = {
   'chevron-down': <path d="M6 9.5 12 15.5 18 9.5" />,
 
   'chevron-left': <path d="M14.5 5 8 12l6.5 7" />,
+
+  'chevron-right': <path d="M9.5 5 16 12l-6.5 7" />,
 
   // Square with a pencil: "write something here".
   compose: (
