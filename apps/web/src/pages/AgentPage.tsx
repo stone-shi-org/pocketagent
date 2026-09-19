@@ -338,6 +338,9 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           resumeAgentSessionId: session.agentSessionId,
           forkSession: false,
           title: session.title,
+          skipPermissions: session.skipPermissionsEnabled,
+          model: transcript.model ?? undefined,
+          effort: transcript.effort !== undefined ? transcript.effort : undefined,
         })
         .then((created) => {
           setPendingPrompt(created.id, text, image);
@@ -350,7 +353,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         });
       return true;
     },
-    [session, resuming, resumeAgent, onApiError, onResumed],
+    [session, resuming, resumeAgent, onApiError, onResumed, transcript.model, transcript.effort],
   );
 
   const handleSend = useCallback(

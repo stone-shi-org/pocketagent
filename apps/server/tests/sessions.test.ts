@@ -11,6 +11,7 @@ import { createOpencodeAdapter } from '../src/agents/opencode.js';
 import { createCodexAdapter } from '../src/agents/codex.js';
 import { createPiAdapter } from '../src/agents/pi.js';
 import { StructuredSession } from '../src/sessions/structured-session.js';
+import { readAgentDefaults, writeAgentDefaults } from '../src/db/index.js';
 
 const AGY_FIXTURE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -834,5 +835,74 @@ describe('derived conversation titles', () => {
       title: string;
     };
     expect(row.title).toBe('Fix the login bug');
+  });
+});
+
+describe('structured agent defaults caching', () => {
+  let t: TestApp;
+  beforeEach(async () => {
+    t = await createTestApp();
+  });
+  afterEach(() => t.cleanup());
+
+  function makeStructuredSession(id = 'struct-defaults'): StructuredSession {
+    return new StructuredSession({
+      id,
+      title: 'Claude Code · project',
+      agent: 'claude',
+      agentDisplayName: 'Claude Code',
+      cwd: t.projectDir,
+      env: {},
+      workspaceLabel: 'project',
+      eventBufferBytes: 64 * 1024,
+      createdAt: Date.now(),
+    });
+  }
+
+  it('maps wire model id to concrete alias from cached catalog when session_started fires', () => {
+    const session = makeStructuredSession();
+    t.context.sessions.wire(session);
+
+    // Pre-populate agent_defaults with catalog containing default and opus[1m] sharing resolvedModel
+    const catalog = [
+      {
+        value: 'default',
+        resolvedModel: 'claude-opus-5[1m]',
+        displayName: 'Default (recommended)',
+        description: '',
+        supportsEffort: true,
+        supportedEffortLevels: ['low'],
+      },
+      {
+        value: 'opus[1m]',
+        resolvedModel: 'claude-opus-5[1m]',
+        displayName: 'Opus (1M context)',
+        description: '',
+        supportsEffort: true,
+        supportedEffortLevels: ['low'],
+      },
+      {
+        value: 'sonnet',
+        resolvedModel: 'claude-sonnet-5',
+        displayName: 'Sonnet',
+        description: '',
+        supportsEffort: false,
+        supportedEffortLevels: [],
+      },
+    ];
+    writeAgentDefaults(t.db, 'claude', { modelsJson: JSON.stringify(catalog) });
+
+    // session_started fires with raw wire id
+    session.emit('event', 1, {
+      kind: 'session_started',
+      agentSessionId: 'sess-1',
+      model: 'claude-opus-5[1m]',
+      cwd: t.projectDir,
+      tools: [],
+      permissionMode: 'default',
+    });
+
+    const defaults = readAgentDefaults(t.db, 'claude');
+    expect(defaults?.model).toBe('opus[1m]');
   });
 });

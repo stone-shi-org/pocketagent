@@ -288,6 +288,24 @@ const MODEL_SONNET: ModelInfo = {
   supportedEffortLevels: [],
 };
 
+const MODEL_DEFAULT: ModelInfo = {
+  value: 'default',
+  resolvedModel: 'claude-opus-5[1m]',
+  displayName: 'Default (recommended)',
+  description: 'Default model',
+  supportsEffort: true,
+  supportedEffortLevels: ['low', 'medium', 'high'],
+};
+
+const MODEL_OPUS_1M: ModelInfo = {
+  value: 'opus[1m]',
+  resolvedModel: 'claude-opus-5[1m]',
+  displayName: 'Opus (1M context)',
+  description: 'Opus with 1M context',
+  supportsEffort: true,
+  supportedEffortLevels: ['low', 'medium', 'high'],
+};
+
 function modelFixture(value: string, displayName: string): ModelInfo {
   return { value, displayName, description: '', supportsEffort: false, supportedEffortLevels: [] };
 }
@@ -341,6 +359,54 @@ describe('transcript: models', () => {
       },
     ]);
     expect(state.model).toBe('gpt-oss-120b-medium');
+  });
+
+  it('preserves user-selected alias when session_started carries matching resolvedModel wire id', () => {
+    const state = applyEvents(emptyTranscript(), [
+      { kind: 'models_available', models: [MODEL_DEFAULT, MODEL_OPUS_1M, MODEL_SONNET] },
+      { kind: 'model_changed', model: 'opus[1m]' },
+      {
+        kind: 'session_started',
+        agentSessionId: 's1',
+        model: 'claude-opus-5[1m]',
+        cwd: '/tmp',
+        tools: [],
+        permissionMode: 'default',
+      },
+    ]);
+    expect(state.model).toBe('opus[1m]');
+  });
+
+  it('preserves explicit default selection when session_started carries matching resolvedModel wire id', () => {
+    const state = applyEvents(emptyTranscript(), [
+      { kind: 'models_available', models: [MODEL_DEFAULT, MODEL_OPUS_1M, MODEL_SONNET] },
+      { kind: 'model_changed', model: 'default' },
+      {
+        kind: 'session_started',
+        agentSessionId: 's1',
+        model: 'claude-opus-5[1m]',
+        cwd: '/tmp',
+        tools: [],
+        permissionMode: 'default',
+      },
+    ]);
+    expect(state.model).toBe('default');
+  });
+
+  it('updates model when session_started carries a genuinely different model', () => {
+    const state = applyEvents(emptyTranscript(), [
+      { kind: 'models_available', models: [MODEL_DEFAULT, MODEL_OPUS_1M, MODEL_SONNET] },
+      { kind: 'model_changed', model: 'opus[1m]' },
+      {
+        kind: 'session_started',
+        agentSessionId: 's1',
+        model: 'claude-sonnet-5',
+        cwd: '/tmp',
+        tools: [],
+        permissionMode: 'default',
+      },
+    ]);
+    expect(state.model).toBe('claude-sonnet-5');
   });
 });
 
@@ -421,6 +487,16 @@ describe('modelDisplayName', () => {
     expect(modelDisplayName([MODEL_SONNET], 'claude-sonnet-5')).toBe('Sonnet');
   });
 
+  it('prefers concrete non-default model display name when wire model matches multiple entries', () => {
+    const models = [MODEL_DEFAULT, MODEL_OPUS_1M, MODEL_SONNET];
+    expect(modelDisplayName(models, 'claude-opus-5[1m]')).toBe('Opus (1M context)');
+  });
+
+  it('displays default model name when model is explicitly default', () => {
+    const models = [MODEL_DEFAULT, MODEL_OPUS_1M, MODEL_SONNET];
+    expect(modelDisplayName(models, 'default')).toBe('Default (recommended)');
+  });
+
   it('falls back to the raw id, stripped of a leading claude- prefix, when nothing matches', () => {
     expect(modelDisplayName([], 'claude-sonnet-4-5')).toBe('sonnet-4-5');
     expect(modelDisplayName([], 'Claude Opus 4.1')).toBe('Opus 4.1');
@@ -442,6 +518,21 @@ describe('resolveCurrentModel', () => {
 
   it('matches by resolvedModel when the id is the resolved wire id, not the alias', () => {
     expect(resolveCurrentModel([MODEL_SONNET], 'claude-sonnet-5')).toBe(MODEL_SONNET);
+  });
+
+  it('prefers concrete non-default model when wire model matches multiple entries', () => {
+    const models = [MODEL_DEFAULT, MODEL_OPUS_1M, MODEL_SONNET];
+    expect(resolveCurrentModel(models, 'claude-opus-5[1m]')).toBe(MODEL_OPUS_1M);
+  });
+
+  it('matches default model when requested explicitly by value', () => {
+    const models = [MODEL_DEFAULT, MODEL_OPUS_1M, MODEL_SONNET];
+    expect(resolveCurrentModel(models, 'default')).toBe(MODEL_DEFAULT);
+  });
+
+  it('matches concrete model when requested explicitly by value', () => {
+    const models = [MODEL_DEFAULT, MODEL_OPUS_1M, MODEL_SONNET];
+    expect(resolveCurrentModel(models, 'opus[1m]')).toBe(MODEL_OPUS_1M);
   });
 
   // agy's `init` line never reports a model (see `normalizeAgyInit`), so a

@@ -536,7 +536,21 @@ export class SessionManager {
         // this cache back at spawn time (see `create()`), but caching it here
         // for every backend costs nothing and is ready for that to extend.
         if (event.kind === 'session_started' && event.model) {
-          writeAgentDefaults(this.opts.db, session.spec.agent, { model: event.model });
+          // If the model is a wire id (e.g. 'claude-opus-5[1m]'), map it back to
+          // the concrete alias in this agent's cached catalog (e.g. 'opus[1m]')
+          // so `agent_defaults` stores the picker alias rather than the raw wire id.
+          const cached = readAgentDefaults(this.opts.db, session.spec.agent);
+          let modelToWrite = event.model;
+          if (cached?.models_json) {
+            try {
+              const catalog = JSON.parse(cached.models_json) as ModelInfo[];
+              const concrete = catalog.find((m) => m.value !== 'default' && m.resolvedModel === event.model);
+              if (concrete) modelToWrite = concrete.value;
+            } catch {
+              // Ignore malformed cache row
+            }
+          }
+          writeAgentDefaults(this.opts.db, session.spec.agent, { model: modelToWrite });
         }
         if (event.kind === 'model_changed') {
           writeAgentDefaults(this.opts.db, session.spec.agent, { model: event.model });

@@ -142,12 +142,28 @@ export function emptyTranscript(): TranscriptState {
  */
 export function applyEvent(state: TranscriptState, event: AgentEvent): TranscriptState {
   switch (event.kind) {
-    case 'session_started':
+    case 'session_started': {
+      // Claude Code emits `init` (normalized here to `session_started`) at the
+      // start of EVERY prompt turn, reporting the wire model id (e.g.
+      // `'claude-opus-5[1m]'`). If `state.model` is already set to an alias that
+      // maps to this wire model (e.g. user selected `'opus[1m]'`), preserve
+      // the user's alias rather than replacing it with the raw wire id.
+      let model = state.model;
+      if (event.model) {
+        const currentMatchesWire =
+          state.model &&
+          (state.model === event.model ||
+            state.models.some((m) => m.value === state.model && m.resolvedModel === event.model));
+        if (!currentMatchesWire) {
+          model = event.model;
+        }
+      }
       return {
         ...state,
-        model: event.model ?? state.model,
+        model,
         agentSessionId: event.agentSessionId,
       };
+    }
 
     case 'user_prompt':
       return {
@@ -362,6 +378,32 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
 }
 
 /**
+ * Matches a requested model string against a backend's catalog of `ModelInfo`
+ * entries.
+ *
+ * Matching precedence:
+ * 1. Exact match on `value` (e.g. `'opus[1m]'`, `'sonnet'`, or `'default'`).
+ * 2. Match on `resolvedModel`, preferring concrete non-default models over
+ *    a `'default'` alias. Claude Agent SDK's `supportedModels()` lists both
+ *    `value: 'default'` and `value: 'opus[1m]'` with the exact same
+ *    `resolvedModel: 'claude-opus-5[1m]'`. When matching a canonical wire id,
+ *    we resolve to the concrete model choice rather than collapsing back to
+ *    the `'default'` placeholder.
+ * 3. Fall back to any `resolvedModel` match (including `'default'` if no concrete
+ *    entry matched).
+ */
+export function findMatchingModel(models: ModelInfo[], model: string | null): ModelInfo | null {
+  if (!model) return null;
+  const exact = models.find((m) => m.value === model);
+  if (exact) return exact;
+
+  const nonDefault = models.find((m) => m.value !== 'default' && m.resolvedModel === model);
+  if (nonDefault) return nonDefault;
+
+  return models.find((m) => m.resolvedModel === model) ?? null;
+}
+
+/**
  * Human label for a model id: the curated `displayName` from `models` when
  * the id matches an entry (by `value` or the resolved wire id — see
  * `ModelInfo.resolvedModel`'s doc comment for why both are checked), falling
@@ -371,7 +413,7 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
  */
 export function modelDisplayName(models: ModelInfo[], model: string | null): string | null {
   if (!model) return null;
-  const match = models.find((m) => m.value === model || m.resolvedModel === model);
+  const match = findMatchingModel(models, model);
   if (match) return match.displayName;
   return model.replace(/^claude[\s-]+/i, '');
 }
@@ -393,7 +435,7 @@ export function modelDisplayName(models: ModelInfo[], model: string | null): str
  */
 export function resolveCurrentModel(models: ModelInfo[], model: string | null): ModelInfo | null {
   if (model) {
-    const match = models.find((m) => m.value === model || m.resolvedModel === model);
+    const match = findMatchingModel(models, model);
     if (match) return match;
   }
   return models[0] ?? null;
