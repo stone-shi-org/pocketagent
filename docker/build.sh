@@ -4,6 +4,7 @@
 #   docker/build.sh                 # thin      -> :<version>, :latest
 #   docker/build.sh claude          # + claude  -> :<version>-claude, :latest-claude
 #   docker/build.sh all             # + all     -> :<version>-all, :latest-all
+#   docker/build.sh hub             # the Hub   -> pocketagent-hub:<version>, :latest
 #
 # This is the documented entry point rather than `docker build` because it is
 # what reads docker/agent-versions.env, so the pins live in exactly one file.
@@ -13,7 +14,8 @@
 # (correctly) excludes .git.
 #
 # Environment:
-#   PA_IMAGE      image name          (default registry.shifamily.com/homestack/pocketagent-server)
+#   PA_IMAGE      image name          (default: this target's image under PA_REGISTRY)
+#   PA_REGISTRY   registry/namespace  (default registry.shifamily.com/homestack)
 #   PA_VERSION    semver to stamp     (default: apps/server/package.json version + git sha)
 #   PA_PLATFORM   buildx --platform   (default: the host's own architecture)
 #   PA_PUSH=1     push instead of loading into the local daemon
@@ -45,7 +47,20 @@ case "$target" in
         ;;
 esac
 
-image="${PA_IMAGE:-registry.shifamily.com/homestack/pocketagent-server}"
+# The image name is per *target*, not global (PA-66): the three server targets
+# publish `pocketagent-server` and `hub` publishes `pocketagent-hub`, because a
+# gateway and a machine-with-agent-CLIs must not share a tag namespace where
+# `:latest` has to mean one of them. `scripts/release-tags.mjs` owns that table
+# and is read here rather than copied, which is what the root `./build.sh` has
+# always done — this script defaulting to a literal `pocketagent-server` meant
+# a bare `docker/build.sh hub` silently retagged the *backend's* `:latest` with
+# the Hub image, and the two share neither a role nor a single byte of content.
+registry="${PA_REGISTRY:-registry.shifamily.com/homestack}"
+image="${PA_IMAGE:-$(node -e '
+  import("./scripts/release-tags.mjs").then(({ imageForTarget }) => {
+    process.stdout.write(imageForTarget(process.argv[1], process.argv[2]));
+  });
+' "$target" "$registry")}"
 
 # Default version: the package version, plus the short sha when this is a git
 # checkout, so a locally built image is never mistaken for a release. Kept

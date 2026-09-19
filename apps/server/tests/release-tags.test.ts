@@ -10,6 +10,7 @@
  * does not typecheck its tests (`apps/server/tsconfig.json` includes only
  * `src/**`), which is also why importing plain `.mjs` here is fine.
  */
+import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { imageForTarget, parseReleaseVersion, releaseTags, TARGETS } from '../../../scripts/release-tags.mjs';
 import { readDeclaredVersions, VERSIONED_PACKAGES } from '../../../scripts/set-version.mjs';
@@ -124,6 +125,30 @@ describe('the hub is a second image, not a tag suffix (PA-66)', () => {
 
   it('gives a prerelease hub only its own exact tag', () => {
     expect(releaseTags({ version: '1.2.3-rc.1', target: 'hub', image: '' })).toEqual(['1.2.3-rc.1']);
+  });
+});
+
+describe("docker/build.sh's target table", () => {
+  // The bug this guards was live on `feature/hub`: `docker/build.sh` defaulted
+  // its image to the literal `pocketagent-server` while the *root* `build.sh`
+  // asked `imageForTarget`, so `docker/build.sh hub` — the invocation the
+  // README and CLAUDE.md both document — built the gateway and pushed it over
+  // the backend's own `:latest`. A comment in `release-tags.mjs` already said
+  // the two "cannot drift"; nothing made that true, so these do.
+  const script = fs.readFileSync(new URL('../../../docker/build.sh', import.meta.url), 'utf8');
+
+  it('offers exactly the targets release-tags.mjs knows about', () => {
+    // The `case` arms, e.g. `    thin)   stage=runtime;     suffix='' ;;`.
+    const offered = [...script.matchAll(/^\s{4}([a-z|]+)\)\s+stage=/gm)]
+      .flatMap((match) => match[1].split('|'));
+    expect(offered.sort()).toEqual(Object.keys(TARGETS).sort());
+  });
+
+  it('derives the image name rather than hardcoding one', () => {
+    // Any literal image name in the default is a second copy of the TARGETS
+    // table, and the `hub` row is the one that makes the copy wrong.
+    expect(script).toMatch(/imageForTarget/);
+    expect(script).not.toMatch(/PA_IMAGE:-[^}$]*pocketagent-/);
   });
 });
 

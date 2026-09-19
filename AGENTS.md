@@ -54,7 +54,7 @@ pnpm lint               # Run eslint lint checks across packages
 pnpm typecheck          # Run type checks across packages
 pnpm test               # Run all tests using vitest
 pnpm generate-token     # Generate secure auth token in .env
-docker/build.sh         # Build the backend image: thin | claude | all
+docker/build.sh         # Build an image: thin | claude | all (backend) | hub (gateway)
 pnpm demo:docker        # Verify the image contract against a real container
 pnpm version:set 1.2.3   # Set the repo semver in all four package.json files
 ./test.sh               # CI entry: install, vitest (JUnit XML), lint, typecheck

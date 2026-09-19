@@ -362,11 +362,17 @@ reading `/proc`, so agents you started on the host are not seen.
 ### Building and extending
 
 ```bash
-docker/build.sh            # thin      -> :<version>, :latest
+docker/build.sh            # thin      -> pocketagent-server:<version>, :latest
 docker/build.sh claude
 docker/build.sh all
+docker/build.sh hub        # the Hub   -> pocketagent-hub:<version>, :latest
 PA_PLATFORM=linux/arm64 PA_PUSH=1 docker/build.sh
 ```
+
+`hub` builds a *different image name*, not a suffixed tag of the server's — see
+[Running a Hub](#running-a-hub). The name comes from `scripts/release-tags.mjs`, the same
+table the release driver reads, so the two cannot disagree about which image a target
+publishes.
 
 Use `docker/build.sh`, not `docker build`: it is what reads `docker/agent-versions.env` and
 what stamps the version into both the server and the web bundle. One platform per invocation —
