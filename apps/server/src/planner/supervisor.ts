@@ -7,7 +7,7 @@ import { stripAnsi } from '../terminal/classifier.js';
 
 export interface MailboxMessage {
   subagentId: string;
-  kind: 'coding_agent' | 'pocket_agent';
+  kind: 'coding_agent' | 'pocket_agent' | 'timer';
   status: string;
   summary: string;
 }
@@ -25,6 +25,9 @@ export interface SubagentOutcome {
   status: 'running' | 'paused_for_approval' | 'done' | 'error' | 'exited' | 'idle' | 'gone';
   summary: string;
   pendingApproval?: boolean;
+  busyForMs?: number | null;
+  lastOutputAgoMs?: number | null;
+  pendingApprovals?: number;
 }
 
 /**
@@ -88,6 +91,9 @@ export class SubagentSupervisor {
     return {
       status: outcome.status,
       summary: outcome.summary,
+      ...(outcome.busyForMs !== undefined ? { busyForMs: outcome.busyForMs } : {}),
+      ...(outcome.lastOutputAgoMs !== undefined ? { lastOutputAgoMs: outcome.lastOutputAgoMs } : {}),
+      ...(outcome.pendingApprovals !== undefined ? { pendingApprovals: outcome.pendingApprovals } : {}),
     };
   }
 

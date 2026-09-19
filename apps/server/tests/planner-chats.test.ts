@@ -1501,4 +1501,162 @@ describe('planner chat routes over HTTP', () => {
     const sessionAfter = t.context.sessions.find(spawnedId);
     expect(sessionAfter?.status).toBe('killed');
   });
+
+  it('prevents spin-polling by short-circuiting unchanged get_subagent_status calls within the same turn', async () => {
+    let spawnedId = '';
+    const fetchImpl = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string) as {
+        messages: Array<{ role: string; content: string | null; tool_call_id?: string }>;
+      };
+      const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+      const toolResults = body.messages.filter((m) => m.role === 'tool');
+
+      if (lastUser?.content === 'run task' && toolResults.length === 0) {
+        return fakeToolCallResponse(
+          'start_subagent_session',
+          {
+            kind: 'coding_agent',
+            path: t.projectDir,
+            agent: 'claude',
+            prompt: 'task',
+          },
+          'call_spawn',
+        );
+      }
+      if (toolResults.length === 1) {
+        const spawnRes = JSON.parse(toolResults[0]!.content!) as { id: string };
+        spawnedId = spawnRes.id;
+        return fakeToolCallResponse(
+          'get_subagent_status',
+          {
+            kind: 'coding_agent',
+            id: spawnedId,
+          },
+          'call_status_1',
+        );
+      }
+      if (toolResults.length === 2) {
+        // Second get_subagent_status call in the same turn without any output changes!
+        return fakeToolCallResponse(
+          'get_subagent_status',
+          {
+            kind: 'coding_agent',
+            id: spawnedId,
+          },
+          'call_status_2',
+        );
+      }
+      return fakeCompletionResponse('ending turn now');
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const { events } = await sendMessage(t, chat.id, 'run task');
+    const toolResults = events.filter((e) => e.kind === 'tool_result');
+    expect(toolResults.length).toBe(3);
+
+    // Call 1 was spawn
+    expect(JSON.parse(String(toolResults[0]!.content))).toMatchObject({ kind: 'coding_agent', id: spawnedId });
+    // Call 2 was first get_subagent_status
+    expect(JSON.parse(String(toolResults[1]!.content))).toMatchObject({ status: 'running' });
+    // Call 3 was second get_subagent_status -> refused by short-circuit!
+    const thirdResult = String(toolResults[2]!.content);
+    expect(thirdResult).toContain('Unchanged since your last check');
+    expect(thirdResult).toContain('end your turn now');
+  });
+
+  it('check_back_in schedules a non-blocking timer wake notification', async () => {
+    let wakeTurnSeen = false;
+    const fetchImpl = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string) as {
+        messages: Array<{ role: string; content: string | null; tool_call_id?: string }>;
+      };
+      const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+      const toolResults = body.messages.filter((m) => m.role === 'tool');
+
+      if (lastUser?.content === 'wait for it' && toolResults.length === 0) {
+        return fakeToolCallResponse('check_back_in', { seconds: 1 }, 'call_wait');
+      }
+      if (lastUser?.content === 'wait for it' && toolResults.length === 1) {
+        return fakeCompletionResponse('timer set, waiting');
+      }
+      if (lastUser?.content?.includes('[Timer Notification]')) {
+        wakeTurnSeen = true;
+        return fakeCompletionResponse('timer wake processed');
+      }
+      return fakeCompletionResponse('ok');
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const { events } = await sendMessage(t, chat.id, 'wait for it');
+    const toolResult = events.find((e) => e.kind === 'tool_result');
+    expect(String(toolResult?.content)).toContain('Timer scheduled to wake in 1 second(s)');
+
+    // Wait for the timer wake to drain and trigger a new turn
+    const deadline = Date.now() + 4000;
+    while (!wakeTurnSeen && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(wakeTurnSeen).toBe(true);
+  });
+
+  it('stop_subagent terminates a live coding subagent session', async () => {
+    let spawnedId = '';
+    const fetchImpl = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string) as {
+        messages: Array<{ role: string; content: string | null; tool_call_id?: string }>;
+      };
+      const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+      const lastMsg = body.messages[body.messages.length - 1];
+
+      if (lastUser?.content === 'spawn subagent' && lastMsg?.role === 'user') {
+        return fakeToolCallResponse(
+          'start_subagent_session',
+          {
+            kind: 'coding_agent',
+            path: t.projectDir,
+            agent: 'claude',
+            prompt: 'task',
+          },
+          'call_spawn',
+        );
+      }
+      if (lastUser?.content === 'spawn subagent' && lastMsg?.role === 'tool') {
+        spawnedId = (JSON.parse(lastMsg.content!) as { id: string }).id;
+        return fakeCompletionResponse('spawned');
+      }
+      if (lastUser?.content === 'stop it' && lastMsg?.role === 'user') {
+        return fakeToolCallResponse(
+          'stop_subagent',
+          {
+            kind: 'coding_agent',
+            id: spawnedId,
+          },
+          'call_stop',
+        );
+      }
+      if (lastUser?.content === 'stop it' && lastMsg?.role === 'tool') {
+        return fakeCompletionResponse('stopped subagent');
+      }
+      return fakeCompletionResponse('ok');
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    await sendMessage(t, chat.id, 'spawn subagent');
+    expect(spawnedId).not.toBe('');
+    expect(t.context.sessions.find(spawnedId)?.status).toBe('running');
+
+    const { events } = await sendMessage(t, chat.id, 'stop it');
+    const toolResult = events.find((e) => e.kind === 'tool_result')!;
+    expect(String(toolResult.content)).toContain(`Terminated coding subagent session ${spawnedId}`);
+    expect(t.context.sessions.find(spawnedId)?.status).toBe('killed');
+  });
 });

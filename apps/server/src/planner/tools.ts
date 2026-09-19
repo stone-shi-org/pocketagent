@@ -330,6 +330,35 @@ export interface PlannerSubagentDeps {
    * PA-76: Whether the action budget for wake-driven turns has been exhausted.
    */
   wakeBudgetExhausted?(): boolean;
+  /**
+   * PA-78: Checks whether get_subagent_status has already been called for this subagent
+   * during the current turn with no change in state.
+   */
+  checkSubagentStatusTurn?(
+    kind: 'coding_agent' | 'pocket_agent',
+    id: string,
+    state: { busy: boolean; busyForMs?: number | null; lastOutputAgoMs?: number | null; summary?: string },
+  ): { shortCircuit: false } | { shortCircuit: true; message: string };
+  /**
+   * PA-78: Checks whether read_session_output has already been called for this tracked subagent
+   * session during the current turn with no change in output.
+   */
+  checkSessionOutputTurn?(
+    sessionId: string,
+    info: SessionInfo,
+  ): { shortCircuit: false } | { shortCircuit: true; message: string };
+  /**
+   * PA-78: Check if a session id is a tracked subagent session for this chat.
+   */
+  isTrackedSubagentSession?(sessionId: string): boolean;
+  /**
+   * PA-78: Schedule a non-blocking timer to wake this chat after seconds.
+   */
+  scheduleCheckBackIn?(seconds: number): { ok: true } | { ok: false; error: string };
+  /**
+   * PA-78: Stop/terminate a subagent session or chat.
+   */
+  stopSubagent?(kind: 'coding_agent' | 'pocket_agent', id: string): Promise<{ ok: boolean; message: string }>;
 }
 
 /** One `get_subagent_status` answer for a subagent handle. `'gone'`
@@ -338,6 +367,9 @@ export interface PlannerSubagentDeps {
 export interface SubagentChatStatus {
   status: 'running' | 'paused_for_approval' | 'done' | 'error' | 'idle' | 'exited' | 'gone';
   summary: string;
+  busyForMs?: number | null;
+  lastOutputAgoMs?: number | null;
+  pendingApprovals?: number;
 }
 
 /** PA-44: see `PlannerToolDeps.spawnDepth`'s doc comment. Exported so
@@ -723,7 +755,14 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     readOnly: true,
     async execute(deps, args) {
       const sessionId = String(args.sessionId ?? '');
-      if (!deps.sessions.find(sessionId)) return `No session found with id ${sessionId}.`;
+      const info = deps.sessions.find(sessionId);
+      if (!info) return `No session found with id ${sessionId}.`;
+      if (deps.subagents.isTrackedSubagentSession?.(sessionId)) {
+        const shortCircuit = deps.subagents.checkSessionOutputTurn?.(sessionId, info);
+        if (shortCircuit?.shortCircuit) {
+          return shortCircuit.message;
+        }
+      }
       return sessionOutputSummary(deps, sessionId);
     },
   },
@@ -956,21 +995,59 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       const id = String(args.id ?? '');
       if (args.kind === 'pocket_agent') {
         const result = await deps.subagents.pocketAgentChatStatus(id);
+        if (result.status === 'running') {
+          const shortCircuit = deps.subagents.checkSubagentStatusTurn?.('pocket_agent', id, {
+            busy: true,
+            busyForMs: result.busyForMs,
+            lastOutputAgoMs: result.lastOutputAgoMs,
+            summary: result.summary,
+          });
+          if (shortCircuit?.shortCircuit) {
+            return shortCircuit.message;
+          }
+        }
         return truncate(JSON.stringify(result), MAX_TOOL_RESULT_CHARS);
       }
       const info = deps.sessions.find(id);
       if (!info) return JSON.stringify({ status: 'gone', summary: `No session found with id ${id}.` });
+      const now = Date.now();
+      const busyForMs = info.busySince != null ? Math.max(0, now - info.busySince) : null;
+      const lastOutputAgoMs = info.lastActivityAt != null ? Math.max(0, now - info.lastActivityAt) : null;
       if (info.pendingApprovalsCount > 0) {
         return truncate(
           JSON.stringify({
             status: 'paused_for_approval',
+            busyForMs,
+            lastOutputAgoMs,
+            pendingApprovals: info.pendingApprovalsCount,
             summary: `Waiting on a human to approve ${info.pendingApprovalsCount} tool call(s) — open this session in the Pocket Agent UI to answer.`,
           }),
           MAX_TOOL_RESULT_CHARS,
         );
       }
       if (info.busy) {
-        return JSON.stringify({ status: 'running', summary: 'Still working on its assigned task.' });
+        const shortCircuit = deps.subagents.checkSubagentStatusTurn?.('coding_agent', id, {
+          busy: true,
+          busyForMs,
+          lastOutputAgoMs,
+        });
+        if (shortCircuit?.shortCircuit) {
+          return shortCircuit.message;
+        }
+        const busySec = busyForMs != null ? Math.round(busyForMs / 1000) : null;
+        const outputSec = lastOutputAgoMs != null ? Math.round(lastOutputAgoMs / 1000) : null;
+        const busyDetail = busySec != null ? `running ${busySec}s` : 'running';
+        const outputDetail = outputSec != null ? `, last output ${outputSec}s ago` : '';
+        return truncate(
+          JSON.stringify({
+            status: 'running',
+            busyForMs,
+            lastOutputAgoMs,
+            pendingApprovals: info.pendingApprovalsCount,
+            summary: `Still working on its assigned task (${busyDetail}${outputDetail}).`,
+          }),
+          MAX_TOOL_RESULT_CHARS,
+        );
       }
       const cached = deps.subagents.codingAgentStatus?.(id);
       if (isTerminalStatus(info.status)) {
@@ -1205,12 +1282,13 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       'Start a new subagent and hand it a task: either a fresh coding-agent session in an ' +
       'already-configured project workspace, or a new chat with another configured Pocket Agent. ' +
       'Call list_subagents first to see what is configured. Returns a handle immediately — the ' +
-      'subagent keeps working after this call returns, so poll get_subagent_status (for a coding ' +
-      'agent, list_sessions/read_session_output work too) to learn when it is done. Starting another ' +
+      'subagent runs asynchronously in the background. Completion is delivered automatically as a wake ' +
+      'notification to this chat; do NOT poll get_subagent_status, list_sessions, or read_session_output in a loop — ' +
+      'end your turn immediately. Starting another ' +
       `subagent is refused past a depth of ${MAX_SUBAGENT_SPAWN_DEPTH} hops from a human, to ` +
       'stop an unbounded chain of agents spawning agents. Only one live subagent session may be started ' +
       'per working tree; if one already exists in the target tree, its existing handle and status are ' +
-      `returned. Up to ${MAX_SUBAGENT_SPAWNS_PER_TURN} subagents may be spawned per turn.`,
+      'returned. Up to ${MAX_SUBAGENT_SPAWNS_PER_TURN} subagents may be spawned per turn.',
     parameters: {
       type: 'object',
       properties: {
@@ -1250,14 +1328,14 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       if (spawnsThisTurn >= maxSpawns) {
         return (
           `Refusing: already spawned ${spawnsThisTurn} subagent(s) this turn ` +
-          `(limit is ${maxSpawns}). Poll get_subagent_status to wait for existing subagents to finish.`
+          `(limit is ${maxSpawns}). Wait for existing subagents to finish or end your turn.`
         );
       }
 
       if (deps.subagents.wakeBudgetExhausted?.()) {
         return (
           'Refusing: subagent spawn budget for wake-driven turns has been exhausted. ' +
-          'Poll get_subagent_status to wait for existing subagents to finish.'
+          'Wait for existing subagents to finish or end your turn.'
         );
       }
 
@@ -1274,7 +1352,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
           return JSON.stringify({
             kind: 'pocket_agent',
             id: chatId,
-            message: `Started Pocket Agent chat ${chatId}. Use get_subagent_status to check on it.`,
+            message: `Started Pocket Agent chat ${chatId}. Completion will be delivered automatically; end your turn now.`,
           });
         } catch (err) {
           return `Could not start subagent chat: ${(err as Error).message}`;
@@ -1333,11 +1411,88 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
           kind: 'coding_agent',
           id: session.id,
           message: sent
-            ? `Started session ${session.id} and sent it the task.`
+            ? `Started session ${session.id} and sent it the task. Completion will be notified automatically; end your turn now.`
             : `Started session ${session.id}, but it ended before the task could be sent.`,
         });
       } catch (err) {
         return `Could not start subagent session: ${(err as Error).message}`;
+      }
+    },
+  },
+  {
+    name: 'check_back_in',
+    description:
+      'Schedule a non-blocking timer to wake this chat after the specified number of seconds. ' +
+      'Returns immediately. You MUST end your turn immediately after calling this tool so that the ' +
+      'chat becomes idle and can receive the wake prompt when the timer expires. ' +
+      'If a background subagent finishes before the timer fires, its completion will wake the chat earlier.',
+    parameters: {
+      type: 'object',
+      properties: {
+        seconds: {
+          type: 'integer',
+          description: 'Number of seconds to wait before waking this chat (between 1 and 300).',
+          minimum: 1,
+          maximum: 300,
+        },
+      },
+      required: ['seconds'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    async execute(deps, args) {
+      const seconds = Number(args.seconds);
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 300) {
+        return 'seconds must be an integer between 1 and 300.';
+      }
+      if (deps.subagents.wakeBudgetExhausted?.()) {
+        return 'Cannot schedule check_back_in: subagent action budget for wake-driven turns is exhausted.';
+      }
+      if (!deps.subagents.scheduleCheckBackIn) {
+        return 'check_back_in is not available in this environment.';
+      }
+      const result = deps.subagents.scheduleCheckBackIn(seconds);
+      if (!result.ok) {
+        return `Could not schedule timer: ${result.error}`;
+      }
+      deps.subagents.recordAction?.();
+      return `Timer scheduled to wake in ${seconds} second(s). End your turn now so the chat is idle when the wake arrives.`;
+    },
+  },
+  {
+    name: 'stop_subagent',
+    description:
+      'Stop a running subagent session or chat that is stuck, unresponsive, or no longer needed. ' +
+      'Terminates the target subagent. Subject to human approval.',
+    parameters: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['coding_agent', 'pocket_agent'] },
+        id: { type: 'string', description: 'The id start_subagent_session returned.' },
+      },
+      required: ['kind', 'id'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const id = String(args.id ?? '');
+      if (args.kind === 'pocket_agent') {
+        if (!deps.subagents.stopSubagent) {
+          return 'stop_subagent for pocket_agent is not available in this environment.';
+        }
+        const res = await deps.subagents.stopSubagent('pocket_agent', id);
+        return res.message;
+      }
+      const info = deps.sessions.find(id);
+      if (!info) return `No session found with id ${id}.`;
+      if (isTerminalStatus(info.status)) {
+        return `Subagent session ${id} has already ended (status: ${info.status}).`;
+      }
+      try {
+        deps.sessions.terminate(id);
+        return `Terminated coding subagent session ${id}.`;
+      } catch (err) {
+        return `Failed to terminate coding subagent session ${id}: ${(err as Error).message}`;
       }
     },
   },

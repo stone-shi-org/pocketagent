@@ -128,6 +128,7 @@ describe('PLANNER_TOOLS catalog', () => {
     const mutatingNames = PLANNER_TOOLS.filter((t) => !t.readOnly).map((t) => t.name).sort();
     expect(readOnlyNames).toEqual(
       [
+        'check_back_in',
         'find_files',
         'get_current_time',
         'get_subagent_status',
@@ -158,6 +159,7 @@ describe('PLANNER_TOOLS catalog', () => {
         'send_instruction',
         'send_telegram_message',
         'start_subagent_session',
+        'stop_subagent',
         'update_cron_job',
         'update_custom_claude_provider',
         'update_settings',
@@ -448,6 +450,42 @@ describe('planner tools against a real app context', () => {
     const tool = findPlannerTool('read_session_output')!;
     const result = await tool.execute(depsFor(t), { sessionId });
     expect(result).toMatch(/no readable transcript/);
+  });
+
+  it('read_session_output short-circuits repeated unchanged output on a tracked subagent', async () => {
+    t = await createTestApp();
+    const sessionId = 'tracked-subagent-session';
+    t.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
+         VALUES (?, 'Subagent', 'shell', 'bash', ?, 'running', 'terminal', ?, 80, 24)`,
+      )
+      .run(sessionId, t.projectDir, Date.now());
+
+    const tool = findPlannerTool('read_session_output')!;
+    let calls = 0;
+    const deps = depsFor(t, undefined, {
+      subagents: {
+        ...SUBAGENTS_UNAVAILABLE,
+        isTrackedSubagentSession: (id) => id === sessionId,
+        checkSessionOutputTurn: (_id, _info) => {
+          calls++;
+          if (calls > 1) {
+            return {
+              shortCircuit: true,
+              message: 'Session output unchanged since your last check 2.1s ago (running 8.3s, no new output). You are notified automatically when this finishes — end your turn now.',
+            };
+          }
+          return { shortCircuit: false };
+        },
+      },
+    });
+
+    const res1 = await tool.execute(deps, { sessionId });
+    expect(res1).toContain('no readable transcript yet');
+
+    const res2 = await tool.execute(deps, { sessionId });
+    expect(res2).toContain('Session output unchanged since your last check');
   });
 
   it('read_file reads a file inside an added project workspace', async () => {
@@ -1183,6 +1221,76 @@ describe('get_subagent_status', () => {
     );
     expect(result).toEqual({ status: 'done', summary: 'done: some-chat-id' });
   });
+
+  it('reports rich status facts including busyForMs, lastOutputAgoMs, and pendingApprovals', async () => {
+    t = await createTestApp();
+    const sessionId = 'active-subagent';
+    const now = 1_700_000_000_000;
+    const createdAt = now - 10000;
+    t.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
+         VALUES (?, 'Subagent', 'shell', 'bash', ?, 'running', 'terminal', ?, 80, 24)`,
+      )
+      .run(sessionId, t.projectDir, createdAt);
+
+    const origFind = t.context.sessions.find.bind(t.context.sessions);
+    const sessionSpy = vi.spyOn(t.context.sessions, 'find').mockImplementation((id: string) => {
+      const base = origFind(id);
+      if (id === sessionId && base) {
+        return {
+          ...base,
+          busy: true,
+          busySince: now - 5000,
+          lastActivityAt: now - 2000,
+          pendingApprovalsCount: 1,
+        };
+      }
+      return base;
+    });
+
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      const tool = findPlannerTool('get_subagent_status')!;
+      const raw = await tool.execute(depsFor(t), { kind: 'coding_agent', id: sessionId });
+      const result = JSON.parse(raw);
+      expect(result.status).toBe('paused_for_approval');
+      expect(result.busyForMs).toBe(5000);
+      expect(result.lastOutputAgoMs).toBe(2000);
+      expect(result.pendingApprovals).toBe(1);
+    } finally {
+      spy.mockRestore();
+      sessionSpy.mockRestore();
+    }
+  });
+
+  it('short-circuits repeated unchanged get_subagent_status calls with refusal', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('get_subagent_status')!;
+    let calls = 0;
+    const deps = depsFor(t, undefined, {
+      subagents: {
+        ...SUBAGENTS_UNAVAILABLE,
+        pocketAgentChatStatus: async () => ({ status: 'running', summary: 'working' }),
+        checkSubagentStatusTurn: () => {
+          calls++;
+          if (calls > 1) {
+            return {
+              shortCircuit: true,
+              message: 'Unchanged since your last check 2.1s ago. You are notified automatically when this finishes — end your turn now.',
+            };
+          }
+          return { shortCircuit: false };
+        },
+      },
+    });
+
+    const res1 = await tool.execute(deps, { kind: 'pocket_agent', id: 'chat-1' });
+    expect(JSON.parse(res1)).toEqual({ status: 'running', summary: 'working' });
+
+    const res2 = await tool.execute(deps, { kind: 'pocket_agent', id: 'chat-1' });
+    expect(res2).toContain('Unchanged since your last check');
+  });
 });
 
 // ---- PA-44: start_subagent_session -------------------------------------------
@@ -1881,5 +1989,156 @@ describe('update_telegram_bot (PA-56)', () => {
       patch: {},
     });
     expect(result).toMatch(/not available/);
+  });
+});
+
+// ---- PA-78: check_back_in ---------------------------------------------------
+
+describe('check_back_in', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('is readOnly: true so it never blocks on approvals', () => {
+    const tool = findPlannerTool('check_back_in')!;
+    expect(tool.readOnly).toBe(true);
+  });
+
+  it('rejects invalid or out-of-range seconds', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('check_back_in')!;
+    expect(await tool.execute(depsFor(t), { seconds: 0 })).toMatch(/between 1 and 300/);
+    expect(await tool.execute(depsFor(t), { seconds: 301 })).toMatch(/between 1 and 300/);
+    expect(await tool.execute(depsFor(t), { seconds: 'foo' as unknown as number })).toMatch(/between 1 and 300/);
+  });
+
+  it('schedules timer via subagents dependency and records action', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('check_back_in')!;
+    let scheduledSeconds = 0;
+    let actionRecorded = false;
+    const deps = depsFor(t, undefined, {
+      subagents: {
+        ...SUBAGENTS_UNAVAILABLE,
+        scheduleCheckBackIn: (s) => {
+          scheduledSeconds = s;
+          return { ok: true };
+        },
+        recordAction: () => {
+          actionRecorded = true;
+        },
+      },
+    });
+    const result = await tool.execute(deps, { seconds: 15 });
+    expect(scheduledSeconds).toBe(15);
+    expect(actionRecorded).toBe(true);
+    expect(result).toMatch(/Timer scheduled to wake in 15 second\(s\)/);
+  });
+
+  it('refuses when wake action budget is exhausted', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('check_back_in')!;
+    const deps = depsFor(t, undefined, {
+      subagents: {
+        ...SUBAGENTS_UNAVAILABLE,
+        wakeBudgetExhausted: () => true,
+      },
+    });
+    const result = await tool.execute(deps, { seconds: 10 });
+    expect(result).toMatch(/wake-driven turns is exhausted/);
+  });
+
+  it('reports error when scheduleCheckBackIn fails', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('check_back_in')!;
+    const deps = depsFor(t, undefined, {
+      subagents: {
+        ...SUBAGENTS_UNAVAILABLE,
+        scheduleCheckBackIn: () => ({ ok: false, error: 'Too many active timers' }),
+      },
+    });
+    const result = await tool.execute(deps, { seconds: 10 });
+    expect(result).toMatch(/Too many active timers/);
+  });
+});
+
+// ---- PA-78: stop_subagent ---------------------------------------------------
+
+describe('stop_subagent', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('is readOnly: false so it is gated by the approval flow', () => {
+    const tool = findPlannerTool('stop_subagent')!;
+    expect(tool.readOnly).toBe(false);
+  });
+
+  it('reports an unknown session id for coding_agent plainly', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('stop_subagent')!;
+    const result = await tool.execute(depsFor(t), { kind: 'coding_agent', id: 'does-not-exist' });
+    expect(result).toMatch(/No session found with id does-not-exist/);
+  });
+
+  it('reports if coding_agent session is already ended', async () => {
+    t = await createTestApp();
+    const sessionId = 'finished-subagent';
+    t.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
+         VALUES (?, 'Subagent', 'shell', 'bash', ?, 'exited', 'terminal', ?, 80, 24)`,
+      )
+      .run(sessionId, t.projectDir, Date.now());
+
+    const tool = findPlannerTool('stop_subagent')!;
+    const result = await tool.execute(depsFor(t), { kind: 'coding_agent', id: sessionId });
+    expect(result).toMatch(/has already ended/);
+  });
+
+  it('terminates a live coding_agent session', async () => {
+    t = await createTestApp();
+    const sessionId = 'live-subagent';
+    t.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
+         VALUES (?, 'Subagent', 'shell', 'bash', ?, 'running', 'terminal', ?, 80, 24)`,
+      )
+      .run(sessionId, t.projectDir, Date.now());
+
+    let terminatedId = '';
+    const origTerminate = t.context.sessions.terminate.bind(t.context.sessions);
+    vi.spyOn(t.context.sessions, 'terminate').mockImplementation((id: string) => {
+      terminatedId = id;
+      return origTerminate(id);
+    });
+
+    const tool = findPlannerTool('stop_subagent')!;
+    const result = await tool.execute(depsFor(t), { kind: 'coding_agent', id: sessionId });
+    expect(result).toMatch(/Terminated coding subagent session/);
+    expect(terminatedId).toBe(sessionId);
+  });
+
+  it('delegates pocket_agent stop to subagents dependency', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('stop_subagent')!;
+    let stoppedKind = '';
+    let stoppedId = '';
+    const deps = depsFor(t, undefined, {
+      subagents: {
+        ...SUBAGENTS_UNAVAILABLE,
+        stopSubagent: async (kind, id) => {
+          stoppedKind = kind;
+          stoppedId = id;
+          return { ok: true, message: `Stopped pocket agent ${id}` };
+        },
+      },
+    });
+    const result = await tool.execute(deps, { kind: 'pocket_agent', id: 'chat-123' });
+    expect(result).toBe('Stopped pocket agent chat-123');
+    expect(stoppedKind).toBe('pocket_agent');
+    expect(stoppedId).toBe('chat-123');
   });
 });
