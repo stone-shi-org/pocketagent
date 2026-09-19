@@ -337,7 +337,7 @@ export interface PlannerSubagentDeps {
   checkSubagentStatusTurn?(
     kind: 'coding_agent' | 'pocket_agent',
     id: string,
-    state: { busy: boolean; busyForMs?: number | null; lastOutputAgoMs?: number | null; summary?: string },
+    state: { busy: boolean; busyForMs?: number | null; lastActivityAt?: number | null; summary?: string },
   ): { shortCircuit: false } | { shortCircuit: true; message: string };
   /**
    * PA-78: Checks whether read_session_output has already been called for this tracked subagent
@@ -370,6 +370,7 @@ export interface SubagentChatStatus {
   busyForMs?: number | null;
   lastOutputAgoMs?: number | null;
   pendingApprovals?: number;
+  lastActivityAt?: number | null;
 }
 
 /** PA-44: see `PlannerToolDeps.spawnDepth`'s doc comment. Exported so
@@ -757,7 +758,10 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       const sessionId = String(args.sessionId ?? '');
       const info = deps.sessions.find(sessionId);
       if (!info) return `No session found with id ${sessionId}.`;
-      if (deps.subagents.isTrackedSubagentSession?.(sessionId)) {
+      const isTracked =
+        (deps.plannerChatId && info.plannerChatId === deps.plannerChatId) ||
+        (deps.subagents.isTrackedSubagentSession?.(sessionId) ?? false);
+      if (info.busy && isTracked) {
         const shortCircuit = deps.subagents.checkSessionOutputTurn?.(sessionId, info);
         if (shortCircuit?.shortCircuit) {
           return shortCircuit.message;
@@ -999,7 +1003,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
           const shortCircuit = deps.subagents.checkSubagentStatusTurn?.('pocket_agent', id, {
             busy: true,
             busyForMs: result.busyForMs,
-            lastOutputAgoMs: result.lastOutputAgoMs,
+            lastActivityAt: result.lastActivityAt,
             summary: result.summary,
           });
           if (shortCircuit?.shortCircuit) {
@@ -1029,7 +1033,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         const shortCircuit = deps.subagents.checkSubagentStatusTurn?.('coding_agent', id, {
           busy: true,
           busyForMs,
-          lastOutputAgoMs,
+          lastActivityAt: info.lastActivityAt,
         });
         if (shortCircuit?.shortCircuit) {
           return shortCircuit.message;
@@ -1288,7 +1292,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       `subagent is refused past a depth of ${MAX_SUBAGENT_SPAWN_DEPTH} hops from a human, to ` +
       'stop an unbounded chain of agents spawning agents. Only one live subagent session may be started ' +
       'per working tree; if one already exists in the target tree, its existing handle and status are ' +
-      'returned. Up to ${MAX_SUBAGENT_SPAWNS_PER_TURN} subagents may be spawned per turn.',
+      `returned. Up to ${MAX_SUBAGENT_SPAWNS_PER_TURN} subagents may be spawned per turn.`,
     parameters: {
       type: 'object',
       properties: {
@@ -1462,13 +1466,17 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
   {
     name: 'stop_subagent',
     description:
-      'Stop a running subagent session or chat that is stuck, unresponsive, or no longer needed. ' +
-      'Terminates the target subagent. Subject to human approval.',
+      'Stop a running coding-agent subagent session that is stuck, unresponsive, or no longer needed. ' +
+      'Terminates the target session. Only subagents started by this chat may be stopped. Subject to human approval.',
     parameters: {
       type: 'object',
       properties: {
-        kind: { type: 'string', enum: ['coding_agent', 'pocket_agent'] },
-        id: { type: 'string', description: 'The id start_subagent_session returned.' },
+        kind: {
+          type: 'string',
+          enum: ['coding_agent', 'pocket_agent'],
+          description: 'The kind start_subagent_session returned (coding_agent is supported for termination).',
+        },
+        id: { type: 'string', description: 'The session id start_subagent_session returned.' },
       },
       required: ['kind', 'id'],
       additionalProperties: false,
@@ -1476,24 +1484,12 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     readOnly: false,
     async execute(deps, args) {
       const id = String(args.id ?? '');
-      if (args.kind === 'pocket_agent') {
-        if (!deps.subagents.stopSubagent) {
-          return 'stop_subagent for pocket_agent is not available in this environment.';
-        }
-        const res = await deps.subagents.stopSubagent('pocket_agent', id);
-        return res.message;
+      const kind = args.kind as 'coding_agent' | 'pocket_agent';
+      if (!deps.subagents.stopSubagent) {
+        return 'stop_subagent is not available in this environment.';
       }
-      const info = deps.sessions.find(id);
-      if (!info) return `No session found with id ${id}.`;
-      if (isTerminalStatus(info.status)) {
-        return `Subagent session ${id} has already ended (status: ${info.status}).`;
-      }
-      try {
-        deps.sessions.terminate(id);
-        return `Terminated coding subagent session ${id}.`;
-      } catch (err) {
-        return `Failed to terminate coding subagent session ${id}: ${(err as Error).message}`;
-      }
+      const res = await deps.subagents.stopSubagent(kind, id);
+      return res.message;
     },
   },
   {

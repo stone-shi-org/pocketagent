@@ -1659,4 +1659,187 @@ describe('planner chat routes over HTTP', () => {
     expect(String(toolResult.content)).toContain(`Terminated coding subagent session ${spawnedId}`);
     expect(t.context.sessions.find(spawnedId)?.status).toBe('killed');
   });
+
+  it('stop_subagent refuses to terminate a session not owned by the caller chat', async () => {
+    const unownedSessionId = 'unrelated-human-session';
+    const fetchImpl = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string) as {
+        messages: Array<{ role: string; content: string | null; tool_call_id?: string }>;
+      };
+      const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+      const lastMsg = body.messages[body.messages.length - 1];
+
+      if (lastUser?.content === 'stop unowned' && lastMsg?.role === 'user') {
+        return fakeToolCallResponse(
+          'stop_subagent',
+          {
+            kind: 'coding_agent',
+            id: unownedSessionId,
+          },
+          'call_stop',
+        );
+      }
+      return fakeCompletionResponse('done');
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
+
+    // Seed an unrelated session not owned by the planner chat
+    t.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
+         VALUES (?, 'Human session', 'shell', 'bash', ?, 'running', 'terminal', ?, 80, 24)`,
+      )
+      .run(unownedSessionId, t.projectDir, Date.now());
+
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const { events } = await sendMessage(t, chat.id, 'stop unowned');
+    const toolResult = events.find((e) => e.kind === 'tool_result')!;
+    expect(String(toolResult.content)).toContain('Refusing to terminate session');
+    expect(String(toolResult.content)).toContain('session was not started by this chat');
+    // Ensure the unrelated session was NOT terminated
+    expect(t.context.sessions.find(unownedSessionId)?.status).toBe('running');
+  });
+
+  it('stop_subagent cleanly refuses pocket_agent subagent termination', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string) as {
+        messages: Array<{ role: string; content: string | null; tool_call_id?: string }>;
+      };
+      const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+      const lastMsg = body.messages[body.messages.length - 1];
+
+      if (lastUser?.content === 'stop pocket' && lastMsg?.role === 'user') {
+        return fakeToolCallResponse(
+          'stop_subagent',
+          {
+            kind: 'pocket_agent',
+            id: 'some-pocket-chat-id',
+          },
+          'call_stop_pocket',
+        );
+      }
+      return fakeCompletionResponse('done');
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const { events } = await sendMessage(t, chat.id, 'stop pocket');
+    const toolResult = events.find((e) => e.kind === 'tool_result')!;
+    expect(String(toolResult.content)).toContain('Stopping pocket_agent subagents is not supported');
+  });
+
+  it('poll check short-circuit resets repeat count when null baseline receives activity', async () => {
+    t = await createTestApp();
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+    const chatsService = t.context.plannerChats;
+
+    // Check 1: baseline with null lastActivityAt
+    const res1 = (chatsService as any).checkSubagentStatusTurnForChat(chat.id, 'coding_agent', 'sub-1', {
+      busy: true,
+      lastActivityAt: null,
+    });
+    expect(res1.shortCircuit).toBe(false);
+
+    // Check 2: repeated check with still null activity -> short circuits
+    const res2 = (chatsService as any).checkSubagentStatusTurnForChat(chat.id, 'coding_agent', 'sub-1', {
+      busy: true,
+      lastActivityAt: null,
+    });
+    expect(res2.shortCircuit).toBe(true);
+    expect(res2.message).toContain('Unchanged since your last check');
+
+    // Check 3: new activity arrives (null -> timestamp) -> resets repeat count
+    const activityTimestamp = Date.now();
+    const res3 = (chatsService as any).checkSubagentStatusTurnForChat(chat.id, 'coding_agent', 'sub-1', {
+      busy: true,
+      lastActivityAt: activityTimestamp,
+    });
+    expect(res3.shortCircuit).toBe(false);
+
+    // Check 4: repeated check with same timestamp -> short circuits again
+    const res4 = (chatsService as any).checkSubagentStatusTurnForChat(chat.id, 'coding_agent', 'sub-1', {
+      busy: true,
+      lastActivityAt: activityTimestamp,
+    });
+    expect(res4.shortCircuit).toBe(true);
+  });
+
+  it('approval pause preserves turn poll check state across resolution', async () => {
+    let spawnedId = '';
+    let approvalId = '';
+    const fetchImpl = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string) as {
+        messages: Array<{ role: string; content: string | null; tool_call_id?: string }>;
+      };
+      const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+      const toolResults = body.messages.filter((m) => m.role === 'tool');
+
+      if (lastUser?.content === 'test approval pause' && toolResults.length === 0) {
+        return fakeToolCallResponse(
+          'start_subagent_session',
+          {
+            kind: 'coding_agent',
+            path: t.projectDir,
+            agent: 'claude',
+            prompt: 'task',
+          },
+          'call_spawn',
+        );
+      }
+      if (lastUser?.content === 'test approval pause' && toolResults.length === 1) {
+        spawnedId = (JSON.parse(toolResults[0]!.content!) as { id: string }).id;
+        return fakeToolCallResponse(
+          'get_subagent_status',
+          { kind: 'coding_agent', id: spawnedId },
+          'call_status_1',
+        );
+      }
+      if (lastUser?.content === 'test approval pause' && toolResults.length === 2) {
+        return fakeToolCallResponse(
+          'mkdir',
+          { path: path.join(t.projectDir, 'pausedir') },
+          'call_mkdir',
+        );
+      }
+      if (lastUser?.content === 'test approval pause' && toolResults.length === 3) {
+        return fakeToolCallResponse(
+          'get_subagent_status',
+          { kind: 'coding_agent', id: spawnedId },
+          'call_status_2',
+        );
+      }
+      return fakeCompletionResponse('turn finished');
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: false });
+    await post(t, '/api/planner/tool-approvals', { scope: 'global', toolName: 'start_subagent_session', decision: 'allow' });
+    const fixedActivityAt = Date.now() - 5000;
+    const origFind = t.context.sessions.find.bind(t.context.sessions);
+    vi.spyOn(t.context.sessions, 'find').mockImplementation((id: string) => {
+      const info = origFind(id);
+      if (info && spawnedId && info.id === spawnedId) {
+        return { ...info, lastActivityAt: fixedActivityAt, busy: true };
+      }
+      return info;
+    });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const { events } = await sendMessage(t, chat.id, 'test approval pause');
+    const req = events.find((e) => e.kind === 'permission_request');
+    expect(req).toBeDefined();
+    approvalId = req!.id;
+
+    // Resolve approval; turn resumes and executes call_status_2
+    const { events: resumedEvents } = await resolve(t, chat.id, approvalId, 'allow_once');
+    const resumedToolResults = resumedEvents.filter((e) => e.kind === 'tool_result');
+    const secondStatusResult = resumedToolResults[resumedToolResults.length - 1];
+    expect(String(secondStatusResult?.content)).toContain('Unchanged since your last check');
+    expect(String(secondStatusResult?.content)).toContain('end your turn now');
+  });
 });

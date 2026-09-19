@@ -282,6 +282,12 @@ export function buildWakePrompt(messages: MailboxMessage[]): string {
   return lines.join('\n');
 }
 
+interface TurnPollRecord {
+  lastCheckedAt: number;
+  lastActivityAt: number | null;
+  count: number;
+}
+
 /**
  * PA-6: planner chat CRUD and the turn loop.
  *
@@ -385,21 +391,13 @@ export class PlannerChatService {
    */
   private readonly scheduledWakeTimersByChat = new Map<string, Set<ReturnType<typeof setTimeout>>>();
   /**
-   * PA-78: AbortControllers for active turns, keyed by chat id, used by stop_subagent.
-   */
-  private readonly activeTurnControllers = new Map<string, AbortController>();
-  /**
    * PA-78: Timestamp when the current active turn started, keyed by chat id.
    */
   private readonly turnStartedAtByChat = new Map<string, number>();
   /**
-   * PA-78: Per-turn get_subagent_status check state for short-circuiting unchanged repeat calls.
+   * PA-78: Per-turn poll check state for short-circuiting unchanged repeat calls (status and output).
    */
-  private readonly subagentChecksThisTurnByChat = new Map<string, Map<string, { lastCheckedAt: number; lastOutputAgoMs?: number | null; count: number }>>();
-  /**
-   * PA-78: Per-turn read_session_output check state for short-circuiting unchanged repeat calls.
-   */
-  private readonly sessionOutputChecksThisTurnByChat = new Map<string, Map<string, { lastCheckedAt: number; lastActivityAt: number | null; count: number }>>();
+  private readonly turnPollChecksByChat = new Map<string, Map<string, TurnPollRecord>>();
 
   /**
    * PA-56: `webhooks`/`cron`, for `read_settings`/`update_webhook`/
@@ -434,15 +432,12 @@ export class PlannerChatService {
       for (const timer of timers) clearTimeout(timer);
     }
     this.scheduledWakeTimersByChat.clear();
-    for (const controller of this.activeTurnControllers.values()) {
-      controller.abort();
-    }
-    this.activeTurnControllers.clear();
     for (const timer of this.drainRetryTimeouts.values()) {
       clearTimeout(timer);
     }
     this.drainRetryTimeouts.clear();
     this.drainRetryAttempts.clear();
+    this.turnPollChecksByChat.clear();
     this.supervisor.dispose();
   }
 
@@ -684,13 +679,7 @@ export class PlannerChatService {
       for (const timer of timers) clearTimeout(timer);
       this.scheduledWakeTimersByChat.delete(id);
     }
-    const controller = this.activeTurnControllers.get(id);
-    if (controller) {
-      controller.abort();
-      this.activeTurnControllers.delete(id);
-    }
-    this.subagentChecksThisTurnByChat.delete(id);
-    this.sessionOutputChecksThisTurnByChat.delete(id);
+    this.turnPollChecksByChat.delete(id);
     this.turnStartedAtByChat.delete(id);
     const retryTimer = this.drainRetryTimeouts.get(id);
     if (retryTimer) {
@@ -1062,11 +1051,8 @@ export class PlannerChatService {
     }
 
     this.activeTurns.add(chat.id);
-    const controller = new AbortController();
-    this.activeTurnControllers.set(chat.id, controller);
     this.turnStartedAtByChat.set(chat.id, Date.now());
-    this.subagentChecksThisTurnByChat.set(chat.id, new Map());
-    this.sessionOutputChecksThisTurnByChat.set(chat.id, new Map());
+    this.turnPollChecksByChat.set(chat.id, new Map());
     try {
       const modelId = this.resolveModelId(chat, opts.modelId);
       const workspacePath = this.workspacePathFor(chat);
@@ -1084,16 +1070,13 @@ export class PlannerChatService {
       };
       yield* this.emit(workspacePath, chat.id, userEvent);
 
-      const effectiveSignal = opts.signal ? AbortSignal.any([opts.signal, controller.signal]) : controller.signal;
-      yield* this.driveLoop(chat, workspacePath, modelId, 0, EMPTY_TURN_STATS, effectiveSignal);
+      yield* this.driveLoop(chat, workspacePath, modelId, 0, EMPTY_TURN_STATS, opts.signal);
     } finally {
-      this.activeTurnControllers.delete(chat.id);
-      this.turnStartedAtByChat.delete(chat.id);
-      this.subagentChecksThisTurnByChat.delete(chat.id);
-      this.sessionOutputChecksThisTurnByChat.delete(chat.id);
       this.activeTurns.delete(chat.id);
       this.activeWakeTurns.delete(chat.id);
       if (!this.isBusy(chat.id)) {
+        this.turnStartedAtByChat.delete(chat.id);
+        this.turnPollChecksByChat.delete(chat.id);
         void this.drainMailbox(chat.id);
       }
     }
@@ -1187,6 +1170,8 @@ export class PlannerChatService {
     } finally {
       this.activeTurns.delete(chatId);
       if (!this.isBusy(chatId)) {
+        this.turnStartedAtByChat.delete(chatId);
+        this.turnPollChecksByChat.delete(chatId);
         void this.drainMailbox(chatId);
       }
     }
@@ -1225,6 +1210,8 @@ export class PlannerChatService {
     updatePlannerChat(this.opts.db, chat.id, { lastModelId: modelId, lastActivityAt: Date.now() });
     writePlannerLastModelId(this.opts.db, modelId);
     this.spawnsThisTurnByChat.delete(chat.id);
+    this.turnPollChecksByChat.delete(chat.id);
+    this.turnStartedAtByChat.delete(chat.id);
   }
 
   /**
@@ -1546,8 +1533,11 @@ export class PlannerChatService {
               this.checkSubagentStatusTurnForChat(chat.id, kind, id, state),
             checkSessionOutputTurn: (sessionId, info) =>
               this.checkSessionOutputTurnForChat(chat.id, sessionId, info),
-            isTrackedSubagentSession: (sessionId) =>
-              this.subagentSessionsByChat.get(chat.id)?.has(sessionId) ?? false,
+            isTrackedSubagentSession: (sessionId) => {
+              if (this.subagentSessionsByChat.get(chat.id)?.has(sessionId)) return true;
+              const info = this.opts.sessions.find(sessionId);
+              return info?.plannerChatId === chat.id;
+            },
             scheduleCheckBackIn: (seconds) =>
               this.scheduleCheckBackInForChat(chat.id, seconds),
             stopSubagent: (kind, id) =>
@@ -1716,6 +1706,7 @@ export class PlannerChatService {
           status: 'paused_for_approval',
           busyForMs,
           lastOutputAgoMs,
+          lastActivityAt: chat.lastActivityAt,
           pendingApprovals: pendingCount,
           summary: `Waiting on a human to approve ${pendingCount} tool call(s) — open this chat in the Pocket Agent UI to answer.`,
         };
@@ -1726,6 +1717,7 @@ export class PlannerChatService {
         status: 'running',
         busyForMs,
         lastOutputAgoMs,
+        lastActivityAt: chat.lastActivityAt,
         pendingApprovals: 0,
         summary: `(still working on its assigned task, running ${busySec}s, last activity ${outputSec}s ago)`,
       };
@@ -1750,35 +1742,36 @@ export class PlannerChatService {
   }
 
   /**
-   * PA-78: Short-circuit repeat get_subagent_status calls within the same turn when state is unchanged.
+   * PA-78: Short-circuit repeat status/output calls within the same turn when state is unchanged.
    */
-  private checkSubagentStatusTurnForChat(
+  private checkPollTurnForChat(
     chatId: string,
-    kind: 'coding_agent' | 'pocket_agent',
-    id: string,
-    state: { busy: boolean; busyForMs?: number | null; lastOutputAgoMs?: number | null; summary?: string },
+    key: string,
+    callLabel: string,
+    runningSec: string,
+    currentActivityAt: number | null,
   ): { shortCircuit: false } | { shortCircuit: true; message: string } {
-    let map = this.subagentChecksThisTurnByChat.get(chatId);
+    let map = this.turnPollChecksByChat.get(chatId);
     if (!map) {
       map = new Map();
-      this.subagentChecksThisTurnByChat.set(chatId, map);
+      this.turnPollChecksByChat.set(chatId, map);
     }
-    const key = `${kind}:${id}`;
     const record = map.get(key);
     const now = Date.now();
     if (!record) {
-      map.set(key, { lastCheckedAt: now, lastOutputAgoMs: state.lastOutputAgoMs, count: 0 });
+      map.set(key, { lastCheckedAt: now, lastActivityAt: currentActivityAt, count: 0 });
       return { shortCircuit: false };
     }
 
-    // If new output has arrived since the last check, reset the repeat count
-    if (
-      state.lastOutputAgoMs != null &&
-      record.lastOutputAgoMs != null &&
-      state.lastOutputAgoMs < record.lastOutputAgoMs
-    ) {
+    // Reset repeat count if new activity arrived since the last check.
+    // Handles null baseline if first check had no activity timestamp yet.
+    const hasNewActivity =
+      (record.lastActivityAt === null && currentActivityAt !== null) ||
+      (currentActivityAt !== null && record.lastActivityAt !== null && currentActivityAt > record.lastActivityAt);
+
+    if (hasNewActivity) {
       record.lastCheckedAt = now;
-      record.lastOutputAgoMs = state.lastOutputAgoMs;
+      record.lastActivityAt = currentActivityAt;
       record.count = 0;
       return { shortCircuit: false };
     }
@@ -1786,12 +1779,11 @@ export class PlannerChatService {
     record.count++;
     const elapsedSec = ((now - record.lastCheckedAt) / 1000).toFixed(1);
     record.lastCheckedAt = now;
-    const runningSec = state.busyForMs != null ? `${(state.busyForMs / 1000).toFixed(1)}s` : 'recently';
 
     if (record.count >= 3) {
       return {
         shortCircuit: true,
-        message: `Refusing repeated get_subagent_status call for ${id}: subagent is still running with no new output. You are notified automatically when it finishes — end your turn now.`,
+        message: `Refusing repeated ${callLabel} call: still running with no new output. You are notified automatically when this finishes — end your turn now.`,
       };
     }
 
@@ -1801,53 +1793,36 @@ export class PlannerChatService {
     };
   }
 
-  /**
-   * PA-78: Short-circuit repeat read_session_output calls within the same turn on tracked subagents when output is unchanged.
-   */
+  private checkSubagentStatusTurnForChat(
+    chatId: string,
+    kind: 'coding_agent' | 'pocket_agent',
+    id: string,
+    state: { busy: boolean; busyForMs?: number | null; lastActivityAt?: number | null; summary?: string },
+  ): { shortCircuit: false } | { shortCircuit: true; message: string } {
+    const runningSec = state.busyForMs != null ? `${(state.busyForMs / 1000).toFixed(1)}s` : 'recently';
+    return this.checkPollTurnForChat(
+      chatId,
+      `status:${kind}:${id}`,
+      `get_subagent_status call for ${id}`,
+      runningSec,
+      state.lastActivityAt ?? null,
+    );
+  }
+
   private checkSessionOutputTurnForChat(
     chatId: string,
     sessionId: string,
     info: SessionInfo,
   ): { shortCircuit: false } | { shortCircuit: true; message: string } {
-    let map = this.sessionOutputChecksThisTurnByChat.get(chatId);
-    if (!map) {
-      map = new Map();
-      this.sessionOutputChecksThisTurnByChat.set(chatId, map);
-    }
-    const record = map.get(sessionId);
     const now = Date.now();
-    if (!record) {
-      map.set(sessionId, { lastCheckedAt: now, lastActivityAt: info.lastActivityAt, count: 0 });
-      return { shortCircuit: false };
-    }
-
-    if (
-      info.lastActivityAt != null &&
-      record.lastActivityAt != null &&
-      info.lastActivityAt > record.lastActivityAt
-    ) {
-      record.lastCheckedAt = now;
-      record.lastActivityAt = info.lastActivityAt;
-      record.count = 0;
-      return { shortCircuit: false };
-    }
-
-    record.count++;
-    const elapsedSec = ((now - record.lastCheckedAt) / 1000).toFixed(1);
-    record.lastCheckedAt = now;
     const runningSec = info.busySince != null ? `${((now - info.busySince) / 1000).toFixed(1)}s` : 'recently';
-
-    if (record.count >= 3) {
-      return {
-        shortCircuit: true,
-        message: `Refusing repeated read_session_output call for subagent session ${sessionId}: still running with no new output. You are notified automatically when this finishes — end your turn now.`,
-      };
-    }
-
-    return {
-      shortCircuit: true,
-      message: `Session output unchanged since your last check ${elapsedSec}s ago (running ${runningSec}, no new output). You are notified automatically when this finishes — end your turn now.`,
-    };
+    return this.checkPollTurnForChat(
+      chatId,
+      `output:${sessionId}`,
+      `read_session_output call for subagent session ${sessionId}`,
+      runningSec,
+      info.lastActivityAt ?? null,
+    );
   }
 
   /**
@@ -1882,13 +1857,13 @@ export class PlannerChatService {
         summary: `Timer check_back_in fired after ${seconds}s.`,
       });
     }, seconds * 1000);
-    timer.unref();
+    timer.unref?.();
     timers.add(timer);
     return { ok: true };
   }
 
   /**
-   * PA-78: Stop/terminate a subagent session or chat.
+   * PA-78: Stop/terminate a subagent session.
    */
   private async stopSubagentForChat(
     chatId: string,
@@ -1896,28 +1871,23 @@ export class PlannerChatService {
     id: string,
   ): Promise<{ ok: boolean; message: string }> {
     if (kind === 'pocket_agent') {
-      const chat = this.get(id);
-      if (!chat) {
-        return { ok: false, message: `No subagent chat found with id ${id}.` };
-      }
-      if (!this.isBusy(id)) {
-        return { ok: true, message: `Subagent chat ${id} is not currently running.` };
-      }
-      const controller = this.activeTurnControllers.get(id);
-      if (controller) {
-        controller.abort();
-        this.activeTurnControllers.delete(id);
-      }
-      for (const [approvalId, pending] of this.pendingTurns.entries()) {
-        if (pending.chatId === id) {
-          this.pendingTurns.delete(approvalId);
-        }
-      }
-      this.supervisor.forget('pocket_agent', id);
-      return { ok: true, message: `Stopped subagent chat ${id}.` };
+      return {
+        ok: false,
+        message: 'Stopping pocket_agent subagents is not supported — only coding_agent sessions can be terminated.',
+      };
     }
     const info = this.opts.sessions.find(id);
     if (!info) return { ok: false, message: `No session found with id ${id}.` };
+
+    const isOwned =
+      (info.plannerChatId && info.plannerChatId === chatId) ||
+      (this.subagentSessionsByChat.get(chatId)?.has(id) ?? false);
+    if (!isOwned) {
+      return {
+        ok: false,
+        message: `Refusing to terminate session ${id}: session was not started by this chat.`,
+      };
+    }
     if (isTerminalStatus(info.status)) {
       return { ok: true, message: `Subagent session ${id} has already ended (status: ${info.status}).` };
     }

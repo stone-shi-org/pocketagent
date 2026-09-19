@@ -481,11 +481,44 @@ describe('planner tools against a real app context', () => {
       },
     });
 
+    const baseInfo = deps.sessions.find(sessionId)!;
+    vi.spyOn(deps.sessions, 'find').mockReturnValue({ ...baseInfo, busy: true });
+
     const res1 = await tool.execute(deps, { sessionId });
     expect(res1).toContain('no readable transcript yet');
 
     const res2 = await tool.execute(deps, { sessionId });
     expect(res2).toContain('Session output unchanged since your last check');
+  });
+
+  it('read_session_output does not short-circuit a completed (busy: false) tracked subagent', async () => {
+    t = await createTestApp();
+    const sessionId = 'completed-subagent-session';
+    t.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
+         VALUES (?, 'Subagent', 'shell', 'bash', ?, 'exited', 'terminal', ?, 80, 24)`,
+      )
+      .run(sessionId, t.projectDir, Date.now());
+
+    const tool = findPlannerTool('read_session_output')!;
+    let checkCalls = 0;
+    const deps = depsFor(t, undefined, {
+      subagents: {
+        ...SUBAGENTS_UNAVAILABLE,
+        isTrackedSubagentSession: (id) => id === sessionId,
+        checkSessionOutputTurn: () => {
+          checkCalls++;
+          return { shortCircuit: true, message: 'should not be called' };
+        },
+      },
+    });
+
+    const res1 = await tool.execute(deps, { sessionId });
+    expect(res1).toContain('no readable transcript yet');
+    const res2 = await tool.execute(deps, { sessionId });
+    expect(res2).toContain('no readable transcript yet');
+    expect(checkCalls).toBe(0);
   });
 
   it('read_file reads a file inside an added project workspace', async () => {
@@ -2076,49 +2109,32 @@ describe('stop_subagent', () => {
     expect(tool.readOnly).toBe(false);
   });
 
-  it('reports an unknown session id for coding_agent plainly', async () => {
+  it('reports when stop_subagent is not available in the environment', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('stop_subagent')!;
     const result = await tool.execute(depsFor(t), { kind: 'coding_agent', id: 'does-not-exist' });
-    expect(result).toMatch(/No session found with id does-not-exist/);
+    expect(result).toBe('stop_subagent is not available in this environment.');
   });
 
-  it('reports if coding_agent session is already ended', async () => {
+  it('delegates coding_agent stop to subagents dependency', async () => {
     t = await createTestApp();
-    const sessionId = 'finished-subagent';
-    t.db
-      .prepare(
-        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
-         VALUES (?, 'Subagent', 'shell', 'bash', ?, 'exited', 'terminal', ?, 80, 24)`,
-      )
-      .run(sessionId, t.projectDir, Date.now());
-
     const tool = findPlannerTool('stop_subagent')!;
-    const result = await tool.execute(depsFor(t), { kind: 'coding_agent', id: sessionId });
-    expect(result).toMatch(/has already ended/);
-  });
-
-  it('terminates a live coding_agent session', async () => {
-    t = await createTestApp();
-    const sessionId = 'live-subagent';
-    t.db
-      .prepare(
-        `INSERT INTO sessions (id, title, agent, command, cwd, status, transport, created_at, cols, rows)
-         VALUES (?, 'Subagent', 'shell', 'bash', ?, 'running', 'terminal', ?, 80, 24)`,
-      )
-      .run(sessionId, t.projectDir, Date.now());
-
-    let terminatedId = '';
-    const origTerminate = t.context.sessions.terminate.bind(t.context.sessions);
-    vi.spyOn(t.context.sessions, 'terminate').mockImplementation((id: string) => {
-      terminatedId = id;
-      return origTerminate(id);
+    let stoppedKind = '';
+    let stoppedId = '';
+    const deps = depsFor(t, undefined, {
+      subagents: {
+        ...SUBAGENTS_UNAVAILABLE,
+        stopSubagent: async (kind, id) => {
+          stoppedKind = kind;
+          stoppedId = id;
+          return { ok: true, message: `Terminated coding subagent session ${id}.` };
+        },
+      },
     });
-
-    const tool = findPlannerTool('stop_subagent')!;
-    const result = await tool.execute(depsFor(t), { kind: 'coding_agent', id: sessionId });
-    expect(result).toMatch(/Terminated coding subagent session/);
-    expect(terminatedId).toBe(sessionId);
+    const result = await tool.execute(deps, { kind: 'coding_agent', id: 'session-123' });
+    expect(result).toBe('Terminated coding subagent session session-123.');
+    expect(stoppedKind).toBe('coding_agent');
+    expect(stoppedId).toBe('session-123');
   });
 
   it('delegates pocket_agent stop to subagents dependency', async () => {
