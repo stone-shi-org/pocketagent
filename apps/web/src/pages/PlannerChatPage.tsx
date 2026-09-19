@@ -47,6 +47,7 @@ interface Props {
   chatId: string;
   onBack: () => void;
   onOpenSession?: (sessionId: string) => void;
+  onOpenPlannerChat?: (chatId: string) => void;
   onApiError: (error: unknown) => void;
 }
 
@@ -98,11 +99,18 @@ function toModelInfos(models: PlannerModel[]): ModelInfo[] {
  * two, since `PermissionDecision` has no workspace/global concept of its
  * own. A full drag/minimize `ApprovalSheet` mirror is future scope.
  */
-export function PlannerChatPage({ chatId, onBack, onOpenSession, onApiError }: Props): JSX.Element {
+export function PlannerChatPage({
+  chatId,
+  onBack,
+  onOpenSession,
+  onOpenPlannerChat,
+  onApiError,
+}: Props): JSX.Element {
   const [chat, setChat] = useState<PlannerChat | null>(null);
   const [models, setModels] = useState<PlannerModel[]>([]);
   const [transcript, setTranscript] = useState<TranscriptState | null>(null);
   const [subagents, setSubagents] = useState<SessionInfo[]>([]);
+  const [plannerSubagents, setPlannerSubagents] = useState<PlannerChat[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // PA-36: this page had no "gone" detection at all before — a deleted chat
@@ -136,8 +144,9 @@ export function PlannerChatPage({ chatId, onBack, onOpenSession, onApiError }: P
 
   const refreshSubagents = useCallback(async () => {
     try {
-      const { subagents: list } = await api.listPlannerChatSubagents(chatId);
+      const { subagents: list, plannerChats: pList } = await api.listPlannerChatSubagents(chatId);
       setSubagents(list);
+      setPlannerSubagents(pList ?? []);
     } catch {
       // ignore
     }
@@ -145,18 +154,19 @@ export function PlannerChatPage({ chatId, onBack, onOpenSession, onApiError }: P
 
   const load = useCallback(async () => {
     try {
-      const [{ chats }, { models: modelList }, { events }, { subagents: subagentList }] = await Promise.all([
+      const [{ chats }, { models: modelList }, { events }, subagentData] = await Promise.all([
         api.listPlannerChats(),
         api.listPlannerModels(),
         api.plannerChatHistory(chatId),
-        api.listPlannerChatSubagents(chatId).catch(() => ({ subagents: [] })),
+        api.listPlannerChatSubagents(chatId).catch(() => ({ subagents: [], plannerChats: [] })),
       ]);
       const found = chats.find((c) => c.id === chatId) ?? null;
       setChat(found);
       setMissing(found === null);
       setModels(modelList);
       setTranscript(applyEvents(emptyTranscript(), events));
-      setSubagents(subagentList);
+      setSubagents(subagentData.subagents ?? []);
+      setPlannerSubagents(subagentData.plannerChats ?? []);
       setError(null);
     } catch (err) {
       onApiError(err);
@@ -410,6 +420,23 @@ export function PlannerChatPage({ chatId, onBack, onOpenSession, onApiError }: P
         )}
       </div>
 
+      {chat?.parentChatId && (
+        <div className="planner-parent-chat-banner" role="status">
+          <Icon name="agent-generic" size={13} />
+          <span>Spawned as a subagent by</span>
+          <button
+            type="button"
+            className="planner-parent-chat-link"
+            onClick={() => {
+              if (onOpenPlannerChat) onOpenPlannerChat(chat.parentChatId!);
+              else window.location.hash = `#/planner/${encodeURIComponent(chat.parentChatId!)}`;
+            }}
+          >
+            parent chat
+          </button>
+        </div>
+      )}
+
       {chat?.skipToolApprovalsEnabled === true && (
         // PA-10 disclosure. CLAUDE.md's first invariant requires that a session
         // running with approvals bypassed "say so persistently in the UI, not
@@ -429,12 +456,12 @@ export function PlannerChatPage({ chatId, onBack, onOpenSession, onApiError }: P
         </div>
       )}
 
-      {subagents.length > 0 && (
+      {subagents.length + plannerSubagents.length > 0 && (
         <div className="planner-subagents-panel" aria-label="Subagents spawned by this chat">
           <div className="planner-subagents-header">
             <Icon name="agent-generic" size={13} />
             <span className="planner-subagents-title">Subagents</span>
-            <span className="planner-subagents-count">{subagents.length}</span>
+            <span className="planner-subagents-count">{subagents.length + plannerSubagents.length}</span>
           </div>
           <div className="planner-subagents-list">
             {subagents.map((subagent) => {
@@ -469,6 +496,31 @@ export function PlannerChatPage({ chatId, onBack, onOpenSession, onApiError }: P
                 </a>
               );
             })}
+            {plannerSubagents.map((subChat) => (
+              <a
+                key={subChat.id}
+                href={`#/planner/${encodeURIComponent(subChat.id)}`}
+                className="planner-subagent-card"
+                onClick={(e) => {
+                  e.preventDefault();
+                  if (onOpenPlannerChat) {
+                    onOpenPlannerChat(subChat.id);
+                  } else {
+                    window.location.hash = `#/planner/${encodeURIComponent(subChat.id)}`;
+                  }
+                }}
+                title={`${subChat.title ?? 'Untitled chat'} (Pocket Agent · ${subChat.workspaceName})`}
+              >
+                <span className="planner-subagent-status">
+                  <Icon name="agent-generic" size={13} />
+                </span>
+                <div className="planner-subagent-info">
+                  <span className="planner-subagent-name">{subChat.title ?? 'Untitled chat'}</span>
+                  <span className="planner-subagent-cwd">Pocket Agent · {subChat.workspaceName}</span>
+                </div>
+                <Icon name="chevron-right" size={12} className="planner-subagent-arrow" />
+              </a>
+            ))}
           </div>
         </div>
       )}

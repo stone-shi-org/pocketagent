@@ -45,6 +45,7 @@ export function PocketAgentsSection({
   activeChatId,
 }: Props): JSX.Element | null {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [subagentsCollapsed, setSubagentsCollapsed] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState<Set<string>>(() => new Set());
   // Which workspace's "..." menu is open, keyed by workspace id — same
   // one-at-a-time, keyed-by-owner pattern `ProjectList`'s `menuFor` uses.
@@ -64,6 +65,14 @@ export function PocketAgentsSection({
 
   const toggle = (id: string): void =>
     setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const toggleSubagents = (id: string): void =>
+    setSubagentsCollapsed((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -150,6 +159,9 @@ export function PocketAgentsSection({
       {workspaces.map((ws) => {
         const isCollapsed = collapsed.has(ws.id);
         const wsChats = chats.filter((c) => c.workspaceId === ws.id);
+        const mainChats = wsChats.filter((c) => !c.parentChatId);
+        const subagentChats = wsChats.filter((c) => !!c.parentChatId);
+        const isSubagentsExpanded = !subagentsCollapsed.has(ws.id);
         return (
           <div key={ws.id}>
             <div className="project-head">
@@ -208,7 +220,7 @@ export function PocketAgentsSection({
               <div className="project-empty">No chats yet</div>
             )}
             {!isCollapsed &&
-              wsChats.map((chat) => (
+              mainChats.map((chat) => (
                 <div key={chat.id} className="chat-line">
                   <button
                     type="button"
@@ -229,6 +241,75 @@ export function PocketAgentsSection({
                   </button>
                 </div>
               ))}
+            {!isCollapsed && subagentChats.length > 0 && (
+              <div className="subagents-group">
+                <div className="subagents-head project-head">
+                  <button
+                    type="button"
+                    className="project-name subagents-toggle"
+                    onClick={() => toggleSubagents(ws.id)}
+                    aria-expanded={isSubagentsExpanded}
+                    title="Subagents started by a planner chat"
+                  >
+                    <span className="project-icon">
+                      <Icon name="agent-generic" className="folder" />
+                    </span>
+                    <span className="project-label">Subagents</span>
+                    <Icon
+                      name="chevron-down"
+                      className={`project-caret${isSubagentsExpanded ? '' : ' closed'}`}
+                    />
+                    <span className="project-count">{subagentChats.length}</span>
+                  </button>
+                </div>
+                {isSubagentsExpanded &&
+                  subagentChats.map((chat) => (
+                    <div key={chat.id} className="chat-line">
+                      <button
+                        type="button"
+                        className={`chat-row${activeChatId === chat.id ? ' active' : ''}`}
+                        onClick={() => onOpenChat(chat.id)}
+                        title={chat.title ?? 'Untitled chat'}
+                      >
+                        <span className="chat-title">
+                          {chat.parentChatId && (
+                            <span
+                              className="chat-planner-badge"
+                              role="button"
+                              tabIndex={0}
+                              aria-label="Spawned by a planner chat"
+                              title="Spawned by a planner chat. Open parent planner chat."
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onOpenChat(chat.parentChatId!);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.stopPropagation();
+                                  e.preventDefault();
+                                  onOpenChat(chat.parentChatId!);
+                                }
+                              }}
+                            >
+                              <Icon name="agent-generic" size={13} />
+                            </span>
+                          )}
+                          {chat.title ?? 'Untitled chat'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className="chat-remove"
+                        onClick={() => removeChat(chat.id)}
+                        aria-label={`Delete ${chat.title ?? 'Untitled chat'}`}
+                        title="Delete chat"
+                      >
+                        <Icon name="close" size={14} />
+                      </button>
+                    </div>
+                  ))}
+              </div>
+            )}
           </div>
         );
       })}

@@ -1124,7 +1124,7 @@ describe('GET /api/planner/chats/:id/subagents (PA-75)', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ subagents: [] });
+    expect(res.json()).toEqual({ subagents: [], plannerChats: [] });
   });
 
   it('returns subagents associated with this planner chat id', async () => {
@@ -1148,6 +1148,12 @@ describe('GET /api/planner/chats/:id/subagents (PA-75)', () => {
       plannerChatId: chat.id,
     });
 
+    // Create a subagent planner chat pointing to this chat
+    const childChat = t.context.plannerChats.create({
+      parentChatId: chat.id,
+      title: 'Child Planner Chat',
+    });
+
     // Create another session without planner chat
     await t.context.sessions.create({
       agent: 'claude',
@@ -1165,10 +1171,13 @@ describe('GET /api/planner/chats/:id/subagents (PA-75)', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    const subagents = res.json().subagents;
-    expect(subagents).toHaveLength(1);
-    expect(subagents[0].id).toBe(session.id);
-    expect(subagents[0].plannerChatId).toBe(chat.id);
+    const body = res.json();
+    expect(body.subagents).toHaveLength(1);
+    expect(body.subagents[0].id).toBe(session.id);
+    expect(body.subagents[0].plannerChatId).toBe(chat.id);
+    expect(body.plannerChats).toHaveLength(1);
+    expect(body.plannerChats[0].id).toBe(childChat.id);
+    expect(body.plannerChats[0].parentChatId).toBe(chat.id);
   });
 });
 

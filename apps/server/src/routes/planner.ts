@@ -1022,7 +1022,10 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const { id } = request.params as { id: string };
     const chat = app.pocket.plannerChats.get(id);
     if (!chat) return notFound(reply, 'Chat not found.');
-    return { subagents: app.pocket.sessions.listByPlannerChatId(id) };
+    return {
+      subagents: app.pocket.sessions.listByPlannerChatId(id),
+      plannerChats: app.pocket.plannerChats.listByParentChatId(id),
+    };
   });
 
   /**

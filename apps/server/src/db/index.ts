@@ -1238,13 +1238,15 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE mcp_registries ADD COLUMN reported_instructions TEXT;
   `,
   // PA-75: provenance for planner-spawned subagents. Links a coding-agent
-  // session back to the Pocket Agent chat that created it via
-  // `start_subagent_session`. ON DELETE SET NULL keeps the session row when
+  // session or child Pocket Agent chat back to the Pocket Agent chat that created
+  // it via `start_subagent_session`. ON DELETE SET NULL keeps the session row when
   // the planner chat is deleted, reverting it to an ordinary chat in its
-  // project folder.
+  // project folder or Pocket Agent.
   `
   ALTER TABLE sessions ADD COLUMN planner_chat_id TEXT REFERENCES planner_chats(id) ON DELETE SET NULL;
   CREATE INDEX IF NOT EXISTS idx_sessions_planner_chat_id ON sessions (planner_chat_id);
+  ALTER TABLE planner_chats ADD COLUMN parent_chat_id TEXT REFERENCES planner_chats(id) ON DELETE SET NULL;
+  CREATE INDEX IF NOT EXISTS idx_planner_chats_parent ON planner_chats (parent_chat_id);
   `,
 ];
 
@@ -1458,6 +1460,15 @@ export function openDatabase(databasePath: string): Db {
   if (sessionColumns.size > 0 && !sessionColumns.has('planner_chat_id')) {
     db.exec('ALTER TABLE sessions ADD COLUMN planner_chat_id TEXT REFERENCES planner_chats(id) ON DELETE SET NULL');
     db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_planner_chat_id ON sessions (planner_chat_id)');
+  }
+  const plannerChatColumns = new Set(
+    (db.prepare('PRAGMA table_info(planner_chats)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (plannerChatColumns.size > 0 && !plannerChatColumns.has('parent_chat_id')) {
+    db.exec('ALTER TABLE planner_chats ADD COLUMN parent_chat_id TEXT REFERENCES planner_chats(id) ON DELETE SET NULL');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_planner_chats_parent ON planner_chats (parent_chat_id)');
   }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 

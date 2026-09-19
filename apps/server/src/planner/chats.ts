@@ -27,6 +27,7 @@ import {
   readPlannerChat,
   readPlannerChatMemoryFoldedTurns,
   readPlannerChats,
+  readPlannerChatsByParentId,
   readPlannerSettings,
   resolvePlannerUrlFetchApiKey,
   resolvePlannerWebSearchApiKey,
@@ -381,6 +382,10 @@ export class PlannerChatService {
     return readPlannerChat(this.opts.db, id);
   }
 
+  listByParentChatId(parentChatId: string): PlannerChat[] {
+    return readPlannerChatsByParentId(this.opts.db, parentChatId);
+  }
+
   create(input: {
     workspaceId?: string;
     title?: string;
@@ -392,6 +397,10 @@ export class PlannerChatService {
      * can. See `PlannerChat.skipToolApprovalsEnabled`.
      */
     skipToolApprovals?: boolean;
+    /**
+     * PA-75: provenance for planner-spawned subagent chats.
+     */
+    parentChatId?: string | null;
   }): PlannerChat {
     const workspace = input.workspaceId
       ? this.opts.plannerWorkspaces.get(input.workspaceId)
@@ -411,6 +420,7 @@ export class PlannerChatService {
       createdAt: now,
       lastActivityAt: now,
       skipToolApprovalsEnabled: input.skipToolApprovals === true,
+      parentChatId: input.parentChatId ?? null,
     };
     insertPlannerChat(this.opts.db, chat);
     return chat;
@@ -1341,7 +1351,7 @@ export class PlannerChatService {
     const workspace = this.opts.plannerWorkspaces.get(workspaceId);
     if (!workspace) throw new Error(`No Pocket Agent workspace found with id ${workspaceId}.`);
 
-    const child = this.create({ workspaceId });
+    const child = this.create({ workspaceId, parentChatId: callerChatId });
     this.spawnDepthByChat.set(child.id, callerDepth + 1);
 
     const turn = this.sendMessage(child.id, prompt);

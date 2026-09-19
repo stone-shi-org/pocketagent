@@ -235,6 +235,7 @@ export function App(): JSX.Element {
           chatId={route.chatId}
           onBack={() => navigate({ name: 'planner' })}
           onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
+          onOpenPlannerChat={(chatId) => navigate({ name: 'planner-chat', chatId })}
           onApiError={handleApiError}
         />
       </Suspense>

@@ -459,6 +459,11 @@ export const PlannerChat = z.object({
    * the moment it was created". `PlannerChatPage` badges it.
    */
   skipToolApprovalsEnabled: z.boolean(),
+  /**
+   * PA-75: provenance for planner-spawned subagent chats. Points to the parent
+   * PlannerChat id that created this subagent chat via `start_subagent_session`.
+   */
+  parentChatId: z.string().nullable().optional(),
 });
 export type PlannerChat = z.infer<typeof PlannerChat>;
 
@@ -482,6 +487,7 @@ export const CreatePlannerChatRequest = z.object({
   workspaceId: z.string().optional(),
   title: z.string().max(200).optional(),
   modelId: z.string().max(200).optional(),
+  parentChatId: z.string().nullable().optional(),
 });
 export type CreatePlannerChatRequest = z.infer<typeof CreatePlannerChatRequest>;
 
@@ -834,6 +840,7 @@ export function pocketAgentLabelSlug(name: string): string {
 
 export const PlannerChatSubagentsResponse = z.object({
   subagents: z.array(SessionInfo),
+  plannerChats: z.array(PlannerChat).optional(),
 });
 export type PlannerChatSubagentsResponse = z.infer<typeof PlannerChatSubagentsResponse>;
 

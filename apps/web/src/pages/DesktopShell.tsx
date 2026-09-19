@@ -694,6 +694,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                       chatId={tab.route.chatId}
                       onBack={() => closeTab(tab.id)}
                       onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
+                      onOpenPlannerChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}
                       onApiError={onApiError}
                     />
                   </Suspense>

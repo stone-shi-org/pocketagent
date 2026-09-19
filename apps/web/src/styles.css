@@ -5912,7 +5912,32 @@ button.chat-rate-limit-badge {
   color: var(--text);
 }
 
-/* PA-75: Subagents list in planner chat page */
+/* PA-75: Parent chat banner and subagents list in planner chat page */
+.planner-parent-chat-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: var(--bg-elev-1);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.planner-parent-chat-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.planner-parent-chat-link:hover {
+  color: var(--accent-hover, var(--accent));
+}
+
 .planner-subagents-panel {
   border-bottom: 1px solid var(--border);
   padding: 8px 16px;

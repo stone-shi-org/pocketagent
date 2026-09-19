@@ -628,6 +628,7 @@ interface PlannerChatDbRow {
   created_at: number;
   last_activity_at: number;
   skip_tool_approvals: number;
+  parent_chat_id?: string | null;
 }
 
 function chatFromDbRow(row: PlannerChatDbRow): PlannerChat {
@@ -640,6 +641,7 @@ function chatFromDbRow(row: PlannerChatDbRow): PlannerChat {
     createdAt: row.created_at,
     lastActivityAt: row.last_activity_at,
     skipToolApprovalsEnabled: row.skip_tool_approvals === 1,
+    parentChatId: row.parent_chat_id ?? null,
   };
 }
 
@@ -654,6 +656,13 @@ export function readPlannerChats(db: Db, workspaceId?: string): PlannerChat[] {
   return rows.map(chatFromDbRow);
 }
 
+export function readPlannerChatsByParentId(db: Db, parentChatId: string): PlannerChat[] {
+  const rows = db
+    .prepare('SELECT * FROM planner_chats WHERE parent_chat_id = ? ORDER BY last_activity_at DESC')
+    .all(parentChatId) as PlannerChatDbRow[];
+  return rows.map(chatFromDbRow);
+}
+
 export function readPlannerChat(db: Db, id: string): PlannerChat | null {
   const row = db.prepare('SELECT * FROM planner_chats WHERE id = ?').get(id) as
     | PlannerChatDbRow
@@ -665,10 +674,14 @@ export function insertPlannerChat(db: Db, chat: PlannerChat): void {
   db.prepare(
     `INSERT INTO planner_chats
        (id, workspace_id, workspace_name, title, last_model_id, created_at, last_activity_at,
-        skip_tool_approvals)
+        skip_tool_approvals, parent_chat_id)
      VALUES (@id, @workspaceId, @workspaceName, @title, @lastModelId, @createdAt, @lastActivityAt,
-        @skipToolApprovals)`,
-  ).run({ ...chat, skipToolApprovals: chat.skipToolApprovalsEnabled ? 1 : 0 });
+        @skipToolApprovals, @parentChatId)`,
+  ).run({
+    ...chat,
+    skipToolApprovals: chat.skipToolApprovalsEnabled ? 1 : 0,
+    parentChatId: chat.parentChatId ?? null,
+  });
 }
 
 /** Partial update: only the keys present in `patch` are touched. */
