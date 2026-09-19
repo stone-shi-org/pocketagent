@@ -7,7 +7,8 @@ import readline from 'node:readline';
  * server.
  *
  * Third shape of "structured" in this codebase: `StructuredSession` holds an
- * SDK query open, `AgySession` spawns a subprocess per turn, `OpencodeSession`
+ * SDK query open, `AgySession` holds one `agy` subprocess open per session and
+ * writes NDJSON prompts to its stdin, `OpencodeSession`
  * talks HTTP + SSE to a shared daemon. This one talks newline-delimited
  * JSON-RPC 2.0 over the child's stdin/stdout (confirmed empirically against
  * the real, installed CLI v0.147.0 — the protocol's own schema says nothing

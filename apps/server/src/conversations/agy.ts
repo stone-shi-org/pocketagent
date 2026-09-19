@@ -6,10 +6,11 @@ import type { AgentEvent } from '@pocketagent/protocol';
 /**
  * Reading agy's own on-disk conversation transcripts.
  *
- * Unlike Claude Code, agy's live `stream-json` process is fire-and-forget per
- * turn (see `AgySession`'s class doc comment) and PocketAgent's own in-memory
- * `EventBuffer` is the only place a live conversation's history lives — gone
- * the moment the session is evicted or the server restarts. `/history`
+ * Unlike Claude Code, agy streams a live conversation and keeps no transcript
+ * PocketAgent can read back mid-session (see `AgySession`'s class doc
+ * comment), so PocketAgent's own in-memory `EventBuffer` is the only place a
+ * live conversation's history lives — gone the moment the session is evicted
+ * or the server restarts. `/history`
  * (`routes/sessions.ts`) fell back to `ConversationStore`, which only ever
  * finds Claude's `.jsonl` transcripts, so a finished agy chat always looked
  * empty when reopened. Confirmed live (v1.1.18) that agy keeps its own

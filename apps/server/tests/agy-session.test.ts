@@ -45,7 +45,7 @@ describe('AgySession', () => {
     session = null;
   });
 
-  it('starts running immediately with no process yet, since print mode is per-turn', async () => {
+  it('starts running immediately with no process yet, since the child is spawned by the first prompt', async () => {
     session = new AgySession(makeSpec());
     await session.start();
     expect(session.status).toBe('running');
@@ -259,6 +259,83 @@ describe('AgySession', () => {
     expect(session.agentSessionId).toBe(firstId);
   });
 
+  /**
+   * The regression this whole process model exists for.
+   *
+   * agy's `run_command` converts any command still running past
+   * `WaitMsBeforeAsync` into a background task, and the model will happily
+   * end its turn while one is still `RUNNING` ("waiting for the tests to
+   * finish"). Under the per-turn `agy -p` process this replaced, the turn
+   * ending exited agy, which cancelled the task — "Cancelling steps [614] /
+   * CLI store manager shutting down" in agy's own log, a 2-minute `pnpm test`
+   * killed 71s in, and a session left idle insisting it was still waiting.
+   *
+   * The fixture's stand-in is a timer that can only fire if the process is
+   * still alive after the turn, so this fails the moment anything goes back
+   * to ending the process per turn.
+   */
+  it('keeps a background task running after the turn that started it completes', async () => {
+    const taskFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-bg-')), 'task.done');
+    session = new AgySession(
+      makeSpec({
+        env: {
+          ...(process.env as Record<string, string>),
+          AGY_FIXTURE_BACKGROUND_TASK_FILE: taskFile,
+        },
+      }),
+    );
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('BACKGROUND_TASK');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+    await waitFor(() => session?.busy === false);
+    // The turn is genuinely over and the session genuinely idle before the
+    // task has finished — this is exactly the window that used to kill it.
+    expect(fs.existsSync(taskFile)).toBe(false);
+
+    await waitFor(() => fs.existsSync(taskFile), { timeout: 5_000 });
+    expect(fs.readFileSync(taskFile, 'utf8')).toBe('FINISHED');
+
+    // And the conversation is still there to be asked about the result.
+    session.prompt('and?');
+    await waitFor(() => events.filter((e) => e.kind === 'turn_complete').length === 2);
+    expect(session.isAlive()).toBe(true);
+  }, 15_000);
+
+  /**
+   * agy reports its `result` figures cumulatively over the conversation once
+   * one process serves several turns (see `AgySession.cumulative`), so each
+   * turn's footer has to be handed its own share — otherwise duration, token
+   * counts and tok/s all grow without bound from the second turn on.
+   */
+  it('reports per-turn stats, not the conversation totals agy actually sends', async () => {
+    session = new AgySession(makeSpec());
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('first');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+    session.prompt('second');
+    await waitFor(() => events.filter((e) => e.kind === 'turn_complete').length === 2);
+
+    const [first, second] = events.filter((e) => e.kind === 'turn_complete');
+    // The fixture adds 10/5/1 per turn and reports the running total, so the
+    // second turn arrives as 20/10/2 on the wire and must still read as its
+    // own 10/5/1 here.
+    expect(first).toMatchObject({ inputTokens: 10, outputTokens: 5, numTurns: 1 });
+    expect(second).toMatchObject({ inputTokens: 10, outputTokens: 5, numTurns: 1 });
+
+    // Likewise the duration: the fixture claims a total 30s then 60s, and
+    // both turns really took milliseconds.
+    for (const turn of [first, second]) {
+      expect(turn).toMatchObject({ isError: false });
+      const durationMs = (turn as { durationMs: number | null }).durationMs;
+      expect(durationMs).not.toBeNull();
+      expect(durationMs as number).toBeLessThan(30_000);
+    }
+  });
+
   it('queues a second prompt sent while the first is still running', async () => {
     session = new AgySession(makeSpec());
     await session.start();
@@ -368,7 +445,16 @@ describe('AgySession', () => {
       return argv.filter((_a, i) => argv[i - 1] === '--add-dir');
     }
 
-    it('passes --add-dir <spec.cwd> on a normal turn', async () => {
+    /**
+     * Just the session's own long-lived children — not the startup `/help`
+     * probe or the `models` subcommand, which are separate one-shot
+     * invocations and have no `--input-format`.
+     */
+    function streamChildren(file: string): string[][] {
+      return argvLog(file).filter((argv) => argv.includes('--input-format'));
+    }
+
+    it('passes --add-dir <spec.cwd> when it spawns the session child', async () => {
       session = new AgySession(specWithArgvLog(argvFile));
       await session.start();
       const events = collect(session);
@@ -376,17 +462,22 @@ describe('AgySession', () => {
       session.prompt('hello');
       await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
 
-      const turn = argvLog(argvFile).find((argv) => argv.includes('hello'));
-      expect(turn).toBeDefined();
-      expect(addDirs(turn as string[])).toEqual([session.spec.cwd]);
+      const [child] = streamChildren(argvFile);
+      expect(child).toBeDefined();
+      expect(addDirs(child as string[])).toEqual([session.spec.cwd]);
+      // The prompt travels on stdin, never in argv — `--input-format
+      // stream-json` rejects a prompt given on the command line outright.
+      expect(child).not.toContain('hello');
     });
 
     /**
-     * A per-turn respawn means the flag has to be re-passed every time —
-     * getting it onto only the first turn would leave every later turn in
-     * the scratch project, which is the original bug for all but one reply.
+     * The core guarantee of the long-lived process, asserted on argv because
+     * that is the only place a second spawn would show up: two turns must be
+     * served by *one* child. A per-turn respawn is what cancelled agy's
+     * background tasks between turns (see `AgySession`'s class doc comment),
+     * so a regression here is that bug returning.
      */
-    it('re-passes --add-dir on a resumed turn, alongside --conversation', async () => {
+    it('serves consecutive turns from one child rather than respawning per turn', async () => {
       session = new AgySession(specWithArgvLog(argvFile));
       await session.start();
       const events = collect(session);
@@ -396,11 +487,29 @@ describe('AgySession', () => {
       session.prompt('second');
       await waitFor(() => events.filter((e) => e.kind === 'turn_complete').length === 2);
 
-      const second = argvLog(argvFile).find((argv) => argv.includes('second'));
-      expect(second).toBeDefined();
-      expect(addDirs(second as string[])).toEqual([session.spec.cwd]);
-      // The whole point of a resumed turn: both flags travel together.
-      expect(second).toContain('--conversation');
+      expect(streamChildren(argvFile)).toHaveLength(1);
+    });
+
+    /**
+     * A resumed session's child has to carry both flags: `--conversation` to
+     * continue the transcript, and `--add-dir` so it does so in the session's
+     * own directory rather than agy's scratch project.
+     */
+    it('passes --add-dir alongside --conversation when resuming a conversation', async () => {
+      session = new AgySession(
+        specWithArgvLog(argvFile, { resumeAgentSessionId: 'prior-conversation-id' }),
+      );
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('hello');
+      await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+      const [child] = streamChildren(argvFile);
+      expect(child).toBeDefined();
+      expect(addDirs(child as string[])).toEqual([session.spec.cwd]);
+      expect(child).toContain('--conversation');
+      expect(child).toContain('prior-conversation-id');
     });
 
     /**
@@ -429,9 +538,52 @@ describe('AgySession', () => {
       session.prompt('hello');
       await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
 
-      const turn = argvLog(argvFile).find((argv) => argv.includes('hello'));
-      expect(addDirs(turn as string[])).toEqual([projectDir]);
+      const [child] = streamChildren(argvFile);
+      expect(addDirs(child as string[])).toEqual([projectDir]);
       expect(projectDir).not.toBe(process.cwd());
+    });
+
+    /**
+     * agy answers its own slash commands inside the CLI and refuses them on
+     * the stream-json input, so they have to go out as their own `--print`
+     * invocation — carrying the session's conversation so `/model` and
+     * friends act on the right one.
+     */
+    it('routes a slash command to a one-shot --print invocation, not the live child', async () => {
+      session = new AgySession(specWithArgvLog(argvFile));
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('hello');
+      await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+      session.prompt('/model gemini-3.6-flash-high');
+      await waitFor(() => events.filter((e) => e.kind === 'turn_complete').length === 2);
+
+      const slash = argvLog(argvFile).find((argv) => argv.includes('/model gemini-3.6-flash-high'));
+      expect(slash).toBeDefined();
+      expect(slash).not.toContain('--input-format');
+      expect(slash).toContain('--conversation');
+      // The live child is untouched by it — still one, still the same one.
+      expect(streamChildren(argvFile)).toHaveLength(1);
+      expect(session.isAlive()).toBe(true);
+    });
+
+    /**
+     * A prompt that merely *starts* with a path must not be mistaken for a
+     * slash command: routing it to a one-shot process would quietly lose the
+     * background-task guarantee, which is the same class of bug as the one
+     * the long-lived child exists to fix.
+     */
+    it('treats a leading absolute path as an ordinary prompt, not a slash command', async () => {
+      session = new AgySession(specWithArgvLog(argvFile));
+      await session.start();
+      const events = collect(session);
+
+      session.prompt('/data/homes/x please review');
+      await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+      expect(streamChildren(argvFile)).toHaveLength(1);
+      expect(argvLog(argvFile).some((argv) => argv.includes('/data/homes/x please review'))).toBe(false);
     });
   });
 

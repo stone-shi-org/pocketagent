@@ -53,7 +53,7 @@ interface CreatedSession {
  * An agent driven through `opencode serve`'s HTTP + SSE API.
  *
  * Third shape of "structured" in this codebase, alongside `StructuredSession`
- * (one long-lived SDK query) and `AgySession` (one subprocess per turn):
+ * (one long-lived SDK query) and `AgySession` (one long-lived subprocess):
  * opencode's server is a genuine multi-session daemon, shared across every
  * `OpencodeSession` via one `OpencodeServerManager` (see that class). This
  * object owns exactly one opencode-side session id and the PocketAgent-facing

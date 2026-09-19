@@ -19,7 +19,7 @@ import { resolveExecutable } from './registry.js';
  * offer the normal off-by-default behaviour; every session this starts is
  * bypassed from birth, and the client must say so permanently rather than
  * offer a checkbox that implies an off state which does not exist. See
- * `AgySession` for the per-turn subprocess model this implies.
+ * `AgySession` for the long-lived subprocess model this implies.
  */
 export function createAgyAdapter(bin: string): AgentAdapter {
   return {
@@ -34,7 +34,7 @@ export function createAgyAdapter(bin: string): AgentAdapter {
 
     buildCommand() {
       // Args are unused for the structured transport (AgySession builds its
-      // own per-turn argv); this only has to be truthful for `isAvailable`
+      // own argv); this only has to be truthful for `isAvailable`
       // and for `env` merging, which happens regardless of transport.
       return { command: bin, args: [] };
     },

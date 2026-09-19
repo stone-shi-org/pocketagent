@@ -1108,6 +1108,30 @@ These are load-bearing. Several were bugs first.
 - **A project is an added folder, or a directory inside one.** Chats in a directory outside
   every folder are not listed, so removing a folder actually removes it. Nothing is deleted;
   re-adding brings its chats back.
+- **An `agy` session is one long-lived process, and a turn ending must never end it.**
+  `AgySession` drives the CLI with `--input-format stream-json` — agy's own documented
+  "so a driver can keep a session open" mode — writing one NDJSON prompt per turn to a
+  child that outlives every turn. It used to spawn `agy -p <prompt>` per turn, and that
+  silently destroyed work: agy converts any `run_command` still running past the model's
+  `WaitMsBeforeAsync` (the model routinely passes 10s) into a background task, the model
+  will happily end its turn while one is still `RUNNING` ("waiting for the tests to
+  finish"), and the process exiting cancelled it — `Cancelling steps [614]` / `CLI store
+  manager shutting down` in agy's own log, with a two-minute `pnpm test` killed 71s in and
+  the session left idle insisting it was still waiting. Holding the process open also
+  makes agy *defer* the turn's `result` until its background tasks drain (confirmed
+  against v1.2.6: a 150s task held the turn open 152.7s, where the same probe under `-p`
+  ended the turn in 5.8s and killed the task), so `busy` is finally honest. Three things
+  follow. A slash command must go out as its own one-shot `--print` invocation, because
+  agy answers those itself and refuses them on the stream ("run it as its own
+  `--print /x` invocation") — and the check for one must not match a leading absolute
+  path, or an ordinary prompt silently loses the guarantee. `--model` is spawn-time only,
+  so a switch recycles the child *between* turns (`respawnBeforeNextTurn`) rather than
+  killing the running turn's background work. And `result` figures are
+  **conversation-cumulative** on a held-open process rather than per-turn, so
+  `makeStatsPerTurn` converts them or every turn footer after the first reports growing
+  nonsense. Asserted in `apps/server/tests/agy-session.test.ts`, whose fixture
+  deliberately stays alive across turns so a regression to per-turn processes fails a
+  test rather than passing quietly.
 - **`cols`/`rows` are `nonnegative()`, not `positive()`** — a structured session has no
   character grid and reports 0. Requiring a positive value silently invalidated every
   `attached` frame for structured sessions.

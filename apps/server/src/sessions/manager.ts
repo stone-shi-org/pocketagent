@@ -44,7 +44,8 @@ import { probeAgyModels, probeClaudeModels, probePiModels } from './agent-probe.
 /**
  * Any engine behind the `structured` transport. `StructuredSession` holds the
  * Claude Agent SDK's query open for the session's whole life; `AgySession`
- * spawns the `agy` CLI fresh per turn; `OpencodeSession` and `CodexSession`
+ * holds one `agy` CLI process open for the same span, writing one NDJSON
+ * prompt per turn to its stdin; `OpencodeSession` and `CodexSession`
  * each talk to a shared daemon (HTTP + SSE for opencode, JSON-RPC over stdio
  * for codex); `PiSession` owns one persistent `pi --mode rpc` process per
  * session, no daemon to share. All five normalize into the same `AgentEvent`
@@ -1041,8 +1042,7 @@ export class SessionManager {
 
   /**
    * Structured, but via `PiSession` — a persistent per-session `pi --mode
-   * rpc` process, not a per-turn subprocess like `AgySession` or a shared
-   * daemon like opencode/codex. `skipPermissions` is not a parameter here
+   * rpc` process, not a shared daemon like opencode/codex. `skipPermissions` is not a parameter here
    * for the same reason as `startAgy`: it is always `true`, enforced in
    * `create()` via `adapter.forcesSkipPermissions`.
    */
@@ -1136,8 +1136,8 @@ export class SessionManager {
 
   /**
    * Structured, but via `OpencodeSession` talking to a shared
-   * `opencode serve` process instead of the Claude Agent SDK or a per-turn
-   * `agy` subprocess. See `OpencodeSession`/`OpencodeServerManager` for why
+   * `opencode serve` process instead of the Claude Agent SDK or a session's
+   * own `agy` subprocess. See `OpencodeSession`/`OpencodeServerManager` for why
    * this is its own code path.
    */
   private async startOpencode(args: {
@@ -1317,8 +1317,8 @@ export class SessionManager {
 
   /**
    * Structured, but via `CodexSession` talking to a shared
-   * `codex app-server` process instead of the Claude Agent SDK, a per-turn
-   * `agy` subprocess, or opencode's HTTP server. See `CodexSession`/
+   * `codex app-server` process instead of the Claude Agent SDK, a session's
+   * own `agy` subprocess, or opencode's HTTP server. See `CodexSession`/
    * `CodexServerManager` for why this is its own code path.
    */
   private async startCodex(args: {

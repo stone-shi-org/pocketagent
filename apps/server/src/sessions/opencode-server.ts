@@ -7,7 +7,7 @@ import readline from 'node:readline';
  * server.
  *
  * This is a different shape from Claude's `StructuredSession` (one Agent SDK
- * query per chat) and `AgySession` (one `agy` process per turn): opencode's
+ * query per chat) and `AgySession` (one `agy` process per session): opencode's
  * server is a genuine multi-session daemon — `POST /session?directory=<cwd>`
  * takes the working directory per request, not at spawn time — so spawning
  * one per chat would waste the ~1-2s plugin/provider/LSP boot sequence for no

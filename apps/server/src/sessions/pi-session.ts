@@ -62,12 +62,11 @@ interface CommandResponse {
 /**
  * An agent driven through `pi --mode rpc`'s JSON protocol over stdin/stdout.
  *
- * Unlike the other three structured engines, `pi`'s RPC mode is a genuinely
- * persistent per-session process — closer in shape to `StructuredSession`
- * (one process, fed prompts for the session's whole life) than to
- * `AgySession` (fresh process per turn) or `OpencodeSession`/`CodexSession`
- * (one process shared across many sessions). There is no daemon to share, so
- * this class owns its child directly.
+ * `pi`'s RPC mode is a persistent per-session process, the same shape as
+ * `StructuredSession` and `AgySession` (one process, fed prompts for the
+ * session's whole life) rather than `OpencodeSession`/`CodexSession` (one
+ * process shared across many sessions). There is no daemon to share, so this
+ * class owns its child directly.
  *
  * Framing is newline-delimited JSON, split on bare `\n` only — pi's own RPC
  * docs call out that U+2028/U+2029 are valid inside JSON strings and a
