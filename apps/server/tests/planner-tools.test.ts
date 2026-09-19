@@ -2109,6 +2109,14 @@ describe('stop_subagent', () => {
     expect(tool.readOnly).toBe(false);
   });
 
+  it('restricts kind parameter enum to coding_agent', () => {
+    const tool = findPlannerTool('stop_subagent')!;
+    const schema = tool.parameters as {
+      properties?: { kind?: { enum?: string[] } };
+    };
+    expect(schema.properties?.kind?.enum).toEqual(['coding_agent']);
+  });
+
   it('reports when stop_subagent is not available in the environment', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('stop_subagent')!;

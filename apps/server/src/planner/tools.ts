@@ -1473,8 +1473,8 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       properties: {
         kind: {
           type: 'string',
-          enum: ['coding_agent', 'pocket_agent'],
-          description: 'The kind start_subagent_session returned (coding_agent is supported for termination).',
+          enum: ['coding_agent'],
+          description: 'The kind start_subagent_session returned (only coding_agent is supported for termination).',
         },
         id: { type: 'string', description: 'The session id start_subagent_session returned.' },
       },
