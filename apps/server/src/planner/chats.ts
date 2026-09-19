@@ -171,7 +171,10 @@ export interface PlannerChatServiceOptions {
    */
   telegramBots?: TelegramBotStore;
   telegramLinks?: TelegramLinksStore;
-  logger?: { warn: (obj: unknown, msg?: string) => void };
+  logger?: {
+    warn: (obj: unknown, msg?: string) => void;
+    error?: (obj: unknown, msg?: string) => void;
+  };
   /** Injected in tests so no real network call is ever made. */
   llmFetch?: typeof fetch;
   /** PA-31: injected in tests so `web_search`/`url_fetch` never make a real
@@ -355,6 +358,14 @@ export class PlannerChatService {
    */
   private readonly wakeActionBudgetByChat = new Map<string, number>();
   /**
+   * PA-76: Retry timeouts for mailbox draining when wake turns fail.
+   */
+  private readonly drainRetryTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * PA-76: Consecutive failed drain attempts by chat.
+   */
+  private readonly drainRetryAttempts = new Map<string, number>();
+  /**
    * PA-76: Coordinates subagent completion and approval notifications.
    */
   private readonly supervisor: SubagentSupervisor;
@@ -388,6 +399,11 @@ export class PlannerChatService {
   }
 
   dispose(): void {
+    for (const timer of this.drainRetryTimeouts.values()) {
+      clearTimeout(timer);
+    }
+    this.drainRetryTimeouts.clear();
+    this.drainRetryAttempts.clear();
     this.supervisor.dispose();
   }
 
@@ -472,6 +488,12 @@ export class PlannerChatService {
    * PA-76: Coalesces queued mailbox messages and wakes the parent chat.
    */
   private async drainMailbox(chatId: string): Promise<void> {
+    const pendingTimer = this.drainRetryTimeouts.get(chatId);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      this.drainRetryTimeouts.delete(chatId);
+    }
+
     if (this.isBusy(chatId)) return;
     const messages = this.mailboxByChat.get(chatId);
     if (!messages || messages.length === 0) return;
@@ -486,10 +508,28 @@ export class PlannerChatService {
       for await (const _event of turn) {
         // drain events (they are emitted to observers via emit)
       }
+      this.drainRetryAttempts.delete(chatId);
     } catch (err) {
       if (readPlannerChat(this.opts.db, chatId)) {
         const current = this.mailboxByChat.get(chatId) ?? [];
         this.mailboxByChat.set(chatId, [...queued, ...current]);
+
+        const attempts = (this.drainRetryAttempts.get(chatId) ?? 0) + 1;
+        this.drainRetryAttempts.set(chatId, attempts);
+        const MAX_DRAIN_RETRIES = 5;
+        if (attempts <= MAX_DRAIN_RETRIES) {
+          const delayMs = Math.min(1000 * Math.pow(2, attempts - 1), 30_000);
+          const timer = setTimeout(() => {
+            this.drainRetryTimeouts.delete(chatId);
+            if (!this.isBusy(chatId)) {
+              void this.drainMailbox(chatId);
+            }
+          }, delayMs);
+          timer.unref?.();
+          this.drainRetryTimeouts.set(chatId, timer);
+        } else {
+          this.opts.logger?.error?.({ chatId, attempts }, 'subagent mailbox drain retries exhausted');
+        }
       }
       this.opts.logger?.warn?.({ err, chatId }, 'wake turn failed; restored messages to mailbox');
     }
@@ -600,6 +640,12 @@ export class PlannerChatService {
     this.activeWakeTurns.delete(id);
     this.mailboxByChat.delete(id);
     this.wakeActionBudgetByChat.delete(id);
+    const retryTimer = this.drainRetryTimeouts.get(id);
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      this.drainRetryTimeouts.delete(id);
+    }
+    this.drainRetryAttempts.delete(id);
     return deletePlannerChat(this.opts.db, id);
   }
 

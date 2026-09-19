@@ -73,19 +73,50 @@ function toModelInfos(models: PlannerModel[]): ModelInfo[] {
   }));
 }
 
+interface EventKeyInfo {
+  key: string;
+  ephemeral: boolean;
+}
+
 /**
  * PA-76: generates a deduplication key for agent events when both the POST
  * stream (active turn) and GET SSE stream (observer) deliver events for the
  * same chat. `text_delta` is excluded from deduplication since it is only sent
  * on the active HTTP stream, not via SSE.
+ *
+ * Events with permanent IDs use permanent deduplication; un-id'd events
+ * (notices, rate limits, model/effort changes) use ephemeral deduplication
+ * with a short time-window so identical events across different turns are
+ * not swallowed (R3).
  */
-function eventKey(event: AgentEvent): string | null {
+function eventKey(event: AgentEvent): EventKeyInfo | null {
   if (event.kind === 'text_delta') return null;
   if ('id' in event && typeof event.id === 'string' && event.id) {
-    return `${event.kind}:${event.id}`;
+    return { key: `${event.kind}:${event.id}`, ephemeral: false };
   }
   if (event.kind === 'turn_complete') {
-    return `turn_complete:${event.completedAt ?? `${event.durationMs}_${event.inputTokens}_${event.outputTokens}`}`;
+    return {
+      key: `turn_complete:${event.completedAt ?? `${event.durationMs}_${event.inputTokens}_${event.outputTokens}`}`,
+      ephemeral: false,
+    };
+  }
+  if (event.kind === 'notice') {
+    return { key: `notice:${event.level}:${event.text}`, ephemeral: true };
+  }
+  if (event.kind === 'rate_limit') {
+    return { key: `rate_limit:${event.provider}:${event.resetsAt ?? ''}:${event.limitType ?? ''}`, ephemeral: true };
+  }
+  if (event.kind === 'session_started') {
+    return { key: `session_started:${event.agentSessionId ?? ''}:${event.model ?? ''}`, ephemeral: true };
+  }
+  if (event.kind === 'model_changed') {
+    return { key: `model_changed:${event.model}`, ephemeral: true };
+  }
+  if (event.kind === 'effort_changed') {
+    return { key: `effort_changed:${event.effort}`, ephemeral: true };
+  }
+  if (event.kind === 'commands_available') {
+    return { key: `commands_available:${event.commands.map((c) => c.name).join(',')}`, ephemeral: true };
   }
   return null;
 }
@@ -131,9 +162,29 @@ export function PlannerChatPage({
   const [subagents, setSubagents] = useState<SessionInfo[]>([]);
   const [plannerSubagents, setPlannerSubagents] = useState<PlannerChat[]>([]);
   const [sending, setSending] = useState(false);
-  const seenEventKeys = useRef<Set<string>>(new Set());
-  const liveEventsBuffer = useRef<AgentEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const seenPermanentKeys = useRef<Set<string>>(new Set());
+  const seenEphemeralKeys = useRef<Map<string, number>>(new Map());
+  const liveEventsBuffer = useRef<AgentEvent[]>([]);
+  const loadingRef = useRef(false);
+  const EPHEMERAL_DEDUPE_WINDOW_MS = 5000;
+
+  const isEventSeen = useCallback((info: EventKeyInfo): boolean => {
+    if (!info.ephemeral) {
+      return seenPermanentKeys.current.has(info.key);
+    }
+    const lastSeen = seenEphemeralKeys.current.get(info.key);
+    if (lastSeen === undefined) return false;
+    return Date.now() - lastSeen < EPHEMERAL_DEDUPE_WINDOW_MS;
+  }, []);
+
+  const markEventSeen = useCallback((info: EventKeyInfo): void => {
+    if (!info.ephemeral) {
+      seenPermanentKeys.current.add(info.key);
+    } else {
+      seenEphemeralKeys.current.set(info.key, Date.now());
+    }
+  }, []);
   const [isDocumentVisible, setIsDocumentVisible] = useState(() =>
     typeof document !== 'undefined' ? document.visibilityState !== 'hidden' : true,
   );
@@ -219,8 +270,9 @@ export function PlannerChatPage({
   };
 
   const load = useCallback(async () => {
+    loadingRef.current = true;
+    liveEventsBuffer.current = [];
     try {
-      liveEventsBuffer.current = [];
       const [{ chats }, { models: modelList }, { events }, subagentData] = await Promise.all([
         api.listPlannerChats(),
         api.listPlannerModels(),
@@ -231,10 +283,11 @@ export function PlannerChatPage({
       setChat(found);
       setMissing(found === null);
       setModels(modelList);
-      seenEventKeys.current.clear();
+      seenPermanentKeys.current.clear();
+      seenEphemeralKeys.current.clear();
       for (const ev of events) {
         const k = eventKey(ev);
-        if (k) seenEventKeys.current.add(k);
+        if (k) markEventSeen(k);
       }
       let baseTranscript = applyEvents(emptyTranscript(), events);
       // PA-76: Replay any live events that arrived via SSE while the history fetch was in flight
@@ -242,10 +295,11 @@ export function PlannerChatPage({
       liveEventsBuffer.current = [];
       for (const ev of inFlight) {
         const k = eventKey(ev);
-        if (!k || !seenEventKeys.current.has(k)) {
-          if (k) seenEventKeys.current.add(k);
-          baseTranscript = applyEvent(baseTranscript, ev);
+        if (k) {
+          if (isEventSeen(k)) continue;
+          markEventSeen(k);
         }
+        baseTranscript = applyEvent(baseTranscript, ev);
       }
       setTranscript(baseTranscript);
       setSubagents(subagentData.subagents ?? []);
@@ -258,8 +312,11 @@ export function PlannerChatPage({
       } else {
         setError(err instanceof ApiError ? err.message : 'Could not load this chat.');
       }
+    } finally {
+      loadingRef.current = false;
+      liveEventsBuffer.current = [];
     }
-  }, [chatId, onApiError]);
+  }, [chatId, onApiError, isEventSeen, markEventSeen]);
 
   useEffect(() => {
     void load();
@@ -321,11 +378,13 @@ export function PlannerChatPage({
       structured session's WebSocket events go through. */
   const onStreamEvent = useCallback(
     (event: AgentEvent): void => {
-      liveEventsBuffer.current.push(event);
+      if (loadingRef.current) {
+        liveEventsBuffer.current.push(event);
+      }
       const key = eventKey(event);
       if (key) {
-        if (seenEventKeys.current.has(key)) return;
-        seenEventKeys.current.add(key);
+        if (isEventSeen(key)) return;
+        markEventSeen(key);
       }
       setTranscript((prev) => applyEvent(prev ?? emptyTranscript(), event));
       if (event.kind === 'user_prompt') {
@@ -345,7 +404,7 @@ export function PlannerChatPage({
         })();
       }
     },
-    [chatId, refreshSubagents],
+    [chatId, refreshSubagents, isEventSeen, markEventSeen],
   );
 
   useEffect(() => {
@@ -381,7 +440,8 @@ export function PlannerChatPage({
       void (async () => {
         try {
           await api.clearPlannerChatHistory(chatId);
-          seenEventKeys.current.clear();
+          seenPermanentKeys.current.clear();
+          seenEphemeralKeys.current.clear();
           setTranscript({
             ...emptyTranscript(),
             items: [

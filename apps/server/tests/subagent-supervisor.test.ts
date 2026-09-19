@@ -354,6 +354,21 @@ describe('PA-76: SubagentSupervisor and Mailbox', () => {
     expect(queue).toHaveLength(1);
     expect(queue[0].subagentId).toBe('sub-recover');
 
+    // Verify a retry timer was scheduled with attempt count = 1 (R1)
+    expect((t.context.plannerChats as any).drainRetryTimeouts.has(chat.id)).toBe(true);
+    expect((t.context.plannerChats as any).drainRetryAttempts.get(chat.id)).toBe(1);
+
+    // Restore sendMessage to succeed, and re-drain
+    (t.context.plannerChats as any).sendMessage = async function* () {
+      yield { kind: 'turn_complete', isError: false, completedAt: Date.now() };
+    };
+    await (t.context.plannerChats as any).drainMailbox(chat.id);
+
+    // After successful drain, mailbox is empty, attempts are deleted, and retry timer is cleared
+    expect((t.context.plannerChats as any).mailboxByChat.get(chat.id)).toBeUndefined();
+    expect((t.context.plannerChats as any).drainRetryTimeouts.has(chat.id)).toBe(false);
+    expect((t.context.plannerChats as any).drainRetryAttempts.has(chat.id)).toBe(false);
+
     (t.context.plannerChats as any).sendMessage = originalSendMessage;
   });
 });
