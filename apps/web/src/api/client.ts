@@ -832,8 +832,14 @@ export const api = {
     const controller = new AbortController();
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 
+    let retryAttempt = 0;
+    const MAX_RETRIES = 10;
+    const INITIAL_DELAY_MS = 1000;
+    const MAX_DELAY_MS = 30000;
+
     const connect = async () => {
       if (controller.signal.aborted) return;
+      let isFatal = false;
       try {
         const response = await fetch(`/api/planner/chats/${encodeURIComponent(id)}/events`, {
           method: 'GET',
@@ -842,8 +848,12 @@ export const api = {
           signal: controller.signal,
         });
         if (!response.ok) {
+          if (response.status === 401 || response.status === 403 || response.status === 404 || response.status === 400 || response.status === 410) {
+            isFatal = true;
+          }
           throw new ApiError(`Failed to subscribe to chat events (${response.status})`, response.status, 'bad_response');
         }
+        retryAttempt = 0;
         const reader = response.body?.getReader();
         if (!reader) return;
         const decoder = new TextDecoder();
@@ -871,8 +881,12 @@ export const api = {
         if (controller.signal.aborted) return;
         onError?.(err);
       } finally {
-        if (!controller.signal.aborted) {
-          reconnectTimeout = setTimeout(connect, 3000);
+        if (!controller.signal.aborted && !isFatal) {
+          retryAttempt++;
+          if (retryAttempt <= MAX_RETRIES) {
+            const delay = Math.min(INITIAL_DELAY_MS * Math.pow(2, retryAttempt - 1), MAX_DELAY_MS);
+            reconnectTimeout = setTimeout(connect, delay);
+          }
         }
       }
     };

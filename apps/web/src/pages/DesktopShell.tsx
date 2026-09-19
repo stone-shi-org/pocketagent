@@ -692,6 +692,7 @@ export function DesktopShell({ route, onNavigate, onApiError, onLogout }: Props)
                   <Suspense fallback={<PageFallback />}>
                     <PlannerChatPage
                       chatId={tab.route.chatId}
+                      active={tab.id === activeTabId}
                       onBack={() => closeTab(tab.id)}
                       onOpenSession={(sessionId) => onNavigate({ name: 'terminal', sessionId })}
                       onOpenPlannerChat={(chatId) => onNavigate({ name: 'planner-chat', chatId })}

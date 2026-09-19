@@ -311,11 +311,23 @@ export interface PlannerSubagentDeps {
    */
   recordSpawn?(): void;
   /**
+   * PA-76: Record a subagent action (spawn or instruction) that consumes wake budget.
+   */
+  recordAction?(): void;
+  /**
+   * PA-76: Re-track a coding subagent session with a parent chat.
+   */
+  trackCodingSubagent?(sessionId: string, parentChatId: string): void;
+  /**
+   * PA-76: Invalidate cached status for a coding subagent session when new work begins.
+   */
+  invalidateCodingStatus?(sessionId: string): void;
+  /**
    * PA-76: Cached status for a coding-agent subagent from SubagentSupervisor.
    */
   codingAgentStatus?(id: string): SubagentChatStatus | null;
   /**
-   * PA-76: Whether the spawn budget for wake-driven turns has been exhausted.
+   * PA-76: Whether the action budget for wake-driven turns has been exhausted.
    */
   wakeBudgetExhausted?(): boolean;
 }
@@ -392,8 +404,14 @@ const SEARCH_TIMEOUT_MS = 20_000;
     this long is a sign the search needs narrowing, not more room. */
 const MAX_SEARCH_RESULTS = 300;
 
-/** Exported for direct unit testing — keeps the tail so conclusions/results aren't lost (PA-76). */
+/** Keeps the head — used for file reading, grep, and search results. */
 export function truncate(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n…(truncated, ${text.length - max} more characters)`;
+}
+
+/** PA-76: Keeps the tail for subagent results and summaries so conclusions aren't lost. */
+export function truncateTail(text: string, max: number): string {
   if (text.length <= max) return text;
   return `…(truncated, ${text.length - max} earlier characters)\n${text.slice(-max)}`;
 }
@@ -431,10 +449,10 @@ export function lastMessageSummary(events: readonly AgentEvent[]): string {
     const ev = events[i]!;
     if (ev.kind === 'text') {
       const result = extractResultSummary(ev.text);
-      return truncate(result ?? ev.text, MAX_TOOL_RESULT_CHARS);
+      return truncateTail(result ?? ev.text, MAX_TOOL_RESULT_CHARS);
     }
   }
-  return truncate(summarizeEvents(events), MAX_TOOL_RESULT_CHARS);
+  return truncateTail(summarizeEvents(events), MAX_TOOL_RESULT_CHARS);
 }
 
 /** Exported for direct unit testing — see `tests/planner-tools.test.ts`. */
@@ -511,7 +529,7 @@ async function sessionLastResultSummary(deps: PlannerToolDeps, sessionId: string
       const raw = live.buffer.replayAfter(0).data;
       const text = stripAnsi(raw).trim();
       if (text.length === 0) return '(no terminal output yet)';
-      return truncate(text, MAX_TOOL_RESULT_CHARS);
+      return truncateTail(text, MAX_TOOL_RESULT_CHARS);
     }
     const buffered = live.buffer.replayAfter(0).events.map((e) => e.event);
     const { events: priorEvents } = await readSessionHistory(deps.historyDeps, sessionId);
@@ -940,18 +958,8 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         const result = await deps.subagents.pocketAgentChatStatus(id);
         return truncate(JSON.stringify(result), MAX_TOOL_RESULT_CHARS);
       }
-      const cached = deps.subagents.codingAgentStatus?.(id);
-      if (cached) {
-        return truncate(JSON.stringify(cached), MAX_TOOL_RESULT_CHARS);
-      }
       const info = deps.sessions.find(id);
       if (!info) return JSON.stringify({ status: 'gone', summary: `No session found with id ${id}.` });
-      if (isTerminalStatus(info.status)) {
-        return truncate(
-          JSON.stringify({ status: 'exited', sessionStatus: info.status, summary: await sessionLastResultSummary(deps, id) }),
-          MAX_TOOL_RESULT_CHARS,
-        );
-      }
       if (info.pendingApprovalsCount > 0) {
         return truncate(
           JSON.stringify({
@@ -964,8 +972,23 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       if (info.busy) {
         return JSON.stringify({ status: 'running', summary: 'Still working on its assigned task.' });
       }
+      const cached = deps.subagents.codingAgentStatus?.(id);
+      if (isTerminalStatus(info.status)) {
+        const summary =
+          cached && (cached.status === 'exited' || cached.status === 'done')
+            ? cached.summary
+            : await sessionLastResultSummary(deps, id);
+        return truncate(
+          JSON.stringify({ status: 'exited', sessionStatus: info.status, summary }),
+          MAX_TOOL_RESULT_CHARS,
+        );
+      }
+      const summary =
+        cached && cached.status === 'idle'
+          ? cached.summary
+          : await sessionLastResultSummary(deps, id);
       return truncate(
-        JSON.stringify({ status: 'idle', summary: await sessionLastResultSummary(deps, id) }),
+        JSON.stringify({ status: 'idle', summary }),
         MAX_TOOL_RESULT_CHARS,
       );
     },
@@ -1101,6 +1124,10 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     },
     readOnly: false,
     async execute(deps, args) {
+      if (deps.subagents.wakeBudgetExhausted?.()) {
+        return 'Subagent action budget for wake-driven turns has been exhausted. Wait for a human to continue.';
+      }
+
       const sessionId = String(args.sessionId ?? '');
       const prompt = String(args.prompt ?? '').trim();
       if (!prompt) return 'No instruction text provided.';
@@ -1117,9 +1144,16 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
           return `Session ${sessionId} cannot receive prompts right now.`;
         }
         const sent = (live as StructuredLikeSession).prompt(prompt);
-        return sent
-          ? `Instruction sent to running session ${sessionId}.`
-          : `Session ${sessionId} ended before the instruction could be sent.`;
+        if (sent) {
+          deps.subagents.recordAction?.();
+          if (deps.plannerChatId) {
+            deps.subagents.trackCodingSubagent?.(sessionId, deps.plannerChatId);
+          } else {
+            deps.subagents.invalidateCodingStatus?.(sessionId);
+          }
+          return `Instruction sent to running session ${sessionId}.`;
+        }
+        return `Session ${sessionId} ended before the instruction could be sent.`;
       }
 
       // Not live: resume into a fresh session. Re-validate `cwd` at call
@@ -1144,14 +1178,22 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
           transport: 'structured',
           resumeAgentSessionId: info.agentSessionId,
           forkSession: false,
+          ...(deps.plannerChatId ? { plannerChatId: deps.plannerChatId } : {}),
         });
         if (resumed.transport !== 'structured') {
           return `Resuming session ${sessionId} unexpectedly produced a terminal session.`;
         }
         const sent = (resumed as StructuredLikeSession).prompt(prompt);
-        return sent
-          ? `Resumed session ${sessionId} as ${resumed.id} and sent the instruction.`
-          : `Resumed session ${sessionId} as ${resumed.id}, but it ended before the instruction could be sent.`;
+        if (sent) {
+          deps.subagents.recordAction?.();
+          if (deps.plannerChatId) {
+            deps.subagents.trackCodingSubagent?.(resumed.id, deps.plannerChatId);
+          } else {
+            deps.subagents.invalidateCodingStatus?.(resumed.id);
+          }
+          return `Resumed session ${sessionId} as ${resumed.id} and sent the instruction.`;
+        }
+        return `Resumed session ${sessionId} as ${resumed.id}, but it ended before the instruction could be sent.`;
       } catch (err) {
         return `Could not resume session ${sessionId}: ${(err as Error).message}`;
       }

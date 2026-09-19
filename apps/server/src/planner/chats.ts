@@ -351,9 +351,9 @@ export class PlannerChatService {
    */
   private readonly mailboxByChat = new Map<string, MailboxMessage[]>();
   /**
-   * PA-76: Decrementing subagent spawn budget across wake-driven turns for a chat.
+   * PA-76: Decrementing subagent action budget across wake-driven turns for a chat.
    */
-  private readonly wakeSpawnBudgetByChat = new Map<string, number>();
+  private readonly wakeActionBudgetByChat = new Map<string, number>();
   /**
    * PA-76: Coordinates subagent completion and approval notifications.
    */
@@ -475,21 +475,24 @@ export class PlannerChatService {
     if (this.isBusy(chatId)) return;
     const messages = this.mailboxByChat.get(chatId);
     if (!messages || messages.length === 0) return;
+    const queued = [...messages];
     this.mailboxByChat.delete(chatId);
 
-    const wakePrompt = buildWakePrompt(messages);
-    this.opts.logger?.warn?.({ chatId, count: messages.length }, 'draining subagent mailbox to wake planner chat');
+    const wakePrompt = buildWakePrompt(queued);
+    this.opts.logger?.warn?.({ chatId, count: queued.length }, 'draining subagent mailbox to wake planner chat');
 
-    const turn = this.sendMessage(chatId, wakePrompt, { isWake: true });
-    (async () => {
-      try {
-        for await (const _event of turn) {
-          // drain events (they are emitted to observers via emit)
-        }
-      } catch (err) {
-        this.opts.logger?.warn?.({ err, chatId }, 'wake turn failed');
+    try {
+      const turn = this.sendMessage(chatId, wakePrompt, { isWake: true });
+      for await (const _event of turn) {
+        // drain events (they are emitted to observers via emit)
       }
-    })();
+    } catch (err) {
+      if (readPlannerChat(this.opts.db, chatId)) {
+        const current = this.mailboxByChat.get(chatId) ?? [];
+        this.mailboxByChat.set(chatId, [...queued, ...current]);
+      }
+      this.opts.logger?.warn?.({ err, chatId }, 'wake turn failed; restored messages to mailbox');
+    }
   }
 
   list(workspaceId?: string): PlannerChat[] {
@@ -574,10 +577,13 @@ export class PlannerChatService {
     // never spawn or be spawned into again, so its depth entry would just
     // leak for the life of the process otherwise.
     this.spawnDepthByChat.delete(id);
+    // PA-76: Clean up supervisor outcomes for this chat and any subagents it spawned.
+    this.supervisor.forget('pocket_agent', id);
     // PA-74: terminate any live subagent sessions this chat spawned, and clean up tracking.
     const subagents = this.subagentSessionsByChat.get(id);
     if (subagents) {
       for (const sessionId of subagents) {
+        this.supervisor.forget('coding_agent', sessionId);
         const info = this.opts.sessions.find(sessionId);
         if (info && !isTerminalStatus(info.status)) {
           try {
@@ -593,7 +599,7 @@ export class PlannerChatService {
     this.activeTurns.delete(id);
     this.activeWakeTurns.delete(id);
     this.mailboxByChat.delete(id);
-    this.wakeSpawnBudgetByChat.delete(id);
+    this.wakeActionBudgetByChat.delete(id);
     return deletePlannerChat(this.opts.db, id);
   }
 
@@ -954,7 +960,7 @@ export class PlannerChatService {
       this.spawnsThisTurnByChat.set(id, 0);
     } else {
       this.spawnsThisTurnByChat.set(id, 0);
-      this.wakeSpawnBudgetByChat.set(id, maxSpawns);
+      this.wakeActionBudgetByChat.set(id, maxSpawns);
     }
 
     this.activeTurns.add(chat.id);
@@ -1396,22 +1402,32 @@ export class PlannerChatService {
             pocketAgentEnabledTools: (workspaceId: string) => this.toolsFor(workspaceId).map((t) => t.name),
             findLiveCodingSubagent: (treeRoot: string) => this.findLiveCodingSubagentForChat(chat.id, treeRoot),
             recordCodingSubagent: (sessionId: string) => this.recordCodingSubagentForChat(chat.id, sessionId),
+            trackCodingSubagent: (sessionId: string, parentChatId: string) =>
+              this.supervisor.trackCodingSubagent(sessionId, parentChatId),
+            invalidateCodingStatus: (sessionId: string) =>
+              this.supervisor.invalidate('coding_agent', sessionId),
             codingAgentStatus: (sessionId: string) => this.supervisor.getOutcome('coding_agent', sessionId),
             spawnsThisTurn: () => this.spawnsThisTurnForChat(chat.id),
+            recordAction: () => {
+              if (this.isWakeTurnActive(chat.id)) {
+                const budget = this.wakeActionBudgetByChat.get(chat.id) ?? 0;
+                this.wakeActionBudgetByChat.set(chat.id, Math.max(0, budget - 1));
+              }
+            },
             recordSpawn: () => {
               this.recordSpawnForChat(chat.id);
               if (this.isWakeTurnActive(chat.id)) {
-                const budget = this.wakeSpawnBudgetByChat.get(chat.id) ?? 0;
-                this.wakeSpawnBudgetByChat.set(chat.id, Math.max(0, budget - 1));
+                const budget = this.wakeActionBudgetByChat.get(chat.id) ?? 0;
+                this.wakeActionBudgetByChat.set(chat.id, Math.max(0, budget - 1));
               }
             },
             wakeBudgetExhausted: () => {
               if (this.isWakeTurnActive(chat.id)) {
-                const budget = this.wakeSpawnBudgetByChat.get(chat.id) ?? 0;
+                const budget = this.wakeActionBudgetByChat.get(chat.id) ?? 0;
                 if (budget <= 0) {
                   this.opts.logger?.warn?.(
                     { chatId: chat.id },
-                    'subagent spawn budget for wake-driven turns exhausted',
+                    'subagent action budget for wake-driven turns exhausted',
                   );
                   return true;
                 }
@@ -1568,11 +1584,16 @@ export class PlannerChatService {
    * would see.
    */
   private async subagentChatStatusForTool(chatId: string): Promise<SubagentChatStatus> {
+    const chat = this.get(chatId);
+    if (!chat) return { status: 'gone', summary: `No subagent chat found with id ${chatId}.` };
+
+    if (this.isBusy(chatId)) {
+      return { status: 'running', summary: '(still working on its assigned task)' };
+    }
+
     const cached = this.supervisor.getOutcome('pocket_agent', chatId);
     if (cached) return cached;
 
-    const chat = this.get(chatId);
-    if (!chat) return { status: 'gone', summary: `No subagent chat found with id ${chatId}.` };
     const events = await this.history(chatId);
     const last = events[events.length - 1];
     if (!last) return { status: 'running', summary: '(just started, no output yet)' };

@@ -45,6 +45,7 @@ const PLANNER_SLASH_COMMANDS: SlashCommandInfo[] = [
 
 interface Props {
   chatId: string;
+  active?: boolean;
   onBack: () => void;
   onOpenSession?: (sessionId: string) => void;
   onOpenPlannerChat?: (chatId: string) => void;
@@ -86,9 +87,6 @@ function eventKey(event: AgentEvent): string | null {
   if (event.kind === 'turn_complete') {
     return `turn_complete:${event.completedAt ?? `${event.durationMs}_${event.inputTokens}_${event.outputTokens}`}`;
   }
-  if (event.kind === 'notice') {
-    return `notice:${event.level}:${event.text}`;
-  }
   return null;
 }
 
@@ -121,6 +119,7 @@ function eventKey(event: AgentEvent): string | null {
  */
 export function PlannerChatPage({
   chatId,
+  active = true,
   onBack,
   onOpenSession,
   onOpenPlannerChat,
@@ -133,7 +132,24 @@ export function PlannerChatPage({
   const [plannerSubagents, setPlannerSubagents] = useState<PlannerChat[]>([]);
   const [sending, setSending] = useState(false);
   const seenEventKeys = useRef<Set<string>>(new Set());
+  const liveEventsBuffer = useRef<AgentEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [isDocumentVisible, setIsDocumentVisible] = useState(() =>
+    typeof document !== 'undefined' ? document.visibilityState !== 'hidden' : true,
+  );
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const onVisibilityChange = () => {
+      setIsDocumentVisible(document.visibilityState !== 'hidden');
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, []);
+
+  const shouldStream = active && isDocumentVisible;
   // PA-36: this page had no "gone" detection at all before — a deleted chat
   // silently rendered as `chat === null` / "Untitled chat" with an empty
   // transcript, same failure shape `ChatPreviewPage`'s own `missing` state
@@ -204,6 +220,7 @@ export function PlannerChatPage({
 
   const load = useCallback(async () => {
     try {
+      liveEventsBuffer.current = [];
       const [{ chats }, { models: modelList }, { events }, subagentData] = await Promise.all([
         api.listPlannerChats(),
         api.listPlannerModels(),
@@ -219,7 +236,18 @@ export function PlannerChatPage({
         const k = eventKey(ev);
         if (k) seenEventKeys.current.add(k);
       }
-      setTranscript(applyEvents(emptyTranscript(), events));
+      let baseTranscript = applyEvents(emptyTranscript(), events);
+      // PA-76: Replay any live events that arrived via SSE while the history fetch was in flight
+      const inFlight = liveEventsBuffer.current;
+      liveEventsBuffer.current = [];
+      for (const ev of inFlight) {
+        const k = eventKey(ev);
+        if (!k || !seenEventKeys.current.has(k)) {
+          if (k) seenEventKeys.current.add(k);
+          baseTranscript = applyEvent(baseTranscript, ev);
+        }
+      }
+      setTranscript(baseTranscript);
       setSubagents(subagentData.subagents ?? []);
       setPlannerSubagents(subagentData.plannerChats ?? []);
       setError(null);
@@ -238,9 +266,10 @@ export function PlannerChatPage({
   }, [load]);
 
   useEffect(() => {
+    if (!shouldStream) return;
     const timer = setInterval(() => void refreshSubagents(), 5000);
     return () => clearInterval(timer);
-  }, [refreshSubagents]);
+  }, [shouldStream, refreshSubagents]);
 
   // PA-36: closes this tab (desktop) or navigates back to the Pocket Agent
   // list (phone) as soon as the chat is confirmed gone — same auto-close
@@ -292,6 +321,7 @@ export function PlannerChatPage({
       structured session's WebSocket events go through. */
   const onStreamEvent = useCallback(
     (event: AgentEvent): void => {
+      liveEventsBuffer.current.push(event);
       const key = eventKey(event);
       if (key) {
         if (seenEventKeys.current.has(key)) return;
@@ -319,11 +349,21 @@ export function PlannerChatPage({
   );
 
   useEffect(() => {
+    if (!shouldStream) return;
     const unsubscribe = api.subscribePlannerChatEvents(chatId, onStreamEvent);
     return () => {
       unsubscribe();
     };
-  }, [chatId, onStreamEvent]);
+  }, [chatId, shouldStream, onStreamEvent]);
+
+  // PA-76: Refetch chat and transcript when tab becomes active/visible again.
+  const wasStreaming = useRef(shouldStream);
+  useEffect(() => {
+    if (shouldStream && !wasStreaming.current) {
+      void load();
+    }
+    wasStreaming.current = shouldStream;
+  }, [shouldStream, load]);
 
   const pending = transcript?.pending[0] ?? null;
   const isChatBusy = sending || (chat?.busy ?? false) || (transcript?.busy ?? false);
