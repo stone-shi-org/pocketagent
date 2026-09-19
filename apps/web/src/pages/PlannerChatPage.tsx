@@ -152,6 +152,35 @@ export function PlannerChatPage({
     }
   }, [chatId]);
 
+  const removeCodingSubagent = async (subagent: SessionInfo, e: React.MouseEvent): Promise<void> => {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      setSubagents((prev) => prev.filter((s) => s.id !== subagent.id));
+      await api.removeChat({ sessionId: subagent.id, conversationId: subagent.agentSessionId ?? undefined });
+      if (subagent.status === 'running' || subagent.status === 'starting') {
+        await api.deleteSession(subagent.id).catch(() => {});
+      }
+    } catch (err) {
+      onApiError(err);
+    } finally {
+      void refreshSubagents();
+    }
+  };
+
+  const removePlannerSubagent = async (subChatId: string, e: React.MouseEvent): Promise<void> => {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      setPlannerSubagents((prev) => prev.filter((c) => c.id !== subChatId));
+      await api.deletePlannerChat(subChatId);
+    } catch (err) {
+      onApiError(err);
+    } finally {
+      void refreshSubagents();
+    }
+  };
+
   const load = useCallback(async () => {
     try {
       const [{ chats }, { models: modelList }, { events }, subagentData] = await Promise.all([
@@ -181,6 +210,11 @@ export function PlannerChatPage({
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    const timer = setInterval(() => void refreshSubagents(), 5000);
+    return () => clearInterval(timer);
+  }, [refreshSubagents]);
 
   // PA-36: closes this tab (desktop) or navigates back to the Pocket Agent
   // list (phone) as soon as the chat is confirmed gone — same auto-close
@@ -467,59 +501,79 @@ export function PlannerChatPage({
             {subagents.map((subagent) => {
               const live = subagent.status === 'running' || subagent.status === 'starting';
               return (
-                <a
-                  key={subagent.id}
-                  href={`#/s/${encodeURIComponent(subagent.id)}`}
-                  className={`planner-subagent-card${live ? ' live' : ''}`}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    if (onOpenSession) {
-                      onOpenSession(subagent.id);
-                    } else {
-                      window.location.hash = `#/s/${encodeURIComponent(subagent.id)}`;
-                    }
-                  }}
-                  title={`${subagent.title} (${subagent.workspaceLabel || subagent.cwd})`}
-                >
-                  <span className="planner-subagent-status">
-                    {live ? (
-                      <span className="live-dot" aria-label="running" />
-                    ) : (
-                      <span className="dead-dot" aria-label="finished" />
-                    )}
-                  </span>
-                  <div className="planner-subagent-info">
-                    <span className="planner-subagent-name">{subagent.title}</span>
-                    <span className="planner-subagent-cwd">{subagent.workspaceLabel || subagent.cwd}</span>
-                  </div>
-                  <Icon name="chevron-right" size={12} className="planner-subagent-arrow" />
-                </a>
+                <div key={subagent.id} className="planner-subagent-card-wrap">
+                  <a
+                    href={`#/s/${encodeURIComponent(subagent.id)}`}
+                    className={`planner-subagent-card${live ? ' live' : ''}`}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      if (onOpenSession) {
+                        onOpenSession(subagent.id);
+                      } else {
+                        window.location.hash = `#/s/${encodeURIComponent(subagent.id)}`;
+                      }
+                    }}
+                    title={`${subagent.title} (${subagent.workspaceLabel || subagent.cwd})`}
+                  >
+                    <span className="planner-subagent-status">
+                      {live ? (
+                        <span className="live-dot" aria-label="running" />
+                      ) : (
+                        <span className="dead-dot" aria-label="finished" />
+                      )}
+                    </span>
+                    <div className="planner-subagent-info">
+                      <span className="planner-subagent-name">{subagent.title}</span>
+                      <span className="planner-subagent-cwd">{subagent.workspaceLabel || subagent.cwd}</span>
+                    </div>
+                    <Icon name="chevron-right" size={12} className="planner-subagent-arrow" />
+                  </a>
+                  <button
+                    type="button"
+                    className="planner-subagent-card-remove"
+                    onClick={(e) => removeCodingSubagent(subagent, e)}
+                    aria-label={`Delete ${subagent.title}`}
+                    title="Delete subagent"
+                  >
+                    <Icon name="close" size={12} />
+                  </button>
+                </div>
               );
             })}
             {plannerSubagents.map((subChat) => (
-              <a
-                key={subChat.id}
-                href={`#/planner/${encodeURIComponent(subChat.id)}`}
-                className="planner-subagent-card"
-                onClick={(e) => {
-                  e.preventDefault();
-                  if (onOpenPlannerChat) {
-                    onOpenPlannerChat(subChat.id);
-                  } else {
-                    window.location.hash = `#/planner/${encodeURIComponent(subChat.id)}`;
-                  }
-                }}
-                title={`${subChat.title ?? 'Untitled chat'} (Pocket Agent · ${subChat.workspaceName})`}
-              >
-                <span className="planner-subagent-status">
-                  <Icon name="agent-generic" size={13} />
-                </span>
-                <div className="planner-subagent-info">
-                  <span className="planner-subagent-name">{subChat.title ?? 'Untitled chat'}</span>
-                  <span className="planner-subagent-cwd">Pocket Agent · {subChat.workspaceName}</span>
-                </div>
-                <Icon name="chevron-right" size={12} className="planner-subagent-arrow" />
-              </a>
+              <div key={subChat.id} className="planner-subagent-card-wrap">
+                <a
+                  href={`#/planner/${encodeURIComponent(subChat.id)}`}
+                  className="planner-subagent-card"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    if (onOpenPlannerChat) {
+                      onOpenPlannerChat(subChat.id);
+                    } else {
+                      window.location.hash = `#/planner/${encodeURIComponent(subChat.id)}`;
+                    }
+                  }}
+                  title={`${subChat.title ?? 'Untitled chat'} (Pocket Agent · ${subChat.workspaceName})`}
+                >
+                  <span className="planner-subagent-status">
+                    <Icon name="agent-generic" size={13} />
+                  </span>
+                  <div className="planner-subagent-info">
+                    <span className="planner-subagent-name">{subChat.title ?? 'Untitled chat'}</span>
+                    <span className="planner-subagent-cwd">Pocket Agent · {subChat.workspaceName}</span>
+                  </div>
+                  <Icon name="chevron-right" size={12} className="planner-subagent-arrow" />
+                </a>
+                <button
+                  type="button"
+                  className="planner-subagent-card-remove"
+                  onClick={(e) => removePlannerSubagent(subChat.id, e)}
+                  aria-label={`Delete ${subChat.title ?? 'Untitled chat'}`}
+                  title="Delete subagent"
+                >
+                  <Icon name="close" size={12} />
+                </button>
+              </div>
             ))}
           </div>
         </div>

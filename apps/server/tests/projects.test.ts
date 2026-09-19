@@ -236,7 +236,7 @@ describe('ProjectService', () => {
     });
   });
 
-  it('excludes planner subagents from project chats (PA-75)', async () => {
+  it('groups planner subagents into project.subagents with provenance, separate from human chats (PA-75)', async () => {
     const plannerChatId = 'pc-123';
     db.prepare('INSERT INTO planner_chats (id, workspace_name, title, created_at, last_activity_at) VALUES (?, ?, ?, ?, ?)').run(
       plannerChatId,
@@ -258,10 +258,11 @@ describe('ProjectService', () => {
     ]);
 
     expect(project.chats.map((c) => c.id)).toEqual(['human-chat']);
-    expect(project.subagents).toEqual([]);
+    expect(project.subagents.map((c) => c.id)).toEqual(['subagent-sess']);
+    expect(project.subagents[0].plannerChatId).toBe(plannerChatId);
   });
 
-  it('excludes planner subagents with disk-only conversations from project chats (PA-75)', async () => {
+  it('resolves plannerChatId for disk-only conversations if matched by conversation id (PA-75)', async () => {
     const plannerChatId = 'pc-456';
     db.prepare('INSERT INTO planner_chats (id, workspace_name, title, created_at, last_activity_at) VALUES (?, ?, ?, ?, ?)').run(
       plannerChatId,
@@ -281,7 +282,8 @@ describe('ProjectService', () => {
     const [project] = await service.list([]);
 
     expect(project.chats.map((c) => c.id)).toEqual([]);
-    expect(project.subagents).toEqual([]);
+    expect(project.subagents.map((c) => c.id)).toEqual(['conv-subagent']);
+    expect(project.subagents[0].plannerChatId).toBe(plannerChatId);
   });
 
   it('carries a live session limit refusal into its chat row', async () => {

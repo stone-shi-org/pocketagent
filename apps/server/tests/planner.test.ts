@@ -1179,5 +1179,48 @@ describe('GET /api/planner/chats/:id/subagents (PA-75)', () => {
     expect(body.plannerChats[0].id).toBe(childChat.id);
     expect(body.plannerChats[0].parentChatId).toBe(chat.id);
   });
+
+  it('excludes removed subagents from subagents list', async () => {
+    const chat = (
+      await t.app.inject({
+        method: 'POST',
+        url: '/api/planner/chats',
+        headers: authHeaders(t.cookie),
+        payload: { title: 'Parent Chat' },
+      })
+    ).json();
+
+    const session = await t.context.sessions.create({
+      agent: 'claude',
+      cwd: t.projectDir,
+      cols: 80,
+      rows: 24,
+      transport: 'structured',
+      title: 'Coding Subagent',
+      plannerChatId: chat.id,
+    });
+
+    // Stop and remove the session
+    await t.app.inject({
+      method: 'DELETE',
+      url: `/api/sessions/${session.id}`,
+      headers: authHeaders(t.cookie),
+    });
+    await t.app.inject({
+      method: 'POST',
+      url: '/api/chats/remove',
+      headers: authHeaders(t.cookie),
+      payload: { sessionId: session.id },
+    });
+
+    const res = await t.app.inject({
+      method: 'GET',
+      url: `/api/planner/chats/${chat.id}/subagents`,
+      headers: authHeaders(t.cookie),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().subagents).toHaveLength(0);
+  });
 });
 

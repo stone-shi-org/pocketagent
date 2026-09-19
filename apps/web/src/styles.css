@@ -6039,6 +6039,48 @@ button.chat-rate-limit-badge {
   margin-left: 4px;
 }
 
+.planner-subagent-card-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  max-width: 320px;
+}
+
+.planner-subagent-card-wrap .planner-subagent-card {
+  flex: 1;
+  padding-right: 28px;
+}
+
+.planner-subagent-card-remove {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.7;
+  transition: opacity 0.15s, color 0.15s, background-color 0.15s;
+}
+
+.planner-subagent-card-remove:hover {
+  opacity: 1;
+  color: var(--danger);
+  background: var(--bg-elev);
+}
+
+.subagent-chat-line {
+  margin-left: 14px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+
 /* PA-6: the inline stand-in for `ApprovalSheet` — see `PlannerChatPage`'s
    doc comment for why this chat gets its own, plainer, docked approval card
    rather than the real draggable bottom sheet. Sits directly between

@@ -16,6 +16,7 @@ import {
   markStaleSessionsInterrupted,
   pruneOldSessions,
   readAgentDefaults,
+  readHiddenChats,
   readSetting,
   recordAgentRefresh,
   writeAgentDefaults,
@@ -1660,9 +1661,13 @@ export class SessionManager {
   listByPlannerChatId(plannerChatId: string): SessionInfo[] {
     const infos: SessionInfo[] = [];
     const seen = new Set<string>();
+    const removedChats = readHiddenChats(this.opts.db);
 
     for (const session of this.live.values()) {
       if (session.plannerChatId === plannerChatId) {
+        if (removedChats.has(session.id) || (session.agentSessionId && removedChats.has(session.agentSessionId))) {
+          continue;
+        }
         infos.push(this.toInfo(session));
         seen.add(session.id);
       }
@@ -1674,6 +1679,9 @@ export class SessionManager {
 
     for (const row of rows) {
       if (seen.has(row.id)) continue;
+      if (removedChats.has(row.id) || (row.agent_session_id && removedChats.has(row.agent_session_id))) {
+        continue;
+      }
       infos.push(this.rowToInfo(row));
     }
 
