@@ -8,23 +8,35 @@ import type { HostDirectory } from '../hosts/directory.js';
  * `directory.manageHint` says whether this writes to a Hub registry every
  * browser shares, or to this browser's own `localStorage`. Those promise very
  * different things and a user who assumes the wrong one will conclude the
- * feature is broken.
+ * feature is broken. It is also why the third field's own label and
+ * placeholder are source-conditional rather than fixed text — the two modes
+ * hand the *same value* to two different network hops.
  *
- * ## Why a path and not a URL
+ * ## Local mode: a path, not a URL
  *
- * The field is a **same-origin path prefix**, because that is the only thing
- * that can work: requests authenticate with an HttpOnly `SameSite` cookie, so a
- * cross-origin backend would need `SameSite=None; Secure` and a credentialed
- * CORS allowlist, which the loopback-over-plain-HTTP posture cannot provide
- * (see `HostEndpoint`'s own doc comment, PA-60). A second host is therefore
- * something a reverse proxy already publishes on this origin, and this dialog
- * records where. `normalizeBasePath` cannot produce an absolute URL from
- * whatever is typed, so this input cannot point the browser at another origin
- * even deliberately.
+ * With no Hub, this field is a **same-origin path prefix**, because that is
+ * the only thing that can work: requests authenticate with an HttpOnly
+ * `SameSite` cookie, so a cross-origin backend would need `SameSite=None;
+ * Secure` and a credentialed CORS allowlist, which the loopback-over-plain-HTTP
+ * posture cannot provide (see `HostEndpoint`'s own doc comment, PA-60). A
+ * second host is therefore something a reverse proxy already publishes on
+ * this origin, and this dialog records where. `normalizeBasePath` cannot
+ * produce an absolute URL from whatever is typed, so this input cannot point
+ * *this browser* at another origin even deliberately.
  *
- * The default prefix matches the Hub's own routing table (`/h/<id>/api/**`), so
- * a host registered by hand today keeps the same address once a Hub is put in
- * front of the same backends.
+ * The default prefix matches the Hub's own routing table (`/h/<id>/api/**`),
+ * so a host registered by hand today keeps the same address once a Hub is
+ * put in front of the same backends.
+ *
+ * ## Hub mode: a URL, not a path
+ *
+ * With a Hub, `directory.add` sends this same field as `baseUrl` straight to
+ * `POST /api/hub/hosts` — the address the *Hub process* dials directly on its
+ * own network (e.g. `http://dev01:8787`), which is an entirely different hop
+ * from anything the browser touches. A path prefix here would be rejected by
+ * the Hub's own `baseUrlProblem` (`new URL('/h/dev02')` throws), and
+ * `/h/<id>` — the right default for local mode — would be actively wrong
+ * advice in this one, so no default is offered here at all.
  */
 export function AddHostDialog({
   directory,
@@ -39,9 +51,15 @@ export function AddHostDialog({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // Proposed, not forced: typing an id fills the prefix, but an operator whose
-  // proxy mounts somewhere else can still say so.
-  const effectiveBasePath = basePath.trim() === '' ? directory.defaultBasePathFor(id.trim()) : basePath;
+  const isHub = directory.source === 'hub';
+
+  // Proposed, not forced, and *local mode only*: typing an id fills the
+  // prefix, but an operator whose proxy mounts somewhere else can still say
+  // so. In Hub mode `/h/<id>` is a path, not a reachable address, so there is
+  // no sensible default to fall back to — an empty field stays empty and the
+  // submit button below refuses it instead.
+  const effectiveBasePath =
+    !isHub && basePath.trim() === '' ? directory.defaultBasePathFor(id.trim()) : basePath;
 
   const submit = async (): Promise<void> => {
     setBusy(true);
@@ -93,12 +111,18 @@ export function AddHostDialog({
         </label>
 
         <label className="field">
-          <span>Path prefix on this origin</span>
+          <span>{isHub ? 'Backend address (as the Hub can reach it)' : 'Path prefix on this origin'}</span>
           <input
             type="text"
             value={basePath}
             onChange={(e) => setBasePath(e.target.value)}
-            placeholder={id.trim() === '' ? '/h/dev02' : directory.defaultBasePathFor(id.trim())}
+            placeholder={
+              isHub
+                ? 'http://dev02:8787'
+                : id.trim() === ''
+                  ? '/h/dev02'
+                  : directory.defaultBasePathFor(id.trim())
+            }
             autoCapitalize="none"
             autoCorrect="off"
             spellCheck={false}
@@ -121,7 +145,10 @@ export function AddHostDialog({
             type="button"
             className="primary"
             onClick={() => void submit()}
-            disabled={busy || id.trim() === ''}
+            // Hub mode has no default to fall back to (see `effectiveBasePath`),
+            // so an empty field here is a missing required address, not a
+            // "use the convention" signal the way it is in local mode.
+            disabled={busy || id.trim() === '' || (isHub && basePath.trim() === '')}
           >
             {busy ? 'Adding…' : 'Add host'}
           </button>
