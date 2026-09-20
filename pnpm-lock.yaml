@@ -171,7 +171,7 @@ importers:
         version: 9.14.0
       web-push:
         specifier: ^3.6.7
-        version: 3.6.7
+        version: 3.6.7(supports-color@8.1.1)
       zod:
         specifier: ^3.24.1
         version: 3.25.76
