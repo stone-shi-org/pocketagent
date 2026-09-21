@@ -18,6 +18,7 @@ import { ShellSection } from '../components/ShellSection.js';
 import { HostGroup } from '../components/HostGroup.js';
 import { HostSheet } from '../components/HostSheet.js';
 import { AddHostDialog } from '../components/AddHostDialog.js';
+import { BindHostDialog } from '../components/BindHostDialog.js';
 import { HostProvider } from '../hosts/HostContext.js';
 import { useHostFleet } from '../hosts/useHostFleet.js';
 import { currentHostId, visibleHosts } from '../hosts/selected-host.js';
@@ -91,6 +92,7 @@ export function ProjectsPage({
   const [showShell, setShowShell] = useState<string | null>(null);
   const [showHostSheet, setShowHostSheet] = useState(false);
   const [showAddHost, setShowAddHost] = useState(false);
+  const [bindHostId, setBindHostId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<string[]>(loadCollapsedHosts);
 
   const hosts = directory.hosts;
@@ -312,6 +314,7 @@ export function ProjectsPage({
             // the "no such host" screen for a host the user just deleted.
             if (selected === hostId) nav.goToHost(null);
           }}
+          onBind={(hostId) => setBindHostId(hostId)}
           onClose={() => setShowHostSheet(false)}
           canManage={directory.canManage}
         />
@@ -319,6 +322,18 @@ export function ProjectsPage({
 
       {showAddHost && (
         <AddHostDialog directory={directory} onClose={() => setShowAddHost(false)} />
+      )}
+
+      {bindHostId !== null && (
+        <BindHostDialog
+          directory={directory}
+          hostId={bindHostId}
+          hostLabel={hosts.find((host) => host.endpoint.id === bindHostId)?.label ?? bindHostId}
+          alreadyBound={
+            hosts.find((host) => host.endpoint.id === bindHostId)?.hubBound === true
+          }
+          onClose={() => setBindHostId(null)}
+        />
       )}
 
       {/* Every dialog below acts on exactly one host, so each is mounted inside

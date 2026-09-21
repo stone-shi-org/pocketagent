@@ -37,6 +37,19 @@ import type { HostDirectory } from '../hosts/directory.js';
  * the Hub's own `baseUrlProblem` (`new URL('/h/dev02')` throws), and
  * `/h/<id>` — the right default for local mode — would be actively wrong
  * advice in this one, so no default is offered here at all.
+ *
+ * ## The token field is Hub-only, and optional
+ *
+ * Adding a Hub host and binding it are still two different calls
+ * (`POST /api/hub/hosts` then `POST /api/hub/hosts/:id/bind` — see
+ * `README.md`'s own "add a host, then bind it" wording), but a token
+ * pasted in here lets this one submit do both in sequence, since that is
+ * the overwhelmingly common case: you have the backend's token in hand
+ * *because* you are adding it right now. Leaving it blank still adds the
+ * host, unbound, exactly as before — `HostSheet`'s per-row Bind/Re-bind
+ * action (`BindHostDialog`) is what covers a host added without one, or
+ * one whose stored credential stopped decrypting after the Hub's own
+ * `POCKETAGENT_SETTINGS_ENC_KEY` changed.
  */
 export function AddHostDialog({
   directory,
@@ -48,6 +61,7 @@ export function AddHostDialog({
   const [id, setId] = useState('');
   const [label, setLabel] = useState('');
   const [basePath, setBasePath] = useState('');
+  const [token, setToken] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -61,19 +75,36 @@ export function AddHostDialog({
   const effectiveBasePath =
     !isHub && basePath.trim() === '' ? directory.defaultBasePathFor(id.trim()) : basePath;
 
+  const trimmedToken = token.trim();
+
   const submit = async (): Promise<void> => {
     setBusy(true);
     setError(null);
+    const trimmedId = id.trim();
     const problem = await directory.add({
-      id: id.trim(),
-      label: label.trim() === '' ? id.trim() : label.trim(),
+      id: trimmedId,
+      label: label.trim() === '' ? trimmedId : label.trim(),
       basePath: effectiveBasePath,
     });
-    setBusy(false);
     if (problem) {
+      setBusy(false);
       setError(problem);
       return;
     }
+    if (isHub && trimmedToken !== '') {
+      const bindProblem = await directory.bind(trimmedId, trimmedToken);
+      setBusy(false);
+      if (bindProblem) {
+        // The host was added either way — only the bind half failed — so this
+        // is not the same kind of error as the block above: closing now would
+        // hide that the host exists but still needs `HostSheet`'s Bind action.
+        setError(`Host added, but bind failed: ${bindProblem} You can bind it later from the Hosts panel.`);
+        return;
+      }
+      onClose();
+      return;
+    }
+    setBusy(false);
     onClose();
   };
 
@@ -129,6 +160,22 @@ export function AddHostDialog({
           />
         </label>
 
+        {isHub && (
+          <label className="field">
+            <span>Access token (optional — binds immediately)</span>
+            <input
+              type="password"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="that backend's POCKETAGENT_AUTH_TOKEN"
+              autoComplete="new-password"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+          </label>
+        )}
+
         <p className="hint">{directory.manageHint}</p>
 
         {error && (
@@ -150,7 +197,7 @@ export function AddHostDialog({
             // "use the convention" signal the way it is in local mode.
             disabled={busy || id.trim() === '' || (isHub && basePath.trim() === '')}
           >
-            {busy ? 'Adding…' : 'Add host'}
+            {busy ? (isHub && trimmedToken !== '' ? 'Adding & binding…' : 'Adding…') : 'Add host'}
           </button>
         </div>
       </div>

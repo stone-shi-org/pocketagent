@@ -36,6 +36,7 @@ export function HostSheet({
   onSelect,
   onAdd,
   onRemove,
+  onBind,
   onClose,
   canManage,
 }: {
@@ -45,6 +46,8 @@ export function HostSheet({
   onSelect: (hostId: string) => void;
   onAdd: () => void;
   onRemove: (hostId: string) => void;
+  /** Only ever called for a host whose `hubBound` is non-null — see below. */
+  onBind: (hostId: string) => void;
   onClose: () => void;
   canManage: boolean;
 }): JSX.Element {
@@ -106,6 +109,34 @@ export function HostSheet({
                     here rather than hiding in a `title`. */}
                 {drift !== null && <span className="host-sheet-note">{drift}</span>}
               </button>
+              {/* `hubBound` is null in local mode, where there is no separate
+                  credential to hold at all — see `HostRecord`'s own doc
+                  comment. Shown for *every* Hub-mode row, bound or not: a
+                  bound host can still need a fresh credential re-minted
+                  (e.g. after `POCKETAGENT_SETTINGS_ENC_KEY` rotates on the
+                  Hub), so "Re-bind" has to stay reachable even once
+                  `hubBound` is true. */}
+              {canManage && host.hubBound !== null && (
+                <button
+                  type="button"
+                  className="round-btn plain host-sheet-bind"
+                  onClick={() => {
+                    // Closes the sheet first, the same order "Add host…" uses
+                    // below — `BindHostDialog` is its own backdrop, and two
+                    // stacked ones is not the intended layering.
+                    onBind(host.endpoint.id);
+                    onClose();
+                  }}
+                  aria-label={`${host.hubBound ? 'Re-bind' : 'Bind'} ${host.label}`}
+                  title={
+                    host.hubBound
+                      ? `Re-bind ${host.label} (mint a fresh credential)`
+                      : `Bind ${host.label} (no usable credential yet)`
+                  }
+                >
+                  <Icon name="key" size={16} />
+                </button>
+              )}
               {canManage && host.canRemove && (
                 <button
                   type="button"

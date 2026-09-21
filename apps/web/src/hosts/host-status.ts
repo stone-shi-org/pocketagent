@@ -82,6 +82,16 @@ export interface HostRecord {
   /** False for the host serving this bundle, which cannot be un-registered. */
   readonly canRemove: boolean;
   /**
+   * Whether a Hub holds a usable scoped credential for this host — `null` in
+   * local mode, where the concept does not exist at all (a same-origin path
+   * prefix authenticates on the browser's own cookie, never on a credential
+   * the Hub holds). `false` covers both "never bound" and "bound, but the
+   * stored credential no longer decrypts" (a rotated
+   * `POCKETAGENT_SETTINGS_ENC_KEY`) — `HostRegistry.credentialFor` collapses
+   * those the same way for the same reason, and a fresh bind fixes either.
+   */
+  readonly hubBound: boolean | null;
+  /**
    * Where this host's build sits against the newest one we know of (PA-69).
    *
    * On the record rather than derived in each renderer because a record is the
@@ -159,6 +169,8 @@ export function hostRecordFor(entry: {
   canRemove?: boolean;
   /** Overrides the derived status, for a host the Hub reports as disabled. */
   forced?: { status: HostStatus; message: string } | undefined;
+  /** `HubHostEntry.boundAt !== null`, or omitted entirely in local mode. */
+  hubBound?: boolean;
 }): HostRecord {
   const { status, compatibility } = entry.forced
     ? { status: entry.forced.status, compatibility: null }
@@ -182,6 +194,7 @@ export function hostRecordFor(entry: {
     aliases: info && info.id !== entry.endpoint.id ? [info.id] : [],
     isDefault: entry.isDefault ?? entry.endpoint.id === DEFAULT_HOST_ID,
     canRemove: entry.canRemove ?? entry.endpoint.basePath !== '',
+    hubBound: entry.hubBound ?? null,
     // Filled by `withVersionDrift` below, which is the only thing that can:
     // drift needs the whole list, and this function sees one host.
     drift: detectVersionDrift(info?.version ?? null, null),

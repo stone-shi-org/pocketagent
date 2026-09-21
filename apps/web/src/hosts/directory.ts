@@ -69,6 +69,14 @@ export interface HostDirectory {
     basePath: string;
   }) => Promise<string | null>;
   readonly remove: (hostId: string) => Promise<string | null>;
+  /**
+   * Exchanges a backend's master token for a scoped `pah_` credential.
+   * Resolves to an error message, or null on success. Meaningless in local
+   * mode (there is no separate credential to hold), so it refuses rather
+   * than silently doing nothing — the caller should not be offering this at
+   * all when `source !== 'hub'`, per each host's `hubBound` (null there).
+   */
+  readonly bind: (hostId: string, token: string) => Promise<string | null>;
   /** Re-probes every host now, ignoring backoff. */
   readonly refresh: () => void;
   readonly defaultBasePathFor: (id: string) => string;
@@ -173,6 +181,8 @@ interface Entry {
   readonly canRemove: boolean;
   /** Set when the Hub says this host is registered but switched off. */
   readonly disabledReason?: string;
+  /** `HubHostEntry.boundAt !== null`. Omitted in local mode, where it does not apply. */
+  readonly hubBound?: boolean;
 }
 
 function entriesFromLocal(local: readonly LocalHostEntry[], defaultLabel: string): Entry[] {
@@ -196,6 +206,7 @@ function entriesFromHub(hosts: readonly HubHostEntry[]): Entry[] {
     label: host.label,
     isDefault: host.isDefault,
     canRemove: !host.isDefault,
+    hubBound: host.boundAt !== null,
     ...(host.enabled
       ? {}
       : { disabledReason: `${host.label} is registered but disabled in the Hub.` }),
@@ -315,6 +326,7 @@ export function useHostDirectory(): HostDirectory {
             probe: probes[entry.endpoint.id],
             isDefault: entry.isDefault,
             canRemove: entry.canRemove,
+            ...(entry.hubBound === undefined ? {} : { hubBound: entry.hubBound }),
             ...(entry.disabledReason === undefined
               ? {}
               : { forced: { status: 'offline' as const, message: entry.disabledReason } }),
@@ -384,6 +396,31 @@ export function useHostDirectory(): HostDirectory {
     [source, local, applyRegistry],
   );
 
+  const bind = useCallback(
+    async (hostId: string, token: string): Promise<string | null> => {
+      if (source !== 'hub') return 'Only a Hub-registered host can be bound.';
+      try {
+        const response = await fetch(`/api/hub/hosts/${encodeURIComponent(hostId)}/bind`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ token }),
+        });
+        if (!response.ok) {
+          const body = (await response.json().catch(() => null)) as {
+            error?: { message?: string };
+          } | null;
+          return body?.error?.message ?? 'The Hub could not bind that host.';
+        }
+        applyRegistry(await probeHubRegistry());
+        return null;
+      } catch {
+        return 'Could not reach the Hub.';
+      }
+    },
+    [source, applyRegistry],
+  );
+
   return {
     source: source ?? 'local',
     ready: source !== null,
@@ -394,6 +431,7 @@ export function useHostDirectory(): HostDirectory {
     manageHint: source === 'hub' ? HUB_HINT : LOCAL_HINT,
     add,
     remove,
+    bind,
     refresh: () => probeAll(true),
     defaultBasePathFor,
   };
