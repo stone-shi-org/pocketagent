@@ -92,6 +92,26 @@ export interface HostRecord {
    */
   readonly hubBound: boolean | null;
   /**
+   * The Hub registry's own row id for this host — `null` in local mode.
+   *
+   * Deliberately *not* the same thing as `endpoint.id`: a Hub's default host
+   * is aliased to `DEFAULT_HOST_ID` there (PA-66 D6b, so old bare `/api/*`
+   * links keep working through the Hub), so `endpoint.id` for that one row
+   * reads `'local'` no matter what it is actually called in the registry.
+   * Any call that addresses the *Hub's* API by id — bind, edit, remove — has
+   * to use this field instead, or it 404s on exactly the host most likely to
+   * be the only one registered so far (a first-added host is auto-promoted
+   * to default). That 404 is a bug this field exists to make impossible to
+   * reintroduce, not a hypothetical.
+   */
+  readonly hubHostId: string | null;
+  /**
+   * The address the *Hub* dials for this host, e.g. `http://dev02:8787` —
+   * `null` in local mode, where `endpoint.basePath` already is the address
+   * the browser itself would use and there is no second one to show.
+   */
+  readonly hubBaseUrl: string | null;
+  /**
    * Where this host's build sits against the newest one we know of (PA-69).
    *
    * On the record rather than derived in each renderer because a record is the
@@ -115,6 +135,18 @@ export function hostMatches(record: HostRecord, id: string): boolean {
 /** The record `id` names, or null. Aliases included, so a bookmark resolves. */
 export function findHost(records: readonly HostRecord[], id: string): HostRecord | null {
   return records.find((record) => hostMatches(record, id)) ?? null;
+}
+
+/**
+ * The record whose *management* id (`hubHostId`, falling back to
+ * `endpoint.id`) is `id` — the id `HostSheet` hands to `onBind`/`onEdit`/
+ * `onRemove`, which is deliberately not always `endpoint.id`. Looking a
+ * management id up with plain `findHost` would silently fail for a Hub's
+ * default host, whose `endpoint.id` is aliased to `DEFAULT_HOST_ID` — see
+ * `HostRecord.hubHostId`'s own doc comment.
+ */
+export function findHostByManageId(records: readonly HostRecord[], id: string): HostRecord | null {
+  return records.find((record) => (record.hubHostId ?? record.endpoint.id) === id) ?? null;
 }
 
 /**
@@ -171,6 +203,10 @@ export function hostRecordFor(entry: {
   forced?: { status: HostStatus; message: string } | undefined;
   /** `HubHostEntry.boundAt !== null`, or omitted entirely in local mode. */
   hubBound?: boolean;
+  /** `HubHostEntry.id`, or omitted entirely in local mode. */
+  hubHostId?: string;
+  /** `HubHostEntry.baseUrl`, or omitted entirely in local mode. */
+  hubBaseUrl?: string;
 }): HostRecord {
   const { status, compatibility } = entry.forced
     ? { status: entry.forced.status, compatibility: null }
@@ -195,6 +231,8 @@ export function hostRecordFor(entry: {
     isDefault: entry.isDefault ?? entry.endpoint.id === DEFAULT_HOST_ID,
     canRemove: entry.canRemove ?? entry.endpoint.basePath !== '',
     hubBound: entry.hubBound ?? null,
+    hubHostId: entry.hubHostId ?? null,
+    hubBaseUrl: entry.hubBaseUrl ?? null,
     // Filled by `withVersionDrift` below, which is the only thing that can:
     // drift needs the whole list, and this function sees one host.
     drift: detectVersionDrift(info?.version ?? null, null),

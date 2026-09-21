@@ -37,6 +37,7 @@ export function HostSheet({
   onAdd,
   onRemove,
   onBind,
+  onEdit,
   onClose,
   canManage,
 }: {
@@ -45,9 +46,17 @@ export function HostSheet({
   onSelectAll: () => void;
   onSelect: (hostId: string) => void;
   onAdd: () => void;
+  /**
+   * All three of `onRemove`/`onBind`/`onEdit` receive the Hub's own registry
+   * id (`host.hubHostId`) when there is one, never the routing
+   * `host.endpoint.id` — see `HostRecord.hubHostId`'s doc comment for why
+   * those two differ for a Hub's default host, and why using the wrong one
+   * here 404s on exactly that host.
+   */
   onRemove: (hostId: string) => void;
   /** Only ever called for a host whose `hubBound` is non-null — see below. */
   onBind: (hostId: string) => void;
+  onEdit: (hostId: string) => void;
   onClose: () => void;
   canManage: boolean;
 }): JSX.Element {
@@ -88,6 +97,9 @@ export function HostSheet({
 
           {hosts.map((host) => {
             const drift = hostDriftMessage(host);
+            // The id every management call below must use — see the prop
+            // doc comment above for why this is not always `endpoint.id`.
+            const manageId = host.hubHostId ?? host.endpoint.id;
             return (
             <div key={host.endpoint.id} className="host-sheet-row">
               <button
@@ -109,6 +121,24 @@ export function HostSheet({
                     here rather than hiding in a `title`. */}
                 {drift !== null && <span className="host-sheet-note">{drift}</span>}
               </button>
+              {/* Same gate `canRemove` already gives Remove below: false only
+                  for the local-mode synthetic entry that *is* the origin
+                  serving this bundle, which is not a registry row at all
+                  and so has nothing here to edit. */}
+              {canManage && host.canRemove && (
+                <button
+                  type="button"
+                  className="round-btn plain host-sheet-edit"
+                  onClick={() => {
+                    onEdit(manageId);
+                    onClose();
+                  }}
+                  aria-label={`Edit ${host.label}`}
+                  title={`Edit ${host.label}`}
+                >
+                  <Icon name="edit" size={16} />
+                </button>
+              )}
               {/* `hubBound` is null in local mode, where there is no separate
                   credential to hold at all — see `HostRecord`'s own doc
                   comment. Shown for *every* Hub-mode row, bound or not: a
@@ -124,7 +154,7 @@ export function HostSheet({
                     // Closes the sheet first, the same order "Add host…" uses
                     // below — `BindHostDialog` is its own backdrop, and two
                     // stacked ones is not the intended layering.
-                    onBind(host.endpoint.id);
+                    onBind(manageId);
                     onClose();
                   }}
                   aria-label={`${host.hubBound ? 'Re-bind' : 'Bind'} ${host.label}`}
@@ -141,7 +171,7 @@ export function HostSheet({
                 <button
                   type="button"
                   className="round-btn plain host-sheet-remove"
-                  onClick={() => onRemove(host.endpoint.id)}
+                  onClick={() => onRemove(manageId)}
                   aria-label={`Remove ${host.label}`}
                   title={`Remove ${host.label}`}
                 >

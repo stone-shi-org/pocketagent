@@ -6585,6 +6585,7 @@ button.chat-rate-limit-badge {
   color: var(--accent);
 }
 
+.host-sheet-edit,
 .host-sheet-bind,
 .host-sheet-remove {
   flex: none;

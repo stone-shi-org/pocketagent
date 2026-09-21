@@ -77,6 +77,15 @@ export interface HostDirectory {
    * all when `source !== 'hub'`, per each host's `hubBound` (null there).
    */
   readonly bind: (hostId: string, token: string) => Promise<string | null>;
+  /**
+   * Edits a host's name and address in place — `PATCH /api/hub/hosts/:id` in
+   * hub mode, or (since `addLocalHost` already upserts by id) re-adding a
+   * local one under the same id. Resolves to an error message, or null.
+   */
+  readonly update: (
+    hostId: string,
+    patch: { label?: string; basePath?: string },
+  ) => Promise<string | null>;
   /** Re-probes every host now, ignoring backoff. */
   readonly refresh: () => void;
   readonly defaultBasePathFor: (id: string) => string;
@@ -183,6 +192,13 @@ interface Entry {
   readonly disabledReason?: string;
   /** `HubHostEntry.boundAt !== null`. Omitted in local mode, where it does not apply. */
   readonly hubBound?: boolean;
+  /**
+   * The Hub's own row id, distinct from `endpoint.id` for the default host
+   * (see `HostRecord.hubHostId`'s own comment) — omitted in local mode.
+   */
+  readonly hubHostId?: string;
+  /** The address the Hub dials for this host. Omitted in local mode. */
+  readonly hubBaseUrl?: string;
 }
 
 function entriesFromLocal(local: readonly LocalHostEntry[], defaultLabel: string): Entry[] {
@@ -205,8 +221,17 @@ function entriesFromHub(hosts: readonly HubHostEntry[]): Entry[] {
     endpoint: host.isDefault ? DEFAULT_HOST : hostEndpoint(host.id, defaultBasePathFor(host.id)),
     label: host.label,
     isDefault: host.isDefault,
-    canRemove: !host.isDefault,
+    // The backend's own `remove()` reassigns the default to whichever host
+    // survives (or leaves none, if this was the last one — the next `create`
+    // re-defaults), so there is no structural reason to forbid removing this
+    // one specifically. Forbidding it anyway would strand a Hub whose only
+    // host is misconfigured: it is auto-promoted to default the moment it is
+    // the first one added, with no "make default" affordance on another to
+    // demote it first.
+    canRemove: true,
     hubBound: host.boundAt !== null,
+    hubHostId: host.id,
+    hubBaseUrl: host.baseUrl,
     ...(host.enabled
       ? {}
       : { disabledReason: `${host.label} is registered but disabled in the Hub.` }),
@@ -327,6 +352,8 @@ export function useHostDirectory(): HostDirectory {
             isDefault: entry.isDefault,
             canRemove: entry.canRemove,
             ...(entry.hubBound === undefined ? {} : { hubBound: entry.hubBound }),
+            ...(entry.hubHostId === undefined ? {} : { hubHostId: entry.hubHostId }),
+            ...(entry.hubBaseUrl === undefined ? {} : { hubBaseUrl: entry.hubBaseUrl }),
             ...(entry.disabledReason === undefined
               ? {}
               : { forced: { status: 'offline' as const, message: entry.disabledReason } }),
@@ -421,6 +448,58 @@ export function useHostDirectory(): HostDirectory {
     [source, applyRegistry],
   );
 
+  const update = useCallback(
+    async (
+      hostId: string,
+      patch: { label?: string; basePath?: string },
+    ): Promise<string | null> => {
+      if (source === 'hub') {
+        try {
+          const response = await fetch(`/api/hub/hosts/${encodeURIComponent(hostId)}`, {
+            method: 'PATCH',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            // `baseUrl` is the Hub's own field name for what this dialog
+            // calls `basePath` everywhere else — the same one value, two
+            // names, `AddHostDialog`'s own doc comment already explains why.
+            body: JSON.stringify({ label: patch.label, baseUrl: patch.basePath }),
+          });
+          if (!response.ok) {
+            const body = (await response.json().catch(() => null)) as {
+              error?: { message?: string };
+            } | null;
+            return body?.error?.message ?? 'The Hub refused that change.';
+          }
+          applyRegistry(await probeHubRegistry());
+          return null;
+        } catch {
+          return 'Could not reach the Hub.';
+        }
+      }
+      if (hostId === DEFAULT_HOST_ID) {
+        return 'This is the host serving this page, and cannot be edited.';
+      }
+      const existing = local.find((row) => row.id === hostId);
+      if (!existing) return 'No such host.';
+      const problem = localHostProblem(
+        { id: hostId, label: patch.label ?? existing.label, basePath: patch.basePath ?? existing.basePath },
+        local.filter((row) => row.id !== hostId),
+        [DEFAULT_HOST_ID],
+      );
+      if (problem) return problem;
+      // `addLocalHost` upserts by id, so re-adding under the same id is the
+      // edit.
+      setLocal(
+        addLocalHost(
+          { id: hostId, label: patch.label ?? existing.label, basePath: patch.basePath ?? existing.basePath },
+          local,
+        ),
+      );
+      return null;
+    },
+    [source, local, applyRegistry],
+  );
+
   return {
     source: source ?? 'local',
     ready: source !== null,
@@ -432,6 +511,7 @@ export function useHostDirectory(): HostDirectory {
     add,
     remove,
     bind,
+    update,
     refresh: () => probeAll(true),
     defaultBasePathFor,
   };

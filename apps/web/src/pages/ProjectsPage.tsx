@@ -19,6 +19,8 @@ import { HostGroup } from '../components/HostGroup.js';
 import { HostSheet } from '../components/HostSheet.js';
 import { AddHostDialog } from '../components/AddHostDialog.js';
 import { BindHostDialog } from '../components/BindHostDialog.js';
+import { EditHostDialog } from '../components/EditHostDialog.js';
+import { findHostByManageId } from '../hosts/host-status.js';
 import { HostProvider } from '../hosts/HostContext.js';
 import { useHostFleet } from '../hosts/useHostFleet.js';
 import { currentHostId, visibleHosts } from '../hosts/selected-host.js';
@@ -93,6 +95,7 @@ export function ProjectsPage({
   const [showHostSheet, setShowHostSheet] = useState(false);
   const [showAddHost, setShowAddHost] = useState(false);
   const [bindHostId, setBindHostId] = useState<string | null>(null);
+  const [editHostId, setEditHostId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<string[]>(loadCollapsedHosts);
 
   const hosts = directory.hosts;
@@ -309,12 +312,18 @@ export function ProjectsPage({
           onSelect={(hostId) => nav.goToHost(hostId)}
           onAdd={() => setShowAddHost(true)}
           onRemove={(hostId) => {
+            // `hostId` here is a *management* id (see `HostSheet`'s prop doc
+            // comment), which for a Hub's default host differs from the
+            // routing id `selected` is compared against — resolve the record
+            // first rather than comparing the two ids directly.
+            const record = findHostByManageId(hosts, hostId);
             void directory.remove(hostId);
             // A removed host cannot stay selected, or the very next render is
             // the "no such host" screen for a host the user just deleted.
-            if (selected === hostId) nav.goToHost(null);
+            if (record && selected === record.endpoint.id) nav.goToHost(null);
           }}
           onBind={(hostId) => setBindHostId(hostId)}
+          onEdit={(hostId) => setEditHostId(hostId)}
           onClose={() => setShowHostSheet(false)}
           canManage={directory.canManage}
         />
@@ -328,13 +337,19 @@ export function ProjectsPage({
         <BindHostDialog
           directory={directory}
           hostId={bindHostId}
-          hostLabel={hosts.find((host) => host.endpoint.id === bindHostId)?.label ?? bindHostId}
-          alreadyBound={
-            hosts.find((host) => host.endpoint.id === bindHostId)?.hubBound === true
-          }
+          hostLabel={findHostByManageId(hosts, bindHostId)?.label ?? bindHostId}
+          alreadyBound={findHostByManageId(hosts, bindHostId)?.hubBound === true}
           onClose={() => setBindHostId(null)}
         />
       )}
+
+      {editHostId !== null &&
+        (() => {
+          const record = findHostByManageId(hosts, editHostId);
+          return record ? (
+            <EditHostDialog directory={directory} host={record} onClose={() => setEditHostId(null)} />
+          ) : null;
+        })()}
 
       {/* Every dialog below acts on exactly one host, so each is mounted inside
           that host's provider and its open-state *is* the host id. Reached

@@ -18,6 +18,8 @@ import { HostGroup } from '../components/HostGroup.js';
 import { HostSheet } from '../components/HostSheet.js';
 import { AddHostDialog } from '../components/AddHostDialog.js';
 import { BindHostDialog } from '../components/BindHostDialog.js';
+import { EditHostDialog } from '../components/EditHostDialog.js';
+import { findHostByManageId } from '../hosts/host-status.js';
 import { HostProvider } from '../hosts/HostContext.js';
 import { useHostFleet } from '../hosts/useHostFleet.js';
 import { currentHostId, visibleHosts } from '../hosts/selected-host.js';
@@ -230,6 +232,7 @@ export function DesktopShell({
   const [showHostSheet, setShowHostSheet] = useState(false);
   const [showAddHost, setShowAddHost] = useState(false);
   const [bindHostId, setBindHostId] = useState<string | null>(null);
+  const [editHostId, setEditHostId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<string[]>(loadCollapsedHosts);
 
   const hosts = directory.hosts;
@@ -1082,10 +1085,16 @@ export function DesktopShell({
           onSelect={(hostId) => nav.goToHost(hostId)}
           onAdd={() => setShowAddHost(true)}
           onRemove={(hostId) => {
+            // `hostId` here is a *management* id (see `HostSheet`'s prop doc
+            // comment), which for a Hub's default host differs from the
+            // routing id `selectedHostId` is compared against — resolve the
+            // record first rather than comparing the two ids directly.
+            const record = findHostByManageId(hosts, hostId);
             void directory.remove(hostId);
-            if (selectedHostId === hostId) nav.goToHost(null);
+            if (record && selectedHostId === record.endpoint.id) nav.goToHost(null);
           }}
           onBind={(hostId) => setBindHostId(hostId)}
+          onEdit={(hostId) => setEditHostId(hostId)}
           onClose={() => setShowHostSheet(false)}
           canManage={directory.canManage}
         />
@@ -1099,13 +1108,19 @@ export function DesktopShell({
         <BindHostDialog
           directory={directory}
           hostId={bindHostId}
-          hostLabel={hosts.find((host) => host.endpoint.id === bindHostId)?.label ?? bindHostId}
-          alreadyBound={
-            hosts.find((host) => host.endpoint.id === bindHostId)?.hubBound === true
-          }
+          hostLabel={findHostByManageId(hosts, bindHostId)?.label ?? bindHostId}
+          alreadyBound={findHostByManageId(hosts, bindHostId)?.hubBound === true}
           onClose={() => setBindHostId(null)}
         />
       )}
+
+      {editHostId !== null &&
+        (() => {
+          const record = findHostByManageId(hosts, editHostId);
+          return record ? (
+            <EditHostDialog directory={directory} host={record} onClose={() => setEditHostId(null)} />
+          ) : null;
+        })()}
 
       {showAdd !== null && (
         <HostProvider endpoint={nav.endpointFor(showAdd)}>
