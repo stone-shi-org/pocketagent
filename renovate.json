@@ -1,0 +1,91 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+
+  "enabledManagers": ["custom.regex"],
+
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Claude Code pin (docker/agent-versions.env)",
+      "fileMatch": ["^docker/agent-versions\\.env$"],
+      "matchStrings": ["CLAUDE_CODE_VERSION=(?<currentValue>[0-9.]+)"],
+      "depNameTemplate": "@anthropic-ai/claude-code",
+      "datasourceTemplate": "npm",
+      "groupName": "claude-code agent pin"
+    },
+    {
+      "customType": "regex",
+      "description": "Codex pin (docker/agent-versions.env)",
+      "fileMatch": ["^docker/agent-versions\\.env$"],
+      "matchStrings": ["CODEX_VERSION=(?<currentValue>[0-9.]+)"],
+      "depNameTemplate": "@openai/codex",
+      "datasourceTemplate": "npm",
+      "groupName": "codex agent pin"
+    },
+    {
+      "customType": "regex",
+      "description": "opencode pin (docker/agent-versions.env)",
+      "fileMatch": ["^docker/agent-versions\\.env$"],
+      "matchStrings": ["OPENCODE_VERSION=(?<currentValue>[0-9.]+)"],
+      "depNameTemplate": "opencode-ai",
+      "datasourceTemplate": "npm",
+      "groupName": "opencode agent pin"
+    },
+    {
+      "customType": "regex",
+      "description": "pi pin (docker/agent-versions.env)",
+      "fileMatch": ["^docker/agent-versions\\.env$"],
+      "matchStrings": ["PI_VERSION=(?<currentValue>[0-9.]+)"],
+      "depNameTemplate": "@earendil-works/pi-coding-agent",
+      "datasourceTemplate": "npm",
+      "groupName": "pi agent pin"
+    },
+    {
+      "customType": "regex",
+      "description": "Claude Code pin (apps/server/src/agents/catalog.ts)",
+      "fileMatch": ["^apps/server/src/agents/catalog\\.ts$"],
+      "matchStrings": [
+        "packageName: '@anthropic-ai/claude-code',\\s*\\n\\s*version: '(?<currentValue>[^']+)'"
+      ],
+      "depNameTemplate": "@anthropic-ai/claude-code",
+      "datasourceTemplate": "npm",
+      "groupName": "claude-code agent pin"
+    },
+    {
+      "customType": "regex",
+      "description": "Codex pin (apps/server/src/agents/catalog.ts)",
+      "fileMatch": ["^apps/server/src/agents/catalog\\.ts$"],
+      "matchStrings": [
+        "packageName: '@openai/codex',\\s*\\n\\s*version: '(?<currentValue>[^']+)'"
+      ],
+      "depNameTemplate": "@openai/codex",
+      "datasourceTemplate": "npm",
+      "groupName": "codex agent pin"
+    },
+    {
+      "customType": "regex",
+      "description": "opencode pin (apps/server/src/agents/catalog.ts)",
+      "fileMatch": ["^apps/server/src/agents/catalog\\.ts$"],
+      "matchStrings": [
+        "packageName: 'opencode-ai',\\s*\\n\\s*version: '(?<currentValue>[^']+)'"
+      ],
+      "depNameTemplate": "opencode-ai",
+      "datasourceTemplate": "npm",
+      "groupName": "opencode agent pin"
+    },
+    {
+      "customType": "regex",
+      "description": "pi pin (apps/server/src/agents/catalog.ts)",
+      "fileMatch": ["^apps/server/src/agents/catalog\\.ts$"],
+      "matchStrings": [
+        "packageName: '@earendil-works/pi-coding-agent',\\s*\\n\\s*version: '(?<currentValue>[^']+)'"
+      ],
+      "depNameTemplate": "@earendil-works/pi-coding-agent",
+      "datasourceTemplate": "npm",
+      "groupName": "pi agent pin"
+    }
+  ],
+
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 4
+}
