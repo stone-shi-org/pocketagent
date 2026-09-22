@@ -28,12 +28,13 @@
 # build has to be a genuine per-platform `pnpm install` under
 # `buildx --platform` rather than one build plus `COPY --from`.
 
-# Debian, deliberately, and for two independent reasons. `node-pty` and
-# `better-sqlite3` compile against glibc and Alpine/musl is a known way to
-# break the first of them — and separately, the agent CLIs this image is meant
+# Debian for deps/build/hub-runtime and Ubuntu 26.04 for server runtime (PA-79).
+# `node-pty` and `better-sqlite3` compile against glibc and Alpine/musl is a known
+# way to break the first of them — and separately, the agent CLIs this image is meant
 # to run include dynamically-linked glibc ELF binaries (Google's `agy` is one),
 # so a musl base would break them even when the server itself started fine.
 ARG NODE_IMAGE=node:22-bookworm-slim
+ARG SERVER_BASE_IMAGE=ubuntu:26.04
 
 # ---------------------------------------------------------------------------
 # deps — the full dependency tree, with the toolchain the native modules need
@@ -101,45 +102,91 @@ RUN pnpm install --frozen-lockfile --prod
 # ---------------------------------------------------------------------------
 # runtime — the thin image
 # ---------------------------------------------------------------------------
-FROM ${NODE_IMAGE} AS runtime
+# Ubuntu 26.04 LTS (PA-79), glibc-based for node-pty, better-sqlite3, and agent
+# binaries (agy, etc.). Node 22 and npm/corepack/pnpm are copied from the deps
+# stage so the runtime receives the exact official Node toolchain without
+# pulling compilers into the runtime image.
+FROM ${SERVER_BASE_IMAGE} AS runtime
+
+COPY --from=deps /usr/local /usr/local
 
 # Every package here is required by something the server actually does:
 #   ca-certificates  TLS to the agent APIs and MCP endpoints
 #   git              git/status.ts, the whole worktree service
-#   openssh-client   the operator's repos normally have ssh remotes
-#   tmux             POCKETAGENT_BACKEND=tmux fails its boot probe without it
-#   tini             PID 1 reaping (see ENTRYPOINT below)
 #   gosu             the UID/GID remap in docker-entrypoint.sh
 #   less             sessions/env.ts sets LESS=-R, which assumes a pager exists
 #   procps           `ps` inside `docker exec`, for looking at PTY children
+#   tini             PID 1 reaping (see ENTRYPOINT below)
+#   tmux             POCKETAGENT_BACKEND=tmux fails its boot probe without it
+#   openssh-client   the operator's repos normally have ssh remotes
+#   zsh              interactive shell support with Oh-My-Zsh (PA-79)
+#   curl, wget       fetching scripts and assets
+#   autojump         terminal productivity plugin for zsh
+#   sudo             passwordless sudo for developer container ergonomics
+#   locales          UTF-8 locale support for zsh prompt and plugins
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        autojump \
         ca-certificates \
+        curl \
         git \
         gosu \
         less \
+        locales \
         openssh-client \
         procps \
+        sudo \
         tini \
         tmux \
+        wget \
+        zsh \
+    && locale-gen en_US.UTF-8 \
     && rm -rf /var/lib/apt/lists/*
 
-# The base image ships a `node` account already holding uid/gid 1000, which is
+# The base image ships an `ubuntu` account already holding uid/gid 1000, which is
 # the overwhelmingly common host uid and therefore the one this image's own
 # user most needs to be able to take. Two accounts cannot share a uid without
 # making passwd lookups ambiguous — and an ambiguous lookup is exactly what
 # breaks `git`, which refuses a repository whose owner it cannot match. So the
 # unused account is removed rather than worked around.
-RUN userdel --remove node \
+RUN userdel --remove ubuntu 2>/dev/null || true \
+    && userdel --remove node 2>/dev/null || true \
     && groupadd --gid 1000 pocketagent \
-    && useradd --uid 1000 --gid 1000 --shell /bin/bash --create-home pocketagent
+    && useradd --uid 1000 --gid 1000 --shell /bin/zsh --create-home pocketagent \
+    && echo "pocketagent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/pocketagent \
+    && chmod 0440 /etc/sudoers.d/pocketagent
+
+# Oh-My-Zsh and plugins (PA-79). Installed into /home/pocketagent and copied to
+# /etc/skel so that when /home/pocketagent is mounted as a volume at run time,
+# docker-entrypoint.sh can seed dotfiles into fresh mounts.
+COPY docker/zsh-in-docker.sh /tmp/zsh-in-docker.sh
+RUN chmod +x /tmp/zsh-in-docker.sh \
+    && gosu pocketagent /tmp/zsh-in-docker.sh -x \
+        -p "git" \
+        -p "autojump" \
+        -p https://github.com/zsh-users/zsh-autosuggestions \
+        -p https://github.com/zsh-users/zsh-completions \
+        -p https://github.com/zsh-users/zsh-history-substring-search \
+        -p https://github.com/zsh-users/zsh-syntax-highlighting \
+    && cp -r /home/pocketagent/.oh-my-zsh /etc/skel/.oh-my-zsh \
+    && cp /home/pocketagent/.zshrc /etc/skel/.zshrc \
+    && rm -rf /home/pocketagent/.oh-my-zsh/.git \
+              /home/pocketagent/.oh-my-zsh/custom/*/*/.git \
+              /etc/skel/.oh-my-zsh/.git \
+              /etc/skel/.oh-my-zsh/custom/*/*/.git \
+              /tmp/zsh-in-docker.sh
 
 ENV NODE_ENV=production \
     HOME=/home/pocketagent \
     PORT=8787 \
     POCKETAGENT_DATA_DIR=/data \
     POCKETAGENT_WEB_DIST=/app/apps/web/dist \
-    NPM_CONFIG_PREFIX=/home/pocketagent/.npm-global
+    NPM_CONFIG_PREFIX=/home/pocketagent/.npm-global \
+    SHELL=/bin/zsh \
+    POCKETAGENT_SHELL=/bin/zsh \
+    LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8
 
 # The mounted agent prefix comes *before* /usr/local/bin, so an agent the
 # operator installs on demand (PA-68) overrides the one this image pinned
@@ -158,16 +205,24 @@ ENV PATH=/home/pocketagent/.npm-global/bin:/home/pocketagent/.local/bin:/home/po
 ENV HOST=0.0.0.0
 
 # A login shell is not a detail here: planner/tools.ts runs `exec_command` as
-# `$SHELL -lc`, and Debian's /etc/profile *overwrites* PATH unconditionally,
-# dropping everything set above. /etc/profile.d is sourced afterwards, so this
-# is what keeps a tool call and the server itself agreeing about where agent
-# binaries live. Verified by docker-smoke.mjs rather than assumed.
+# `$SHELL -lc`. /etc/profile *overwrites* PATH unconditionally on login shells,
+# dropping everything set above. /etc/profile.d is sourced afterwards for bash,
+# and /etc/zsh/zshenv is read for all zsh invocations. This is what keeps a
+# tool call and the server itself agreeing about where agent binaries live.
+# Verified by docker-smoke.mjs rather than assumed.
 RUN printf '%s\n' \
     '# PocketAgent: re-apply the agent prefix that /etc/profile just discarded.' \
     'PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"' \
     'export PATH' \
     > /etc/profile.d/10-pocketagent-path.sh \
-    && chmod 0644 /etc/profile.d/10-pocketagent-path.sh
+    && chmod 0644 /etc/profile.d/10-pocketagent-path.sh \
+    && mkdir -p /etc/zsh \
+    && printf '%s\n' \
+    '# PocketAgent: ensure the agent prefix is in PATH for all zsh invocations.' \
+    'PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"' \
+    'export PATH' \
+    >> /etc/zsh/zshenv \
+    && chmod 0644 /etc/zsh/zshenv
 
 # Created in the image, owned by the image's user, so that an *empty named
 # volume* mounted here inherits that ownership from Docker. A bind mount does

@@ -114,6 +114,14 @@ if [ "$(id -u)" = '0' ]; then
         usermod --non-unique --uid "$TARGET_UID" "$APP_USER"
     fi
 
+    # Seed dotfiles from /etc/skel if HOME is missing them (e.g. fresh bind mount or named volume)
+    if [ ! -d "$HOME/.oh-my-zsh" ] && [ -d /etc/skel/.oh-my-zsh ]; then
+        cp -r /etc/skel/.oh-my-zsh "$HOME/" 2>/dev/null || true
+    fi
+    if [ ! -f "$HOME/.zshrc" ] && [ -f /etc/skel/.zshrc ]; then
+        cp /etc/skel/.zshrc "$HOME/" 2>/dev/null || true
+    fi
+
     # Only ever the image's own directories. $HOME and the data root are the
     # two the remap can strand, and each is skipped the moment it turns out to
     # be a mount — at which point ownership is the operator's to set and
@@ -122,6 +130,10 @@ if [ "$(id -u)" = '0' ]; then
         [ -d "$dir" ] || continue
         if is_mount_point "$dir"; then
             log "$dir is a mount point; leaving its ownership alone"
+            if [ "$dir" = "$HOME" ]; then
+                [ -d "$HOME/.oh-my-zsh" ] && chown -R "$TARGET_UID:$TARGET_GID" "$HOME/.oh-my-zsh" 2>/dev/null || true
+                [ -f "$HOME/.zshrc" ] && chown "$TARGET_UID:$TARGET_GID" "$HOME/.zshrc" 2>/dev/null || true
+            fi
         else
             chown -R "$TARGET_UID:$TARGET_GID" "$dir"
         fi

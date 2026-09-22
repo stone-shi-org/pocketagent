@@ -309,7 +309,7 @@ heading('It runs as the host uid, not root');
 
 heading('A login shell still has the agent prefix on PATH');
 {
-  // Debian's /etc/profile overwrites PATH unconditionally, and
+  // /etc/profile overwrites PATH unconditionally on bash login shells, and
   // planner/tools.ts runs exec_command as `$SHELL -lc`. Without
   // /etc/profile.d/10-pocketagent-path.sh an agent installed into the mounted
   // prefix is invisible to exactly the surface most likely to look for it.
@@ -326,6 +326,35 @@ heading('A login shell still has the agent prefix on PATH');
     order.indexOf('/home/pocketagent/.npm-global/bin') < order.indexOf('/usr/local/bin'),
     'mounted prefix precedes /usr/local/bin (an on-demand install wins)',
   );
+}
+
+heading('A zsh login shell still has the agent prefix on PATH (PA-79)');
+{
+  const zshLoginPath = tryRun('docker', [
+    'exec', '--user', `${HOST_UID}:${HOST_GID}`, CONTAINER, 'zsh', '-lc', 'echo "$PATH"',
+  ]);
+  check(
+    zshLoginPath.stdout.startsWith('/home/pocketagent/.npm-global/bin:'),
+    'zsh login shell PATH starts with the mounted agent prefix',
+    zshLoginPath.stdout.split(':').slice(0, 2).join(':'),
+  );
+  const zshOrder = zshLoginPath.stdout.split(':');
+  check(
+    zshOrder.indexOf('/home/pocketagent/.npm-global/bin') < zshOrder.indexOf('/usr/local/bin'),
+    'zsh: mounted prefix precedes /usr/local/bin (an on-demand install wins)',
+  );
+}
+
+heading('Ubuntu 26.04 base and zsh shell environment (PA-79)');
+{
+  const osRelease = inContainer('cat /etc/os-release');
+  check(osRelease.stdout.includes('Ubuntu 26.04'), 'os-release reports Ubuntu 26.04', osRelease.stdout.split('\n')[0]);
+  const userShell = inContainer('getent passwd pocketagent');
+  check(userShell.stdout.trim().endsWith('/bin/zsh'), 'pocketagent user shell is /bin/zsh', userShell.stdout.trim());
+  const zshrc = inContainer('test -f "$HOME/.zshrc" && echo ok');
+  check(zshrc.stdout.trim() === 'ok', '.zshrc exists in HOME');
+  const omz = inContainer('test -d "$HOME/.oh-my-zsh" && echo ok');
+  check(omz.stdout.trim() === 'ok', '.oh-my-zsh exists in HOME');
 }
 
 heading('git works inside the mounted repo');
