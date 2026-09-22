@@ -806,4 +806,33 @@ describe('websocket terminal transport', () => {
       expect(error.code).toBe('bad_message');
     });
   });
+
+  // PA-83 #3/#4: TTS-only stop, routed through the same `requireStructured`
+  // guard as `interrupt` — these two tests only pin that routing (a
+  // terminal session, an unattached one); `voiceTts.cancel` actually not
+  // touching `session.interrupt()` is covered at the unit level in
+  // `voice-tts-service.test.ts`, since exercising it here would need a
+  // live-stt-configured structured session this file's other tests don't
+  // otherwise set up.
+  describe('stop_speech handling', () => {
+    it('rejects stop_speech on a non-structured (terminal) session', async () => {
+      const id = await newShellSession();
+      const client = await connect();
+      client.send({ type: 'attach', sessionId: id, afterSeq: 0 });
+      await client.next('attached');
+
+      client.send({ type: 'stop_speech', sessionId: id });
+      const error = await client.next('error');
+      expect(error.code).toBe('bad_message');
+    });
+
+    it('rejects stop_speech before attaching', async () => {
+      const id = await newShellSession();
+      const client = await connect();
+
+      client.send({ type: 'stop_speech', sessionId: id });
+      const error = await client.next('error');
+      expect(error.code).toBe('not_attached');
+    });
+  });
 });

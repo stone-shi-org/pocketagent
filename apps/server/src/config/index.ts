@@ -275,6 +275,25 @@ export interface Config {
    * or null to use live-stt's configured default model (PA-81).
    */
   liveSttTtsModel: string | null;
+  /**
+   * PA-83 #1: the client-side live-listen VAD's "sensitivity" knob, 1 (least
+   * sensitive) to 10 (most) — see `apps/web/src/audio/vad.ts`'s
+   * `vadOptionsForSensitivity`, which is where this number is actually
+   * consumed; nothing on the server reads it. There is no matching env var
+   * on purpose: unlike every other `SETTINGS_FIELDS` entry, this setting was
+   * never a `.env` knob to begin with (it didn't exist before this
+   * Settings-page control did), so there is nothing for it to be *seeded
+   * from* — `5` here is simply the literal default `loadConfig()` returns,
+   * and `seedSettingsFromEnvIfNeeded` writes it into the database on first
+   * boot exactly like every field that does have an env-var origin.
+   */
+  voiceTurnSensitivity: number;
+  /**
+   * PA-83 #1: trailing silence (ms) the client-side VAD waits before ending
+   * a live-listen turn — the "silent time" the ticket asked about. Same
+   * "config-literal-only, no env var" shape as `voiceTurnSensitivity` above.
+   */
+  voiceTurnSilenceMs: number;
 }
 
 const MIN_TOKEN_LENGTH = 24;
@@ -553,5 +572,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     liveSttUrl,
     liveSttModel: e.POCKETAGENT_LIVE_STT_MODEL?.trim() || null,
     liveSttTtsModel: e.POCKETAGENT_LIVE_STT_TTS_MODEL?.trim() || null,
+    // PA-83 #1: literal defaults, not env-derived — see the `Config` field's
+    // own doc comment above for why these two have no `RawEnv` counterpart.
+    voiceTurnSensitivity: 5,
+    voiceTurnSilenceMs: 800,
   };
 }

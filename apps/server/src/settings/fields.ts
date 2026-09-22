@@ -106,6 +106,12 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   // PA-81: live STT and TTS model overrides, take effect immediately
   nullableStr('liveSttModel', 'live_stt_model', true),
   nullableStr('liveSttTtsModel', 'live_stt_tts_model', true),
+  // PA-83 #1: live-listen VAD tuning. `live` because nothing on the server
+  // caches these — the browser re-reads them from `GET /api/settings` each
+  // time it constructs a `LiveListenController`, the same "no restart"
+  // shape `liveSttUrl` above already established for a voice-feature knob.
+  num('voiceTurnSensitivity', 'voice_turn_sensitivity', true),
+  num('voiceTurnSilenceMs', 'voice_turn_silence_ms', true),
   str('shell', 'shell', false),
   str('claudeBin', 'claude_bin', false),
   str('agyBin', 'agy_bin', false),

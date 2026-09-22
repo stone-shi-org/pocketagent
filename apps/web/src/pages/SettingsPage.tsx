@@ -620,6 +620,25 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
             )}
           </div>
         </TextRow>
+        <NumberRow
+          label="Live-listen sensitivity"
+          help="1 (least sensitive — needs louder, clearer speech) to 10 (most sensitive — picks up quieter speech). 5 is the original, unconfigurable default."
+          value={settings.voiceTurnSensitivity}
+          min={1}
+          max={10}
+          busy={busy('voiceTurnSensitivity')}
+          onChange={(v) => saveDebounced('voiceTurnSensitivity', v)}
+        />
+        <NumberRow
+          label="Live-listen silence before turn ends"
+          unit="ms"
+          help="How long the mic must stay quiet before live-listen mode treats what you said as finished and sends it. Lower ends a turn sooner but risks cutting off a mid-sentence pause."
+          value={settings.voiceTurnSilenceMs}
+          min={200}
+          max={3000}
+          busy={busy('voiceTurnSilenceMs')}
+          onChange={(v) => saveDebounced('voiceTurnSilenceMs', v)}
+        />
         <TextRow
           label="Push contact"
           help="VAPID sub claim: a mailto: or https: URL identifying this deployment."

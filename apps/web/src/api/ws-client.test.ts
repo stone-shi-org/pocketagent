@@ -715,6 +715,16 @@ describe('TerminalConnection: structured sessions', () => {
     ]);
   });
 
+  it('sends a stop_speech frame (PA-83 #3/#4)', () => {
+    const { connection, socket } = setup();
+    connection.open('abc');
+    socket().open();
+
+    connection.sendStopSpeech();
+
+    expect(socket().parsedSent().slice(1)).toEqual([{ type: 'stop_speech', sessionId: 'abc' }]);
+  });
+
   it('reports voice_mode_changed and tts_audio frames to their handlers', () => {
     const seenModeChanges: boolean[] = [];
     const seenChunks: unknown[] = [];

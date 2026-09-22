@@ -100,4 +100,44 @@ describe('generalized settings fields over HTTP', () => {
     expect(t.context.config.liveSttModel).toBe('whisper-large-v3-turbo-q8_0');
     expect(t.context.config.liveSttTtsModel).toBe('kokoro-82m-v1');
   });
+
+  it('voiceTurnSensitivity and voiceTurnSilenceMs default to 5/800 and take effect with no restart (PA-83)', async () => {
+    t = await createTestApp();
+    const initial = await t.app.inject({ method: 'GET', url: '/api/settings', headers: headers(t) });
+    expect(initial.json().settings.voiceTurnSensitivity).toBe(5);
+    expect(initial.json().settings.voiceTurnSilenceMs).toBe(800);
+    expect(initial.json().restartRequiredKeys).not.toContain('voiceTurnSensitivity');
+    expect(initial.json().restartRequiredKeys).not.toContain('voiceTurnSilenceMs');
+
+    const patch = await t.app.inject({
+      method: 'PATCH',
+      url: '/api/settings',
+      headers: headers(t),
+      payload: { voiceTurnSensitivity: 8, voiceTurnSilenceMs: 1200 },
+    });
+    expect(patch.statusCode).toBe(200);
+    expect(patch.json().settings.voiceTurnSensitivity).toBe(8);
+    expect(patch.json().settings.voiceTurnSilenceMs).toBe(1200);
+    expect(t.context.config.voiceTurnSensitivity).toBe(8);
+    expect(t.context.config.voiceTurnSilenceMs).toBe(1200);
+  });
+
+  it('rejects out-of-range voiceTurnSensitivity/voiceTurnSilenceMs rather than clamping', async () => {
+    t = await createTestApp();
+    const tooSensitive = await t.app.inject({
+      method: 'PATCH',
+      url: '/api/settings',
+      headers: headers(t),
+      payload: { voiceTurnSensitivity: 11 },
+    });
+    expect(tooSensitive.statusCode).toBe(400);
+
+    const tooLongSilence = await t.app.inject({
+      method: 'PATCH',
+      url: '/api/settings',
+      headers: headers(t),
+      payload: { voiceTurnSilenceMs: 5000 },
+    });
+    expect(tooLongSilence.statusCode).toBe(400);
+  });
 });

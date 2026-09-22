@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { rms, SpeechEndpointer, type VadOptions } from './vad.js';
+import { DEFAULT_VAD_OPTIONS, rms, SpeechEndpointer, vadOptionsForSensitivity, type VadOptions } from './vad.js';
 
 describe('rms', () => {
   it('is zero for silence', () => {
@@ -92,5 +92,39 @@ describe('SpeechEndpointer', () => {
     expect(vad.isSpeaking()).toBe(false);
     // A fresh speech_start still fires correctly after reset.
     expect(vad.push(0.2, 1)).toBe('speech_start');
+  });
+});
+
+describe('vadOptionsForSensitivity', () => {
+  it('reproduces DEFAULT_VAD_OPTIONS exactly at sensitivity 5 and silenceMs 800', () => {
+    expect(vadOptionsForSensitivity(5, 800)).toEqual(DEFAULT_VAD_OPTIONS);
+  });
+
+  it('lowers both thresholds as sensitivity increases, preserving their ratio', () => {
+    const low = vadOptionsForSensitivity(1, 800);
+    const mid = vadOptionsForSensitivity(5, 800);
+    const high = vadOptionsForSensitivity(10, 800);
+    expect(low.speechThreshold).toBeGreaterThan(mid.speechThreshold);
+    expect(mid.speechThreshold).toBeGreaterThan(high.speechThreshold);
+    for (const opts of [low, mid, high]) {
+      expect(opts.silenceThreshold / opts.speechThreshold).toBeCloseTo(
+        DEFAULT_VAD_OPTIONS.silenceThreshold / DEFAULT_VAD_OPTIONS.speechThreshold,
+        10,
+      );
+    }
+  });
+
+  it('clamps sensitivity to [1, 10] rather than extrapolating unboundedly', () => {
+    expect(vadOptionsForSensitivity(20, 800)).toEqual(vadOptionsForSensitivity(10, 800));
+    expect(vadOptionsForSensitivity(-3, 800)).toEqual(vadOptionsForSensitivity(1, 800));
+  });
+
+  it('clamps silenceMs to [200, 3000], the Settings-page range', () => {
+    expect(vadOptionsForSensitivity(5, 50).hangoverMs).toBe(200);
+    expect(vadOptionsForSensitivity(5, 10_000).hangoverMs).toBe(3000);
+  });
+
+  it('passes an in-range silenceMs straight through as hangoverMs', () => {
+    expect(vadOptionsForSensitivity(5, 1200).hangoverMs).toBe(1200);
   });
 });

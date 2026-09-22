@@ -452,6 +452,13 @@ export const RuntimeSettings = z.object({
   liveSttModel: z.string(),
   /** Model name for TTS (PA-81). Blank uses live-stt's configured default model. */
   liveSttTtsModel: z.string(),
+  /** PA-83 #1: live-listen turn-detection sensitivity, 1 (least) – 10 (most).
+   *  Consumed entirely client-side by `vadOptionsForSensitivity`; 5
+   *  reproduces the VAD's original hardcoded thresholds exactly. */
+  voiceTurnSensitivity: z.number().int().min(1).max(10),
+  /** PA-83 #1: trailing silence (ms) the live-listen VAD waits before
+   *  ending a turn — the "how long before it thinks I'm done talking" knob. */
+  voiceTurnSilenceMs: z.number().int().min(200).max(3000),
   shell: z.string().min(1),
   claudeBin: z.string().min(1),
   agyBin: z.string().min(1),

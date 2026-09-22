@@ -714,6 +714,26 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
           break;
         }
 
+        // PA-83 #3/#4: TTS-only stop. Deliberately does *not* call
+        // `session.interrupt()` — that is the whole point of this being a
+        // separate message from `interrupt` above: a "skip" voice command or
+        // the composer's dedicated "stop speaking" button must silence the
+        // talk-back without touching the agent's turn, which keeps
+        // generating exactly as if this had never been sent.
+        // `voiceTts.cancel` is what actually prevents the rest of this
+        // turn's reply from being read aloud — it resets the sentence
+        // chunker and cancels the pump, so no further `tts_audio` chunks are
+        // emitted for this turn; without it, the *client's*
+        // `TtsPlaybackQueue.stop()` alone would only mute the current
+        // sentence, since its own `enqueue()` un-stops itself the instant
+        // the next chunk arrives.
+        case 'stop_speech': {
+          const session = requireStructured(message.sessionId);
+          if (!session) break;
+          voiceTts.cancel(message.sessionId);
+          break;
+        }
+
         case 'voice_mode': {
           const info = sessions.find(message.sessionId);
           if (!info) {

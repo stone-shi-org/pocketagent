@@ -32,6 +32,8 @@ import { takePendingPrompt, setPendingPrompt } from '../agent/pending-prompt.js'
 import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
 import { LiveListenController } from '../audio/live-listen.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
+import { vadOptionsForSensitivity, type VadOptions } from '../audio/vad.js';
+import { isSkipCommand } from '../audio/voice-commands.js';
 
 interface Props {
   sessionId: string;
@@ -97,6 +99,24 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   const [liveListenActive, setLiveListenActive] = useState(false);
   const [micLevel, setMicLevel] = useState(0);
   const [liveListenError, setLiveListenError] = useState<string | null>(null);
+  /** PA-83 #4: mirrors `TtsPlaybackQueue`'s own playing/not-playing state, so
+   *  the composer can offer a dedicated "stop speaking" control distinct
+   *  from `onInterrupt` (which stops the agent's *turn*, not just its
+   *  already-generated audio — see `handleStopSpeaking` below). */
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  /** Set from the connection effect, read from `handleStopSpeaking` outside
+   *  it — same "closure var + ref bridges an effect-scoped instance to an
+   *  event handler defined outside the effect" pattern `connRef` already
+   *  uses for the connection itself. */
+  const ttsQueueRef = useRef<TtsPlaybackQueue | null>(null);
+  /** PA-83 #1: the live-listen sensitivity/silence-duration settings,
+   *  fetched once alongside `voiceEnabled` below and read fresh by
+   *  `syncLiveListen` every time it actually constructs a
+   *  `LiveListenController` — a ref rather than state so a settings fetch
+   *  that resolves after this session's connection effect has already run
+   *  is still picked up on the *next* live-listen start, with no need to
+   *  recreate that effect (which would tear down and reopen the socket). */
+  const vadOptionsRef = useRef<Partial<VadOptions>>({});
   const [pickingAgent, setPickingAgent] = useState(false);
   const [confirmingStop, setConfirmingStop] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -132,7 +152,8 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
     // effect's closure, not component state: neither needs to trigger a
     // re-render on their own, and they must be torn down in lockstep with
     // this same connection on cleanup.
-    const ttsQueue = new TtsPlaybackQueue();
+    const ttsQueue = new TtsPlaybackQueue((playing) => setIsSpeaking(playing));
+    ttsQueueRef.current = ttsQueue;
     let liveListen: LiveListenController | null = null;
     let liveListenStarting = false;
     // The most recently requested state, kept separate from `liveListen`
@@ -168,6 +189,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
 
       liveListenStarting = true;
       const controller = new LiveListenController({
+        vad: vadOptionsRef.current,
         onUtterance: (utterance) => {
           if (!utterance.audioBase64) return;
           void (async () => {
@@ -176,7 +198,25 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
                 data: utterance.audioBase64,
                 durationMs: utterance.durationMs,
               });
-              if (text.trim()) handleSendRef.current(text);
+              const trimmed = text.trim();
+              if (!trimmed) return;
+              // PA-83 #3: an embedded "skip" (and its few short variants)
+              // controls the talk-back only — it must never be forwarded to
+              // the agent as a prompt, unlike every other transcribed
+              // utterance. Both calls matter: `ttsQueue.stop()` silences
+              // whatever's already playing/queued in *this* tab right now,
+              // and `sendStopSpeech()` cancels the server-side pump for the
+              // rest of this turn — without it, the reply is likely still
+              // generating, and `TtsPlaybackQueue.enqueue()`'s own
+              // auto-resume would start playing the *next* sentence's audio
+              // the moment it streams in, undoing the stop within a second
+              // or two.
+              if (isSkipCommand(trimmed)) {
+                ttsQueue.stop();
+                conn.sendStopSpeech();
+                return;
+              }
+              handleSendRef.current(text);
             } catch (err) {
               setLiveListenError(
                 err instanceof Error ? err.message : 'Could not transcribe that recording.',
@@ -365,8 +405,10 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
       // open after this tab has navigated away from the session.
       void liveListen?.stop();
       ttsQueue.stop();
+      ttsQueueRef.current = null;
       setLiveListenActive(false);
       setMicLevel(0);
+      setIsSpeaking(false);
     };
   }, [sessionId]);
 
@@ -545,6 +587,23 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   }, []);
 
   /**
+   * PA-83 #4: silences the agent's talk-back only. Deliberately *not*
+   * `connRef.current?.sendInterrupt()` — that stops the turn itself
+   * (`session.interrupt()` server-side) and is what the busy/stop button in
+   * `PromptBox` already does; this button exists specifically for someone
+   * who is happy with the reply and just does not want to keep listening to
+   * it read aloud. Both calls are needed, same reasoning as the "skip"
+   * voice command above: the local stop silences what is already playing in
+   * *this* tab, and `sendStopSpeech()` cancels the server-side pump so the
+   * still-generating reply's next sentence does not start playing a moment
+   * later via `TtsPlaybackQueue.enqueue()`'s own auto-resume.
+   */
+  const handleStopSpeaking = useCallback(() => {
+    ttsQueueRef.current?.stop();
+    connRef.current?.sendStopSpeech();
+  }, []);
+
+  /**
    * The agent roster, fetched only once this chat can actually be resumed.
    *
    * Deliberately not fetched on mount: for a live session there is nothing to
@@ -567,7 +626,19 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
     void api
       .getSettings()
       .then((res) => {
-        if (!cancelled) setVoiceEnabled(res.settings.liveSttUrl !== '');
+        if (cancelled) return;
+        setVoiceEnabled(res.settings.liveSttUrl !== '');
+        // PA-83 #1: read fresh by `syncLiveListen` the next time it actually
+        // constructs a `LiveListenController` (see `vadOptionsRef`'s own doc
+        // comment above) — if live-listen is already on by the time this
+        // resolves, the *current* controller keeps whatever it was built
+        // with; toggling live-listen off and on again picks up the change,
+        // same as every other "fetched once per mount" limitation this
+        // effect's own top-of-file comment already documents for `liveSttUrl`.
+        vadOptionsRef.current = vadOptionsForSensitivity(
+          res.settings.voiceTurnSensitivity,
+          res.settings.voiceTurnSilenceMs,
+        );
       })
       .catch(() => {});
     return () => {
@@ -815,6 +886,8 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         onSetLiveListen={handleSetLiveListen}
         micLevel={micLevel}
         liveListenError={liveListenError}
+        isSpeaking={isSpeaking}
+        onStopSpeaking={handleStopSpeaking}
         commands={transcript.commands}
         models={transcript.models}
         currentModel={transcript.model}

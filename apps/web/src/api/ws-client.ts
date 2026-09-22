@@ -499,6 +499,13 @@ export class TerminalConnection {
     return this.send({ type: 'interrupt', sessionId: this.sessionId });
   }
 
+  /** PA-83 #3/#4: silence the talk-back only — unlike `sendInterrupt`, the
+   *  agent's turn keeps running untouched. */
+  sendStopSpeech(): boolean {
+    if (!this.sessionId) return false;
+    return this.send({ type: 'stop_speech', sessionId: this.sessionId });
+  }
+
   /** Toggle live-listen/talk-back mode (PA-20 Phase 2). The server rejects
    *  this outright when live-stt isn't configured or the session isn't
    *  structured; either way the reply comes back as `voice_mode_changed`. */

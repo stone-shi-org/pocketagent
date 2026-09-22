@@ -40,6 +40,35 @@ export const DEFAULT_VAD_OPTIONS: VadOptions = {
   minSpeechMs: 250,
 };
 
+/**
+ * PA-83 #1: maps the Settings page's user-facing "turn detection" knobs onto
+ * the RMS thresholds `SpeechEndpointer` actually reads. `sensitivity` is an
+ * integer 1 (least sensitive — needs louder, clearer speech to count) to 10
+ * (most sensitive — picks up much quieter speech); `silenceMs` is
+ * `hangoverMs` under its Settings-page name, threaded straight through
+ * rather than folded into the sensitivity scale, since "how long to wait in
+ * silence before treating a turn as finished" is genuinely a separate knob
+ * from "how loud does speech need to be."
+ *
+ * Deliberately anchored so `sensitivity === 5` reproduces
+ * `DEFAULT_VAD_OPTIONS`'s thresholds exactly (0.8 ** 0 === 1) — an operator
+ * who never opens the setting sees byte-identical behavior to before this
+ * feature existed, and every step away from 5 scales both thresholds
+ * together (preserving the hysteresis ratio between them) by a fixed 20%
+ * rather than by a hand-picked pair of endpoints, which would have made 5
+ * an arbitrary point on the curve instead of the anchor.
+ */
+export function vadOptionsForSensitivity(sensitivity: number, silenceMs: number): VadOptions {
+  const clampedSensitivity = Math.min(10, Math.max(1, Math.round(sensitivity)));
+  const factor = 0.8 ** (clampedSensitivity - 5);
+  return {
+    speechThreshold: DEFAULT_VAD_OPTIONS.speechThreshold * factor,
+    silenceThreshold: DEFAULT_VAD_OPTIONS.silenceThreshold * factor,
+    hangoverMs: Math.min(3000, Math.max(200, Math.round(silenceMs))),
+    minSpeechMs: DEFAULT_VAD_OPTIONS.minSpeechMs,
+  };
+}
+
 export type VadTransition = 'speech_start' | 'speech_end' | null;
 
 /** Root-mean-square energy of one audio frame — the endpointer's only input. */

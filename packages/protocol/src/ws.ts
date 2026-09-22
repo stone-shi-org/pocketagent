@@ -319,6 +319,20 @@ export const ResolveQueuedPromptMessage = z.object({
 });
 
 /**
+ * PA-83 #3/#4: silence the agent's talk-back for the remainder of the
+ * current turn, without touching the turn itself — the server-side
+ * distinction from `InterruptMessage` above is that this never calls
+ * `session.interrupt()`. Sent either by a spoken "skip" command (a
+ * `voice-commands.ts` match, live-listen mode) or the composer's dedicated
+ * "stop speaking" button, both of which want "I heard enough, stop talking"
+ * without also cancelling whatever the agent is still doing.
+ */
+export const StopSpeechMessage = z.object({
+  type: z.literal('stop_speech'),
+  sessionId: SessionId,
+});
+
+/**
  * Toggle live-listen/talk-back mode for a structured session (PA-20 Phase 2).
  * Off by default and never implied by anything else — the toggle is the only
  * way this turns on, and the server rejects it outright when live-stt is not
@@ -344,6 +358,7 @@ export const ClientMessage = z.discriminatedUnion('type', [
   PromptMessage,
   PermissionMessage,
   InterruptMessage,
+  StopSpeechMessage,
   ResolveQueuedPromptMessage,
   SetModelMessage,
   SetEffortMessage,

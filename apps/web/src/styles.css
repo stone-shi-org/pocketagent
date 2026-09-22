@@ -1156,6 +1156,27 @@ input[type='number']::-webkit-outer-spin-button {
   transition: transform 60ms linear;
 }
 
+/* PA-83 #4: the "Speaking…" state's stop control — a small pill button
+   inline with the indicator's own text, not a full-size round icon button
+   like `.live-listen-btn`, since this sits inside an already-compact
+   status row rather than the composer's main control strip. */
+.live-listen-stop-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  padding: 3px 9px 3px 7px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.live-listen-stop-btn:hover {
+  opacity: 0.85;
+}
+
 /* The "+" button's popup menu — same floating-above-the-pill shape as
    `.slash-picker`/`.model-picker`, anchored from the left since that's the
    trigger's own edge (the model chip's picker anchors right for the same

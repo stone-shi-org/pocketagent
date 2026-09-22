@@ -127,6 +127,19 @@ interface Props {
    *  callback, despite the neighboring `onX` callback props. */
   liveListenError?: string | null;
   /**
+   * PA-83 #4: mirrors `TtsPlaybackQueue.isPlaying()` — true while the
+   * agent's spoken reply is actually being read aloud. Swaps the
+   * "Listening…" indicator for a "Speaking…" one with its own stop control
+   * (see `onStopSpeaking`); the two never show at once, since barge-in
+   * (speech detected while this is true) silences playback before the
+   * endpointer would otherwise report speech.
+   */
+  isSpeaking?: boolean;
+  /** Silences the talk-back only — distinct from `onInterrupt`, which stops
+   *  the agent's whole turn. Only meaningful (and only rendered) while
+   *  `isSpeaking`. */
+  onStopSpeaking?: () => void;
+  /**
    * Slash commands this agent currently supports, for the `/` picker.
    * Undefined/empty just means no picker — the box still sends whatever text
    * is typed, so an agent-agnostic caller (e.g. TerminalPage) can omit this
@@ -220,6 +233,8 @@ export function PromptBox({
   onSetLiveListen,
   micLevel = 0,
   liveListenError = null,
+  isSpeaking = false,
+  onStopSpeaking,
   commands = [],
   models = [],
   currentModel = null,
@@ -633,14 +648,40 @@ export function PromptBox({
       */}
       {!isVoiceRecording && liveListenActive && (
         <div className="live-listen-indicator" role="status" aria-live="polite">
-          <span className="live-listen-dot" aria-hidden="true" />
-          <span>Listening…</span>
-          <span className="live-listen-meter" aria-hidden="true">
-            <span
-              className="live-listen-meter-fill"
-              style={{ transform: `scaleX(${Math.min(1, micLevel * 8)})` }}
-            />
-          </span>
+          {isSpeaking ? (
+            // PA-83 #4: while the reply is actually being read aloud, this
+            // replaces the meter with a dedicated stop control — "otherwise
+            // it talks very long" was the ticket's own complaint, and
+            // waiting to detect the user's own speech (barge-in) is not the
+            // only way to want it to stop.
+            <>
+              <span className="live-listen-dot" aria-hidden="true" />
+              <span>Speaking…</span>
+              {onStopSpeaking && (
+                <button
+                  type="button"
+                  className="live-listen-stop-btn"
+                  onClick={onStopSpeaking}
+                  aria-label="Stop speaking"
+                  title="Stop speaking"
+                >
+                  <Icon name="stop" size={13} />
+                  <span>Stop</span>
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <span className="live-listen-dot" aria-hidden="true" />
+              <span>Listening…</span>
+              <span className="live-listen-meter" aria-hidden="true">
+                <span
+                  className="live-listen-meter-fill"
+                  style={{ transform: `scaleX(${Math.min(1, micLevel * 8)})` }}
+                />
+              </span>
+            </>
+          )}
         </div>
       )}
       {supportsImageAttachment && !isVoiceRecording && !isTranscribing && (
