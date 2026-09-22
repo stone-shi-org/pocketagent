@@ -244,10 +244,20 @@ export class SessionManager {
    * mode does — see `SessionInfo.voiceModeEnabled`'s own doc comment.
    */
   private readonly voiceModeSessions = new Set<string>();
-  private voiceTts: { attach(session: StructuredLikeSession): void } | null = null;
+  // PA-83: `cancel` widened onto this narrow interface (previously
+  // `attach`-only) specifically for `terminate()` below — see that call
+  // site's own comment for why an explicit stop can't wait for the
+  // session's eventual `'exit'` event to silence talk-back.
+  private voiceTts: {
+    attach(session: StructuredLikeSession): void;
+    cancel(sessionId: string): void;
+  } | null = null;
   private sweepTimer: NodeJS.Timeout | null = null;
 
-  setVoiceTts(voiceTts: { attach(session: StructuredLikeSession): void }): void {
+  setVoiceTts(voiceTts: {
+    attach(session: StructuredLikeSession): void;
+    cancel(sessionId: string): void;
+  }): void {
     this.voiceTts = voiceTts;
   }
   /**
@@ -1802,6 +1812,17 @@ export class SessionManager {
         // this is specifically "someone just asked to stop it", which an
         // agent finishing its own turn must not be confused with (PA-40).
         this.notifyTerminated(id);
+        // PA-83: silence talk-back the instant termination is *requested*,
+        // not once `session.terminate()`'s abort actually finishes
+        // unwinding the SDK's run loop and fires `'exit'` — which can lag
+        // well behind this call (an in-flight response keeps streaming
+        // until the abort is actually observed), and is exactly the gap
+        // `VoiceTtsService`'s `exited` gate does *not* cover, since that
+        // only fires from `'exit'` itself. `cancel()` mutes for the rest of
+        // this turn immediately; `'exit'`'s own `cleanupSession` still runs
+        // later and makes the mute permanent — the two compose rather than
+        // race, since neither undoes the other.
+        this.voiceTts?.cancel(id);
       }
       return;
     }
@@ -2150,6 +2171,10 @@ export class SessionManager {
           if (now - last > idleMs) {
             this.opts.logger?.warn({ sessionId: id }, 'terminating idle session');
             session.terminate();
+            // PA-83: same reasoning as `terminate(id)`'s own call to this —
+            // an idle-timeout kill is still an explicit "stop it" the
+            // instant it happens, not something to wait on `'exit'` for.
+            this.voiceTts?.cancel(id);
           }
         }
         continue;

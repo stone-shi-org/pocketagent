@@ -183,6 +183,13 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         const controller = liveListen;
         liveListen = null;
         setMicLevel(0);
+        // PA-83: turning the toggle off is "stop the stream" — talk-back
+        // must not be allowed to keep going once the mic goes off, the
+        // same hard stop the dedicated "Stop speaking" button gives (and
+        // for the same reason: the server keeps synthesizing whatever is
+        // left of an in-progress reply unless explicitly told to cancel).
+        ttsQueue.stop();
+        conn.sendStopSpeech();
         await controller?.stop();
         return;
       }
@@ -290,6 +297,12 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         },
         onStatus: (next, info) => {
           setStatus(next);
+          // PA-83: a session ending for *any* reason — this tab's own Stop
+          // button, another tab's, an idle timeout — must hard-stop talk
+          // back here too; the server-side fix (`SessionManager.terminate`
+          // now cancelling voice immediately) only covers *new* synthesis,
+          // not audio already sent to (or mid-flight toward) this tab.
+          if (isTerminalStatus(next)) ttsQueue.stop();
           if (info) {
             latestTitle = info.title;
             setSession(info);
@@ -371,8 +384,16 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         },
         onExit: () => {
           setStatus((prev) => (isTerminalStatus(prev) ? prev : 'exited'));
+          // PA-83: see the identical call in `onStatus` above — belt and
+          // suspenders, since not every backend/path is guaranteed to push
+          // a `status` frame on its way out.
+          ttsQueue.stop();
         },
         onError: (code, message) => {
+          // PA-83: both codes mean "this session is gone" — including for a
+          // *different* tab/view than the one that stopped it (PA-40's own
+          // fan-out), which has no other signal telling it to stop talking.
+          if (code === 'not_found' || code === 'terminated') ttsQueue.stop();
           if (code === 'not_found') {
             setFatal(message);
             setMissing(true);
@@ -497,6 +518,14 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   const terminate = useCallback(async () => {
     setStopping(true);
     stoppedHereRef.current = true;
+    // PA-83: silence any in-progress talk-back the instant termination is
+    // requested, rather than waiting for the DELETE round trip and then
+    // whatever server/status push eventually follows it. The server side
+    // (`SessionManager.terminate` now calling `voiceTts.cancel` immediately,
+    // not just on the session's eventual `'exit'`) stops *new* synthesis;
+    // this stops audio already sent to (or mid-flight toward) this tab.
+    ttsQueueRef.current?.stop();
+    connRef.current?.sendStopSpeech();
     try {
       await api.deleteSession(sessionId);
     } catch (err) {

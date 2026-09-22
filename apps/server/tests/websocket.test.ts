@@ -719,6 +719,38 @@ describe('websocket terminal transport', () => {
   });
 
   /**
+   * PA-83 follow-up: "even after I terminated the session, talk-back is
+   * still going on" — traced to `SessionManager.terminate()` only notifying
+   * *tabs* (`onTerminated`, above) and never telling `VoiceTtsService` a
+   * turn just ended, so whatever text the SDK's run loop produced before
+   * actually unwinding (which can lag well behind `terminate()` itself)
+   * kept being synthesized and streamed. This pins the fix at the
+   * `SessionManager` level, the same choke point `onTerminated` already
+   * uses for exactly this "someone just asked to stop it" moment, rather
+   * than a full voice-configured session (which needs a real live-stt
+   * fixture this file's other tests don't set up).
+   */
+  it("terminate() cancels this session's voice synthesis immediately, not just on eventual exit", async () => {
+    const id = await newShellSession();
+    let cancelledFor: string | null = null;
+    t.context.sessions.setVoiceTts({
+      attach: () => {},
+      cancel: (sessionId: string) => {
+        cancelledFor = sessionId;
+      },
+    });
+
+    const res = await t.app.inject({
+      method: 'DELETE',
+      url: `/api/sessions/${id}`,
+      headers: { cookie: t.cookie },
+    });
+    expect(res.statusCode).toBe(200);
+
+    expect(cancelledFor).toBe(id);
+  });
+
+  /**
    * PA-40 round 3: the reporter's repro survived both earlier rounds because
    * neither one was the actual gap. Double-clicking a *finished* chat opens
    * it read-only in `ChatPreviewPage` (`useProjects.open`'s `onOpenChat`
