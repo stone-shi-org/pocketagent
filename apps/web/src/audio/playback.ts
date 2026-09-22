@@ -41,13 +41,23 @@ export class TtsPlaybackQueue {
     this.onPlaybackStateChange?.(false);
   }
 
-  private playChunk(chunk: { pcm: Int16Array; sampleRateHz: number }): Promise<void> {
+  private async playChunk(chunk: { pcm: Int16Array; sampleRateHz: number }): Promise<void> {
+    if (this.stopped) return;
+    this.context ??= new AudioContext();
+    if (this.context.state === 'suspended') {
+      try {
+        await this.context.resume();
+      } catch {
+        // May fail if user gesture is required by browser policy
+      }
+    }
+    if (this.stopped) return;
+
     return new Promise((resolve) => {
-      if (this.stopped) {
+      if (this.stopped || !this.context) {
         resolve();
         return;
       }
-      this.context ??= new AudioContext();
       const float32 = int16ToFloat32(chunk.pcm);
       const buffer = this.context.createBuffer(1, float32.length, chunk.sampleRateHz);
       buffer.getChannelData(0).set(float32);

@@ -64,6 +64,9 @@ export class PushToTalkRecorder {
     }
 
     this.context = new AudioContext();
+    if (this.context.state === 'suspended') {
+      await this.context.resume();
+    }
     await this.context.audioWorklet.addModule('/pcm-worklet-processor.js');
     const source = this.context.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.context, 'pcm-capture-processor');
