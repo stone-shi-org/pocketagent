@@ -354,6 +354,10 @@ export function PromptBox({
   async function handleVoiceRecorded(utterance: RecordedUtterance): Promise<void> {
     if (!onTranscribeVoice) return;
     setVoiceError(null);
+    if (!utterance.audioBase64) {
+      setVoiceError("Didn't catch that — speak while the mic is active.");
+      return;
+    }
     let text: string;
     try {
       text = await onTranscribeVoice({ data: utterance.audioBase64, durationMs: utterance.durationMs });

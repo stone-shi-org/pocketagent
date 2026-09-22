@@ -169,6 +169,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
       liveListenStarting = true;
       const controller = new LiveListenController({
         onUtterance: (utterance) => {
+          if (!utterance.audioBase64) return;
           void (async () => {
             try {
               const { text } = await api.transcribeVoice(sessionId, {

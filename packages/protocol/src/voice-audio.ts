@@ -23,7 +23,7 @@ export const MAX_VOICE_AUDIO_BASE64_CHARS = Math.ceil((MAX_VOICE_AUDIO_BYTES * 4
 
 export const VoiceAudioUpload = z.object({
   /** Raw base64 16kHz mono PCM16 samples, no `data:` URL prefix. */
-  data: z.string().min(1).max(MAX_VOICE_AUDIO_BASE64_CHARS),
+  data: z.string().min(1, 'Audio data is required.').max(MAX_VOICE_AUDIO_BASE64_CHARS),
   durationMs: z.number().nonnegative(),
 });
 export type VoiceAudioUpload = z.infer<typeof VoiceAudioUpload>;
