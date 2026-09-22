@@ -64,7 +64,7 @@ export class PushToTalkRecorder {
     }
 
     this.context = new AudioContext();
-    await this.context.audioWorklet.addModule(new URL('./pcm-worklet-processor.js', import.meta.url));
+    await this.context.audioWorklet.addModule('/pcm-worklet-processor.js');
     const source = this.context.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.context, 'pcm-capture-processor');
     this.node.port.onmessage = (event: MessageEvent<Float32Array>) => {

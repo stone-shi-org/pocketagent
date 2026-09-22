@@ -101,7 +101,7 @@ export default tseslint.config(
     // `window`/`document`, and no entry for it in the `globals` package the
     // way `globals.serviceworker` covers a service worker, so its handful of
     // globals are spelled out by hand.
-    files: ['apps/web/src/audio/pcm-worklet-processor.js'],
+    files: ['apps/web/public/pcm-worklet-processor.js'],
     languageOptions: {
       globals: { AudioWorkletProcessor: 'readonly', registerProcessor: 'readonly', sampleRate: 'readonly' },
     },
