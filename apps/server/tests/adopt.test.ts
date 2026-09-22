@@ -689,6 +689,44 @@ describeTmux('adopting a tmux session on a foreign server', () => {
     await waitFor(async () => (await sessionAttached('create-and-attach')) >= 1, { timeout: 10_000 });
   });
 
+  it('creates an adoptable session in a directory outside configured workspace roots', async () => {
+    // Shell/adopted tmux sessions belong to the user and can run anywhere on
+    // the system (e.g. recreating an agent-rc shell session in a folder not
+    // declared in POCKETAGENT_WORKSPACE_ROOTS). POST /api/adoptable must allow
+    // valid directories outside workspace roots.
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pa-outside-ws-')));
+    try {
+      const created = await t.app.inject({
+        method: 'POST',
+        url: '/api/adoptable',
+        headers: { cookie: t.cookie },
+        payload: { name: 'outside-ws-tmux', cwd: outside },
+      });
+      expect(created.statusCode).toBe(201);
+      const target = created.json();
+      expect(target.cwd).toBe(outside);
+
+      const session = await t.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: { cookie: t.cookie },
+        payload: {
+          agent: 'shell',
+          cwd: target.cwd,
+          cols: target.cols,
+          rows: target.rows,
+          transport: 'terminal',
+          adoptTargetId: target.id,
+        },
+      });
+      expect(session.statusCode).toBe(201);
+      expect(session.json().adopted).toBe(true);
+      expect(session.json().cwd).toBe(outside);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it('clears finished shell sessions via /api/shells/clear-finished', async () => {
     // The Shell category clears through a route of its own, with no cwd in
     // the body (PA-25). It has to: a shell row's `cwd` column is the pane's

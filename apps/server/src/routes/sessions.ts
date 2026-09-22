@@ -481,14 +481,23 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       });
     }
 
-    // A caller-supplied cwd (a project row's "New tmux session") is
-    // validated the same way `POST /api/sessions` validates one; omitting it
-    // (the Shell dialog's free-form create) keeps the old fallback.
+    // Adopted tmux sessions can be in any directory on the host (the user's own
+    // terminal, outside configured workspace roots). Validate with
+    // canonicalDirectory rather than workspace root containment, matching the
+    // rule POST /api/sessions applies to adopted panes.
     let cwd: string;
     if (parsed.data.cwd !== undefined) {
-      const resolved = await resolveWorkspaceCwdOrReply(workspaces, parsed.data.cwd, reply);
-      if (resolved === null) return reply;
-      cwd = resolved;
+      try {
+        cwd = await workspaces.canonicalDirectory(parsed.data.cwd);
+      } catch (err) {
+        if (err instanceof WorkspaceError) {
+          const status = err.code === 'forbidden' ? 403 : err.code === 'not_found' ? 404 : 400;
+          return reply.code(status).send({ error: { code: err.code, message: err.message } });
+        }
+        return reply.code(400).send({
+          error: { code: 'invalid', message: err instanceof Error ? err.message : 'Invalid directory.' },
+        });
+      }
     } else {
       cwd = workspaces.getRoots()[0] ?? process.cwd();
     }

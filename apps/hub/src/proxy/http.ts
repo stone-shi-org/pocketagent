@@ -88,13 +88,15 @@ export async function proxyHttp(
         headers,
       },
       (response) => {
-        // PA-66 D21: a backend's 401/403 must not reach the browser as-is.
+        // PA-66 D21: a backend's 401 must not reach the browser as-is.
         // `App.tsx` drops the *whole* app to the login screen on any 401, so
         // one revoked credential would sign the operator out of every other
         // host too. Translating it says what actually happened and keeps the
         // Hub session intact. 502 rather than 401 is the point; the body names
         // the host so the UI can mark that row rather than guessing.
-        if (response.statusCode === 401 || response.statusCode === 403) {
+        // Deliberately *not* 403: a backend's 403 is a domain error (e.g.
+        // forbidden directory, bad origin), not a rejected hub credential.
+        if (response.statusCode === 401) {
           response.resume();
           request.log.warn(
             { hostId: options.hostId, status: response.statusCode },

@@ -174,7 +174,7 @@ export class Provisioner {
     if (probe.transportError !== null) {
       return finish('failed', `Could not reach ${hostLabel}: ${probe.transportError}`, null);
     }
-    if (probe.status === 401 || probe.status === 403) {
+    if (probe.status === 401) {
       // The same translation PA-66 makes for a proxied 401: the credential is
       // the problem, and saying "provisioning failed" would send the operator
       // looking at the template.

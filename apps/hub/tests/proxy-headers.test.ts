@@ -231,6 +231,29 @@ describe('header hygiene on the way down', () => {
     expect(body.error.code).toBe('host_credential_rejected');
   });
 
+  it('relays 403 domain errors as 403 without translating to 502', async () => {
+    // A 403 from the backend is a domain error (e.g. directory outside roots,
+    // forbidden path, bad CSRF origin), NOT a rejected Hub credential. The
+    // Hub must relay it as 403 so the error message remains consistent.
+    backend.respondWith((_request, response) => {
+      response.writeHead(403, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          error: { code: 'forbidden', message: 'Directory is outside the configured workspace roots.' },
+        }),
+      );
+    });
+    const response = await fetch(`${hub.baseUrl}/h/dev01/api/adoptable`, {
+      method: 'POST',
+      headers: { cookie: hub.cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'shell', cwd: '/some/outside/path' }),
+    });
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('forbidden');
+    expect(body.error.message).toBe('Directory is outside the configured workspace roots.');
+  });
+
   it("relays the backend's own security headers", async () => {
     // A proxied body is the backend's, so its `nosniff`/CSP should govern it.
     // `reply.hijack()` skips the Hub's own `onSend`, which is correct here
