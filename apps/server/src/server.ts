@@ -1,3 +1,4 @@
+import type { FastifyInstance } from 'fastify';
 import { buildApp, VERSION } from './app.js';
 import { RESTART_EXIT_CODE } from './admin/index.js';
 import { loadConfig, ConfigError } from './config/index.js';
@@ -51,7 +52,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     app.log.info({ signal, exitCode }, 'shutting down; terminating PTY sessions');
     try {
-      await app.close();
+      await Promise.race([app.close(), forcedExitAfter(app, SHUTDOWN_TIMEOUT_MS)]);
     } finally {
       process.exit(exitCode);
     }
@@ -91,6 +92,35 @@ async function main(): Promise<void> {
  * caller is usually on the same machine or a tailnet.
  */
 const RESPONSE_FLUSH_GRACE_MS = 250;
+
+/**
+ * Belt-and-suspenders around `app.close()` in `shutdown()` above. Every known
+ * way to hang it — a held-open SSE stream, an attached browser WebSocket, a
+ * plain keep-alive HTTP connection — already ends itself via its own
+ * `preClose` hook (`push.ts`, `ws/index.ts`, `app.ts`), because Fastify's own
+ * internal shutdown calls the underlying `http.Server.close()`, which does
+ * not resolve while any connection stays open and non-idle. Without a bound
+ * here, a *future* hook that misses this and hangs `app.close()` would wait
+ * out systemd's `TimeoutStopSec` (90s by default, unset in the recommended
+ * unit) before a SIGKILL forces the restart through — which on the next boot
+ * reads as "refuses to start" rather than as a slow stop, and is exactly the
+ * incident this constant exists to keep from recurring. Long enough that a
+ * healthy shutdown (normally milliseconds) never races it.
+ */
+const SHUTDOWN_TIMEOUT_MS = 8_000;
+
+function forcedExitAfter(app: FastifyInstance, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      app.log.warn(
+        { timeoutMs: ms },
+        'app.close() did not resolve in time; forcing exit rather than waiting for systemd to SIGKILL',
+      );
+      resolve();
+    }, ms);
+    timer.unref?.();
+  });
+}
 
 main().catch((err) => {
   process.stderr.write(`PocketAgent failed to start: ${err instanceof Error ? err.stack : err}\n`);

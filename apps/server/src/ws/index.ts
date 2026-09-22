@@ -191,6 +191,25 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
     for (const onRemoved of [...set]) onRemoved();
   });
 
+  // A live browser WS is a non-idle socket on the underlying `http.Server`
+  // for as long as the tab stays open — Node's own `server.close()` does not
+  // resolve while one is open, the same way it would not resolve while an SSE
+  // stream is (see `push.ts`'s own `preClose` hook and its comment). One
+  // attached terminal tab was enough to reproduce a shutdown that hung until
+  // systemd's `TimeoutStopSec` SIGKILLed the process, which read as "refuses
+  // to start" on the next boot rather than as a slow stop. `@fastify/websocket`
+  // decorates `websocketServer` with the underlying `ws.Server`, whose
+  // `clients` set is every live socket regardless of which route or session it
+  // belongs to — `terminate()`, not `close()`, because the process is going
+  // away regardless (the same "short grace, not indefinite" call
+  // `SessionManager.shutdown()` already makes) and the browser's own reconnect
+  // logic already treats a dropped connection as routine.
+  app.addHook('preClose', async () => {
+    for (const client of app.websocketServer.clients) {
+      client.terminate();
+    }
+  });
+
   app.get('/api/ws', { websocket: true }, (socket, request) => {
     const ws = socket as unknown as WebSocket;
 

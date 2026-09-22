@@ -2170,23 +2170,42 @@ export class SessionManager {
    * whole point of using tmux, and it is what lets `systemctl restart` be a
    * non-event. On the direct backend the processes are our children and cannot
    * survive, so we terminate them cleanly rather than orphaning them.
+   *
+   * Durability is decided **per session**, via `session.survivesServerRestart`,
+   * never off `this.opts.backend` — that used to be the same thing, until
+   * adoption. An adopted session always runs on `directBackend` regardless of
+   * the manager's configured backend (see the `input.adopt ? this.opts
+   * .directBackend : this.opts.backend` choice above), specifically so that
+   * killing it only ever kills the local `tmux attach-session` client and
+   * never the foreign pane. Deciding durability off the manager-wide backend
+   * used to call `detachProcess()` on an adopted session too whenever the
+   * manager's own backend was `tmux` (the recommended, durable production
+   * config) — and `DirectProcessHandle.detach()` is a no-op that never kills
+   * anything, so that local attach client was silently orphaned instead of
+   * exiting. It doesn't block `process.exit()` by itself, but it does sit in
+   * the systemd unit's cgroup as a leftover process, which is harmless on its
+   * own but easy to mistake for the cause of a slow restart. Fixed by asking
+   * each session, which already reports this correctly (`PtySession
+   * .survivesServerRestart` reads its own `backend`, not the manager's).
    */
   async shutdown(): Promise<void> {
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.sweepTimer = null;
 
-    const durable = this.opts.backend.survivesServerRestart;
+    const allLive = [...this.live.values()];
+    const durableSessions = allLive.filter((s) => s.survivesServerRestart);
+    const transientSessions = allLive.filter((s) => !s.survivesServerRestart);
 
-    if (durable) {
-      for (const session of this.live.values()) {
-        // The row stays `running` with its external id, so the next boot can
-        // find and re-adopt it.
-        this.persist(session);
-        session.detachProcess();
-        session.dispose();
-      }
-    } else {
-      const alive = [...this.live.values()].filter((s) => s.isAlive());
+    for (const session of durableSessions) {
+      // The row stays `running` with its external id, so the next boot can
+      // find and re-adopt it.
+      this.persist(session);
+      session.detachProcess();
+      session.dispose();
+    }
+
+    {
+      const alive = transientSessions.filter((s) => s.isAlive());
       // A short grace at shutdown: the server is going away regardless, and an
       // interactive shell ignores SIGTERM, so waiting the full 5s just delays
       // exit for every session.
@@ -2198,7 +2217,7 @@ export class SessionManager {
         await new Promise((r) => setTimeout(r, 25));
       }
 
-      for (const session of this.live.values()) {
+      for (const session of transientSessions) {
         this.persist(session);
         session.dispose();
       }

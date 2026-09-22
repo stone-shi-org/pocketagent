@@ -887,8 +887,20 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     });
   }
 
-  app.addHook('onClose', async (instance) => {
-    instance.server.closeAllConnections?.();
+  // `preClose`, not `onClose`: Fastify calls the underlying `http.Server
+  // .close()` internally, and that call does not resolve while a connection
+  // is open and non-idle — a live SSE stream (`push.ts`) or an attached
+  // browser WebSocket (`ws/index.ts`) both qualify, and each closes its own
+  // kind here via its own `preClose` hook. `closeAllConnections?.()` is the
+  // backstop for everything else (plain keep-alive HTTP), and it has to run
+  // before that same internal close too, for the identical reason — sitting
+  // in `onClose` (its original spot) meant it never got a turn to run, since
+  // `onClose` hooks only fire *after* `server.close()` has already resolved.
+  app.addHook('preClose', async () => {
+    app.server.closeAllConnections?.();
+  });
+
+  app.addHook('onClose', async () => {
     usage.stop();
     // Before `sessions.shutdown()`: no new run may be started into a manager
     // that is already tearing down.

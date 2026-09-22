@@ -484,6 +484,65 @@ describeTmux('adopting a tmux session on a foreign server', () => {
     expect(await userSessionExists('outlives-us')).toBe(true);
   });
 
+  it(
+    "shutting down a durable-backend server still kills the adopted session's local attach client",
+    async () => {
+      // Regression: `SessionManager.shutdown()` used to decide "detach, don't
+      // kill" off the manager's own configured backend rather than per
+      // session. An adopted session always runs its local attach client on
+      // the direct backend (see "runs the attach client as a direct child"
+      // above) regardless of what the manager's *primary* backend is — so
+      // with `POCKETAGENT_BACKEND=tmux` (the recommended, durable production
+      // config, unlike this describe block's own default), the old code
+      // called `detachProcess()` on the adopted session too, and
+      // `DirectProcessHandle.detach()` is a no-op that never kills anything.
+      // The local `tmux attach-session` client this server had spawned was
+      // silently orphaned rather than exiting — harmless to the user's
+      // foreign session, which must still survive, but a leftover process in
+      // the systemd unit's cgroup that outlives the unit systemd believes it
+      // just stopped.
+      await t.cleanup();
+      t = await createTestApp({
+        POCKETAGENT_ADOPT_TMUX_SOCKET: USER_SOCKET,
+        POCKETAGENT_BACKEND: 'tmux',
+        POCKETAGENT_TMUX_SOCKET: OWN_SOCKET,
+      });
+
+      await startUserSession('durable-adopt', t.projectDir, ['sleep', '120']);
+      await sleep(400);
+
+      const target = (await listTargets()).targets.find((x) => x.sessionName === 'durable-adopt');
+      const created = await t.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: { cookie: t.cookie },
+        payload: { agent: 'shell', cwd: t.projectDir, cols: 80, rows: 24, adoptTargetId: target.id },
+      });
+      expect(created.statusCode).toBe(201);
+      expect(created.json().backend).toBe('direct');
+      const attachClientPid = created.json().pid as number;
+      await waitFor(async () => (await sessionAttached('durable-adopt')) >= 1, { timeout: 10_000 });
+
+      await t.app.close();
+
+      // The foreign session the user was working in is untouched...
+      expect(await userSessionExists('durable-adopt')).toBe(true);
+      // ...but the local attach client this server spawned to view it is
+      // actually gone, not leaked as an orphan.
+      await waitFor(
+        () => {
+          try {
+            process.kill(attachClientPid, 0);
+            return false;
+          } catch {
+            return true;
+          }
+        },
+        { timeout: 10_000 },
+      );
+    },
+  );
+
   it('reports the adopted session\'s stable id, and keeps it filed under Shell after a restart', async () => {
     // Regression for: detaching a shell chat and reopening the Shell dialog
     // used to always create an unrelated new "Shell" entry, because nothing

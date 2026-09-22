@@ -14,7 +14,17 @@ export const pushRoutes: FastifyPluginAsync = async (app) => {
   const { push, sessions } = app.pocket;
 
   const activeStreams = new Set<ReturnType<typeof openSseStream>>();
-  app.addHook('onClose', async () => {
+  // `preClose`, not `onClose`: Fastify's own shutdown ends by calling the
+  // underlying `http.Server.close()`, which does not resolve while a
+  // connection is open and non-idle — exactly what a held-open SSE stream (the
+  // Hub's `/api/push/events`, heartbeat every 15s) is. `onClose` hooks only
+  // run *after* that call resolves, so ending the stream there never gets a
+  // chance to run — the shutdown just hangs until the peer disconnects or
+  // (in production) systemd's `TimeoutStopSec` SIGKILLs the process. `preClose`
+  // runs first, for exactly this reason (see the Fastify docs' own worked
+  // example: "Close all WebSocket connections so that server.close() can
+  // complete").
+  app.addHook('preClose', async () => {
     for (const stream of activeStreams) {
       stream.end();
     }

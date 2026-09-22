@@ -375,10 +375,23 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
   if (options.startHealthPoller !== false) void health.start();
   if (options.startPushRelay !== false) void pushRelay.start();
 
+  // `preClose`, not `onClose`: Fastify's internal shutdown calls the
+  // underlying `http.Server.close()`, which does not resolve while a
+  // connection is open and non-idle — and a spliced WS proxy connection is
+  // exactly that, by design, for as long as a terminal is attached through
+  // this Hub. `onClose` hooks only run *after* that call resolves, so closing
+  // the sockets there never gets a turn to run and the shutdown hangs until
+  // the peer disconnects or (in production) systemd's `TimeoutStopSec`
+  // SIGKILLs the process — the same defect `apps/server`'s own push/WS
+  // `preClose` hooks fix, and more exposed here, since a live proxied
+  // connection is the Hub's normal steady state rather than an edge case.
+  app.addHook('preClose', async () => {
+    sockets.closeAll();
+  });
+
   app.addHook('onClose', async () => {
     health.stop();
     pushRelay.stop();
-    sockets.closeAll();
     if (ownsDb) db.close();
   });
 

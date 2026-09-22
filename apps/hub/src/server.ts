@@ -1,3 +1,4 @@
+import type { FastifyInstance } from 'fastify';
 import { buildHubApp } from './app.js';
 import { HubConfigError, loadHubConfig } from './config.js';
 import { HUB_VERSION, HUB_VERSION_WARNING } from './version.js';
@@ -35,12 +36,44 @@ async function main(): Promise<void> {
     );
   }
 
-  const shutdown = (signal: string): void => {
+  let shuttingDown = false;
+  const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     app.log.info({ signal }, 'shutting down');
-    void app.close().then(() => process.exit(0));
+    try {
+      await Promise.race([app.close(), forcedExitAfter(app, SHUTDOWN_TIMEOUT_MS)]);
+    } finally {
+      process.exit(0);
+    }
   };
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+}
+
+/**
+ * Belt-and-suspenders around `app.close()` above — mirrors
+ * `apps/server/src/server.ts`'s own constant of the same name and for the
+ * same reason (duplicated rather than shared, like `EX_CONFIG` above: the two
+ * are separate deployables and this file must not depend on `apps/server`).
+ * A spliced WS proxy connection is this Hub's normal steady state, not an
+ * edge case, so it is the most exposed of any known way to hang
+ * `app.close()` — see `apps/hub/src/app.ts`'s `preClose` hook, which is what
+ * actually fixes that case. This is the fallback for the next one.
+ */
+const SHUTDOWN_TIMEOUT_MS = 8_000;
+
+function forcedExitAfter(app: FastifyInstance, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      app.log.warn(
+        { timeoutMs: ms },
+        'app.close() did not resolve in time; forcing exit rather than waiting for systemd to SIGKILL',
+      );
+      resolve();
+    }, ms);
+    timer.unref?.();
+  });
 }
 
 void main();
