@@ -27,6 +27,7 @@ import type { SkillRegistryService } from './planner/skills.js';
 import type { TelegramBotStore } from './telegram/bots-store.js';
 import type { TelegramLinksStore } from './telegram/links-store.js';
 import type { AdminService } from './admin/index.js';
+import type { VoiceTtsService } from './voice/tts-service.js';
 
 export interface PocketContext {
   config: Config;
@@ -39,6 +40,9 @@ export interface PocketContext {
   admin: AdminService;
   cron: CronService;
   webhooks: WebhookService;
+  /** PA-20 Phase 3: sentence-chunked TTS for live-listen/talk-back mode —
+      see `voice/tts-service.ts`'s doc comment. */
+  voiceTts: VoiceTtsService;
   /** PA-11: a human's follow-up prompts waiting on a busy working tree. */
   promptQueue: PromptQueueService;
   workspaces: WorkspaceRegistry;

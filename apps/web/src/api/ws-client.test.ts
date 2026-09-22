@@ -94,6 +94,7 @@ const SESSION: SessionInfo = {
   adopted: false,
   adoptTargetId: null,
   skipPermissionsEnabled: false,
+  voiceModeEnabled: false,
   providerDisclosure: null,
   rateLimit: null,
   pendingApprovalsCount: 0,
@@ -697,6 +698,47 @@ describe('TerminalConnection: structured sessions', () => {
       { type: 'permission', sessionId: 'abc', requestId: 'p2', decision: 'deny', message: 'not that file' },
       { type: 'interrupt', sessionId: 'abc' },
       { type: 'model', sessionId: 'abc', model: 'claude-opus-4-8' },
+    ]);
+  });
+
+  it('sends a voice_mode frame (PA-20)', () => {
+    const { connection, socket } = setup();
+    connection.open('abc');
+    socket().open();
+
+    connection.sendVoiceMode(true);
+    connection.sendVoiceMode(false);
+
+    expect(socket().parsedSent().slice(1)).toEqual([
+      { type: 'voice_mode', sessionId: 'abc', enabled: true },
+      { type: 'voice_mode', sessionId: 'abc', enabled: false },
+    ]);
+  });
+
+  it('reports voice_mode_changed and tts_audio frames to their handlers', () => {
+    const seenModeChanges: boolean[] = [];
+    const seenChunks: unknown[] = [];
+    const { connection, socket } = setup({
+      onVoiceModeChanged: (enabled) => seenModeChanges.push(enabled),
+      onTtsAudio: (chunk) => seenChunks.push(chunk),
+    });
+    connection.open('abc');
+    socket().open();
+
+    socket().emit({ type: 'voice_mode_changed', sessionId: 'abc', enabled: true });
+    socket().emit({
+      type: 'tts_audio',
+      sessionId: 'abc',
+      turnId: 't1',
+      sentenceSeq: 0,
+      data: 'AAA=',
+      sampleRateHz: 24000,
+      done: false,
+    });
+
+    expect(seenModeChanges).toEqual([true]);
+    expect(seenChunks).toEqual([
+      { turnId: 't1', sentenceSeq: 0, data: 'AAA=', sampleRateHz: 24000, done: false },
     ]);
   });
 

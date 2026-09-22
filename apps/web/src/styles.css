@@ -949,6 +949,132 @@ input[type='number']::-webkit-outer-spin-button {
   opacity: 0.5;
 }
 
+/* Push-to-talk (PA-20). Same round-icon-button footprint as `.attach-btn` —
+   these are the two secondary actions that sit beside the send button — but
+   gets its own `.recording` state: a filled danger-colour background while
+   held, the one persistent "the mic is live" signal push-to-talk needs
+   (unlike the later live-listen mode, there is no separate always-visible
+   indicator, because a held finger already *is* the visible proof of
+   consent). */
+.mic-btn {
+  flex: none;
+  align-self: flex-end;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-dim);
+  touch-action: none; /* a hold-and-drag must not also scroll the page */
+}
+
+.mic-btn:hover:not(:disabled) {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+
+.mic-btn:disabled {
+  opacity: 0.5;
+}
+
+.mic-btn.recording {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* Live-listen toggle (PA-20 Phase 2) — same round-icon-button footprint as
+   `.mic-btn`/`.attach-btn`, its own `.active` state since it's a standing
+   toggle rather than a held-down button. */
+.live-listen-btn {
+  flex: none;
+  align-self: flex-end;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-dim);
+}
+
+.live-listen-btn:hover:not(:disabled) {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+
+.live-listen-btn:disabled {
+  opacity: 0.5;
+}
+
+.live-listen-btn.active {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* The persistent "mic is live" indicator — deliberately *not* inside the
+   picker-gated `.attach-preview` above (a slash-command picker opening must
+   never hide it) and deliberately not dismissible: this mode removes
+   push-to-talk's implicit privacy guarantee, so the indicator has to stay
+   honest for as long as the mode is actually on. */
+.live-listen-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+  color: var(--text-dim);
+  align-self: flex-start;
+}
+
+.live-listen-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  animation: live-listen-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes live-listen-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* The ticket's one "listening" feedback affordance — an energy meter, no
+   captions, no partials. A fixed-width track with a scaled fill rather than
+   a resized element, so the bar never reflows neighboring controls as the
+   level changes many times a second. */
+.live-listen-meter {
+  display: inline-block;
+  width: 40px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.live-listen-meter-fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: left;
+  background: var(--accent);
+  transition: transform 60ms linear;
+}
+
 /* The "+" button's popup menu — same floating-above-the-pill shape as
    `.slash-picker`/`.model-picker`, anchored from the left since that's the
    trigger's own edge (the model chip's picker anchors right for the same

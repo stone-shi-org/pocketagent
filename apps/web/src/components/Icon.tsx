@@ -33,6 +33,8 @@ export type IconName =
   | 'check'
   | 'close'
   | 'attach'
+  | 'mic'
+  | 'live-listen'
   | 'plus'
   | 'minimize'
   | 'shield'
@@ -244,6 +246,32 @@ const PATHS: Record<IconName, JSX.Element> = {
   // files" item, so it reads distinctly from `compose`'s pencil-in-square.
   attach: (
     <path d="M16.5 6.5v9a4 4 0 0 1-8 0v-10a2.5 2.5 0 0 1 5 0v9a1 1 0 0 1-2 0v-8" />
+  ),
+
+  // A classic mic capsule on a stand: PA-20's push-to-talk button. Distinct
+  // silhouette from `attach`'s paperclip and `plus`'s cross so a phone-sized
+  // composer row can tell "record" apart from "attach a file" at a glance.
+  mic: (
+    <>
+      <rect x="9" y="3.5" width="6" height="11" rx="3" />
+      <path d="M6 11.5a6 6 0 0 0 12 0" />
+      <path d="M12 17.5v3M9 20.5h6" />
+    </>
+  ),
+
+  // A small mic with sound waves radiating from it: PA-20 Phase 2's
+  // continuous live-listen toggle — distinct silhouette from the plain
+  // `mic` capsule (push-to-talk) so the two input modes never look like the
+  // same button in two states. Colour/pulsing for "currently on" comes from
+  // CSS (`.live-listen-btn.active`), same convention `mic-btn.recording`
+  // already uses, rather than a second icon variant.
+  'live-listen': (
+    <>
+      <rect x="10" y="9" width="4" height="7" rx="2" />
+      <path d="M12 16v2.5" />
+      <path d="M15.5 8.5a5 5 0 0 1 0 7M17.7 6.3a8 8 0 0 1 0 11.4" />
+      <path d="M8.5 8.5a5 5 0 0 0 0 7M6.3 6.3a8 8 0 0 0 0 11.4" />
+    </>
   ),
 
   // A plain "+": the prompt box's attach trigger, same glyph most chat apps

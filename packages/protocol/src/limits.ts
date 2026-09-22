@@ -1,4 +1,5 @@
 import { MAX_IMAGE_BASE64_CHARS, MAX_IMAGE_BYTES } from './prompt-image.js';
+import { MAX_VOICE_AUDIO_BASE64_CHARS, MAX_VOICE_AUDIO_BYTES } from './voice-audio.js';
 
 /**
  * Hard caps, enforced on the server before any frame is acted on.
@@ -24,6 +25,10 @@ export const LIMITS = {
   maxImageBytes: MAX_IMAGE_BYTES,
   /** Base64 inflates by 4/3; this is the cap actually applied to `image.data`. */
   maxImageBase64Chars: MAX_IMAGE_BASE64_CHARS,
+  /** Raw PCM16 byte cap for a push-to-talk utterance (PA-20), before base64 encoding. */
+  maxVoiceAudioBytes: MAX_VOICE_AUDIO_BYTES,
+  /** Base64 inflates by 4/3; this is the cap actually applied to `audio.data`. */
+  maxVoiceAudioBase64Chars: MAX_VOICE_AUDIO_BASE64_CHARS,
   minCols: 2,
   maxCols: 1000,
   minRows: 2,

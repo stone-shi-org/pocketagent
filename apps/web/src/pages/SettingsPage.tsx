@@ -459,6 +459,14 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
           onChange={(v) => saveDebounced('codeServerUrl', v)}
         />
         <TextRow
+          label="Live STT URL"
+          help="Base URL of the self-hosted live-stt service's HTTP admin port (PA-20). Reachable only from this server, never the browser. Blank hides the voice-input mic button entirely."
+          placeholder="http://10.100.0.50:8000"
+          value={settings.liveSttUrl}
+          busy={busy('liveSttUrl')}
+          onChange={(v) => saveDebounced('liveSttUrl', v)}
+        />
+        <TextRow
           label="Push contact"
           help="VAPID sub claim: a mailto: or https: URL identifying this deployment."
           restart={restart.has('pushContact')}

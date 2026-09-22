@@ -18,6 +18,7 @@ import type { ManagedSession, StructuredLikeSession } from '../sessions/manager.
 import { StructuredSession } from '../sessions/structured-session.js';
 import type { PtySession } from '../sessions/pty-session.js';
 import { saveAttachmentToWorkspace } from '../sessions/attachments.js';
+import type { TtsAudioChunk } from '../voice/tts-service.js';
 
 /**
  * Only some structured backends can switch model/effort live (today: the
@@ -102,7 +103,7 @@ interface Attachment {
 }
 
 export const websocketRoutes: FastifyPluginAsync = async (app) => {
-  const { sessions, config, promptQueue } = app.pocket;
+  const { sessions, config, promptQueue, voiceTts } = app.pocket;
 
   /**
    * Every live attachment, across every connection, indexed by session id —
@@ -354,6 +355,28 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
           send({ type: 'agent_event', sessionId, seq, event });
         session.on('event', onEvent);
         unsubscribers.push(() => session.off('event', onEvent));
+
+        // PA-20 Phase 3: forward this session's synthesized TTS audio, if
+        // any is ever produced (only while its live-listen mode is on).
+        // Session-scoped event name (`audio:<id>`) rather than one generic
+        // event every connection would have to filter on `sessionId` —
+        // only a small number of sessions have voice mode on at once.
+        // Deliberately not run through `EventBuffer`/`seq`/replay: stale
+        // audio for a reply already superseded is not worth resurrecting on
+        // reconnect, unlike `agent_event`.
+        const onTtsAudio = (chunk: TtsAudioChunk): void =>
+          send({ type: 'tts_audio', sessionId, ...chunk });
+        voiceTts.on(`audio:${sessionId}`, onTtsAudio);
+        unsubscribers.push(() => voiceTts.off(`audio:${sessionId}`, onTtsAudio));
+
+        // Same per-session pub/sub, for the `voice_mode` toggle itself —
+        // every tab attached to this session must agree on the state,
+        // including the tab that sent the toggle (see
+        // `VoiceTtsService.notifyModeChanged`'s doc comment).
+        const onVoiceModeChanged = (enabled: boolean): void =>
+          send({ type: 'voice_mode_changed', sessionId, enabled });
+        voiceTts.on(`mode:${sessionId}`, onVoiceModeChanged);
+        unsubscribers.push(() => voiceTts.off(`mode:${sessionId}`, onVoiceModeChanged));
 
         attached = {
           type: 'attached',
@@ -663,6 +686,30 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
           const session = requireStructured(message.sessionId);
           if (!session) break;
           void session.interrupt();
+          // PA-20 Phase 4 (barge-in): the one explicit, non-heuristic signal
+          // that this turn just ended early — there is no dedicated
+          // "interrupted" `AgentEvent` to observe instead (the SDK's own
+          // `notice: 'Interrupted.'` is a string match, not a real signal).
+          // Stops any TTS audio already mid-synthesis for this turn from
+          // reaching the browser after the user has started talking again.
+          voiceTts.cancel(message.sessionId);
+          break;
+        }
+
+        case 'voice_mode': {
+          const session = requireStructured(message.sessionId);
+          if (!session) break;
+          if (!voiceTts.isConfigured()) {
+            sendError('bad_message', 'Voice input is not configured on this server.', message.sessionId);
+            break;
+          }
+          sessions.setVoiceModeEnabled(message.sessionId, message.enabled);
+          // Idempotent — subscribes to this session's event stream at most
+          // once for its whole lifetime, regardless of how many times the
+          // toggle flips; turning it off needs no unsubscribe; the listener
+          // itself checks the live toggle state on every event.
+          if (message.enabled) voiceTts.attach(session);
+          voiceTts.notifyModeChanged(message.sessionId, message.enabled);
           break;
         }
 

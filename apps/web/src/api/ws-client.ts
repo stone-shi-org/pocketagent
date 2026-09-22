@@ -108,6 +108,21 @@ export interface TerminalConnectionHandlers {
   onAgentReplay?: (events: AgentEvent[], truncated: boolean) => void;
   /** Approvals still awaiting an answer at attach time. */
   onPendingPermissions?: (requests: PermissionRequestEvent[]) => void;
+
+  // ---- PA-20 voice input ----
+  /** The `voice_mode` toggle's new state — broadcast to every tab attached
+   *  to this session, including the one that sent it, so the persistent
+   *  "mic is live" indicator never disagrees with the toggle itself. */
+  onVoiceModeChanged?: (enabled: boolean) => void;
+  /** One chunk of synthesized reply speech (Phase 3), in order. `data`
+   *  is empty on the final chunk for a `turnId` — a pure end-of-turn marker. */
+  onTtsAudio?: (chunk: {
+    turnId: string;
+    sentenceSeq: number;
+    data: string;
+    sampleRateHz: number;
+    done: boolean;
+  }) => void;
 }
 
 export interface TerminalConnectionOptions {
@@ -375,6 +390,18 @@ export class TerminalConnection {
       case 'error':
         this.handlers.onError?.(message.code, message.message);
         break;
+      case 'voice_mode_changed':
+        this.handlers.onVoiceModeChanged?.(message.enabled);
+        break;
+      case 'tts_audio':
+        this.handlers.onTtsAudio?.({
+          turnId: message.turnId,
+          sentenceSeq: message.sentenceSeq,
+          data: message.data,
+          sampleRateHz: message.sampleRateHz,
+          done: message.done,
+        });
+        break;
       case 'pong':
         break;
     }
@@ -470,6 +497,14 @@ export class TerminalConnection {
   sendInterrupt(): boolean {
     if (!this.sessionId) return false;
     return this.send({ type: 'interrupt', sessionId: this.sessionId });
+  }
+
+  /** Toggle live-listen/talk-back mode (PA-20 Phase 2). The server rejects
+   *  this outright when live-stt isn't configured or the session isn't
+   *  structured; either way the reply comes back as `voice_mode_changed`. */
+  sendVoiceMode(enabled: boolean): boolean {
+    if (!this.sessionId) return false;
+    return this.send({ type: 'voice_mode', sessionId: this.sessionId, enabled });
   }
 
   /** Switch a structured session's model. Takes effect on its next prompt. */

@@ -96,6 +96,13 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   bool('cookieSecure', 'cookie_secure', true),
   bool('trustProxy', 'trust_proxy', false),
   nullableStr('codeServerBaseUrl', 'code_server_url', true),
+  // PA-20: live, not restart-required — `VoiceTtsService`/`routes/voice.ts`
+  // both read `config.liveSttUrl` through a getter closure rather than
+  // capturing a constructed `LiveSttClient` at boot, specifically so this
+  // can be `true` here (see those two files' own doc comments). Getting
+  // this flag wrong the other way (marking it live without that refactor)
+  // is exactly the bug this field's own doc comment above warns about.
+  nullableStr('liveSttUrl', 'live_stt_url', true),
   str('shell', 'shell', false),
   str('claudeBin', 'claude_bin', false),
   str('agyBin', 'agy_bin', false),

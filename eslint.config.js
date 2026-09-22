@@ -96,4 +96,14 @@ export default tseslint.config(
     files: ['apps/web/public/sw.js'],
     languageOptions: { globals: globals.serviceworker },
   },
+  {
+    // PA-20: the AudioWorklet processor has its own global scope too — no
+    // `window`/`document`, and no entry for it in the `globals` package the
+    // way `globals.serviceworker` covers a service worker, so its handful of
+    // globals are spelled out by hand.
+    files: ['apps/web/src/audio/pcm-worklet-processor.js'],
+    languageOptions: {
+      globals: { AudioWorkletProcessor: 'readonly', registerProcessor: 'readonly', sampleRate: 'readonly' },
+    },
+  },
 );

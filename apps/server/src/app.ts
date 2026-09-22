@@ -44,6 +44,8 @@ import {
   createAgyUsageSource,
 } from './usage/index.js';
 import { CronService } from './cron/index.js';
+import { createLiveSttClient } from './voice/live-stt-client.js';
+import { VoiceTtsService } from './voice/tts-service.js';
 import { authRoutes } from './routes/auth.js';
 import { cronRoutes } from './routes/cron.js';
 import { customClaudeProviderRoutes } from './routes/custom-claude-providers.js';
@@ -51,6 +53,7 @@ import { pushRoutes } from './routes/push.js';
 import { sessionRoutes } from './routes/sessions.js';
 import { settingsRoutes } from './routes/settings.js';
 import { usageRoutes } from './routes/usage.js';
+import { voiceRoutes } from './routes/voice.js';
 import { worktreeRoutes } from './routes/worktrees.js';
 import { webhookRoutes } from './routes/webhooks.js';
 import { plannerRoutes } from './routes/planner.js';
@@ -619,6 +622,21 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // before the server accepts its first request.
   plannerChats.attachRunServices({ webhooks, cron });
 
+  // PA-20 Phase 3: one instance, shared across every session — it looks up
+  // `sessions.isVoiceModeEnabled` live rather than caching it, so a toggle
+  // takes effect on the very next event with no extra wiring. The client
+  // getter is the same shape as `getCodeServerBaseUrl` above: `liveSttUrl`
+  // is a live `SETTINGS_FIELDS` entry (per user feedback that this belongs
+  // in Settings, not `POCKETAGENT_LIVE_STT_URL`), so re-reading
+  // `config.liveSttUrl` on every call — rather than resolving it once here
+  // — is what makes a `PATCH /api/settings` take effect immediately. `null`
+  // when unset means every call is a no-op — see `VoiceTtsService.isConfigured()`.
+  const voiceTts = new VoiceTtsService(
+    () => (config.liveSttUrl ? createLiveSttClient(config.liveSttUrl) : null),
+    (sessionId) => sessions.isVoiceModeEnabled(sessionId),
+    app.log,
+  );
+
   // PA-11: one queue, shared. A webhook delivery, a scheduled run and a human's
   // own prompt all contend for the same working trees, so they have to be
   // ordered against each other rather than each keeping a private queue.
@@ -654,6 +672,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     admin,
     cron,
     webhooks,
+    voiceTts,
     promptQueue,
     workspaces,
     plannerWorkspaces,
@@ -848,6 +867,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(settingsRoutes);
   await app.register(pushRoutes);
   await app.register(usageRoutes);
+  await app.register(voiceRoutes);
   await app.register(websocketRoutes);
 
   // ---- Static frontend ------------------------------------------------------

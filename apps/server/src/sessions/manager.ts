@@ -231,6 +231,19 @@ const SWEEP_INTERVAL_MS = 15_000;
 export class SessionManager {
   private readonly live = new Map<string, ManagedSession>();
   private readonly attachCounts = new Map<string, number>();
+  /**
+   * PA-20 Phase 2: sessions with live-listen/talk-back on right now. A plain
+   * `Set` here — not a field on `StructuredSession` itself — because the
+   * toggle is a PocketAgent-side concept, not a property of any particular
+   * backend's SDK handle (unlike `model`/`effort`, which really do live on
+   * the agent), and `StructuredLikeSession` is a bare union across five
+   * backends with no shared field to add it to without touching all five.
+   * Deliberately in-memory only: it must reset to empty on every restart,
+   * the same "never comes back on by itself" requirement
+   * `globalSkipPermissions` explicitly does *not* have to honor but this
+   * mode does — see `SessionInfo.voiceModeEnabled`'s own doc comment.
+   */
+  private readonly voiceModeSessions = new Set<string>();
   private sweepTimer: NodeJS.Timeout | null = null;
   /**
    * The operator's server-wide "skip all approvals" switch. See CLAUDE.md —
@@ -1632,6 +1645,7 @@ export class SessionManager {
       );
     }
     this.live.delete(id);
+    this.voiceModeSessions.delete(id);
     const changes = this.opts.db.prepare('DELETE FROM sessions WHERE id = ?').run(id).changes;
     if (changes === 0 && !live) {
       throw new SessionError(`No such session: ${id}`, 'not_found', 404);
@@ -1822,6 +1836,16 @@ export class SessionManager {
     return count;
   }
 
+  /** PA-20 Phase 2: flip a session's live-listen/talk-back toggle. */
+  setVoiceModeEnabled(id: string, enabled: boolean): void {
+    if (enabled) this.voiceModeSessions.add(id);
+    else this.voiceModeSessions.delete(id);
+  }
+
+  isVoiceModeEnabled(id: string): boolean {
+    return this.voiceModeSessions.has(id);
+  }
+
   /** Live sessions first, then recent history from SQLite. */
   list(limit = 50): SessionInfo[] {
     const infos: SessionInfo[] = [];
@@ -1971,6 +1995,7 @@ export class SessionManager {
         typeof session.pendingPermissions === 'function'
           ? session.pendingPermissions().length
           : 0,
+      voiceModeEnabled: this.isVoiceModeEnabled(session.id),
     };
   }
 
@@ -2018,6 +2043,9 @@ export class SessionManager {
       skipPermissionsEnabled: row.skip_permissions === 1,
       providerDisclosure: this.opts.agents.get(row.agent)?.providerDisclosure ?? null,
       pendingApprovalsCount: 0,
+      // History rows have no live listener — a finished session's voice mode
+      // is definitionally off, and the toggle is in-memory only besides.
+      voiceModeEnabled: false,
     };
   }
 
@@ -2126,6 +2154,12 @@ export class SessionManager {
       if (this.attachedCount(id) === 0 && now - endedAt > 10 * 60_000) {
         session.dispose();
         this.live.delete(id);
+        // A dead session's voice mode is definitionally off — nothing is
+        // listening for it anymore — and `rowToInfo` (used once it's out of
+        // `live`) always reports `false` regardless, so this is pure
+        // housekeeping against `voiceModeSessions` growing unbounded over a
+        // long-lived server rather than something any reader depends on.
+        this.voiceModeSessions.delete(id);
       }
     }
   }
