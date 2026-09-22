@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_VAD_OPTIONS, rms, SpeechEndpointer, vadOptionsForSensitivity, type VadOptions } from './vad.js';
+import {
+  DEFAULT_VAD_OPTIONS,
+  rms,
+  SpeechEndpointer,
+  vadOptionsForSensitivity,
+  type VadOptions,
+  type VadTransition,
+} from './vad.js';
 
 describe('rms', () => {
   it('is zero for silence', () => {
@@ -20,6 +27,7 @@ const OPTS: VadOptions = {
   silenceThreshold: 0.05,
   hangoverMs: 500,
   minSpeechMs: 200,
+  maxSpeechMs: 30_000,
   // PA-85. The margin is set so the absolute thresholds above stay in force
   // for every pre-existing case below (their energies are well clear of
   // 2.5x a ~0.01 noise floor), which is the point: the adaptive threshold
@@ -229,5 +237,68 @@ describe('SpeechEndpointer voiced-ratio gate (PA-85)', () => {
     for (let t = 10; t <= 350; t += 10) vad.push(0.4, t);
     expect(vad.push(0.01, 360)).toBeNull();
     expect(vad.push(0.01, 900)).toBe('speech_end');
+  });
+});
+
+describe('SpeechEndpointer bounded runs and internal pauses (PA-85 review fixes)', () => {
+  it('does not discard a real sentence containing a long internal pause', () => {
+    // "run the tests" ... long think ... "in watch mode", with a generous
+    // hangover (a setting `vadOptionsForSensitivity` explicitly allows).
+    // If silent frames counted toward the voiced ratio's denominator, this
+    // whole utterance would be thrown away as noise — with no transcript and
+    // no feedback, which is the worst failure this feature can produce.
+    const vad = new SpeechEndpointer({ ...OPTS, hangoverMs: 3000 });
+    expect(vad.push(0.5, 0)).toBe('speech_start');
+    for (let t = 10; t <= 600; t += 10) vad.push(0.5, t);
+    // 2.5s of true silence mid-sentence — under the 3s hangover, so the turn
+    // has not ended.
+    for (let t = 610; t <= 3100; t += 10) vad.push(0.001, t);
+    for (let t = 3110; t <= 3700; t += 10) vad.push(0.5, t);
+    for (let t = 3710; t < 6700; t += 10) vad.push(0.001, t);
+    expect(vad.push(0.001, 6710)).toBe('speech_end');
+  });
+
+  it('still rejects a transient regardless of how much silence surrounds it', () => {
+    const vad = new SpeechEndpointer({ ...OPTS, hangoverMs: 3000 });
+    expect(vad.push(0.6, 0)).toBe('speech_start');
+    // Decay tail in the hysteresis band: audible, never loud.
+    for (let t = 10; t <= 400; t += 10) vad.push(0.06, t);
+    for (let t = 410; t < 3500; t += 10) vad.push(0.001, t);
+    expect(vad.push(0.001, 3510)).toBeNull();
+  });
+
+  it('closes out a run that steady ambient noise would otherwise keep open forever', () => {
+    // Energy parked in the hysteresis band: never loud enough to be voiced,
+    // never quiet enough to start the hangover clock. Before maxSpeechMs this
+    // never terminated — unbounded buffering, and a barge-in pause with
+    // nothing left to resolve it.
+    const vad = new SpeechEndpointer({ ...OPTS, maxSpeechMs: 5000 });
+    expect(vad.push(0.5, 0)).toBe('speech_start');
+    let terminated: string | null = 'none';
+    for (let t = 10; t <= 6000; t += 10) {
+      const transition = vad.push(0.06, t);
+      if (!vad.isSpeaking()) {
+        terminated = transition;
+        break;
+      }
+    }
+    // Terminated, and as a discard (a band-only run is not speech) rather
+    // than by silently staying in `speaking`.
+    expect(vad.isSpeaking()).toBe(false);
+    expect(terminated).toBeNull();
+  });
+
+  it('delivers a genuinely long instruction at the max rather than discarding it', () => {
+    const vad = new SpeechEndpointer({ ...OPTS, maxSpeechMs: 5000 });
+    expect(vad.push(0.5, 0)).toBe('speech_start');
+    let transition: VadTransition | 'none' = 'none';
+    for (let t = 10; t <= 6000; t += 10) {
+      const got = vad.push(0.5, t);
+      if (!vad.isSpeaking()) {
+        transition = got;
+        break;
+      }
+    }
+    expect(transition).toBe('speech_end');
   });
 });

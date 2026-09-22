@@ -12,6 +12,13 @@ import { base64ToInt16Array, int16ToFloat32 } from './pcm.js';
  * heard in the order the reply was written, not the order the network
  * happened to deliver them.
  */
+/**
+ * How long to wait for a suspended `AudioContext` to resume before giving up
+ * on this chunk. Generous enough for a real resume, bounded because the
+ * promise can otherwise never settle (see the call site).
+ */
+const CONTEXT_RESUME_TIMEOUT_MS = 2000;
+
 export class TtsPlaybackQueue {
   private context: AudioContext | null = null;
   private queue: { pcm: Int16Array; sampleRateHz: number }[] = [];
@@ -158,18 +165,29 @@ export class TtsPlaybackQueue {
     this.pumpActive = true;
     this.playing = true;
     this.onPlaybackStateChange?.(true);
-    while (this.queue.length > 0 && !this.stopped && !this.paused) {
-      const chunk = this.queue.shift()!;
-      this.currentChunk = chunk;
-      await this.playChunk(chunk);
-      // Cleared only on an *uninterrupted* finish. `pause()` reads this to
-      // decide what to put back, so clearing it unconditionally would lose
-      // the sentence that was playing when the pause landed.
-      if (!this.paused) this.currentChunk = null;
+    // `finally`, not a trailing statement: `playChunk` can genuinely throw —
+    // `new AudioContext()` past Chrome's ~6-per-page limit (reachable, since
+    // `DesktopShell` keeps every session tab mounted with its own queue),
+    // `createBuffer` on a zero length or an out-of-range `sampleRateHz` off
+    // the wire, `source.start()` on a bad state. Letting that escape would
+    // leave `pumpActive` set forever, and since every restart path
+    // (`enqueue`, `resume`) is gated on it, the talk-back would be
+    // permanently silent for the life of the page with no way back.
+    try {
+      while (this.queue.length > 0 && !this.stopped && !this.paused) {
+        const chunk = this.queue.shift()!;
+        this.currentChunk = chunk;
+        await this.playChunk(chunk);
+        // Cleared only on an *uninterrupted* finish. `pause()` reads this to
+        // decide what to put back, so clearing it unconditionally would lose
+        // the sentence that was playing when the pause landed.
+        if (!this.paused) this.currentChunk = null;
+      }
+    } finally {
+      this.pumpActive = false;
+      this.playing = false;
+      this.onPlaybackStateChange?.(false);
     }
-    this.pumpActive = false;
-    this.playing = false;
-    this.onPlaybackStateChange?.(false);
   }
 
   private async playChunk(chunk: { pcm: Int16Array; sampleRateHz: number }): Promise<void> {
@@ -177,7 +195,15 @@ export class TtsPlaybackQueue {
     this.context ??= new AudioContext();
     if (this.context.state === 'suspended') {
       try {
-        await this.context.resume();
+        // Raced against a timeout: on iOS Safari a `resume()` awaiting a user
+        // gesture can stay pending indefinitely, and this `await` sits inside
+        // the pump — so an unresolved promise here would hold `pumpActive`
+        // and wedge the queue exactly as a throw would. Losing one chunk to a
+        // still-suspended context is recoverable; never finishing is not.
+        await Promise.race([
+          this.context.resume(),
+          new Promise((resolve) => setTimeout(resolve, CONTEXT_RESUME_TIMEOUT_MS)),
+        ]);
       } catch {
         // May fail if user gesture is required by browser policy
       }
@@ -220,6 +246,13 @@ export class TtsPlaybackQueue {
     this.paused = false;
     this.currentChunk = null;
     this.queue = [];
+    // Belt-and-braces with `pump()`'s own `finally`: an explicit stop is the
+    // user reaching for the controls, and it must be able to recover the
+    // queue from *any* state — including a `pumpActive` left set by something
+    // this class did not anticipate. Clearing it here is what preserves the
+    // pre-PA-85 property that toggling live-listen off and on fixes a wedged
+    // talk-back.
+    this.pumpActive = false;
     try {
       this.currentSource?.stop();
     } catch {

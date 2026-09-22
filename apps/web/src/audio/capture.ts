@@ -12,6 +12,18 @@ export interface RecordedUtterance {
   /** Base64 16kHz mono PCM16, the exact `VoiceAudioUpload.data` shape. */
   audioBase64: string;
   durationMs: number;
+  /**
+   * PA-85: the span that actually carried speech, excluding the trailing
+   * silence the endpointer waited out before declaring the turn over. Only
+   * live-listen can know this — push-to-talk is bounded by a finger, not by a
+   * hangover — so it is optional, and the utterance harness falls back to
+   * `durationMs` when it is absent.
+   *
+   * Kept separate from `durationMs` rather than narrowing it, because
+   * `durationMs` describes the *audio* being uploaded and is what the
+   * recording UI counts; this describes the speech inside it.
+   */
+  voicedMs?: number;
 }
 
 export interface PushToTalkOptions {

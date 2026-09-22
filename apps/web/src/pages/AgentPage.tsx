@@ -127,13 +127,18 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
    *  recreate that effect (which would tear down and reopen the socket). */
   const vadOptionsRef = useRef<Partial<VadOptions>>({});
   /**
-   * PA-85: an utterance the harness judged borderline — parked in the
-   * composer instead of being sent or discarded. `seq` is what makes the
-   * handoff idempotent *and* repeatable: `PromptBox` appends on a change to
-   * it, so saying the same borderline thing twice lands twice, while a
-   * re-render with no new utterance lands nothing.
+   * PA-85: utterances the harness judged borderline — parked in the composer
+   * instead of being sent or discarded.
+   *
+   * A list with monotonic `seq`s rather than one slot, because `PromptBox`
+   * consumes it as a high-water mark: that is what makes the handoff
+   * idempotent across a remount (a desktop tab switch, or the layout
+   * boundary swapping the whole shell) while still delivering two parks that
+   * resolve in the same React batch. Accumulating here is cheap — a parked
+   * utterance is a short string, and the list only grows while someone is
+   * ignoring the composer.
    */
-  const [reviewText, setReviewText] = useState<{ text: string; seq: number } | null>(null);
+  const [reviewText, setReviewText] = useState<{ items: { text: string; seq: number }[] } | null>(null);
   const reviewSeqRef = useRef(0);
   /**
    * PA-85: a transient, non-error explanation of something the harness just
@@ -286,6 +291,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
                 ...(words ? { words } : {}),
                 ...(durationSec !== undefined ? { durationSec } : {}),
                 durationMs: utterance.durationMs,
+                ...(utterance.voicedMs !== undefined ? { voicedMs: utterance.voicedMs } : {}),
               });
 
               if (judgement.verdict === 'drop') {
@@ -309,7 +315,8 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
                   ttsQueue.stop();
                   conn.sendStopSpeech();
                 }
-                setReviewText({ text: trimmed, seq: reviewSeqRef.current++ });
+                const seq = reviewSeqRef.current++;
+                setReviewText((prev) => ({ items: [...(prev?.items ?? []), { text: trimmed, seq }] }));
                 showLiveListenNotice(`Parked for review — ${judgement.reason}`);
                 return;
               }
@@ -355,8 +362,14 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         // The VAD rejected that run, so no utterance is coming and nothing
         // else will ever resolve the pause above. Undoing it here is what
         // keeps a discarded cough from silencing the rest of the reply.
+        //
+        // It also reports itself, for the same reason every harness verdict
+        // does: this is a rejection, it is the one the Tier 1 gate made *more*
+        // frequent, and a rejection nobody can see is how a working
+        // microphone comes to look broken.
         onSpeechDiscarded: () => {
           ttsQueue.resume();
+          showLiveListenNotice('Ignored — too short or not sustained');
         },
         onLevel: setMicLevel,
         onError: (message) => {
@@ -364,6 +377,13 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           liveListen = null;
           desiredLiveListen = false;
           setMicLevel(0);
+          // The capture died, possibly mid-utterance and therefore possibly
+          // mid barge-in pause. No further frames will arrive, so neither
+          // `onSpeechDiscarded` nor `onUtterance` can resolve it. Recovery
+          // would otherwise depend on `sendVoiceMode(false)` round-tripping
+          // back through the socket — which is exactly what may also be down
+          // when capture dies. Stop locally and unconditionally.
+          ttsQueue.stop();
           // The capture died out from under the toggle — tell the server so
           // `SessionInfo.voiceModeEnabled` (and every other tab's indicator)
           // stops claiming the mic is live when it demonstrably is not.

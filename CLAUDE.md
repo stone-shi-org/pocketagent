@@ -969,7 +969,17 @@ Three layers, cheapest first, and each catches something the others cannot:
   milliseconds while only a couple of frames were ever loud. `minSpeechMs` was
   deliberately **not** raised — a spoken "yes" is 300-400ms, so a floor high
   enough to reject a throat-clear rejects the single-word answers the feature
-  is most valuable for.
+  is most valuable for. Two details of the ratio are load-bearing rather than
+  tidy. Its denominator is **voiced + hysteresis-band frames**, never all
+  frames: counting silent ones puts every *internal* pause in the denominator,
+  so "run the tests" — long pause — "in watch mode" would be discarded as
+  noise at a generous `hangoverMs`, which is exactly the setting a slow
+  speaker picks. And a run is bounded by `maxSpeechMs`, because ambient energy
+  above the *silence* threshold never starts the hangover clock at all — the
+  endpointer would stay `speaking` forever, buffering audio without bound and
+  holding a barge-in pause nothing could resolve. That bound is not a
+  decay-into-allow timeout: it answers nothing and relaxes no gate, it only
+  refuses to have an unbounded state.
 - **The ASR's own confidence** (`voice/live-stt-client.ts` asks for
   `verbose_json`; LS-7 on the live-stt side). live-stt computed per-word
   confidence all along — `proto/livestt/v1/asr.proto`'s `Word` carries it and
@@ -983,7 +993,12 @@ Three layers, cheapest first, and each catches something the others cannot:
   Confidence is *not* comparable across live-stt's backends (whisper reports a
   mean over a word's tokens, parakeet a `min`), so a threshold is meaningful
   against either but does not transfer exactly — raised as an open question on
-  LS-7 rather than papered over.
+  LS-7 rather than papered over. Because a backend swap is therefore
+  *expected*, values outside `(0,1]` are discarded as no-signal rather than
+  trusted: a backend reporting log-probabilities would otherwise put every
+  mean under the drop threshold, and a perfectly working microphone would
+  transcribe fine and send nothing at all — a silent, total failure no test
+  would notice.
 - **Text rules** (`audio/utterance-harness.ts`) — a filler-token set, an
   all-tokens-are-filler test, and the enumerable non-speech repertoire
   whisper-family decoders emit. Matched on the **whole** normalized utterance,
@@ -991,7 +1006,12 @@ Three layers, cheapest first, and each catches something the others cannot:
   "thank you for fixing the tests" is a real instruction. This layer is not
   redundant with confidence, and the evidence is concrete: whisper returns
   `[BLANK_AUDIO]` for digital silence at confidence **0.79**, so a
-  confidence-only filter sends it straight on.
+  confidence-only filter sends it straight on. The words-per-second check
+  belongs to this layer too, and it is measured against the endpointer's
+  **voiced** span (`RecordedUtterance.voicedMs`) rather than the uploaded
+  audio's length: both other measurements fold in up to `hangoverMs` of
+  trailing silence, which is the dominant term and made the check essentially
+  never fire on the short blips it was written for.
 
 **"yeah" drops but "yes" sends**, a deliberate asymmetry on the reporter's own
 evidence — PA-85 names "oh, yeah, hum" as what STT invents out of sounds that
@@ -1006,10 +1026,14 @@ through unchanged, `drop` is discarded *with a visible reason*, and
 **`review` is parked in the composer** — reusing PA-82's review-before-send
 affordance rather than inventing a second one. That gives the thresholds an
 honest tuning story: too tight degrades to "you have to tap send" rather than
-to "your words vanished". The review handoff is keyed on a **counter**, not
-compared by text, so the same borderline utterance said twice lands twice —
-the alternative swallows a repeat, which is exactly what someone does when
-they think they were not heard. It deliberately does not focus the textarea,
+to "your words vanished". The review handoff is a list of counter-keyed items
+consumed as a **high-water mark**, which is the third design and the only
+correct one: comparing by text swallows a genuine repeat (exactly what someone
+does when they think they were not heard), and treating the counter as
+"append one item" loses an utterance whenever two parks resolve in the same
+React batch, while keying the effect on the counter alone re-appends
+everything on any remount — a desktop tab switch, or crossing the layout
+boundary that swaps the whole shell. It deliberately does not focus the textarea,
 unlike push-to-talk's own review path: that one follows a tap, whereas this
 fires at any moment in a hands-free session, and popping the on-screen
 keyboard unasked is the wrong thing to do to someone not holding the phone.
@@ -1025,7 +1049,25 @@ the irreversible `interrupt` waits for the verdict: a real command commits it,
 junk calls `resume()` and the reply carries on. `pause()`/`resume()` are
 deliberately distinct from `stop()`, which PA-83 made a *durable* mute for its
 own good reasons — a stop must never be downgradeable to a pause, and
-`resume()` must never revive one. `pause()` puts the interrupted sentence back
+`resume()` must never revive one.
+
+Because every restart path is now gated on a `pumpActive` flag, **that flag's
+lifetime is the fragile part**: `pump()` clears it in a `finally` and `stop()`
+clears it outright, because `playChunk` can genuinely throw (an
+`AudioContext` past Chrome's ~6-per-page limit is reachable — `DesktopShell`
+keeps every session tab mounted with its own queue — as is `createBuffer` on a
+bad `sampleRateHz` off the wire), and a leaked flag means the talk-back is
+permanently silent for the life of the page with no way back. A suspended
+context's `resume()` is raced against a timeout for the same reason: on iOS it
+can stay pending indefinitely, and that `await` sits inside the pump.
+
+Every path that ends a listening session or a run resolves the pause, and that
+set is larger than it looks: the six verdict/error exits in `onUtterance`, a
+VAD-level discard (`onSpeechDiscarded` — which fires *no* utterance, and which
+the Tier 1 gate makes more frequent, so missing it left the reply paused
+forever), and a mic that dies mid-utterance (`onError` stops locally rather
+than waiting for `voice_mode_changed` to round-trip through a socket that may
+be down for the same reason the capture died). `pause()` puts the interrupted sentence back
 at the head of the queue, so resuming replays that sentence rather than losing
 it (`AudioBufferSourceNode` has no resume-from-offset, and re-hearing one
 sentence beats silently skipping it).

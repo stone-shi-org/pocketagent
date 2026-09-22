@@ -115,8 +115,10 @@ const AMBIGUOUS_ACKS: ReadonlySet<string> = new Set([
  * what appear here.
  */
 const HALLUCINATION_PHRASES: ReadonlySet<string> = new Set([
+  // Punctuation-free: the lookup is against the normalized form, so an entry
+  // carrying a "!" could never match.
   'thank you', 'thanks', 'thank you very much', 'thanks for watching',
-  'thanks for watching!', 'please subscribe', 'subscribe',
+  'please subscribe', 'subscribe',
   'blank audio', 'blank_audio', 'silence', 'music', 'inaudible',
   'foreign', 'applause', 'laughter', 'noise', 'beep', 'bye', 'bye bye',
   'you', 'the', 'a',
@@ -209,10 +211,25 @@ export interface HarnessInput {
   words?: TranscriptWord[];
   /** live-stt's own measurement of the uploaded audio's length. */
   durationSec?: number;
-  /** The endpointer's measured voiced span, always available since it is
-   *  computed in this browser. Used as the denominator for the speech-rate
-   *  check when `durationSec` is absent. */
+  /** The endpointer's measured span from start-of-speech to end-of-hangover.
+   *  A last-resort denominator only: it includes the trailing silence, which
+   *  is why `voicedMs` is preferred. */
   durationMs?: number;
+  /**
+   * The endpointer's measured *voiced* span — start of speech to the moment
+   * the closing silence began, excluding the hangover. The right denominator
+   * for a speech-rate check, and the only one of the three that is not
+   * inflated by however long the turn-detection hangover happens to be.
+   */
+  voicedMs?: number;
+}
+
+/** First strictly-positive, finite value, or undefined if there is none. */
+function firstUsableSeconds(candidates: (number | undefined)[]): number | undefined {
+  for (const value of candidates) {
+    if (value !== undefined && Number.isFinite(value) && value > 0) return value;
+  }
+  return undefined;
 }
 
 /**
@@ -246,9 +263,16 @@ export function judgeUtterance(input: HarnessInput): UtteranceJudgement {
   }
 
   const lexical = input.words?.filter((w) => isLexicalWord(w.word)) ?? [];
+  // Range-checked, not merely finite (PA-85 review). Confidence is documented
+  // as *not* comparable across live-stt's ASR backends, so a backend swap
+  // reporting a log-probability (negative) or a 0-100 percentage is the
+  // anticipated shape of change — and either would silently break this gate
+  // in a way no test would see: log-probs put every mean below the drop
+  // threshold, so a perfectly working microphone would transcribe fine and
+  // send nothing at all. Anything outside (0,1] is treated as no signal.
   const confidences = lexical
     .map((w) => w.confidence)
-    .filter((c): c is number => typeof c === 'number' && Number.isFinite(c));
+    .filter((c): c is number => typeof c === 'number' && Number.isFinite(c) && c > 0 && c <= 1);
 
   if (confidences.length > 0) {
     const mean = confidences.reduce((sum, c) => sum + c, 0) / confidences.length;
@@ -268,13 +292,31 @@ export function judgeUtterance(input: HarnessInput): UtteranceJudgement {
     }
   }
 
-  // Speech rate, as a check on a *confident* hallucination. Prefers
-  // live-stt's own duration over the endpointer's, since the two measure
-  // slightly different spans and the rate is only meaningful against the
-  // audio the words were actually decoded from.
-  const seconds = input.durationSec ?? (input.durationMs !== undefined ? input.durationMs / 1000 : undefined);
-  if (lexical.length > 1 && seconds !== undefined && seconds > 0) {
-    const wordsPerSecond = lexical.length / seconds;
+  // Speech rate, as a check on a *confident* hallucination.
+  //
+  // Measured against the **voiced** span, not the uploaded audio's length.
+  // That distinction is what makes the check work at all: both `durationSec`
+  // (live-stt's view of the file) and `durationMs` (start of speech to end of
+  // hangover) include up to `hangoverMs` — 800ms by default, up to 3s — of
+  // trailing silence, so a 200ms blip yielding four words reports ~4 words/sec
+  // and looks perfectly ordinary. `vad.ts` already reasons this way about its
+  // own duration floor; the same reasoning had simply not been applied here.
+  //
+  // Falls back through voiced → live-stt → endpointer, and each step uses an
+  // explicit `undefined` check rather than `??` so a genuine zero is treated
+  // as "no usable measurement" instead of silently disabling the check.
+  const seconds = firstUsableSeconds([
+    input.voicedMs !== undefined ? input.voicedMs / 1000 : undefined,
+    input.durationSec,
+    input.durationMs !== undefined ? input.durationMs / 1000 : undefined,
+  ]);
+  // Counts *tokens*, not `lexical`, so the check still runs on a live-stt
+  // that reports no per-word data at all — which the protocol documents as a
+  // supported deployment, and which would otherwise have no defence against a
+  // confident hallucination whatsoever.
+  const wordCount = lexical.length > 0 ? lexical.length : tokens.length;
+  if (wordCount > 1 && seconds !== undefined) {
+    const wordsPerSecond = wordCount / seconds;
     if (wordsPerSecond > MAX_PLAUSIBLE_WORDS_PER_SECOND) {
       return {
         verdict: 'review',

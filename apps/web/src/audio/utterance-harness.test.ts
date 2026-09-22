@@ -302,3 +302,102 @@ describe('judgeUtterance — degenerate input', () => {
     expect(judgeUtterance({ text: 'Oh!' }).normalized).toBe('oh');
   });
 });
+
+/**
+ * PA-85 review fixes. Each of these was a way the harness could have failed
+ * *silently* — either rejecting everything or checking nothing — which is the
+ * failure mode a filter must not have.
+ */
+describe('judgeUtterance — robustness against a backend that changes units', () => {
+  it('ignores negative confidences instead of dropping every utterance', () => {
+    // A backend reporting log-probabilities is the anticipated shape of
+    // change (the protocol comment says confidence is not comparable across
+    // backends). Read naively, every mean falls under the drop threshold and
+    // a working microphone sends nothing at all, forever.
+    const result = judgeUtterance({
+      text: 'run the tests',
+      words: [
+        { word: 'run', confidence: -0.12 },
+        { word: 'the', confidence: -0.4 },
+        { word: 'tests', confidence: -0.08 },
+      ],
+      voicedMs: 900,
+    });
+    expect(result.verdict).toBe('send');
+  });
+
+  it('ignores out-of-range confidences on a 0-100 scale', () => {
+    const result = judgeUtterance({
+      text: 'run the tests',
+      words: [
+        { word: 'run', confidence: 95 },
+        { word: 'the', confidence: 88 },
+        { word: 'tests', confidence: 91 },
+      ],
+      voicedMs: 900,
+    });
+    expect(result.verdict).toBe('send');
+  });
+
+  it('still uses the in-range subset when only some words are unusable', () => {
+    const result = judgeUtterance({
+      text: 'shall we',
+      words: [
+        { word: 'shall', confidence: 0.2 },
+        { word: 'we', confidence: Number.NaN },
+      ],
+      voicedMs: 900,
+    });
+    expect(result.verdict).toBe('drop');
+  });
+});
+
+describe('judgeUtterance — speech rate is measured against voiced time', () => {
+  it('fires on a short blip, which it could not when the hangover was included', () => {
+    // 4 words out of 200ms of actual speech. With the default 800ms hangover
+    // folded in, this reported 4 words/sec and looked entirely ordinary —
+    // so the check essentially never fired on the blips it was written for.
+    const result = judgeUtterance({
+      text: 'thanks for watching everyone',
+      words: ['thanks', 'for', 'watching', 'everyone'].map((word) => ({ word, confidence: 0.95 })),
+      voicedMs: 200,
+      durationSec: 1.0,
+    });
+    expect(result.verdict).toBe('review');
+    expect(result.reason).toContain('speech rate');
+  });
+
+  it('prefers voicedMs over live-stt duration when both are present', () => {
+    const plausible = judgeUtterance({
+      text: 'run the tests and then push',
+      words: ['run', 'the', 'tests', 'and', 'then', 'push'].map((word) => ({ word, confidence: 0.9 })),
+      voicedMs: 1500,
+      durationSec: 0.3,
+    });
+    expect(plausible.verdict).toBe('send');
+  });
+
+  it('falls through a zero duration to the next measurement instead of skipping the check', () => {
+    // `durationSec: 0` is not nullish, so `??` kept it and disabled the check
+    // even though a usable measurement was sitting right beside it.
+    const result = judgeUtterance({
+      text: 'thanks for watching everyone',
+      words: ['thanks', 'for', 'watching', 'everyone'].map((word) => ({ word, confidence: 0.95 })),
+      durationSec: 0,
+      durationMs: 300,
+    });
+    expect(result.verdict).toBe('review');
+  });
+
+  it('runs on a live-stt that reports no per-word data at all', () => {
+    // The pre-LS-7 deployment the protocol documents as supported. Without
+    // counting tokens instead of words, the only defence against a
+    // *confident* hallucination was completely inoperative there.
+    const result = judgeUtterance({
+      text: 'thanks for watching everyone today',
+      voicedMs: 300,
+    });
+    expect(result.verdict).toBe('review');
+    expect(result.reason).toContain('speech rate');
+  });
+});

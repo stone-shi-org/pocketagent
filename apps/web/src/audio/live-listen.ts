@@ -167,19 +167,38 @@ export class LiveListenController {
       offset += chunk.length;
     }
     const durationMs = performance.now() - this.speechStartedAtMs;
+    // The endpointer's own measurement, which excludes the hangover it just
+    // waited out — see `SpeechEndpointer.lastVoicedMs`. `durationMs` above
+    // describes the buffer being uploaded (hangover included, which is
+    // harmless to transcribe); this describes the speech inside it, and is
+    // the only one of the two a words-per-second check can use.
+    const voicedMs = this.endpointer.lastVoicedMs();
     this.chunks = [];
 
     const resampled = resampleLinear(merged, nativeSampleRate, TARGET_SAMPLE_RATE);
     const pcm16 = floatTo16BitPcm(resampled);
-    this.opts.onUtterance({ audioBase64: int16ArrayToBase64(pcm16), durationMs });
+    this.opts.onUtterance({
+      audioBase64: int16ArrayToBase64(pcm16),
+      durationMs,
+      ...(voicedMs !== null ? { voicedMs } : {}),
+    });
   }
 
-  /** Barge-in support: force back to "not speaking" without emitting
-   *  whatever's buffered — used when live-listen mode is turned off mid
-   *  utterance, so a half-captured recording is never submitted. */
+  /**
+   * Barge-in support: force back to "not speaking" without emitting
+   * whatever's buffered — so a half-captured recording is never submitted.
+   *
+   * Currently unused. If it is ever wired up, note what it bypasses: PA-85's
+   * discard detection works by watching `isSpeaking()` change across a
+   * `push()`, so resetting the endpointer directly ends a run *without*
+   * firing `onSpeechDiscarded`. Any caller must therefore resolve the
+   * talk-back pause itself (a `stop()` is what every existing teardown path
+   * does), or the reply stays paused with nothing left to un-pause it.
+   */
   resetTurn(): void {
     this.chunks = [];
     this.endpointer.reset();
+    this.opts.onSpeechDiscarded?.();
   }
 
   async stop(): Promise<void> {

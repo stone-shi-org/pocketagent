@@ -139,12 +139,13 @@ interface Props {
    * whatever is already in the box on every change of `seq`, reusing PA-82's
    * review-before-send affordance rather than inventing a second one.
    *
-   * Keyed on a counter rather than compared by text, so the same borderline
-   * utterance said twice is appended twice — the alternative silently
-   * swallows a repeat, which is precisely what someone does when they think
-   * they were not heard.
+   * A monotonic-`seq` list rather than one slot, and consumed as a
+   * high-water mark: the same borderline utterance said twice is appended
+   * twice (the alternative silently swallows a repeat, which is precisely
+   * what someone does when they think they were not heard), while a remount
+   * re-appends nothing and two parks arriving in one render batch both land.
    */
-  reviewText?: { text: string; seq: number } | null;
+  reviewText?: { items: { text: string; seq: number }[] } | null;
   /**
    * PA-83 #4: mirrors `TtsPlaybackQueue.isPlaying()` — true while the
    * agent's spoken reply is actually being read aloud. Swaps the
@@ -288,28 +289,44 @@ export function PromptBox({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const micButtonRef = useRef<MicButtonHandle>(null);
+  /** Highest `reviewText` seq already appended — see the effect below. */
+  const consumedReviewSeqRef = useRef(0);
 
   /**
-   * PA-85: append an utterance the harness parked for review.
+   * PA-85: append utterances the harness parked for review.
    *
-   * Keyed on `reviewText.seq` alone, so the same text arriving twice appends
-   * twice. Deliberately does *not* focus the textarea, unlike
+   * Deliberately does *not* focus the textarea, unlike
    * `handleVoiceRecorded`'s own review path: that one follows a deliberate
    * tap on the mic, whereas this one can fire at any moment in a hands-free
    * session, and popping the on-screen keyboard unasked is exactly the wrong
    * thing to do to someone who is not holding the phone.
+   *
+   * Two things this cannot do, both learned the hard way. It cannot key off
+   * `seq` alone: `AgentPage` never clears `reviewText`, so a remount — a
+   * desktop tab switch, or crossing the 900px/`pointer: fine` boundary that
+   * swaps the whole shell — would re-run the effect with the same `seq` and
+   * append the same utterance twice. And it cannot treat `seq` as a *signal*
+   * to append one item: two parks resolving in one React batch collapse into
+   * a single effect run carrying only the later `seq`, silently losing the
+   * first — the exact failure the counter was supposed to prevent.
+   *
+   * So `seq` is a **high-water mark**: the effect appends every id above the
+   * last one it consumed, and the ref survives re-render while the parked
+   * items themselves are held by `AgentPage`. Nothing is lost and nothing is
+   * duplicated, which is the whole promise of "parked, not dropped".
    */
   useEffect(() => {
     if (!reviewText) return;
-    const incoming = reviewText.text.trim();
+    const pending = reviewText.items.filter((item) => item.seq > consumedReviewSeqRef.current);
+    if (pending.length === 0) return;
+    consumedReviewSeqRef.current = pending[pending.length - 1]!.seq;
+    const incoming = pending
+      .map((item) => item.text.trim())
+      .filter(Boolean)
+      .join(' ');
     if (!incoming) return;
     setText((prev) => (prev.trim() ? `${prev.trim()} ${incoming}` : incoming));
-    // Depends on `seq` alone, deliberately: `reviewText.text` is read here
-    // but must not be a dependency, or an identical repeat that `seq` had
-    // already accounted for would append a second time. (This repo does not
-    // enable `react-hooks/exhaustive-deps`, so there is no directive to
-    // suppress — hence the note.)
-  }, [reviewText?.seq]);
+  }, [reviewText]);
 
   useEffect(() => {
     if (!isVoiceRecording) {
