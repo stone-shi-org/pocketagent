@@ -43,6 +43,43 @@ export class VoiceTtsService extends EventEmitter {
   private readonly attached = new Set<string>();
   private readonly chunkers = new Map<string, SentenceChunker>();
   private readonly pumps = new Map<string, TurnTtsPump>();
+  /**
+   * PA-83: sessions whose process has already exited — a hard, permanent
+   * stop, checked before anything else in the `'event'` listener below.
+   * Deliberately *not* the same thing as `!isVoiceModeEnabled(id)`: that
+   * flag is `SessionManager.voiceModeSessions`, which is only cleared by an
+   * explicit `forget()` or by 10-minutes-later housekeeping
+   * (`manager.ts`'s sweep) — for up to that whole window after a session
+   * merely *exits*, the flag still reads `true`. And it's not the same as
+   * `!attached.has(id)` either, since `attach()`'s listener is never
+   * unsubscribed (matching `SessionManager.wire()`'s own always-on
+   * listener). Node's child-process stdout can still flush a few final
+   * buffered bytes — and this file's stream parser can still emit the
+   * `AgentEvent`s they decode into — a tick or two *after* the process's
+   * own `'exit'` event fires; without this set, that trailing
+   * `text_delta` (or worse, a stray `user_prompt`) would lazily start a
+   * brand new, unmuted `TurnTtsPump` and keep talking to a session that no
+   * longer exists. This is the fix for "even after I terminated the
+   * session, talk-back is still going on" (PA-83 follow-up).
+   */
+  private readonly exited = new Set<string>();
+  /**
+   * PA-83 #3/#4: sessions where a human explicitly stopped the talk-back
+   * for the turn in progress (`cancel()`, called from `stop_speech` — the
+   * composer's Stop button, a "skip" voice command — and also from
+   * `interrupt`). The underlying turn is not necessarily dead the way
+   * `interrupt`'s is: `stop_speech` deliberately leaves the agent's turn
+   * running, so more `text_delta`/`turn_complete` events for it keep
+   * arriving, and none of them may resurrect audio — `onDelta`'s own
+   * "start a pump lazily if one is missing" fallback (for the unrelated
+   * "voice mode toggled on mid-reply" case) is exactly the mechanism that
+   * would otherwise do it, the moment `turn_complete` deletes the
+   * cancelled pump out from under a reply that is still continuing.
+   * Cleared the instant a genuinely *new* turn starts (`user_prompt`),
+   * matching the reporter's own words: "never tried to talk again unless
+   * NEW turn."
+   */
+  private readonly mutedUntilNextTurn = new Set<string>();
 
   constructor(
     private readonly getClient: () => LiveSttClient | null,
@@ -80,6 +117,9 @@ export class VoiceTtsService extends EventEmitter {
     this.attached.add(session.id);
 
     session.on('event', (_seq: number, event: AgentEvent) => {
+      // PA-83: checked first and unconditionally — see `exited`'s own doc
+      // comment for why `isVoiceModeEnabled` alone cannot be trusted here.
+      if (this.exited.has(session.id)) return;
       if (this.isVoiceModeEnabled(session.id)) this.handleEvent(session.id, event);
     });
 
@@ -97,11 +137,21 @@ export class VoiceTtsService extends EventEmitter {
   cancel(sessionId: string): void {
     this.pumps.get(sessionId)?.cancel();
     this.chunkers.get(sessionId)?.reset();
+    // PA-83: stays silent through the rest of *this* turn no matter how
+    // many more `text_delta`s or stray `turn_complete`s arrive for it —
+    // see `mutedUntilNextTurn`'s own doc comment. Harmless for the
+    // `interrupt` caller too: that turn is meant to be over, so muting it
+    // until the next real `user_prompt` changes nothing it didn't already
+    // want.
+    this.mutedUntilNextTurn.add(sessionId);
   }
 
   private handleEvent(sessionId: string, event: AgentEvent): void {
     switch (event.kind) {
       case 'user_prompt':
+        // PA-83: a real new turn is the one thing that un-mutes — see
+        // `mutedUntilNextTurn`'s own doc comment.
+        this.mutedUntilNextTurn.delete(sessionId);
         this.startTurn(sessionId);
         break;
       case 'text_delta':
@@ -158,6 +208,13 @@ export class VoiceTtsService extends EventEmitter {
   }
 
   private onDelta(sessionId: string, text: string): void {
+    // PA-83: a stop/skip for this turn must not be undone by the very
+    // fallback that exists for a different case (below) — without this
+    // check, `turn_complete` deleting the cancelled pump out from under a
+    // still-continuing reply would make the next `text_delta` look
+    // indistinguishable from "voice mode just got toggled on mid-reply,"
+    // and resurrect audio the user explicitly stopped.
+    if (this.mutedUntilNextTurn.has(sessionId)) return;
     // Voice mode can be toggled on mid-reply — there is no `user_prompt` to
     // have started a turn in that case, so start one lazily rather than
     // dropping the rest of an already-in-progress reply's audio entirely.
@@ -180,5 +237,12 @@ export class VoiceTtsService extends EventEmitter {
     this.chunkers.delete(sessionId);
     this.pumps.get(sessionId)?.cancel();
     this.pumps.delete(sessionId);
+    this.mutedUntilNextTurn.delete(sessionId);
+    // PA-83: permanent, unlike everything else cleaned up above — a new
+    // session gets a new id, so there is nothing to ever un-exit this one
+    // for. See `exited`'s own doc comment for why this, and not the state
+    // cleared above, is what actually closes the "talk-back keeps going
+    // after I terminated the session" gap.
+    this.exited.add(sessionId);
   }
 }

@@ -194,25 +194,109 @@ describe('VoiceTtsService', () => {
     expect(seenByOtherSession).toEqual([]);
   });
 
-  it("cleans up a session's state on exit so a later re-emit does nothing", async () => {
+  it("PA-83: marks a session exited so a later re-emit synthesizes nothing", async () => {
     const synthesize = vi.fn(async (t: string) => speech(t));
+    // `isVoiceModeEnabled` hardcoded `true` regardless of session state —
+    // deliberately, to isolate this from `SessionManager.voiceModeSessions`'s
+    // own lifecycle (only cleared by `forget()` or ten-minutes-later
+    // housekeeping, per `manager.ts`), and prove the `exited` gate holds even
+    // when that flag is stale.
     const service = new VoiceTtsService(() => fakeClient(synthesize), () => true);
     const session = fakeSession('s1');
     service.attach(session);
     (session as unknown as EventEmitter).emit('exit', 0, null);
 
+    // A real child process can still flush a few buffered stdout bytes — and
+    // this file's own listener is never unsubscribed — a tick after `exit`
+    // fires; simulating exactly that trailing event is the whole point of
+    // this test (see the "talk-back keeps going after I terminated the
+    // session" report this fixes).
     session.emitAgentEvent({ kind: 'user_prompt', id: 'u1', text: 'hi' } as AgentEvent);
-    session.emitAgentEvent({ kind: 'text_delta', id: 't1', text: 'Should still work. ' } as AgentEvent);
+    session.emitAgentEvent({ kind: 'text_delta', id: 't1', text: 'Should never be synthesized. ' } as AgentEvent);
     await flush();
 
-    // Exit only clears this service's own bookkeeping (chunker/pump); the
-    // event listener itself isn't removed (matching `SessionManager.wire()`'s
-    // own always-on listener, which also never unsubscribes) — a dead
-    // session shouldn't emit further events in practice, but if it somehow
-    // did, a *new* turn/chunker/pump would simply be created lazily rather
-    // than reusing stale state. This just proves cleanup doesn't crash or
-    // wedge later handling.
-    expect(synthesize).toHaveBeenCalledWith('Should still work.');
+    expect(synthesize).not.toHaveBeenCalled();
+  });
+
+  it('PA-83: cancel() mutes the rest of the turn even once turn_complete deletes the pump', async () => {
+    const synthesize = vi.fn(async (t: string) => speech(t));
+    const service = new VoiceTtsService(() => fakeClient(synthesize), () => true);
+    const session = fakeSession('s1');
+    const chunks: TtsAudioChunk[] = [];
+    service.on('audio:s1', (c: TtsAudioChunk) => chunks.push(c));
+    service.attach(session);
+
+    session.emitAgentEvent({ kind: 'user_prompt', id: 'u1', text: 'hi' } as AgentEvent);
+    session.emitAgentEvent({ kind: 'text_delta', id: 't1', text: 'Before stop. ' } as AgentEvent);
+    await flush();
+    // "Before stop." already made it to the browser — cancel() stopping a
+    // *future* sentence was never in question and is not what this test is
+    // about (see `chunkCountAfterStop` below).
+    const chunkCountAfterStop = chunks.length;
+    // The composer's "Stop speaking" button / a "skip" voice command — the
+    // WS `stop_speech` handler calls exactly this, deliberately without
+    // `session.interrupt()`, so the turn (and its `text_delta`s) keeps
+    // coming.
+    service.cancel('s1');
+    // A `turn_complete` for the very turn that was just muted deletes the
+    // pump out of `this.pumps` — the reproduction for the reported "stop
+    // it, but it starts talking again a moment later" bug: without the
+    // mute flag, the *next* `text_delta` would find no pump and lazily
+    // start a brand new, unmuted one via the "voice mode toggled on
+    // mid-reply" fallback.
+    session.emitAgentEvent({
+      kind: 'turn_complete',
+      stopReason: null,
+      isError: false,
+      numTurns: 1,
+      durationMs: 1,
+      costUsd: null,
+    } as AgentEvent);
+    await flush();
+    session.emitAgentEvent({ kind: 'text_delta', id: 't1', text: 'After stop, same turn somehow. ' } as AgentEvent);
+    await flush();
+
+    expect(synthesize).not.toHaveBeenCalledWith('After stop, same turn somehow.');
+    // No *new* chunk reached the browser after the stop point — the one
+    // already-in-flight sentence from before it doesn't count against this.
+    expect(chunks.length).toBe(chunkCountAfterStop);
+  });
+
+  it('PA-83: a genuinely new user_prompt un-mutes and talks again normally', async () => {
+    const synthesize = vi.fn(async (t: string) => speech(t));
+    const service = new VoiceTtsService(() => fakeClient(synthesize), () => true);
+    const session = fakeSession('s1');
+    const chunks: TtsAudioChunk[] = [];
+    service.on('audio:s1', (c: TtsAudioChunk) => chunks.push(c));
+    service.attach(session);
+
+    session.emitAgentEvent({ kind: 'user_prompt', id: 'u1', text: 'hi' } as AgentEvent);
+    session.emitAgentEvent({ kind: 'text_delta', id: 't1', text: 'Stopped mid-reply. ' } as AgentEvent);
+    service.cancel('s1');
+    session.emitAgentEvent({
+      kind: 'turn_complete',
+      stopReason: null,
+      isError: false,
+      numTurns: 1,
+      durationMs: 1,
+      costUsd: null,
+    } as AgentEvent);
+    await flush();
+
+    // A new, real turn — not another stray delta of the old one.
+    session.emitAgentEvent({ kind: 'user_prompt', id: 'u2', text: 'go on' } as AgentEvent);
+    session.emitAgentEvent({ kind: 'text_delta', id: 't2', text: 'Fresh reply.' } as AgentEvent);
+    session.emitAgentEvent({
+      kind: 'turn_complete',
+      stopReason: null,
+      isError: false,
+      numTurns: 1,
+      durationMs: 1,
+      costUsd: null,
+    } as AgentEvent);
+    await flush();
+
+    expect(synthesize).toHaveBeenCalledWith('Fresh reply.');
   });
 
   it('passes configured model from getModel getter to client.synthesize (PA-81)', async () => {
