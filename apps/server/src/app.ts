@@ -636,6 +636,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     (sessionId) => sessions.isVoiceModeEnabled(sessionId),
     app.log,
   );
+  sessions.setVoiceTts(voiceTts);
 
   // PA-11: one queue, shared. A webhook delivery, a scheduled run and a human's
   // own prompt all contend for the same working trees, so they have to be

@@ -90,6 +90,24 @@ describe('POST /api/sessions/:id/voice/transcribe', () => {
       expect(res.json()).toEqual({ text: 'turn on the lights' });
     });
 
+    it('transcribes successfully for an inactive/exited session found in DB', async () => {
+      // Terminate the session so it is no longer live in memory
+      await t.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sessionId}/terminate`,
+        headers: { cookie: t.cookie },
+      });
+
+      const res = await t.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sessionId}/voice/transcribe`,
+        headers: { cookie: t.cookie },
+        payload: { audio: { data: SOME_AUDIO_BASE64, durationMs: 500 } },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ text: 'turn on the lights' });
+    });
+
     it('404s for an unknown session id even when voice is configured', async () => {
       const res = await t.app.inject({
         method: 'POST',

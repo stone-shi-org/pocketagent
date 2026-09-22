@@ -244,7 +244,12 @@ export class SessionManager {
    * mode does — see `SessionInfo.voiceModeEnabled`'s own doc comment.
    */
   private readonly voiceModeSessions = new Set<string>();
+  private voiceTts: { attach(session: StructuredLikeSession): void } | null = null;
   private sweepTimer: NodeJS.Timeout | null = null;
+
+  setVoiceTts(voiceTts: { attach(session: StructuredLikeSession): void }): void {
+    this.voiceTts = voiceTts;
+  }
   /**
    * The operator's server-wide "skip all approvals" switch. See CLAUDE.md —
    * this is a deliberate override of the per-session, off-by-default
@@ -660,6 +665,7 @@ export class SessionManager {
     });
 
     if (session.transport === 'structured') {
+      this.voiceTts?.attach(session);
       session.on('permission', (pending) => this.onPermissionChange(session.id, pending.length));
       session.on('event', (_seq, event) => {
         if (event.kind === 'turn_complete') this.onTurnComplete(session);

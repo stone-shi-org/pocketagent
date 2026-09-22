@@ -793,4 +793,17 @@ describe('websocket terminal transport', () => {
     });
     expect(res.statusCode).toBe(200);
   });
+
+  describe('voice_mode handling', () => {
+    it('rejects voice_mode when voice is not configured', async () => {
+      const id = await newShellSession();
+      const client = await connect();
+      client.send({ type: 'attach', sessionId: id, afterSeq: 0 });
+      await client.next('attached');
+
+      client.send({ type: 'voice_mode', sessionId: id, enabled: true });
+      const error = await client.next('error');
+      expect(error.code).toBe('bad_message');
+    });
+  });
 });

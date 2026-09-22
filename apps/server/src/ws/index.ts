@@ -94,7 +94,7 @@ const MAX_MESSAGES_PER_SECOND = 300;
 const HEARTBEAT_MS = 30_000;
 
 interface Attachment {
-  session: ManagedSession;
+  session: ManagedSession | null;
   detach: () => void;
   /** See `attachTo`'s `peek` parameter. */
   peek: boolean;
@@ -287,7 +287,7 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
       attachments.delete(sessionId);
       // Peek attaches never incremented the count in the first place — see
       // `attachTo`'s `peek` parameter.
-      if (!attachment.peek) sessions.detach(sessionId);
+      if (!attachment.peek && attachment.session) sessions.detach(sessionId);
     };
 
     /**
@@ -308,12 +308,29 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
         // memory only — so there is nothing to attach to either way.
         const persisted = sessions.find(sessionId);
         if (persisted) {
+          detachFrom(sessionId);
           send({ type: 'status', sessionId, status: persisted.status, session: persisted });
           sendError(
             'session_ended',
             'This session ended when the server restarted. Its output was not kept.',
             sessionId,
           );
+          if (persisted.transport === 'structured') {
+            const unsubscribers: (() => void)[] = [];
+            const onVoiceModeChanged = (enabled: boolean): void =>
+              send({ type: 'voice_mode_changed', sessionId, enabled });
+            voiceTts.on(`mode:${sessionId}`, onVoiceModeChanged);
+            unsubscribers.push(() => voiceTts.off(`mode:${sessionId}`, onVoiceModeChanged));
+
+            attachments.set(sessionId, {
+              session: null,
+              peek,
+              detach: () => {
+                for (const off of unsubscribers) off();
+              },
+              unregisterForgotten: () => {},
+            });
+          }
           return;
         }
         sendError('not_found', 'Session is no longer available on this server.', sessionId);
@@ -466,7 +483,7 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
 
     const requireAttached = (sessionId: string): ManagedSession | null => {
       const attachment = attachments.get(sessionId);
-      if (!attachment) {
+      if (!attachment || !attachment.session) {
         sendError('not_attached', 'Attach to the session before sending to it.', sessionId);
         return null;
       }
@@ -537,7 +554,8 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
           attachTo(message.sessionId, message.afterSeq ?? 0, message.epoch, message.peek === true);
           const attached = attachments.get(message.sessionId);
           if (
-            attached?.session.transport === 'terminal' &&
+            attached?.session &&
+            attached.session.transport === 'terminal' &&
             message.cols &&
             message.rows &&
             mayResize(attached.session, message.force === true)
@@ -697,19 +715,28 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
         }
 
         case 'voice_mode': {
-          const session = requireStructured(message.sessionId);
-          if (!session) break;
+          const info = sessions.find(message.sessionId);
+          if (!info) {
+            sendError('not_found', 'Session is no longer available on this server.', message.sessionId);
+            break;
+          }
+          if (info.transport !== 'structured') {
+            sendError('bad_message', 'This session is a terminal, not a structured agent.', message.sessionId);
+            break;
+          }
           if (!voiceTts.isConfigured()) {
             sendError('bad_message', 'Voice input is not configured on this server.', message.sessionId);
             break;
           }
           sessions.setVoiceModeEnabled(message.sessionId, message.enabled);
-          // Idempotent — subscribes to this session's event stream at most
-          // once for its whole lifetime, regardless of how many times the
-          // toggle flips; turning it off needs no unsubscribe; the listener
-          // itself checks the live toggle state on every event.
-          if (message.enabled) voiceTts.attach(session);
+          const live = sessions.get(message.sessionId);
+          if (live && live.transport === 'structured' && message.enabled) {
+            voiceTts.attach(live);
+          }
           voiceTts.notifyModeChanged(message.sessionId, message.enabled);
+          if (!attachments.has(message.sessionId)) {
+            send({ type: 'voice_mode_changed', sessionId: message.sessionId, enabled: message.enabled });
+          }
           break;
         }
 

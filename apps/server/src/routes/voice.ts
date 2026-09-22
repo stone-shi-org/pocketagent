@@ -30,7 +30,7 @@ export const voiceRoutes: FastifyPluginAsync = async (app) => {
       });
     }
 
-    const session = sessions.get(request.params.id);
+    const session = sessions.find(request.params.id);
     if (!session) {
       return reply.code(404).send({ error: { code: 'not_found', message: 'No such session.' } });
     }
