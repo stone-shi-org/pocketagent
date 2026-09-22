@@ -284,4 +284,113 @@ describe('POST /api/sessions/:id/voice/transcribe', () => {
       expect(res.json().error.message).toContain('at capacity');
     });
   });
+
+  describe('STT and TTS diagnostic test routes (PA-81)', () => {
+    let t: TestApp;
+    let liveStt: { url: string; close: () => Promise<void> };
+    let lastTranscribeBody = '';
+    let lastSpeechBody: unknown = null;
+
+    beforeEach(async () => {
+      lastTranscribeBody = '';
+      lastSpeechBody = null;
+      liveStt = await startFakeLiveStt((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on('data', (c: Buffer) => chunks.push(c));
+        req.on('end', () => {
+          const bodyBuf = Buffer.concat(chunks);
+          if (req.url === '/v1/audio/transcriptions') {
+            lastTranscribeBody = bodyBuf.toString('latin1');
+            res.writeHead(200, { 'content-type': 'application/json' }).end(
+              JSON.stringify({ text: 'diagnostic transcript ok' }),
+            );
+          } else if (req.url === '/v1/audio/speech') {
+            lastSpeechBody = JSON.parse(bodyBuf.toString('utf8'));
+            res.writeHead(200, { 'content-type': 'audio/pcm' }).end(
+              Buffer.from(new Int16Array([10, 20, 30]).buffer),
+            );
+          } else if (req.url === '/v1/models') {
+            res.writeHead(200, { 'content-type': 'application/json' }).end(
+              JSON.stringify({
+                object: 'list',
+                data: [
+                  { id: 'whisper-large-v3-turbo-q8_0', type: 'asr', default: true },
+                  { id: 'kokoro-82m-v1', type: 'tts', default: true, sample_rate: 24000 },
+                ],
+              }),
+            );
+          } else {
+            res.writeHead(404).end();
+          }
+        });
+      });
+      t = await createTestApp({ POCKETAGENT_LIVE_STT_URL: liveStt.url });
+    });
+
+    afterEach(async () => {
+      await t.cleanup();
+      await liveStt.close();
+    });
+
+    it('POST /api/voice/test-stt succeeds with transcript and duration', async () => {
+      const res = await t.app.inject({
+        method: 'POST',
+        url: '/api/voice/test-stt',
+        headers: { cookie: t.cookie },
+        payload: { model: 'whisper-test-model' },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.ok).toBe(true);
+      expect(body.transcript).toBe('diagnostic transcript ok');
+      expect(body.durationMs).toBeGreaterThanOrEqual(0);
+      expect(lastTranscribeBody).toContain('name="model"');
+      expect(lastTranscribeBody).toContain('whisper-test-model');
+    });
+
+    it('POST /api/voice/test-stt returns 400 when voice service URL is not configured', async () => {
+      await t.app.inject({
+        method: 'PATCH',
+        url: '/api/settings',
+        headers: { cookie: t.cookie },
+        payload: { liveSttUrl: '' },
+      });
+      const res = await t.app.inject({
+        method: 'POST',
+        url: '/api/voice/test-stt',
+        headers: { cookie: t.cookie },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('voice_disabled');
+    });
+
+    it('POST /api/voice/test-tts succeeds with base64 audio and sample rate', async () => {
+      const res = await t.app.inject({
+        method: 'POST',
+        url: '/api/voice/test-tts',
+        headers: { cookie: t.cookie },
+        payload: { model: 'piper-en-us', text: 'Hello test' },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.ok).toBe(true);
+      expect(body.sampleRateHz).toBe(22050);
+      expect(typeof body.audio).toBe('string');
+      expect(lastSpeechBody).toEqual({ input: 'Hello test', response_format: 'pcm', model: 'piper-en-us' });
+    });
+
+    it('GET /api/voice/models returns models list', async () => {
+      const res = await t.app.inject({
+        method: 'GET',
+        url: '/api/voice/models',
+        headers: { cookie: t.cookie },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().models).toEqual([
+        { id: 'whisper-large-v3-turbo-q8_0', type: 'asr', default: true },
+        { id: 'kokoro-82m-v1', type: 'tts', default: true, sampleRate: 24000 },
+      ]);
+    });
+  });
 });

@@ -106,11 +106,20 @@ export interface SynthesizedSpeech {
   sampleRateHz: number;
 }
 
+export interface LiveSttModelEntry {
+  id: string;
+  type: string;
+  default?: boolean;
+  sampleRate?: number;
+}
+
 export interface LiveSttClient {
   /** Transcribes one buffered utterance. Throws `LiveSttError` on any failure. */
-  transcribe(pcm16: Buffer): Promise<string>;
+  transcribe(pcm16: Buffer, model?: string | null): Promise<string>;
   /** Synthesizes one already-chunked sentence. Throws `LiveSttError` on any failure. */
-  synthesize(text: string): Promise<SynthesizedSpeech>;
+  synthesize(text: string, model?: string | null): Promise<SynthesizedSpeech>;
+  /** Fetches available model list from `GET /v1/models`. */
+  listModels(): Promise<LiveSttModelEntry[]>;
 }
 
 export function createLiveSttClient(rawBaseUrl: string, fetchImpl: typeof fetch = fetch): LiveSttClient {
@@ -124,11 +133,14 @@ export function createLiveSttClient(rawBaseUrl: string, fetchImpl: typeof fetch 
   // tolerates. Doing it here covers both origins uniformly.
   const baseUrl = rawBaseUrl.replace(/\/$/, '');
   return {
-    async transcribe(pcm16: Buffer): Promise<string> {
+    async transcribe(pcm16: Buffer, model?: string | null): Promise<string> {
       const wav = pcm16ToWav(pcm16);
       const form = new FormData();
       form.append('file', new Blob([wav], { type: 'audio/wav' }), 'utterance.wav');
       form.append('response_format', 'json');
+      if (model?.trim()) {
+        form.append('model', model.trim());
+      }
 
       let response: Response;
       try {
@@ -160,13 +172,21 @@ export function createLiveSttClient(rawBaseUrl: string, fetchImpl: typeof fetch 
       return transcript;
     },
 
-    async synthesize(text: string): Promise<SynthesizedSpeech> {
+    async synthesize(text: string, model?: string | null): Promise<SynthesizedSpeech> {
       let response: Response;
+      const payload: Record<string, unknown> = {
+        input: text,
+        response_format: 'pcm',
+      };
+      if (model?.trim()) {
+        payload.model = model.trim();
+      }
+
       try {
         response = await fetchImpl(`${baseUrl}/v1/audio/speech`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ input: text, response_format: 'pcm' }),
+          body: JSON.stringify(payload),
         });
       } catch (err) {
         throw new LiveSttError(
@@ -187,7 +207,32 @@ export function createLiveSttClient(rawBaseUrl: string, fetchImpl: typeof fetch 
       }
 
       const arrayBuffer = await response.arrayBuffer();
-      return { pcm: Buffer.from(arrayBuffer), sampleRateHz: TTS_SAMPLE_RATE_HZ };
+      const sampleRateHz = model?.toLowerCase().includes('piper') ? 22050 : TTS_SAMPLE_RATE_HZ;
+      return { pcm: Buffer.from(arrayBuffer), sampleRateHz };
+    },
+
+    async listModels(): Promise<LiveSttModelEntry[]> {
+      let response: Response;
+      try {
+        response = await fetchImpl(`${baseUrl}/v1/models`);
+      } catch {
+        return [];
+      }
+      if (!response.ok) return [];
+      try {
+        const body = (await response.json()) as {
+          data?: Array<{ id: string; type: string; default?: boolean; sample_rate?: number }>;
+        };
+        if (!body || !Array.isArray(body.data)) return [];
+        return body.data.map((m) => ({
+          id: m.id,
+          type: m.type,
+          default: m.default,
+          sampleRate: m.sample_rate,
+        }));
+      } catch {
+        return [];
+      }
     },
   };
 }

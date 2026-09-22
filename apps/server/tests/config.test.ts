@@ -110,6 +110,29 @@ describe('config', () => {
     ).toThrow(/POCKETAGENT_LIVE_STT_URL is not a valid URL/);
   });
 
+  it('seeds liveSttModel and liveSttTtsModel from env when provided (PA-81)', () => {
+    const config = loadConfig(
+      env({
+        POCKETAGENT_AUTH_TOKEN: TEST_TOKEN,
+        POCKETAGENT_LIVE_STT_MODEL: 'whisper-large-v3-turbo-q8_0',
+        POCKETAGENT_LIVE_STT_TTS_MODEL: 'kokoro-82m-v1',
+      }),
+    );
+    expect(config.liveSttModel).toBe('whisper-large-v3-turbo-q8_0');
+    expect(config.liveSttTtsModel).toBe('kokoro-82m-v1');
+  });
+
+  it('leaves liveSttModel and liveSttTtsModel null when env vars are unset or blank (PA-81)', () => {
+    const config = loadConfig(
+      env({
+        POCKETAGENT_AUTH_TOKEN: TEST_TOKEN,
+        POCKETAGENT_LIVE_STT_MODEL: '   ',
+      }),
+    );
+    expect(config.liveSttModel).toBeNull();
+    expect(config.liveSttTtsModel).toBeNull();
+  });
+
   it('rejects out-of-range numeric settings', () => {
     const ws = makeWorkspace();
     try {

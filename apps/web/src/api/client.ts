@@ -106,6 +106,11 @@ import type {
   UpdateTelegramLinkRequest,
   VoiceTranscribeRequest,
   VoiceTranscribeResponse,
+  VoiceTestSttRequest,
+  VoiceTestSttResponse,
+  VoiceTestTtsRequest,
+  VoiceTestTtsResponse,
+  VoiceModelListResponse,
 } from '@pocketagent/protocol';
 import { DEFAULT_HOST, hostUrl, type HostEndpoint } from './host.js';
 
@@ -375,6 +380,24 @@ export function createApiClient(endpoint: HostEndpoint) {
       request<VoiceTranscribeResponse>(`/api/sessions/${encodeURIComponent(id)}/voice/transcribe`, {
         method: 'POST',
         body: JSON.stringify({ audio }),
+      }),
+
+    /** PA-81: lists available ASR and TTS models from the live-stt service. */
+    listVoiceModels: () =>
+      request<VoiceModelListResponse>('/api/voice/models'),
+
+    /** PA-81: tests STT using an embedded test audio sample. */
+    testVoiceStt: (payload?: VoiceTestSttRequest) =>
+      request<VoiceTestSttResponse>('/api/voice/test-stt', {
+        method: 'POST',
+        body: JSON.stringify(payload ?? {}),
+      }),
+
+    /** PA-81: tests TTS and returns synthesized speech audio. */
+    testVoiceTts: (payload?: VoiceTestTtsRequest) =>
+      request<VoiceTestTtsResponse>('/api/voice/test-tts', {
+        method: 'POST',
+        body: JSON.stringify(payload ?? {}),
       }),
 
     createSession: (input: {

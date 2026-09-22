@@ -214,4 +214,23 @@ describe('VoiceTtsService', () => {
     // wedge later handling.
     expect(synthesize).toHaveBeenCalledWith('Should still work.');
   });
+
+  it('passes configured model from getModel getter to client.synthesize (PA-81)', async () => {
+    const synthesize = vi.fn(async (t: string, _m?: string | null) => speech(t));
+    const currentModel = 'kokoro-82m-v1';
+    const service = new VoiceTtsService(
+      () => fakeClient(synthesize),
+      () => true,
+      undefined,
+      () => currentModel,
+    );
+    const session = fakeSession('s1');
+    service.attach(session);
+
+    session.emitAgentEvent({ kind: 'user_prompt', id: 'u1', text: 'hi' } as AgentEvent);
+    session.emitAgentEvent({ kind: 'text_delta', id: 't1', text: 'Testing model. ' } as AgentEvent);
+    await flush();
+
+    expect(synthesize).toHaveBeenCalledWith('Testing model.', 'kokoro-82m-v1');
+  });
 });

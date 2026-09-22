@@ -79,4 +79,25 @@ describe('generalized settings fields over HTTP', () => {
     });
     expect(res.statusCode).toBe(400);
   });
+
+  it('liveSttModel and liveSttTtsModel take effect immediately with no restart required (PA-81)', async () => {
+    t = await createTestApp();
+    const initial = await t.app.inject({ method: 'GET', url: '/api/settings', headers: headers(t) });
+    expect(initial.json().settings.liveSttModel).toBe('');
+    expect(initial.json().settings.liveSttTtsModel).toBe('');
+    expect(initial.json().restartRequiredKeys).not.toContain('liveSttModel');
+    expect(initial.json().restartRequiredKeys).not.toContain('liveSttTtsModel');
+
+    const patch = await t.app.inject({
+      method: 'PATCH',
+      url: '/api/settings',
+      headers: headers(t),
+      payload: { liveSttModel: 'whisper-large-v3-turbo-q8_0', liveSttTtsModel: 'kokoro-82m-v1' },
+    });
+    expect(patch.statusCode).toBe(200);
+    expect(patch.json().settings.liveSttModel).toBe('whisper-large-v3-turbo-q8_0');
+    expect(patch.json().settings.liveSttTtsModel).toBe('kokoro-82m-v1');
+    expect(t.context.config.liveSttModel).toBe('whisper-large-v3-turbo-q8_0');
+    expect(t.context.config.liveSttTtsModel).toBe('kokoro-82m-v1');
+  });
 });

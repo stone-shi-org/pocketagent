@@ -48,6 +48,7 @@ export class VoiceTtsService extends EventEmitter {
     private readonly getClient: () => LiveSttClient | null,
     private readonly isVoiceModeEnabled: (sessionId: string) => boolean,
     private readonly logger?: { warn: (obj: unknown, msg: string) => void },
+    private readonly getModel?: () => string | null,
   ) {
     super();
   }
@@ -143,7 +144,8 @@ export class VoiceTtsService extends EventEmitter {
         (text) => {
           const client = this.getClient();
           if (!client) throw new Error('live-stt is no longer configured');
-          return client.synthesize(text);
+          const model = this.getModel?.();
+          return model ? client.synthesize(text, model) : client.synthesize(text);
         },
         (chunk) => this.emit(`audio:${sessionId}`, chunk),
         (err) =>

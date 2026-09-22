@@ -166,3 +166,39 @@ describe('createApiClient: host base path', () => {
     expect(calls[0]).toBe('/h/h2/api/planner/chats/chat-1/messages');
   });
 });
+
+describe('api voice test methods (PA-81)', () => {
+  it('testVoiceStt posts model and liveSttUrl payload', async () => {
+    const { calls } = mockFetch(200, { ok: true, transcript: 'hello', durationMs: 120 });
+    const res = await api.testVoiceStt({ liveSttUrl: 'http://10.0.0.1:8000', model: 'whisper' });
+
+    expect(calls[0]?.url).toBe('/api/voice/test-stt');
+    expect(calls[0]?.init?.method).toBe('POST');
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      liveSttUrl: 'http://10.0.0.1:8000',
+      model: 'whisper',
+    });
+    expect(res).toEqual({ ok: true, transcript: 'hello', durationMs: 120 });
+  });
+
+  it('testVoiceTts posts model and liveSttUrl payload', async () => {
+    const { calls } = mockFetch(200, { ok: true, audio: 'abc', sampleRateHz: 24000, durationMs: 150 });
+    const res = await api.testVoiceTts({ liveSttUrl: 'http://10.0.0.1:8000', model: 'kokoro' });
+
+    expect(calls[0]?.url).toBe('/api/voice/test-tts');
+    expect(calls[0]?.init?.method).toBe('POST');
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      liveSttUrl: 'http://10.0.0.1:8000',
+      model: 'kokoro',
+    });
+    expect(res).toEqual({ ok: true, audio: 'abc', sampleRateHz: 24000, durationMs: 150 });
+  });
+
+  it('listVoiceModels fetches /api/voice/models', async () => {
+    const { calls } = mockFetch(200, { models: [{ id: 'm1', type: 'asr' }] });
+    const res = await api.listVoiceModels();
+
+    expect(calls[0]?.url).toBe('/api/voice/models');
+    expect(res.models).toHaveLength(1);
+  });
+});

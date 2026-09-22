@@ -85,6 +85,8 @@ const RawEnv = z.object({
    * restart needed, and the database wins over this var forever after.
    */
   POCKETAGENT_LIVE_STT_URL: z.string().optional(),
+  POCKETAGENT_LIVE_STT_MODEL: z.string().optional(),
+  POCKETAGENT_LIVE_STT_TTS_MODEL: z.string().optional(),
 
   POCKETAGENT_SHELL: z.string().optional(),
   POCKETAGENT_CLAUDE_BIN: z.string().default('claude'),
@@ -263,6 +265,16 @@ export interface Config {
    * than in `.env`.
    */
   liveSttUrl: string | null;
+  /**
+   * Model name for Speech-to-Text (e.g. `whisper-large-v3-turbo-q8_0`),
+   * or null to use live-stt's configured default model (PA-81).
+   */
+  liveSttModel: string | null;
+  /**
+   * Model name for Text-to-Speech (e.g. `kokoro-82m-v1`, `piper-en-us`),
+   * or null to use live-stt's configured default model (PA-81).
+   */
+  liveSttTtsModel: string | null;
 }
 
 const MIN_TOKEN_LENGTH = 24;
@@ -539,5 +551,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     isNetworkExposed,
     codeServerBaseUrl: e.POCKETAGENT_CODE_SERVER_URL?.trim() || null,
     liveSttUrl,
+    liveSttModel: e.POCKETAGENT_LIVE_STT_MODEL?.trim() || null,
+    liveSttTtsModel: e.POCKETAGENT_LIVE_STT_TTS_MODEL?.trim() || null,
   };
 }

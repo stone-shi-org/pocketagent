@@ -11,6 +11,7 @@ import { HubTemplatesSection } from '../components/HubTemplatesSection.js';
 import { getTerminalFontOverride, setTerminalFontOverride } from '../agent/terminal-font-pref.js';
 import { formatBuildInfo } from '../version.js';
 import { useHostApi } from '../hosts/HostContext.js';
+import { TtsPlaybackQueue } from '../audio/playback.js';
 
 type Settings = SettingsResponse['settings'];
 
@@ -48,6 +49,89 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
   const [confirmingSkip, setConfirmingSkip] = useState(false);
   const [fontOverride, setFontOverride] = useState(() => getTerminalFontOverride() ?? '');
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  const [voiceModels, setVoiceModels] = useState<{ asr: string[]; tts: string[] }>({ asr: [], tts: [] });
+  const [testingStt, setTestingStt] = useState(false);
+  const [sttResult, setSttResult] = useState<{ ok: boolean; message: string; durationMs?: number } | null>(null);
+  const [testingTts, setTestingTts] = useState(false);
+  const [playingTts, setPlayingTts] = useState(false);
+  const [ttsResult, setTtsResult] = useState<{ ok: boolean; message: string; durationMs?: number } | null>(null);
+  const ttsPlaybackRef = useRef<TtsPlaybackQueue | null>(null);
+
+  useEffect(() => {
+    if (!data?.settings.liveSttUrl) {
+      setVoiceModels({ asr: [], tts: [] });
+      return;
+    }
+    let cancelled = false;
+    api.listVoiceModels()
+      .then((res) => {
+        if (cancelled) return;
+        const asr = res.models.filter((m) => m.type === 'asr').map((m) => m.id);
+        const tts = res.models.filter((m) => m.type === 'tts').map((m) => m.id);
+        setVoiceModels({ asr, tts });
+      })
+      .catch(() => {
+        // Fallback gracefully if live-stt is unreachable
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, data?.settings.liveSttUrl]);
+
+  useEffect(() => {
+    return () => {
+      ttsPlaybackRef.current?.stop();
+    };
+  }, []);
+
+  const runTestStt = async (): Promise<void> => {
+    if (!data?.settings.liveSttUrl) return;
+    setTestingStt(true);
+    setSttResult(null);
+    try {
+      const res = await api.testVoiceStt({
+        liveSttUrl: data.settings.liveSttUrl,
+        model: data.settings.liveSttModel || undefined,
+      });
+      setSttResult({ ok: true, message: res.transcript, durationMs: res.durationMs });
+    } catch (err) {
+      setSttResult({
+        ok: false,
+        message: err instanceof ApiError ? err.message : (err instanceof Error ? err.message : 'STT test failed'),
+      });
+    } finally {
+      setTestingStt(false);
+    }
+  };
+
+  const runTestTts = async (): Promise<void> => {
+    if (!data?.settings.liveSttUrl) return;
+    setTestingTts(true);
+    setTtsResult(null);
+    try {
+      const res = await api.testVoiceTts({
+        liveSttUrl: data.settings.liveSttUrl,
+        model: data.settings.liveSttTtsModel || undefined,
+      });
+      setTtsResult({
+        ok: true,
+        message: `Playing audio (${res.sampleRateHz}Hz)`,
+        durationMs: res.durationMs,
+      });
+      ttsPlaybackRef.current?.stop();
+      const queue = new TtsPlaybackQueue((playing) => setPlayingTts(playing));
+      ttsPlaybackRef.current = queue;
+      queue.enqueue(res.audio, res.sampleRateHz);
+    } catch (err) {
+      setTtsResult({
+        ok: false,
+        message: err instanceof ApiError ? err.message : (err instanceof Error ? err.message : 'TTS test failed'),
+      });
+    } finally {
+      setTestingTts(false);
+    }
+  };
 
   const load = useCallback(async () => {
     try {
@@ -466,6 +550,74 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
           busy={busy('liveSttUrl')}
           onChange={(v) => saveDebounced('liveSttUrl', v)}
         />
+        <TextRow
+          label="STT Model"
+          help="Model name for Speech-to-Text (e.g. whisper-large-v3-turbo-q8_0, realtime_eou_120m-v1). Blank uses live-stt's configured default model."
+          placeholder="realtime_eou_120m-v1 (default)"
+          value={settings.liveSttModel}
+          busy={busy('liveSttModel')}
+          listId="stt-models-list"
+          onChange={(v) => saveDebounced('liveSttModel', v)}
+        >
+          <datalist id="stt-models-list">
+            {voiceModels.asr.map((id) => (
+              <option key={id} value={id} />
+            ))}
+          </datalist>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
+            <button
+              type="button"
+              disabled={testingStt || !settings.liveSttUrl}
+              onClick={() => void runTestStt()}
+            >
+              {testingStt ? 'Testing STT…' : 'Test STT'}
+            </button>
+            {sttResult && (
+              <span
+                className={sttResult.ok ? 'planner-test-ok' : 'planner-test-fail'}
+                style={{ fontSize: '13px' }}
+              >
+                {sttResult.ok
+                  ? `✓ (${sttResult.durationMs}ms): "${sttResult.message}"`
+                  : `✗ ${sttResult.message}`}
+              </span>
+            )}
+          </div>
+        </TextRow>
+        <TextRow
+          label="TTS Model"
+          help="Model name for Text-to-Speech (e.g. kokoro-82m-v1, piper-en-us). Blank uses live-stt's configured default model."
+          placeholder="kokoro-82m-v1 (default)"
+          value={settings.liveSttTtsModel}
+          busy={busy('liveSttTtsModel')}
+          listId="tts-models-list"
+          onChange={(v) => saveDebounced('liveSttTtsModel', v)}
+        >
+          <datalist id="tts-models-list">
+            {voiceModels.tts.map((id) => (
+              <option key={id} value={id} />
+            ))}
+          </datalist>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
+            <button
+              type="button"
+              disabled={testingTts || playingTts || !settings.liveSttUrl}
+              onClick={() => void runTestTts()}
+            >
+              {testingTts ? 'Testing TTS…' : playingTts ? 'Playing…' : 'Test TTS'}
+            </button>
+            {ttsResult && (
+              <span
+                className={ttsResult.ok ? 'planner-test-ok' : 'planner-test-fail'}
+                style={{ fontSize: '13px' }}
+              >
+                {ttsResult.ok
+                  ? `✓ (${ttsResult.durationMs}ms): ${ttsResult.message}`
+                  : `✗ ${ttsResult.message}`}
+              </span>
+            )}
+          </div>
+        </TextRow>
         <TextRow
           label="Push contact"
           help="VAPID sub claim: a mailto: or https: URL identifying this deployment."

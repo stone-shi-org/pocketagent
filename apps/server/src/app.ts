@@ -635,6 +635,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     () => (config.liveSttUrl ? createLiveSttClient(config.liveSttUrl) : null),
     (sessionId) => sessions.isVoiceModeEnabled(sessionId),
     app.log,
+    () => config.liveSttTtsModel,
   );
   sessions.setVoiceTts(voiceTts);
 

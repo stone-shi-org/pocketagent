@@ -147,6 +147,58 @@ export const VoiceTranscribeResponse = z.object({
 export type VoiceTranscribeResponse = z.infer<typeof VoiceTranscribeResponse>;
 
 /**
+ * PA-81: Diagnostic STT test.
+ * Transcribes an embedded sample audio to verify connectivity and model functionality.
+ */
+export const VoiceTestSttRequest = z.object({
+  liveSttUrl: z.string().optional(),
+  model: z.string().optional(),
+});
+export type VoiceTestSttRequest = z.infer<typeof VoiceTestSttRequest>;
+
+export const VoiceTestSttResponse = z.object({
+  ok: z.literal(true),
+  transcript: z.string(),
+  durationMs: z.number(),
+});
+export type VoiceTestSttResponse = z.infer<typeof VoiceTestSttResponse>;
+
+/**
+ * PA-81: Diagnostic TTS test.
+ * Synthesizes test text to verify connectivity and model functionality.
+ */
+export const VoiceTestTtsRequest = z.object({
+  liveSttUrl: z.string().optional(),
+  model: z.string().optional(),
+  text: z.string().max(1000).optional(),
+});
+export type VoiceTestTtsRequest = z.infer<typeof VoiceTestTtsRequest>;
+
+export const VoiceTestTtsResponse = z.object({
+  ok: z.literal(true),
+  audio: z.string(),
+  sampleRateHz: z.number().int().positive(),
+  durationMs: z.number(),
+});
+export type VoiceTestTtsResponse = z.infer<typeof VoiceTestTtsResponse>;
+
+/**
+ * PA-81: Model catalog returned by `GET /api/voice/models` (mirrors `GET /v1/models`).
+ */
+export const VoiceModelInfo = z.object({
+  id: z.string(),
+  type: z.string(),
+  default: z.boolean().optional(),
+  sampleRate: z.number().optional(),
+});
+export type VoiceModelInfo = z.infer<typeof VoiceModelInfo>;
+
+export const VoiceModelListResponse = z.object({
+  models: z.array(VoiceModelInfo),
+});
+export type VoiceModelListResponse = z.infer<typeof VoiceModelListResponse>;
+
+/**
  * Removes a linked git worktree and its local branch (three-dot menu, worktree
  * rows only). The server derives the branch name from the worktree's own
  * `HEAD` rather than trusting one from the client — see `WorktreeService.remove`.
@@ -396,6 +448,10 @@ export const RuntimeSettings = z.object({
    *  restart — see `VoiceTtsService`'s own doc comment for why it's shaped
    *  as a getter rather than a boot-time value. */
   liveSttUrl: z.string(),
+  /** Model name for STT (PA-81). Blank uses live-stt's configured default model. */
+  liveSttModel: z.string(),
+  /** Model name for TTS (PA-81). Blank uses live-stt's configured default model. */
+  liveSttTtsModel: z.string(),
   shell: z.string().min(1),
   claudeBin: z.string().min(1),
   agyBin: z.string().min(1),

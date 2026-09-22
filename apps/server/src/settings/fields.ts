@@ -103,6 +103,9 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   // this flag wrong the other way (marking it live without that refactor)
   // is exactly the bug this field's own doc comment above warns about.
   nullableStr('liveSttUrl', 'live_stt_url', true),
+  // PA-81: live STT and TTS model overrides, take effect immediately
+  nullableStr('liveSttModel', 'live_stt_model', true),
+  nullableStr('liveSttTtsModel', 'live_stt_tts_model', true),
   str('shell', 'shell', false),
   str('claudeBin', 'claude_bin', false),
   str('agyBin', 'agy_bin', false),

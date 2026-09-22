@@ -99,6 +99,22 @@ describe('createLiveSttClient.transcribe', () => {
     expect(receivedBody).toContain('name="response_format"');
   });
 
+  it('forwards model parameter in multipart/form-data when provided (PA-81)', async () => {
+    let receivedBody = '';
+    const server = await startFakeLiveStt((_req, res, body) => {
+      receivedBody = body.toString('latin1');
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ text: 'model test' }));
+    });
+    close = server.close;
+
+    const client = createLiveSttClient(server.url);
+    const text = await client.transcribe(Buffer.from(new Int16Array([1, 2]).buffer), 'whisper-large-v3-turbo-q8_0');
+
+    expect(text).toBe('model test');
+    expect(receivedBody).toContain('name="model"');
+    expect(receivedBody).toContain('whisper-large-v3-turbo-q8_0');
+  });
+
   it('surfaces a 503 (VRAM/capacity) as a retryable LiveSttError with the nested error message', async () => {
     const server = await startFakeLiveStt((_req, res) => {
       res
@@ -195,6 +211,22 @@ describe('createLiveSttClient.synthesize', () => {
     });
   });
 
+  it('forwards model parameter in JSON and adjusts sample rate for piper (PA-81)', async () => {
+    let receivedBody: unknown;
+    const fakePcm = Buffer.from(new Int16Array([10, 20]).buffer);
+    const server = await startFakeLiveStt((req, res, body) => {
+      receivedBody = JSON.parse(body.toString('utf8'));
+      res.writeHead(200, { 'content-type': 'audio/pcm' }).end(fakePcm);
+    });
+    close = server.close;
+
+    const client = createLiveSttClient(server.url);
+    const result = await client.synthesize('Piper speaking.', 'piper-en-us');
+
+    expect(receivedBody).toEqual({ input: 'Piper speaking.', response_format: 'pcm', model: 'piper-en-us' });
+    expect(result.sampleRateHz).toBe(22050);
+  });
+
   it('surfaces a non-503 error as non-retryable', async () => {
     const server = await startFakeLiveStt((_req, res) => {
       res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'text is required' }));
@@ -211,5 +243,42 @@ describe('createLiveSttClient.synthesize', () => {
       name: 'LiveSttError',
       retryable: true,
     });
+  });
+});
+
+describe('createLiveSttClient.listModels', () => {
+  let close: (() => Promise<void>) | undefined;
+  afterEach(async () => {
+    await close?.();
+    close = undefined;
+  });
+
+  it('fetches and maps models from /v1/models (PA-81)', async () => {
+    const server = await startFakeLiveStt((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' }).end(
+        JSON.stringify({
+          object: 'list',
+          data: [
+            { id: 'realtime_eou_120m-v1', type: 'asr', default: true },
+            { id: 'kokoro-82m-v1', type: 'tts', default: true, sample_rate: 24000 },
+          ],
+        }),
+      );
+    });
+    close = server.close;
+
+    const client = createLiveSttClient(server.url);
+    const models = await client.listModels();
+
+    expect(models).toEqual([
+      { id: 'realtime_eou_120m-v1', type: 'asr', default: true, sampleRate: undefined },
+      { id: 'kokoro-82m-v1', type: 'tts', default: true, sampleRate: 24000 },
+    ]);
+  });
+
+  it('returns empty array when /v1/models is unreachable or non-200 (PA-81)', async () => {
+    const client = createLiveSttClient('http://127.0.0.1:1');
+    const models = await client.listModels();
+    expect(models).toEqual([]);
   });
 });
