@@ -26,6 +26,8 @@ export type IconName =
   | 'arrow-up'
   | 'stop'
   | 'laptop'
+  | 'host'
+  | 'server'
   | 'branch'
   | 'copy'
   | 'check'
@@ -185,6 +187,23 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <rect x="4" y="5" width="16" height="11" rx="1.8" />
       <path d="M2.5 19.5h19" />
+    </>
+  ),
+
+  // A server chassis with status LEDs and drive slots: "a remote host/backend".
+  host: (
+    <>
+      <rect x="3" y="4.5" width="18" height="6.5" rx="1.5" />
+      <rect x="3" y="13" width="18" height="6.5" rx="1.5" />
+      <path d="M7 7.75h.01M14 7.75h3M7 16.25h.01M14 16.25h3" />
+    </>
+  ),
+
+  server: (
+    <>
+      <rect x="3" y="4.5" width="18" height="6.5" rx="1.5" />
+      <rect x="3" y="13" width="18" height="6.5" rx="1.5" />
+      <path d="M7 7.75h.01M14 7.75h3M7 16.25h.01M14 16.25h3" />
     </>
   ),
 

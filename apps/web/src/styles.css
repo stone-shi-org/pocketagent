@@ -6452,6 +6452,29 @@ button.chat-rate-limit-badge {
   box-shadow: var(--shadow-sm);
 }
 
+.host-tile-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.host-tile-icon .host-dot {
+  position: absolute;
+  bottom: -1px;
+  right: -2px;
+  box-shadow: 0 0 0 1.5px var(--bg-elev-2);
+}
+
+.host-tile:hover .host-tile-icon .host-dot {
+  box-shadow: 0 0 0 1.5px var(--bg-elev);
+}
+
+.host-tile.active .host-tile-icon .host-dot,
+.host-tile.active:hover .host-tile-icon .host-dot {
+  box-shadow: 0 0 0 1.5px var(--bg);
+}
+
 .host-tile-label {
   max-width: 100%;
   overflow: hidden;

@@ -71,7 +71,10 @@ export function HostRail({
           // incompatible, and `hostDriftMessage` is null for both.
           title={host.message ?? drift ?? `${host.label} — ${hostStatusSummary(host)}`}
         >
-          <span className={hostDotClass(host.status)} aria-hidden="true" />
+          <div className="host-tile-icon">
+            <Icon name="host" size={18} />
+            <span className={hostDotClass(host.status)} aria-hidden="true" />
+          </div>
           <span className="host-tile-label">{host.label}</span>
           {host.runningSessions !== null && host.runningSessions > 0 && (
             <span className="host-tile-count">{host.runningSessions}</span>
