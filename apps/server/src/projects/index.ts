@@ -31,6 +31,7 @@ import {
   readWebhookDeliveryConversationIds,
   readWebhooks,
   readHiddenChats,
+  unhideChat,
   readProjectVisibility,
   setProjectVisibility,
   readPlannerChatConversationIds,
@@ -317,7 +318,20 @@ export class ProjectService {
       // what stops it appearing twice, and is why a directory whose only
       // activity was a shell no longer gets a project card of its own.
       if (isShellSession(session)) continue;
-      if (
+      const isAlive = !TERMINAL.has(session.status);
+      if (isAlive) {
+        // A live session must never be hidden. Furthermore, if this conversation
+        // was previously hidden while finished, resuming it or starting a new run
+        // revives it — so unhide it permanently.
+        if (session.agentSessionId && removedChats.has(session.agentSessionId)) {
+          unhideChat(this.db, session.agentSessionId);
+          removedChats.delete(session.agentSessionId);
+        }
+        if (removedChats.has(session.id)) {
+          unhideChat(this.db, session.id);
+          removedChats.delete(session.id);
+        }
+      } else if (
         (session.agentSessionId && removedChats.has(session.agentSessionId)) ||
         removedChats.has(session.id)
       ) {

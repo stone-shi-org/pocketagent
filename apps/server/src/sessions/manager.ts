@@ -14,6 +14,7 @@ import type { Db, SessionRow } from '../db/index.js';
 import {
   GLOBAL_SKIP_PERMISSIONS_KEY,
   hideChat,
+  unhideChat,
   markStaleSessionsInterrupted,
   pruneOldSessions,
   readAgentDefaults,
@@ -657,22 +658,27 @@ export class SessionManager {
         // wiring needed. Only the SDK-backed `claude` sessions currently read
         // this cache back at spawn time (see `create()`), but caching it here
         // for every backend costs nothing and is ready for that to extend.
-        if (event.kind === 'session_started' && event.model) {
-          // If the model is a wire id (e.g. 'claude-opus-5[1m]'), map it back to
-          // the concrete alias in this agent's cached catalog (e.g. 'opus[1m]')
-          // so `agent_defaults` stores the picker alias rather than the raw wire id.
-          const cached = readAgentDefaults(this.opts.db, session.spec.agent);
-          let modelToWrite = event.model;
-          if (cached?.models_json) {
-            try {
-              const catalog = JSON.parse(cached.models_json) as ModelInfo[];
-              const concrete = catalog.find((m) => m.value !== 'default' && m.resolvedModel === event.model);
-              if (concrete) modelToWrite = concrete.value;
-            } catch {
-              // Ignore malformed cache row
-            }
+        if (event.kind === 'session_started') {
+          if (event.agentSessionId) {
+            this.unhideChat(event.agentSessionId);
           }
-          writeAgentDefaults(this.opts.db, session.spec.agent, { model: modelToWrite });
+          if (event.model) {
+            // If the model is a wire id (e.g. 'claude-opus-5[1m]'), map it back to
+            // the concrete alias in this agent's cached catalog (e.g. 'opus[1m]')
+            // so `agent_defaults` stores the picker alias rather than the raw wire id.
+            const cached = readAgentDefaults(this.opts.db, session.spec.agent);
+            let modelToWrite = event.model;
+            if (cached?.models_json) {
+              try {
+                const catalog = JSON.parse(cached.models_json) as ModelInfo[];
+                const concrete = catalog.find((m) => m.value !== 'default' && m.resolvedModel === event.model);
+                if (concrete) modelToWrite = concrete.value;
+              } catch {
+                // Ignore malformed cache row
+              }
+            }
+            writeAgentDefaults(this.opts.db, session.spec.agent, { model: modelToWrite });
+          }
         }
         if (event.kind === 'model_changed') {
           writeAgentDefaults(this.opts.db, session.spec.agent, { model: event.model });
@@ -882,6 +888,9 @@ export class SessionManager {
 
     const id = crypto.randomBytes(9).toString('base64url');
     const workspaceLabel = this.opts.workspaces.labelFor(input.cwd);
+    if (input.resumeAgentSessionId) {
+      this.unhideChat(input.resumeAgentSessionId);
+    }
     const title =
       input.title?.trim() ||
       input.adopt?.label ||
@@ -1646,6 +1655,11 @@ export class SessionManager {
     this.notifyChatHidden(conversationId);
   }
 
+  /** Unhide a conversation, e.g. when resuming or running a new turn in it. */
+  unhideChat(conversationId: string): void {
+    unhideChat(this.opts.db, conversationId);
+  }
+
   /**
    * Forget every finished session that belongs to a specific conversation id
    * (e.g. after hiding or deleting the conversation).
@@ -1843,7 +1857,7 @@ export class SessionManager {
 
     for (const session of this.live.values()) {
       if (session.plannerChatId === plannerChatId) {
-        if (removedChats.has(session.id) || (session.agentSessionId && removedChats.has(session.agentSessionId))) {
+        if (!session.isAlive() && (removedChats.has(session.id) || (session.agentSessionId && removedChats.has(session.agentSessionId)))) {
           continue;
         }
         infos.push(this.toInfo(session));
@@ -2047,6 +2061,9 @@ export class SessionManager {
   }
 
   persist(session: ManagedSession): void {
+    if (session.agentSessionId && session.isAlive()) {
+      this.unhideChat(session.agentSessionId);
+    }
     this.opts.db
       .prepare(
         `UPDATE sessions

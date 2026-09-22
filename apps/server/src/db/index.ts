@@ -1653,6 +1653,10 @@ export function hideChat(db: Db, conversationId: string): void {
   ).run(conversationId, Date.now());
 }
 
+export function unhideChat(db: Db, conversationId: string): void {
+  db.prepare('DELETE FROM hidden_chats WHERE conversation_id = ?').run(conversationId);
+}
+
 export interface AgentDefaultsRow {
   agent_id: string;
   model: string | null;

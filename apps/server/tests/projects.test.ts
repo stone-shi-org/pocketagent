@@ -8,7 +8,7 @@ import { ProjectService, findMainRepoCwd, readGitBranch } from '../src/projects/
 import { ConversationStore, encodeProjectDir } from '../src/conversations/index.js';
 import { AgyTranscriptStore } from '../src/conversations/agy.js';
 import { PiTranscriptStore } from '../src/conversations/pi.js';
-import { hideChat, openDatabase } from '../src/db/index.js';
+import { hideChat, openDatabase, readHiddenChats } from '../src/db/index.js';
 import { WorkspaceRegistry } from '../src/workspaces/index.js';
 import { createTestApp, makeWorkspace, waitFor, TEST_AGENT_ID, type TestApp } from './helpers.js';
 
@@ -1009,7 +1009,7 @@ describe('ProjectService', () => {
       expect(main?.worktrees[1]?.isDeleted).toBe(true);
     });
 
-    it('excludes sessions whose agentSessionId or sessionId was hidden', async () => {
+    it('excludes finished sessions whose agentSessionId or sessionId was hidden', async () => {
       const deletedWorktreePath = path.join(ws.project, '.worktrees', 'deleted-hidden');
       hideChat(db, 'hidden-conv-id');
       hideChat(db, 'hidden-sess-id');
@@ -1021,22 +1021,49 @@ describe('ProjectService', () => {
           cwd: deletedWorktreePath,
           agentSessionId: 'hidden-conv-id',
           title: 'Hidden conversation',
+          status: 'exited',
         }),
         makeSession({
           id: 'hidden-sess-id',
           cwd: deletedWorktreePath,
           title: 'Hidden session id',
+          status: 'exited',
         }),
         makeSession({
           id: 'visible-sess',
           cwd: deletedWorktreePath,
           title: 'Visible chat',
+          status: 'exited',
         }),
       ]);
 
       const main = projects.find((p) => p.cwd === ws.project);
       expect(main?.worktrees).toHaveLength(1);
       expect(main?.worktrees[0]?.chats.map((c) => c.title)).toEqual(['Visible chat']);
+    });
+
+    it('does not exclude a live session even if its agentSessionId or sessionId was previously hidden, and unhides it', async () => {
+      const deletedWorktreePath = path.join(ws.project, '.worktrees', 'deleted-hidden');
+      hideChat(db, 'hidden-conv-id');
+      hideChat(db, 'hidden-sess-id');
+
+      const projects = await service.list([
+        makeSession({ id: 'main-sess', cwd: ws.project }),
+        makeSession({
+          id: 'live-resumed',
+          cwd: deletedWorktreePath,
+          agentSessionId: 'hidden-conv-id',
+          title: 'Resumed conversation',
+          status: 'running',
+        }),
+      ]);
+
+      const main = projects.find((p) => p.cwd === ws.project);
+      expect(main?.worktrees).toHaveLength(1);
+      expect(main?.worktrees[0]?.chats.map((c) => c.title)).toEqual(['Resumed conversation']);
+      // Should have been unhidden in the database as well
+      const hidden = readHiddenChats(db);
+      expect(hidden.has('hidden-conv-id')).toBe(false);
     });
   });
 
