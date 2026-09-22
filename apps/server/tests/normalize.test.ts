@@ -1272,6 +1272,167 @@ describe('normalizeOpencodeEvent: robustness', () => {
   });
 });
 
+describe('normalizeOpencodeEvent: v2 events', () => {
+  it('normalizes session.text.delta and session.text.ended', () => {
+    expect(
+      normalizeOpencodeEvent({
+        type: 'session.text.delta',
+        data: { assistantMessageID: 'msg_1', delta: 'hello ' },
+      }),
+    ).toEqual([{ kind: 'text_delta', id: 'msg_1', text: 'hello ' }]);
+
+    expect(
+      normalizeOpencodeEvent({
+        type: 'session.text.ended',
+        data: { assistantMessageID: 'msg_1', text: 'hello world' },
+      }),
+    ).toEqual([{ kind: 'text', id: 'msg_1', text: 'hello world' }]);
+  });
+
+  it('normalizes session.reasoning.ended to thinking event', () => {
+    expect(
+      normalizeOpencodeEvent({
+        type: 'session.reasoning.ended',
+        data: { assistantMessageID: 'msg_1', text: 'Let me think about this.' },
+      }),
+    ).toEqual([{ kind: 'thinking', id: 'msg_1_reasoning', text: 'Let me think about this.' }]);
+  });
+
+  it('normalizes session.tool.called and session.tool.success / failed', () => {
+    expect(
+      normalizeOpencodeEvent({
+        type: 'session.tool.called',
+        data: { id: 'call_1', name: 'bash', input: { command: 'ls -la' } },
+      }),
+    ).toEqual([
+      {
+        kind: 'tool_use',
+        id: 'call_1',
+        name: 'bash',
+        input: { command: 'ls -la' },
+        summary: 'Run ls -la',
+        filePath: null,
+      },
+    ]);
+
+    expect(
+      normalizeOpencodeEvent({
+        type: 'session.tool.success',
+        data: { id: 'call_1', content: 'total 0\n' },
+      }),
+    ).toEqual([
+      {
+        kind: 'tool_result',
+        id: 'oc_tr_call_1',
+        toolUseId: 'call_1',
+        content: 'total 0\n',
+        truncated: false,
+        isError: false,
+      },
+    ]);
+
+    expect(
+      normalizeOpencodeEvent({
+        type: 'session.tool.failed',
+        data: { id: 'call_2', error: { message: 'command failed' } },
+      }),
+    ).toEqual([
+      {
+        kind: 'tool_result',
+        id: 'oc_tr_call_2',
+        toolUseId: 'call_2',
+        content: 'command failed',
+        truncated: false,
+        isError: true,
+      },
+    ]);
+  });
+
+  it('normalizes permission.asked to permission_request', () => {
+    expect(
+      normalizeOpencodeEvent({
+        type: 'permission.asked',
+        data: {
+          id: 'perm_1',
+          action: 'bash',
+          message: 'Allow running rm -rf?',
+          metadata: { command: 'rm -rf /tmp/x' },
+        },
+      }),
+    ).toEqual([
+      {
+        kind: 'permission_request',
+        id: 'perm_1',
+        toolName: 'bash',
+        input: { command: 'rm -rf /tmp/x' },
+        title: 'Allow running rm -rf?',
+        displayName: null,
+        filePath: null,
+        reason: null,
+        canAllowForSession: true,
+        questions: null,
+      },
+    ]);
+  });
+
+  it('normalizes session.execution lifecycle events', () => {
+    expect(
+      normalizeOpencodeEvent({
+        type: 'session.execution.succeeded',
+        data: { sessionID: 'ses_1' },
+      }),
+    ).toEqual([
+      {
+        kind: 'turn_complete',
+        stopReason: null,
+        isError: false,
+        numTurns: null,
+        durationMs: null,
+        costUsd: null,
+        inputTokens: null,
+        outputTokens: null,
+      },
+    ]);
+
+    expect(
+      normalizeOpencodeEvent({
+        type: 'session.execution.interrupted',
+        data: { sessionID: 'ses_1' },
+      }),
+    ).toEqual([
+      {
+        kind: 'turn_complete',
+        stopReason: 'interrupted',
+        isError: false,
+        numTurns: null,
+        durationMs: null,
+        costUsd: null,
+        inputTokens: null,
+        outputTokens: null,
+      },
+    ]);
+
+    expect(
+      normalizeOpencodeEvent({
+        type: 'session.execution.failed',
+        data: { sessionID: 'ses_1', error: { message: 'boom' } },
+      }),
+    ).toEqual([
+      { kind: 'notice', level: 'error', text: 'boom' },
+      {
+        kind: 'turn_complete',
+        stopReason: 'error',
+        isError: true,
+        numTurns: null,
+        durationMs: null,
+        costUsd: null,
+        inputTokens: null,
+        outputTokens: null,
+      },
+    ]);
+  });
+});
+
 describe('normalizeOpencodeCommands', () => {
   it('maps the real GET /command shape, dropping template and hints', () => {
     const commands = normalizeOpencodeCommands([
@@ -1281,6 +1442,17 @@ describe('normalizeOpencodeCommands', () => {
     expect(commands).toEqual([
       { name: 'init', description: 'guided AGENTS.md setup', argumentHint: '', aliases: [] },
       { name: 'review', description: 'review changes', argumentHint: '', aliases: [] },
+    ]);
+  });
+
+  it('unwraps v2 { data: [...] } envelope', () => {
+    const commands = normalizeOpencodeCommands({
+      data: [
+        { name: 'init', description: 'guided AGENTS.md setup' },
+      ],
+    });
+    expect(commands).toEqual([
+      { name: 'init', description: 'guided AGENTS.md setup', argumentHint: '', aliases: [] },
     ]);
   });
 
@@ -1846,6 +2018,42 @@ describe('opencodeHistoryEvents', () => {
       'user_prompt',
       'text',
       'turn_complete',
+    ]);
+  });
+
+  it('reconstructs v2 history with user, assistant (text + tool + reasoning), and idle', () => {
+    const events = opencodeHistoryEvents({
+      data: [
+        { id: 'u1', type: 'user', text: 'show me files' },
+        {
+          id: 'a1',
+          type: 'assistant',
+          content: [
+            { id: 'r1', type: 'reasoning', text: 'checking directory' },
+            { id: 't1', type: 'tool', name: 'bash', state: { status: 'completed', input: { command: 'ls' }, content: 'a.txt\n' } },
+            { id: 'p1', type: 'text', text: 'Here are the files: a.txt' },
+          ],
+        },
+        { id: 'i1', type: 'idle' },
+      ],
+    });
+
+    expect(events).toEqual([
+      { kind: 'user_prompt', id: 'u1', text: 'show me files' },
+      { kind: 'thinking', id: 'r1', text: 'checking directory' },
+      { kind: 'tool_use', id: 't1', name: 'bash', input: { command: 'ls' }, summary: 'Run ls', filePath: null },
+      { kind: 'tool_result', id: 'oc_hist_tr_t1', toolUseId: 't1', content: 'a.txt\n', truncated: false, isError: false },
+      { kind: 'text', id: 'p1', text: 'Here are the files: a.txt' },
+      {
+        kind: 'turn_complete',
+        stopReason: null,
+        isError: false,
+        numTurns: null,
+        durationMs: null,
+        costUsd: null,
+        inputTokens: null,
+        outputTokens: null,
+      },
     ]);
   });
 

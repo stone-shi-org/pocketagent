@@ -177,12 +177,35 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
   async start(): Promise<void> {
     try {
       if (!this._opencodeSessionId) {
-        const created = await this.server.request<CreatedSession>('/session', {
-          method: 'POST',
-          query: { directory: this.spec.cwd },
-          body: { title: this.spec.title },
-        });
-        this._opencodeSessionId = created.id;
+        if (this.server.isV2) {
+          let modelRef: { providerID: string; id: string } | undefined;
+          if (this.spec.model) {
+            const slash = this.spec.model.indexOf('/');
+            if (slash >= 0) {
+              modelRef = {
+                providerID: this.spec.model.slice(0, slash),
+                id: this.spec.model.slice(slash + 1),
+              };
+            }
+          }
+          const created = await this.server.request<{ data?: { id?: string }; id?: string }>('/api/session', {
+            method: 'POST',
+            body: {
+              title: this.spec.title,
+              location: { directory: this.spec.cwd },
+              ...(modelRef ? { model: modelRef } : {}),
+            },
+          });
+          this._opencodeSessionId = created.data?.id ?? created.id ?? null;
+          if (!this._opencodeSessionId) throw new Error('OpenCode v2 did not return a session id');
+        } else {
+          const created = await this.server.request<CreatedSession>('/session', {
+            method: 'POST',
+            query: { directory: this.spec.cwd },
+            body: { title: this.spec.title },
+          });
+          this._opencodeSessionId = created.id;
+        }
       }
     } catch (err) {
       this._startError = err instanceof Error ? err.message : String(err);
@@ -227,8 +250,8 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
 
   /**
    * Backfill this resumed session's own prior conversation into its buffer,
-   * via opencode's own `GET /session/{id}/message` (see normalize.ts's
-   * `opencodeHistoryEvents` doc comment for the shape and what it does and
+   * via opencode's own `GET /session/{id}/message` or v2's `GET /api/session/{id}/message`
+   * (see normalize.ts's `opencodeHistoryEvents` doc comment for the shape and what it does and
    * does not reconstruct). Awaited — unlike `fetchInitialCommands`/
    * `fetchInitialModels` below — so every history event lands in the buffer,
    * in order, before this session is usable: the WebSocket layer replays the
@@ -238,9 +261,15 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
   private async fetchHistory(): Promise<void> {
     if (!this._opencodeSessionId) return;
     try {
-      const raw = await this.server.request<unknown>(`/session/${this._opencodeSessionId}/message`, {
+      const endpoint = this.server.isV2
+        ? `/api/session/${this._opencodeSessionId}/message`
+        : `/session/${this._opencodeSessionId}/message`;
+      const query = this.server.isV2
+        ? { order: 'asc' }
+        : { directory: this.spec.cwd };
+      const raw = await this.server.request<unknown>(endpoint, {
         method: 'GET',
-        query: { directory: this.spec.cwd },
+        query,
       });
       for (const event of opencodeHistoryEvents(raw)) this.emitEvent(event);
     } catch {
@@ -320,9 +349,13 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
   private async fetchInitialCommands(): Promise<void> {
     if (!this._opencodeSessionId) return;
     try {
-      const raw = await this.server.request<unknown>('/command', {
+      const endpoint = this.server.isV2 ? '/api/command' : '/command';
+      const query = this.server.isV2
+        ? { 'location[directory]': this.spec.cwd }
+        : { directory: this.spec.cwd };
+      const raw = await this.server.request<unknown>(endpoint, {
         method: 'GET',
-        query: { directory: this.spec.cwd },
+        query,
       });
       const commands = normalizeOpencodeCommands(raw);
       this.knownCommands.clear();
@@ -336,15 +369,26 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
   private handleRaw(raw: unknown): void {
     this._lastActivityAt = Date.now();
 
-    // Cache the assistant's running cost/tokens — `session.idle` (mapped to
-    // `turn_complete`) carries none of its own; see `normalizeOpencodeEvent`.
-    if (isRecord(raw) && raw.type === 'message.updated') {
-      const properties = isRecord(raw.properties) ? raw.properties : {};
-      const info = isRecord(properties.info) ? properties.info : null;
-      if (info && info.role === 'assistant') {
-        const tokens = isRecord(info.tokens) ? info.tokens : {};
+    // Cache the assistant's running cost/tokens:
+    // - v1: message.updated for assistant
+    // - v2: session.usage.updated or session.step.ended
+    if (isRecord(raw)) {
+      if (raw.type === 'message.updated') {
+        const properties = isRecord(raw.properties) ? raw.properties : {};
+        const info = isRecord(properties.info) ? properties.info : null;
+        if (info && info.role === 'assistant') {
+          const tokens = isRecord(info.tokens) ? info.tokens : {};
+          this._lastUsage = {
+            cost: typeof info.cost === 'number' ? info.cost : null,
+            input: typeof tokens.input === 'number' ? tokens.input : null,
+            output: typeof tokens.output === 'number' ? tokens.output : null,
+          };
+        }
+      } else if (raw.type === 'session.usage.updated' || raw.type === 'session.step.ended') {
+        const data = isRecord(raw.data) ? raw.data : {};
+        const tokens = isRecord(data.tokens) ? data.tokens : {};
         this._lastUsage = {
-          cost: typeof info.cost === 'number' ? info.cost : null,
+          cost: typeof data.cost === 'number' ? data.cost : null,
           input: typeof tokens.input === 'number' ? tokens.input : null,
           output: typeof tokens.output === 'number' ? tokens.output : null,
         };
@@ -362,7 +406,9 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
         this._lastUsage = null;
         continue;
       }
-      if (isRecord(raw) && raw.type === 'session.error') this.setBusy(false);
+      if (isRecord(raw) && (raw.type === 'session.error' || raw.type === 'session.execution.failed')) {
+        this.setBusy(false);
+      }
       this.emitEvent(event);
     }
   }
@@ -412,17 +458,31 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
     // a bare `/` a user typed as ordinary punctuation) is just chat text, the
     // same as it would be for every other agent. See `fetchInitialCommands`.
     const command = matchKnownCommand(text, this.knownCommands);
-    const endpoint = command
-      ? `/session/${this._opencodeSessionId}/command`
-      : `/session/${this._opencodeSessionId}/prompt_async`;
-    const body = command
-      ? { command: command.name, arguments: command.args }
-      : { parts: [{ type: 'text', text }] };
+    let endpoint: string;
+    let body: unknown;
+    let query: Record<string, string> | undefined;
+
+    if (this.server.isV2) {
+      endpoint = command
+        ? `/api/session/${this._opencodeSessionId}/command`
+        : `/api/session/${this._opencodeSessionId}/prompt`;
+      body = command
+        ? { name: command.name, text: command.args }
+        : { text };
+    } else {
+      endpoint = command
+        ? `/session/${this._opencodeSessionId}/command`
+        : `/session/${this._opencodeSessionId}/prompt_async`;
+      body = command
+        ? { command: command.name, arguments: command.args }
+        : { parts: [{ type: 'text', text }] };
+      query = { directory: this.spec.cwd };
+    }
 
     void this.server
       .request(endpoint, {
         method: 'POST',
-        query: { directory: this.spec.cwd },
+        query,
         body,
       })
       .catch((err) => {
@@ -439,10 +499,16 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
   async interrupt(): Promise<void> {
     if (!this._opencodeSessionId) return;
     try {
-      await this.server.request(`/session/${this._opencodeSessionId}/abort`, {
-        method: 'POST',
-        query: { directory: this.spec.cwd },
-      });
+      if (this.server.isV2) {
+        await this.server.request(`/api/session/${this._opencodeSessionId}/interrupt`, {
+          method: 'POST',
+        });
+      } else {
+        await this.server.request(`/session/${this._opencodeSessionId}/abort`, {
+          method: 'POST',
+          query: { directory: this.spec.cwd },
+        });
+      }
       this.emitEvent({ kind: 'notice', level: 'info', text: 'Interrupted.' });
     } catch (err) {
       this.emitEvent({
@@ -539,11 +605,18 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
     message?: string,
   ): Promise<void> {
     try {
-      await this.server.request(`/permission/${id}/reply`, {
-        method: 'POST',
-        query: { directory: this.spec.cwd },
-        body: { reply, ...(message?.trim() ? { message: message.trim() } : {}) },
-      });
+      if (this.server.isV2) {
+        await this.server.request(`/api/session/${this._opencodeSessionId}/permission/${id}/reply`, {
+          method: 'POST',
+          body: { decision: reply, ...(message?.trim() ? { message: message.trim() } : {}) },
+        });
+      } else {
+        await this.server.request(`/permission/${id}/reply`, {
+          method: 'POST',
+          query: { directory: this.spec.cwd },
+          body: { reply, ...(message?.trim() ? { message: message.trim() } : {}) },
+        });
+      }
     } catch (err) {
       this.emitEvent({
         kind: 'notice',
@@ -570,10 +643,14 @@ export class OpencodeSession extends EventEmitter<StructuredSessionEvents> {
 
     if (this._opencodeSessionId) {
       this.server.unregister(this._opencodeSessionId);
+      const abortPath = this.server.isV2
+        ? `/api/session/${this._opencodeSessionId}/interrupt`
+        : `/session/${this._opencodeSessionId}/abort`;
+      const query = this.server.isV2 ? undefined : { directory: this.spec.cwd };
       void this.server
-        .request(`/session/${this._opencodeSessionId}/abort`, {
+        .request(abortPath, {
           method: 'POST',
-          query: { directory: this.spec.cwd },
+          query,
         })
         .catch(() => undefined);
     }

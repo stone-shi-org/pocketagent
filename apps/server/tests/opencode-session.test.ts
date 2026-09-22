@@ -11,10 +11,13 @@ const FIXTURE = path.resolve(
   'fixtures/fake-opencode-server.mjs',
 );
 
-function makeServer(): OpencodeServerManager {
+function makeServer(v2 = false): OpencodeServerManager {
   return new OpencodeServerManager({
     executablePath: FIXTURE,
-    env: process.env,
+    env: {
+      ...process.env,
+      ...(v2 ? { OPENCODE_FIXTURE_VERSION: 'v2' } : {}),
+    },
     cwd: process.cwd(),
   });
 }
@@ -424,3 +427,182 @@ describe('OpencodeSession', () => {
     expect(exited).toBe(true);
   });
 });
+
+describe('OpencodeServerManager (v2)', () => {
+  let server: OpencodeServerManager | null = null;
+  afterEach(() => {
+    server?.dispose();
+    server = null;
+  });
+
+  it('spawns the v2 fixture, learns its port and password, and sets isV2', async () => {
+    server = makeServer(true);
+    const baseUrl = await server.ensureStarted();
+    expect(baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    expect(server.isV2).toBe(true);
+    expect(server.apiVersion).toBe('v2');
+    expect(server.password).toBe('fake-token');
+  });
+
+  it('request() sends basic auth and round-trips JSON with v2 fixture', async () => {
+    server = makeServer(true);
+    const info = await server.request<{ data: { id: string } }>('/api/session', {
+      method: 'POST',
+      body: { title: 'v2 session', location: { directory: '/tmp' } },
+    });
+    expect(info.data.id).toMatch(/^ses_test/);
+  });
+});
+
+describe('OpencodeSession (v2)', () => {
+  let server: OpencodeServerManager | null = null;
+  let session: OpencodeSession | null = null;
+
+  afterEach(() => {
+    session?.terminate();
+    server?.dispose();
+    session = null;
+    server = null;
+  });
+
+  it('creates the opencode-side session on start() via /api/session and emits session_started', async () => {
+    server = makeServer(true);
+    session = new OpencodeSession(makeSpec(), server);
+    await session.start();
+    expect(session.status).toBe('running');
+    expect(session.agentSessionId).toMatch(/^ses_test/);
+  });
+
+  it('backfills prior conversation via GET /api/session/:id/message when resuming, before start() resolves', async () => {
+    server = makeServer(true);
+    session = new OpencodeSession(makeSpec({ resumeAgentSessionId: 'ses_existing' }), server);
+    const events = collect(session);
+    await session.start();
+
+    expect(events.find((e) => e.kind === 'user_prompt')).toMatchObject({ text: 'what is in this dir?' });
+    expect(events.find((e) => e.kind === 'tool_use')).toMatchObject({ name: 'bash', input: { command: 'ls' } });
+    expect(events.find((e) => e.kind === 'tool_result')).toMatchObject({ content: 'file.txt\n', isError: false });
+    expect(events.find((e) => e.kind === 'text')).toMatchObject({ text: 'Just file.txt.' });
+    expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({ stopReason: null, isError: false });
+    expect(session.busy).toBe(false);
+  });
+
+  it('learns the command list at start via GET /api/command', async () => {
+    server = makeServer(true);
+    session = new OpencodeSession(makeSpec(), server);
+    const events = collect(session);
+    await session.start();
+
+    await waitFor(() => events.some((e) => e.kind === 'commands_available'));
+    expect(events.find((e) => e.kind === 'commands_available')).toMatchObject({
+      commands: [
+        { name: 'init', description: 'guided AGENTS.md setup', argumentHint: '', aliases: [] },
+        { name: 'review', description: 'review changes [commit|branch|pr], defaults to uncommitted', argumentHint: '', aliases: [] },
+      ],
+    });
+  });
+
+  it('routes a known command to POST /api/session/{id}/command', async () => {
+    server = makeServer(true);
+    session = new OpencodeSession(makeSpec(), server);
+    const events = collect(session);
+    await session.start();
+    await waitFor(() => events.some((e) => e.kind === 'commands_available'));
+
+    session.prompt('/init extra context');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    expect(events.find((e) => e.kind === 'text')).toMatchObject({ text: 'echo: /init extra context' });
+  });
+
+  it('runs one turn end to end in v2: user_prompt, tool_use/result, text, turn_complete with usage', async () => {
+    server = makeServer(true);
+    session = new OpencodeSession(makeSpec(), server);
+    await session.start();
+    const events = collect(session);
+
+    expect(session.prompt('hello')).toBe(true);
+    expect(session.busy).toBe(true);
+    expect(events[0]).toMatchObject({ kind: 'user_prompt', text: 'hello' });
+
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toEqual(
+      expect.arrayContaining(['user_prompt', 'tool_use', 'tool_result', 'text', 'turn_complete']),
+    );
+    expect(events.find((e) => e.kind === 'tool_use')).toMatchObject({ name: 'bash', summary: 'Run echo hi' });
+    expect(events.find((e) => e.kind === 'tool_result')).toMatchObject({ content: 'hi\n', isError: false });
+    expect(events.find((e) => e.kind === 'text')).toMatchObject({ text: 'echo: hello' });
+    expect(events.find((e) => e.kind === 'turn_complete')).toMatchObject({
+      inputTokens: 10,
+      outputTokens: 5,
+      costUsd: 0.01,
+    });
+    await waitFor(() => session?.busy === false);
+  });
+
+  it('surfaces a real permission request in v2 and resolves via /api/session/:id/permission/:id/reply', async () => {
+    server = makeServer(true);
+    session = new OpencodeSession(makeSpec(), server);
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('NEEDS_PERMISSION');
+    await waitFor(() => events.some((e) => e.kind === 'permission_request'));
+    expect(session.pendingPermissions()).toHaveLength(1);
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(events.some((e) => e.kind === 'turn_complete')).toBe(false);
+
+    const request = events.find((e) => e.kind === 'permission_request');
+    expect(session.resolvePermission(request!.id, 'allow')).toBe(true);
+    expect(session.pendingPermissions()).toHaveLength(0);
+
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+    expect(events.some((e) => e.kind === 'tool_result')).toBe(true);
+  });
+
+  it('auto-bypasses permissions in v2 when skipPermissions is set', async () => {
+    server = makeServer(true);
+    session = new OpencodeSession(makeSpec({ skipPermissions: true }), server);
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('NEEDS_PERMISSION');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+
+    expect(events.some((e) => e.kind === 'permission_request')).toBe(false);
+    expect(session.pendingPermissions()).toHaveLength(0);
+  });
+
+  it('interrupt() aborts an in-flight v2 turn via /api/session/:id/interrupt', async () => {
+    server = makeServer(true);
+    session = new OpencodeSession(makeSpec(), server);
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('SLOW');
+    await waitFor(() => events.some((e) => e.kind === 'tool_use'));
+
+    await session.interrupt();
+    await waitFor(() => events.some((e) => e.kind === 'notice' && e.text === 'Interrupted.'));
+
+    expect(session.isAlive()).toBe(true);
+  });
+
+  it('surfaces session.execution.failed as an error notice in v2', async () => {
+    server = makeServer(true);
+    session = new OpencodeSession(makeSpec(), server);
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('FAIL');
+    await waitFor(() => events.some((e) => e.kind === 'notice' && e.level === 'error'));
+
+    expect(session.isAlive()).toBe(true);
+    expect(events.find((e) => e.kind === 'notice')).toMatchObject({ text: 'simulated failure' });
+    await waitFor(() => session?.busy === false);
+  });
+});
+

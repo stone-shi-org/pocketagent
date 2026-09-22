@@ -28,6 +28,8 @@ import readline from 'node:readline';
 export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
   private child: ChildProcessWithoutNullStreams | null = null;
   private baseUrl: string | null = null;
+  private password: string | null = null;
+  private _apiVersion: 'v1' | 'v2' = 'v1';
   private starting: Promise<string> | null = null;
   private ready = false;
   private readonly eventStreams = new Map<string, { abort: AbortController; refCount: number }>();
@@ -42,6 +44,14 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
     },
   ) {
     super();
+  }
+
+  get apiVersion(): 'v1' | 'v2' {
+    return this._apiVersion;
+  }
+
+  get isV2(): boolean {
+    return this._apiVersion === 'v2';
   }
 
   /** Spawns the server on first call; every later call reuses it. */
@@ -78,17 +88,47 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
 
       let stderrTail = '';
       const onLine = (line: string): void => {
-        // Observed against the real CLI (v1.17.18): `opencode server
-        // listening on http://127.0.0.1:PORT`. `--port 0` means the actual
-        // port is only knowable by reading this line.
-        const match = /opencode server listening on (http:\/\/\S+)/.exec(line);
-        const url = match?.[1];
-        if (!url) return;
-        settle(() => {
-          this.baseUrl = url;
+        // v1 prints: `opencode server listening on http://127.0.0.1:PORT`
+        // v2 prints: `server listening on http://127.0.0.1:PORT`
+        // followed immediately by `server password <token>`.
+        const v1Match = /^opencode server listening on (http:\/\/\S+)/.exec(line);
+        if (v1Match && v1Match[1]) {
+          this._apiVersion = 'v1';
+          this.baseUrl = v1Match[1];
           this.ready = true;
-          resolve(url);
-        });
+          settle(() => resolve(this.baseUrl!));
+          return;
+        }
+
+        const v2Match = /^server listening on (http:\/\/\S+)/.exec(line);
+        if (v2Match && v2Match[1]) {
+          this._apiVersion = 'v2';
+          this.baseUrl = v2Match[1];
+          if (this.password) {
+            this.ready = true;
+            settle(() => resolve(this.baseUrl!));
+          } else {
+            // Give up to 1000ms for "server password <token>" line
+            setTimeout(() => {
+              if (this.baseUrl && !this.ready) {
+                this.ready = true;
+                settle(() => resolve(this.baseUrl!));
+              }
+            }, 1000).unref?.();
+          }
+          return;
+        }
+
+        const pwMatch = /^server password (\S+)/.exec(line);
+        if (pwMatch && pwMatch[1]) {
+          this.password = pwMatch[1];
+          this._apiVersion = 'v2';
+          if (this.baseUrl && !this.ready) {
+            this.ready = true;
+            settle(() => resolve(this.baseUrl!));
+          }
+          return;
+        }
       };
 
       readline.createInterface({ input: child.stdout }).on('line', (line) => {
@@ -108,6 +148,8 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
         const wasReady = this.ready;
         this.child = null;
         this.baseUrl = null;
+        this.password = null;
+        this._apiVersion = 'v1';
         this.ready = false;
         for (const { abort } of this.eventStreams.values()) abort.abort();
         this.eventStreams.clear();
@@ -169,13 +211,18 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
     for (;;) {
       if (signal.aborted) return;
       try {
-        const url = new URL('/event', baseUrl);
-        // Required, not cosmetic: without a `directory` query param, `/event`
-        // delivers only session-less bookkeeping (`server.connected`,
-        // `server.heartbeat`) and silently omits every `message.*`/`session.*`
-        // event — every turn would hang forever with no error anywhere.
-        url.searchParams.set('directory', directory);
-        const res = await fetch(url, { signal });
+        const url = new URL(this._apiVersion === 'v2' ? '/api/event' : '/event', baseUrl);
+        // Required for v1: without a `directory` query param, `/event` delivers
+        // only session-less bookkeeping. For v2, `/api/event` is global across
+        // all locations.
+        if (this._apiVersion !== 'v2') {
+          url.searchParams.set('directory', directory);
+        }
+        const headers: Record<string, string> = {};
+        if (this._apiVersion === 'v2' && this.password) {
+          headers['Authorization'] = `Basic ${Buffer.from(`opencode:${this.password}`).toString('base64')}`;
+        }
+        const res = await fetch(url, { headers, signal });
         const body = res.body;
         if (!body) return;
         const reader = body.getReader();
@@ -212,14 +259,15 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
       } catch {
         continue;
       }
-      if (typeof parsed !== 'object' || parsed === null) continue;
-      const properties = (parsed as Record<string, unknown>).properties;
+      if (!isRecord(parsed)) continue;
+      const properties = isRecord(parsed.properties) ? parsed.properties : null;
+      const data = isRecord(parsed.data) ? parsed.data : null;
       const sessionID =
-        typeof properties === 'object' &&
-        properties !== null &&
-        typeof (properties as Record<string, unknown>).sessionID === 'string'
-          ? ((properties as Record<string, unknown>).sessionID as string)
-          : null;
+        (typeof properties?.sessionID === 'string' ? properties.sessionID : null) ??
+        (typeof data?.sessionID === 'string' ? data.sessionID : null) ??
+        (isRecord(data?.metadata) && typeof data.metadata.sessionID === 'string'
+          ? (data.metadata.sessionID as string)
+          : null);
       // Session-less events (plugin/catalog/provider bookkeeping) have no
       // handler to reach and are not part of any chat's transcript.
       if (!sessionID) continue;
@@ -256,6 +304,7 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
     init: {
       method?: string;
       body?: unknown;
+      headers?: Record<string, string>;
       query?: Record<string, string | undefined>;
     } = {},
   ): Promise<T> {
@@ -264,9 +313,16 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
     for (const [key, value] of Object.entries(init.query ?? {})) {
       if (value !== undefined) url.searchParams.set(key, value);
     }
+    const headers: Record<string, string> = { ...init.headers };
+    if (init.body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+    }
+    if (this._apiVersion === 'v2' && this.password) {
+      headers['Authorization'] = `Basic ${Buffer.from(`opencode:${this.password}`).toString('base64')}`;
+    }
     const res = await fetch(url, {
       method: init.method ?? 'GET',
-      headers: init.body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      headers,
       body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
     });
     if (!res.ok) {
@@ -330,6 +386,12 @@ export class OpencodeServerManager extends EventEmitter<{ crashed: [] }> {
       this.child = null;
     }
     this.baseUrl = null;
+    this.password = null;
+    this._apiVersion = 'v1';
     this.ready = false;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

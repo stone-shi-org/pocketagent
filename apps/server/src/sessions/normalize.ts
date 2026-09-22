@@ -755,8 +755,10 @@ export function normalizeOpencodeEvent(message: unknown): AgentEvent[] {
   if (!isRecord(message)) return [];
   const type = str(message.type);
   const properties = isRecord(message.properties) ? message.properties : {};
+  const data = isRecord(message.data) ? message.data : {};
 
   switch (type) {
+    // ---- v1 event types ----------------------------------------------------
     case 'message.part.updated':
       return normalizeOpencodePart(properties);
     case 'message.updated':
@@ -784,14 +786,175 @@ export function normalizeOpencodeEvent(message: unknown): AgentEvent[] {
     case 'permission.updated':
       return [normalizeOpencodePermission(properties)];
     case 'permission.replied': {
-      const decision = opencodeReplyToDecision(str(properties.response));
-      const id = str(properties.id) ?? str(properties.permissionID);
+      const decision = opencodeReplyToDecision(str(properties.response) ?? str(data.response) ?? str(data.decision));
+      const id = str(properties.id) ?? str(properties.permissionID) ?? str(data.requestID) ?? str(data.id);
       if (!id) return [];
       return [{ kind: 'permission_resolved', id, decision, message: null }];
     }
+
+    // ---- v2 event types ----------------------------------------------------
+    case 'session.text.delta': {
+      const id = str(data.assistantMessageID) ?? str(data.id) ?? 'oc_part';
+      const delta = str(data.delta);
+      if (!delta) return [];
+      return [{ kind: 'text_delta', id, text: delta }];
+    }
+    case 'session.text.ended': {
+      const id = str(data.assistantMessageID) ?? str(data.id) ?? 'oc_part';
+      const text = str(data.text) ?? '';
+      if (text.trim().length === 0) return [];
+      return [{ kind: 'text', id, text: clamp(text, MAX_TEXT_CHARS) }];
+    }
+    case 'session.reasoning.ended': {
+      const id = str(data.assistantMessageID) ? `${str(data.assistantMessageID)}_reasoning` : 'oc_reasoning';
+      const text = str(data.text) ?? '';
+      if (text.trim().length === 0) return [];
+      return [{ kind: 'thinking', id, text: clamp(text, MAX_TEXT_CHARS) }];
+    }
+    case 'session.tool.input.started': {
+      const callId = str(data.id);
+      const name = str(data.name);
+      if (callId && name) recordOpencodeToolName(callId, name);
+      return [];
+    }
+    case 'session.tool.called': {
+      const id = str(data.id) ?? 'oc_tool';
+      const name = opencodeToolNames.get(id) ?? str(data.name) ?? 'tool';
+      const input = isRecord(data.input) ? data.input : {};
+      return [
+        {
+          kind: 'tool_use',
+          id,
+          name,
+          input,
+          summary: summarizeOpencodeTool(name, input),
+          filePath: extractOpencodePath(input),
+        },
+      ];
+    }
+    case 'session.tool.success': {
+      const id = str(data.id) ?? 'oc_tool';
+      opencodeToolNames.delete(id);
+      const content = extractToolContent(data.content);
+      return [
+        {
+          kind: 'tool_result',
+          id: `oc_tr_${id}`,
+          toolUseId: id,
+          content: clamp(content, MAX_RESULT_CHARS),
+          truncated: content.length > MAX_RESULT_CHARS,
+          isError: false,
+        },
+      ];
+    }
+    case 'session.tool.failed': {
+      const id = str(data.id) ?? 'oc_tool';
+      opencodeToolNames.delete(id);
+      const content = extractToolContent(data.content) || extractOpencodeErrorMessage(data.error);
+      return [
+        {
+          kind: 'tool_result',
+          id: `oc_tr_${id}`,
+          toolUseId: id,
+          content: clamp(content, MAX_RESULT_CHARS),
+          truncated: content.length > MAX_RESULT_CHARS,
+          isError: true,
+        },
+      ];
+    }
+    case 'permission.asked':
+      return [normalizeOpencodePermissionV2(data)];
+    case 'session.execution.succeeded':
+      return [
+        {
+          kind: 'turn_complete',
+          stopReason: null,
+          isError: false,
+          numTurns: null,
+          durationMs: null,
+          costUsd: null,
+          inputTokens: null,
+          outputTokens: null,
+        },
+      ];
+    case 'session.execution.failed':
+      return [
+        ...normalizeOpencodeSessionError(data.error),
+        {
+          kind: 'turn_complete',
+          stopReason: 'error',
+          isError: true,
+          numTurns: null,
+          durationMs: null,
+          costUsd: null,
+          inputTokens: null,
+          outputTokens: null,
+        },
+      ];
+    case 'session.execution.interrupted':
+      return [
+        {
+          kind: 'turn_complete',
+          stopReason: 'interrupted',
+          isError: false,
+          numTurns: null,
+          durationMs: null,
+          costUsd: null,
+          inputTokens: null,
+          outputTokens: null,
+        },
+      ];
+    case 'session.step.failed':
+      return [{ kind: 'notice', level: 'error', text: extractOpencodeErrorMessage(data.error) }];
+
     default:
       return [];
   }
+}
+
+const opencodeToolNames = new Map<string, string>();
+function recordOpencodeToolName(id: string, name: string): void {
+  if (opencodeToolNames.size > 2000) {
+    const first = opencodeToolNames.keys().next().value;
+    if (first !== undefined) opencodeToolNames.delete(first);
+  }
+  opencodeToolNames.set(id, name);
+}
+
+function extractToolContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (isRecord(item) && typeof item.text === 'string') return item.text;
+        return '';
+      })
+      .filter((t) => t.length > 0)
+      .join('\n');
+  }
+  return '';
+}
+
+function normalizeOpencodePermissionV2(data: Record<string, unknown>): AgentEvent {
+  const id = str(data.id) ?? '';
+  const toolName = str(data.action) ?? str(data.type) ?? 'tool';
+  const metadata = isRecord(data.metadata) ? data.metadata : {};
+  const resources = Array.isArray(data.resources) ? data.resources.filter(isString) : [];
+  const filePath = extractOpencodePath(metadata) ?? (resources.length > 0 && resources[0] ? resources[0] : null);
+
+  return {
+    kind: 'permission_request',
+    id,
+    toolName,
+    input: metadata,
+    title: str(data.message) ?? str(data.title) ?? `Allow: ${toolName}?`,
+    displayName: null,
+    filePath,
+    reason: null,
+    canAllowForSession: true,
+    questions: null,
+  };
 }
 
 function normalizeOpencodeSessionError(error: unknown): AgentEvent[] {
@@ -945,7 +1108,7 @@ function opencodeReplyToDecision(
 function extractOpencodeErrorMessage(error: unknown): string {
   if (!isRecord(error)) return 'Unknown error.';
   const data = isRecord(error.data) ? error.data : {};
-  const message = str(data.message);
+  const message = str(data.message) ?? str(error.message);
   if (message) return message;
   const name = str(error.name);
   return name ? `${name}.` : 'Unknown error.';
@@ -1017,9 +1180,13 @@ export function extractOpencodePath(input: Record<string, unknown>): string | nu
  * often thousands of characters and has no use in a picker.
  */
 export function normalizeOpencodeCommands(value: unknown): SlashCommandInfo[] {
-  if (!Array.isArray(value)) return [];
+  const list = Array.isArray(value)
+    ? value
+    : isRecord(value) && Array.isArray(value.data)
+      ? value.data
+      : [];
   const commands: SlashCommandInfo[] = [];
-  for (const raw of value) {
+  for (const raw of list) {
     if (!isRecord(raw)) continue;
     const name = str(raw.name);
     if (!name) continue;
@@ -1108,93 +1275,170 @@ function historyTurnComplete(): AgentEvent {
  * /session/{id}/message` (confirmed live against a real, installed `opencode
  * serve`: an array of `{info, parts}`, the same `Message`/`Part` shapes
  * `normalizeOpencodeEvent` already parses live via `message.updated`/
- * `message.part.updated`) — see `OpencodeSession.fetchHistory`'s doc comment
- * for why this exists.
- *
- * Unlike the live event stream, there is no separate "tool started" snapshot
- * to reconstruct here: a completed or errored tool part is the only record of
- * that call this endpoint gives, so it is expanded into both its `tool_use`
- * and `tool_result` at once, in that order, rather than only the `tool_result`
- * half `normalizeOpencodePart` emits for an already-finished live call.
- * `subtask`/`file`/`stepStart`/`stepFinish`/`snapshot`/`patch`/`agent`/`retry`/
- * `compaction` parts are dropped, same discipline as `AgyTranscriptStore`'s
- * "readable what-was-said, not a full re-render" for agy's own disk history.
+ * `message.part.updated`) or v2's `GET /api/session/{id}/message` (`{ data:
+ * Array<Session.Message> }` containing top-level `type` and structured `content`).
  */
 export function opencodeHistoryEvents(messagesRaw: unknown): AgentEvent[] {
-  if (!Array.isArray(messagesRaw)) return [];
+  const rawList = Array.isArray(messagesRaw)
+    ? messagesRaw
+    : isRecord(messagesRaw) && Array.isArray(messagesRaw.data)
+      ? messagesRaw.data
+      : [];
+  if (rawList.length === 0) return [];
   const events: AgentEvent[] = [];
   let openTurn = false;
 
-  for (const entry of messagesRaw) {
+  for (const entry of rawList) {
     if (!isRecord(entry)) continue;
-    const info = isRecord(entry.info) ? entry.info : null;
-    const parts = Array.isArray(entry.parts) ? entry.parts.filter(isRecord) : [];
-    if (!info) continue;
-    const role = str(info.role);
 
-    if (role === 'user') {
-      const text = parts
-        .filter((p) => str(p.type) === 'text')
-        .map((p) => str(p.text) ?? '')
-        .filter((t) => t.trim().length > 0)
-        .join('\n');
-      if (text) {
-        if (openTurn) {
-          events.push(historyTurnComplete());
-          openTurn = false;
+    // v1 shape: { info: { role, id }, parts: [...] }
+    if (entry.info && Array.isArray(entry.parts)) {
+      const info = isRecord(entry.info) ? entry.info : null;
+      if (!info) continue;
+      const role = str(info.role);
+      const parts = entry.parts.filter(isRecord);
+
+      if (role === 'user') {
+        const text = parts
+          .filter((p) => str(p.type) === 'text')
+          .map((p) => str(p.text) ?? '')
+          .filter((t) => t.trim().length > 0)
+          .join('\n');
+        if (text) {
+          if (openTurn) {
+            events.push(historyTurnComplete());
+            openTurn = false;
+          }
+          events.push({ kind: 'user_prompt', id: str(info.id) ?? `oc_hist_${events.length}`, text });
         }
-        events.push({ kind: 'user_prompt', id: str(info.id) ?? `oc_hist_${events.length}`, text });
+        continue;
+      }
+
+      if (role !== 'assistant') continue;
+
+      for (const partRaw of parts) {
+        const partType = str(partRaw.type);
+        const id = str(partRaw.id) ?? str(partRaw.callID) ?? `oc_hist_part_${events.length}`;
+
+        if (partType === 'text') {
+          const text = str(partRaw.text) ?? '';
+          if (text.trim().length === 0) continue;
+          events.push({ kind: 'text', id, text: clamp(text, MAX_TEXT_CHARS) });
+          openTurn = true;
+          continue;
+        }
+
+        if (partType === 'reasoning') {
+          const text = str(partRaw.text) ?? '';
+          if (text.trim().length === 0) continue;
+          events.push({ kind: 'thinking', id, text: clamp(text, MAX_TEXT_CHARS) });
+          openTurn = true;
+          continue;
+        }
+
+        if (partType === 'tool') {
+          const state = isRecord(partRaw.state) ? partRaw.state : null;
+          const status = state ? str(state.status) : null;
+          if (status !== 'completed' && status !== 'error') continue;
+          const name = str(partRaw.tool) ?? 'tool';
+          const input = state && isRecord(state.input) ? state.input : {};
+          events.push({
+            kind: 'tool_use',
+            id,
+            name,
+            input,
+            summary: summarizeOpencodeTool(name, input),
+            filePath: extractOpencodePath(input),
+          });
+          const isError = status === 'error';
+          const content = state ? str(isError ? state.error : state.output) ?? '' : '';
+          events.push({
+            kind: 'tool_result',
+            id: `oc_hist_tr_${id}`,
+            toolUseId: id,
+            content: clamp(content, MAX_RESULT_CHARS),
+            truncated: content.length > MAX_RESULT_CHARS,
+            isError,
+          });
+          openTurn = true;
+        }
       }
       continue;
     }
 
-    if (role !== 'assistant') continue;
+    // v2 shape: { id, type: 'user' | 'assistant' | 'idle', ... }
+    const type = str(entry.type);
+    const id = str(entry.id) ?? `oc_hist_${events.length}`;
 
-    for (const partRaw of parts) {
-      const partType = str(partRaw.type);
-      const id = str(partRaw.id) ?? str(partRaw.callID) ?? `oc_hist_part_${events.length}`;
-
-      if (partType === 'text') {
-        const text = str(partRaw.text) ?? '';
-        if (text.trim().length === 0) continue;
-        events.push({ kind: 'text', id, text: clamp(text, MAX_TEXT_CHARS) });
-        openTurn = true;
-        continue;
+    if (type === 'user') {
+      const payloadText = isRecord(entry.payload) ? str(entry.payload.text) : undefined;
+      const text = str(entry.text) ?? payloadText ?? '';
+      if (text.trim().length > 0) {
+        if (openTurn) {
+          events.push(historyTurnComplete());
+          openTurn = false;
+        }
+        events.push({ kind: 'user_prompt', id, text });
       }
+      continue;
+    }
 
-      if (partType === 'reasoning') {
-        const text = str(partRaw.text) ?? '';
-        if (text.trim().length === 0) continue;
-        events.push({ kind: 'thinking', id, text: clamp(text, MAX_TEXT_CHARS) });
-        openTurn = true;
-        continue;
+    if (type === 'assistant') {
+      const contentList = Array.isArray(entry.content) ? entry.content.filter(isRecord) : [];
+      for (const item of contentList) {
+        const itemType = str(item.type);
+        const itemId = str(item.id) ?? `oc_hist_part_${events.length}`;
+
+        if (itemType === 'text') {
+          const text = str(item.text) ?? '';
+          if (text.trim().length === 0) continue;
+          events.push({ kind: 'text', id: itemId, text: clamp(text, MAX_TEXT_CHARS) });
+          openTurn = true;
+          continue;
+        }
+
+        if (itemType === 'reasoning') {
+          const text = str(item.text) ?? '';
+          if (text.trim().length === 0) continue;
+          events.push({ kind: 'thinking', id: itemId, text: clamp(text, MAX_TEXT_CHARS) });
+          openTurn = true;
+          continue;
+        }
+
+        if (itemType === 'tool') {
+          const name = str(item.name) ?? 'tool';
+          const state = isRecord(item.state) ? item.state : null;
+          const status = state ? str(state.status) : null;
+          if (status !== 'completed' && status !== 'error') continue;
+          const input = state && isRecord(state.input) ? state.input : {};
+          events.push({
+            kind: 'tool_use',
+            id: itemId,
+            name,
+            input,
+            summary: summarizeOpencodeTool(name, input),
+            filePath: extractOpencodePath(input),
+          });
+          const isError = status === 'error';
+          const toolContent = state ? extractToolContent(state.content) || (isError ? extractOpencodeErrorMessage(state.error) : '') : '';
+          events.push({
+            kind: 'tool_result',
+            id: `oc_hist_tr_${itemId}`,
+            toolUseId: itemId,
+            content: clamp(toolContent, MAX_RESULT_CHARS),
+            truncated: toolContent.length > MAX_RESULT_CHARS,
+            isError,
+          });
+          openTurn = true;
+        }
       }
+      continue;
+    }
 
-      if (partType === 'tool') {
-        const state = isRecord(partRaw.state) ? partRaw.state : null;
-        const status = state ? str(state.status) : null;
-        if (status !== 'completed' && status !== 'error') continue;
-        const name = str(partRaw.tool) ?? 'tool';
-        const input = state && isRecord(state.input) ? state.input : {};
-        events.push({
-          kind: 'tool_use',
-          id,
-          name,
-          input,
-          summary: summarizeOpencodeTool(name, input),
-          filePath: extractOpencodePath(input),
-        });
-        const isError = status === 'error';
-        const content = state ? str(isError ? state.error : state.output) ?? '' : '';
-        events.push({
-          kind: 'tool_result',
-          id: `oc_hist_tr_${id}`,
-          toolUseId: id,
-          content: clamp(content, MAX_RESULT_CHARS),
-          truncated: content.length > MAX_RESULT_CHARS,
-          isError,
-        });
-        openTurn = true;
+    if (type === 'idle') {
+      if (openTurn) {
+        events.push(historyTurnComplete());
+        openTurn = false;
       }
     }
   }

@@ -1526,7 +1526,11 @@ export class SessionManager {
     const server = this.getOpencodeServerForHistory();
     if (!server) return [];
     try {
-      const raw = await server.request<unknown>(`/session/${sessionId}/message`, { method: 'GET' });
+      const path = server.isV2
+        ? `/api/session/${sessionId}/message`
+        : `/session/${sessionId}/message`;
+      const query = server.isV2 ? { order: 'asc' } : undefined;
+      const raw = await server.request<unknown>(path, { method: 'GET', query });
       return opencodeHistoryEvents(raw);
     } catch {
       return [];
