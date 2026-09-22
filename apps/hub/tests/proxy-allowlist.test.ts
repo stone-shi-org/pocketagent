@@ -22,6 +22,8 @@ describe('resolveProxyTarget', () => {
   it("keeps the Hub's own namespaces away from the default host", () => {
     expect(resolveProxyTarget('/api/hub/hosts').kind).toBe('hub');
     expect(resolveProxyTarget('/api/auth/login').kind).toBe('hub');
+    expect(resolveProxyTarget('/api/auth/logout').kind).toBe('hub');
+    expect(resolveProxyTarget('/api/auth/me').kind).toBe('hub');
     expect(resolveProxyTarget('/health').kind).toBe('hub');
   });
 
@@ -119,6 +121,19 @@ describe('resolveProxyTarget', () => {
     // `/api/auth/hubs` is behind the gate and is what Settings → Hubs reads,
     // so it must not be caught by the `/api/auth/hub-bind` deny entry.
     expect(resolveProxyTarget('/h/dev01/api/auth/hubs').kind).toBe('proxy');
+    // PA-87: on the default host (bare root), `/api/auth/hubs` and its deletion
+    // subpath must proxy to the default backend rather than being trapped by
+    // the Hub's `/api/auth/*` surface.
+    expect(resolveProxyTarget('/api/auth/hubs')).toEqual({
+      kind: 'proxy',
+      hostId: null,
+      upstreamPath: '/api/auth/hubs',
+    });
+    expect(resolveProxyTarget('/api/auth/hubs/cred-1')).toEqual({
+      kind: 'proxy',
+      hostId: null,
+      upstreamPath: '/api/auth/hubs/cred-1',
+    });
   });
 
   it('names a reason for every deny entry', () => {
@@ -179,5 +194,14 @@ describe('the proxy refuses without dialing the backend', () => {
     expect(response.status).toBe(200);
     expect(backend.requests).toHaveLength(1);
     expect(backend.requests[0]?.url).toBe('/api/sessions');
+  });
+
+  it('proxies /api/auth/hubs on the default host (PA-87)', async () => {
+    const response = await fetch(`${hub.baseUrl}/api/auth/hubs`, {
+      headers: { cookie: hub.cookie },
+    });
+    expect(response.status).toBe(200);
+    expect(backend.requests).toHaveLength(1);
+    expect(backend.requests[0]?.url).toBe('/api/auth/hubs');
   });
 });

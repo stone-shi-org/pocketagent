@@ -114,6 +114,11 @@ function decodeOnce(pathname: string): string | null {
   }
 }
 
+function isHubAuthPath(pathname: string): boolean {
+  const trimmed = pathname.endsWith('/') && pathname.length > 1 ? pathname.slice(0, -1) : pathname;
+  return trimmed === '/api/auth/login' || trimmed === '/api/auth/logout' || trimmed === '/api/auth/me';
+}
+
 /**
  * Decide what a request path is, before anything is dialed.
  *
@@ -175,7 +180,9 @@ export function resolveProxyTarget(rawUrl: string): ProxyTarget {
   // backend can never shadow the registry or the login route.
   if (decoded === '/health') return { kind: 'hub' };
   if (decoded.startsWith('/api/hub/') || decoded === '/api/hub') return { kind: 'hub' };
-  if (decoded.startsWith('/api/auth/')) return { kind: 'hub' };
+  // PA-87: The Hub defines only login, logout, and me under `/api/auth/`.
+  // Backend auth routes like `/api/auth/hubs` must reach the default host.
+  if (isHubAuthPath(decoded)) return { kind: 'hub' };
   if (decoded.startsWith('/api/push/') || decoded === '/api/push') return { kind: 'hub' };
 
   if (decoded.startsWith('/api/')) {
