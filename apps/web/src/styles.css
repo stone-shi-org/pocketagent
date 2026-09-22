@@ -1457,12 +1457,19 @@ input[type='number']::-webkit-outer-spin-button {
    turn's header actually rendered at, never a guess. */
 .prompt-glass {
   /* PA-57: 65%/16px read as barely-there — content behind it showed through
-     too strongly to register as a panel. Raised the opaque share and trimmed
-     the blur so the frosted look survives but the panel reads as distinct
-     from the scrolled content behind it. */
-  background: color-mix(in srgb, var(--bg) 84%, transparent);
-  backdrop-filter: blur(11px) saturate(160%);
-  -webkit-backdrop-filter: blur(11px) saturate(160%);
+     too strongly to register as a panel. A first pass raised this to 84%/11px,
+     but a side-by-side render against a high-contrast backdrop (repeating
+     stripes, checked with a throwaway Playwright screenshot rather than by
+     eyeballing the running app) showed 65% and 84% are nearly
+     indistinguishable — color-mix's alpha does not scale opacity the way the
+     percentage number suggests, so a "moderate" bump reads as no bump at
+     all. 93%/10px is the point where the panel actually reads as a distinct,
+     mostly-opaque bar instead of a light tint over whatever is scrolled
+     underneath; the frosted edge is now in the blur/saturate, not in how
+     much of the backdrop shows through. */
+  background: color-mix(in srgb, var(--bg) 93%, transparent);
+  backdrop-filter: blur(10px) saturate(160%);
+  -webkit-backdrop-filter: blur(10px) saturate(160%);
   border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   box-shadow: var(--shadow-sm);
 }
