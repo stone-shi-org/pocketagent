@@ -173,6 +173,15 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
      */
     async function syncLiveListen(shouldBeOn: boolean): Promise<void> {
       desiredLiveListen = shouldBeOn;
+      // PA-83: the speaker is decided here, *before* the two convergence
+      // guards below — those are about whether the mic controller already
+      // matches the requested state, and both of them return early in
+      // exactly the cases that still need the talk-back silenced (a start
+      // still in flight, or a controller that never came up because the
+      // mic failed). Switching the stream off means nothing is talking,
+      // full stop; switching it on re-arms a queue an earlier stop muted.
+      if (shouldBeOn) ttsQueue.arm();
+      else ttsQueue.stop();
       // A start already in flight will re-check `desiredLiveListen` itself
       // the moment it settles (see the `finally` block below) — calling in
       // again here would race it rather than help it.
@@ -183,12 +192,12 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         const controller = liveListen;
         liveListen = null;
         setMicLevel(0);
-        // PA-83: turning the toggle off is "stop the stream" — talk-back
-        // must not be allowed to keep going once the mic goes off, the
-        // same hard stop the dedicated "Stop speaking" button gives (and
-        // for the same reason: the server keeps synthesizing whatever is
-        // left of an in-progress reply unless explicitly told to cancel).
-        ttsQueue.stop();
+        // The local queue is already muted above; this is the server half —
+        // its pump still holds every sentence pushed before the toggle and
+        // would go on synthesizing them. The `voice_mode` handler cancels
+        // for the same reason, making this belt-and-suspenders rather than
+        // the only thing standing between a switched-off stream and a
+        // reply that keeps reading itself out.
         conn.sendStopSpeech();
         await controller?.stop();
         return;
@@ -210,14 +219,13 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
               // PA-83 #3: an embedded "skip" (and its few short variants)
               // controls the talk-back only — it must never be forwarded to
               // the agent as a prompt, unlike every other transcribed
-              // utterance. Both calls matter: `ttsQueue.stop()` silences
-              // whatever's already playing/queued in *this* tab right now,
-              // and `sendStopSpeech()` cancels the server-side pump for the
-              // rest of this turn — without it, the reply is likely still
-              // generating, and `TtsPlaybackQueue.enqueue()`'s own
-              // auto-resume would start playing the *next* sentence's audio
-              // the moment it streams in, undoing the stop within a second
-              // or two.
+              // utterance. Both calls matter, and for different reasons:
+              // `ttsQueue.stop()` silences (and durably mutes) this tab,
+              // covering the sentences already synthesized and in flight
+              // toward it, while `sendStopSpeech()` stops the server's pump
+              // producing the rest of them at all — which is what keeps a
+              // long reply from spending the whole TTS budget on audio
+              // nobody will hear.
               if (isSkipCommand(trimmed)) {
                 ttsQueue.stop();
                 conn.sendStopSpeech();
@@ -327,6 +335,12 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         },
         onAgentEvent: (event) => {
           setTranscript((prev) => applyEvent(prev, event));
+          // PA-83: a new turn is the one thing that lets the talk-back speak
+          // again after a stop — the same rule, and the same trigger,
+          // `VoiceTtsService.mutedUntilNextTurn` uses on the server. Without
+          // it the local queue would stay muted for the rest of the session
+          // once anything ever stopped it.
+          if (event.kind === 'user_prompt') ttsQueue.arm();
           if (event.kind === 'rate_limit' && event.resetsAt === null) {
             // agy reports the exhaustion in its turn stream but puts the reset
             // schedule in `/usage`; use the already-cached endpoint rather
@@ -612,6 +626,15 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
    * because nothing was ever set.
    */
   const handleSetLiveListen = useCallback((enabled: boolean) => {
+    // PA-83: silence on the click itself, not on the server's echo coming
+    // back through `onVoiceModeChanged` -> `syncLiveListen`. The echo does
+    // arrive and does the same thing, but "switch the stream off" has to be
+    // instant to feel like a stop at all, and the round trip is exactly
+    // long enough for another sentence to start playing.
+    if (!enabled) {
+      ttsQueueRef.current?.stop();
+      connRef.current?.sendStopSpeech();
+    }
     connRef.current?.sendVoiceMode(enabled);
   }, []);
 
@@ -622,10 +645,9 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
    * `PromptBox` already does; this button exists specifically for someone
    * who is happy with the reply and just does not want to keep listening to
    * it read aloud. Both calls are needed, same reasoning as the "skip"
-   * voice command above: the local stop silences what is already playing in
-   * *this* tab, and `sendStopSpeech()` cancels the server-side pump so the
-   * still-generating reply's next sentence does not start playing a moment
-   * later via `TtsPlaybackQueue.enqueue()`'s own auto-resume.
+   * voice command above: the local stop mutes this tab (including the
+   * sentences already in flight toward it), and `sendStopSpeech()` stops
+   * the server's pump from synthesizing the rest of the reply at all.
    */
   const handleStopSpeaking = useCallback(() => {
     ttsQueueRef.current?.stop();

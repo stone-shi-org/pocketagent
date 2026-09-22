@@ -753,6 +753,16 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
           if (live && live.transport === 'structured' && message.enabled) {
             voiceTts.attach(live);
           }
+          // PA-83: turning the toggle *off* is a hard stop, not merely "stop
+          // starting new sentences". The `attach()` listener's own
+          // `isVoiceModeEnabled` gate only stops *future* `text_delta`s from
+          // being chunked — the pump already holds every sentence pushed
+          // before this moment and keeps synthesizing and emitting them, so
+          // the reply goes on being read aloud after the user switched the
+          // stream off. Cancelling here (rather than relying on the client
+          // to also send `stop_speech`) is what makes this authoritative for
+          // *every* tab, including one that toggled it off from elsewhere.
+          if (!message.enabled) voiceTts.cancel(message.sessionId);
           voiceTts.notifyModeChanged(message.sessionId, message.enabled);
           if (!attachments.has(message.sessionId)) {
             send({ type: 'voice_mode_changed', sessionId: message.sessionId, enabled: message.enabled });

@@ -18,6 +18,21 @@ export class TtsPlaybackQueue {
   private playing = false;
   private currentSource: AudioBufferSourceNode | null = null;
   private stopped = false;
+  /**
+   * PA-83: `stopped` alone is not a stop — `enqueue()` cleared it on the
+   * very next chunk, which is correct for "this turn ended, here comes the
+   * next one" and catastrophic for "the user pressed stop". A reply's
+   * remaining sentences are already synthesized and in flight over the
+   * socket when the stop happens, so each arriving chunk un-paused the
+   * queue and playback resumed a moment later — the reported "I clicked
+   * stop / switched the stream off and it keeps talking". `muted` is the
+   * durable half: it survives every subsequent `enqueue()` and is cleared
+   * only by `arm()`, which the caller invokes when a genuinely new turn
+   * starts. Mirrors `VoiceTtsService.mutedUntilNextTurn` on the server,
+   * deliberately — the two halves of one rule ("stopped stays stopped
+   * until a new turn"), each enforced where its own audio actually lives.
+   */
+  private muted = false;
 
   constructor(private readonly onPlaybackStateChange?: (playing: boolean) => void) {}
 
@@ -25,9 +40,23 @@ export class TtsPlaybackQueue {
    *  no-op — nothing to play, it exists only as an end-of-turn signal). */
   enqueue(base64Data: string, sampleRateHz: number): void {
     if (base64Data.length === 0) return;
+    // Dropped outright rather than buffered: a muted turn's audio is never
+    // wanted later, and keeping it would make `arm()` replay a stale reply
+    // over the top of the new one it was called for.
+    if (this.muted) return;
     this.stopped = false;
     this.queue.push({ pcm: base64ToInt16Array(base64Data), sampleRateHz });
     if (!this.playing) void this.pump();
+  }
+
+  /**
+   * PA-83: allow speech again after a `stop()`. Called when a genuinely new
+   * turn begins (the `user_prompt` event, or live-listen being switched
+   * back on) — never on a mere incoming chunk, which is exactly the
+   * "un-stop itself" behaviour that made a stop temporary.
+   */
+  arm(): void {
+    this.muted = false;
   }
 
   private async pump(): Promise<void> {
@@ -75,8 +104,14 @@ export class TtsPlaybackQueue {
    * everything still queued. Idempotent and safe to call even with nothing
    * playing — the VAD's `speech_start` transition calls this unconditionally
    * the instant new speech is detected, not just while `isPlaying()`.
+   *
+   * PA-83: also a *durable* stop (see `muted`) — nothing plays again until
+   * `arm()`. That is what every caller here already meant: barge-in is
+   * followed by the user's own utterance (whose `user_prompt` re-arms),
+   * and every other caller is an explicit "stop talking".
    */
   stop(): void {
+    this.muted = true;
     this.stopped = true;
     this.queue = [];
     try {

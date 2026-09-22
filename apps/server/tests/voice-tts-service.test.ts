@@ -262,6 +262,53 @@ describe('VoiceTtsService', () => {
     expect(chunks.length).toBe(chunkCountAfterStop);
   });
 
+  /**
+   * PA-83 follow-up: "when user stopped stream (click stream button again),
+   * all talk-back must have hard stop." Turning voice mode off only flips
+   * the getter below, and `attach()`'s listener consults it per *event* —
+   * so it stops new `text_delta`s being chunked and does nothing whatsoever
+   * about the sentences the pump is already holding, which go on being
+   * synthesized and emitted. `ws/index.ts`'s `voice_mode` handler therefore
+   * cancels explicitly when disabling, exactly as its `interrupt` and
+   * `terminate()` siblings do; this pins that pairing.
+   */
+  it('PA-83: voice mode off + cancel() drops sentences the pump was already holding', async () => {
+    let inFlightResolve!: (v: SynthesizedSpeech) => void;
+    const inFlight = new Promise<SynthesizedSpeech>((resolve) => {
+      inFlightResolve = resolve;
+    });
+    const synthesize = vi
+      .fn<(text: string) => Promise<SynthesizedSpeech>>()
+      .mockImplementationOnce(() => inFlight)
+      .mockImplementation(async (t: string) => speech(t));
+
+    let voiceModeEnabled = true;
+    const service = new VoiceTtsService(() => fakeClient(synthesize), () => voiceModeEnabled);
+    const session = fakeSession('s1');
+    const chunks: TtsAudioChunk[] = [];
+    service.on('audio:s1', (c: TtsAudioChunk) => chunks.push(c));
+    service.attach(session);
+
+    session.emitAgentEvent({ kind: 'user_prompt', id: 'u1', text: 'hi' } as AgentEvent);
+    // Two complete sentences in one delta: the first is handed to
+    // `synthesize` (and left pending), the second waits behind it in the
+    // pump's promise chain — the state the toggle has to be able to cancel.
+    session.emitAgentEvent({ kind: 'text_delta', id: 't1', text: 'One. Two. ' } as AgentEvent);
+    await flush();
+    expect(synthesize).toHaveBeenCalledTimes(1);
+
+    // The toggle: the getter flips *and* the handler cancels.
+    voiceModeEnabled = false;
+    service.cancel('s1');
+    inFlightResolve(speech('One.'));
+    await flush();
+
+    // Nothing reached the browser, and the sentence still queued behind the
+    // in-flight one never even reached live-stt.
+    expect(chunks).toEqual([]);
+    expect(synthesize).toHaveBeenCalledTimes(1);
+  });
+
   it('PA-83: a genuinely new user_prompt un-mutes and talks again normally', async () => {
     const synthesize = vi.fn(async (t: string) => speech(t));
     const service = new VoiceTtsService(() => fakeClient(synthesize), () => true);
