@@ -89,14 +89,17 @@ describe('createLiveSttClient.transcribe', () => {
     close = server.close;
 
     const client = createLiveSttClient(server.url);
-    const text = await client.transcribe(Buffer.from(new Int16Array([1, 2, 3]).buffer));
+    const result = await client.transcribe(Buffer.from(new Int16Array([1, 2, 3]).buffer));
 
-    expect(text).toBe('hello world');
+    expect(result.text).toBe('hello world');
     expect(receivedContentType).toMatch(/^multipart\/form-data/);
     // The uploaded file part must carry a real WAV header, not raw PCM.
     expect(receivedBody).toContain('RIFF');
     expect(receivedBody).toContain('name="file"');
     expect(receivedBody).toContain('name="response_format"');
+    // PA-85: `verbose_json`, not `json` — it is the only format carrying the
+    // per-word confidence the browser's utterance harness gates on.
+    expect(receivedBody).toContain('verbose_json');
   });
 
   it('forwards model parameter in multipart/form-data when provided (PA-81)', async () => {
@@ -108,11 +111,100 @@ describe('createLiveSttClient.transcribe', () => {
     close = server.close;
 
     const client = createLiveSttClient(server.url);
-    const text = await client.transcribe(Buffer.from(new Int16Array([1, 2]).buffer), 'whisper-large-v3-turbo-q8_0');
+    const result = await client.transcribe(
+      Buffer.from(new Int16Array([1, 2]).buffer),
+      'whisper-large-v3-turbo-q8_0',
+    );
 
-    expect(text).toBe('model test');
+    expect(result.text).toBe('model test');
     expect(receivedBody).toContain('name="model"');
     expect(receivedBody).toContain('whisper-large-v3-turbo-q8_0');
+  });
+
+  /**
+   * PA-85 / LS-7. The word list below is the real shape live-stt answers
+   * `verbose_json` with, copied from the running service — `confidence` is
+   * the field LS-7 added, which its serializer previously dropped even
+   * though the value had already travelled the whole pipeline.
+   */
+  it('returns per-word confidence and duration from a verbose_json response', async () => {
+    const server = await startFakeLiveStt((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' }).end(
+        JSON.stringify({
+          task: 'transcribe',
+          language: '',
+          duration: 1.5,
+          text: "well i don't wish to see",
+          words: [
+            { word: 'well', start: 0.8, end: 0.88, confidence: 0.9546 },
+            { word: 'i', start: 0.96, end: 1.04, confidence: 0.9957 },
+          ],
+        }),
+      );
+    });
+    close = server.close;
+
+    const client = createLiveSttClient(server.url);
+    const result = await client.transcribe(Buffer.from(new Int16Array([1, 2]).buffer));
+
+    expect(result.text).toBe("well i don't wish to see");
+    expect(result.durationSec).toBe(1.5);
+    expect(result.words).toEqual([
+      { word: 'well', start: 0.8, end: 0.88, confidence: 0.9546 },
+      { word: 'i', start: 0.96, end: 1.04, confidence: 0.9957 },
+    ]);
+  });
+
+  /**
+   * The graceful-degradation half, and the one that matters operationally: a
+   * live-stt predating LS-7 answers with words but no `confidence`. That must
+   * leave the field absent rather than defaulted, because the harness reads
+   * absent as "no signal" and a fabricated 0 as "reject this".
+   */
+  it('omits confidence entirely when the service does not report it', async () => {
+    const server = await startFakeLiveStt((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' }).end(
+        JSON.stringify({ text: 'hello there', duration: 1, words: [{ word: 'hello', start: 0, end: 0.4 }] }),
+      );
+    });
+    close = server.close;
+
+    const client = createLiveSttClient(server.url);
+    const result = await client.transcribe(Buffer.from(new Int16Array([1]).buffer));
+
+    expect(result.words).toEqual([{ word: 'hello', start: 0, end: 0.4 }]);
+    expect(result.words?.[0]).not.toHaveProperty('confidence');
+  });
+
+  it('tolerates a response with no words key at all, the pre-PA-85 server shape', async () => {
+    const server = await startFakeLiveStt((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ text: 'plain' }));
+    });
+    close = server.close;
+
+    const client = createLiveSttClient(server.url);
+    const result = await client.transcribe(Buffer.from(new Int16Array([1]).buffer));
+
+    expect(result.text).toBe('plain');
+    expect(result.words).toBeUndefined();
+    expect(result.durationSec).toBeUndefined();
+  });
+
+  it('skips malformed word entries rather than failing the whole transcription', async () => {
+    const server = await startFakeLiveStt((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' }).end(
+        JSON.stringify({
+          text: 'hi',
+          words: [null, 'nope', { start: 1 }, { word: 'hi', confidence: 0.9 }],
+        }),
+      );
+    });
+    close = server.close;
+
+    const client = createLiveSttClient(server.url);
+    const result = await client.transcribe(Buffer.from(new Int16Array([1]).buffer));
+
+    expect(result.words).toEqual([{ word: 'hi', confidence: 0.9 }]);
   });
 
   it('surfaces a 503 (VRAM/capacity) as a retryable LiveSttError with the nested error message', async () => {

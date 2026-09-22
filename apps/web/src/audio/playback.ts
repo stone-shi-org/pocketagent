@@ -33,6 +33,44 @@ export class TtsPlaybackQueue {
    * until a new turn"), each enforced where its own audio actually lives.
    */
   private muted = false;
+  /**
+   * PA-85: a *reversible* halt, unlike `stop()`/`muted`.
+   *
+   * Two-stage barge-in needs to silence the talk-back the instant energy is
+   * detected — waiting for the transcript would mean the agent talks over the
+   * whole interruption — but at that point nothing yet knows whether the
+   * sound was a command or a cough. `stop()` cannot serve: it is deliberately
+   * durable (PA-83) and discards the queue, so a cough would permanently
+   * silence a reply mid-sentence. So the fast path pauses, the harness's
+   * verdict then either commits (`stop()`) or undoes it (`resume()`).
+   *
+   * Deliberately *not* folded into `stopped`: `enqueue` drops chunks while
+   * `muted` and must keep buffering them while merely paused, or resuming
+   * would replay a reply with a hole in it.
+   */
+  private paused = false;
+  /** The chunk currently being played, kept so `pause()` can put it back at
+   *  the head of the queue. One chunk is one sentence (`sentence-chunker.ts`),
+   *  so resuming replays that sentence from its start rather than losing it —
+   *  `AudioBufferSourceNode` has no resume-from-offset, and re-hearing one
+   *  sentence is a far better outcome than silently skipping it. */
+  private currentChunk: { pcm: Int16Array; sampleRateHz: number } | null = null;
+  /**
+   * True for as long as a `pump()` call is still inside its loop, which is
+   * *not* the same as `playing`.
+   *
+   * `pause()` sets `playing = false` immediately so `isPlaying()` — and the
+   * "Speaking…" indicator reading it — reflects the halt at once. But the
+   * `pump()` that was running is still parked on `await playChunk(...)` until
+   * the stopped source fires `onended`. A `resume()` landing in that window
+   * would see `!playing` and start a *second* pump against the same queue,
+   * and the two would shift chunks out from under each other. Reachable only
+   * on a sub-millisecond pause/resume pair, which the real callers cannot
+   * produce (a discard is at least one audio frame after a start, and a
+   * verdict is a network round trip later) — guarded anyway, because the
+   * symptom would be garbled overlapping speech that no test would catch.
+   */
+  private pumpActive = false;
 
   constructor(private readonly onPlaybackStateChange?: (playing: boolean) => void) {}
 
@@ -46,7 +84,9 @@ export class TtsPlaybackQueue {
     if (this.muted) return;
     this.stopped = false;
     this.queue.push({ pcm: base64ToInt16Array(base64Data), sampleRateHz });
-    if (!this.playing) void this.pump();
+    // Buffered but not started while paused — a barge-in under evaluation
+    // must not be drowned out by the next sentence arriving over the socket.
+    if (!this.pumpActive && !this.paused) void this.pump();
   }
 
   /**
@@ -57,15 +97,77 @@ export class TtsPlaybackQueue {
    */
   arm(): void {
     this.muted = false;
+    // A genuinely new turn supersedes any *paused* remnant of the previous
+    // one — clearing the flag alone would let the old reply's parked
+    // sentences play underneath the new one. Guarded on `paused` so the
+    // non-paused path stays byte-identical to PA-83's own behaviour, where
+    // `arm()` deliberately touches nothing but the mute.
+    if (this.paused) {
+      this.paused = false;
+      this.currentChunk = null;
+      this.queue = [];
+    }
+  }
+
+  /**
+   * PA-85, stage one of barge-in: silence playback now, keep everything so it
+   * can be undone. Idempotent, and a no-op once `stop()` has been called —
+   * a durable stop must not be downgradeable to a pause.
+   */
+  pause(): void {
+    if (this.paused || this.muted) return;
+    this.paused = true;
+    this.stopped = true;
+    // Back to the head of the queue so `resume()` replays this sentence
+    // whole. Done before stopping the source: `stop()` synchronously fires
+    // `onended`, which lets `pump()` proceed.
+    if (this.currentChunk) {
+      this.queue.unshift(this.currentChunk);
+      this.currentChunk = null;
+    }
+    try {
+      this.currentSource?.stop();
+    } catch {
+      // Already stopped/ended — same reason `stop()` below swallows this.
+    }
+    this.currentSource = null;
+    this.playing = false;
+  }
+
+  /**
+   * PA-85, the undo: the utterance that triggered the pause turned out to be
+   * junk, so carry on reading. A no-op if a real stop happened in between,
+   * so a `stop()` racing a verdict still wins.
+   */
+  resume(): void {
+    if (!this.paused) return;
+    this.paused = false;
+    if (this.muted) return;
+    this.stopped = false;
+    // `pumpActive`, not `playing`: see its own comment for why the two differ
+    // exactly inside this window.
+    if (this.queue.length > 0 && !this.pumpActive) void this.pump();
+  }
+
+  isPaused(): boolean {
+    return this.paused;
   }
 
   private async pump(): Promise<void> {
+    if (this.pumpActive) return;
+    this.pumpActive = true;
     this.playing = true;
     this.onPlaybackStateChange?.(true);
-    while (this.queue.length > 0 && !this.stopped) {
+    while (this.queue.length > 0 && !this.stopped && !this.paused) {
       const chunk = this.queue.shift()!;
+      this.currentChunk = chunk;
       await this.playChunk(chunk);
+      // Cleared only on an *uninterrupted* finish. `pause()` reads this to
+      // decide what to put back, so clearing it unconditionally would lose
+      // the sentence that was playing when the pause landed.
+      if (!this.paused) this.currentChunk = null;
     }
+    this.pumpActive = false;
     this.playing = false;
     this.onPlaybackStateChange?.(false);
   }
@@ -113,6 +215,10 @@ export class TtsPlaybackQueue {
   stop(): void {
     this.muted = true;
     this.stopped = true;
+    // A durable stop supersedes a pause in both directions: `resume()` must
+    // not revive it, and the sentence `pause()` parked must not come back.
+    this.paused = false;
+    this.currentChunk = null;
     this.queue = [];
     try {
       this.currentSource?.stop();

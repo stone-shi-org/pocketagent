@@ -61,8 +61,18 @@ export const voiceRoutes: FastifyPluginAsync = async (app) => {
     }
 
     try {
-      const text = await client.transcribe(pcm16, config.liveSttModel);
-      return reply.send({ text });
+      // PA-85: `words`/`durationSec` are forwarded verbatim rather than
+      // judged here. The harness that acts on them lives in the browser
+      // because that is where the *other* half of the evidence is — the
+      // endpointer's measured voiced duration, and whether the agent's
+      // talk-back is currently playing (a barge-in). Splitting the decision
+      // across two processes would mean neither could see all of it.
+      const result = await client.transcribe(pcm16, config.liveSttModel);
+      return reply.send({
+        text: result.text,
+        ...(result.words ? { words: result.words } : {}),
+        ...(result.durationSec !== undefined ? { durationSec: result.durationSec } : {}),
+      });
     } catch (err) {
       if (err instanceof LiveSttError) {
         return reply.code(err.retryable ? 503 : 502).send({
@@ -121,7 +131,7 @@ export const voiceRoutes: FastifyPluginAsync = async (app) => {
 
     const start = performance.now();
     try {
-      const transcript = await client.transcribe(pcm16, model || undefined);
+      const { text: transcript } = await client.transcribe(pcm16, model || undefined);
       const durationMs = Math.round(performance.now() - start);
       return reply.send({ ok: true, transcript, durationMs });
     } catch (err) {

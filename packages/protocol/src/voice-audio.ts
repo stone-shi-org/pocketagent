@@ -27,3 +27,35 @@ export const VoiceAudioUpload = z.object({
   durationMs: z.number().nonnegative(),
 });
 export type VoiceAudioUpload = z.infer<typeof VoiceAudioUpload>;
+
+/**
+ * One word of a transcript, with the ASR's own confidence in it (PA-85, and
+ * LS-7 on the live-stt side).
+ *
+ * live-stt computed this all along — `proto/livestt/v1/asr.proto`'s `Word`
+ * carries a `confidence` float, and `transcribe_http.py` accumulated it — but
+ * its `verbose_json` serializer dropped the field, so nothing downstream could
+ * read it. LS-7 added it; this is the shape it emits.
+ *
+ * Every field is optional because this is *evidence, not a contract*: a
+ * live-stt predating LS-7 answers `verbose_json` with no `confidence` key, and
+ * a server predating this change answers `{ text }` with no `words` at all.
+ * The harness that reads this must degrade to "no confidence signal available"
+ * rather than treat a missing number as a low one — a filter that silently
+ * became strict against an older voice service would drop real commands and
+ * look like a broken microphone.
+ *
+ * `confidence` is *not* comparable across live-stt's ASR backends: whisper
+ * reports the mean token probability over the word, parakeet the `min` over
+ * its tokens. Both are "higher is better" in (0,1], so a threshold is
+ * meaningful against either, but one tuned on one backend does not transfer
+ * exactly to the other. Raised as an open question on LS-7 rather than
+ * papered over here.
+ */
+export const TranscriptWord = z.object({
+  word: z.string(),
+  start: z.number().optional(),
+  end: z.number().optional(),
+  confidence: z.number().optional(),
+});
+export type TranscriptWord = z.infer<typeof TranscriptWord>;

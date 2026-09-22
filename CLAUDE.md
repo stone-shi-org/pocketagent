@@ -934,6 +934,119 @@ that only exercises `execute()` with a known-good id; the fix is a real tool for
 call, not a better sentence, and `planner-tools.test.ts` now pins the description to the tool
 name it actually points at so the two cannot drift apart silently again.
 
+### The live-listen utterance harness (PA-85)
+
+Voice input has two modes: push-to-talk (a finger is down, so intent is
+unambiguous) and **live-listen**, a continuously open mic that endpoints
+utterances itself. The second one has no intent signal at all, and the
+reported failure was exactly that: a non-speech sound — "not even a word" —
+gets transcribed into a filler token and forwarded to a coding agent as a
+prompt. Reproduced against the real service while building this: a 350ms
+synthetic thump came back from this deployment's own default ASR model as the
+word **"yeah"**, at confidence 0.19.
+
+**Two filters were proposed on the ticket and both were rejected**, which is
+most of why the code looks the way it does. A **minimum word count** ("at
+least three words") fails in both directions: the most valuable utterances in
+a hands-free session are one word — *yes*, *no*, *stop*, *approve* — and the
+first invariant here is that nobody answers an approval for the user, so
+voice is precisely how you would answer one without a keyboard; meanwhile "oh
+yeah okay" is three words of pure filler. So `isAllFiller` tests whether
+*every* token is filler rather than how many there are. A **lightweight LLM
+classifier** puts a round trip on the critical path of every utterance
+(immediacy is the whole point of the mode), needs an endpoint a standalone
+install may not have, and when wrong it silently discards a real command.
+
+Three layers, cheapest first, and each catches something the others cannot:
+
+- **The audio gate** (`audio/vad.ts`) never uploads a byte. `speechThreshold`
+  became an absolute *floor* rather than the whole rule: the effective
+  threshold is a margin above a tracked ambient noise floor, so the gate
+  self-calibrates instead of asking the user to hand-tune an absolute level —
+  which is what PA-83's sensitivity slider exists to work around. A
+  `minVoicedRatio` requirement is orthogonal to `minSpeechMs` and catches what
+  a duration floor cannot: a transient with a long decay tail *spans* enough
+  milliseconds while only a couple of frames were ever loud. `minSpeechMs` was
+  deliberately **not** raised — a spoken "yes" is 300-400ms, so a floor high
+  enough to reject a throat-clear rejects the single-word answers the feature
+  is most valuable for.
+- **The ASR's own confidence** (`voice/live-stt-client.ts` asks for
+  `verbose_json`; LS-7 on the live-stt side). live-stt computed per-word
+  confidence all along — `proto/livestt/v1/asr.proto`'s `Word` carries it and
+  `transcribe_http.py` accumulated it — and its serializer dropped the field,
+  so nothing downstream could read it. Same request, no added latency, and it
+  is the model's own judgement about its own output rather than a second
+  model's guess about the first one's text. It is **evidence, not a contract**:
+  a live-stt predating LS-7 reports none, and the harness must read absent as
+  "no signal" rather than as "low confidence", or a voice feature silently
+  gets stricter against an older service and looks like a broken mic.
+  Confidence is *not* comparable across live-stt's backends (whisper reports a
+  mean over a word's tokens, parakeet a `min`), so a threshold is meaningful
+  against either but does not transfer exactly — raised as an open question on
+  LS-7 rather than papered over.
+- **Text rules** (`audio/utterance-harness.ts`) — a filler-token set, an
+  all-tokens-are-filler test, and the enumerable non-speech repertoire
+  whisper-family decoders emit. Matched on the **whole** normalized utterance,
+  never as substrings, for the reason `voice-commands.ts` already records:
+  "thank you for fixing the tests" is a real instruction. This layer is not
+  redundant with confidence, and the evidence is concrete: whisper returns
+  `[BLANK_AUDIO]` for digital silence at confidence **0.79**, so a
+  confidence-only filter sends it straight on.
+
+**"yeah" drops but "yes" sends**, a deliberate asymmetry on the reporter's own
+evidence — PA-85 names "oh, yeah, hum" as what STT invents out of sounds that
+were not words. A deliberate "yeah" is sacrificed; "yes" is the word to say
+when you mean it, and also the one that answers an approval.
+
+**The verdict is three-way, and that is the part worth defending hardest.**
+Any threshold will eventually reject something a human meant, and a silently
+dropped command is the worst available failure: no feedback, so the user
+concludes the mic is dead and repeats themselves louder. So `send` goes
+through unchanged, `drop` is discarded *with a visible reason*, and
+**`review` is parked in the composer** — reusing PA-82's review-before-send
+affordance rather than inventing a second one. That gives the thresholds an
+honest tuning story: too tight degrades to "you have to tap send" rather than
+to "your words vanished". The review handoff is keyed on a **counter**, not
+compared by text, so the same borderline utterance said twice lands twice —
+the alternative swallows a repeat, which is exactly what someone does when
+they think they were not heard. It deliberately does not focus the textarea,
+unlike push-to-talk's own review path: that one follows a tap, whereas this
+fires at any moment in a hands-free session, and popping the on-screen
+keyboard unasked is the wrong thing to do to someone not holding the phone.
+
+**Barge-in is two-stage, and fixing it mattered more than the bug the ticket
+was filed about.** `onSpeechStart` fires on a raw RMS crossing with no
+transcript involved, and it used to call `stop()` and send `interrupt` — so a
+cough while the agent was talking *destroyed a turn in flight*. A harness that
+only filtered the prompt path would have left the more destructive path
+untouched. Now the fast, reversible half happens immediately
+(`TtsPlaybackQueue.pause()`, which is what makes barge-in feel responsive) and
+the irreversible `interrupt` waits for the verdict: a real command commits it,
+junk calls `resume()` and the reply carries on. `pause()`/`resume()` are
+deliberately distinct from `stop()`, which PA-83 made a *durable* mute for its
+own good reasons — a stop must never be downgradeable to a pause, and
+`resume()` must never revive one. `pause()` puts the interrupted sentence back
+at the head of the queue, so resuming replays that sentence rather than losing
+it (`AudioBufferSourceNode` has no resume-from-offset, and re-hearing one
+sentence beats silently skipping it).
+
+**The harness runs in the browser, not the server.** The route forwards
+`words`/`durationSec` verbatim and judges nothing, because the other half of
+the evidence is client-side — the endpointer's measured voiced span, and
+whether the talk-back is currently playing. Splitting the decision across two
+processes would mean neither could see all of it. It also keeps push-to-talk
+honest: a server-side filter would drop "oh" for someone who deliberately held
+the button down and is owed whatever they said.
+
+Known limitation: the thresholds are fixed, well-commented constants rather
+than settings. PA-83 already added two voice knobs, and the adaptive noise
+floor is partly an attempt to stop needing the first one — a third knob should
+wait until the fixed values are shown wrong on real hardware. None of this was
+verifiable against a real microphone in the environment it was written in (the
+same limitation `vad.ts`'s own header records), so the unit tests carry
+recorded real-service output and real-device testing is the acceptance
+evidence.
+
 ### The home screen
 
 `projects/index.ts` composes `GET /api/projects`: live sessions and on-disk conversations
@@ -1821,6 +1934,29 @@ These are load-bearing. Several were bugs first.
   unauthorized hosts are reported at `GET /api/push/status` and surfaced as warning badges in
   the UI rather than silently dropping notifications. Crucially, terminal I/O is never sent or
   stored over this mechanism — only high-level approval/message notification metadata.
+- **A live-listen utterance is never silently discarded, and barge-in commits
+  only after the harness has judged it** (PA-85). The mic is open with no
+  intent signal, so a filter is unavoidable — but the filter's own mistakes
+  must be visible and recoverable, which is why the verdict has three values
+  and not two: `drop` always names a reason in the UI, and the borderline case
+  is *parked in the composer* rather than thrown away. A silently dropped
+  command reads as a dead microphone, which is a worse failure than the filler
+  prompt the harness exists to stop, and it is the failure a two-valued filter
+  inevitably produces. Two things follow and must not be quietly reverted. The
+  audio gate may only ever get *stricter* than its configured absolute
+  thresholds (the adaptive noise floor is a `max`, so a quiet room behaves
+  exactly as it did before), and `minSpeechMs` must stay low enough to admit a
+  spoken "yes" — rejecting short utterances by duration, or by a word count,
+  breaks answering an approval by voice, which is the one thing the first
+  invariant says must always be the user's own act. And `onSpeechStart` must
+  never send `interrupt` on its own: it fires on a raw energy threshold with no
+  transcript, so the only irreversible action it may take is none —
+  `TtsPlaybackQueue.pause()` is reversible, `stop()` plus `interrupt()` waits
+  for a verdict. Before that split, a cough destroyed a turn in flight.
+  Asserted in `apps/web/src/audio/utterance-harness.test.ts` (including
+  recorded real-service output, where this deployment's own model transcribed a
+  350ms thump as "yeah" and whisper returned `[BLANK_AUDIO]` at confidence
+  0.79) and `playback.test.ts`.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.

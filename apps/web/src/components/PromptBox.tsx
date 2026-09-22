@@ -127,6 +127,25 @@ interface Props {
    *  callback, despite the neighboring `onX` callback props. */
   liveListenError?: string | null;
   /**
+   * PA-85: a transient, informational message about what the utterance
+   * harness just did — "Ignored — filler only (\"oh\")", "Parked for review
+   * — low confidence (0.41)". Rendered distinctly from `liveListenError`,
+   * because this is a normal outcome being disclosed rather than a fault: a
+   * rejection nobody can see reads as a dead microphone.
+   */
+  liveListenNotice?: string | null;
+  /**
+   * PA-85: an utterance the harness parked instead of sending. Appended to
+   * whatever is already in the box on every change of `seq`, reusing PA-82's
+   * review-before-send affordance rather than inventing a second one.
+   *
+   * Keyed on a counter rather than compared by text, so the same borderline
+   * utterance said twice is appended twice — the alternative silently
+   * swallows a repeat, which is precisely what someone does when they think
+   * they were not heard.
+   */
+  reviewText?: { text: string; seq: number } | null;
+  /**
    * PA-83 #4: mirrors `TtsPlaybackQueue.isPlaying()` — true while the
    * agent's spoken reply is actually being read aloud. Swaps the
    * "Listening…" indicator for a "Speaking…" one with its own stop control
@@ -233,6 +252,8 @@ export function PromptBox({
   onSetLiveListen,
   micLevel = 0,
   liveListenError = null,
+  liveListenNotice = null,
+  reviewText = null,
   isSpeaking = false,
   onStopSpeaking,
   commands = [],
@@ -267,6 +288,28 @@ export function PromptBox({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const micButtonRef = useRef<MicButtonHandle>(null);
+
+  /**
+   * PA-85: append an utterance the harness parked for review.
+   *
+   * Keyed on `reviewText.seq` alone, so the same text arriving twice appends
+   * twice. Deliberately does *not* focus the textarea, unlike
+   * `handleVoiceRecorded`'s own review path: that one follows a deliberate
+   * tap on the mic, whereas this one can fire at any moment in a hands-free
+   * session, and popping the on-screen keyboard unasked is exactly the wrong
+   * thing to do to someone who is not holding the phone.
+   */
+  useEffect(() => {
+    if (!reviewText) return;
+    const incoming = reviewText.text.trim();
+    if (!incoming) return;
+    setText((prev) => (prev.trim() ? `${prev.trim()} ${incoming}` : incoming));
+    // Depends on `seq` alone, deliberately: `reviewText.text` is read here
+    // but must not be a dependency, or an identical repeat that `seq` had
+    // already accounted for would append a second time. (This repo does not
+    // enable `react-hooks/exhaustive-deps`, so there is no directive to
+    // suppress — hence the note.)
+  }, [reviewText?.seq]);
 
   useEffect(() => {
     if (!isVoiceRecording) {
@@ -682,6 +725,12 @@ export function PromptBox({
               </span>
             </>
           )}
+          {/* PA-85: why the harness just ignored or parked something. Inside
+              the indicator rather than in the error row above, because it is
+              a normal outcome of listening, not a fault — and the indicator
+              is the one element guaranteed to be on screen whenever
+              live-listen is on. */}
+          {liveListenNotice && <span className="live-listen-notice">{liveListenNotice}</span>}
         </div>
       )}
       {supportsImageAttachment && !isVoiceRecording && !isTranscribing && (

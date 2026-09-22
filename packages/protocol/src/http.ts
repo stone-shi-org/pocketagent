@@ -13,7 +13,7 @@ import {
 import { EffortLevel, SessionTransport } from './agent-events.js';
 import { LIMITS } from './limits.js';
 import { ProtocolRange } from './protocol-negotiation.js';
-import { VoiceAudioUpload } from './voice-audio.js';
+import { TranscriptWord, VoiceAudioUpload } from './voice-audio.js';
 
 export const LoginRequest = z.object({
   token: z.string().min(1).max(512),
@@ -141,8 +141,23 @@ export const VoiceTranscribeRequest = z.object({
 });
 export type VoiceTranscribeRequest = z.infer<typeof VoiceTranscribeRequest>;
 
+/**
+ * PA-85: `words`/`durationSec` are the harness's evidence, and both are
+ * optional for the reason `TranscriptWord`'s own comment gives — a live-stt
+ * predating LS-7 reports no confidence, and the harness must read that as "no
+ * signal" rather than "no confidence". `text` alone remains sufficient, which
+ * is what keeps this change additive for every existing caller.
+ *
+ * `durationSec` is the *uploaded audio's* length as live-stt measured it, not
+ * the voiced span — the browser already knows the latter from its own
+ * endpointer. Both are kept because they disagree usefully: words-per-second
+ * computed against the upload is what catches a hallucination, since filler
+ * invented out of a fraction of a second of noise reports an implausible rate.
+ */
 export const VoiceTranscribeResponse = z.object({
   text: z.string(),
+  words: z.array(TranscriptWord).optional(),
+  durationSec: z.number().optional(),
 });
 export type VoiceTranscribeResponse = z.infer<typeof VoiceTranscribeResponse>;
 

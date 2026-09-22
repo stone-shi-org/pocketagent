@@ -22,6 +22,22 @@ export interface LiveListenOptions {
    * for the entire duration of what they're saying.
    */
   onSpeechStart?: () => void;
+  /**
+   * PA-85: a run of speech started (so `onSpeechStart` fired) but the
+   * endpointer then *rejected* it — too short, or not sustained enough to
+   * clear `minVoicedRatio` — so no utterance will ever be emitted for it.
+   *
+   * Load-bearing rather than informational. `onSpeechStart` is now the fast,
+   * reversible half of two-stage barge-in: it pauses the agent's talk-back
+   * before anything knows whether the sound was a command. Every other
+   * outcome resolves that pause in `onUtterance`, but a VAD-level discard
+   * never reaches `onUtterance` at all — so without this callback a cough
+   * loud enough to trip `speech_start` and junky enough to be discarded would
+   * leave the reply paused mid-sentence with nothing left to resume it. The
+   * Tier 1 gate added in the same ticket makes that outcome *more* frequent,
+   * not less, which is what turns this from a tidy-up into a requirement.
+   */
+  onSpeechDiscarded?: () => void;
   /** Per-frame RMS energy, for an audio-level meter — the ticket's only
    *  "listening" UI feedback (no live captions, no partials). */
   onLevel?: (level: number) => void;
@@ -103,6 +119,13 @@ export class LiveListenController {
     const energy = rms(frame);
     this.opts.onLevel?.(energy);
 
+    // Sampled before the push: the endpointer reports a *rejected* run by
+    // silently returning to idle with a `null` transition, which is
+    // indistinguishable from ordinary silence by the return value alone.
+    // Comparing the speaking state across the call is what separates them,
+    // and it does so without widening `VadTransition` — `SpeechEndpointer`'s
+    // three-state contract is what `vad.ts` says every caller may depend on.
+    const wasSpeaking = this.endpointer.isSpeaking();
     const transition = this.endpointer.push(energy, performance.now());
 
     if (transition === 'speech_start') {
@@ -120,12 +143,18 @@ export class LiveListenController {
     }
     if (transition === 'speech_end') {
       this.emitUtterance();
+      return;
     }
-    // `transition === null` while not speaking: either true silence between
-    // utterances, or a too-short blip the endpointer already discarded —
-    // either way `this.chunks` is left for the *next* `speech_start` to
-    // reset, so a discarded blip's few frames never leak into a later
-    // utterance.
+    // Not speaking, and no `speech_end`: either true silence between
+    // utterances, or a blip the endpointer just discarded. `this.chunks` is
+    // left for the *next* `speech_start` to reset either way, so a discarded
+    // blip's few frames never leak into a later utterance — but a discard has
+    // to be *announced*, because something is waiting on this utterance's
+    // outcome (see `onSpeechDiscarded`).
+    if (wasSpeaking) {
+      this.chunks = [];
+      this.opts.onSpeechDiscarded?.();
+    }
   }
 
   private emitUtterance(): void {

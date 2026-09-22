@@ -1116,6 +1116,22 @@ input[type='number']::-webkit-outer-spin-button {
   align-self: flex-start;
 }
 
+/* PA-85: the harness explaining itself — "Ignored — filler only (\"oh\")".
+   Dimmer than the indicator's own text and allowed to wrap, since it carries
+   a reason rather than a status; it clears itself after a few seconds, so it
+   must never reflow the composer enough to move the send button under a
+   thumb that is already travelling toward it. */
+.live-listen-notice {
+  color: var(--text-dim);
+  opacity: 0.85;
+  font-size: 11.5px;
+  font-style: italic;
+  max-width: 60vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .live-listen-dot {
   width: 8px;
   height: 8px;

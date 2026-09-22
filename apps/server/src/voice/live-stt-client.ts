@@ -113,9 +113,41 @@ export interface LiveSttModelEntry {
   sampleRate?: number;
 }
 
+/**
+ * One word live-stt reported, with its own confidence (PA-85 / LS-7).
+ *
+ * `confidence` is optional rather than defaulted, deliberately: a live-stt
+ * predating LS-7 answers `verbose_json` with no such key, and substituting a
+ * number there would be inventing evidence. The harness reading this treats
+ * absent as "no signal" and falls back to its text-only rules.
+ */
+export interface LiveSttWord {
+  word: string;
+  start?: number;
+  end?: number;
+  confidence?: number;
+}
+
+/**
+ * PA-85: `transcribe()` used to return a bare string. It now returns the
+ * evidence the harness needs alongside it — see `TranscriptWord` in the
+ * protocol package for why per-word confidence is the right discriminator for
+ * filtering non-speech, and why it had to be unlocked in live-stt first.
+ *
+ * `words` is `[]` (not undefined) when live-stt answered with an empty list,
+ * and undefined only when the response carried no `words` key at all — which
+ * is how a caller tells "this service does not report words" from "it reported
+ * none for this audio".
+ */
+export interface TranscriptionResult {
+  text: string;
+  words?: LiveSttWord[];
+  durationSec?: number;
+}
+
 export interface LiveSttClient {
   /** Transcribes one buffered utterance. Throws `LiveSttError` on any failure. */
-  transcribe(pcm16: Buffer, model?: string | null): Promise<string>;
+  transcribe(pcm16: Buffer, model?: string | null): Promise<TranscriptionResult>;
   /** Synthesizes one already-chunked sentence. Throws `LiveSttError` on any failure. */
   synthesize(text: string, model?: string | null): Promise<SynthesizedSpeech>;
   /** Fetches available model list from `GET /v1/models`. */
@@ -133,11 +165,17 @@ export function createLiveSttClient(rawBaseUrl: string, fetchImpl: typeof fetch 
   // tolerates. Doing it here covers both origins uniformly.
   const baseUrl = rawBaseUrl.replace(/\/$/, '');
   return {
-    async transcribe(pcm16: Buffer, model?: string | null): Promise<string> {
+    async transcribe(pcm16: Buffer, model?: string | null): Promise<TranscriptionResult> {
       const wav = pcm16ToWav(pcm16);
       const form = new FormData();
       form.append('file', new Blob([wav], { type: 'audio/wav' }), 'utterance.wav');
-      form.append('response_format', 'json');
+      // `verbose_json` rather than `json` (PA-85): it is the only response
+      // format that carries per-word timings and — since LS-7 — the ASR's own
+      // per-word confidence, which is what the browser's utterance harness
+      // gates on. Same request, same cost: this is a richer serialization of
+      // a transcription live-stt already performed, not extra work asked of
+      // it, which is the whole reason this beats adding an LLM filter.
+      form.append('response_format', 'verbose_json');
       if (model?.trim()) {
         form.append('model', model.trim());
       }
@@ -169,7 +207,37 @@ export function createLiveSttClient(rawBaseUrl: string, fetchImpl: typeof fetch 
       if (typeof transcript !== 'string') {
         throw new LiveSttError('The voice service response was missing a transcript.', false);
       }
-      return transcript;
+
+      // Everything past `text` is optional evidence, so a malformed or absent
+      // `words`/`duration` degrades to "no signal" instead of failing a
+      // transcription that otherwise succeeded. A voice feature that started
+      // erroring because the harness's *optional* input was missing would be
+      // a strictly worse outcome than the noise the harness exists to filter.
+      const rawWords = (body as { words?: unknown }).words;
+      const words = Array.isArray(rawWords)
+        ? rawWords.flatMap((entry): LiveSttWord[] => {
+            if (!entry || typeof entry !== 'object') return [];
+            const w = entry as { word?: unknown; start?: unknown; end?: unknown; confidence?: unknown };
+            if (typeof w.word !== 'string') return [];
+            return [
+              {
+                word: w.word,
+                ...(typeof w.start === 'number' ? { start: w.start } : {}),
+                ...(typeof w.end === 'number' ? { end: w.end } : {}),
+                ...(typeof w.confidence === 'number' ? { confidence: w.confidence } : {}),
+              },
+            ];
+          })
+        : undefined;
+
+      const rawDuration = (body as { duration?: unknown }).duration;
+      const durationSec = typeof rawDuration === 'number' ? rawDuration : undefined;
+
+      return {
+        text: transcript,
+        ...(words ? { words } : {}),
+        ...(durationSec !== undefined ? { durationSec } : {}),
+      };
     },
 
     async synthesize(text: string, model?: string | null): Promise<SynthesizedSpeech> {

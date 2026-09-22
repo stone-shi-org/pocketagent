@@ -17,20 +17,68 @@
  */
 
 export interface VadOptions {
-  /** RMS at or above which a frame counts as speech. */
+  /**
+   * RMS at or above which a frame counts as speech — an *absolute floor*
+   * since PA-85, not the whole rule: the effective threshold is this or the
+   * tracked ambient noise floor times `noiseMarginMultiplier`, whichever is
+   * higher (see `SpeechEndpointer.effectiveThresholds`).
+   */
   speechThreshold: number;
   /** RMS below which a frame counts as silence. Lower than `speechThreshold`
    *  (hysteresis) so energy hovering right at one level doesn't chatter
-   *  between states frame to frame. */
+   *  between states frame to frame. Also an absolute floor, scaled with
+   *  `speechThreshold` when the adaptive threshold wins. */
   silenceThreshold: number;
   /** Continuous silence (ms) required before declaring end-of-turn — the
    *  "trailing silence hangover" the PA-20 ticket calls out as the main
    *  quality knob for false triggers (a mid-sentence thinking pause). */
   hangoverMs: number;
-  /** Speech shorter than this (ms) is discarded as noise rather than
-   *  producing a `speech_end` transition — a cough or a door slam should not
-   *  submit an empty/garbage utterance. */
+  /**
+   * Speech shorter than this (ms) is discarded as noise rather than
+   * producing a `speech_end` transition — a cough or a door slam should not
+   * submit an empty/garbage utterance.
+   *
+   * PA-85 deliberately did **not** raise this. It is the obvious lever for
+   * "stop sending 'oh' to the agent" and it is the wrong one: a spoken "yes"
+   * or "no" runs about 300-400ms, so a floor high enough to reject a
+   * throat-clear also rejects the single-word answers that are the most
+   * valuable thing anyone says into a hands-free session — the same reason
+   * the ticket's proposed three-word minimum was rejected. Short *and*
+   * junk is separated from short *and* meant by `utterance-harness.ts`,
+   * which has the transcript and the ASR's own confidence to judge with,
+   * rather than by a duration threshold here that has neither.
+   */
   minSpeechMs: number;
+  /**
+   * PA-85: how many times the tracked ambient noise floor a frame must
+   * exceed to count as speech.
+   *
+   * `speechThreshold` alone is an *absolute* level, which is why PA-83 had
+   * to expose a 1-10 sensitivity slider: no single number is right for both
+   * a quiet room and a noisy one, so the user was asked to hand-tune a
+   * quantity the code can measure for itself. A margin above the measured
+   * floor self-calibrates, which is what removes most of the reported
+   * "there was a sound, not even a word, and it sent something" class
+   * before any audio is uploaded at all — no added latency, no STT call.
+   *
+   * It only ever makes the gate *stricter* (the absolute floor is a
+   * minimum), so a quiet room behaves exactly as it did before PA-85.
+   */
+  noiseMarginMultiplier: number;
+  /**
+   * PA-85: the fraction of an utterance's frames that must actually have
+   * exceeded the speech threshold for it to count as speech.
+   *
+   * Orthogonal to `minSpeechMs`, and it catches what a duration floor
+   * cannot: a door slam or a dropped object is a sharp transient with a
+   * slow decay tail, so it can *span* enough milliseconds to clear a
+   * duration check while only a handful of frames were ever loud. Real
+   * speech is sustained — most of its frames are above the threshold.
+   * Measured up to the moment the closing silence began, never including
+   * the hangover window itself, which would otherwise dilute every
+   * utterance's ratio by design.
+   */
+  minVoicedRatio: number;
 }
 
 export const DEFAULT_VAD_OPTIONS: VadOptions = {
@@ -38,7 +86,20 @@ export const DEFAULT_VAD_OPTIONS: VadOptions = {
   silenceThreshold: 0.012,
   hangoverMs: 800,
   minSpeechMs: 250,
+  noiseMarginMultiplier: 2.5,
+  minVoicedRatio: 0.35,
 };
+
+/**
+ * PA-85: how fast the ambient noise floor estimate follows the room.
+ *
+ * Applied once per frame while idle, and a frame is one 128-sample render
+ * quantum (~2.7ms at 48kHz), so 0.05 settles in roughly 50-60ms of silence.
+ * Fast enough that the first utterance after switching the mic on is already
+ * judged against a real measurement rather than a cold default, and slow
+ * enough that it is not yanked around by one anomalous frame.
+ */
+const NOISE_FLOOR_ALPHA = 0.05;
 
 /**
  * PA-83 #1: maps the Settings page's user-facing "turn detection" knobs onto
@@ -57,6 +118,11 @@ export const DEFAULT_VAD_OPTIONS: VadOptions = {
  * together (preserving the hysteresis ratio between them) by a fixed 20%
  * rather than by a hand-picked pair of endpoints, which would have made 5
  * an arbitrary point on the curve instead of the anchor.
+ *
+ * PA-85's two additions are deliberately *not* on this scale. They are
+ * relative measures already (a multiple of the measured floor, and a
+ * fraction of an utterance's frames), so they mean the same thing at every
+ * sensitivity setting and there is nothing for the slider to scale.
  */
 export function vadOptionsForSensitivity(sensitivity: number, silenceMs: number): VadOptions {
   const clampedSensitivity = Math.min(10, Math.max(1, Math.round(sensitivity)));
@@ -66,6 +132,8 @@ export function vadOptionsForSensitivity(sensitivity: number, silenceMs: number)
     silenceThreshold: DEFAULT_VAD_OPTIONS.silenceThreshold * factor,
     hangoverMs: Math.min(3000, Math.max(200, Math.round(silenceMs))),
     minSpeechMs: DEFAULT_VAD_OPTIONS.minSpeechMs,
+    noiseMarginMultiplier: DEFAULT_VAD_OPTIONS.noiseMarginMultiplier,
+    minVoicedRatio: DEFAULT_VAD_OPTIONS.minVoicedRatio,
   };
 }
 
@@ -89,52 +157,128 @@ export class SpeechEndpointer {
   private state: 'idle' | 'speaking' = 'idle';
   private silenceSinceMs: number | null = null;
   private speechStartedAtMs: number | null = null;
+  /**
+   * PA-85: EMA of frame energy observed while idle, or null until the first
+   * idle frame has been seen. Updated only while idle *and* only from frames
+   * below the current speech threshold, so an utterance never raises the
+   * floor that is supposed to be measuring the room between utterances.
+   */
+  private noiseFloor: number | null = null;
+  /** Frames since `speech_start` whose energy cleared the speech threshold. */
+  private voicedFrames = 0;
+  /** All frames since `speech_start`. */
+  private totalFrames = 0;
+  /** `totalFrames` as of the moment the closing silence began, or null if no
+   *  silence run is currently open. Snapshotting it is what keeps the
+   *  hangover window out of the voiced-ratio denominator. */
+  private framesAtSilenceOnset: number | null = null;
 
   constructor(private readonly opts: VadOptions = DEFAULT_VAD_OPTIONS) {}
 
+  /**
+   * The thresholds actually in force for this frame: the configured absolute
+   * floors, or a margin above the measured ambient noise, whichever is
+   * higher. The silence threshold keeps its configured ratio to the speech
+   * threshold so hysteresis survives the adaptive case — without that, a
+   * noisy room would get a raised speech threshold and an unchanged silence
+   * threshold, and every pause between words would read as end-of-turn.
+   */
+  private effectiveThresholds(): { speech: number; silence: number } {
+    const adaptiveSpeech = (this.noiseFloor ?? 0) * this.opts.noiseMarginMultiplier;
+    const speech = Math.max(this.opts.speechThreshold, adaptiveSpeech);
+    // Guard a zero/negative configured speech threshold rather than dividing
+    // by it: `vadOptionsForSensitivity` cannot produce one, but `VadOptions`
+    // is a public shape and a caller can.
+    const hysteresisRatio =
+      this.opts.speechThreshold > 0 ? this.opts.silenceThreshold / this.opts.speechThreshold : 1;
+    return { speech, silence: Math.min(speech, speech * hysteresisRatio) };
+  }
+
   push(energy: number, atMs: number): VadTransition {
+    const { speech, silence } = this.effectiveThresholds();
+
     if (this.state === 'idle') {
-      if (energy >= this.opts.speechThreshold) {
+      if (energy >= speech) {
         this.state = 'speaking';
         this.speechStartedAtMs = atMs;
         this.silenceSinceMs = null;
+        // This frame is itself the first frame of the utterance, and it is
+        // by definition voiced — counting it keeps the ratio honest for a
+        // very short utterance made of only a few frames.
+        this.voicedFrames = 1;
+        this.totalFrames = 1;
+        this.framesAtSilenceOnset = null;
         return 'speech_start';
       }
+      // Only frames that are *not* speech feed the floor estimate, so a loud
+      // sound the hysteresis has not yet promoted to `speaking` cannot drag
+      // the threshold up behind it.
+      this.noiseFloor = this.noiseFloor === null ? energy : this.noiseFloor * (1 - NOISE_FLOOR_ALPHA) + energy * NOISE_FLOOR_ALPHA;
       return null;
     }
 
     // state === 'speaking'
-    if (energy < this.opts.silenceThreshold) {
-      if (this.silenceSinceMs === null) this.silenceSinceMs = atMs;
+    this.totalFrames++;
+    if (energy >= speech) this.voicedFrames++;
+
+    if (energy < silence) {
+      if (this.silenceSinceMs === null) {
+        this.silenceSinceMs = atMs;
+        this.framesAtSilenceOnset = this.totalFrames;
+      }
       if (atMs - this.silenceSinceMs >= this.opts.hangoverMs) {
         // Measured up to when silence *began*, not up to now — using `atMs`
         // here would fold the hangover wait itself into "how long they
         // spoke," which would let a blip well under `minSpeechMs` sail
         // through just because the hangover window is long enough.
-        const spoke =
+        const longEnough =
           this.speechStartedAtMs !== null &&
           this.silenceSinceMs - this.speechStartedAtMs >= this.opts.minSpeechMs;
+        // PA-85: and it has to have been *sustained*, not one transient with
+        // a decay tail long enough to span the duration floor.
+        const denominator = this.framesAtSilenceOnset ?? this.totalFrames;
+        const sustained = denominator > 0 && this.voicedFrames / denominator >= this.opts.minVoicedRatio;
         this.reset();
-        return spoke ? 'speech_end' : null;
+        return longEnough && sustained ? 'speech_end' : null;
       }
       return null;
     }
 
     // Still loud enough to count as ongoing speech — cancel any hangover
-    // countdown a brief dip below `silenceThreshold` may have started.
+    // countdown a brief dip below the silence threshold may have started.
     this.silenceSinceMs = null;
+    this.framesAtSilenceOnset = null;
     return null;
   }
 
-  /** Force back to `idle` — used on barge-in (a fresh utterance starting
-   *  while TTS plays) and when live-listen mode is turned off. */
+  /**
+   * Force back to `idle` — used on barge-in (a fresh utterance starting
+   * while TTS plays) and when live-listen mode is turned off.
+   *
+   * PA-85: deliberately keeps `noiseFloor`. The room is as noisy as it was a
+   * moment ago, and throwing the measurement away would mean every reset
+   * re-learned it from scratch — the first utterance after each one judged
+   * against a cold default, which is exactly the case the estimate exists to
+   * cover. `LiveListenController.stop()` discards the whole instance anyway,
+   * so a genuinely new session still starts with no assumptions.
+   */
   reset(): void {
     this.state = 'idle';
     this.silenceSinceMs = null;
     this.speechStartedAtMs = null;
+    this.voicedFrames = 0;
+    this.totalFrames = 0;
+    this.framesAtSilenceOnset = null;
   }
 
   isSpeaking(): boolean {
     return this.state === 'speaking';
+  }
+
+  /** The current ambient noise estimate, or null before any idle frame has
+   *  been observed. Exposed for tests and for diagnosing a room where the
+   *  adaptive threshold, rather than the configured one, is in force. */
+  noiseFloorEstimate(): number | null {
+    return this.noiseFloor;
   }
 }

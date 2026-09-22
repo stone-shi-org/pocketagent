@@ -34,6 +34,15 @@ import { LiveListenController } from '../audio/live-listen.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
 import { vadOptionsForSensitivity, type VadOptions } from '../audio/vad.js';
 import { isSkipCommand } from '../audio/voice-commands.js';
+import { judgeUtterance } from '../audio/utterance-harness.js';
+
+/**
+ * PA-85: how long a harness notice stays on screen. Long enough to read a
+ * short sentence, short enough that it is gone before the next utterance —
+ * this is an explanation of something already handled, not a state the user
+ * has to dismiss.
+ */
+const LIVE_LISTEN_NOTICE_MS = 4000;
 
 interface Props {
   sessionId: string;
@@ -117,6 +126,33 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
    *  is still picked up on the *next* live-listen start, with no need to
    *  recreate that effect (which would tear down and reopen the socket). */
   const vadOptionsRef = useRef<Partial<VadOptions>>({});
+  /**
+   * PA-85: an utterance the harness judged borderline — parked in the
+   * composer instead of being sent or discarded. `seq` is what makes the
+   * handoff idempotent *and* repeatable: `PromptBox` appends on a change to
+   * it, so saying the same borderline thing twice lands twice, while a
+   * re-render with no new utterance lands nothing.
+   */
+  const [reviewText, setReviewText] = useState<{ text: string; seq: number } | null>(null);
+  const reviewSeqRef = useRef(0);
+  /**
+   * PA-85: a transient, non-error explanation of something the harness just
+   * did — "Ignored — filler only (\"oh\")". Deliberately separate from
+   * `liveListenError`, which means the mic is broken and stays up until
+   * something fixes it; this is informational and clears itself.
+   *
+   * It exists because a *silent* rejection is the worst failure this feature
+   * can have: with no feedback the user concludes the microphone is dead and
+   * repeats themselves louder, which is exactly the experience the harness
+   * was supposed to improve.
+   */
+  const [liveListenNotice, setLiveListenNotice] = useState<string | null>(null);
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function showLiveListenNotice(message: string): void {
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    setLiveListenNotice(message);
+    noticeTimerRef.current = setTimeout(() => setLiveListenNotice(null), LIVE_LISTEN_NOTICE_MS);
+  }
   const [pickingAgent, setPickingAgent] = useState(false);
   const [confirmingStop, setConfirmingStop] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -207,15 +243,23 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
       const controller = new LiveListenController({
         vad: vadOptionsRef.current,
         onUtterance: (utterance) => {
-          if (!utterance.audioBase64) return;
+          if (!utterance.audioBase64) {
+            // Nothing was captured, so nothing can clear a barge-in pause —
+            // do it here or the talk-back stays silent forever.
+            ttsQueue.resume();
+            return;
+          }
           void (async () => {
             try {
-              const { text } = await api.transcribeVoice(sessionId, {
+              const { text, words, durationSec } = await api.transcribeVoice(sessionId, {
                 data: utterance.audioBase64,
                 durationMs: utterance.durationMs,
               });
               const trimmed = text.trim();
-              if (!trimmed) return;
+              if (!trimmed) {
+                ttsQueue.resume();
+                return;
+              }
               // PA-83 #3: an embedded "skip" (and its few short variants)
               // controls the talk-back only — it must never be forwarded to
               // the agent as a prompt, unlike every other transcribed
@@ -231,21 +275,88 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
                 conn.sendStopSpeech();
                 return;
               }
+
+              // PA-85: the harness, and the one place its three verdicts are
+              // acted on. Each also resolves the barge-in pause `onSpeechStart`
+              // opened, in a different direction — which is the whole reason
+              // the interrupt was deferred to here instead of being sent the
+              // instant energy was detected.
+              const judgement = judgeUtterance({
+                text,
+                ...(words ? { words } : {}),
+                ...(durationSec !== undefined ? { durationSec } : {}),
+                durationMs: utterance.durationMs,
+              });
+
+              if (judgement.verdict === 'drop') {
+                // Junk. Undo the pause and keep reading — a cough must not
+                // cost the user the rest of the reply. Never silent, though:
+                // a rejection the user cannot see is indistinguishable from a
+                // dead microphone, which is why this notice exists.
+                ttsQueue.resume();
+                showLiveListenNotice(`Ignored — ${judgement.reason}`);
+                return;
+              }
+
+              if (judgement.verdict === 'review') {
+                // Neither sent nor discarded. If this interrupted the
+                // talk-back, the human clearly engaged, so stop it — but do
+                // *not* interrupt the turn, since no prompt is being sent and
+                // killing it would destroy work for nothing. Guarded so an
+                // utterance that interrupted nothing does not leave the queue
+                // durably muted for no reason.
+                if (ttsQueue.isPaused() || ttsQueue.isPlaying()) {
+                  ttsQueue.stop();
+                  conn.sendStopSpeech();
+                }
+                setReviewText({ text: trimmed, seq: reviewSeqRef.current++ });
+                showLiveListenNotice(`Parked for review — ${judgement.reason}`);
+                return;
+              }
+
+              // A real command. *Now* the barge-in is a genuine interruption,
+              // so commit it: stop the talk-back durably and end the turn the
+              // new prompt is replacing.
+              if (ttsQueue.isPaused() || ttsQueue.isPlaying()) {
+                ttsQueue.stop();
+                conn.sendInterrupt();
+              }
               handleSendRef.current(text);
             } catch (err) {
+              // A failed transcription is not evidence about the utterance,
+              // so the pause is undone rather than committed — the reply
+              // carries on and the error is surfaced.
+              ttsQueue.resume();
               setLiveListenError(
                 err instanceof Error ? err.message : 'Could not transcribe that recording.',
               );
             }
           })();
         },
-        // Barge-in (Phase 4): react the instant new speech starts, not once
-        // the utterance finishes — waiting for `onUtterance` would mean the
-        // agent keeps talking for the entire time the user is interrupting.
+        /**
+         * Barge-in (Phase 4), made two-stage by PA-85.
+         *
+         * This fires on a raw RMS threshold crossing, with no transcript
+         * involved — so before PA-85 it sent `interrupt` and *destroyed a
+         * turn in flight* on any cough or keyboard knock loud enough to trip
+         * the VAD. That was strictly worse than the filler-prompt problem the
+         * ticket was actually about, and a harness that only filtered the
+         * prompt path would have left it untouched.
+         *
+         * So the fast, reversible half happens here (pause playback, which is
+         * what makes barge-in feel responsive) and the irreversible half — the
+         * `interrupt` — waits for the harness's verdict in `onUtterance`
+         * above. A real command commits it; junk undoes it.
+         */
         onSpeechStart: () => {
           if (!ttsQueue.isPlaying()) return;
-          ttsQueue.stop();
-          conn.sendInterrupt();
+          ttsQueue.pause();
+        },
+        // The VAD rejected that run, so no utterance is coming and nothing
+        // else will ever resolve the pause above. Undoing it here is what
+        // keeps a discarded cough from silencing the rest of the reply.
+        onSpeechDiscarded: () => {
+          ttsQueue.resume();
         },
         onLevel: setMicLevel,
         onError: (message) => {
@@ -468,6 +579,15 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
       cancelled = true;
     };
   }, [sessionId, onApiError]);
+
+  // PA-85: a pending notice timer must not outlive the page — it would fire
+  // `setLiveListenNotice` on an unmounted component.
+  useEffect(
+    () => () => {
+      if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    },
+    [],
+  );
 
   // PA-36: closes this tab (desktop) or navigates back to the list (phone)
   // as soon as the session is confirmed gone — the fix for a tab restored
@@ -937,6 +1057,8 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         onSetLiveListen={handleSetLiveListen}
         micLevel={micLevel}
         liveListenError={liveListenError}
+        liveListenNotice={liveListenNotice}
+        reviewText={reviewText}
         isSpeaking={isSpeaking}
         onStopSpeaking={handleStopSpeaking}
         commands={transcript.commands}

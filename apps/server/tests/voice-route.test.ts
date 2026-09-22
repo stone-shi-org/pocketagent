@@ -394,3 +394,117 @@ describe('POST /api/sessions/:id/voice/transcribe', () => {
     });
   });
 });
+
+/**
+ * PA-85: the transcribe route forwards live-stt's per-word confidence rather
+ * than judging it. The decision lives in the browser because that is where
+ * the other half of the evidence is — the endpointer's measured voiced span,
+ * and whether the agent's talk-back is currently playing.
+ */
+describe('POST /api/sessions/:id/voice/transcribe — harness evidence (PA-85)', () => {
+  let t: TestApp;
+  let liveStt: { url: string; close: () => Promise<void> };
+  let sessionId: string;
+  let requestedFormat = '';
+
+  beforeEach(async () => {
+    liveStt = await startFakeLiveStt((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks).toString('latin1');
+        requestedFormat = body.includes('verbose_json') ? 'verbose_json' : 'json';
+        res.writeHead(200, { 'content-type': 'application/json' }).end(
+          JSON.stringify({
+            task: 'transcribe',
+            language: '',
+            duration: 1.5,
+            text: "well i don't wish to see",
+            words: [
+              { word: 'well', start: 0.8, end: 0.88, confidence: 0.9546 },
+              { word: 'i', start: 0.96, end: 1.04, confidence: 0.9957 },
+            ],
+          }),
+        );
+      });
+    });
+    t = await createTestApp({ POCKETAGENT_LIVE_STT_URL: liveStt.url });
+
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: { cookie: t.cookie },
+      payload: { agent: TEST_AGENT_ID, cwd: t.projectDir, cols: 80, rows: 24 },
+    });
+    expect(created.statusCode).toBe(201);
+    sessionId = created.json().id as string;
+  });
+
+  afterEach(async () => {
+    await t.cleanup();
+    await liveStt.close();
+  });
+
+  it('asks live-stt for verbose_json', async () => {
+    await t.app.inject({
+      method: 'POST',
+      url: `/api/sessions/${sessionId}/voice/transcribe`,
+      headers: { cookie: t.cookie },
+      payload: { audio: { data: SOME_AUDIO_BASE64, durationMs: 500 } },
+    });
+    expect(requestedFormat).toBe('verbose_json');
+  });
+
+  it('forwards words and duration to the browser untouched', async () => {
+    const res = await t.app.inject({
+      method: 'POST',
+      url: `/api/sessions/${sessionId}/voice/transcribe`,
+      headers: { cookie: t.cookie },
+      payload: { audio: { data: SOME_AUDIO_BASE64, durationMs: 500 } },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      text: "well i don't wish to see",
+      durationSec: 1.5,
+      words: [
+        { word: 'well', start: 0.8, end: 0.88, confidence: 0.9546 },
+        { word: 'i', start: 0.96, end: 1.04, confidence: 0.9957 },
+      ],
+    });
+  });
+
+  it('does not filter anything server-side — a filler transcript still comes back', async () => {
+    // The harness deliberately does not run here. A server that dropped "oh"
+    // would also drop it for push-to-talk, where the user deliberately held
+    // the button and is owed whatever they said.
+    await liveStt.close();
+    liveStt = await startFakeLiveStt((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res
+          .writeHead(200, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ text: 'oh', duration: 0.3, words: [{ word: 'oh', confidence: 0.2 }] }));
+      });
+    });
+    const t2 = await createTestApp({ POCKETAGENT_LIVE_STT_URL: liveStt.url });
+    try {
+      const created = await t2.app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: { cookie: t2.cookie },
+        payload: { agent: TEST_AGENT_ID, cwd: t2.projectDir, cols: 80, rows: 24 },
+      });
+      const id = created.json().id as string;
+      const res = await t2.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${id}/voice/transcribe`,
+        headers: { cookie: t2.cookie },
+        payload: { audio: { data: SOME_AUDIO_BASE64, durationMs: 300 } },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().text).toBe('oh');
+    } finally {
+      await t2.cleanup();
+    }
+  });
+});

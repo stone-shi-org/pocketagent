@@ -20,6 +20,12 @@ const OPTS: VadOptions = {
   silenceThreshold: 0.05,
   hangoverMs: 500,
   minSpeechMs: 200,
+  // PA-85. The margin is set so the absolute thresholds above stay in force
+  // for every pre-existing case below (their energies are well clear of
+  // 2.5x a ~0.01 noise floor), which is the point: the adaptive threshold
+  // only ever tightens, so these tests still describe the same machine.
+  noiseMarginMultiplier: 2.5,
+  minVoicedRatio: 0.35,
 };
 
 describe('SpeechEndpointer', () => {
@@ -126,5 +132,102 @@ describe('vadOptionsForSensitivity', () => {
 
   it('passes an in-range silenceMs straight through as hangoverMs', () => {
     expect(vadOptionsForSensitivity(5, 1200).hangoverMs).toBe(1200);
+  });
+});
+
+describe('SpeechEndpointer adaptive noise floor (PA-85)', () => {
+  it('tracks the ambient floor from idle frames only', () => {
+    const vad = new SpeechEndpointer(OPTS);
+    expect(vad.noiseFloorEstimate()).toBeNull();
+    for (let i = 0; i < 200; i++) vad.push(0.02, i * 3);
+    expect(vad.noiseFloorEstimate()).toBeCloseTo(0.02, 3);
+  });
+
+  it('does not let speech raise the floor it is measured against', () => {
+    const vad = new SpeechEndpointer(OPTS);
+    for (let i = 0; i < 200; i++) vad.push(0.02, i * 3);
+    const before = vad.noiseFloorEstimate()!;
+    // A long loud utterance: every frame is above the speech threshold, so
+    // none of it may feed the estimate.
+    for (let i = 0; i < 200; i++) vad.push(0.5, 1000 + i * 3);
+    expect(vad.noiseFloorEstimate()).toBeCloseTo(before, 10);
+  });
+
+  it('a noisy room raises the effective speech threshold above the absolute one', () => {
+    // Floor settles near 0.08; 2.5x that is 0.2, well above the configured
+    // 0.1 — so 0.15 counts as speech in a quiet room and must not in this one.
+    const noisy = new SpeechEndpointer(OPTS);
+    for (let i = 0; i < 400; i++) noisy.push(0.08, i * 3);
+    expect(noisy.push(0.15, 2000)).toBeNull();
+    expect(noisy.isSpeaking()).toBe(false);
+
+    const quiet = new SpeechEndpointer(OPTS);
+    for (let i = 0; i < 400; i++) quiet.push(0.005, i * 3);
+    expect(quiet.push(0.15, 2000)).toBe('speech_start');
+  });
+
+  it('keeps the measurement across reset(), so each barge-in does not relearn the room', () => {
+    const vad = new SpeechEndpointer(OPTS);
+    for (let i = 0; i < 200; i++) vad.push(0.02, i * 3);
+    const before = vad.noiseFloorEstimate();
+    vad.reset();
+    expect(vad.noiseFloorEstimate()).toBe(before);
+  });
+
+  it('preserves hysteresis when the adaptive threshold is the one in force', () => {
+    // A mid-word dip must not end the turn just because the noisy-room
+    // speech threshold went up while the silence threshold stayed put.
+    const vad = new SpeechEndpointer(OPTS);
+    for (let i = 0; i < 400; i++) vad.push(0.08, i * 3);
+    // Effective speech ~0.2, effective silence ~0.1 (the 0.5 configured ratio).
+    expect(vad.push(0.4, 2000)).toBe('speech_start');
+    // 0.15 is below the effective *speech* threshold but above the effective
+    // *silence* one — ongoing speech, so no hangover clock may start.
+    expect(vad.push(0.15, 2100)).toBeNull();
+    expect(vad.push(0.4, 2200)).toBeNull();
+    expect(vad.isSpeaking()).toBe(true);
+  });
+});
+
+describe('SpeechEndpointer voiced-ratio gate (PA-85)', () => {
+  it('rejects a transient whose decay tail spans minSpeechMs but was never sustained', () => {
+    const vad = new SpeechEndpointer(OPTS);
+    // One loud frame (a door slam), then a long tail that sits above the
+    // silence threshold but below the speech one — so the utterance "lasts"
+    // 400ms, clearing minSpeechMs, on a single voiced frame.
+    expect(vad.push(0.5, 0)).toBe('speech_start');
+    for (let t = 10; t <= 400; t += 10) vad.push(0.06, t);
+    expect(vad.push(0.01, 410)).toBeNull(); // silence begins
+    expect(vad.push(0.01, 950)).toBeNull(); // hangover elapses — still rejected
+    expect(vad.isSpeaking()).toBe(false);
+  });
+
+  it('accepts genuinely sustained speech of the same duration', () => {
+    const vad = new SpeechEndpointer(OPTS);
+    expect(vad.push(0.5, 0)).toBe('speech_start');
+    for (let t = 10; t <= 400; t += 10) vad.push(0.5, t);
+    expect(vad.push(0.01, 410)).toBeNull();
+    expect(vad.push(0.01, 950)).toBe('speech_end');
+  });
+
+  it('does not count the hangover window against the ratio', () => {
+    // Every frame of the utterance proper is voiced, then a very long
+    // silence. If the hangover frames were in the denominator, a generous
+    // hangover would reject every real utterance.
+    const vad = new SpeechEndpointer({ ...OPTS, hangoverMs: 2000 });
+    expect(vad.push(0.5, 0)).toBe('speech_start');
+    for (let t = 10; t <= 300; t += 10) vad.push(0.5, t);
+    for (let t = 310; t < 2300; t += 10) vad.push(0.01, t);
+    expect(vad.push(0.01, 2310)).toBe('speech_end');
+  });
+
+  it('still admits a short single-word command, which is why minSpeechMs was left alone', () => {
+    // ~350ms of sustained speech, the length of a spoken "yes" — the case a
+    // raised duration floor or a three-word minimum would have destroyed.
+    const vad = new SpeechEndpointer(OPTS);
+    expect(vad.push(0.4, 0)).toBe('speech_start');
+    for (let t = 10; t <= 350; t += 10) vad.push(0.4, t);
+    expect(vad.push(0.01, 360)).toBeNull();
+    expect(vad.push(0.01, 900)).toBe('speech_end');
   });
 });
