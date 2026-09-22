@@ -1,12 +1,25 @@
-import { useEffect, useRef, useState, type PointerEvent } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type PointerEvent } from 'react';
 import { PushToTalkRecorder, VoiceCaptureError, type RecordedUtterance } from '../audio/capture.js';
 import { Icon } from './Icon.js';
 
-interface Props {
+export interface MicButtonProps {
   /** Fires once with the buffered utterance ready to transcribe. */
   onRecorded: (utterance: RecordedUtterance) => void;
   onError: (message: string) => void;
+  /** Reports when recording state changes so the prompt box can adapt its UI (PA-82). */
+  onRecordingChange?: (recording: boolean) => void;
+  /** Real-time RMS audio level stream during recording (PA-82). */
+  onLevel?: (level: number) => void;
+  /** Notifies whether the active pointer is hovering over the discard button. */
+  onOverDiscardChange?: (over: boolean) => void;
   disabled?: boolean;
+}
+
+export interface MicButtonHandle {
+  /** Cancels recording immediately, discarding buffered audio. */
+  cancel: () => Promise<void>;
+  /** Finishes recording and emits the buffered utterance for transcription. */
+  stop: () => Promise<void>;
 }
 
 type RecordingState = 'idle' | 'starting' | 'recording';
@@ -15,12 +28,15 @@ type RecordingState = 'idle' | 'starting' | 'recording';
 const HOLD_THRESHOLD_MS = 350;
 
 /**
- * Mic button (PA-20 Phase 1): supports both hold-to-record (release to stop)
- * and tap-to-record (tap to start, tap to stop). Hands the buffered utterance
- * to the caller (`PromptBox`), which transcribes it and submits the result
- * through the same send path typed text already uses.
+ * Mic button (PA-20 Phase 1, enhanced in PA-82): supports both hold-to-record
+ * (release to stop) and tap-to-record (tap to start, second click to stop).
+ * Hands the buffered utterance to the caller (`PromptBox`), which transcribes
+ * it and either populates the prompt box (default) or sends directly.
  */
-export function MicButton({ onRecorded, onError, disabled = false }: Props): JSX.Element {
+export const MicButton = forwardRef<MicButtonHandle, MicButtonProps>(function MicButton(
+  { onRecorded, onError, onRecordingChange, onLevel, onOverDiscardChange, disabled = false }: MicButtonProps,
+  ref,
+): JSX.Element {
   const [recording, setRecording] = useState(false);
   const stateRef = useRef<RecordingState>('idle');
   const pointerDownAtRef = useRef<number>(0);
@@ -30,7 +46,7 @@ export function MicButton({ onRecorded, onError, disabled = false }: Props): JSX
   // not leave a live microphone stream behind.
   useEffect(
     () => () => {
-      void recorderRef.current?.stop();
+      void recorderRef.current?.cancel();
     },
     [],
   );
@@ -39,10 +55,29 @@ export function MicButton({ onRecorded, onError, disabled = false }: Props): JSX
     onError(err instanceof VoiceCaptureError ? err.message : fallback);
   }
 
+  async function cancelRecording(): Promise<void> {
+    const recorder = recorderRef.current;
+    stateRef.current = 'idle';
+    setRecording(false);
+    onRecordingChange?.(false);
+    onLevel?.(0);
+    onOverDiscardChange?.(false);
+    recorderRef.current = null;
+    if (!recorder) return;
+    try {
+      await recorder.cancel();
+    } catch {
+      // Best effort teardown
+    }
+  }
+
   async function stopAndEmit(): Promise<void> {
     const recorder = recorderRef.current;
     stateRef.current = 'idle';
     setRecording(false);
+    onRecordingChange?.(false);
+    onLevel?.(0);
+    onOverDiscardChange?.(false);
     recorderRef.current = null;
     if (!recorder) return;
     try {
@@ -52,6 +87,15 @@ export function MicButton({ onRecorded, onError, disabled = false }: Props): JSX
       reportError(err, 'Could not finish recording.');
     }
   }
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      cancel: cancelRecording,
+      stop: stopAndEmit,
+    }),
+    [],
+  );
 
   async function begin(event: PointerEvent<HTMLButtonElement>): Promise<void> {
     if (disabled) return;
@@ -67,7 +111,7 @@ export function MicButton({ onRecorded, onError, disabled = false }: Props): JSX
     pointerDownAtRef.current = performance.now();
     event.currentTarget.setPointerCapture(event.pointerId);
 
-    const recorder = new PushToTalkRecorder();
+    const recorder = new PushToTalkRecorder({ onLevel });
     try {
       await recorder.start();
     } catch (err) {
@@ -85,10 +129,25 @@ export function MicButton({ onRecorded, onError, disabled = false }: Props): JSX
 
     stateRef.current = 'recording';
     setRecording(true);
+    onRecordingChange?.(true);
   }
 
-  async function end(): Promise<void> {
+  function handlePointerMove(event: PointerEvent<HTMLButtonElement>): void {
     if (stateRef.current === 'idle') return;
+    const target = document.elementFromPoint(event.clientX, event.clientY);
+    const overDiscard = Boolean(target?.closest('.voice-discard-btn'));
+    onOverDiscardChange?.(overDiscard);
+  }
+
+  async function end(event: PointerEvent<HTMLButtonElement>): Promise<void> {
+    if (stateRef.current === 'idle') return;
+
+    // Check if pointer was released over the discard/stop button
+    const target = document.elementFromPoint(event.clientX, event.clientY);
+    if (target?.closest('.voice-discard-btn')) {
+      await cancelRecording();
+      return;
+    }
 
     const heldMs = performance.now() - pointerDownAtRef.current;
     if (heldMs < HOLD_THRESHOLD_MS) {
@@ -106,18 +165,24 @@ export function MicButton({ onRecorded, onError, disabled = false }: Props): JSX
     await stopAndEmit();
   }
 
+  async function handlePointerCancel(): Promise<void> {
+    if (stateRef.current === 'idle') return;
+    await cancelRecording();
+  }
+
   return (
     <button
       type="button"
       className={recording ? 'mic-btn recording' : 'mic-btn'}
       disabled={disabled}
       aria-pressed={recording}
-      aria-label={recording ? 'Recording — tap or release to send' : 'Hold or tap to record a voice prompt'}
+      aria-label={recording ? 'Recording — tap or release to finish' : 'Hold or tap to record a voice prompt'}
       onPointerDown={(e) => void begin(e)}
-      onPointerUp={() => void end()}
-      onPointerCancel={() => void end()}
+      onPointerMove={handlePointerMove}
+      onPointerUp={(e) => void end(e)}
+      onPointerCancel={() => void handlePointerCancel()}
     >
       <Icon name="mic" size={19} />
     </button>
   );
-}
+});

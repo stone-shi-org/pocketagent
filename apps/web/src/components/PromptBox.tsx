@@ -9,10 +9,22 @@ import {
 import type { EffortLevel, ModelInfo, PromptImage, SlashCommandInfo } from '@pocketagent/protocol';
 import { readImageFile } from '../agent/image-attachment.js';
 import { resolveCurrentModel } from '../agent/transcript.js';
+import { getVoiceDirectSendPref } from '../agent/voice-prefs.js';
 import type { RecordedUtterance } from '../audio/capture.js';
 import { AttachButton } from './AttachButton.js';
 import { Icon } from './Icon.js';
-import { MicButton } from './MicButton.js';
+import { MicButton, type MicButtonHandle } from './MicButton.js';
+
+const WAVE_BAR_PROFILES = [
+  0.25, 0.35, 0.45, 0.6, 0.75, 0.85, 0.95, 1.0, 0.95, 0.85, 0.75, 0.6, 0.45, 0.35,
+  0.3, 0.4, 0.55, 0.7, 0.85, 0.95, 1.0, 0.9, 0.8, 0.65, 0.5, 0.35, 0.25, 0.2,
+];
+
+export function formatElapsed(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s < 10 ? '0' : ''}${s}`;
+}
 
 /**
  * Friendlier names for the effort levels the Claude Agent SDK defines.
@@ -233,9 +245,25 @@ export function PromptBox({
   // still going to be sent.
   const [attachedImage, setAttachedImage] = useState<PromptImage | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
-  // Same "don't persist across a reload" reasoning as `attachError` — a
-  // transcription failure is only meaningful right after it happens.
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [isVoiceRecording, setIsVoiceRecording] = useState(false);
+  const [voiceLevel, setVoiceLevel] = useState(0);
+  const [isOverDiscard, setIsOverDiscard] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const micButtonRef = useRef<MicButtonHandle>(null);
+
+  useEffect(() => {
+    if (!isVoiceRecording) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const timer = setInterval(() => {
+      setElapsedSeconds((s) => s + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [isVoiceRecording]);
+
   const [selected, setSelected] = useState(0);
   // One entry per currently-rendered picker row, so the active one can be
   // scrolled into view on arrow-key navigation — `.slash-picker` scrolls
@@ -344,12 +372,9 @@ export function PromptBox({
   }
 
   /**
-   * The mic button's release handler: transcribe, then submit exactly like a
-   * typed message — no local `text` state involved, so a voice prompt never
-   * flickers through the textarea on its way out. An empty/whitespace-only
-   * transcript (silence, or the utterance was too short for whisper to hear
-   * anything) is treated as a soft failure rather than sending a blank
-   * prompt no one meant to submit.
+   * The mic button's release/finish handler (PA-20, enhanced in PA-82): transcribe,
+   * then either insert the text into the prompt box for review (default) or send
+   * immediately if the direct-send setting is enabled.
    */
   async function handleVoiceRecorded(utterance: RecordedUtterance): Promise<void> {
     if (!onTranscribeVoice) return;
@@ -358,18 +383,37 @@ export function PromptBox({
       setVoiceError("Didn't catch that — speak while the mic is active.");
       return;
     }
-    let text: string;
+    setIsTranscribing(true);
+    let transcriptText: string;
     try {
-      text = await onTranscribeVoice({ data: utterance.audioBase64, durationMs: utterance.durationMs });
+      transcriptText = await onTranscribeVoice({ data: utterance.audioBase64, durationMs: utterance.durationMs });
     } catch (err) {
       setVoiceError(err instanceof Error ? err.message : 'Could not transcribe that recording.');
       return;
+    } finally {
+      setIsTranscribing(false);
     }
-    if (!text.trim()) {
+    const trimmed = transcriptText.trim();
+    if (!trimmed) {
       setVoiceError("Didn't catch that — try again.");
       return;
     }
-    onSend(text);
+    if (getVoiceDirectSendPref()) {
+      const fullText = text.trim() ? `${text.trim()} ${trimmed}` : trimmed;
+      if (onSend(fullText, attachedImage ?? undefined)) {
+        setText('');
+        setAttachedImage(null);
+      }
+    } else {
+      setText((prev) => (prev.trim() ? `${prev.trim()} ${trimmed}` : trimmed));
+      setTimeout(() => {
+        ref.current?.focus();
+        if (ref.current) {
+          const len = ref.current.value.length;
+          ref.current.setSelectionRange(len, len);
+        }
+      }, 50);
+    }
   }
 
   function onPaste(event: ClipboardEvent<HTMLTextAreaElement>): void {
@@ -457,7 +501,7 @@ export function PromptBox({
   }
 
   return (
-    <div className="promptbar">
+    <div className={isVoiceRecording ? 'promptbar recording' : 'promptbar'}>
       {modelPickerVisible && (
         <div className="model-picker" role="listbox" aria-label="Models" ref={modelPickerRef}>
           {models.map((model) => {
@@ -554,7 +598,7 @@ export function PromptBox({
           ))}
         </div>
       )}
-      {!pickerOpen && (attachedImage || attachError || voiceError || liveListenError) && (
+      {!pickerOpen && !isVoiceRecording && (attachedImage || attachError || voiceError || liveListenError) && (
         <div className="attach-preview">
           {attachedImage ? (
             <>
@@ -587,7 +631,7 @@ export function PromptBox({
         clicked. The level meter is deliberately the *only* extra feedback —
         no live captions, no partials, per the ticket.
       */}
-      {liveListenActive && (
+      {!isVoiceRecording && liveListenActive && (
         <div className="live-listen-indicator" role="status" aria-live="polite">
           <span className="live-listen-dot" aria-hidden="true" />
           <span>Listening…</span>
@@ -599,73 +643,116 @@ export function PromptBox({
           </span>
         </div>
       )}
-      {supportsImageAttachment && (
+      {supportsImageAttachment && !isVoiceRecording && !isTranscribing && (
         <AttachButton inputRef={fileInputRef} onFile={(file) => void attach(file)} disabled={disabled} />
       )}
       {supportsVoiceInput && onTranscribeVoice && !liveListenActive && (
         <MicButton
+          key="mic-btn"
+          ref={micButtonRef}
           onRecorded={(utterance) => void handleVoiceRecorded(utterance)}
           onError={setVoiceError}
-          disabled={disabled}
+          onRecordingChange={setIsVoiceRecording}
+          onLevel={setVoiceLevel}
+          onOverDiscardChange={setIsOverDiscard}
+          disabled={disabled || isTranscribing}
         />
       )}
-      {supportsLiveListen && onSetLiveListen && (
-        <button
-          type="button"
-          className={liveListenActive ? 'live-listen-btn active' : 'live-listen-btn'}
-          onClick={() => onSetLiveListen(!liveListenActive)}
-          disabled={disabled}
-          aria-pressed={liveListenActive}
-          aria-label={liveListenActive ? 'Turn off live listening' : 'Turn on live listening (hands-free)'}
-        >
-          <Icon name="live-listen" size={19} />
-        </button>
+      {isVoiceRecording ? (
+        <div className="promptbar-recording" role="status" aria-label="Recording audio">
+          <span className="promptbar-recording-time">{formatElapsed(elapsedSeconds)}</span>
+          <div
+            className="promptbar-wave"
+            aria-hidden="true"
+            title="Click to finish recording"
+            onClick={() => void micButtonRef.current?.stop()}
+          >
+            {WAVE_BAR_PROFILES.map((profile, index) => (
+              <span
+                key={index}
+                className="promptbar-wave-bar"
+                style={{
+                  transform: `scaleY(${Math.min(1, Math.max(0.14, (voiceLevel * 7 + 0.12) * profile))})`,
+                }}
+              />
+            ))}
+          </div>
+          <button
+            type="button"
+            className={isOverDiscard ? 'voice-discard-btn hovered' : 'voice-discard-btn'}
+            onClick={() => void micButtonRef.current?.cancel()}
+            aria-label="Cancel recording (discard)"
+            title="Cancel recording (discard)"
+          >
+            <Icon name="stop" size={15} />
+          </button>
+        </div>
+      ) : isTranscribing ? (
+        <div className="promptbar-transcribing" role="status" aria-live="polite">
+          <span className="live-listen-dot" aria-hidden="true" />
+          <span>Transcribing voice…</span>
+        </div>
+      ) : (
+        <>
+          {supportsLiveListen && onSetLiveListen && (
+            <button
+              type="button"
+              className={liveListenActive ? 'live-listen-btn active' : 'live-listen-btn'}
+              onClick={() => onSetLiveListen(!liveListenActive)}
+              disabled={disabled}
+              aria-pressed={liveListenActive}
+              aria-label={liveListenActive ? 'Turn off live listening' : 'Turn on live listening (hands-free)'}
+            >
+              <Icon name="live-listen" size={19} />
+            </button>
+          )}
+          <textarea
+            ref={ref}
+            value={text}
+            onChange={(e) => {
+              setText(e.target.value);
+              setDismissed(false);
+              setModelPickerOpen(false);
+            }}
+            onKeyDown={onKeyDown}
+            onPaste={supportsImageAttachment ? onPaste : undefined}
+            placeholder="Type a prompt…"
+            rows={1}
+            aria-label="Prompt"
+            enterKeyHint="enter"
+          />
+          {models.length > 0 && (
+            <button
+              type="button"
+              className="model-chip"
+              onClick={() => setModelPickerOpen((v) => !v)}
+              disabled={disabled}
+              aria-haspopup="listbox"
+              aria-expanded={modelPickerOpen}
+              aria-label={`Model: ${currentModelLabel ?? 'unknown'}. Choose a different model.`}
+              ref={modelChipRef}
+            >
+              <span>{currentModelLabel ?? '…'}</span>
+              <Icon name="chevron-down" size={14} />
+            </button>
+          )}
+          {/* Stop, not send, while a turn is in flight — one control instead of a
+              separate "Stop generating" chip elsewhere on the page (it used to
+              live in `.agent-strip`, disconnected from the box the user is
+              actually looking at while typing the next thing). `text.length`
+              never gates this in the busy state: stopping shouldn't require
+              having typed anything. */}
+          <button
+            type="button"
+            className={busy ? 'primary stop' : 'primary'}
+            onClick={busy ? onInterrupt : send}
+            disabled={busy ? disabled : disabled || (text.length === 0 && !attachedImage)}
+            aria-label={busy ? 'Stop generating' : 'Send prompt'}
+          >
+            <Icon name={busy ? 'stop' : 'arrow-up'} size={busy ? 16 : 18} />
+          </button>
+        </>
       )}
-      <textarea
-        ref={ref}
-        value={text}
-        onChange={(e) => {
-          setText(e.target.value);
-          setDismissed(false);
-          setModelPickerOpen(false);
-        }}
-        onKeyDown={onKeyDown}
-        onPaste={supportsImageAttachment ? onPaste : undefined}
-        placeholder="Type a prompt…"
-        rows={1}
-        aria-label="Prompt"
-        enterKeyHint="enter"
-      />
-      {models.length > 0 && (
-        <button
-          type="button"
-          className="model-chip"
-          onClick={() => setModelPickerOpen((v) => !v)}
-          disabled={disabled}
-          aria-haspopup="listbox"
-          aria-expanded={modelPickerOpen}
-          aria-label={`Model: ${currentModelLabel ?? 'unknown'}. Choose a different model.`}
-          ref={modelChipRef}
-        >
-          <span>{currentModelLabel ?? '…'}</span>
-          <Icon name="chevron-down" size={14} />
-        </button>
-      )}
-      {/* Stop, not send, while a turn is in flight — one control instead of a
-          separate "Stop generating" chip elsewhere on the page (it used to
-          live in `.agent-strip`, disconnected from the box the user is
-          actually looking at while typing the next thing). `text.length`
-          never gates this in the busy state: stopping shouldn't require
-          having typed anything. */}
-      <button
-        type="button"
-        className={busy ? 'primary stop' : 'primary'}
-        onClick={busy ? onInterrupt : send}
-        disabled={busy ? disabled : disabled || (text.length === 0 && !attachedImage)}
-        aria-label={busy ? 'Stop generating' : 'Send prompt'}
-      >
-        <Icon name={busy ? 'stop' : 'arrow-up'} size={busy ? 16 : 18} />
-      </button>
     </div>
   );
 }

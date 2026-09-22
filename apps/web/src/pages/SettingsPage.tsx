@@ -9,6 +9,7 @@ import { HostAdminSection } from '../components/HostAdminSection.js';
 import { HubsSection } from '../components/HubsSection.js';
 import { HubTemplatesSection } from '../components/HubTemplatesSection.js';
 import { getTerminalFontOverride, setTerminalFontOverride } from '../agent/terminal-font-pref.js';
+import { getVoiceDirectSendPref, setVoiceDirectSendPref } from '../agent/voice-prefs.js';
 import { formatBuildInfo } from '../version.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
@@ -48,6 +49,7 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
   const [pending, setPending] = useState<Set<string>>(new Set());
   const [confirmingSkip, setConfirmingSkip] = useState(false);
   const [fontOverride, setFontOverride] = useState(() => getTerminalFontOverride() ?? '');
+  const [voiceDirectSend, setVoiceDirectSend] = useState(() => getVoiceDirectSendPref());
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   const [voiceModels, setVoiceModels] = useState<{ asr: string[]; tts: string[] }>({ asr: [], tts: [] });
@@ -642,6 +644,16 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
       </SectionCard>
 
       <SectionCard title="Device Options" icon="laptop">
+        <BoolRow
+          label="Directly send voice prompt"
+          help="When enabled, push-to-talk voice recordings are sent immediately upon release. When disabled (default), transcribed text appears in the prompt box for review."
+          checked={voiceDirectSend}
+          busy={false}
+          onChange={(v) => {
+            setVoiceDirectSend(v);
+            setVoiceDirectSendPref(v);
+          }}
+        />
         <div className="settings-row settings-row-stacked">
           <div className="settings-row-info">
             <label className="settings-row-label" htmlFor="terminal-font">

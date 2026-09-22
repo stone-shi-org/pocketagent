@@ -985,6 +985,87 @@ input[type='number']::-webkit-outer-spin-button {
   color: #fff;
 }
 
+/* Push-to-talk recording wave & discard UI (PA-82).
+   While recording, the prompt box transforms its body into a full-width
+   audio level indicator showing the wave of sound with a stop/discard button. */
+.promptbar.recording {
+  border-color: var(--danger);
+}
+
+.promptbar-recording {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-height: 32px;
+  width: 100%;
+}
+
+.promptbar-recording-time {
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--danger);
+  font-weight: 600;
+  flex: none;
+  min-width: 32px;
+}
+
+.promptbar-wave {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  flex: 1;
+  height: 32px;
+  overflow: hidden;
+  padding: 0 4px;
+  cursor: pointer;
+}
+
+.promptbar-wave-bar {
+  flex: 0 0 3px;
+  height: 24px;
+  border-radius: 2px;
+  background: var(--accent);
+  transform-origin: center;
+  transition: transform 60ms ease-out;
+}
+
+.voice-discard-btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--danger);
+  cursor: pointer;
+  transition: background 120ms ease, transform 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.voice-discard-btn:hover,
+.voice-discard-btn.hovered {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+  transform: scale(1.08);
+}
+
+.promptbar-transcribing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  height: 32px;
+  font-size: 13.5px;
+  color: var(--text-dim);
+  padding: 0 8px;
+}
+
 /* Live-listen toggle (PA-20 Phase 2) — same round-icon-button footprint as
    `.mic-btn`/`.attach-btn`, its own `.active` state since it's a standing
    toggle rather than a held-down button. */

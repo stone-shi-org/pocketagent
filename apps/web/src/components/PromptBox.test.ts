@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SlashCommandInfo } from '@pocketagent/protocol';
-import { filterSlashCommands, slashFragment } from './PromptBox.js';
+import { filterSlashCommands, formatElapsed, slashFragment } from './PromptBox.js';
 
 describe('slashFragment', () => {
   it('matches a bare slash at the start of the box', () => {
@@ -62,5 +62,25 @@ describe('filterSlashCommands', () => {
     expect(filterSlashCommands(pocketCommands, 'reset')).toEqual([pocketCommands[0]]);
     expect(filterSlashCommands(pocketCommands, 'photo')).toEqual([pocketCommands[3]]);
     expect(filterSlashCommands(pocketCommands, 'attach')).toEqual([pocketCommands[3]]);
+  });
+});
+
+describe('formatElapsed', () => {
+  it('formats zero seconds as 0:00', () => {
+    expect(formatElapsed(0)).toBe('0:00');
+  });
+
+  it('formats single-digit seconds with leading zero', () => {
+    expect(formatElapsed(5)).toBe('0:05');
+  });
+
+  it('formats double-digit seconds correctly', () => {
+    expect(formatElapsed(42)).toBe('0:42');
+  });
+
+  it('formats minutes and seconds across minute boundaries', () => {
+    expect(formatElapsed(60)).toBe('1:00');
+    expect(formatElapsed(75)).toBe('1:15');
+    expect(formatElapsed(605)).toBe('10:05');
   });
 });
