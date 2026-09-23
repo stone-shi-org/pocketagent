@@ -1200,6 +1200,25 @@ sentence-by-sentence, which is the accepted cost: the alternative needs a second
 signal telling the browser which audio to discard, and it guesses wrong in
 precisely the compliant case.
 
+**A Pocket Agent turn's audio is bound to the request that produced it, and the
+drain budget is therefore load-bearing** (PA-89). A coding session's talk-back
+rides a WebSocket that outlives the turn; a planner turn has only *this*
+request's SSE stream, so when the generator ends, any sentence still being
+synthesized is racing the response closing — and `SseStream.write` silently
+no-ops once it has. `TTS_DRAIN_BUDGET_MS` (`routes/planner.ts`) is how long the
+response is held open for that. It was 5s, which is shorter than a single
+synthesis: live-stt on a CPU backend takes ~9.5s for a one-sentence summary
+(measured on this deployment), so the summary was *always* dropped — no error,
+no log, just silence. It went unnoticed only because untagged scratchpad text
+used to be spoken mid-turn, early enough to land before the close; removing that
+above is what exposed it. Two rules follow. The budget must stay well clear of a
+real synthesis (a test pins it against the measured figure), and **a discarded
+chunk must log** — this is the one TTS failure with no exception behind it, and
+silence is indistinguishable from a dead speaker, which is the failure PA-85's
+invariant is written against. The bound itself stays, because
+`LiveSttClient.synthesize` puts no timeout on its `fetch`: this is PA-68's "a
+wedged network call is nobody's decision", not the approval no-decay rule.
+
 ### The home screen
 
 `projects/index.ts` composes `GET /api/projects`: live sessions and on-disk conversations

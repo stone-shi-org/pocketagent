@@ -154,6 +154,37 @@ function mapChatError(reply: FastifyReply, err: unknown): FastifyReply | never {
  * event, not a rejection, because this function no longer has form left to
  * turn a promise rejection into.
  */
+/**
+ * How long the response is held open after the turn's last event purely so
+ * queued TTS audio can still be written (PA-89).
+ *
+ * Unlike a coding session — whose audio rides a WebSocket that outlives the
+ * turn — a Pocket Agent turn's audio can only reach the browser on *this*
+ * request's SSE stream. So when the generator ends, any sentence still being
+ * synthesized is in a race against the response closing, and `SseStream.write`
+ * silently no-ops once it has.
+ *
+ * This was 5s, which is shorter than one synthesis: live-stt on a CPU backend
+ * takes ~9.5s for a one-sentence `<speak>` summary (measured against this
+ * deployment, 2026-09-23). The turn therefore always won the race and the
+ * summary was dropped without a trace — no error, no log, just silence, which
+ * reads as "talk-back is broken" and is exactly the failure PA-85's own
+ * invariant says must never be silent. It went unnoticed while untagged
+ * scratchpad text was still spoken *mid-turn*, because that audio was
+ * synthesized early enough to land before the close; PA-89's fix to stop
+ * speaking scratchpad removed the only thing masking it.
+ *
+ * A bound is still required — `LiveSttClient.synthesize` puts no timeout on
+ * its `fetch`, so waiting unconditionally would hand a hung voice service the
+ * ability to pin a request open forever. This is the PA-68 "a wedged
+ * subprocess is nobody's decision" case, not the approval no-decay rule: it
+ * ends a *network wait*, and it never answers anything on a human's behalf.
+ * Sized for a couple of sentences at the measured CPU rate, with plenty of
+ * head-room, and a warning when it trips so a slower backend reports itself
+ * instead of going quiet again.
+ */
+export const TTS_DRAIN_BUDGET_MS = 60_000;
+
 async function streamPlannerEvents(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -196,6 +227,17 @@ async function streamPlannerEvents(
       (sentence) => client.synthesize(sentence, options.config?.liveSttTtsModel),
       (chunk) => {
         if (!chunk.done) {
+          // A chunk that misses the stream is the one TTS failure with no
+          // exception behind it, so it has to announce itself: `write` is a
+          // no-op once the response is gone, which is silence that looks
+          // identical to a broken microphone. See `TTS_DRAIN_BUDGET_MS`.
+          if (stream.closed) {
+            request.log.warn(
+              { bytes: chunk.data.length },
+              'planner turn TTS audio discarded: the response stream closed before synthesis finished',
+            );
+            return;
+          }
           stream.write({
             kind: 'tts_audio',
             id: crypto.randomUUID(),
@@ -247,27 +289,25 @@ async function streamPlannerEvents(
       stream.write(event);
     }
     if (pumpFinishPromise) {
-      // PA-93: speech synthesis for spoken summaries can take several seconds
-      // per sentence (e.g. Kokoro on live-stt takes 6-10s). A 5s timeout prematurely
-      // closed the SSE stream and cancelled the pump before audio chunks were emitted.
-      const timeoutMs = options?.ttsTimeoutMs ?? 60_000;
-      let timedOut = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          pumpFinishPromise,
-          new Promise<void>((resolve) => {
-            timer = setTimeout(() => {
-              timedOut = true;
-              resolve();
-            }, timeoutMs);
-          }),
-        ]);
-      } finally {
-        if (timer) clearTimeout(timer);
+      const budgetMs = options?.ttsTimeoutMs ?? TTS_DRAIN_BUDGET_MS;
+      let drained = false;
+      void pumpFinishPromise.then(() => {
+        drained = true;
+      });
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        pumpFinishPromise,
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, budgetMs);
+        }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
+      if (!drained) {
+        request.log.warn(
+          { budgetMs },
+          'planner turn TTS did not finish within its drain budget; remaining audio is lost',
+        );
       }
-      if (timedOut) {
-        request.log.warn({ timeoutMs }, 'planner turn TTS completion timed out');
       }
     }
   } catch (err) {

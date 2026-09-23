@@ -508,3 +508,19 @@ describe('VoiceTtsService', () => {
     ]);
   });
 });
+
+/**
+ * PA-89. A Pocket Agent turn's audio can only reach the browser on the request
+ * that produced it, so the drain budget is the whole of whether talk-back is
+ * audible — and the failure when it is too short is *silent*, which is why it
+ * survived a release. Measured against this deployment on 2026-09-23: one
+ * one-sentence `<speak>` summary took ~9.5s to synthesize on live-stt's CPU
+ * backend, against a budget that was then 5s, so the summary was always lost.
+ */
+describe('planner TTS drain budget', () => {
+  it('leaves room for several sentences at the measured CPU synthesis rate', async () => {
+    const { TTS_DRAIN_BUDGET_MS } = await import('../src/routes/planner.js');
+    const MEASURED_ONE_SENTENCE_MS = 9_500;
+    expect(TTS_DRAIN_BUDGET_MS).toBeGreaterThanOrEqual(MEASURED_ONE_SENTENCE_MS * 3);
+  });
+});
