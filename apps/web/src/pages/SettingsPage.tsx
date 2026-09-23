@@ -215,19 +215,29 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
 
   if (error && !data) {
     return (
-      <PageShell onBack={onBack}>
+      <div className="settings-page">
+        {onBack && (
+          <div className="settings-header" style={{ borderBottom: 'none' }}>
+            <div />
+            <div className="settings-header-actions">
+              <button type="button" className="settings-close-btn" onClick={onBack}>
+                Close
+              </button>
+            </div>
+          </div>
+        )}
         <div className="error-box" role="alert">
           {error}
         </div>
-      </PageShell>
+      </div>
     );
   }
 
   if (!data) {
     return (
-      <PageShell onBack={onBack}>
+      <div className="settings-page">
         <div className="spinner">Loading settings…</div>
-      </PageShell>
+      </div>
     );
   }
 
@@ -236,7 +246,7 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
   const busy = (key: string) => pending.has(key);
 
   return (
-    <PageShell onBack={onBack}>
+    <div className="settings-page">
       {error && (
         <div className="error-box" role="alert">
           {error}
@@ -253,7 +263,17 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
             Manage server configurations, agent execution paths, timeouts, and device preferences.
           </p>
         </div>
+        {onBack && (
+          <div className="settings-header-actions">
+            <button type="button" className="settings-close-btn" onClick={onBack} aria-label="Close settings">
+              Close
+            </button>
+          </div>
+        )}
       </div>
+
+      <div className="settings-grid">
+        <div className="settings-col">
 
       <SectionCard title="This server" icon="laptop" desc="Environment and network configuration fixed at process launch.">
         <dl className="settings-fixed">
@@ -390,323 +410,327 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
         />
       </SectionCard>
 
-      <SectionCard title="Agent Executables" icon="code">
-        <TextRow
-          label="Shell binary"
-          restart={restart.has('shell')}
-          value={settings.shell}
-          busy={busy('shell')}
-          onChange={(v) => saveDebounced('shell', v)}
-        />
-        <TextRow
-          label="Claude binary"
-          restart={restart.has('claudeBin')}
-          value={settings.claudeBin}
-          busy={busy('claudeBin')}
-          onChange={(v) => saveDebounced('claudeBin', v)}
-        />
-        <TextRow
-          label="Gemini (agy) binary"
-          restart={restart.has('agyBin')}
-          value={settings.agyBin}
-          busy={busy('agyBin')}
-          onChange={(v) => saveDebounced('agyBin', v)}
-        />
-        <TextRow
-          label="opencode binary"
-          restart={restart.has('opencodeBin')}
-          value={settings.opencodeBin}
-          busy={busy('opencodeBin')}
-          onChange={(v) => saveDebounced('opencodeBin', v)}
-        />
-        <TextRow
-          label="Codex binary"
-          restart={restart.has('codexBin')}
-          value={settings.codexBin}
-          busy={busy('codexBin')}
-          onChange={(v) => saveDebounced('codexBin', v)}
-        />
-        <TextRow
-          label="pi binary"
-          restart={restart.has('piBin')}
-          value={settings.piBin}
-          busy={busy('piBin')}
-          onChange={(v) => saveDebounced('piBin', v)}
-        />
-        {/* PA-68. Kept in this section rather than next to "Coding Agents"
-            because it belongs with the other five paths: it is where an
-            on-demand install writes, and it only works if it is a directory
-            `agents/registry.ts` already searches — which is why the setup
-            dialog refuses to offer an install when it is not. */}
-        <TextRow
-          label="Agent install prefix"
-          restart={restart.has('agentInstallPrefix')}
-          value={settings.agentInstallPrefix}
-          busy={busy('agentInstallPrefix')}
-          onChange={(v) => saveDebounced('agentInstallPrefix', v)}
-        />
-      </SectionCard>
+          <SectionCard title="Process Backend" icon="agents" desc="Changing options while sessions run applies to new sessions after restart.">
+            <SelectRow
+              label="Backend"
+              restart
+              value={settings.backend}
+              options={[
+                { value: 'direct', label: 'direct — child of this process' },
+                { value: 'tmux', label: 'tmux — survives server restarts' },
+              ]}
+              busy={busy('backend')}
+              onChange={(v) => saveNow('backend', v)}
+            />
+            <TextRow
+              label="tmux binary"
+              restart={restart.has('tmuxBin')}
+              value={settings.tmuxBin}
+              busy={busy('tmuxBin')}
+              onChange={(v) => saveDebounced('tmuxBin', v)}
+            />
+            <TextRow
+              label="tmux socket"
+              restart={restart.has('tmuxSocket')}
+              value={settings.tmuxSocket}
+              busy={busy('tmuxSocket')}
+              onChange={(v) => saveDebounced('tmuxSocket', v)}
+            />
+            <TextRow
+              label="Adopt tmux socket"
+              help="A foreign tmux socket whose panes may be adopted. Blank disables adoption."
+              restart={restart.has('adoptTmuxSocket')}
+              value={settings.adoptTmuxSocket}
+              busy={busy('adoptTmuxSocket')}
+              onChange={(v) => saveDebounced('adoptTmuxSocket', v)}
+            />
+            <TextRow
+              label="tmux systemd scope slice"
+              help="Runs the tmux server's own scope under this systemd --user slice. Blank disables it."
+              restart={restart.has('tmuxSessionScopeSlice')}
+              value={settings.tmuxSessionScopeSlice}
+              busy={busy('tmuxSessionScopeSlice')}
+              onChange={(v) => saveDebounced('tmuxSessionScopeSlice', v)}
+            />
+          </SectionCard>
 
-      <SectionCard
-        title="Coding Agents"
-        icon="code"
-        desc="Whether each coding agent CLI is installed and signed in, its model catalog as last observed, and on-demand installation."
-      >
-        <CodingAgentsSection onApiError={onApiError} />
-      </SectionCard>
+          <SectionCard
+            title="This Host"
+            icon="laptop"
+            desc="The build this host is running, and asking it to drain and restart. The image it comes back on is fixed by its unit, never chosen here."
+          >
+            <HostAdminSection onApiError={onApiError} />
+          </SectionCard>
 
-      <SectionCard
-        title="Custom Claude Providers"
-        icon="code"
-        desc="Claude Code driven against a third-party Anthropic-compatible endpoint."
-      >
-        <CustomClaudeProvidersSection onApiError={onApiError} />
-      </SectionCard>
+          <SectionCard title="Logging & Diagnostics" icon="compose">
+            <SelectRow
+              label="Log level"
+              value={settings.logLevel}
+              options={['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'].map((l) => ({
+                value: l,
+                label: l,
+              }))}
+              busy={busy('logLevel')}
+              onChange={(v) => saveNow('logLevel', v)}
+            />
+          </SectionCard>
+        </div>
 
-      <SectionCard
-        title="Hubs"
-        icon="laptop"
-        desc="Hubs bound to this backend, and revoking one. A Hub stores a credential minted here, never this server's access token."
-      >
-        <HubsSection onApiError={onApiError} />
-      </SectionCard>
+        <div className="settings-col">
+          <SectionCard title="Agent Executables" icon="code">
+            <TextRow
+              label="Shell binary"
+              restart={restart.has('shell')}
+              value={settings.shell}
+              busy={busy('shell')}
+              onChange={(v) => saveDebounced('shell', v)}
+            />
+            <TextRow
+              label="Claude binary"
+              restart={restart.has('claudeBin')}
+              value={settings.claudeBin}
+              busy={busy('claudeBin')}
+              onChange={(v) => saveDebounced('claudeBin', v)}
+            />
+            <TextRow
+              label="Gemini (agy) binary"
+              restart={restart.has('agyBin')}
+              value={settings.agyBin}
+              busy={busy('agyBin')}
+              onChange={(v) => saveDebounced('agyBin', v)}
+            />
+            <TextRow
+              label="opencode binary"
+              restart={restart.has('opencodeBin')}
+              value={settings.opencodeBin}
+              busy={busy('opencodeBin')}
+              onChange={(v) => saveDebounced('opencodeBin', v)}
+            />
+            <TextRow
+              label="Codex binary"
+              restart={restart.has('codexBin')}
+              value={settings.codexBin}
+              busy={busy('codexBin')}
+              onChange={(v) => saveDebounced('codexBin', v)}
+            />
+            <TextRow
+              label="pi binary"
+              restart={restart.has('piBin')}
+              value={settings.piBin}
+              busy={busy('piBin')}
+              onChange={(v) => saveDebounced('piBin', v)}
+            />
+            {/* PA-68. Kept in this section rather than next to "Coding Agents"
+                because it belongs with the other five paths: it is where an
+                on-demand install writes, and it only works if it is a directory
+                `agents/registry.ts` already searches — which is why the setup
+                dialog refuses to offer an install when it is not. */}
+            <TextRow
+              label="Agent install prefix"
+              restart={restart.has('agentInstallPrefix')}
+              value={settings.agentInstallPrefix}
+              busy={busy('agentInstallPrefix')}
+              onChange={(v) => saveDebounced('agentInstallPrefix', v)}
+            />
+          </SectionCard>
 
-      {/* PA-70. Renders nothing — not even the card — unless this origin is a
-          Hub, so a standalone install's Settings page is unchanged. */}
-      <HubTemplatesSection />
+          <SectionCard
+            title="Coding Agents"
+            icon="code"
+            desc="Whether each coding agent CLI is installed and signed in, its model catalog as last observed, and on-demand installation."
+          >
+            <CodingAgentsSection onApiError={onApiError} />
+          </SectionCard>
 
-      <SectionCard
-        title="This Host"
-        icon="laptop"
-        desc="The build this host is running, and asking it to drain and restart. The image it comes back on is fixed by its unit, never chosen here."
-      >
-        <HostAdminSection onApiError={onApiError} />
-      </SectionCard>
+          <SectionCard
+            title="Custom Claude Providers"
+            icon="code"
+            desc="Claude Code driven against a third-party Anthropic-compatible endpoint."
+          >
+            <CustomClaudeProvidersSection onApiError={onApiError} />
+          </SectionCard>
 
-      <SectionCard
-        title="Telegram"
-        icon="compose"
-        desc="Pair a Telegram bot's chats to a Pocket Agent so it can be reached from Telegram."
-      >
-        <TelegramSection onApiError={onApiError} />
-      </SectionCard>
+          <SectionCard
+            title="Hubs"
+            icon="laptop"
+            desc="Hubs bound to this backend, and revoking one. A Hub stores a credential minted here, never this server's access token."
+          >
+            <HubsSection onApiError={onApiError} />
+          </SectionCard>
 
-      <SectionCard title="Process Backend" icon="agents" desc="Changing options while sessions run applies to new sessions after restart.">
-        <SelectRow
-          label="Backend"
-          restart
-          value={settings.backend}
-          options={[
-            { value: 'direct', label: 'direct — child of this process' },
-            { value: 'tmux', label: 'tmux — survives server restarts' },
-          ]}
-          busy={busy('backend')}
-          onChange={(v) => saveNow('backend', v)}
-        />
-        <TextRow
-          label="tmux binary"
-          restart={restart.has('tmuxBin')}
-          value={settings.tmuxBin}
-          busy={busy('tmuxBin')}
-          onChange={(v) => saveDebounced('tmuxBin', v)}
-        />
-        <TextRow
-          label="tmux socket"
-          restart={restart.has('tmuxSocket')}
-          value={settings.tmuxSocket}
-          busy={busy('tmuxSocket')}
-          onChange={(v) => saveDebounced('tmuxSocket', v)}
-        />
-        <TextRow
-          label="Adopt tmux socket"
-          help="A foreign tmux socket whose panes may be adopted. Blank disables adoption."
-          restart={restart.has('adoptTmuxSocket')}
-          value={settings.adoptTmuxSocket}
-          busy={busy('adoptTmuxSocket')}
-          onChange={(v) => saveDebounced('adoptTmuxSocket', v)}
-        />
-        <TextRow
-          label="tmux systemd scope slice"
-          help="Runs the tmux server's own scope under this systemd --user slice. Blank disables it."
-          restart={restart.has('tmuxSessionScopeSlice')}
-          value={settings.tmuxSessionScopeSlice}
-          busy={busy('tmuxSessionScopeSlice')}
-          onChange={(v) => saveDebounced('tmuxSessionScopeSlice', v)}
-        />
-      </SectionCard>
+          {/* PA-70. Renders nothing — not even the card — unless this origin is a
+              Hub, so a standalone install's Settings page is unchanged. */}
+          <HubTemplatesSection />
 
-      <SectionCard title="Integrations" icon="attach">
-        <TextRow
-          label="code-server URL"
-          help="Base URL of a code-server instance reachable from the browser. Blank hides the 'Open in code-server' action."
-          placeholder="https://host/code/"
-          value={settings.codeServerUrl}
-          busy={busy('codeServerUrl')}
-          onChange={(v) => saveDebounced('codeServerUrl', v)}
-        />
-        <TextRow
-          label="Live STT URL"
-          help="Base URL of the self-hosted live-stt service's HTTP admin port (PA-20). Reachable only from this server, never the browser. Blank hides the voice-input mic button entirely."
-          placeholder="http://10.100.0.50:8000"
-          value={settings.liveSttUrl}
-          busy={busy('liveSttUrl')}
-          onChange={(v) => saveDebounced('liveSttUrl', v)}
-        />
-        <TextRow
-          label="STT Model"
-          help="Model name for Speech-to-Text (e.g. whisper-large-v3-turbo-q8_0, realtime_eou_120m-v1). Blank uses live-stt's configured default model."
-          placeholder="realtime_eou_120m-v1 (default)"
-          value={settings.liveSttModel}
-          busy={busy('liveSttModel')}
-          listId="stt-models-list"
-          onChange={(v) => saveDebounced('liveSttModel', v)}
-        >
-          <datalist id="stt-models-list">
-            {voiceModels.asr.map((id) => (
-              <option key={id} value={id} />
-            ))}
-          </datalist>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
-            <button
-              type="button"
-              disabled={testingStt || !settings.liveSttUrl}
-              onClick={() => void runTestStt()}
+          <SectionCard
+            title="Telegram"
+            icon="compose"
+            desc="Pair a Telegram bot's chats to a Pocket Agent so it can be reached from Telegram."
+          >
+            <TelegramSection onApiError={onApiError} />
+          </SectionCard>
+
+          <SectionCard title="Integrations" icon="attach">
+            <TextRow
+              label="code-server URL"
+              help="Base URL of a code-server instance reachable from the browser. Blank hides the 'Open in code-server' action."
+              placeholder="https://host/code/"
+              value={settings.codeServerUrl}
+              busy={busy('codeServerUrl')}
+              onChange={(v) => saveDebounced('codeServerUrl', v)}
+            />
+            <TextRow
+              label="Live STT URL"
+              help="Base URL of the self-hosted live-stt service's HTTP admin port (PA-20). Reachable only from this server, never the browser. Blank hides the voice-input mic button entirely."
+              placeholder="http://10.100.0.50:8000"
+              value={settings.liveSttUrl}
+              busy={busy('liveSttUrl')}
+              onChange={(v) => saveDebounced('liveSttUrl', v)}
+            />
+            <TextRow
+              label="STT Model"
+              help="Model name for Speech-to-Text (e.g. whisper-large-v3-turbo-q8_0, realtime_eou_120m-v1). Blank uses live-stt's configured default model."
+              placeholder="realtime_eou_120m-v1 (default)"
+              value={settings.liveSttModel}
+              busy={busy('liveSttModel')}
+              listId="stt-models-list"
+              onChange={(v) => saveDebounced('liveSttModel', v)}
             >
-              {testingStt ? 'Testing STT…' : 'Test STT'}
-            </button>
-            {sttResult && (
-              <span
-                className={sttResult.ok ? 'planner-test-ok' : 'planner-test-fail'}
-                style={{ fontSize: '13px' }}
-              >
-                {sttResult.ok
-                  ? `✓ (${sttResult.durationMs}ms): "${sttResult.message}"`
-                  : `✗ ${sttResult.message}`}
-              </span>
-            )}
-          </div>
-        </TextRow>
-        <TextRow
-          label="TTS Model"
-          help="Model name for Text-to-Speech (e.g. kokoro-82m-v1, piper-en-us). Blank uses live-stt's configured default model."
-          placeholder="kokoro-82m-v1 (default)"
-          value={settings.liveSttTtsModel}
-          busy={busy('liveSttTtsModel')}
-          listId="tts-models-list"
-          onChange={(v) => saveDebounced('liveSttTtsModel', v)}
-        >
-          <datalist id="tts-models-list">
-            {voiceModels.tts.map((id) => (
-              <option key={id} value={id} />
-            ))}
-          </datalist>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
-            <button
-              type="button"
-              disabled={testingTts || playingTts || !settings.liveSttUrl}
-              onClick={() => void runTestTts()}
+              <datalist id="stt-models-list">
+                {voiceModels.asr.map((id) => (
+                  <option key={id} value={id} />
+                ))}
+              </datalist>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
+                <button
+                  type="button"
+                  disabled={testingStt || !settings.liveSttUrl}
+                  onClick={() => void runTestStt()}
+                >
+                  {testingStt ? 'Testing STT…' : 'Test STT'}
+                </button>
+                {sttResult && (
+                  <span
+                    className={sttResult.ok ? 'planner-test-ok' : 'planner-test-fail'}
+                    style={{ fontSize: '13px' }}
+                  >
+                    {sttResult.ok
+                      ? `✓ (${sttResult.durationMs}ms): "${sttResult.message}"`
+                      : `✗ ${sttResult.message}`}
+                  </span>
+                )}
+              </div>
+            </TextRow>
+            <TextRow
+              label="TTS Model"
+              help="Model name for Text-to-Speech (e.g. kokoro-82m-v1, piper-en-us). Blank uses live-stt's configured default model."
+              placeholder="kokoro-82m-v1 (default)"
+              value={settings.liveSttTtsModel}
+              busy={busy('liveSttTtsModel')}
+              listId="tts-models-list"
+              onChange={(v) => saveDebounced('liveSttTtsModel', v)}
             >
-              {testingTts ? 'Testing TTS…' : playingTts ? 'Playing…' : 'Test TTS'}
-            </button>
-            {ttsResult && (
-              <span
-                className={ttsResult.ok ? 'planner-test-ok' : 'planner-test-fail'}
-                style={{ fontSize: '13px' }}
-              >
-                {ttsResult.ok
-                  ? `✓ (${ttsResult.durationMs}ms): ${ttsResult.message}`
-                  : `✗ ${ttsResult.message}`}
-              </span>
-            )}
-          </div>
-        </TextRow>
-        <NumberRow
-          label="Live-listen sensitivity"
-          help="1 (least sensitive — needs louder, clearer speech) to 10 (most sensitive — picks up quieter speech). 5 is the original, unconfigurable default."
-          value={settings.voiceTurnSensitivity}
-          min={1}
-          max={10}
-          busy={busy('voiceTurnSensitivity')}
-          onChange={(v) => saveDebounced('voiceTurnSensitivity', v)}
-        />
-        <NumberRow
-          label="Live-listen silence before turn ends"
-          unit="ms"
-          help="How long the mic must stay quiet before live-listen mode treats what you said as finished and sends it. Lower ends a turn sooner but risks cutting off a mid-sentence pause."
-          value={settings.voiceTurnSilenceMs}
-          min={200}
-          max={3000}
-          busy={busy('voiceTurnSilenceMs')}
-          onChange={(v) => saveDebounced('voiceTurnSilenceMs', v)}
-        />
-        <BoolRow
-          label="Spoken summary for talk-back"
-          help="Asks the agent to open a voice turn with a short, spoken-friendly summary that talk-back reads instead of the written reply. Code blocks, file paths and URLs are left out of speech either way — turning this off only stops the request being added to your prompt."
-          checked={settings.voiceSpokenSummaryEnabled}
-          busy={busy('voiceSpokenSummaryEnabled')}
-          onChange={(v) => saveNow('voiceSpokenSummaryEnabled', v)}
-        />
-        <TextRow
-          label="Push contact"
-          help="VAPID sub claim: a mailto: or https: URL identifying this deployment."
-          restart={restart.has('pushContact')}
-          value={settings.pushContact}
-          busy={busy('pushContact')}
-          onChange={(v) => saveDebounced('pushContact', v)}
-        />
-      </SectionCard>
+              <datalist id="tts-models-list">
+                {voiceModels.tts.map((id) => (
+                  <option key={id} value={id} />
+                ))}
+              </datalist>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
+                <button
+                  type="button"
+                  disabled={testingTts || playingTts || !settings.liveSttUrl}
+                  onClick={() => void runTestTts()}
+                >
+                  {testingTts ? 'Testing TTS…' : playingTts ? 'Playing…' : 'Test TTS'}
+                </button>
+                {ttsResult && (
+                  <span
+                    className={ttsResult.ok ? 'planner-test-ok' : 'planner-test-fail'}
+                    style={{ fontSize: '13px' }}
+                  >
+                    {ttsResult.ok
+                      ? `✓ (${ttsResult.durationMs}ms): ${ttsResult.message}`
+                      : `✗ ${ttsResult.message}`}
+                  </span>
+                )}
+              </div>
+            </TextRow>
+            <NumberRow
+              label="Live-listen sensitivity"
+              help="1 (least sensitive — needs louder, clearer speech) to 10 (most sensitive — picks up quieter speech). 5 is the original, unconfigurable default."
+              value={settings.voiceTurnSensitivity}
+              min={1}
+              max={10}
+              busy={busy('voiceTurnSensitivity')}
+              onChange={(v) => saveDebounced('voiceTurnSensitivity', v)}
+            />
+            <NumberRow
+              label="Live-listen silence before turn ends"
+              unit="ms"
+              help="How long the mic must stay quiet before live-listen mode treats what you said as finished and sends it. Lower ends a turn sooner but risks cutting off a mid-sentence pause."
+              value={settings.voiceTurnSilenceMs}
+              min={200}
+              max={3000}
+              busy={busy('voiceTurnSilenceMs')}
+              onChange={(v) => saveDebounced('voiceTurnSilenceMs', v)}
+            />
+            <BoolRow
+              label="Spoken summary for talk-back"
+              help="Asks the agent to open a voice turn with a short, spoken-friendly summary that talk-back reads instead of the written reply. Code blocks, file paths and URLs are left out of speech either way — turning this off only stops the request being added to your prompt."
+              checked={settings.voiceSpokenSummaryEnabled}
+              busy={busy('voiceSpokenSummaryEnabled')}
+              onChange={(v) => saveNow('voiceSpokenSummaryEnabled', v)}
+            />
+            <TextRow
+              label="Push contact"
+              help="VAPID sub claim: a mailto: or https: URL identifying this deployment."
+              restart={restart.has('pushContact')}
+              value={settings.pushContact}
+              busy={busy('pushContact')}
+              onChange={(v) => saveDebounced('pushContact', v)}
+            />
+          </SectionCard>
 
-      <SectionCard title="Logging & Diagnostics" icon="compose">
-        <SelectRow
-          label="Log level"
-          value={settings.logLevel}
-          options={['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'].map((l) => ({
-            value: l,
-            label: l,
-          }))}
-          busy={busy('logLevel')}
-          onChange={(v) => saveNow('logLevel', v)}
-        />
-      </SectionCard>
-
-      <SectionCard title="Device Options" icon="laptop">
-        <BoolRow
-          label="Directly send voice prompt"
-          help="When enabled, push-to-talk voice recordings are sent immediately upon release. When disabled (default), transcribed text appears in the prompt box for review."
-          checked={voiceDirectSend}
-          busy={false}
-          onChange={(v) => {
-            setVoiceDirectSend(v);
-            setVoiceDirectSendPref(v);
-          }}
-        />
-        <div className="settings-row settings-row-stacked">
-          <div className="settings-row-info">
-            <label className="settings-row-label" htmlFor="terminal-font">
-              Terminal font
-            </label>
-          </div>
-          <div className="settings-row-control">
-            <input
-              id="terminal-font"
-              type="text"
-              className="settings-input"
-              value={fontOverride}
-              placeholder='Bundled default: "JetBrainsMono Nerd Font Mono"'
-              onChange={(e) => {
-                setFontOverride(e.target.value);
-                setTerminalFontOverride(e.target.value);
+          <SectionCard title="Device Options" icon="laptop">
+            <BoolRow
+              label="Directly send voice prompt"
+              help="When enabled, push-to-talk voice recordings are sent immediately upon release. When disabled (default), transcribed text appears in the prompt box for review."
+              checked={voiceDirectSend}
+              busy={false}
+              onChange={(v) => {
+                setVoiceDirectSend(v);
+                setVoiceDirectSendPref(v);
               }}
             />
-          </div>
-          <p className="transport-hint">
-            Terminals render Powerline and Nerd Font glyphs using a font bundled with the app. Set this only if you have a custom font installed on <strong>this device</strong>. Stored locally in this browser.
-          </p>
+            <div className="settings-row settings-row-stacked">
+              <div className="settings-row-info">
+                <label className="settings-row-label" htmlFor="terminal-font">
+                  Terminal font
+                </label>
+              </div>
+              <div className="settings-row-control">
+                <input
+                  id="terminal-font"
+                  type="text"
+                  className="settings-input"
+                  value={fontOverride}
+                  placeholder='Bundled default: "JetBrainsMono Nerd Font Mono"'
+                  onChange={(e) => {
+                    setFontOverride(e.target.value);
+                    setTerminalFontOverride(e.target.value);
+                  }}
+                />
+              </div>
+              <p className="transport-hint">
+                Terminals render Powerline and Nerd Font glyphs using a font bundled with the app. Set this only if you have a custom font installed on <strong>this device</strong>. Stored locally in this browser.
+              </p>
+            </div>
+          </SectionCard>
         </div>
-      </SectionCard>
+      </div>
 
       <p className="version-footer">{formatBuildInfo()}</p>
-    </PageShell>
+    </div>
   );
 }
 
@@ -739,23 +763,6 @@ export function SectionCard({
       </div>
       {children}
     </section>
-  );
-}
-
-function PageShell({ onBack, children }: { onBack?: () => void; children: ReactNode }): JSX.Element {
-  if (!onBack) return <div className="settings-page">{children}</div>;
-  return (
-    <div className="app">
-      <header className="home-bar">
-        <button type="button" className="round-btn" onClick={onBack} aria-label="Back">
-          <Icon name="chevron-left" size={20} />
-        </button>
-        <div className="home-title">
-          <strong>Settings</strong>
-        </div>
-      </header>
-      <div className="settings-page">{children}</div>
-    </div>
   );
 }
 
