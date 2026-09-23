@@ -84,3 +84,29 @@ describe('formatElapsed', () => {
     expect(formatElapsed(605)).toBe('10:05');
   });
 });
+
+describe('PromptBox attach and mic button placement (PA-91)', () => {
+  it('renders AttachButton before MicButton so MicButton maintains a stable position', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+
+    const html = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-test-pa91"
+        onSend={() => true}
+        disabled={false}
+        supportsImageAttachment={true}
+        supportsVoiceInput={true}
+        onTranscribeVoice={async () => 'transcribed'}
+      />,
+    );
+
+    const attachIdx = html.indexOf('class="attach-btn"');
+    const micIdx = html.indexOf('class="mic-btn"');
+    expect(attachIdx).toBeGreaterThan(-1);
+    expect(micIdx).toBeGreaterThan(-1);
+    // AttachButton must precede MicButton in the DOM
+    expect(attachIdx).toBeLessThan(micIdx);
+  });
+});
+

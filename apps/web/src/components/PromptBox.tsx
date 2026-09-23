@@ -750,8 +750,15 @@ export function PromptBox({
           {liveListenNotice && <span className="live-listen-notice">{liveListenNotice}</span>}
         </div>
       )}
-      {supportsImageAttachment && !isVoiceRecording && !isTranscribing && (
-        <AttachButton inputRef={fileInputRef} onFile={(file) => void attach(file)} disabled={disabled} />
+      {/* PA-91: keep the attach trigger mounted (disabled) while recording
+          or transcribing so the mic button immediately beside it does not jump
+          under the user's held finger or pointer. */}
+      {supportsImageAttachment && (
+        <AttachButton
+          inputRef={fileInputRef}
+          onFile={(file) => void attach(file)}
+          disabled={disabled || isVoiceRecording || isTranscribing}
+        />
       )}
       {supportsVoiceInput && onTranscribeVoice && !liveListenActive && (
         <MicButton
