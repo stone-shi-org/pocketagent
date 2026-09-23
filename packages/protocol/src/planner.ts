@@ -535,6 +535,8 @@ export const PlannerSendMessageRequest = z
     image: PromptImage.optional(),
     /** Overrides the chat's remembered model for this turn onward. */
     modelId: z.string().max(200).optional(),
+    /** PA-89: whether voice mode / live listen is active for this turn */
+    voiceMode: z.boolean().optional(),
   })
   .refine((data) => data.content.trim().length > 0 || !!data.image, {
     message: 'Must provide content or an image.',

@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import {
   LIMITS,
   VoiceTranscribeRequest,
@@ -11,6 +11,7 @@ import { getTestUtterancePcm16 } from '../voice/fixtures/test-utterance.js';
 /**
  * PA-20 Phase 1: push-to-talk transcription.
  * PA-81: STT and TTS model selection & diagnostic test endpoints.
+ * PA-89: audio input for planner agent.
  *
  * Deliberately not gated on transport (`sessions.get` only checks the
  * session exists) — unlike the later live-listen/talk-back mode, submitting
@@ -21,9 +22,12 @@ import { getTestUtterancePcm16 } from '../voice/fixtures/test-utterance.js';
  * `onSend` — the same path a typed message already uses.
  */
 export const voiceRoutes: FastifyPluginAsync = async (app) => {
-  const { sessions, config } = app.pocket;
+  const { sessions, config, plannerChats } = app.pocket;
 
-  app.post<{ Params: { id: string } }>('/api/sessions/:id/voice/transcribe', async (request, reply) => {
+  const handleTranscribe = async (
+    request: FastifyRequest<{ Params: { id: string } }>,
+    reply: FastifyReply,
+  ) => {
     // `liveSttUrl` is a live (no-restart) `SETTINGS_FIELDS` entry (PA-20),
     // so this is re-derived per request rather than captured once at plugin
     // registration — a route plugin's setup body runs exactly once at boot,
@@ -37,8 +41,14 @@ export const voiceRoutes: FastifyPluginAsync = async (app) => {
       });
     }
 
-    const session = sessions.find(request.params.id);
-    if (!session) {
+    const rawId = request.params.id;
+    const session = sessions.find(rawId);
+    const plannerChat =
+      !session && plannerChats
+        ? plannerChats.get(rawId.startsWith('planner_') ? rawId.slice('planner_'.length) : rawId)
+        : null;
+
+    if (!session && !plannerChat) {
       return reply.code(404).send({ error: { code: 'not_found', message: 'No such session.' } });
     }
 
@@ -81,7 +91,10 @@ export const voiceRoutes: FastifyPluginAsync = async (app) => {
       }
       throw err;
     }
-  });
+  };
+
+  app.post<{ Params: { id: string } }>('/api/sessions/:id/voice/transcribe', handleTranscribe);
+  app.post<{ Params: { id: string } }>('/api/planner/chats/:id/voice/transcribe', handleTranscribe);
 
   /**
    * PA-81: Query models available on live-stt (covers ASR and TTS).

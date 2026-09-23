@@ -16,6 +16,11 @@ import { Transcript } from '../components/Transcript.js';
 import { PromptBox } from '../components/PromptBox.js';
 import { applyEvent, applyEvents, emptyTranscript, type TranscriptState } from '../agent/transcript.js';
 import { useHostApi } from '../hosts/HostContext.js';
+import { LiveListenController } from '../audio/live-listen.js';
+import { TtsPlaybackQueue } from '../audio/playback.js';
+import { vadOptionsForSensitivity, type VadOptions } from '../audio/vad.js';
+import { isSkipCommand } from '../audio/voice-commands.js';
+import { judgeUtterance } from '../audio/utterance-harness.js';
 
 const PLANNER_SLASH_COMMANDS: SlashCommandInfo[] = [
   {
@@ -91,7 +96,7 @@ interface EventKeyInfo {
  * not swallowed (R3).
  */
 function eventKey(event: AgentEvent): EventKeyInfo | null {
-  if (event.kind === 'text_delta') return null;
+  if (event.kind === 'text_delta' || event.kind === 'tts_audio') return null;
   if ('id' in event && typeof event.id === 'string' && event.id) {
     return { key: `${event.kind}:${event.id}`, ephemeral: false };
   }
@@ -165,6 +170,54 @@ export function PlannerChatPage({
   const [plannerSubagents, setPlannerSubagents] = useState<PlannerChat[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [liveListenActive, setLiveListenActive] = useState(false);
+  const [micLevel, setMicLevel] = useState(0);
+  const [liveListenError, setLiveListenError] = useState<string | null>(null);
+  const [liveListenNotice, setLiveListenNotice] = useState<string | null>(null);
+  const [reviewText, setReviewText] = useState<{ items: { text: string; seq: number }[] } | null>(null);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
+  const reviewSeqRef = useRef(0);
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showLiveListenNotice = useCallback((notice: string) => {
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    setLiveListenNotice(notice);
+    noticeTimerRef.current = setTimeout(() => {
+      setLiveListenNotice(null);
+      noticeTimerRef.current = null;
+    }, 4000);
+  }, []);
+
+  const vadOptionsRef = useRef<VadOptions | undefined>(undefined);
+  const ttsQueueRef = useRef<TtsPlaybackQueue | null>(null);
+
+  useEffect(() => {
+    const queue = new TtsPlaybackQueue((playing) => setIsSpeaking(playing));
+    ttsQueueRef.current = queue;
+    return () => {
+      queue.stop();
+      ttsQueueRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getSettings()
+      .then((res) => {
+        if (cancelled) return;
+        setVoiceEnabled(res.settings.liveSttUrl !== '');
+        vadOptionsRef.current = vadOptionsForSensitivity(
+          res.settings.voiceTurnSensitivity,
+          res.settings.voiceTurnSilenceMs,
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
   const seenPermanentKeys = useRef<Set<string>>(new Set());
   const seenEphemeralKeys = useRef<Map<string, number>>(new Map());
   const liveEventsBuffer = useRef<AgentEvent[]>([]);
@@ -380,6 +433,10 @@ export function PlannerChatPage({
       structured session's WebSocket events go through. */
   const onStreamEvent = useCallback(
     (event: AgentEvent): void => {
+      if (event.kind === 'tts_audio') {
+        ttsQueueRef.current?.enqueue(event.chunk.data, event.chunk.sampleRateHz);
+        return;
+      }
       if (loadingRef.current) {
         liveEventsBuffer.current.push(event);
       }
@@ -516,7 +573,8 @@ export function PlannerChatPage({
     const wasUntitled = chat?.title == null;
     void (async () => {
       try {
-        await api.sendPlannerMessage(chatId, { content: trimmed, image }, onStreamEvent);
+        ttsQueueRef.current?.arm();
+        await api.sendPlannerMessage(chatId, { content: trimmed, image, voiceMode: liveListenActive }, onStreamEvent);
         if (wasUntitled) {
           const { chats } = await api.listPlannerChats();
           setChat((prev) => chats.find((c) => c.id === chatId) ?? prev);
@@ -535,6 +593,133 @@ export function PlannerChatPage({
     })();
     return true;
   };
+
+  const handleSendRef = useRef(handleSend);
+  useEffect(() => {
+    handleSendRef.current = handleSend;
+  }, [handleSend]);
+
+  const handleToggleLiveListen = useCallback((enabled: boolean) => {
+    if (!enabled) {
+      ttsQueueRef.current?.stop();
+    }
+    setLiveListenActive(enabled);
+  }, []);
+
+  const handleStopSpeaking = useCallback(() => {
+    ttsQueueRef.current?.stop();
+  }, []);
+
+  useEffect(() => {
+    if (!liveListenActive || !shouldStream) {
+      setMicLevel(0);
+      return;
+    }
+
+    let controller: LiveListenController | null = null;
+    let cancelled = false;
+
+    const start = async () => {
+      ttsQueueRef.current?.arm();
+      const ctrl = new LiveListenController({
+        vad: vadOptionsRef.current,
+        onUtterance: (utterance) => {
+          if (!utterance.audioBase64) {
+            ttsQueueRef.current?.resume();
+            return;
+          }
+          void (async () => {
+            try {
+              const { text, words, durationSec } = await api.transcribeVoice(chatId, {
+                data: utterance.audioBase64,
+                durationMs: utterance.durationMs,
+              });
+              const trimmed = text.trim();
+              if (!trimmed) {
+                ttsQueueRef.current?.resume();
+                return;
+              }
+              if (isSkipCommand(trimmed)) {
+                ttsQueueRef.current?.stop();
+                return;
+              }
+              const judgement = judgeUtterance({
+                text,
+                ...(words ? { words } : {}),
+                ...(durationSec !== undefined ? { durationSec } : {}),
+                durationMs: utterance.durationMs,
+                ...(utterance.voicedMs !== undefined ? { voicedMs: utterance.voicedMs } : {}),
+              });
+              if (judgement.verdict === 'drop') {
+                ttsQueueRef.current?.resume();
+                showLiveListenNotice(`Ignored — ${judgement.reason}`);
+                return;
+              }
+              if (judgement.verdict === 'review') {
+                if (ttsQueueRef.current?.isPaused() || ttsQueueRef.current?.isPlaying()) {
+                  ttsQueueRef.current?.stop();
+                }
+                const seq = reviewSeqRef.current++;
+                setReviewText((prev) => ({ items: [...(prev?.items ?? []), { text: trimmed, seq }] }));
+                showLiveListenNotice(`Parked for review — ${judgement.reason}`);
+                return;
+              }
+              if (ttsQueueRef.current?.isPaused() || ttsQueueRef.current?.isPlaying()) {
+                ttsQueueRef.current?.stop();
+              }
+              handleSendRef.current(text);
+            } catch (err) {
+              ttsQueueRef.current?.resume();
+              setLiveListenError(
+                err instanceof Error ? err.message : 'Could not transcribe that recording.',
+              );
+            }
+          })();
+        },
+        onSpeechStart: () => {
+          if (!ttsQueueRef.current?.isPlaying()) return;
+          ttsQueueRef.current?.pause();
+        },
+        onSpeechDiscarded: () => {
+          ttsQueueRef.current?.resume();
+          showLiveListenNotice('Ignored — too short or not sustained');
+        },
+        onLevel: setMicLevel,
+        onError: (message) => {
+          setLiveListenError(message);
+          setLiveListenActive(false);
+          setMicLevel(0);
+          ttsQueueRef.current?.stop();
+        },
+      });
+
+      try {
+        await ctrl.start();
+        if (cancelled) {
+          await ctrl.stop();
+          return;
+        }
+        controller = ctrl;
+        setLiveListenError(null);
+      } catch (err) {
+        if (!cancelled) {
+          setLiveListenError(err instanceof Error ? err.message : 'Could not start live listening.');
+          setLiveListenActive(false);
+        }
+      }
+    };
+
+    void start();
+
+    return () => {
+      cancelled = true;
+      if (controller) {
+        void controller.stop();
+        controller = null;
+      }
+      setMicLevel(0);
+    };
+  }, [liveListenActive, shouldStream, chatId, api, showLiveListenNotice]);
 
   const decide = (decision: PlannerToolApprovalChoice): void => {
     const pending = transcript?.pending[0];
@@ -876,6 +1061,21 @@ export function PlannerChatPage({
         onSend={handleSend}
         disabled={disabled}
         supportsImageAttachment={true}
+        supportsVoiceInput={voiceEnabled}
+        onTranscribeVoice={
+          voiceEnabled
+            ? (audio) => api.transcribeVoice(chatId, audio).then((res) => res.text)
+            : undefined
+        }
+        supportsLiveListen={voiceEnabled}
+        liveListenActive={liveListenActive}
+        onSetLiveListen={handleToggleLiveListen}
+        micLevel={micLevel}
+        liveListenError={liveListenError}
+        liveListenNotice={liveListenNotice}
+        reviewText={reviewText}
+        isSpeaking={isSpeaking}
+        onStopSpeaking={handleStopSpeaking}
         commands={PLANNER_SLASH_COMMANDS}
         models={toModelInfos(models)}
         currentModel={chat?.lastModelId ?? null}

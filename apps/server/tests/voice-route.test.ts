@@ -108,6 +108,47 @@ describe('POST /api/sessions/:id/voice/transcribe', () => {
       expect(res.json()).toEqual({ text: 'turn on the lights' });
     });
 
+    it('transcribes successfully for a planner chat (PA-89)', async () => {
+      const chatRes = await t.app.inject({
+        method: 'POST',
+        url: '/api/planner/chats',
+        headers: { cookie: t.cookie },
+        payload: { title: 'Test Planner Chat' },
+      });
+      expect(chatRes.statusCode).toBe(201);
+      const chatId = chatRes.json().id as string;
+
+      // Via /api/sessions/:id/voice/transcribe with planner_${chatId}
+      const resPrefixed = await t.app.inject({
+        method: 'POST',
+        url: `/api/sessions/planner_${chatId}/voice/transcribe`,
+        headers: { cookie: t.cookie },
+        payload: { audio: { data: SOME_AUDIO_BASE64, durationMs: 500 } },
+      });
+      expect(resPrefixed.statusCode).toBe(200);
+      expect(resPrefixed.json()).toEqual({ text: 'turn on the lights' });
+
+      // Via /api/sessions/:id/voice/transcribe with raw chatId
+      const resRaw = await t.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${chatId}/voice/transcribe`,
+        headers: { cookie: t.cookie },
+        payload: { audio: { data: SOME_AUDIO_BASE64, durationMs: 500 } },
+      });
+      expect(resRaw.statusCode).toBe(200);
+      expect(resRaw.json()).toEqual({ text: 'turn on the lights' });
+
+      // Via /api/planner/chats/:id/voice/transcribe
+      const resPlannerRoute = await t.app.inject({
+        method: 'POST',
+        url: `/api/planner/chats/${chatId}/voice/transcribe`,
+        headers: { cookie: t.cookie },
+        payload: { audio: { data: SOME_AUDIO_BASE64, durationMs: 500 } },
+      });
+      expect(resPlannerRoute.statusCode).toBe(200);
+      expect(resPlannerRoute.json()).toEqual({ text: 'turn on the lights' });
+    });
+
     it('404s for an unknown session id even when voice is configured', async () => {
       const res = await t.app.inject({
         method: 'POST',

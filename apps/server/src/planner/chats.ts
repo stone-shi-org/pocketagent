@@ -1,12 +1,14 @@
 import crypto from 'node:crypto';
-import type {
-  AgentEvent,
-  PlannerChat,
-  PlannerContextPreviewResponse,
-  PlannerMemory,
-  PlannerSystemPromptSection,
-  PlannerToolApprovalChoice,
-  SessionInfo,
+import {
+  appendSpokenSummaryInstruction,
+  stripSpokenSummaryInstruction,
+  type AgentEvent,
+  type PlannerChat,
+  type PlannerContextPreviewResponse,
+  type PlannerMemory,
+  type PlannerSystemPromptSection,
+  type PlannerToolApprovalChoice,
+  type SessionInfo,
 } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import type { Config } from '../config/index.js';
@@ -1118,7 +1120,7 @@ export class PlannerChatService {
   async *sendMessage(
     id: string,
     content: string,
-    opts: { modelId?: string; image?: PromptImage; signal?: AbortSignal; isWake?: boolean } = {},
+    opts: { modelId?: string; image?: PromptImage; signal?: AbortSignal; isWake?: boolean; voiceMode?: boolean } = {},
   ): AsyncGenerator<AgentEvent> {
     const chat = this.requireChat(id);
     if (this.isBusy(id)) {
@@ -1142,15 +1144,20 @@ export class PlannerChatService {
       const modelId = this.resolveModelId(chat, opts.modelId);
       const workspacePath = this.workspacePathFor(chat);
 
+      let promptContent = content;
+      if (opts.voiceMode && this.opts.config?.voiceSpokenSummaryEnabled) {
+        promptContent = appendSpokenSummaryInstruction(promptContent);
+      }
+
       if (chat.title === null) {
-        const title = deriveChatTitle(content || (opts.image ? 'Image prompt' : ''));
+        const title = deriveChatTitle(stripSpokenSummaryInstruction(promptContent) || (opts.image ? 'Image prompt' : ''));
         if (title) updatePlannerChat(this.opts.db, chat.id, { title });
       }
 
       const userEvent: AgentEvent = {
         kind: 'user_prompt',
         id: crypto.randomUUID(),
-        text: content,
+        text: promptContent,
         ...(opts.image ? { image: opts.image } : {}),
       };
       yield* this.emit(workspacePath, chat.id, userEvent);

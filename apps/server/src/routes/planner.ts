@@ -54,6 +54,10 @@ import { PlannerLlmClient, PlannerLlmError } from '../planner/llm-client.js';
 import { PLANNER_TOOLS, postJsonToIntegration } from '../planner/tools.js';
 import { SkillRegistryError, type SkillSummary } from '../planner/skills.js';
 import { auditConfigChange } from './shared.js';
+import { createLiveSttClient } from '../voice/live-stt-client.js';
+import { SpokenTextPipeline } from '../voice/spoken-text-pipeline.js';
+import { TurnTtsPump } from '../voice/turn-tts-pump.js';
+import type { Config } from '../config/index.js';
 import {
   deleteAllPlannerModels,
   deletePlannerModel,
@@ -154,6 +158,10 @@ async function streamPlannerEvents(
   request: FastifyRequest,
   reply: FastifyReply,
   generator: AsyncGenerator<AgentEvent>,
+  options?: {
+    voiceMode?: boolean;
+    config?: Config;
+  },
 ): Promise<void> {
   let first: IteratorResult<AgentEvent>;
   try {
@@ -169,12 +177,74 @@ async function streamPlannerEvents(
   // writer would change behaviour this path has shipped and been tested with.
   const stream = openSseStream(request, reply);
 
+  const liveSttUrl = options?.config?.liveSttUrl;
+  const useTts = Boolean(options?.voiceMode && liveSttUrl);
+  let pipeline: SpokenTextPipeline | null = null;
+  let pump: TurnTtsPump | null = null;
+  let pumpFinishPromise: Promise<void> | null = null;
+
+  if (useTts && liveSttUrl) {
+    const client = createLiveSttClient(liveSttUrl);
+    pipeline = new SpokenTextPipeline();
+    let resolveFinish: () => void = () => {};
+    pumpFinishPromise = new Promise<void>((resolve) => {
+      resolveFinish = resolve;
+    });
+    pump = new TurnTtsPump(
+      crypto.randomUUID(),
+      (sentence) => client.synthesize(sentence, options.config?.liveSttTtsModel),
+      (chunk) => {
+        if (!chunk.done) {
+          stream.write({
+            kind: 'tts_audio',
+            id: crypto.randomUUID(),
+            chunk: { data: chunk.data, sampleRateHz: chunk.sampleRateHz },
+          } as AgentEvent);
+        } else {
+          resolveFinish();
+        }
+      },
+      (err) => {
+        request.log.warn({ err }, 'planner turn TTS synthesis failed');
+      },
+    );
+
+    request.raw.on('close', () => {
+      pump?.cancel();
+      resolveFinish();
+    });
+  }
+
   try {
-    if (!first.done) stream.write(first.value);
+    const handleEvent = (event: AgentEvent) => {
+      if (pump && pipeline) {
+        if (event.kind === 'text_delta') {
+          const sentences = pipeline.push(event.text);
+          for (const s of sentences) pump.push(s);
+        } else if (event.kind === 'turn_complete') {
+          const sentences = pipeline.flush();
+          for (const s of sentences) pump.push(s);
+          pump.finish();
+        }
+      }
+    };
+
+    if (!first.done) {
+      handleEvent(first.value);
+      stream.write(first.value);
+    }
     for await (const event of generator) {
+      handleEvent(event);
       stream.write(event);
     }
+    if (pumpFinishPromise) {
+      await Promise.race([
+        pumpFinishPromise,
+        new Promise((resolve) => setTimeout(resolve, 5000)),
+      ]);
+    }
   } catch (err) {
+    pump?.cancel();
     // Not expected in normal operation (see this function's doc comment),
     // but if something still throws mid-stream there is no status left to
     // change — a final in-band notice is the only way left to say so.
@@ -1173,9 +1243,13 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       {
         ...(parsed.data.modelId ? { modelId: parsed.data.modelId } : {}),
         ...(parsed.data.image ? { image: parsed.data.image } : {}),
+        ...(parsed.data.voiceMode !== undefined ? { voiceMode: parsed.data.voiceMode } : {}),
       },
     );
-    await streamPlannerEvents(request, reply, generator);
+    await streamPlannerEvents(request, reply, generator, {
+      voiceMode: parsed.data.voiceMode,
+      config: app.pocket.config,
+    });
   });
 
   /**

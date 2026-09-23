@@ -1,8 +1,25 @@
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PlannerLlmClient, PlannerLlmError } from '../src/planner/llm-client.js';
 import { authHeaders, createTestApp, type TestApp } from './helpers.js';
+
+function startFakeLiveStt(
+  handler: (req: http.IncomingMessage, res: http.ServerResponse) => void,
+): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = http.createServer(handler);
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address() as AddressInfo;
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        close: () => new Promise((r) => server.close(() => r())),
+      });
+    });
+  });
+}
 
 /**
  * PA-6: the LLM client, the chat turn loop (phase 2), the read-only
@@ -226,8 +243,13 @@ describe('planner chat routes over HTTP', () => {
     t2.app.inject({ method: 'DELETE', url, headers: authHeaders(t2.cookie) });
 
   /** Sends a message and returns the turn's full parsed event sequence. */
-  const sendMessage = async (t2: TestApp, chatId: string, content: string) => {
-    const res = await post(t2, `/api/planner/chats/${chatId}/messages`, { content });
+  const sendMessage = async (
+    t2: TestApp,
+    chatId: string,
+    content: string,
+    extra?: { voiceMode?: boolean; modelId?: string },
+  ) => {
+    const res = await post(t2, `/api/planner/chats/${chatId}/messages`, { content, ...extra });
     return { res, events: parseEvents(res) };
   };
 
@@ -1842,4 +1864,78 @@ describe('planner chat routes over HTTP', () => {
     expect(String(secondStatusResult?.content)).toContain('Unchanged since your last check');
     expect(String(secondStatusResult?.content)).toContain('end your turn now');
   });
+
+  it('appends spoken summary instruction when voiceMode is enabled and cleans auto-derived title (PA-89)', async () => {
+    let capturedUserContent = '';
+    const fetchImpl = vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+      const body = JSON.parse(init?.body as string);
+      const lastUser = body.messages.filter((m: { role: string }) => m.role === 'user').pop();
+      capturedUserContent = lastUser?.content ?? '';
+      return fakeCompletionResponse('I will help you plan your week.');
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const { events } = await sendMessage(t, chat.id, 'Plan my week', { voiceMode: true });
+
+    // The user_prompt event emitted to client includes the instruction
+    const userPrompt = events.find((e) => e.kind === 'user_prompt');
+    expect(userPrompt).toBeDefined();
+    expect((userPrompt as { text: string }).text).toContain('Plan my week');
+    expect((userPrompt as { text: string }).text).toContain('<speak>');
+
+    // The LLM received the spoken summary instruction
+    expect(capturedUserContent).toContain('Plan my week');
+    expect(capturedUserContent).toContain('<speak>');
+
+    // But the auto-derived chat title stripped the instruction!
+    const list = (await get(t, '/api/planner/chats')).json().chats;
+    const found = list.find((c: { id: string }) => c.id === chat.id);
+    expect(found.title).toBe('Plan my week');
+  });
+
+  it('streams tts_audio events when voiceMode is enabled and model produces speak tags (PA-89)', async () => {
+    const fakePcm = Buffer.from(new Int16Array([100, 200, 300, 400]).buffer);
+    const liveStt = await startFakeLiveStt((req, res) => {
+      if (req.method === 'POST' && req.url === '/v1/audio/speech') {
+        res.writeHead(200, { 'content-type': 'audio/pcm' });
+        res.end(fakePcm);
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    try {
+      const fetchImpl = vi.fn().mockImplementation(() => {
+        return fakeCompletionResponse('Here is the plan. <speak>The week has been planned.</speak>');
+      });
+
+      t = await createTestApp(
+        { POCKETAGENT_LIVE_STT_URL: liveStt.url },
+        undefined,
+        undefined,
+        undefined,
+        fetchImpl as unknown as typeof fetch,
+      );
+      await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+      const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+      const { events } = await sendMessage(t, chat.id, 'Plan my week', { voiceMode: true });
+
+      const ttsEvents = events.filter((e) => e.kind === 'tts_audio');
+      expect(ttsEvents.length).toBeGreaterThan(0);
+      const audioEvent = ttsEvents[0] as {
+        kind: 'tts_audio';
+        id: string;
+        chunk: { data: string; sampleRateHz: number };
+      };
+      expect(audioEvent.chunk.sampleRateHz).toBe(24000);
+      expect(audioEvent.chunk.data).toBe(fakePcm.toString('base64'));
+    } finally {
+      await liveStt.close();
+    }
+  });
 });
+

@@ -366,6 +366,16 @@ export type UserPromptEvent = z.infer<typeof UserPromptEvent>;
 export type CommandsAvailableEvent = z.infer<typeof CommandsAvailableEvent>;
 export type CommandOutputEvent = z.infer<typeof CommandOutputEvent>;
 
+export const TtsAudioEvent = z.object({
+  kind: z.literal('tts_audio'),
+  id: z.string(),
+  chunk: z.object({
+    data: z.string(),
+    sampleRateHz: z.number().int().positive(),
+  }),
+});
+export type TtsAudioEvent = z.infer<typeof TtsAudioEvent>;
+
 export const AgentEvent = z.discriminatedUnion('kind', [
   SessionStartedEvent,
   TextEvent,
@@ -385,6 +395,7 @@ export const AgentEvent = z.discriminatedUnion('kind', [
   ModelChangedEvent,
   EffortChangedEvent,
   ConversationResetEvent,
+  TtsAudioEvent,
 ]);
 export type AgentEvent = z.infer<typeof AgentEvent>;
 
