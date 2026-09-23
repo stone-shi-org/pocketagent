@@ -537,44 +537,10 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
         </div>
       )}
 
-      <div className="planner-section">
-        <h3>About you</h3>
-        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
-          Sent to every agent alongside its own Identity text (set per agent, in that agent's own
-          editor page) — your name, email, Jira username, or anything else an agent should know
-          about who it's talking to.
-        </p>
-        <textarea
-          id="planner-me-instruction"
-          value={meInstructionInput}
-          disabled={busy}
-          onChange={(e) => setMeInstructionInput(e.target.value)}
-          onBlur={saveMeInstruction}
-          rows={3}
-          style={{ width: '100%', resize: 'vertical' }}
-        />
-      </div>
-
-      <div className="planner-section">
-        <h3>Tools &amp; environment</h3>
-        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
-          Also sent to every agent — SSH key paths, URLs for things you reference by name, which
-          environment variable is used for what. Anything an agent would otherwise have to guess
-          about your setup.
-        </p>
-        <textarea
-          id="planner-tools-instruction"
-          value={toolsInstructionInput}
-          disabled={busy}
-          onChange={(e) => setToolsInstructionInput(e.target.value)}
-          onBlur={saveToolsInstruction}
-          rows={3}
-          style={{ width: '100%', resize: 'vertical' }}
-        />
-      </div>
-
-      <div className="planner-section">
-        <h3>LLM endpoint</h3>
+      <div className="planner-grid">
+        <div className="planner-col">
+          <div className="planner-section">
+            <h3>LLM endpoint</h3>
         <div className="planner-field">
           <label htmlFor="planner-base-url">Base URL (OpenAI-compatible)</label>
           <input
@@ -623,6 +589,121 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
         {revealedApiKey && (
           <p className="planner-row-meta" style={{ marginTop: 6, wordBreak: 'break-all' }}>
             {revealedApiKey}
+          </p>
+        )}
+      </div>
+
+      <div className="planner-section">
+        <div className="planner-section-header">
+          <h3>Models</h3>
+          <div className="planner-section-actions">
+            <button
+              type="button"
+              className="planner-btn"
+              disabled={discovering || !settings?.baseUrl}
+              onClick={discoverModels}
+              title={settings?.baseUrl ? undefined : 'Set an endpoint URL first.'}
+            >
+              {discovering ? 'Querying…' : 'Query models'}
+            </button>
+            <button
+              type="button"
+              className="planner-btn"
+              disabled={testingAll || !models || models.length === 0}
+              onClick={testAllModels}
+            >
+              {testingAll ? 'Testing…' : 'Test all'}
+            </button>
+            <button
+              type="button"
+              className="planner-btn danger"
+              disabled={busy || !models || models.length === 0}
+              onClick={() => setConfirmingDeleteAllModels(true)}
+            >
+              Delete all
+            </button>
+          </div>
+        </div>
+        {discoverMessage && <p className="planner-row-meta">{discoverMessage}</p>}
+        {models?.length === 0 && (
+          <p className="planner-row-meta">
+            No models configured yet — query the endpoint above, then pick from the suggestions as
+            you type an id below.
+          </p>
+        )}
+        {models?.map((m) => {
+          const result = testResults[m.id];
+          return (
+            <div key={m.id} className="planner-model-row">
+              <span>
+                {m.label} <span className="planner-row-meta">({m.modelId})</span>
+                {result === 'testing' && <span className="planner-row-meta"> — testing…</span>}
+                {result && result !== 'testing' && (
+                  <span className={result.ok ? 'planner-test-ok' : 'planner-test-fail'}>
+                    {' '}
+                    — {result.ok ? `OK (${result.latencyMs}ms)` : 'Failed'}: {result.message}
+                  </span>
+                )}
+              </span>
+              <div className="planner-row-actions">
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={result === 'testing' || testingAll}
+                  onClick={() => testModel(m.id)}
+                >
+                  Test
+                </button>
+                <button
+                  type="button"
+                  className="planner-btn danger"
+                  disabled={busy}
+                  onClick={() => removeModel(m.id)}
+                  aria-label={`Remove ${m.label}`}
+                >
+                  <Icon name="trash" size={14} />
+                </button>
+              </div>
+            </div>
+          );
+        })}
+        <div className="planner-inline" style={{ marginTop: 10 }}>
+          <input
+            type="text"
+            placeholder="Model id, e.g. gpt-4o-mini"
+            value={newModelId}
+            onChange={(e) => setNewModelId(e.target.value)}
+          />
+          <input
+            type="text"
+            placeholder="Label, e.g. Fast"
+            value={newModelLabel}
+            onChange={(e) => setNewModelLabel(e.target.value)}
+          />
+          <button type="button" className="planner-btn" disabled={busy} onClick={addModel}>
+            <Icon name="plus" size={14} /> Add
+          </button>
+        </div>
+        {modelSuggestions.length > 0 && (
+          <div className="planner-suggestions" role="listbox" aria-label="Matching models">
+            {modelSuggestions.map((modelId) => (
+              <button
+                key={modelId}
+                type="button"
+                role="option"
+                aria-selected={false}
+                className="planner-suggestion"
+                disabled={busy}
+                onClick={() => addDiscoveredModel(modelId)}
+              >
+                <Icon name="plus" size={13} /> {modelId}
+              </button>
+            ))}
+          </div>
+        )}
+        {newModelId.trim().length > 0 && discoveredIds.length === 0 && (
+          <p className="planner-row-meta" style={{ marginTop: 6 }}>
+            Query the endpoint above to get suggestions, or type a full id and a label and press Add.
           </p>
         )}
       </div>
@@ -861,128 +942,108 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       </div>
 
       <div className="planner-section">
-        <div className="planner-section-header">
-          <h3>Models</h3>
-          <div className="planner-section-actions">
-            <button
-              type="button"
-              className="planner-btn"
-              disabled={discovering || !settings?.baseUrl}
-              onClick={discoverModels}
-              title={settings?.baseUrl ? undefined : 'Set an endpoint URL first.'}
-            >
-              {discovering ? 'Querying…' : 'Query models'}
-            </button>
-            <button
-              type="button"
-              className="planner-btn"
-              disabled={testingAll || !models || models.length === 0}
-              onClick={testAllModels}
-            >
-              {testingAll ? 'Testing…' : 'Test all'}
-            </button>
-            <button
-              type="button"
-              className="planner-btn danger"
-              disabled={busy || !models || models.length === 0}
-              onClick={() => setConfirmingDeleteAllModels(true)}
-            >
-              Delete all
-            </button>
-          </div>
-        </div>
-        {discoverMessage && <p className="planner-row-meta">{discoverMessage}</p>}
-        {models?.length === 0 && (
-          <p className="planner-row-meta">
-            No models configured yet — query the endpoint above, then pick from the suggestions as
-            you type an id below.
-          </p>
-        )}
-        {models?.map((m) => {
-          const result = testResults[m.id];
-          return (
-            <div key={m.id} className="planner-model-row">
-              <span>
-                {m.label} <span className="planner-row-meta">({m.modelId})</span>
-                {result === 'testing' && <span className="planner-row-meta"> — testing…</span>}
-                {result && result !== 'testing' && (
-                  <span className={result.ok ? 'planner-test-ok' : 'planner-test-fail'}>
-                    {' '}
-                    — {result.ok ? `OK (${result.latencyMs}ms)` : 'Failed'}: {result.message}
-                  </span>
-                )}
+        <h3>About you</h3>
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          Sent to every agent alongside its own Identity text (set per agent, in that agent's own
+          editor page) — your name, email, Jira username, or anything else an agent should know
+          about who it's talking to.
+        </p>
+        <textarea
+          id="planner-me-instruction"
+          value={meInstructionInput}
+          disabled={busy}
+          onChange={(e) => setMeInstructionInput(e.target.value)}
+          onBlur={saveMeInstruction}
+          rows={3}
+          style={{ width: '100%', resize: 'vertical' }}
+        />
+      </div>
+
+      <div className="planner-section">
+        <h3>Tools &amp; environment</h3>
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          Also sent to every agent — SSH key paths, URLs for things you reference by name, which
+          environment variable is used for what. Anything an agent would otherwise have to guess
+          about your setup.
+        </p>
+        <textarea
+          id="planner-tools-instruction"
+          value={toolsInstructionInput}
+          disabled={busy}
+          onChange={(e) => setToolsInstructionInput(e.target.value)}
+          onBlur={saveToolsInstruction}
+          rows={3}
+          style={{ width: '100%', resize: 'vertical' }}
+        />
+      </div>
+    </div>
+
+    <div className="planner-col">
+      <div className="planner-section">
+        <h3>Agents</h3>
+        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+          Each agent has its own name, model, tool subset, and directory — see "Pocket Agents" on
+          the home screen for its chats. Open one to configure it.
+        </p>
+        {workspaces === null && <div className="spinner">Loading…</div>}
+        {workspaces?.map((ws) => (
+          <div key={ws.id} className="planner-model-row">
+            <span>
+              {ws.name}
+              {ws.isDefault && <span className="planner-row-meta"> (default)</span>}
+              <br />
+              <span className="planner-row-meta" title={ws.path}>
+                {ws.path}
               </span>
-              <div className="planner-row-actions">
-                <button
-                  type="button"
-                  className="planner-btn"
-                  disabled={result === 'testing' || testingAll}
-                  onClick={() => testModel(m.id)}
-                >
-                  Test
-                </button>
+            </span>
+            <div className="planner-row-actions">
+              <button type="button" className="planner-btn" onClick={() => onOpenAgent(ws.id)}>
+                Edit
+              </button>
+              {!ws.isDefault && (
                 <button
                   type="button"
                   className="planner-btn danger"
                   disabled={busy}
-                  onClick={() => removeModel(m.id)}
-                  aria-label={`Remove ${m.label}`}
+                  onClick={() => setConfirmingDeleteAgent(ws)}
+                  aria-label={`Delete ${ws.name}`}
                 >
                   <Icon name="trash" size={14} />
                 </button>
-              </div>
+              )}
             </div>
-          );
-        })}
+          </div>
+        ))}
         <div className="planner-inline" style={{ marginTop: 10 }}>
           <input
             type="text"
-            placeholder="Model id, e.g. gpt-4o-mini"
-            value={newModelId}
-            onChange={(e) => setNewModelId(e.target.value)}
+            placeholder="New agent name"
+            value={newAgentName}
+            onChange={(e) => setNewAgentName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') addAgent();
+            }}
           />
-          <input
-            type="text"
-            placeholder="Label, e.g. Fast"
-            value={newModelLabel}
-            onChange={(e) => setNewModelLabel(e.target.value)}
-          />
-          <button type="button" className="planner-btn" disabled={busy} onClick={addModel}>
-            <Icon name="plus" size={14} /> Add
+          <button type="button" className="planner-btn" disabled={busy} onClick={addAgent}>
+            <Icon name="plus" size={14} /> Add agent
           </button>
         </div>
-        {modelSuggestions.length > 0 && (
-          <div className="planner-suggestions" role="listbox" aria-label="Matching models">
-            {modelSuggestions.map((modelId) => (
-              <button
-                key={modelId}
-                type="button"
-                role="option"
-                aria-selected={false}
-                className="planner-suggestion"
-                disabled={busy}
-                onClick={() => addDiscoveredModel(modelId)}
-              >
-                <Icon name="plus" size={13} /> {modelId}
-              </button>
-            ))}
-          </div>
-        )}
-        {newModelId.trim().length > 0 && discoveredIds.length === 0 && (
+        {newAgentPath ? (
           <p className="planner-row-meta" style={{ marginTop: 6 }}>
-            Query the endpoint above to get suggestions, or type a full id and a label and press Add.
+            Directory: <code title={newAgentPath.path}>{newAgentPath.path}</code>
+            {newAgentPath.create && ' (will be created)'} —{' '}
+            <button type="button" className="planner-link-btn" onClick={() => setNewAgentPath(null)}>
+              use an app-created scratch folder instead
+            </button>
+          </p>
+        ) : (
+          <p className="planner-row-meta" style={{ marginTop: 6 }}>
+            Defaults to an app-created scratch folder —{' '}
+            <button type="button" className="planner-link-btn" onClick={() => setShowDirectoryPicker(true)}>
+              pick an existing directory instead
+            </button>
           </p>
         )}
-      </div>
-
-      <div className="planner-section">
-        <h3>MCP servers</h3>
-        <McpRegistriesSection onApiError={onApiError} onChanged={() => void load()} />
-      </div>
-
-      <div className="planner-section">
-        <h3>Skills</h3>
-        <SkillsSection onApiError={onApiError} onChanged={() => void load()} />
       </div>
 
       <div className="planner-section">
@@ -1132,71 +1193,16 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       </div>
 
       <div className="planner-section">
-        <h3>Agents</h3>
-        <p className="planner-row-meta" style={{ marginBottom: 10 }}>
-          Each agent has its own name, model, tool subset, and directory — see "Pocket Agents" on
-          the home screen for its chats. Open one to configure it.
-        </p>
-        {workspaces === null && <div className="spinner">Loading…</div>}
-        {workspaces?.map((ws) => (
-          <div key={ws.id} className="planner-model-row">
-            <span>
-              {ws.name}
-              {ws.isDefault && <span className="planner-row-meta"> (default)</span>}
-              <br />
-              <span className="planner-row-meta" title={ws.path}>
-                {ws.path}
-              </span>
-            </span>
-            <div className="planner-row-actions">
-              <button type="button" className="planner-btn" onClick={() => onOpenAgent(ws.id)}>
-                Edit
-              </button>
-              {!ws.isDefault && (
-                <button
-                  type="button"
-                  className="planner-btn danger"
-                  disabled={busy}
-                  onClick={() => setConfirmingDeleteAgent(ws)}
-                  aria-label={`Delete ${ws.name}`}
-                >
-                  <Icon name="trash" size={14} />
-                </button>
-              )}
-            </div>
-          </div>
-        ))}
-        <div className="planner-inline" style={{ marginTop: 10 }}>
-          <input
-            type="text"
-            placeholder="New agent name"
-            value={newAgentName}
-            onChange={(e) => setNewAgentName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') addAgent();
-            }}
-          />
-          <button type="button" className="planner-btn" disabled={busy} onClick={addAgent}>
-            <Icon name="plus" size={14} /> Add agent
-          </button>
-        </div>
-        {newAgentPath ? (
-          <p className="planner-row-meta" style={{ marginTop: 6 }}>
-            Directory: <code title={newAgentPath.path}>{newAgentPath.path}</code>
-            {newAgentPath.create && ' (will be created)'} —{' '}
-            <button type="button" className="planner-link-btn" onClick={() => setNewAgentPath(null)}>
-              use an app-created scratch folder instead
-            </button>
-          </p>
-        ) : (
-          <p className="planner-row-meta" style={{ marginTop: 6 }}>
-            Defaults to an app-created scratch folder —{' '}
-            <button type="button" className="planner-link-btn" onClick={() => setShowDirectoryPicker(true)}>
-              pick an existing directory instead
-            </button>
-          </p>
-        )}
+        <h3>MCP servers</h3>
+        <McpRegistriesSection onApiError={onApiError} onChanged={() => void load()} />
       </div>
+
+      <div className="planner-section">
+        <h3>Skills</h3>
+        <SkillsSection onApiError={onApiError} onChanged={() => void load()} />
+      </div>
+    </div>
+  </div>
 
       {showDirectoryPicker && (
         <PlannerDirectoryPicker
