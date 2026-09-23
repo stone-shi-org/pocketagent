@@ -364,4 +364,54 @@ describe('VoiceTtsService', () => {
 
     expect(synthesize).toHaveBeenCalledWith('Testing model.', 'kokoro-82m-v1');
   });
+
+  it('cancels pre-tool scratchpad audio on tool_use and synthesizes only post-tool speak summary', async () => {
+    const synthesize = vi.fn(async (t: string) => speech(t));
+    const service = new VoiceTtsService(() => fakeClient(synthesize), () => true);
+    const session = fakeSession('s1');
+    const chunks: TtsAudioChunk[] = [];
+    service.on('audio:s1', (c: TtsAudioChunk) => chunks.push(c));
+    service.attach(session);
+
+    session.emitAgentEvent({ kind: 'user_prompt', id: 'u1', text: 'what is the weather?' } as AgentEvent);
+    // Pre-tool scratchpad / preamble text
+    session.emitAgentEvent({ kind: 'text_delta', id: 't1', text: 'I need to fetch the weather URL. ' } as AgentEvent);
+    await flush();
+
+    // Tool use occurs
+    session.emitAgentEvent({
+      kind: 'tool_use',
+      id: 'tu1',
+      name: 'fetch_url',
+      input: { url: 'https://weather.test' },
+      summary: 'Fetch weather',
+      filePath: null,
+    } as AgentEvent);
+    session.emitAgentEvent({
+      kind: 'tool_result',
+      id: 'tr1',
+      toolUseId: 'tu1',
+      content: '66 degrees and sunny',
+      isError: false,
+    } as AgentEvent);
+
+    // Final answer with <speak> tag
+    session.emitAgentEvent({
+      kind: 'text_delta',
+      id: 't2',
+      text: '<speak>Today in Kirkland is sunny with a high of 66.</speak>\n\nHere is the detailed forecast.',
+    } as AgentEvent);
+    session.emitAgentEvent({
+      kind: 'turn_complete',
+      stopReason: null,
+      isError: false,
+      numTurns: 1,
+      durationMs: 10,
+      costUsd: null,
+    } as AgentEvent);
+    await flush();
+
+    expect(synthesize).toHaveBeenCalledWith('Today in Kirkland is sunny with a high of 66.');
+    expect(synthesize).not.toHaveBeenCalledWith('Here is the detailed forecast.');
+  });
 });

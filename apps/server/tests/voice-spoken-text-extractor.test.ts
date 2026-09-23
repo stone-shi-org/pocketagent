@@ -74,6 +74,25 @@ describe('SpokenTextExtractor — tagged replies', () => {
     const out = speak(new SpokenTextExtractor(), ['\n\n  <speak>Fine.</speak>\nbody']);
     expect(out.trim()).toBe('Fine.');
   });
+
+  it('speaks tagged summary when tag arrives after short greeting in same delta', () => {
+    const out = speak(new SpokenTextExtractor(), [
+      'Sure! <speak>Today in Kirkland is sunny with a high of 66.</speak>\n\n',
+      'Here is the detailed weather forecast:\n',
+      '- Wind: 5mph\n- Humidity: 40%\n',
+    ]);
+    expect(out.trim()).toBe('Today in Kirkland is sunny with a high of 66.');
+  });
+
+  it('switches to tagged mode and drops post-tag prose if speak tag appears in a later delta', () => {
+    const out = speak(new SpokenTextExtractor(), [
+      'I will look that up for you.\n',
+      '<speak>Found the result: everything passed.</speak>\n',
+      'Details in log files.\n',
+    ]);
+    expect(out).toContain('Found the result: everything passed.');
+    expect(out).not.toContain('Details in log files');
+  });
 });
 
 describe('SpokenTextExtractor — untagged fallback', () => {

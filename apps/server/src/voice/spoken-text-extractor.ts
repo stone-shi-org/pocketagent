@@ -106,7 +106,18 @@ export class SpokenTextExtractor {
       return this.pushFallback(this.takePending());
     }
 
-    return this.mode === 'tagged' ? this.pushTagged(delta) : this.pushFallback(delta);
+    if (this.mode === 'fallback') {
+      if (delta.includes(SPEAK_OPEN_TAG) || (this.lineBuffer + delta).includes(SPEAK_OPEN_TAG)) {
+        this.mode = 'tagged';
+        const combined = this.lineBuffer + delta;
+        this.lineBuffer = '';
+        this.lineState = 'pending';
+        return this.pushTagged(combined);
+      }
+      return this.pushFallback(delta);
+    }
+
+    return this.pushTagged(delta);
   }
 
   /** Call once the turn's text is fully known (`turn_complete`). Releases

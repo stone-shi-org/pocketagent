@@ -182,6 +182,7 @@ async function streamPlannerEvents(
   let pipeline: SpokenTextPipeline | null = null;
   let pump: TurnTtsPump | null = null;
   let pumpFinishPromise: Promise<void> | null = null;
+  let resetPump: (() => void) | null = null;
 
   if (useTts && liveSttUrl) {
     const client = createLiveSttClient(liveSttUrl);
@@ -190,41 +191,52 @@ async function streamPlannerEvents(
     pumpFinishPromise = new Promise<void>((resolve) => {
       resolveFinish = resolve;
     });
-    pump = new TurnTtsPump(
-      crypto.randomUUID(),
-      (sentence) => client.synthesize(sentence, options.config?.liveSttTtsModel),
-      (chunk) => {
-        if (!chunk.done) {
-          stream.write({
-            kind: 'tts_audio',
-            id: crypto.randomUUID(),
-            chunk: { data: chunk.data, sampleRateHz: chunk.sampleRateHz },
-          } as AgentEvent);
-        } else {
-          resolveFinish();
-        }
-      },
-      (err) => {
-        request.log.warn({ err }, 'planner turn TTS synthesis failed');
-      },
-    );
+    const createPump = () =>
+      new TurnTtsPump(
+        crypto.randomUUID(),
+        (sentence) => client.synthesize(sentence, options.config?.liveSttTtsModel),
+        (chunk) => {
+          if (!chunk.done) {
+            stream.write({
+              kind: 'tts_audio',
+              id: crypto.randomUUID(),
+              chunk: { data: chunk.data, sampleRateHz: chunk.sampleRateHz },
+            } as AgentEvent);
+          } else {
+            resolveFinish();
+          }
+        },
+        (err) => {
+          request.log.warn({ err }, 'planner turn TTS synthesis failed');
+        },
+      );
+    pump = createPump();
 
     request.raw.on('close', () => {
       pump?.cancel();
       resolveFinish();
     });
+
+    const origCreate = createPump;
+    resetPump = () => {
+      pump?.cancel();
+      pipeline?.reset();
+      pump = origCreate();
+    };
   }
 
   try {
     const handleEvent = (event: AgentEvent) => {
-      if (pump && pipeline) {
-        if (event.kind === 'text_delta') {
+      if (useTts && pipeline) {
+        if (event.kind === 'tool_use') {
+          resetPump?.();
+        } else if (event.kind === 'text_delta') {
           const sentences = pipeline.push(event.text);
-          for (const s of sentences) pump.push(s);
+          for (const s of sentences) pump?.push(s);
         } else if (event.kind === 'turn_complete') {
           const sentences = pipeline.flush();
-          for (const s of sentences) pump.push(s);
-          pump.finish();
+          for (const s of sentences) pump?.push(s);
+          pump?.finish();
         }
       }
     };

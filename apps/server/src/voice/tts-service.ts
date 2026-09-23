@@ -160,6 +160,14 @@ export class VoiceTtsService extends EventEmitter {
         this.mutedUntilNextTurn.delete(sessionId);
         this.startTurn(sessionId);
         break;
+      case 'tool_use':
+        // When an agent invokes a tool, any pre-tool text was intermediate scratchpad.
+        // Cancel in-flight pre-tool TTS audio and reset the pipeline so the post-tool final answer
+        // starts with a fresh pump and extractor to catch the <speak> summary tag.
+        this.pumps.get(sessionId)?.cancel();
+        this.pumps.delete(sessionId);
+        this.pipelineFor(sessionId).reset();
+        break;
       case 'text_delta':
         this.onDelta(sessionId, event.text);
         break;
