@@ -155,7 +155,13 @@ describe('VoiceTtsService', () => {
     service.attach(session);
 
     session.emitAgentEvent({ kind: 'user_prompt', id: 'u1', text: 'hi' } as AgentEvent);
-    session.emitAgentEvent({ kind: 'text_delta', id: 't1', text: 'Once only. ' } as AgentEvent);
+    // Tagged, because PA-89 holds *untagged* text until `turn_complete` — this
+    // test is about double-subscription, not about that hold.
+    session.emitAgentEvent({
+      kind: 'text_delta',
+      id: 't1',
+      text: '<speak>Once only. </speak>',
+    } as AgentEvent);
     await flush();
 
     // Double-subscription would call synthesize() twice for the same sentence.
@@ -293,7 +299,11 @@ describe('VoiceTtsService', () => {
     // Two complete sentences in one delta: the first is handed to
     // `synthesize` (and left pending), the second waits behind it in the
     // pump's promise chain — the state the toggle has to be able to cancel.
-    session.emitAgentEvent({ kind: 'text_delta', id: 't1', text: 'One. Two. ' } as AgentEvent);
+    session.emitAgentEvent({
+      kind: 'text_delta',
+      id: 't1',
+      text: '<speak>One. Two. </speak>',
+    } as AgentEvent);
     await flush();
     expect(synthesize).toHaveBeenCalledTimes(1);
 
@@ -359,13 +369,17 @@ describe('VoiceTtsService', () => {
     service.attach(session);
 
     session.emitAgentEvent({ kind: 'user_prompt', id: 'u1', text: 'hi' } as AgentEvent);
-    session.emitAgentEvent({ kind: 'text_delta', id: 't1', text: 'Testing model. ' } as AgentEvent);
+    session.emitAgentEvent({
+      kind: 'text_delta',
+      id: 't1',
+      text: '<speak>Testing model. </speak>',
+    } as AgentEvent);
     await flush();
 
     expect(synthesize).toHaveBeenCalledWith('Testing model.', 'kokoro-82m-v1');
   });
 
-  it('cancels pre-tool scratchpad audio on tool_use and synthesizes only post-tool speak summary', async () => {
+  it('PA-89: never speaks pre-tool scratchpad, and honours the post-tool <speak> tag', async () => {
     const synthesize = vi.fn(async (t: string) => speech(t));
     const service = new VoiceTtsService(() => fakeClient(synthesize), () => true);
     const session = fakeSession('s1');
@@ -411,7 +425,86 @@ describe('VoiceTtsService', () => {
     } as AgentEvent);
     await flush();
 
-    expect(synthesize).toHaveBeenCalledWith('Today in Kirkland is sunny with a high of 66.');
-    expect(synthesize).not.toHaveBeenCalledWith('Here is the detailed forecast.');
+    // The summary, and *only* the summary. The scratchpad was never spoken
+    // (it was held, then dropped by the `tool_use`), and the written reply was
+    // not narrated — which it would be if the extractor were still latched
+    // into fallback by that scratchpad, as it was before PA-89.
+    expect(synthesize.mock.calls.map(([t]) => t)).toEqual([
+      'Today in Kirkland is sunny with a high of 66.',
+    ]);
+  });
+
+  it('PA-89: a tagged lede still being synthesized survives a tool call', async () => {
+    // The lede's synthesis is deliberately left pending when `tool_use`
+    // lands. That is the only window in which the server can still retract
+    // it — and retracting it is the regression: PA-84 asks for the summary
+    // *first* precisely so a multi-minute tool-using turn is not silent, so
+    // a `tool_use` that cancelled the pump would delete the one thing the
+    // user is waiting to hear.
+    let inFlightResolve!: (v: SynthesizedSpeech) => void;
+    const inFlight = new Promise<SynthesizedSpeech>((resolve) => {
+      inFlightResolve = resolve;
+    });
+    const synthesize = vi
+      .fn<(text: string) => Promise<SynthesizedSpeech>>()
+      .mockImplementationOnce(() => inFlight)
+      .mockImplementation(async (t: string) => speech(t));
+
+    const service = new VoiceTtsService(() => fakeClient(synthesize), () => true);
+    const session = fakeSession('s1');
+    const chunks: TtsAudioChunk[] = [];
+    service.on('audio:s1', (c: TtsAudioChunk) => chunks.push(c));
+    service.attach(session);
+
+    session.emitAgentEvent({
+      kind: 'user_prompt',
+      id: 'u1',
+      text: 'what is the weather?',
+    } as AgentEvent);
+    session.emitAgentEvent({
+      kind: 'text_delta',
+      id: 't1',
+      text: '<speak>Let me look up the weather for you.</speak>',
+    } as AgentEvent);
+    await flush();
+
+    expect(synthesize).toHaveBeenCalledWith('Let me look up the weather for you.');
+    expect(chunks).toEqual([]); // still synthesizing
+
+    session.emitAgentEvent({
+      kind: 'tool_use',
+      id: 'tu1',
+      name: 'fetch_url',
+      input: { url: 'https://weather.test' },
+      summary: 'Fetch weather',
+      filePath: null,
+    } as AgentEvent);
+    await flush();
+
+    inFlightResolve(speech('Let me look up the weather for you.'));
+    await flush();
+
+    // Reaches the browser despite the intervening tool call.
+    expect(chunks.filter((c) => !c.done).length).toBe(1);
+
+    session.emitAgentEvent({
+      kind: 'text_delta',
+      id: 't2',
+      text: '<speak>It is 66 and sunny.</speak>',
+    } as AgentEvent);
+    session.emitAgentEvent({
+      kind: 'turn_complete',
+      stopReason: null,
+      isError: false,
+      numTurns: 1,
+      durationMs: 10,
+      costUsd: null,
+    } as AgentEvent);
+    await flush();
+
+    expect(synthesize.mock.calls.map(([t]) => t)).toEqual([
+      'Let me look up the weather for you.',
+      'It is 66 and sunny.',
+    ]);
   });
 });

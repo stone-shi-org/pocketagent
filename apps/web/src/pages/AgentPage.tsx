@@ -472,10 +472,6 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           // it the local queue would stay muted for the rest of the session
           // once anything ever stopped it.
           if (event.kind === 'user_prompt') ttsQueue.arm();
-          if (event.kind === 'tool_use') {
-            ttsQueue.stop();
-            ttsQueue.arm();
-          }
           if (event.kind === 'rate_limit' && event.resetsAt === null) {
             // agy reports the exhaustion in its turn stream but puts the reset
             // schedule in `/usage`; use the already-cached endpoint rather

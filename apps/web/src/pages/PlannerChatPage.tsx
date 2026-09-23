@@ -433,10 +433,6 @@ export function PlannerChatPage({
       structured session's WebSocket events go through. */
   const onStreamEvent = useCallback(
     (event: AgentEvent): void => {
-      if (event.kind === 'tool_use') {
-        ttsQueueRef.current?.stop();
-        ttsQueueRef.current?.arm();
-      }
       if (event.kind === 'tts_audio') {
         ttsQueueRef.current?.enqueue(event.chunk.data, event.chunk.sampleRateHz);
         return;

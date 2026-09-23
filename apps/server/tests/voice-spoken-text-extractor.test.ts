@@ -234,3 +234,66 @@ describe('SpokenTextPipeline', () => {
     expect(pipeline.flush()).toEqual(['no punctuation here']);
   });
 });
+
+/**
+ * PA-89. Reproduced from prod planner chat 83251c3c: the model narrated
+ * "I need to fetch the URL…" before calling a tool, which was streamed as
+ * `text_delta` but never emitted as a `text` event (`driveLoop` drops the
+ * content of a round trip that ends in tool calls). Speaking it also latched
+ * the extractor into fallback for the rest of the turn, so the final reply's
+ * `<speak>` summary was ignored and the whole written answer was read out.
+ */
+describe('SpokenTextPipeline — untagged text is held until the turn settles', () => {
+  const PRE_TOOL = ['I need ', 'to fetch ', 'the URL ', 'for the forecast. '];
+  const TAGGED_REPLY =
+    '<speak>Today in Kirkland is looking nice, with a high of 66 degrees.</speak>\n\n' +
+    "**Today's weather in Kirkland, WA:**\n\n- **High:** 66F\n";
+
+  it('says nothing while untagged text is still only maybe the reply', () => {
+    const pipeline = new SpokenTextPipeline();
+    const spoken = PRE_TOOL.flatMap((d) => pipeline.push(d));
+    // Complete sentences, deliberately withheld: a tool call may yet prove
+    // they were a scratchpad.
+    expect(spoken).toEqual([]);
+  });
+
+  it('a tool_use discards the scratchpad, and only the summary is spoken', () => {
+    const pipeline = new SpokenTextPipeline();
+    const spoken = PRE_TOOL.flatMap((d) => pipeline.push(d));
+    pipeline.reset(); // what the `tool_use` handler does
+    spoken.push(...pipeline.push(TAGGED_REPLY), ...pipeline.flush());
+    expect(spoken).toEqual([
+      'Today in Kirkland is looking nice, with a high of 66 degrees.',
+    ]);
+    expect(spoken.join(' ')).not.toContain('fetch the URL');
+    // The bug's third symptom: the written reply narrated verbatim.
+    expect(spoken.join(' ')).not.toContain('66F');
+  });
+
+  it('a late tag supersedes the prose that preceded it, with no tool_use at all', () => {
+    const pipeline = new SpokenTextPipeline();
+    const spoken = PRE_TOOL.flatMap((d) => pipeline.push(d));
+    spoken.push(...pipeline.push(TAGGED_REPLY), ...pipeline.flush());
+    expect(spoken).toEqual([
+      'Today in Kirkland is looking nice, with a high of 66 degrees.',
+    ]);
+  });
+
+  it('still speaks an untagged reply — a silent turn reads as a dead mic', () => {
+    const pipeline = new SpokenTextPipeline();
+    const spoken = [
+      ...pipeline.push('The tests pass. '),
+      ...pipeline.push('I pushed the fix.'),
+      ...pipeline.flush(),
+    ];
+    expect(spoken).toEqual(['The tests pass.', 'I pushed the fix.']);
+  });
+
+  it('speaks a tagged lede immediately, so a long tool turn is not silent', () => {
+    const pipeline = new SpokenTextPipeline();
+    // PA-84's whole latency argument: this must not wait for `flush()`.
+    expect(pipeline.push('<speak>Let me look up the weather.</speak>')).toEqual([
+      'Let me look up the weather.',
+    ]);
+  });
+});

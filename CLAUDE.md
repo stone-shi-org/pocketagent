@@ -1173,6 +1173,33 @@ and present as talk-back dying for good, which is the shape of every PA-83 bug.
 Real-device testing is the acceptance evidence here too, for the reason PA-85
 records.
 
+**Untagged text is held until the turn settles; tagged text is spoken at once**
+(PA-89). A turn is not one reply — a tool-using turn is several LLM round trips,
+and the content of a round trip that ends in tool calls is the model thinking out
+loud. `planner/chats.ts`'s `driveLoop` streams that content as `text_delta` and
+then never emits it as a `text` event at all, so on prod chat `83251c3c` the only
+trace of "I need to fetch the URL…" was the speaker saying it. Worse, speaking it
+*latched* the extractor: the mode decision is made on the first delta and held for
+the pipeline's life, so an untagged scratchpad put the whole turn in fallback and
+the final reply's `<speak>` summary was ignored in favour of narrating the written
+answer — the exact failure PA-84 exists to prevent, reintroduced through a path
+PA-84 never saw.
+
+So `SpokenTextPipeline.push` returns tagged sentences immediately and *holds*
+untagged ones, releasing them on `flush()` and dropping them on `reset()` — and
+`tool_use` is now a plain `reset()` in both `VoiceTtsService` and
+`routes/planner.ts`. Three things follow. PA-84's tag-first latency property is
+untouched, because a `<speak>` lede still streams the moment it closes. Nothing
+needs retracting from the browser's playback queue, which is what makes the
+pump deliberately *untouched* by `tool_use`: cancelling it would also kill a
+legitimate lede, and cut it off mid-word if it had already started playing —
+the first cut of this fix did exactly that, and needed a matching
+`ttsQueue.stop()` in both pages to work at all. And a model that ignores the
+instruction entirely has its reply spoken starting at turn end rather than
+sentence-by-sentence, which is the accepted cost: the alternative needs a second
+signal telling the browser which audio to discard, and it guesses wrong in
+precisely the compliant case.
+
 ### The home screen
 
 `projects/index.ts` composes `GET /api/projects`: live sessions and on-disk conversations
@@ -2083,7 +2110,8 @@ These are load-bearing. Several were bugs first.
   recorded real-service output, where this deployment's own model transcribed a
   350ms thump as "yeah" and whisper returned `[BLANK_AUDIO]` at confidence
   0.79) and `playback.test.ts`.
-- **A voice turn's reply is always spoken as *something*, and never as code** (PA-84).
+- **A voice turn's reply is always spoken as *something*, and never as code** (PA-84),
+  **and never before the turn has proved it was the reply** (PA-89).
   The `<speak>` tag is a model's cooperation, not a contract, so an absent tag must fall
   back to speaking the reply with its unspeakable parts stripped — never to silence,
   which is indistinguishable from a dead microphone and is the failure PA-85's own
@@ -2098,8 +2126,15 @@ These are load-bearing. Several were bugs first.
   and `appendSpokenSummaryInstruction` is idempotent so that re-send cannot stack
   copies. And `SpokenTextPipeline.reset()` must clear the extractor *and* the chunker:
   an extractor left mid-fence by a stop swallows the next turn's whole reply, which is
-  the PA-83 shape of bug. Asserted in
-  `apps/server/tests/voice-spoken-text-extractor.test.ts` and `voice-spoken-text.test.ts`.
+  the PA-83 shape of bug. PA-89 adds the fourth: untagged text is **held** by
+  `SpokenTextPipeline` until `flush()`, because mid-turn there is no way to tell the
+  reply from a model narrating its way to a tool call — and a round trip that ends in
+  tool calls is never emitted as a `text` event at all, so the speaker was the only
+  place that scratchpad ever appeared. `tool_use` therefore drops the held text and
+  **must not cancel the pump**: tagged content has already been judged and may
+  already be playing, and PA-84's tag-first rule exists precisely so it is. Asserted in
+  `apps/server/tests/voice-spoken-text-extractor.test.ts`, `voice-spoken-text.test.ts`
+  and `voice-tts-service.test.ts`.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.

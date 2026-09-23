@@ -161,11 +161,14 @@ export class VoiceTtsService extends EventEmitter {
         this.startTurn(sessionId);
         break;
       case 'tool_use':
-        // When an agent invokes a tool, any pre-tool text was intermediate scratchpad.
-        // Cancel in-flight pre-tool TTS audio and reset the pipeline so the post-tool final answer
-        // starts with a fresh pump and extractor to catch the <speak> summary tag.
-        this.pumps.get(sessionId)?.cancel();
-        this.pumps.delete(sessionId);
+        // PA-89: a tool call proves whatever text preceded it was the model
+        // thinking out loud, not the reply. `SpokenTextPipeline` has been
+        // holding that text rather than speaking it (see its `push()`), so
+        // discarding it is all that is needed here — and the pump is
+        // deliberately left alone. Cancelling it would also kill a *tagged*
+        // `<speak>` lede, which is the one thing PA-84 wants spoken before a
+        // long tool-using turn, and would cut it off mid-word if it had
+        // already started playing.
         this.pipelineFor(sessionId).reset();
         break;
       case 'text_delta':

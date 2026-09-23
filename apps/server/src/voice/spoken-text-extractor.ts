@@ -107,17 +107,39 @@ export class SpokenTextExtractor {
     }
 
     if (this.mode === 'fallback') {
-      if (delta.includes(SPEAK_OPEN_TAG) || (this.lineBuffer + delta).includes(SPEAK_OPEN_TAG)) {
+      // A tag that arrives late still wins. `lineBuffer` is included because
+      // an opening tag can straddle a delta boundary, and an unreleased line
+      // tail is exactly where its first half would be sitting — testing
+      // `delta` alone would miss `<spe` + `ak>`. (`lineBuffer + delta`
+      // subsumes `delta`, so there is no second check to make.)
+      const combined = this.lineBuffer + delta;
+      if (combined.includes(SPEAK_OPEN_TAG)) {
         this.mode = 'tagged';
-        const combined = this.lineBuffer + delta;
+        // Every scrap of fallback line state is dropped with the mode: a
+        // half-classified line, a part-spoken one, or an unclosed fence left
+        // over from the prose would otherwise leak into the tagged pass and
+        // silently swallow the summary this switch exists to catch.
         this.lineBuffer = '';
         this.lineState = 'pending';
+        this.emittedInLine = false;
+        this.inFence = false;
         return this.pushTagged(combined);
       }
       return this.pushFallback(delta);
     }
 
     return this.pushTagged(delta);
+  }
+
+  /**
+   * Whether a `<speak>` block has been seen this turn, so the caller can tell
+   * a deliberate spoken summary from prose that merely had nowhere better to
+   * go. `SpokenTextPipeline` reads it to decide whether text may be spoken
+   * *now* or has to wait until the turn's outcome is known — see its own doc
+   * comment for why untagged text cannot be trusted mid-turn.
+   */
+  isTagged(): boolean {
+    return this.mode === 'tagged';
   }
 
   /** Call once the turn's text is fully known (`turn_complete`). Releases
