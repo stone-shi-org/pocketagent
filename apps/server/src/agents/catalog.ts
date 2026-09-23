@@ -128,8 +128,10 @@ export function catalogEntry(id: InstallableAgentId): CatalogEntry {
 export function npmInstallCommand(
   id: InstallableAgentId,
   prefix: string,
+  target: 'pinned' | 'latest' = 'pinned',
 ): { args: string[]; env: Record<string, string> } {
   const entry = CATALOG[id];
+  const pkgSpec = target === 'latest' ? `${entry.packageName}@latest` : `${entry.packageName}@${entry.version}`;
   return {
     args: [
       'install',
@@ -139,7 +141,7 @@ export function npmInstallCommand(
       '--no-audit',
       // A package name is never interpolated from client input: `entry` came
       // out of the frozen table above, keyed by a validated enum member.
-      `${entry.packageName}@${entry.version}`,
+      pkgSpec,
     ],
     env: { NPM_CONFIG_PREFIX: prefix, COREPACK_ENABLE_STRICT: '0' },
   };

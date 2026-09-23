@@ -16,6 +16,7 @@ import { readSessionHistory } from '../sessions/history.js';
 import { WorkspaceError } from '../workspaces/index.js';
 import { readAgentDefaults } from '../db/index.js';
 import { deriveSetupState, refreshAgentAuthStates } from '../agents/auth-probe.js';
+import { refreshAgentVersions } from '../agents/version-probe.js';
 import { resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
@@ -76,6 +77,9 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
             ? null
             : cached.last_install_ok === 1,
           lastInstallError: cached?.last_install_error ?? null,
+          installedVersion: agent.available ? (cached?.last_version ?? null) : null,
+          latestVersion: cached?.last_latest_version ?? null,
+          hasUpdate: agent.available && cached?.last_has_update === 1,
         };
       }),
     };
@@ -102,8 +106,13 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
     // `probeClaudeModels`, which deliberately never sends a turn), they answer
     // the same question an operator is asking when they press Refresh, and
     // running them together keeps `GET /api/agents` free of subprocesses.
-    // Both are best-effort per agent and neither can fail this route.
-    await Promise.all([sessions.refreshAgentCatalogs(), refreshAgentAuthStates(db, agents)]);
+    // PA-90 also refreshes installed agent CLI versions and update availability.
+    // All are best-effort per agent and none can fail this route.
+    await Promise.all([
+      sessions.refreshAgentCatalogs(),
+      refreshAgentAuthStates(db, agents),
+      refreshAgentVersions(db, agents),
+    ]);
     return listAgentsWithCache();
   });
 

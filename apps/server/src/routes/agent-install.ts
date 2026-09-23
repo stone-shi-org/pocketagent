@@ -75,7 +75,7 @@ export const agentInstallRoutes: FastifyPluginAsync = async (app) => {
       // past `openSseStream` the headers are sent and there is no status left.
       let started: { attached: boolean; subscribe: InstallSubscribe };
       try {
-        started = agentInstall.start(parsed.data.id);
+        started = agentInstall.start(parsed.data.id, parsed.data.target ?? 'pinned');
       } catch (err) {
         if (err instanceof AgentInstallError) {
           return reply.code(err.status).send({ error: { code: err.code, message: err.message } });

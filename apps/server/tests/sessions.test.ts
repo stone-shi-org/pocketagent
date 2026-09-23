@@ -145,6 +145,30 @@ describe('session HTTP routes', () => {
     expect(agents.find((a) => a.id === 'shell')?.supportsSkipPermissions).toBe(false);
   });
 
+  it('exposes installedVersion, latestVersion, and hasUpdate fields on every agent (PA-90)', async () => {
+    const res = await t.app.inject({ method: 'GET', url: '/api/agents', headers: headers(t) });
+    const agents = res.json().agents as {
+      id: string;
+      installedVersion: string | null;
+      latestVersion: string | null;
+      hasUpdate: boolean;
+    }[];
+    expect(agents.length).toBeGreaterThan(0);
+    for (const agent of agents) {
+      expect('installedVersion' in agent).toBe(true);
+      expect('latestVersion' in agent).toBe(true);
+      expect(typeof agent.hasUpdate).toBe('boolean');
+    }
+  });
+
+  it('refreshes agents on POST /api/agents/refresh and returns updated list (PA-90)', async () => {
+    const res = await t.app.inject({ method: 'POST', url: '/api/agents/refresh', headers: headers(t) });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { agents: { id: string; installedVersion: string | null; hasUpdate: boolean }[] };
+    expect(Array.isArray(body.agents)).toBe(true);
+    expect(body.agents.length).toBeGreaterThan(0);
+  });
+
   it('ignores skipPermissions for an agent that does not support it, rather than silently spawning it unsafely', async () => {
     // A shell has no approval concept and no `--dangerously-skip-permissions`
     // equivalent; the manager must not just pass the client's wish straight

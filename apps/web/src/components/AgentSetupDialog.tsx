@@ -96,7 +96,7 @@ export function AgentSetupDialog({ focusAgentId, onApiError, onChanged, onClose 
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [progress.lines.length]);
 
-  async function install(id: InstallableAgentId): Promise<void> {
+  async function install(id: InstallableAgentId, target: 'pinned' | 'latest' = 'pinned'): Promise<void> {
     setInstalling(id);
     setProgress(emptyInstallProgress());
     let latest = emptyInstallProgress();
@@ -104,7 +104,7 @@ export function AgentSetupDialog({ focusAgentId, onApiError, onChanged, onClose 
       await api.installAgent(id, (event) => {
         latest = applyInstallEvent(latest, event);
         setProgress(latest);
-      });
+      }, 0, target);
     } catch (err) {
       onApiError(err);
       setProgress({
@@ -192,6 +192,20 @@ export function AgentSetupDialog({ focusAgentId, onApiError, onChanged, onClose 
                       </span>
                     </>
                   )}
+                  {agent.installedVersion && (
+                    <>
+                      <br />
+                      <span className="planner-row-meta">Installed: v{agent.installedVersion}</span>
+                    </>
+                  )}
+                  {agent.hasUpdate && agent.latestVersion && (
+                    <>
+                      <br />
+                      <span className="planner-row-meta" style={{ color: 'var(--tone-warn, #d97706)' }}>
+                        Update available: v{agent.latestVersion}
+                      </span>
+                    </>
+                  )}
                   {agent.lastInstallOk === false && agent.lastInstallError !== null && !busy && (
                     <>
                       <br />
@@ -205,9 +219,17 @@ export function AgentSetupDialog({ focusAgentId, onApiError, onChanged, onClose 
                       type="button"
                       className="planner-btn"
                       disabled={installing !== null}
-                      onClick={() => void install(agent.id as InstallableAgentId)}
+                      onClick={() => void install(agent.id as InstallableAgentId, agent.hasUpdate ? 'latest' : 'pinned')}
                     >
-                      {busy ? 'Installing…' : state === 'not-installed' ? 'Install' : 'Reinstall'}
+                      {busy
+                        ? agent.hasUpdate
+                          ? 'Updating…'
+                          : 'Installing…'
+                        : state === 'not-installed'
+                          ? 'Install'
+                          : agent.hasUpdate
+                            ? 'Update'
+                            : 'Reinstall'}
                     </button>
                   )}
                 </div>

@@ -4,11 +4,15 @@ import {
   applyInstallEvent,
   canOfferInstall,
   emptyInstallProgress,
+  hasUpdateOf,
+  installedVersionOf,
   isInstallable,
   setupBadge,
   setupHint,
   setupStateOf,
   uninstallableReason,
+  updateBadge,
+  versionBadge,
 } from './agent-setup.js';
 
 describe('setupStateOf', () => {
@@ -48,6 +52,53 @@ describe('setupBadge', () => {
     expect(setupBadge('ready').tone).toBe('ok');
     expect(setupBadge('signed-out').tone).toBe('warn');
     expect(setupBadge('not-installed').tone).toBe('missing');
+  });
+});
+
+describe('installedVersionOf', () => {
+  it('returns version when agent is available and has version', () => {
+    expect(installedVersionOf({ available: true, installedVersion: '2.1.278' })).toBe('2.1.278');
+  });
+
+  it('returns null when agent is not available or has no version', () => {
+    expect(installedVersionOf({ available: false, installedVersion: '2.1.278' })).toBeNull();
+    expect(installedVersionOf({ available: true, installedVersion: null })).toBeNull();
+    expect(installedVersionOf({ available: true })).toBeNull();
+  });
+});
+
+describe('hasUpdateOf', () => {
+  it('returns true only when agent is available and hasUpdate is true', () => {
+    expect(hasUpdateOf({ available: true, hasUpdate: true })).toBe(true);
+    expect(hasUpdateOf({ available: true, hasUpdate: false })).toBe(false);
+    expect(hasUpdateOf({ available: false, hasUpdate: true })).toBe(false);
+    expect(hasUpdateOf({ available: true })).toBe(false);
+  });
+});
+
+describe('versionBadge', () => {
+  it('returns neutral badge with version prefix', () => {
+    expect(versionBadge({ available: true, installedVersion: '1.2.9' })).toEqual({
+      label: 'v1.2.9',
+      tone: 'neutral',
+    });
+    expect(versionBadge({ available: false, installedVersion: '1.2.9' })).toBeNull();
+  });
+});
+
+describe('updateBadge', () => {
+  it('returns warn badge when update is available', () => {
+    expect(
+      updateBadge({ available: true, hasUpdate: true, latestVersion: '2.1.280' }),
+    ).toEqual({
+      label: 'Update available: v2.1.280',
+      tone: 'warn',
+    });
+  });
+
+  it('returns null when no update is available', () => {
+    expect(updateBadge({ available: true, hasUpdate: false, latestVersion: '2.1.280' })).toBeNull();
+    expect(updateBadge({ available: false, hasUpdate: true, latestVersion: '2.1.280' })).toBeNull();
   });
 });
 

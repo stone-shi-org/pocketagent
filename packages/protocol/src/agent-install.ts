@@ -88,12 +88,20 @@ export const InstallableAgentListResponse = z.object({
 });
 export type InstallableAgentListResponse = z.infer<typeof InstallableAgentListResponse>;
 
+export const InstallAgentTarget = z.enum(['pinned', 'latest']);
+export type InstallAgentTarget = z.infer<typeof InstallAgentTarget>;
+
 /**
- * The only thing a client may send. See this module's doc comment for why this
- * is a `z.enum` rather than a string the handler validates.
+ * What a client may send to request an install or update. See this module's doc
+ * comment for why `id` is a `z.enum` rather than a string the handler validates.
  */
 export const InstallAgentRequest = z.object({
   id: z.enum(INSTALLABLE_AGENT_IDS),
+  /**
+   * PA-90: Whether to install the server-pinned catalog version or the
+   * newest upstream release ('latest'). Defaults to 'pinned'.
+   */
+  target: InstallAgentTarget.optional(),
 });
 export type InstallAgentRequest = z.infer<typeof InstallAgentRequest>;
 

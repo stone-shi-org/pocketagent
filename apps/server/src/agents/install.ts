@@ -14,6 +14,7 @@ import { catalogEntry, installableAgents, npmInstallCommand } from './catalog.js
 import { agentBinSearchDirs, resolveExecutable } from './registry.js';
 import type { AgentRegistry } from './registry.js';
 import { deriveSetupState, probeAgentAuth } from './auth-probe.js';
+import { probeAndRecordAgentVersion } from './version-probe.js';
 
 /**
  * An install is slow — a 200 MB package over a domestic connection — and a
@@ -33,6 +34,7 @@ type InstallState = 'running' | 'succeeded' | 'failed';
 
 interface InstallJob {
   id: InstallableAgentId;
+  target: 'pinned' | 'latest';
   state: InstallState;
   startedAt: number;
   log: OutputBuffer;
@@ -144,7 +146,10 @@ export class AgentInstallService {
    * `await` in between, for the same reason `RunQueue.tryAcquire` must be: an
    * `await` there hands one install slot to two requests.
    */
-  start(id: InstallableAgentId): { attached: boolean; subscribe: InstallSubscribe } {
+  start(
+    id: InstallableAgentId,
+    target: 'pinned' | 'latest' = 'pinned',
+  ): { attached: boolean; subscribe: InstallSubscribe } {
     const existing = this.jobs.get(id);
     if (existing !== undefined && existing.state === 'running') {
       return { attached: true, subscribe: this.subscriber(existing, true) };
@@ -167,6 +172,7 @@ export class AgentInstallService {
 
     const job: InstallJob = {
       id,
+      target,
       state: 'running',
       startedAt: Date.now(),
       log: new OutputBuffer(LOG_BUFFER_BYTES),
@@ -182,7 +188,7 @@ export class AgentInstallService {
   private async run(job: InstallJob): Promise<void> {
     const entry = catalogEntry(job.id);
     const prefix = this.deps.installPrefix();
-    const { args, env } = npmInstallCommand(job.id, prefix);
+    const { args, env } = npmInstallCommand(job.id, prefix, job.target);
     // Never a workspace directory, and never the server's own cwd — see
     // `npmInstallCommand`'s doc comment for the corepack failure that makes
     // this load-bearing rather than merely tidy.
@@ -251,6 +257,7 @@ export class AgentInstallService {
       if (adapter !== undefined) {
         const result = await probeAgentAuth(adapter);
         recordAgentAuthProbe(this.deps.db, job.id, result);
+        await probeAndRecordAgentVersion(this.deps.db, adapter);
       }
     }
 

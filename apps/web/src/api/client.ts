@@ -12,6 +12,7 @@ import type {
   RestartAcceptedResponse,
   AgentInfo,
   AgentInstallEvent,
+  InstallAgentTarget,
   InstallableAgentId,
   InstallableAgentListResponse,
   ConversationInfo,
@@ -526,11 +527,12 @@ export function createApiClient(endpoint: HostEndpoint) {
       id: InstallableAgentId,
       onEvent: (event: AgentInstallEvent) => void,
       afterSeq = 0,
+      target?: InstallAgentTarget,
     ) =>
       streamSseAt<AgentInstallEvent>(
         endpoint,
         `/api/agents/install?afterSeq=${afterSeq}`,
-        { id },
+        target ? { id, target } : { id },
         onEvent,
       ),
 

@@ -131,6 +131,9 @@ export class AgentRegistry {
     | 'lastInstallAt'
     | 'lastInstallOk'
     | 'lastInstallError'
+    | 'installedVersion'
+    | 'latestVersion'
+    | 'hasUpdate'
   >[] {
     return this.ordered().map((a) => ({
       id: a.id,

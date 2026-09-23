@@ -100,6 +100,11 @@ describe('agent install catalog', () => {
     expect(env.COREPACK_ENABLE_STRICT).toBe('0');
   });
 
+  it('builds package@latest when target is latest (PA-90)', () => {
+    const { args } = npmInstallCommand('claude', '/opt/agents', 'latest');
+    expect(args).toContain('@anthropic-ai/claude-code@latest');
+  });
+
   it('never builds a shell command', () => {
     for (const agent of installableAgents()) {
       const { args } = npmInstallCommand(agent.id, '/tmp/p');

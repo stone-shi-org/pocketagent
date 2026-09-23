@@ -75,6 +75,47 @@ export function setupBadge(state: AgentSetupState): SetupBadge {
 }
 
 /**
+ * PA-90: Installed version string or null when not installed / not known.
+ */
+export function installedVersionOf(
+  agent: Pick<AgentInfo, 'available'> & Partial<Pick<AgentInfo, 'installedVersion'>>,
+): string | null {
+  if (!agent.available || !agent.installedVersion) return null;
+  return agent.installedVersion;
+}
+
+/**
+ * PA-90: True when an installed agent has a newer version available.
+ */
+export function hasUpdateOf(
+  agent: Pick<AgentInfo, 'available'> & Partial<Pick<AgentInfo, 'hasUpdate'>>,
+): boolean {
+  if (!agent.available) return false;
+  return agent.hasUpdate === true;
+}
+
+/**
+ * PA-90: Badge for the installed CLI version, e.g. "v2.1.278".
+ */
+export function versionBadge(
+  agent: Pick<AgentInfo, 'available'> & Partial<Pick<AgentInfo, 'installedVersion'>>,
+): SetupBadge | null {
+  const version = installedVersionOf(agent);
+  if (version === null) return null;
+  return { label: `v${version}`, tone: 'neutral' };
+}
+
+/**
+ * PA-90: Badge when a newer version is available, e.g. "Update available: v2.1.280".
+ */
+export function updateBadge(
+  agent: Pick<AgentInfo, 'available'> & Partial<Pick<AgentInfo, 'hasUpdate' | 'latestVersion'>>,
+): SetupBadge | null {
+  if (!hasUpdateOf(agent) || !agent.latestVersion) return null;
+  return { label: `Update available: v${agent.latestVersion}`, tone: 'warn' };
+}
+
+/**
  * What the operator should do next, in one sentence, or null when nothing is
  * needed.
  *

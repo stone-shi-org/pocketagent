@@ -1,0 +1,130 @@
+import { describe, expect, it } from 'vitest';
+import {
+  parseCliVersion,
+  checkAgentLatestVersion,
+  refreshAgentVersions,
+  probeAndRecordAgentVersion,
+} from '../src/agents/version-probe.js';
+import { openDatabase, readAgentDefaults } from '../src/db/index.js';
+import { AgentRegistry } from '../src/agents/registry.js';
+import type { AgentAdapter } from '../src/agents/types.js';
+
+describe('parseCliVersion', () => {
+  it('extracts semver from Claude Code --version output', () => {
+    expect(parseCliVersion('2.1.278 (Claude Code)')).toBe('2.1.278');
+  });
+
+  it('extracts semver from Antigravity --version output', () => {
+    expect(parseCliVersion('1.2.9\n')).toBe('1.2.9');
+  });
+
+  it('extracts semver from Codex --version output', () => {
+    expect(parseCliVersion('codex-cli 0.155.1\n')).toBe('0.155.1');
+  });
+
+  it('extracts semver from Opencode --version output', () => {
+    expect(parseCliVersion('opencode v2.0.14\n')).toBe('2.0.14');
+  });
+
+  it('extracts semver from Pi --version output', () => {
+    expect(parseCliVersion('0.85.1\n')).toBe('0.85.1');
+  });
+
+  it('extracts semver with prerelease tags', () => {
+    expect(parseCliVersion('agent v1.2.3-rc.1\n')).toBe('1.2.3-rc.1');
+  });
+
+  it('returns null for empty or non-semver output', () => {
+    expect(parseCliVersion('')).toBeNull();
+    expect(parseCliVersion('   \n\t')).toBeNull();
+    expect(parseCliVersion('error: unknown command --version')).toBeNull();
+    expect(parseCliVersion('command not found')).toBeNull();
+  });
+});
+
+describe('checkAgentLatestVersion', () => {
+  it('detects an update when upstream npm version is newer', async () => {
+    const mockFetcher = async () => '2.1.280';
+    const result = await checkAgentLatestVersion('claude', '2.1.278', mockFetcher);
+    expect(result.latestVersion).toBe('2.1.280');
+    expect(result.hasUpdate).toBe(true);
+  });
+
+  it('detects no update when upstream npm version is identical or older', async () => {
+    const mockFetcher = async () => '2.1.278';
+    const result = await checkAgentLatestVersion('claude', '2.1.278', mockFetcher);
+    expect(result.latestVersion).toBe('2.1.278');
+    expect(result.hasUpdate).toBe(false);
+
+    const mockOlder = async () => '2.1.270';
+    const resultOlder = await checkAgentLatestVersion('claude', '2.1.278', mockOlder);
+    expect(resultOlder.latestVersion).toBe('2.1.270');
+    expect(resultOlder.hasUpdate).toBe(false);
+  });
+
+  it('falls back to pinned catalog version when npm fetcher returns null (offline mode)', async () => {
+    const offlineFetcher = async () => null;
+    const result = await checkAgentLatestVersion('claude', '2.1.270', offlineFetcher);
+    // Pinned version in catalog is 2.1.274
+    expect(result.latestVersion).toBe('2.1.274');
+    expect(result.hasUpdate).toBe(true);
+  });
+
+  it('reports hasUpdate false when agent is not installed (currentVersion is null)', async () => {
+    const mockFetcher = async () => '2.1.280';
+    const result = await checkAgentLatestVersion('claude', null, mockFetcher);
+    expect(result.latestVersion).toBe('2.1.280');
+    expect(result.hasUpdate).toBe(false);
+  });
+
+  it('returns null and false for an agent not in the install catalog', async () => {
+    const result = await checkAgentLatestVersion('agy', '1.2.9');
+    expect(result.latestVersion).toBeNull();
+    expect(result.hasUpdate).toBe(false);
+  });
+});
+
+describe('refreshAgentVersions & probeAndRecordAgentVersion', () => {
+  it('records probed version and update status in database', async () => {
+    const db = openDatabase(':memory:');
+    const registry = new AgentRegistry();
+
+    const fakeAdapter: AgentAdapter = {
+      id: 'claude',
+      displayName: 'Claude Code',
+      description: 'Test Claude',
+      transports: ['structured'],
+      defaultTransport: 'structured',
+      buildCommand: () => ({ command: 'claude', args: [] }),
+      // adapter with no bin resolves to null version
+    };
+    registry.register(fakeAdapter);
+
+    const mockFetcher = async () => '2.1.280';
+    await refreshAgentVersions(db, registry, mockFetcher);
+
+    const defaults = readAgentDefaults(db, 'claude');
+    expect(defaults).not.toBeNull();
+    expect(defaults?.last_latest_version).toBe('2.1.280');
+    expect(defaults?.last_has_update).toBe(0); // version is null -> hasUpdate is false (0)
+  });
+
+  it('probes and records version for a single agent via probeAndRecordAgentVersion', async () => {
+    const db = openDatabase(':memory:');
+    const fakeAdapter: AgentAdapter = {
+      id: 'codex',
+      displayName: 'Codex',
+      description: 'Test Codex',
+      transports: ['structured'],
+      defaultTransport: 'structured',
+      buildCommand: () => ({ command: 'codex', args: [] }),
+    };
+
+    const mockFetcher = async () => '0.155.0';
+    await probeAndRecordAgentVersion(db, fakeAdapter, mockFetcher);
+
+    const defaults = readAgentDefaults(db, 'codex');
+    expect(defaults).not.toBeNull();
+    expect(defaults?.last_latest_version).toBe('0.155.0');
+  });
+});

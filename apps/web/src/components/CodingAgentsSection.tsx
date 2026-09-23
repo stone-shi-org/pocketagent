@@ -4,7 +4,15 @@ import { isCustomClaudeProviderId } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { AgentSetupDialog } from './AgentSetupDialog.js';
-import { setupBadge, setupHint, setupStateOf } from '../agent/agent-setup.js';
+import {
+  hasUpdateOf,
+  isInstallable,
+  setupBadge,
+  setupHint,
+  setupStateOf,
+  updateBadge,
+  versionBadge,
+} from '../agent/agent-setup.js';
 
 interface Props {
   onApiError: (error: unknown) => void;
@@ -54,6 +62,7 @@ export function CodingAgentsSection({ onApiError }: Props): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
+  const [focusAgentId, setFocusAgentId] = useState<string | undefined>(undefined);
 
   const load = useCallback(async () => {
     try {
@@ -106,39 +115,69 @@ export function CodingAgentsSection({ onApiError }: Props): JSX.Element {
       {agentsList === null ? (
         <div className="spinner">Loading…</div>
       ) : (
-        codingAgents.map((a) => (
-          <div key={a.id} className="planner-model-row">
-            <span>
-              <strong>{a.displayName}</strong>{' '}
-              {/* PA-68: the state, not just "is the binary there". `available`
-                  alone could not say "installed but not signed in", which is
-                  the case that used to fail a first session cryptically. */}
-              <span className={`settings-badge badge-${setupBadge(setupStateOf(a)).tone}`}>
-                {setupBadge(setupStateOf(a)).label}
+        codingAgents.map((a) => {
+          const vBadge = versionBadge(a);
+          const uBadge = updateBadge(a);
+          const hasUpdate = hasUpdateOf(a);
+          const canInstall = isInstallable(a.id);
+          return (
+            <div key={a.id} className="planner-model-row">
+              <span>
+                <strong>{a.displayName}</strong>{' '}
+                {vBadge !== null && (
+                  <span className={`settings-badge badge-${vBadge.tone}`} style={{ marginRight: 4 }}>
+                    {vBadge.label}
+                  </span>
+                )}
+                {/* PA-68: the state, not just "is the binary there". `available`
+                    alone could not say "installed but not signed in", which is
+                    the case that used to fail a first session cryptically. */}
+                <span className={`settings-badge badge-${setupBadge(setupStateOf(a)).tone}`}>
+                  {setupBadge(setupStateOf(a)).label}
+                </span>
+                {uBadge !== null && (
+                  <span className={`settings-badge badge-${uBadge.tone}`} style={{ marginLeft: 4 }}>
+                    {uBadge.label}
+                  </span>
+                )}
+                <br />
+                <span className="planner-row-meta">
+                  {a.cachedModels.length > 0
+                    ? `${a.cachedModels.length} model(s) known`
+                    : 'No models known yet'}
+                </span>
+                <br />
+                <span className="planner-row-meta">
+                  {a.lastRefreshAt === null
+                    ? 'Never explicitly refreshed'
+                    : a.lastRefreshOk
+                      ? `Last refreshed ${new Date(a.lastRefreshAt).toLocaleString()}`
+                      : `Refresh failed ${new Date(a.lastRefreshAt).toLocaleString()} — ${a.lastRefreshError ?? 'unknown error'}`}
+                </span>
+                {setupHint(a) !== null && (
+                  <>
+                    <br />
+                    <span className="planner-row-meta">{setupHint(a)}</span>
+                  </>
+                )}
               </span>
-              <br />
-              <span className="planner-row-meta">
-                {a.cachedModels.length > 0
-                  ? `${a.cachedModels.length} model(s) known`
-                  : 'No models known yet'}
-              </span>
-              <br />
-              <span className="planner-row-meta">
-                {a.lastRefreshAt === null
-                  ? 'Never explicitly refreshed'
-                  : a.lastRefreshOk
-                    ? `Last refreshed ${new Date(a.lastRefreshAt).toLocaleString()}`
-                    : `Refresh failed ${new Date(a.lastRefreshAt).toLocaleString()} — ${a.lastRefreshError ?? 'unknown error'}`}
-              </span>
-              {setupHint(a) !== null && (
-                <>
-                  <br />
-                  <span className="planner-row-meta">{setupHint(a)}</span>
-                </>
+              {hasUpdate && canInstall && (
+                <div className="planner-row-actions">
+                  <button
+                    type="button"
+                    className="planner-btn"
+                    onClick={() => {
+                      setFocusAgentId(a.id);
+                      setSetupOpen(true);
+                    }}
+                  >
+                    Update
+                  </button>
+                </div>
               )}
-            </span>
-          </div>
-        ))
+            </div>
+          );
+        })
       )}
 
       <div className="planner-inline" style={{ marginTop: 12 }}>
@@ -152,9 +191,13 @@ export function CodingAgentsSection({ onApiError }: Props): JSX.Element {
 
       {setupOpen && (
         <AgentSetupDialog
+          focusAgentId={focusAgentId}
           onApiError={onApiError}
           onChanged={() => void load()}
-          onClose={() => setSetupOpen(false)}
+          onClose={() => {
+            setSetupOpen(false);
+            setFocusAgentId(undefined);
+          }}
         />
       )}
     </>

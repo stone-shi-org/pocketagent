@@ -1321,6 +1321,19 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE agent_defaults ADD COLUMN last_install_ok INTEGER;
   ALTER TABLE agent_defaults ADD COLUMN last_install_error TEXT;
   `,
+
+  // PA-90: Agent version and update tracking.
+  //
+  // `last_version` records the installed CLI version probed via `<bin> --version`.
+  // `last_version_at` is the probe timestamp.
+  // `last_latest_version` is the newest available upstream/catalog version.
+  // `last_has_update` is 1 if an update is available, 0 if up to date, null if unknown.
+  `
+  ALTER TABLE agent_defaults ADD COLUMN last_version TEXT;
+  ALTER TABLE agent_defaults ADD COLUMN last_version_at INTEGER;
+  ALTER TABLE agent_defaults ADD COLUMN last_latest_version TEXT;
+  ALTER TABLE agent_defaults ADD COLUMN last_has_update INTEGER;
+  `,
 ];
 
 /**
@@ -1471,6 +1484,10 @@ export function openDatabase(databasePath: string): Db {
       ['last_install_at', 'ALTER TABLE agent_defaults ADD COLUMN last_install_at INTEGER'],
       ['last_install_ok', 'ALTER TABLE agent_defaults ADD COLUMN last_install_ok INTEGER'],
       ['last_install_error', 'ALTER TABLE agent_defaults ADD COLUMN last_install_error TEXT'],
+      ['last_version', 'ALTER TABLE agent_defaults ADD COLUMN last_version TEXT'],
+      ['last_version_at', 'ALTER TABLE agent_defaults ADD COLUMN last_version_at INTEGER'],
+      ['last_latest_version', 'ALTER TABLE agent_defaults ADD COLUMN last_latest_version TEXT'],
+      ['last_has_update', 'ALTER TABLE agent_defaults ADD COLUMN last_has_update INTEGER'],
     ] as const) {
       if (!agentDefaultColumns.has(name)) db.exec(ddl);
     }
@@ -1682,6 +1699,13 @@ export interface AgentDefaultsRow {
   last_install_ok: number | null;
   /** The real install error, set only when `last_install_ok` is 0. */
   last_install_error: string | null;
+  /** PA-90. Probed CLI version string, e.g. "2.1.278". Null when not probed or uninstalled. */
+  last_version: string | null;
+  last_version_at: number | null;
+  /** PA-90. Newest version available on npm / catalog, e.g. "2.1.280". Null when unknown. */
+  last_latest_version: string | null;
+  /** PA-90. 1 if newer version available, 0 if up to date, null when unknown. */
+  last_has_update: number | null;
 }
 
 export function readAgentDefaults(db: Db, agentId: string): AgentDefaultsRow | null {
@@ -1822,6 +1846,37 @@ export function recordAgentInstall(
     Date.now(),
     result.ok ? 1 : 0,
     result.ok ? null : result.error,
+  );
+}
+
+/**
+ * Record the outcome of one version and update check (PA-90).
+ */
+export function recordAgentVersion(
+  db: Db,
+  agentId: string,
+  info: { version: string | null; latestVersion: string | null; hasUpdate: boolean | null },
+): void {
+  const existing = readAgentDefaults(db, agentId);
+  db.prepare(
+    `INSERT INTO agent_defaults
+       (agent_id, model, effort, models_json, updated_at, last_version, last_version_at, last_latest_version, last_has_update)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET
+         last_version = excluded.last_version,
+         last_version_at = excluded.last_version_at,
+         last_latest_version = excluded.last_latest_version,
+         last_has_update = excluded.last_has_update`,
+  ).run(
+    agentId,
+    existing?.model ?? null,
+    existing?.effort ?? null,
+    existing?.models_json ?? null,
+    existing?.updated_at ?? Date.now(),
+    info.version,
+    Date.now(),
+    info.latestVersion,
+    info.hasUpdate === null ? null : info.hasUpdate ? 1 : 0,
   );
 }
 

@@ -368,6 +368,20 @@ export const AgentInfo = z.object({
    * was open.
    */
   lastInstallError: z.string().nullable(),
+  /**
+   * PA-90: Installed CLI version reported by `<bin> --version`, e.g. "2.1.278".
+   * Null when the agent is not installed, unparseable, or never probed yet.
+   */
+  installedVersion: z.string().nullable(),
+  /**
+   * PA-90: Latest available version from npm registry or pinned catalog,
+   * e.g. "2.1.280". Null when unknown or never probed yet.
+   */
+  latestVersion: z.string().nullable(),
+  /**
+   * PA-90: True when a newer version is known to be available.
+   */
+  hasUpdate: z.boolean(),
 });
 export type AgentInfo = z.infer<typeof AgentInfo>;
 
