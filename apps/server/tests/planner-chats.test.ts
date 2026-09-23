@@ -1937,5 +1937,51 @@ describe('planner chat routes over HTTP', () => {
       await liveStt.close();
     }
   });
+
+  it('streams tts_audio events when synthesis completes within the extended pump timeout (PA-93)', async () => {
+    const fakePcm = Buffer.from(new Int16Array([100, 200, 300, 400]).buffer);
+    const liveStt = await startFakeLiveStt((req, res) => {
+      if (req.method === 'POST' && req.url === '/v1/audio/speech') {
+        // Simulate synthesis latency (e.g. Kokoro takes several seconds per sentence)
+        setTimeout(() => {
+          res.writeHead(200, { 'content-type': 'audio/pcm' });
+          res.end(fakePcm);
+        }, 150);
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    try {
+      const fetchImpl = vi.fn().mockImplementation(() => {
+        return fakeCompletionResponse('<speak>The weather today is cloudy with a high around 65.</speak>\n\nFull forecast follows.');
+      });
+
+      t = await createTestApp(
+        { POCKETAGENT_LIVE_STT_URL: liveStt.url },
+        undefined,
+        undefined,
+        undefined,
+        fetchImpl as unknown as typeof fetch,
+      );
+      await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+      const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+      const { events } = await sendMessage(t, chat.id, 'What is the weather today?', { voiceMode: true });
+
+      const ttsEvents = events.filter((e) => e.kind === 'tts_audio');
+      expect(ttsEvents.length).toBeGreaterThan(0);
+      const audioEvent = ttsEvents[0] as {
+        kind: 'tts_audio';
+        id: string;
+        chunk: { data: string; sampleRateHz: number };
+      };
+      expect(audioEvent.chunk.sampleRateHz).toBe(24000);
+      expect(audioEvent.chunk.data).toBe(fakePcm.toString('base64'));
+    } finally {
+      await liveStt.close();
+    }
+  });
 });
+
 

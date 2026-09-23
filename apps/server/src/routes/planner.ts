@@ -161,6 +161,7 @@ async function streamPlannerEvents(
   options?: {
     voiceMode?: boolean;
     config?: Config;
+    ttsTimeoutMs?: number;
   },
 ): Promise<void> {
   let first: IteratorResult<AgentEvent>;
@@ -246,10 +247,28 @@ async function streamPlannerEvents(
       stream.write(event);
     }
     if (pumpFinishPromise) {
-      await Promise.race([
-        pumpFinishPromise,
-        new Promise((resolve) => setTimeout(resolve, 5000)),
-      ]);
+      // PA-93: speech synthesis for spoken summaries can take several seconds
+      // per sentence (e.g. Kokoro on live-stt takes 6-10s). A 5s timeout prematurely
+      // closed the SSE stream and cancelled the pump before audio chunks were emitted.
+      const timeoutMs = options?.ttsTimeoutMs ?? 60_000;
+      let timedOut = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          pumpFinishPromise,
+          new Promise<void>((resolve) => {
+            timer = setTimeout(() => {
+              timedOut = true;
+              resolve();
+            }, timeoutMs);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      if (timedOut) {
+        request.log.warn({ timeoutMs }, 'planner turn TTS completion timed out');
+      }
     }
   } catch (err) {
     pump?.cancel();
