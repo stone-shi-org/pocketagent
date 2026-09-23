@@ -36,7 +36,11 @@ export default defineConfig({
           name: 'web',
           root: './apps/web',
           environment: 'node',
-          include: ['src/**/*.test.ts'],
+          // `.tsx` too, for the one component test (PA-84's spoken-summary
+          // disclosure): it renders through `react-dom/server`, which needs
+          // no jsdom, but a file holding JSX cannot be named `.test.ts`. A
+          // `.tsx` test that silently never runs is the failure this avoids.
+          include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
         },
       },
     ],

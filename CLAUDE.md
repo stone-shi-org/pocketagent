@@ -1143,6 +1143,18 @@ in would drop a half-arrived `<spea` and then concatenate its `k>` onto
 already-stripped text, corrupting the reply for the rest of the turn. A
 `user_prompt` arrives whole, so it has no such state to break.
 
+**Hidden is not the same as unreachable.** The paraphrase is the one thing in a
+turn that exists *only* as sound: stripped from the reply, gone after playback.
+So an assistant message that carried one gets a small speaker button beside
+"Copy answer" that expands the spoken text (`extractSpokenSummary`, the
+disclosure in `Transcript.tsx`) — collapsed by default, because it must not
+compete with the reply, and plain text rather than markdown, because it is the
+exact string the synthesizer was handed. It is deliberately *not* offered when
+the model wrapped its whole reply in the tag: the empty-bubble guard already
+put that content on screen, so the toggle would expand to a duplicate of the
+message above it. Without this there is no way to answer "what did it actually
+say?", which is the first question a mis-tuned paraphrase provokes.
+
 Two consequences worth knowing. The tag reaches the agent's *own* on-disk
 transcript (for `claude`, Claude Code writes that file and this app never
 rewrites it), so "TTS-only, discarded after playback" was never available —
@@ -2236,7 +2248,19 @@ These are load-bearing. Several were bugs first.
   rots. The one dark surface is the terminal (`--console`), because ANSI palettes are drawn
   for dark backgrounds.
 - Icons are inline SVG in `components/Icon.tsx`, 24px grid, 1.7 stroke, `currentColor`. Add
-  to that set rather than reaching for a text glyph or an icon font.
+  to that set rather than reaching for a text glyph or an icon font. `speaker` is the agent's
+  *output*, deliberately a different silhouette from `mic` and `live-listen`, which are both
+  input — a voice UI where "it spoke" looks like "the mic is on" is the one confusion to avoid.
+- **There is exactly one component test, and it is an exception with a reason**
+  (`components/spoken-summary-disclosure.test.tsx`). The web project is `environment: 'node'`
+  with no jsdom and no testing-library, because everything else here is either pure logic
+  (tested directly) or needs a real browser (the demo scripts). PA-84's disclosure is neither
+  — it is a decision about *what to render*, whose two failure modes (an icon that never
+  appears, or one that expands to a duplicate of the message above it) are invisible to the
+  pure tests under it. `renderToStaticMarkup` settles both with no new dependency; the
+  markdown renderer is stubbed because DOMPurify wants a DOM. `vitest.config.ts`'s web
+  `include` therefore covers `.test.tsx` as well — a JSX test file that silently never runs is
+  worse than no test.
 - **`navigator.clipboard` is not available here.** It needs a secure context, and this app
   is normally reached over plain HTTP on a LAN or tailnet address. `agent/clipboard.ts`
   falls back to a throwaway textarea plus `execCommand('copy')`; anything that copies must

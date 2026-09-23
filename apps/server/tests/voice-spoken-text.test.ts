@@ -4,6 +4,7 @@ import {
   SPEAK_OPEN_TAG,
   SPOKEN_SUMMARY_INSTRUCTION,
   appendSpokenSummaryInstruction,
+  extractSpokenSummary,
   stripSpokenSummary,
   stripSpokenSummaryInstruction,
 } from '@pocketagent/protocol';
@@ -52,6 +53,49 @@ describe('stripSpokenSummary', () => {
   it('handles several blocks in one reply', () => {
     const reply = `${SPEAK_OPEN_TAG}A${SPEAK_CLOSE_TAG}first${SPEAK_OPEN_TAG}B${SPEAK_CLOSE_TAG}second`;
     expect(stripSpokenSummary(reply)).toBe('firstsecond');
+  });
+});
+
+describe('extractSpokenSummary', () => {
+  // What the transcript's "Spoken" disclosure shows. Without it the paraphrase
+  // is invisible everywhere — stripped from the reply and gone after playback —
+  // so there is no way to check what was actually read aloud.
+  it('returns the tagged text', () => {
+    const reply = `${SPEAK_OPEN_TAG}I fixed the bug.${SPEAK_CLOSE_TAG}\n\nHere is the diff.`;
+    expect(extractSpokenSummary(reply)).toBe('I fixed the bug.');
+  });
+
+  it('returns null for a reply that carried no tag', () => {
+    expect(extractSpokenSummary('An ordinary answer.')).toBeNull();
+  });
+
+  it('returns null while the summary is still streaming', () => {
+    // A half-written summary is not yet a summary; revealing it mid-stream
+    // would show text that is still changing.
+    expect(extractSpokenSummary(`${SPEAK_OPEN_TAG}I am still writ`)).toBeNull();
+  });
+
+  it('joins several blocks in order', () => {
+    const reply = `${SPEAK_OPEN_TAG}First.${SPEAK_CLOSE_TAG}x${SPEAK_OPEN_TAG}Second.${SPEAK_CLOSE_TAG}`;
+    expect(extractSpokenSummary(reply)).toBe('First. Second.');
+  });
+
+  it('returns null for an empty block rather than an empty disclosure', () => {
+    expect(extractSpokenSummary(`${SPEAK_OPEN_TAG}   ${SPEAK_CLOSE_TAG}rest`)).toBeNull();
+  });
+
+  it('agrees with the strip when a model wraps its whole reply', () => {
+    // The UI hides the toggle in exactly this case: the guard in
+    // `stripSpokenSummary` already showed this content, so a disclosure would
+    // expand to a duplicate of the message above it.
+    const reply = `${SPEAK_OPEN_TAG}The entire answer.${SPEAK_CLOSE_TAG}`;
+    expect(extractSpokenSummary(reply)).toBe(stripSpokenSummary(reply));
+  });
+
+  it('never returns text the reply still shows', () => {
+    const reply = `${SPEAK_OPEN_TAG}Tests pass.${SPEAK_CLOSE_TAG}\n\nThe written reply.`;
+    expect(stripSpokenSummary(reply)).not.toContain('Tests pass.');
+    expect(extractSpokenSummary(reply)).not.toContain('The written reply.');
   });
 });
 

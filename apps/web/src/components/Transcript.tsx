@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { stripSpokenSummary } from '@pocketagent/protocol';
+import { extractSpokenSummary, stripSpokenSummary } from '@pocketagent/protocol';
 import type { TranscriptItem, TranscriptState, TurnNode } from '../agent/transcript.js';
 import { groupIntoTurns } from '../agent/transcript.js';
 import { promptHeadline } from '../agent/prompt-headline.js';
 import { renderMarkdown } from '../agent/markdown.js';
 import { ToolCard } from './ToolCard.js';
 import { CopyButton } from './CopyButton.js';
+import { Icon } from './Icon.js';
 
 /**
  * Only the most recent turns' prompts stay pinned at the top as their output
@@ -374,13 +375,43 @@ function Item({ item }: { item: TranscriptItem }): JSX.Element | null {
  */
 function AssistantText({ item }: { item: TranscriptItem & { type: 'text' } }): JSX.Element {
   const shown = useMemo(() => stripSpokenSummary(item.text), [item.text]);
+  const spoken = useMemo(() => extractSpokenSummary(item.text), [item.text]);
+  const [spokenOpen, setSpokenOpen] = useState(false);
+
+  // Offered only when there is something the disclosure would actually add.
+  // A model that wrapped its *whole* reply in the tag has already had that
+  // content shown by `stripSpokenSummary`'s own empty-bubble guard, so a
+  // toggle there would expand to a duplicate of the message above it.
+  const hasSpoken = spoken !== null && spoken !== shown;
+
   return (
     <div className="message assistant">
       <Markdown text={shown} streaming={item.streaming} />
       {/* Nothing to copy until the block has stopped growing. */}
       {!item.streaming && (
         <div className="message-actions">
+          {hasSpoken && (
+            <button
+              type="button"
+              className={`copy-btn spoken-btn${spokenOpen ? ' open' : ''}`}
+              onClick={() => setSpokenOpen((open) => !open)}
+              aria-expanded={spokenOpen}
+              aria-label="Spoken summary"
+              title={spokenOpen ? 'Hide what was read aloud' : 'Show what was read aloud'}
+            >
+              <Icon name="speaker" size={15} />
+            </button>
+          )}
           <CopyButton text={shown} label="Copy answer" />
+        </div>
+      )}
+      {/* Plain text, never markdown: this is the string handed to the
+          synthesizer, so rendering it as anything else would show something
+          other than what was said. */}
+      {hasSpoken && spokenOpen && !item.streaming && (
+        <div className="spoken-summary">
+          <span className="spoken-summary-label">Spoken</span>
+          {spoken}
         </div>
       )}
     </div>

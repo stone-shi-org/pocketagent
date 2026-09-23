@@ -102,6 +102,70 @@ export function stripSpokenSummaryInstruction(text: string): string {
 const TRAILING_PARTIAL_TAG = /<\/?(?:s(?:p(?:e(?:a(?:k)?)?)?)?)?$/;
 
 /**
+ * One pass over a reply, splitting it into what is spoken and what is shown.
+ *
+ * Both `stripSpokenSummary` (the browser hiding the tag) and
+ * `extractSpokenSummary` (the browser *showing* it on request) read this, so
+ * the two can never disagree about where a block starts and ends — the same
+ * single-source rule that put this whole module in `packages/protocol`.
+ */
+interface ScannedReply {
+  /** Text outside every `<speak>` block, in order. */
+  outside: string;
+  /** The content of each *closed* block, in order. */
+  spoken: string[];
+  /** A block was opened and its closing tag has not arrived — the reply is
+   *  still streaming its summary, which wants the opposite treatment from a
+   *  model that closed a block around its entire reply. */
+  unclosed: boolean;
+}
+
+function scanReply(text: string): ScannedReply {
+  let outside = '';
+  const spoken: string[] = [];
+  let unclosed = false;
+  let cursor = 0;
+
+  for (;;) {
+    const open = text.indexOf(SPEAK_OPEN_TAG, cursor);
+    if (open === -1) {
+      outside += text.slice(cursor);
+      break;
+    }
+    outside += text.slice(cursor, open);
+    const close = text.indexOf(SPEAK_CLOSE_TAG, open + SPEAK_OPEN_TAG.length);
+    if (close === -1) {
+      unclosed = true;
+      break;
+    }
+    spoken.push(text.slice(open + SPEAK_OPEN_TAG.length, close).trim());
+    cursor = close + SPEAK_CLOSE_TAG.length;
+  }
+
+  return { outside, spoken, unclosed };
+}
+
+/**
+ * The spoken paraphrase a reply carried, or `null` if it carried none.
+ *
+ * This is what the transcript's "spoken summary" disclosure shows. The text is
+ * otherwise invisible — `stripSpokenSummary` removes it and the speaker is the
+ * only place it ever surfaced — so without this there is no way to check what
+ * was actually read aloud, which is the one question a mis-tuned paraphrase
+ * makes someone ask.
+ *
+ * Only *closed* blocks count: a half-written summary is not yet a summary, and
+ * revealing it mid-stream would show text that is still changing.
+ */
+export function extractSpokenSummary(text: string): string | null {
+  if (!text.includes(SPEAK_OPEN_TAG)) return null;
+  const joined = scanReply(text)
+    .spoken.filter((part) => part.length > 0)
+    .join(' ');
+  return joined.length > 0 ? joined : null;
+}
+
+/**
  * Removes `<speak>` blocks (tags *and* their content) from a reply for display.
  *
  * Safe to call on a partially-streamed reply, which is the normal case: an
@@ -118,29 +182,8 @@ export function stripSpokenSummary(text: string): string {
     return text.replace(TRAILING_PARTIAL_TAG, '');
   }
 
-  let out = '';
-  let cursor = 0;
-  // Whether the reply is currently *inside* a block whose closing tag has not
-  // arrived — which is the difference between "the summary is still being
-  // written" and "the summary was the whole reply", and the two want opposite
-  // answers from the guard below.
-  let unclosed = false;
-  for (;;) {
-    const open = text.indexOf(SPEAK_OPEN_TAG, cursor);
-    if (open === -1) {
-      out += text.slice(cursor);
-      break;
-    }
-    out += text.slice(cursor, open);
-    const close = text.indexOf(SPEAK_CLOSE_TAG, open + SPEAK_OPEN_TAG.length);
-    if (close === -1) {
-      unclosed = true;
-      break;
-    }
-    cursor = close + SPEAK_CLOSE_TAG.length;
-  }
-
-  const cleaned = out.replace(TRAILING_PARTIAL_TAG, '').replace(/\n{3,}/g, '\n\n').trim();
+  const { outside, unclosed } = scanReply(text);
+  const cleaned = outside.replace(TRAILING_PARTIAL_TAG, '').replace(/\n{3,}/g, '\n\n').trim();
   if (cleaned.length > 0) return cleaned;
 
   // Nothing outside the tag. Either the spoken summary is still streaming and

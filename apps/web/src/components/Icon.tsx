@@ -35,6 +35,7 @@ export type IconName =
   | 'attach'
   | 'mic'
   | 'live-listen'
+  | 'speaker'
   | 'plus'
   | 'minimize'
   | 'shield'
@@ -271,6 +272,18 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M12 16v2.5" />
       <path d="M15.5 8.5a5 5 0 0 1 0 7M17.7 6.3a8 8 0 0 1 0 11.4" />
       <path d="M8.5 8.5a5 5 0 0 0 0 7M6.3 6.3a8 8 0 0 0 0 11.4" />
+    </>
+  ),
+
+  // A speaker cone with two arcs: PA-84's "what was read aloud" disclosure on
+  // an assistant reply. Deliberately the *output* counterpart to `mic` and
+  // `live-listen`, which are both input — an arc-radiating mic here would make
+  // "the agent spoke this" look like "the mic is on", which is the one
+  // confusion a voice UI cannot afford.
+  speaker: (
+    <>
+      <path d="M11 5.5 6.5 9H4a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h2.5L11 18.5Z" />
+      <path d="M15 9.5a3.5 3.5 0 0 1 0 5M17.8 7a7 7 0 0 1 0 10" />
     </>
   ),
 

@@ -3912,7 +3912,10 @@ button.chat-rate-limit-badge {
   margin: 0 0 10px;
 }
 
-.copy-btn {
+/* PA-84's spoken-summary toggle sits beside the copy button in the same
+   actions row, so the two share one rule rather than two that drift apart. */
+.copy-btn,
+.spoken-btn {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -3925,10 +3928,42 @@ button.chat-rate-limit-badge {
   line-height: 1;
 }
 
-.copy-btn:hover:not(:disabled) {
+.copy-btn:hover:not(:disabled),
+.spoken-btn:hover:not(:disabled) {
   background: var(--bg-elev);
   border-color: transparent;
   color: var(--text);
+}
+
+/* Expanded: the row keeps a standing hint that the panel below belongs to it. */
+.spoken-btn.open {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+
+.spoken-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--border);
+  background: var(--bg-elev);
+  border-radius: 0 8px 8px 0;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.5;
+  /* The synthesizer was handed one plain string; a long one still wraps. */
+  white-space: pre-wrap;
+}
+
+.spoken-summary-label {
+  flex: none;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  opacity: 0.75;
 }
 
 .copy-btn.copied {
