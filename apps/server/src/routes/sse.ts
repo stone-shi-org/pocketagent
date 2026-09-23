@@ -92,16 +92,23 @@ export function openSseStream(
     }
   };
 
-  // `close` on the raw request fires for a client that navigated away, lost
-  // its network, or was cut off by a proxy — all indistinguishable here, and
-  // all meaning the same thing: stop writing and tear down the socket.
-  request.raw.on('close', () => {
+  // PA-90: Listen on the raw response's close event, NOT request.raw.
+  // `request.raw` is the incoming request body stream, which emits 'close'
+  // as soon as the POST request body is consumed (within milliseconds).
+  // Listening to request.raw caused the response to be prematurely destroyed
+  // on every POST with a body, aborting the SSE stream and throwing a network error
+  // in the client.
+  // `reply.raw.on('close')` fires when the response finishes cleanly (writableEnded is true)
+  // or when the client disconnected prematurely (writableEnded is false).
+  reply.raw.on('close', () => {
     if (closed) return;
     closed = true;
     stop();
-    options.onClose?.();
-    if (!reply.raw.destroyed) {
-      reply.raw.destroy();
+    if (!reply.raw.writableEnded) {
+      options.onClose?.();
+      if (!reply.raw.destroyed) {
+        reply.raw.destroy();
+      }
     }
   });
 

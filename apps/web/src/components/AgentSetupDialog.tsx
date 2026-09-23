@@ -106,6 +106,11 @@ export function AgentSetupDialog({ focusAgentId, onApiError, onChanged, onClose 
         setProgress(latest);
       }, 0, target);
     } catch (err) {
+      // If the install already completed successfully, a trailing socket disconnect
+      // must not overwrite success with a failure.
+      if (latest.status === 'succeeded') {
+        return;
+      }
       onApiError(err);
       setProgress({
         ...latest,
