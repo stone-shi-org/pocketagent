@@ -225,9 +225,9 @@ export function isExplicitPath(bin: string | undefined): boolean {
 export function agentBinSearchDirs(): string[] {
   const home = os.homedir();
   return [
+    path.join(home, '.npm-global', 'bin'),
     path.join(home, '.local', 'bin'),
     path.join(home, '.cargo', 'bin'),
-    path.join(home, '.npm-global', 'bin'),
     path.join(home, '.opencode', 'bin'),
   ];
 }
@@ -238,8 +238,20 @@ export function resolveExecutable(bin: string): string | null {
   if (isExplicitPath(bin)) {
     return isExecutable(expanded) ? path.resolve(expanded) : null;
   }
+  const home = os.homedir();
+  const installBin = path.join(home, '.npm-global', 'bin');
   const pathEnv = process.env.PATH ?? '';
-  const searchDirs = [...pathEnv.split(path.delimiter).filter(Boolean), ...agentBinSearchDirs()];
+  // The on-demand agent install prefix comes first so an agent installed or
+  // updated on this host is the one that actually runs, rather than an older
+  // copy earlier on system PATH shadowing it. The container image puts that
+  // prefix first on PATH for this exact reason (see config/index.ts).
+  const searchDirs = Array.from(
+    new Set([
+      installBin,
+      ...pathEnv.split(path.delimiter).filter(Boolean),
+      ...agentBinSearchDirs(),
+    ]),
+  );
   for (const dir of searchDirs) {
     const candidate = path.join(dir, expanded);
     if (isExecutable(candidate)) return candidate;

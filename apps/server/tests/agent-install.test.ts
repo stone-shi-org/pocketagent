@@ -1,7 +1,7 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentInstallEvent, InstallableAgentListResponse } from '@pocketagent/protocol';
 import { INSTALLABLE_AGENT_IDS } from '@pocketagent/protocol';
 import { buildApp } from '../src/app.js';
@@ -9,6 +9,7 @@ import { openDatabase } from '../src/db/index.js';
 import { installableAgents, npmInstallCommand } from '../src/agents/catalog.js';
 import { deriveSetupState } from '../src/agents/auth-probe.js';
 import { installFailure, verifyInstalled, type InstallRunner } from '../src/agents/install.js';
+import { agentBinSearchDirs, resolveExecutable } from '../src/agents/registry.js';
 import { createClaudeAdapter } from '../src/agents/claude.js';
 import { createCodexAdapter } from '../src/agents/codex.js';
 import { authHeaders, createTestApp, makeConfig, makeWorkspace, TEST_TOKEN, type TestApp } from './helpers.js';
@@ -157,6 +158,37 @@ describe('post-install verification', () => {
     const shell = verifyInstalled('sh', tmp);
     expect(shell.resolved).not.toBeNull();
     expect(shell.fromPrefix).toBe(false);
+  });
+
+  it('prefers the on-demand install prefix over other search directories (PA-92)', () => {
+    // When an agent CLI is installed or updated in ~/.npm-global/bin, it must
+    // take precedence over older binaries lingering in ~/.local/bin or PATH.
+    const searchDirs = agentBinSearchDirs();
+    expect(searchDirs[0]).toBe(path.join(os.homedir(), '.npm-global', 'bin'));
+  });
+
+  it('resolves executables from install prefix ahead of PATH (PA-92)', () => {
+    const fakeHome = mkdtempSync(path.join(os.tmpdir(), 'pa-home-'));
+    const fakeGlobal = path.join(fakeHome, '.npm-global', 'bin');
+    const fakePathDir = mkdtempSync(path.join(os.tmpdir(), 'pa-path-'));
+    mkdirSync(fakeGlobal, { recursive: true });
+
+    const globalTool = path.join(fakeGlobal, 'test-tool');
+    const pathTool = path.join(fakePathDir, 'test-tool');
+    writeFileSync(globalTool, '#!/bin/sh\nexit 0', { mode: 0o755 });
+    writeFileSync(pathTool, '#!/bin/sh\nexit 0', { mode: 0o755 });
+
+    const origPath = process.env.PATH;
+    try {
+      vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+      process.env.PATH = fakePathDir;
+      expect(resolveExecutable('test-tool')).toBe(globalTool);
+    } finally {
+      process.env.PATH = origPath;
+      vi.restoreAllMocks();
+      rmSync(fakeHome, { recursive: true, force: true });
+      rmSync(fakePathDir, { recursive: true, force: true });
+    }
   });
 });
 

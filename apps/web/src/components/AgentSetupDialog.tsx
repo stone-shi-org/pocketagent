@@ -110,7 +110,12 @@ export function AgentSetupDialog({ focusAgentId, onApiError, onChanged, onClose 
       setProgress({
         ...latest,
         status: 'failed',
-        error: err instanceof ApiError ? err.message : 'The install could not be started.',
+        error:
+          err instanceof ApiError
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : 'The install could not be started.',
       });
     } finally {
       setInstalling(null);
@@ -253,7 +258,11 @@ export function AgentSetupDialog({ focusAgentId, onApiError, onChanged, onClose 
               <p className="planner-row-meta">Earlier output was dropped to bound memory.</p>
             )}
             <pre className="hook-preview agent-install-log" ref={logRef}>
-              {progress.lines.length > 0 ? progress.lines.join('\n') : 'Starting…'}
+              {progress.lines.length > 0
+                ? progress.lines.join('\n')
+                : progress.status === 'failed'
+                  ? 'Install could not proceed.'
+                  : 'Starting…'}
             </pre>
             {progress.error !== null && (
               <div className="error-box" role="alert">
