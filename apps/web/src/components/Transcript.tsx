@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { stripSpokenSummary } from '@pocketagent/protocol';
 import type { TranscriptItem, TranscriptState, TurnNode } from '../agent/transcript.js';
 import { groupIntoTurns } from '../agent/transcript.js';
 import { promptHeadline } from '../agent/prompt-headline.js';
@@ -339,17 +340,7 @@ function Item({ item }: { item: TranscriptItem }): JSX.Element | null {
       // A user-role text item is always a turn's `prompt` — groupIntoTurns
       // pulls it out of the leaves list, so it renders via TurnPanel's
       // header, never through here.
-      return (
-        <div className="message assistant">
-          <Markdown text={item.text} streaming={item.streaming} />
-          {/* Nothing to copy until the block has stopped growing. */}
-          {!item.streaming && (
-            <div className="message-actions">
-              <CopyButton text={item.text} label="Copy answer" />
-            </div>
-          )}
-        </div>
-      );
+      return <AssistantText item={item} />;
     case 'thinking':
       return <Thinking text={item.text} />;
     case 'tool':
@@ -363,6 +354,37 @@ function Item({ item }: { item: TranscriptItem }): JSX.Element | null {
     default:
       return null;
   }
+}
+
+/**
+ * PA-84: an assistant reply with its `<speak>` block removed.
+ *
+ * The spoken paraphrase is for the speaker only — the ask was that the chat
+ * keeps showing the normal written reply untouched — and the tag genuinely
+ * reaches this component, because it is the model's own output and lands in
+ * the agent's own transcript, which this app never rewrites.
+ *
+ * Stripped at render rather than in the reducer on purpose: `text_delta`
+ * accumulates (`prev.text + event.text`), so stripping on the way in would
+ * drop a half-arrived `<spea` and then concatenate its `k>` onto
+ * already-stripped text, corrupting the reply for the rest of the turn.
+ * `stripSpokenSummary` is safe on a partial reply, so the raw text stays in
+ * `TranscriptState` and only the view hides it. The copy action uses the same
+ * text, so what you copy is what you saw.
+ */
+function AssistantText({ item }: { item: TranscriptItem & { type: 'text' } }): JSX.Element {
+  const shown = useMemo(() => stripSpokenSummary(item.text), [item.text]);
+  return (
+    <div className="message assistant">
+      <Markdown text={shown} streaming={item.streaming} />
+      {/* Nothing to copy until the block has stopped growing. */}
+      {!item.streaming && (
+        <div className="message-actions">
+          <CopyButton text={shown} label="Copy answer" />
+        </div>
+      )}
+    </div>
+  );
 }
 
 function Markdown({ text, streaming }: { text: string; streaming: boolean }): JSX.Element {

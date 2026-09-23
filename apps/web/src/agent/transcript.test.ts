@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent, ModelInfo } from '@pocketagent/protocol';
+import { appendSpokenSummaryInstruction } from '@pocketagent/protocol';
 import {
   applyEvent,
   applyEvents,
@@ -52,6 +53,16 @@ describe('transcript: text', () => {
       image,
     });
     expect(state.items[0]).toMatchObject({ role: 'user', text: 'look at this', image });
+  });
+
+  it('hides the voice spoken-summary instruction from a user prompt (PA-84)', () => {
+    // The server appends it to a voice-enabled turn, so it genuinely is in the
+    // `user_prompt` event — but the chat must show what the human typed.
+    const typed = 'run the tests';
+    const state = applyEvents(emptyTranscript(), [
+      { kind: 'user_prompt', id: 'u1', text: appendSpokenSummaryInstruction(typed) },
+    ]);
+    expect(state.items[0]).toMatchObject({ role: 'user', text: typed });
   });
 
   it('accumulates deltas into one block', () => {

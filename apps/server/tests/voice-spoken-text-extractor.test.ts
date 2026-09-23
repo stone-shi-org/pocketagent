@@ -1,0 +1,217 @@
+import { describe, expect, it } from 'vitest';
+import { SpokenTextExtractor } from '../src/voice/spoken-text-extractor.js';
+import { SpokenTextPipeline } from '../src/voice/spoken-text-pipeline.js';
+
+/**
+ * PA-84. Two properties carry this feature, and both are asserted here rather
+ * than described: a tagged reply speaks *only* its `<speak>` block, and an
+ * untagged one still speaks — with the unspeakable parts removed — because
+ * silence would read as a broken microphone.
+ *
+ * Every case feeds text one delta at a time, because delta boundaries are
+ * streaming timing rather than syntax: the interesting bugs are all a tag or a
+ * fence split across two of them.
+ */
+
+/** Feeds deltas and returns everything the extractor released, turn included. */
+function speak(extractor: SpokenTextExtractor, deltas: string[]): string {
+  let out = '';
+  for (const delta of deltas) out += extractor.push(delta);
+  out += extractor.flush();
+  return out;
+}
+
+/** Splits text into `size`-character deltas — the pathological streaming case. */
+function chop(text: string, size: number): string[] {
+  const parts: string[] = [];
+  for (let i = 0; i < text.length; i += size) parts.push(text.slice(i, i + size));
+  return parts;
+}
+
+describe('SpokenTextExtractor — tagged replies', () => {
+  it('speaks only the tagged summary, never the written reply', () => {
+    const out = speak(new SpokenTextExtractor(), [
+      '<speak>I fixed the auth bug by adding a null check.</speak>\n\n',
+      "Here's the change:\n\n```ts\nif (user == null) return;\n```\n",
+      'It lives in `apps/server/src/auth/index.ts`.\n',
+    ]);
+    expect(out.trim()).toBe('I fixed the auth bug by adding a null check.');
+  });
+
+  it('survives an opening tag split across deltas', () => {
+    const out = speak(new SpokenTextExtractor(), ['<spe', 'ak>', 'All done.', '</speak>rest']);
+    expect(out.trim()).toBe('All done.');
+  });
+
+  it('survives a closing tag split across deltas, and never speaks the markup', () => {
+    const out = speak(new SpokenTextExtractor(), ['<speak>All done.</', 'speak>', 'the reply']);
+    expect(out.trim()).toBe('All done.');
+    expect(out).not.toContain('speak');
+  });
+
+  it('survives the whole reply arriving one character at a time', () => {
+    const out = speak(
+      new SpokenTextExtractor(),
+      chop('<speak>Tests pass.</speak>\nDetails in `foo/bar.ts`.\n', 1),
+    );
+    expect(out.trim()).toBe('Tests pass.');
+  });
+
+  it('speaks several tagged blocks in order', () => {
+    const out = speak(new SpokenTextExtractor(), [
+      '<speak>First part done.</speak>\nnoise\n<speak>Second part too.</speak>\nmore noise',
+    ]);
+    expect(out.replace(/\s+/g, ' ').trim()).toBe('First part done. Second part too.');
+  });
+
+  it('flushes the content of a tag the turn ended before closing', () => {
+    // An interrupted or truncated reply still said something worth hearing.
+    const out = speak(new SpokenTextExtractor(), ['<speak>I was part way through']);
+    expect(out.trim()).toBe('I was part way through');
+  });
+
+  it('tolerates leading whitespace before the tag', () => {
+    const out = speak(new SpokenTextExtractor(), ['\n\n  <speak>Fine.</speak>\nbody']);
+    expect(out.trim()).toBe('Fine.');
+  });
+});
+
+describe('SpokenTextExtractor — untagged fallback', () => {
+  it('speaks prose mid-turn, before any turn_complete (PA-20 stays incremental)', () => {
+    // The regression that matters most: a reply must not be held back waiting
+    // to see whether a tag shows up later.
+    const extractor = new SpokenTextExtractor();
+    expect(extractor.push('Once only. ')).toContain('Once only.');
+  });
+
+  it('drops a fenced code block but keeps the prose around it', () => {
+    const out = speak(new SpokenTextExtractor(), [
+      'I updated the handler.\n',
+      '```ts\nconst x = 1;\nif (x) throw new Error("boom");\n```\n',
+      'That should do it.\n',
+    ]);
+    expect(out).toContain('I updated the handler.');
+    expect(out).toContain('That should do it.');
+    expect(out).not.toContain('throw');
+    expect(out).not.toContain('const');
+  });
+
+  it('drops a fence whose delimiter is split across deltas', () => {
+    const out = speak(new SpokenTextExtractor(), [
+      'Before.\n',
+      '``',
+      '`js\n',
+      'secret_code_line();\n',
+      '```\n',
+      'After.\n',
+    ]);
+    expect(out).toContain('Before.');
+    expect(out).toContain('After.');
+    expect(out).not.toContain('secret_code_line');
+  });
+
+  it('keeps a word-like inline code span and drops a path-like one', () => {
+    const out = speak(new SpokenTextExtractor(), [
+      'I added a `null` check in `apps/server/src/auth/index.ts` today.\n',
+    ]);
+    expect(out).toContain('null');
+    expect(out).not.toContain('apps/server');
+  });
+
+  it('drops URLs and reads a link as its text', () => {
+    const out = speak(new SpokenTextExtractor(), [
+      'See [the docs](https://example.com/a/b) or https://example.com/raw for more.\n',
+    ]);
+    expect(out).toContain('the docs');
+    expect(out).not.toContain('example.com');
+  });
+
+  it('drops table rows and markdown furniture', () => {
+    const out = speak(new SpokenTextExtractor(), [
+      '## Summary\n',
+      '| file | change |\n| --- | --- |\n| a.ts | edited |\n',
+      '- Fixed the parser\n',
+      '1. Ran the tests\n',
+    ]);
+    expect(out).toContain('Summary');
+    expect(out).toContain('Fixed the parser');
+    expect(out).toContain('Ran the tests');
+    expect(out).not.toContain('|');
+    expect(out).not.toContain('-');
+    expect(out).not.toContain('#');
+  });
+
+  it('speaks nothing for a reply that is only code', () => {
+    // Documented consequence rather than an accident: there is no prose to say.
+    const out = speak(new SpokenTextExtractor(), ['```sh\nrm -rf /tmp/x\n```\n']);
+    expect(out.trim()).toBe('');
+  });
+
+  it('strips the markup when a model emits the tag late instead of first', () => {
+    // The accepted cost of deciding early: both halves are spoken, but the
+    // tag itself is never pronounced as letters.
+    const out = speak(new SpokenTextExtractor(), [
+      'Sure thing. ',
+      '<speak>The build is green.</speak>\n',
+    ]);
+    expect(out).toContain('The build is green.');
+    expect(out).not.toContain('speak>');
+    expect(out).not.toContain('<');
+  });
+
+  it('holds a partial path until it is whole, never speaking half of one', () => {
+    const extractor = new SpokenTextExtractor();
+    const out =
+      extractor.push('Look at `apps/ser') + extractor.push('ver/x.ts` now. ') + extractor.flush();
+    expect(out).not.toContain('apps');
+    expect(out).toContain('Look at');
+    expect(out).toContain('now.');
+  });
+});
+
+describe('SpokenTextExtractor — reset', () => {
+  it('does not let a turn interrupted inside a fence mute the next turn', () => {
+    // The PA-83 shape of bug, in a new place: fence state surviving a stop
+    // would swallow the whole next reply and read as talk-back dying for good.
+    const extractor = new SpokenTextExtractor();
+    extractor.push('Working on it.\n```ts\nconst partial = ');
+    extractor.reset();
+
+    const out = speak(extractor, ['The next turn speaks normally.\n']);
+    expect(out).toContain('The next turn speaks normally.');
+  });
+
+  it('does not let a tagged turn leak its mode into the next one', () => {
+    const extractor = new SpokenTextExtractor();
+    extractor.push('<speak>First turn.');
+    extractor.reset();
+
+    // With the tagged mode left set, an untagged second turn would be silent.
+    const out = speak(extractor, ['Second turn, no tag at all.\n']);
+    expect(out).toContain('Second turn, no tag at all.');
+  });
+});
+
+describe('SpokenTextPipeline', () => {
+  it('yields whole sentences from a tagged summary', () => {
+    const pipeline = new SpokenTextPipeline();
+    const sentences = [
+      ...pipeline.push('<speak>Tests pass. I pushed the fix.</speak>\n'),
+      ...pipeline.flush(),
+    ];
+    expect(sentences).toEqual(['Tests pass.', 'I pushed the fix.']);
+  });
+
+  it('reset() clears both stages, so a stopped turn leaves nothing behind', () => {
+    const pipeline = new SpokenTextPipeline();
+    pipeline.push('<speak>Half a sentence');
+    pipeline.reset();
+    expect(pipeline.flush()).toEqual([]);
+  });
+
+  it('flushes a short untagged reply that never hit a sentence boundary', () => {
+    const pipeline = new SpokenTextPipeline();
+    pipeline.push('no punctuation here');
+    expect(pipeline.flush()).toEqual(['no punctuation here']);
+  });
+});

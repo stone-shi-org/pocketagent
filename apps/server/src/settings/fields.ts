@@ -112,6 +112,9 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   // shape `liveSttUrl` above already established for a voice-feature knob.
   num('voiceTurnSensitivity', 'voice_turn_sensitivity', true),
   num('voiceTurnSilenceMs', 'voice_turn_silence_ms', true),
+  // PA-84: read live in `ws/index.ts`'s `case 'prompt'`, so a toggle applies
+  // to the very next turn of an already-running session.
+  bool('voiceSpokenSummaryEnabled', 'voice_spoken_summary_enabled', true),
   str('shell', 'shell', false),
   str('claudeBin', 'claude_bin', false),
   str('agyBin', 'agy_bin', false),

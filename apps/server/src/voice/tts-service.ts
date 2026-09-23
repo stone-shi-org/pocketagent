@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import type { AgentEvent } from '@pocketagent/protocol';
 import type { StructuredLikeSession } from '../sessions/manager.js';
 import type { LiveSttClient } from './live-stt-client.js';
-import { SentenceChunker } from './sentence-chunker.js';
+import { SpokenTextPipeline } from './spoken-text-pipeline.js';
 import { TurnTtsPump } from './turn-tts-pump.js';
 
 export type { TtsAudioChunk } from './turn-tts-pump.js';
@@ -41,7 +41,13 @@ export type { TtsAudioChunk } from './turn-tts-pump.js';
  */
 export class VoiceTtsService extends EventEmitter {
   private readonly attached = new Set<string>();
-  private readonly chunkers = new Map<string, SentenceChunker>();
+  /**
+   * PA-84: per-session `SpokenTextExtractor` + `SentenceChunker`, held
+   * together so a reset can never clear one and leave the other — see
+   * `SpokenTextPipeline`'s own doc comment for why that pairing is load-bearing
+   * rather than tidy.
+   */
+  private readonly pipelines = new Map<string, SpokenTextPipeline>();
   private readonly pumps = new Map<string, TurnTtsPump>();
   /**
    * PA-83: sessions whose process has already exited — a hard, permanent
@@ -124,7 +130,7 @@ export class VoiceTtsService extends EventEmitter {
     });
 
     // A dead session has nothing left to synthesize for; drop its state so a
-    // long-lived server does not accumulate one chunker/pump per session
+    // long-lived server does not accumulate one pipeline/pump per session
     // that ever turned voice mode on, for as long as the process runs.
     session.on('exit', () => this.cleanupSession(session.id));
   }
@@ -136,7 +142,7 @@ export class VoiceTtsService extends EventEmitter {
    *  without needing to know its `turnId`. */
   cancel(sessionId: string): void {
     this.pumps.get(sessionId)?.cancel();
-    this.chunkers.get(sessionId)?.reset();
+    this.pipelines.get(sessionId)?.reset();
     // PA-83: stays silent through the rest of *this* turn no matter how
     // many more `text_delta`s or stray `turn_complete`s arrive for it —
     // see `mutedUntilNextTurn`'s own doc comment. Harmless for the
@@ -163,13 +169,13 @@ export class VoiceTtsService extends EventEmitter {
     }
   }
 
-  private chunkerFor(sessionId: string): SentenceChunker {
-    let chunker = this.chunkers.get(sessionId);
-    if (!chunker) {
-      chunker = new SentenceChunker();
-      this.chunkers.set(sessionId, chunker);
+  private pipelineFor(sessionId: string): SpokenTextPipeline {
+    let pipeline = this.pipelines.get(sessionId);
+    if (!pipeline) {
+      pipeline = new SpokenTextPipeline();
+      this.pipelines.set(sessionId, pipeline);
     }
-    return chunker;
+    return pipeline;
   }
 
   private startTurn(sessionId: string): void {
@@ -177,7 +183,7 @@ export class VoiceTtsService extends EventEmitter {
     // we saw (should not happen, but this is user-facing audio — fail safe
     // rather than let two turns' audio interleave) is cancelled first.
     this.pumps.get(sessionId)?.cancel();
-    this.chunkerFor(sessionId).reset();
+    this.pipelineFor(sessionId).reset();
     const turnId = crypto.randomUUID();
     this.pumps.set(
       sessionId,
@@ -219,22 +225,21 @@ export class VoiceTtsService extends EventEmitter {
     // have started a turn in that case, so start one lazily rather than
     // dropping the rest of an already-in-progress reply's audio entirely.
     if (!this.pumps.has(sessionId)) this.startTurn(sessionId);
-    const sentences = this.chunkerFor(sessionId).push(text);
+    const sentences = this.pipelineFor(sessionId).push(text);
     for (const sentence of sentences) this.pumps.get(sessionId)!.push(sentence);
   }
 
   private onTurnComplete(sessionId: string): void {
     const pump = this.pumps.get(sessionId);
     if (!pump) return;
-    const remainder = this.chunkerFor(sessionId).flush();
-    if (remainder) pump.push(remainder);
+    for (const sentence of this.pipelineFor(sessionId).flush()) pump.push(sentence);
     pump.finish();
     this.pumps.delete(sessionId);
   }
 
   private cleanupSession(sessionId: string): void {
     this.attached.delete(sessionId);
-    this.chunkers.delete(sessionId);
+    this.pipelines.delete(sessionId);
     this.pumps.get(sessionId)?.cancel();
     this.pumps.delete(sessionId);
     this.mutedUntilNextTurn.delete(sessionId);

@@ -1089,6 +1089,78 @@ same limitation `vad.ts`'s own header records), so the unit tests carry
 recorded real-service output and real-device testing is the acceptance
 evidence.
 
+### The spoken-summary tag (PA-84)
+
+Talk-back used to narrate the reply verbatim, code fences and all. A
+voice-enabled turn now asks the model for a short spoken paraphrase wrapped in
+`<speak>…</speak>` (`SPOKEN_SUMMARY_INSTRUCTION`), the TTS pipeline speaks only
+that, and the chat still shows the written reply. Three decisions carry it.
+
+**The tag is requested *first*, and that is a latency constraint rather than a
+style choice.** PA-20 speaks each sentence as it streams, so a paraphrase
+written *after* the reply could not be spoken until the turn's last token —
+total silence then a summary, on exactly the multi-minute turn where a
+hands-free user most wants to know what is happening. A spoken lede keeps the
+immediacy, and it lets `SpokenTextExtractor` answer "is this a tagged reply?"
+from the first few characters: text is held only while it is still a *prefix*
+of `<speak>`. A model that emits the tag late therefore gets both halves
+spoken, with the markup stripped rather than pronounced — the accepted cost of
+not buffering every reply on the chance a tag shows up later.
+
+**The instruction is prompt text, not a system prompt, and that is the whole of
+PA-84's "does each backend need its own hook".** No coding-agent path here has
+system-prompt plumbing at all (only `planner/chats.ts` builds one, and Pocket
+Agent chats have no talk-back); an adapter's `buildCommand().args` never
+reaches a structured session, since `SessionManager` forwards only
+`executable`/`env` and each backend builds its own argv, so a CLI
+`--append-system-prompt` would only affect the *terminal* transport, which has
+no talk-back either; and the Claude SDK's `systemPrompt` option is fixed when
+`query()` is called, making it spawn-time and unable to follow a mid-session
+voice toggle. So the seam is `ws/index.ts`'s `case 'prompt'` — one chokepoint
+every structured backend passes through, already composing server-side text for
+the attached-image note — gated on `isVoiceModeEnabled`. It must stay *above*
+`promptQueue.submit`: a queued prompt is re-sent from its persisted text
+verbatim, so an instruction added later would be lost on exactly the deferred
+path. `SUBAGENT_RESULT_TRAILER` (PA-76) is the same append-then-extract shape.
+
+**An absent tag speaks a filtered reply, never silence.** Skipping speech would
+be indistinguishable from a dead microphone — PA-85's own reasoning — and would
+make this feature's non-compliance look like broken hardware, so
+`SpokenTextExtractor`'s fallback mode speaks the prose with the unspeakable
+parts removed: fenced code, inline code that is not a bare word, tables, URLs,
+paths and markdown furniture. That half needs no model cooperation, which is
+why it is unconditional and why `voiceSpokenSummaryEnabled` only governs
+whether the *instruction* is appended — turning it off stops adding text to
+prompts, it does not restore narrating code.
+
+The grammar lives in `packages/protocol/src/spoken-text.ts` because both sides
+read it: the server decides what to speak, the browser decides what to hide
+(`stripSpokenSummary` at render in `Transcript.tsx`, `stripSpokenSummaryInstruction`
+in `transcript.ts`'s `user_prompt` case). Same rule as `cron-expr.ts`. Stripping
+is *presentational* for an assistant reply and *reducer-level* for a prompt, and
+the asymmetry is deliberate: `text_delta` accumulates, so stripping on the way
+in would drop a half-arrived `<spea` and then concatenate its `k>` onto
+already-stripped text, corrupting the reply for the rest of the turn. A
+`user_prompt` arrives whole, so it has no such state to break.
+
+Two consequences worth knowing. The tag reaches the agent's *own* on-disk
+transcript (for `claude`, Claude Code writes that file and this app never
+rewrites it), so "TTS-only, discarded after playback" was never available —
+hiding it at render is the entire mechanism, and `stripSpokenSummary` shows the
+tag's content rather than an empty bubble if a model wraps its whole reply.
+And because the tag is meaningful, text this app did not author can carry it — a
+webhook prompt built from a Jira ticket, a file the agent echoes. The worst case
+is the speaker saying attacker-chosen words rather than anything executing, and
+the fallback path speaks reply text aloud regardless, so this is documented
+rather than defended with a per-turn nonce fence.
+
+`SpokenTextPipeline` owns the extractor and the `SentenceChunker` together so
+one `reset()` clears both. That is load-bearing, not tidiness: an extractor left
+mid-fence by a stop or an interrupt would swallow the *next* turn's whole reply
+and present as talk-back dying for good, which is the shape of every PA-83 bug.
+Real-device testing is the acceptance evidence here too, for the reason PA-85
+records.
+
 ### The home screen
 
 `projects/index.ts` composes `GET /api/projects`: live sessions and on-disk conversations
@@ -1999,6 +2071,23 @@ These are load-bearing. Several were bugs first.
   recorded real-service output, where this deployment's own model transcribed a
   350ms thump as "yeah" and whisper returned `[BLANK_AUDIO]` at confidence
   0.79) and `playback.test.ts`.
+- **A voice turn's reply is always spoken as *something*, and never as code** (PA-84).
+  The `<speak>` tag is a model's cooperation, not a contract, so an absent tag must fall
+  back to speaking the reply with its unspeakable parts stripped — never to silence,
+  which is indistinguishable from a dead microphone and is the failure PA-85's own
+  invariant is written against. That is why the filter half of
+  `SpokenTextExtractor` is unconditional and `voiceSpokenSummaryEnabled` governs only
+  whether the *instruction* is appended: the knob can stop text being added to prompts,
+  it may never restore narrating a code block. Three things hold the rest up. The tag
+  must keep being requested **first**, or talk-back stops being incremental and goes
+  silent for the length of a turn. The injection must stay **above**
+  `promptQueue.submit` in `ws/index.ts`, because a queued prompt is re-sent from its
+  persisted text verbatim and would otherwise lose it on exactly the deferred path —
+  and `appendSpokenSummaryInstruction` is idempotent so that re-send cannot stack
+  copies. And `SpokenTextPipeline.reset()` must clear the extractor *and* the chunker:
+  an extractor left mid-fence by a stop swallows the next turn's whole reply, which is
+  the PA-83 shape of bug. Asserted in
+  `apps/server/tests/voice-spoken-text-extractor.test.ts` and `voice-spoken-text.test.ts`.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.

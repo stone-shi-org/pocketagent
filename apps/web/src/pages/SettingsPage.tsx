@@ -639,6 +639,13 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
           busy={busy('voiceTurnSilenceMs')}
           onChange={(v) => saveDebounced('voiceTurnSilenceMs', v)}
         />
+        <BoolRow
+          label="Spoken summary for talk-back"
+          help="Asks the agent to open a voice turn with a short, spoken-friendly summary that talk-back reads instead of the written reply. Code blocks, file paths and URLs are left out of speech either way — turning this off only stops the request being added to your prompt."
+          checked={settings.voiceSpokenSummaryEnabled}
+          busy={busy('voiceSpokenSummaryEnabled')}
+          onChange={(v) => saveNow('voiceSpokenSummaryEnabled', v)}
+        />
         <TextRow
           label="Push contact"
           help="VAPID sub claim: a mailto: or https: URL identifying this deployment."

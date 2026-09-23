@@ -3,6 +3,7 @@ import type { WebSocket } from 'ws';
 import {
   LIMITS,
   PROTOCOL_VERSION,
+  appendSpokenSummaryInstruction,
   SERVER_PROTOCOL_RANGE,
   isSupportedProtocolVersion,
   WsCloseCode,
@@ -651,6 +652,24 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
             } catch (err) {
               app.log.warn({ err }, 'failed to save attachment to workspace');
             }
+          }
+
+          // PA-84: a voice-enabled turn asks for a spoken paraphrase wrapped in
+          // `<speak>`, which `VoiceTtsService` then speaks *instead of* the
+          // written reply. This is the seam for all five structured backends at
+          // once: none of them has system-prompt plumbing, an adapter's argv
+          // never reaches a structured session, and the Claude SDK's own
+          // `systemPrompt` is fixed when `query()` is called — so a system
+          // instruction could not follow a mid-session voice toggle, while
+          // prompt text is per-turn and needs no new plumbing. Same shape as
+          // `SUBAGENT_RESULT_TRAILER` (PA-76), and deliberately above
+          // `promptQueue.submit` for the same reason the image note is: a
+          // deferred prompt is re-sent from its persisted text verbatim, so an
+          // instruction added later would be lost exactly on the queued path.
+          // Hidden from the transcript at render, not here — it genuinely is
+          // part of the prompt that ran.
+          if (config.voiceSpokenSummaryEnabled && sessions.isVoiceModeEnabled(message.sessionId)) {
+            promptText = appendSpokenSummaryInstruction(promptText);
           }
 
           // The directory gate for a human's own message. Only ever *defers* it

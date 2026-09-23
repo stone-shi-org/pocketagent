@@ -474,6 +474,10 @@ export const RuntimeSettings = z.object({
   /** PA-83 #1: trailing silence (ms) the live-listen VAD waits before
    *  ending a turn — the "how long before it thinks I'm done talking" knob. */
   voiceTurnSilenceMs: z.number().int().min(200).max(3000),
+  /** PA-84: ask a voice-enabled turn for a `<speak>`-wrapped spoken summary.
+   *  Off still strips code/paths/URLs from what is read aloud — see
+   *  `Config.voiceSpokenSummaryEnabled` for why that half is unconditional. */
+  voiceSpokenSummaryEnabled: z.boolean(),
   shell: z.string().min(1),
   claudeBin: z.string().min(1),
   agyBin: z.string().min(1),

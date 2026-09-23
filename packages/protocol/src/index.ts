@@ -7,6 +7,7 @@ export * from './prompt-image.js';
 export * from './protocol-negotiation.js';
 export * from './version-drift.js';
 export * from './voice-audio.js';
+export * from './spoken-text.js';
 export * from './ws.js';
 export * from './http.js';
 export * from './cron-expr.js';

@@ -1,3 +1,4 @@
+import { stripSpokenSummaryInstruction } from '@pocketagent/protocol';
 import type {
   AgentEvent,
   EffortLevel,
@@ -176,7 +177,14 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
             type: 'text',
             key: `u_${event.id}`,
             role: 'user',
-            text: event.text,
+            // PA-84: a voice-enabled turn carries `SPOKEN_SUMMARY_INSTRUCTION`
+            // appended by the server; the chat shows what the human typed, not
+            // the plumbing. Stripped here rather than at render because a
+            // `user_prompt` always arrives whole — unlike an assistant reply,
+            // there is no partially-streamed state to corrupt — so every
+            // consumer (the turn header, "Copy prompt", the fleet preview)
+            // gets it right for free.
+            text: stripSpokenSummaryInstruction(event.text),
             streaming: false,
             image: event.image,
           },

@@ -122,6 +122,27 @@ describe('generalized settings fields over HTTP', () => {
     expect(t.context.config.voiceTurnSilenceMs).toBe(1200);
   });
 
+  it('voiceSpokenSummaryEnabled defaults on and takes effect with no restart (PA-84)', async () => {
+    t = await createTestApp();
+    const initial = await t.app.inject({ method: 'GET', url: '/api/settings', headers: headers(t) });
+    // On by default: the spoken summary is the feature, and the knob exists to
+    // stop appending to prompts rather than to re-enable narrating code.
+    expect(initial.json().settings.voiceSpokenSummaryEnabled).toBe(true);
+    expect(initial.json().restartRequiredKeys).not.toContain('voiceSpokenSummaryEnabled');
+
+    const patch = await t.app.inject({
+      method: 'PATCH',
+      url: '/api/settings',
+      headers: headers(t),
+      payload: { voiceSpokenSummaryEnabled: false },
+    });
+    expect(patch.statusCode).toBe(200);
+    expect(patch.json().settings.voiceSpokenSummaryEnabled).toBe(false);
+    // Read live in `ws/index.ts`'s prompt handler, so the very next turn of an
+    // already-running session honours it.
+    expect(t.context.config.voiceSpokenSummaryEnabled).toBe(false);
+  });
+
   it('rejects out-of-range voiceTurnSensitivity/voiceTurnSilenceMs rather than clamping', async () => {
     t = await createTestApp();
     const tooSensitive = await t.app.inject({

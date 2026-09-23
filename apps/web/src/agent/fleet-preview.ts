@@ -1,3 +1,4 @@
+import { stripSpokenSummary } from '@pocketagent/protocol';
 import type { AgentEvent } from '@pocketagent/protocol';
 import { promptHeadline } from './prompt-headline.js';
 
@@ -127,7 +128,10 @@ export function applyFleetEvent(state: FleetPreviewState, event: AgentEvent): Fl
     // Not `text_delta`: partial streaming fragments would flood a 5-line
     // buffer with mid-word noise. The completed `text` block is one push.
     case 'text':
-      return pushLine(state, lastLine(event.text));
+      // PA-84: `<speak>` content is for the speaker, not the screen — and it
+      // leads the reply, so previewing it raw would show the paraphrase
+      // instead of the answer.
+      return pushLine(state, lastLine(stripSpokenSummary(event.text)));
 
     case 'thinking':
       return pushLine(state, 'Thinking…');

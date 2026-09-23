@@ -294,6 +294,19 @@ export interface Config {
    * "config-literal-only, no env var" shape as `voiceTurnSensitivity` above.
    */
   voiceTurnSilenceMs: number;
+  /**
+   * PA-84: whether a voice-enabled turn asks the model for a spoken paraphrase
+   * wrapped in `<speak>` (`SPOKEN_SUMMARY_INSTRUCTION`). Same
+   * "config-literal-only, no env var" shape as the two fields above.
+   *
+   * Off does **not** restore reading code aloud — the unspeakable parts of a
+   * reply are stripped either way (`SpokenTextExtractor`'s fallback mode,
+   * which is also what a model that ignores the instruction gets). This knob
+   * only decides whether the prompt asks for the paraphrase at all, so it is
+   * the escape hatch for "stop appending things to my prompts", not for
+   * "narrate my code blocks again".
+   */
+  voiceSpokenSummaryEnabled: boolean;
 }
 
 const MIN_TOKEN_LENGTH = 24;
@@ -576,5 +589,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // own doc comment above for why these two have no `RawEnv` counterpart.
     voiceTurnSensitivity: 5,
     voiceTurnSilenceMs: 800,
+    voiceSpokenSummaryEnabled: true,
   };
 }
