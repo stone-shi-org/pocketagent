@@ -14,6 +14,9 @@ import type { RecordedUtterance } from '../audio/capture.js';
 import { AttachButton } from './AttachButton.js';
 import { Icon } from './Icon.js';
 import { MicButton, type MicButtonHandle } from './MicButton.js';
+import { useAudioInputDevices } from '../audio/devices.js';
+import { MicPicker } from './MicPicker.js';
+
 
 const WAVE_BAR_PROFILES = [
   0.25, 0.35, 0.45, 0.6, 0.75, 0.85, 0.95, 1.0, 0.95, 0.85, 0.75, 0.6, 0.45, 0.35,
@@ -289,8 +292,19 @@ export function PromptBox({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const micButtonRef = useRef<MicButtonHandle>(null);
+  const { devices: audioDevices, selectedDeviceId: selectedMicDeviceId, selectDevice: selectAudioDevice } =
+    useAudioInputDevices();
+  const [micPickerOpen, setMicPickerOpen] = useState(false);
+
+  const currentMicLabel = useMemo(() => {
+    if (!selectedMicDeviceId) return 'Default';
+    const found = audioDevices.find((d) => d.deviceId === selectedMicDeviceId);
+    return found ? found.label : 'Microphone';
+  }, [selectedMicDeviceId, audioDevices]);
+
   /** Highest `reviewText` seq already appended — see the effect below. */
   const consumedReviewSeqRef = useRef(0);
+
 
   /**
    * PA-85: append utterances the harness parked for review.
@@ -577,6 +591,16 @@ export function PromptBox({
 
   return (
     <div className={isVoiceRecording ? 'promptbar recording' : 'promptbar'}>
+      {micPickerOpen && (
+        <MicPicker
+          devices={audioDevices}
+          selectedDeviceId={selectedMicDeviceId}
+          onSelect={(id) => {
+            selectAudioDevice(id);
+          }}
+          onClose={() => setMicPickerOpen(false)}
+        />
+      )}
       {modelPickerVisible && (
         <div className="model-picker" role="listbox" aria-label="Models" ref={modelPickerRef}>
           {models.map((model) => {
@@ -740,6 +764,17 @@ export function PromptBox({
                   style={{ transform: `scaleX(${Math.min(1, micLevel * 8)})` }}
                 />
               </span>
+              <button
+                type="button"
+                className="live-listen-mic-btn"
+                onClick={() => setMicPickerOpen((v) => !v)}
+                title={`Microphone: ${currentMicLabel}. Click to switch.`}
+                aria-label={`Microphone: ${currentMicLabel}. Click to switch.`}
+              >
+                <Icon name="mic" size={12} />
+                <span className="live-listen-mic-name">{currentMicLabel}</span>
+                <Icon name="chevron-down" size={10} />
+              </button>
             </>
           )}
           {/* PA-85: why the harness just ignored or parked something. Inside
@@ -761,16 +796,33 @@ export function PromptBox({
         />
       )}
       {supportsVoiceInput && onTranscribeVoice && !liveListenActive && (
-        <MicButton
-          key="mic-btn"
-          ref={micButtonRef}
-          onRecorded={(utterance) => void handleVoiceRecorded(utterance)}
-          onError={setVoiceError}
-          onRecordingChange={setIsVoiceRecording}
-          onLevel={setVoiceLevel}
-          onOverDiscardChange={setIsOverDiscard}
-          disabled={disabled || isTranscribing}
-        />
+        <div className="mic-control-group">
+          <MicButton
+            key="mic-btn"
+            ref={micButtonRef}
+            onRecorded={(utterance) => void handleVoiceRecorded(utterance)}
+            onError={setVoiceError}
+            onRecordingChange={setIsVoiceRecording}
+            onLevel={setVoiceLevel}
+            onOverDiscardChange={setIsOverDiscard}
+            disabled={disabled || isTranscribing}
+            deviceId={selectedMicDeviceId}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMicPickerOpen((v) => !v);
+            }}
+          />
+          <button
+            type="button"
+            className="mic-select-btn"
+            onClick={() => setMicPickerOpen((v) => !v)}
+            disabled={disabled || isVoiceRecording || isTranscribing}
+            aria-label={`Microphone: ${currentMicLabel}. Choose microphone.`}
+            title={`Microphone: ${currentMicLabel}. Choose microphone.`}
+          >
+            <Icon name="chevron-down" size={10} />
+          </button>
+        </div>
       )}
       {isVoiceRecording ? (
         <div className="promptbar-recording" role="status" aria-label="Recording audio">
@@ -813,6 +865,10 @@ export function PromptBox({
               type="button"
               className={liveListenActive ? 'live-listen-btn active' : 'live-listen-btn'}
               onClick={() => onSetLiveListen(!liveListenActive)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setMicPickerOpen((v) => !v);
+              }}
               disabled={disabled}
               aria-pressed={liveListenActive}
               aria-label={liveListenActive ? 'Turn off live listening' : 'Turn on live listening (hands-free)'}

@@ -110,3 +110,43 @@ describe('PromptBox attach and mic button placement (PA-91)', () => {
   });
 });
 
+describe('PromptBox microphone selection (PA-94)', () => {
+  it('renders mic picker trigger next to mic button when voice input is supported', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+
+    const html = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-test-pa94"
+        onSend={() => true}
+        disabled={false}
+        supportsVoiceInput={true}
+        onTranscribeVoice={async () => 'transcribed'}
+      />,
+    );
+
+    expect(html).toContain('class="mic-select-btn"');
+    expect(html).toContain('Choose microphone');
+  });
+
+  it('renders mic switcher in live-listen indicator when live listen is active', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+
+    const html = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-test-pa94-live"
+        onSend={() => true}
+        disabled={false}
+        supportsLiveListen={true}
+        liveListenActive={true}
+        onSetLiveListen={() => {}}
+      />,
+    );
+
+    expect(html).toContain('class="live-listen-mic-btn"');
+    expect(html).toContain('Microphone:');
+  });
+});
+
+

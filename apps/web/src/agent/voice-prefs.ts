@@ -26,3 +26,32 @@ export function setVoiceDirectSendPref(value: boolean): void {
     /* private browsing or storage disabled */
   }
 }
+
+/**
+ * Browser preference: user-selected microphone device ID for push-to-talk
+ * and hands-free live stream audio capture (PA-94).
+ * Empty string indicates system default device.
+ */
+const MIC_DEVICE_ID_KEY = 'pocketagent:voice-mic-device-id';
+
+export function getVoiceMicDeviceIdPref(): string {
+  try {
+    return localStorage.getItem(MIC_DEVICE_ID_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+export function setVoiceMicDeviceIdPref(deviceId: string): void {
+  try {
+    const trimmed = deviceId.trim();
+    if (trimmed) {
+      localStorage.setItem(MIC_DEVICE_ID_KEY, trimmed);
+    } else {
+      localStorage.removeItem(MIC_DEVICE_ID_KEY);
+    }
+  } catch {
+    /* private browsing or storage disabled */
+  }
+}
+

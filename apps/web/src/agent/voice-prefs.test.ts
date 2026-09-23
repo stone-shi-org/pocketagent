@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getVoiceDirectSendPref, setVoiceDirectSendPref } from './voice-prefs.js';
+import { getVoiceDirectSendPref, getVoiceMicDeviceIdPref, setVoiceDirectSendPref, setVoiceMicDeviceIdPref } from './voice-prefs.js';
 
 /** A minimal in-memory stand-in for the real `localStorage`. */
 function fakeStorage(): Storage {
@@ -46,3 +46,39 @@ describe('voice direct send preference', () => {
     expect(getVoiceDirectSendPref()).toBe(false);
   });
 });
+
+describe('voice mic device id preference (PA-94)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('defaults to empty string when unset (meaning system default)', () => {
+    vi.stubGlobal('localStorage', fakeStorage());
+    expect(getVoiceMicDeviceIdPref()).toBe('');
+  });
+
+  it('remembers preference when set', () => {
+    vi.stubGlobal('localStorage', fakeStorage());
+    setVoiceMicDeviceIdPref('device-mic-123');
+    expect(getVoiceMicDeviceIdPref()).toBe('device-mic-123');
+  });
+
+  it('removes item from storage when set to empty string or whitespace', () => {
+    vi.stubGlobal('localStorage', fakeStorage());
+    setVoiceMicDeviceIdPref('device-mic-123');
+    expect(getVoiceMicDeviceIdPref()).toBe('device-mic-123');
+    setVoiceMicDeviceIdPref('');
+    expect(getVoiceMicDeviceIdPref()).toBe('');
+    setVoiceMicDeviceIdPref('device-mic-456');
+    expect(getVoiceMicDeviceIdPref()).toBe('device-mic-456');
+    setVoiceMicDeviceIdPref('   ');
+    expect(getVoiceMicDeviceIdPref()).toBe('');
+  });
+
+  it('degrades to empty string without throwing when storage is unavailable', () => {
+    vi.stubGlobal('localStorage', undefined);
+    expect(() => setVoiceMicDeviceIdPref('device-mic-123')).not.toThrow();
+    expect(getVoiceMicDeviceIdPref()).toBe('');
+  });
+});
+

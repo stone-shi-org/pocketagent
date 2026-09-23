@@ -1,5 +1,6 @@
 import { floatTo16BitPcm, int16ArrayToBase64, resampleLinear } from './pcm.js';
 import { rms } from './vad.js';
+import { getVoiceMicDeviceIdPref } from '../agent/voice-prefs.js';
 
 /** `live-stt` requires exactly this — see the PA-20 implementation plan's §5.1. */
 const TARGET_SAMPLE_RATE = 16000;
@@ -29,7 +30,10 @@ export interface RecordedUtterance {
 export interface PushToTalkOptions {
   /** Per-frame RMS energy while recording, for live audio level / waveform UI. */
   onLevel?: (level: number) => void;
+  /** Specific microphone device ID. Defaults to the stored preference or system default (PA-94). */
+  deviceId?: string;
 }
+
 
 /**
  * Push-to-talk capture (PA-20 Phase 1, enhanced in PA-82): `start()` on press,
@@ -70,14 +74,33 @@ export class PushToTalkRecorder {
     this.chunks = [];
     this.startedAt = performance.now();
 
+    const chosenDeviceId = this.opts?.deviceId ?? getVoiceMicDeviceIdPref();
+    const audioConstraints: MediaTrackConstraints = {
+      echoCancellation: true,
+      channelCount: 1,
+      ...(chosenDeviceId ? { deviceId: { exact: chosenDeviceId } } : {}),
+    };
+
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, channelCount: 1 },
+        audio: audioConstraints,
       });
     } catch (err) {
-      throw new VoiceCaptureError(
-        err instanceof Error ? `Microphone access denied: ${err.message}` : 'Microphone access denied.',
-      );
+      if (chosenDeviceId) {
+        try {
+          this.stream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, channelCount: 1 },
+          });
+        } catch {
+          throw new VoiceCaptureError(
+            err instanceof Error ? `Microphone access denied: ${err.message}` : 'Microphone access denied.',
+          );
+        }
+      } else {
+        throw new VoiceCaptureError(
+          err instanceof Error ? `Microphone access denied: ${err.message}` : 'Microphone access denied.',
+        );
+      }
     }
 
     this.context = new AudioContext();

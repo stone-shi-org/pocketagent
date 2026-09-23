@@ -1,6 +1,8 @@
 import { floatTo16BitPcm, int16ArrayToBase64, resampleLinear } from './pcm.js';
 import { DEFAULT_VAD_OPTIONS, rms, SpeechEndpointer, type VadOptions } from './vad.js';
 import type { RecordedUtterance } from './capture.js';
+import { getVoiceMicDeviceIdPref } from '../agent/voice-prefs.js';
+
 
 /** `live-stt` requires exactly this — see the PA-20 implementation plan's §5.1. */
 const TARGET_SAMPLE_RATE = 16000;
@@ -42,6 +44,8 @@ export interface LiveListenOptions {
    *  "listening" UI feedback (no live captions, no partials). */
   onLevel?: (level: number) => void;
   onError?: (message: string) => void;
+  /** Specific microphone device ID. Defaults to the stored preference or system default (PA-94). */
+  deviceId?: string;
 }
 
 /**
@@ -84,14 +88,33 @@ export class LiveListenController {
     this.chunks = [];
     this.endpointer.reset();
 
+    const chosenDeviceId = this.opts.deviceId ?? getVoiceMicDeviceIdPref();
+    const audioConstraints: MediaTrackConstraints = {
+      echoCancellation: true,
+      channelCount: 1,
+      ...(chosenDeviceId ? { deviceId: { exact: chosenDeviceId } } : {}),
+    };
+
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, channelCount: 1 },
+        audio: audioConstraints,
       });
     } catch (err) {
-      throw new LiveListenError(
-        err instanceof Error ? `Microphone access denied: ${err.message}` : 'Microphone access denied.',
-      );
+      if (chosenDeviceId) {
+        try {
+          this.stream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, channelCount: 1 },
+          });
+        } catch {
+          throw new LiveListenError(
+            err instanceof Error ? `Microphone access denied: ${err.message}` : 'Microphone access denied.',
+          );
+        }
+      } else {
+        throw new LiveListenError(
+          err instanceof Error ? `Microphone access denied: ${err.message}` : 'Microphone access denied.',
+        );
+      }
     }
 
     // Unlike push-to-talk's one-shot recording, this runs indefinitely —

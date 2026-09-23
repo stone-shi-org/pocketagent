@@ -35,6 +35,8 @@ import { TtsPlaybackQueue } from '../audio/playback.js';
 import { vadOptionsForSensitivity, type VadOptions } from '../audio/vad.js';
 import { isSkipCommand } from '../audio/voice-commands.js';
 import { judgeUtterance } from '../audio/utterance-harness.js';
+import { MIC_CHANGE_EVENT } from '../audio/devices.js';
+
 
 /**
  * PA-85: how long a harness notice stays on screen. Long enough to read a
@@ -563,7 +565,19 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
     conn.open(sessionId);
     void ensureNotificationPermission();
 
+    const onMicChange = (): void => {
+      if (desiredLiveListen && liveListen) {
+        void syncLiveListen(false).then(() => syncLiveListen(true));
+      }
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener(MIC_CHANGE_EVENT, onMicChange);
+    }
+
     return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener(MIC_CHANGE_EVENT, onMicChange);
+      }
       conn.close();
       connRef.current = null;
       // Tear down in the same order they were created — the mic (if live)

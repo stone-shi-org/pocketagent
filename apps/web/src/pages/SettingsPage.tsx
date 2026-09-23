@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { SettingsResponse, UpdateSettingsRequest } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { Icon, type IconName } from '../components/Icon.js';
@@ -13,6 +13,8 @@ import { getVoiceDirectSendPref, setVoiceDirectSendPref } from '../agent/voice-p
 import { formatBuildInfo } from '../version.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
+import { useAudioInputDevices } from '../audio/devices.js';
+
 
 type Settings = SettingsResponse['settings'];
 
@@ -50,7 +52,20 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
   const [confirmingSkip, setConfirmingSkip] = useState(false);
   const [fontOverride, setFontOverride] = useState(() => getTerminalFontOverride() ?? '');
   const [voiceDirectSend, setVoiceDirectSend] = useState(() => getVoiceDirectSendPref());
+  const { devices: audioDevices, selectedDeviceId: micDeviceId, selectDevice: selectMicDevice } =
+    useAudioInputDevices();
+  const micOptions = useMemo(() => {
+    const list = [
+      { value: '', label: 'Default (System default)' },
+      ...audioDevices.map((d) => ({ value: d.deviceId, label: d.label })),
+    ];
+    if (micDeviceId && !list.some((o) => o.value === micDeviceId)) {
+      list.push({ value: micDeviceId, label: 'Previously selected device (disconnected)' });
+    }
+    return list;
+  }, [audioDevices, micDeviceId]);
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
 
   const [voiceModels, setVoiceModels] = useState<{ asr: string[]; tts: string[] }>({ asr: [], tts: [] });
   const [testingStt, setTestingStt] = useState(false);
@@ -692,6 +707,16 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
           </SectionCard>
 
           <SectionCard title="Device Options" icon="laptop">
+            <SelectRow
+              label="Microphone"
+              help="Default audio input device for push-to-talk and live stream."
+              value={micDeviceId}
+              options={micOptions}
+              busy={false}
+              onChange={(deviceId) => {
+                selectMicDevice(deviceId);
+              }}
+            />
             <BoolRow
               label="Directly send voice prompt"
               help="When enabled, push-to-talk voice recordings are sent immediately upon release. When disabled (default), transcribed text appears in the prompt box for review."

@@ -13,6 +13,10 @@ export interface MicButtonProps {
   /** Notifies whether the active pointer is hovering over the discard button. */
   onOverDiscardChange?: (over: boolean) => void;
   disabled?: boolean;
+  /** Specific microphone device ID (PA-94). */
+  deviceId?: string;
+  /** Context menu handler (e.g. right-click to open mic picker) (PA-94). */
+  onContextMenu?: (event: React.MouseEvent<HTMLButtonElement>) => void;
 }
 
 export interface MicButtonHandle {
@@ -34,7 +38,16 @@ const HOLD_THRESHOLD_MS = 350;
  * it and either populates the prompt box (default) or sends directly.
  */
 export const MicButton = forwardRef<MicButtonHandle, MicButtonProps>(function MicButton(
-  { onRecorded, onError, onRecordingChange, onLevel, onOverDiscardChange, disabled = false }: MicButtonProps,
+  {
+    onRecorded,
+    onError,
+    onRecordingChange,
+    onLevel,
+    onOverDiscardChange,
+    disabled = false,
+    deviceId,
+    onContextMenu,
+  }: MicButtonProps,
   ref,
 ): JSX.Element {
   const [recording, setRecording] = useState(false);
@@ -98,7 +111,7 @@ export const MicButton = forwardRef<MicButtonHandle, MicButtonProps>(function Mi
   );
 
   async function begin(event: PointerEvent<HTMLButtonElement>): Promise<void> {
-    if (disabled) return;
+    if (disabled || event.button !== 0) return;
 
     // If already recording (from a tap), a second click/tap stops and sends.
     if (stateRef.current === 'recording') {
@@ -111,7 +124,7 @@ export const MicButton = forwardRef<MicButtonHandle, MicButtonProps>(function Mi
     pointerDownAtRef.current = performance.now();
     event.currentTarget.setPointerCapture(event.pointerId);
 
-    const recorder = new PushToTalkRecorder({ onLevel });
+    const recorder = new PushToTalkRecorder({ onLevel, deviceId });
     try {
       await recorder.start();
     } catch (err) {
@@ -181,6 +194,7 @@ export const MicButton = forwardRef<MicButtonHandle, MicButtonProps>(function Mi
       onPointerMove={handlePointerMove}
       onPointerUp={(e) => void end(e)}
       onPointerCancel={() => void handlePointerCancel()}
+      onContextMenu={onContextMenu}
     >
       <Icon name="mic" size={19} />
     </button>

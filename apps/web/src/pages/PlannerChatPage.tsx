@@ -21,6 +21,10 @@ import { TtsPlaybackQueue } from '../audio/playback.js';
 import { vadOptionsForSensitivity, type VadOptions } from '../audio/vad.js';
 import { isSkipCommand } from '../audio/voice-commands.js';
 import { judgeUtterance } from '../audio/utterance-harness.js';
+import { MIC_CHANGE_EVENT } from '../audio/devices.js';
+
+
+
 
 const PLANNER_SLASH_COMMANDS: SlashCommandInfo[] = [
   {
@@ -610,6 +614,19 @@ export function PlannerChatPage({
     ttsQueueRef.current?.stop();
   }, []);
 
+  const [micVersion, setMicVersion] = useState(0);
+  useEffect(() => {
+    const onMicChange = (): void => setMicVersion((v) => v + 1);
+    if (typeof window !== 'undefined') {
+      window.addEventListener(MIC_CHANGE_EVENT, onMicChange);
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener(MIC_CHANGE_EVENT, onMicChange);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     if (!liveListenActive || !shouldStream) {
       setMicLevel(0);
@@ -719,7 +736,7 @@ export function PlannerChatPage({
       }
       setMicLevel(0);
     };
-  }, [liveListenActive, shouldStream, chatId, api, showLiveListenNotice]);
+  }, [liveListenActive, shouldStream, chatId, api, showLiveListenNotice, micVersion]);
 
   const decide = (decision: PlannerToolApprovalChoice): void => {
     const pending = transcript?.pending[0];
