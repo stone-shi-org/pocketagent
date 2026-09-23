@@ -164,26 +164,44 @@ function mapChatError(reply: FastifyReply, err: unknown): FastifyReply | never {
  * synthesized is in a race against the response closing, and `SseStream.write`
  * silently no-ops once it has.
  *
- * This was 5s, which is shorter than one synthesis: live-stt on a CPU backend
- * takes ~9.5s for a one-sentence `<speak>` summary (measured against this
- * deployment, 2026-09-23). The turn therefore always won the race and the
- * summary was dropped without a trace — no error, no log, just silence, which
- * reads as "talk-back is broken" and is exactly the failure PA-85's own
- * invariant says must never be silent. It went unnoticed while untagged
- * scratchpad text was still spoken *mid-turn*, because that audio was
- * synthesized early enough to land before the close; PA-89's fix to stop
- * speaking scratchpad removed the only thing masking it.
+ * This was a flat 5s, which is shorter than one synthesis: live-stt on a CPU
+ * backend takes ~9.5s for a one-sentence `<speak>` summary (measured against
+ * this deployment, 2026-09-23, and confirmed live — the stream closed at
+ * `turn_complete` + exactly 5.00s). The summary was therefore always dropped
+ * without a trace: no error, no log, just silence, which reads as "talk-back
+ * is broken" and is exactly the failure PA-85's own invariant says must never
+ * be silent. It went unnoticed while untagged scratchpad text was still spoken
+ * *mid-turn*, because that audio was synthesized early enough to land before
+ * the close; holding untagged text back removed the only thing masking it.
  *
- * A bound is still required — `LiveSttClient.synthesize` puts no timeout on
- * its `fetch`, so waiting unconditionally would hand a hung voice service the
- * ability to pin a request open forever. This is the PA-68 "a wedged
- * subprocess is nobody's decision" case, not the approval no-decay rule: it
- * ends a *network wait*, and it never answers anything on a human's behalf.
- * Sized for a couple of sentences at the measured CPU rate, with plenty of
- * head-room, and a warning when it trips so a slower backend reports itself
- * instead of going quiet again.
+ * It scales with the queue rather than being one number, because the two paths
+ * have genuinely different shapes. A compliant `<speak>` summary is one or two
+ * sentences. An *untagged* reply is held in full and released in one go at
+ * `turn_complete` (see `SpokenTextPipeline.push`), so its whole length lands on
+ * a pump that synthesizes strictly serially — a flat budget generous enough for
+ * that case would hold the response open for minutes when a single sentence is
+ * outstanding and the voice service has wedged.
+ *
+ * A bound is still required at all: `LiveSttClient.synthesize` puts no timeout
+ * on its `fetch`, so waiting unconditionally would hand a hung voice service
+ * the ability to pin a request open forever. This is the PA-68 "a wedged
+ * network call is nobody's decision" case, not the approval no-decay rule — it
+ * ends a *network wait* and never answers anything on a human's behalf.
  */
-export const TTS_DRAIN_BUDGET_MS = 60_000;
+const TTS_DRAIN_BASE_MS = 10_000;
+/** Per queued sentence, with headroom over the measured ~9.5s CPU synthesis so
+ *  a slower backend than this one still drains rather than truncating. */
+const TTS_DRAIN_PER_SENTENCE_MS = 15_000;
+/** Absolute ceiling, so a pathological reply cannot hold a socket for ever. */
+const TTS_DRAIN_HARD_CAP_MS = 180_000;
+
+/** The drain budget for a pump with `pendingSentences` still to synthesize. */
+export function ttsDrainBudgetMs(pendingSentences: number): number {
+  return Math.min(
+    TTS_DRAIN_HARD_CAP_MS,
+    TTS_DRAIN_BASE_MS + Math.max(0, pendingSentences) * TTS_DRAIN_PER_SENTENCE_MS,
+  );
+}
 
 async function streamPlannerEvents(
   request: FastifyRequest,
@@ -230,7 +248,7 @@ async function streamPlannerEvents(
           // A chunk that misses the stream is the one TTS failure with no
           // exception behind it, so it has to announce itself: `write` is a
           // no-op once the response is gone, which is silence that looks
-          // identical to a broken microphone. See `TTS_DRAIN_BUDGET_MS`.
+          // identical to a broken microphone. See `ttsDrainBudgetMs`.
           if (stream.closed) {
             request.log.warn(
               { bytes: chunk.data.length },
@@ -288,8 +306,12 @@ async function streamPlannerEvents(
       handleEvent(event);
       stream.write(event);
     }
-    if (pumpFinishPromise) {
-      const budgetMs = options?.ttsTimeoutMs ?? TTS_DRAIN_BUDGET_MS;
+    if (pumpFinishPromise && pump) {
+      // Measured now rather than earlier: every sentence this turn produced has
+      // been pushed by the time the generator is done, and an untagged reply
+      // pushes all of them here at `turn_complete`.
+      const pendingSentences = pump.pendingSentences;
+      const budgetMs = options?.ttsTimeoutMs ?? ttsDrainBudgetMs(pendingSentences);
       let drained = false;
       void pumpFinishPromise.then(() => {
         drained = true;
@@ -304,10 +326,9 @@ async function streamPlannerEvents(
       if (timer !== undefined) clearTimeout(timer);
       if (!drained) {
         request.log.warn(
-          { budgetMs },
+          { budgetMs, pendingSentences },
           'planner turn TTS did not finish within its drain budget; remaining audio is lost',
         );
-      }
       }
     }
   } catch (err) {

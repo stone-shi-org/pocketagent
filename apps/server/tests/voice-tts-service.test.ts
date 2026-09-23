@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import type { AgentEvent } from '@pocketagent/protocol';
 import { VoiceTtsService } from '../src/voice/tts-service.js';
 import type { LiveSttClient, SynthesizedSpeech } from '../src/voice/live-stt-client.js';
-import type { TtsAudioChunk } from '../src/voice/turn-tts-pump.js';
+import { TurnTtsPump, type TtsAudioChunk } from '../src/voice/turn-tts-pump.js';
 import type { StructuredLikeSession } from '../src/sessions/manager.js';
 
 /** A minimal fake structured session: just enough `EventEmitter` surface for
@@ -518,9 +518,120 @@ describe('VoiceTtsService', () => {
  * backend, against a budget that was then 5s, so the summary was always lost.
  */
 describe('planner TTS drain budget', () => {
-  it('leaves room for several sentences at the measured CPU synthesis rate', async () => {
-    const { TTS_DRAIN_BUDGET_MS } = await import('../src/routes/planner.js');
-    const MEASURED_ONE_SENTENCE_MS = 9_500;
-    expect(TTS_DRAIN_BUDGET_MS).toBeGreaterThanOrEqual(MEASURED_ONE_SENTENCE_MS * 3);
+  /** live-stt, CPU backend, one `<speak>` sentence, measured 2026-09-23. */
+  const MEASURED_ONE_SENTENCE_MS = 9_500;
+
+  it('covers the queue it is given at the measured CPU synthesis rate', async () => {
+    const { ttsDrainBudgetMs } = await import('../src/routes/planner.js');
+    // An untagged reply releases every sentence at once (see
+    // `SpokenTextPipeline.push`), and the pump synthesizes them serially — so
+    // the budget has to grow with the queue, not just clear a single sentence.
+    for (const pending of [1, 2, 3, 5, 8, 10]) {
+      expect(ttsDrainBudgetMs(pending)).toBeGreaterThanOrEqual(
+        pending * MEASURED_ONE_SENTENCE_MS,
+      );
+    }
+  });
+
+  it('stays tight when only one sentence is outstanding', async () => {
+    const { ttsDrainBudgetMs } = await import('../src/routes/planner.js');
+    // The point of scaling: a wedged voice service must not pin the response
+    // open for minutes when there is almost nothing left to synthesize.
+    expect(ttsDrainBudgetMs(1)).toBeLessThanOrEqual(40_000);
+    expect(ttsDrainBudgetMs(0)).toBeLessThanOrEqual(15_000);
+  });
+
+  it('is bounded however long the reply is', async () => {
+    const { ttsDrainBudgetMs } = await import('../src/routes/planner.js');
+    expect(ttsDrainBudgetMs(10_000)).toBeLessThanOrEqual(180_000);
+  });
+});
+
+/**
+ * PA-89. `pendingSentences` is the multiplier on how long `routes/planner.ts`
+ * holds the response open, so a count that leaks holds a socket open for a
+ * pump with nothing left to do — and one that under-counts truncates audio.
+ */
+describe('TurnTtsPump.pendingSentences', () => {
+  const chunks: TtsAudioChunk[] = [];
+  const sink = (c: TtsAudioChunk) => chunks.push(c);
+
+  it('counts queued work and releases it as each sentence completes', async () => {
+    const pump = new TurnTtsPump('t', async (t) => speech(t), sink, () => {});
+    pump.push('One.');
+    pump.push('Two.');
+    expect(pump.pendingSentences).toBe(2);
+    await flush();
+    expect(pump.pendingSentences).toBe(0);
+  });
+
+  it('releases the count when synthesis fails', async () => {
+    const pump = new TurnTtsPump(
+      't',
+      async () => {
+        throw new Error('live-stt is down');
+      },
+      sink,
+      () => {},
+    );
+    pump.push('One.');
+    expect(pump.pendingSentences).toBe(1);
+    await flush();
+    expect(pump.pendingSentences).toBe(0);
+  });
+
+  it('releases the count when the pump is cancelled mid-queue', async () => {
+    const pump = new TurnTtsPump('t', async (t) => speech(t), sink, () => {});
+    pump.push('One.');
+    pump.cancel();
+    await flush();
+    expect(pump.pendingSentences).toBe(0);
+  });
+
+  it('releases the count even when the chunk sink itself throws', async () => {
+    // The case the `finally` actually exists for: `synthesizeOne` handles its
+    // own synthesis errors, so the only way out of it that skips a bare
+    // decrement is `onChunk` throwing — which is reachable, since the planner's
+    // sink writes to a socket and the session path emits to arbitrary
+    // listeners. A leak here would inflate the drain budget of a finished pump.
+    const pump = new TurnTtsPump(
+      't',
+      async (t) => speech(t),
+      () => {
+        throw new Error('socket went away');
+      },
+      () => {},
+    );
+    pump.push('One.');
+    await flush();
+    expect(pump.pendingSentences).toBe(0);
+  });
+
+  it('keeps synthesizing later sentences after the sink throws once', async () => {
+    // A rejected `queue` would skip every `.then` appended after it, so one bad
+    // write would silently take the rest of the turn's audio and the `done`
+    // marker with it — leaving the planner's drain to time out for nothing.
+    const seen: string[] = [];
+    const errors: unknown[] = [];
+    let first = true;
+    const pump = new TurnTtsPump(
+      't',
+      async (t) => speech(t),
+      () => {
+        if (first) {
+          first = false;
+          throw new Error('socket went away');
+        }
+        seen.push('delivered');
+      },
+      (e) => errors.push(e),
+    );
+    pump.push('One.');
+    pump.push('Two.');
+    pump.finish();
+    await flush();
+    expect(errors).toHaveLength(1);
+    expect(seen).toEqual(['delivered', 'delivered']); // 2nd sentence + done
+    expect(pump.pendingSentences).toBe(0);
   });
 });

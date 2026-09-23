@@ -27,6 +27,14 @@ export class TurnTtsPump {
   private queue: Promise<void> = Promise.resolve();
   private cancelled = false;
   private sentenceSeq = 0;
+  /**
+   * Sentences pushed but not yet synthesized. Synthesis is strictly serial
+   * (see the promise chain above), so this is the multiplier on how long the
+   * queue still needs — which is what `routes/planner.ts` sizes its drain
+   * budget from, since a Pocket Agent turn's audio dies with the request that
+   * produced it (PA-89).
+   */
+  private pending = 0;
 
   constructor(
     private readonly turnId: string,
@@ -38,28 +46,56 @@ export class TurnTtsPump {
   /** Enqueue one sentence. Resolves in order relative to every other push(). */
   push(sentence: string): void {
     if (this.cancelled) return;
+    this.pending++;
     this.queue = this.queue.then(async () => {
-      if (this.cancelled) return;
-      let speech: SynthesizedSpeech;
       try {
-        speech = await this.synthesize(sentence);
+        await this.synthesizeOne(sentence);
       } catch (err) {
-        // A TTS failure must not break the turn — the text reply already
-        // succeeded and is already on screen; losing just the audio for one
-        // sentence is a degraded experience, not a broken one. Reported so
-        // the caller can log/notify, never thrown back into the chain (that
-        // would abandon every sentence still queued behind this one).
+        // `synthesizeOne` handles a *synthesis* failure itself; reaching here
+        // means the chunk sink threw, which is reachable — the planner's sink
+        // writes to a socket and the session's emits to arbitrary listeners.
+        // It must not escape: `this.queue` is the chain every later sentence
+        // is appended to, so a rejection here skips all of them *and* the
+        // `done` marker, which strands the drain until its budget expires and
+        // loses the rest of the turn's audio. An unhandled rejection is also a
+        // process-level hazard in its own right.
         if (!this.cancelled) this.onError(err);
-        return;
+      } finally {
+        // Released on every exit, including a cancellation, a failed synthesis
+        // and the above: a leaked count would inflate the drain budget of a
+        // pump that has nothing left to do, holding the response open for
+        // nothing.
+        this.pending--;
       }
-      if (this.cancelled) return;
-      this.onChunk({
-        turnId: this.turnId,
-        sentenceSeq: this.sentenceSeq++,
-        data: speech.pcm.toString('base64'),
-        sampleRateHz: speech.sampleRateHz,
-        done: false,
-      });
+    });
+  }
+
+  /** How many pushed sentences have not been synthesized yet. */
+  get pendingSentences(): number {
+    return this.pending;
+  }
+
+  private async synthesizeOne(sentence: string): Promise<void> {
+    if (this.cancelled) return;
+    let speech: SynthesizedSpeech;
+    try {
+      speech = await this.synthesize(sentence);
+    } catch (err) {
+      // A TTS failure must not break the turn — the text reply already
+      // succeeded and is already on screen; losing just the audio for one
+      // sentence is a degraded experience, not a broken one. Reported so
+      // the caller can log/notify, never thrown back into the chain (that
+      // would abandon every sentence still queued behind this one).
+      if (!this.cancelled) this.onError(err);
+      return;
+    }
+    if (this.cancelled) return;
+    this.onChunk({
+      turnId: this.turnId,
+      sentenceSeq: this.sentenceSeq++,
+      data: speech.pcm.toString('base64'),
+      sampleRateHz: speech.sampleRateHz,
+      done: false,
     });
   }
 

@@ -1205,19 +1205,31 @@ drain budget is therefore load-bearing** (PA-89). A coding session's talk-back
 rides a WebSocket that outlives the turn; a planner turn has only *this*
 request's SSE stream, so when the generator ends, any sentence still being
 synthesized is racing the response closing — and `SseStream.write` silently
-no-ops once it has. `TTS_DRAIN_BUDGET_MS` (`routes/planner.ts`) is how long the
-response is held open for that. It was 5s, which is shorter than a single
-synthesis: live-stt on a CPU backend takes ~9.5s for a one-sentence summary
+no-ops once it has. `ttsDrainBudgetMs` (`routes/planner.ts`) is how long the
+response is held open for that, and it **scales with the pump's queue depth**
+rather than being one number: a compliant `<speak>` summary is one or two
+sentences, but an *untagged* reply is held in full and released in one go at
+`turn_complete`, onto a pump that synthesizes strictly serially — so a flat
+budget generous enough for the second case would pin the response open for
+minutes when one sentence is outstanding and the voice service has wedged. It
+was a flat 5s, which is shorter than a single synthesis: live-stt on a CPU backend takes ~9.5s for a one-sentence summary
 (measured on this deployment), so the summary was *always* dropped — no error,
 no log, just silence. It went unnoticed only because untagged scratchpad text
 used to be spoken mid-turn, early enough to land before the close; removing that
-above is what exposed it. Two rules follow. The budget must stay well clear of a
-real synthesis (a test pins it against the measured figure), and **a discarded
-chunk must log** — this is the one TTS failure with no exception behind it, and
+above is what exposed it. Two rules follow. The budget must stay well clear of the
+queue it is given (a test pins it against the measured figure at several queue
+depths, and against the hard cap), and **a discarded chunk must log** — this is the one TTS failure with no exception behind it, and
 silence is indistinguishable from a dead speaker, which is the failure PA-85's
 invariant is written against. The bound itself stays, because
 `LiveSttClient.synthesize` puts no timeout on its `fetch`: this is PA-68's "a
 wedged network call is nobody's decision", not the approval no-decay rule.
+`TurnTtsPump.pendingSentences` is what the budget reads, so its count is
+load-bearing in both directions — leaking one holds a socket open for a pump
+with nothing to do, losing one truncates audio. It is released in a `finally`
+that also **swallows a throwing chunk sink**: `queue` is the chain every later
+sentence is appended to, so letting a failed write reject it skips all of them
+*and* the `done` marker, stranding the drain until its budget expires. That one
+is asserted by a test that fails without the guard.
 
 ### The home screen
 
