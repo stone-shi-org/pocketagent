@@ -116,7 +116,7 @@ and `adopt.test.ts` skip themselves when `tmux` is not installed.
 ### Live demos
 
 The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
-decision. Eighteen demo scripts do; all but three run against a *running* server:
+decision. Nineteen demo scripts do; all but three run against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -137,6 +137,7 @@ pnpm demo:hub             # PA-66: two real backends + a real Hub, started by th
 pnpm demo:provision       # PA-70: templates provisioned onto two real backends, checked on each
 PA_TOKEN=... pnpm demo:multi-host-ui     # multi-host: rail, sheet, aggregate home, deep links, both viewports
 PA_TOKEN=... pnpm demo:agent-install-ui  # agent setup dialog: four states, streamed install, phone viewport
+PA_TOKEN=... PA_GEMINI_KEY=... pnpm demo:gemini-live-ui  # PA-96: real speech → Gemini Live → tool → approval card, phone viewport
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -1240,6 +1241,79 @@ sentence is appended to, so letting a failed write reject it skips all of them
 *and* the `done` marker, stranding the drain until its budget expires. That one
 is asserted by a test that fails without the guard.
 
+### Gemini Live as a per-agent live-stream provider (PA-96)
+
+A Pocket Agent can use **Gemini Live** instead of the live-stt pipeline for live mode,
+chosen per agent (`planner_workspaces.live_provider`, `'pipeline' | 'gemini-live'`, default
+`pipeline`, beside `default_model_id` for the same "real multiple agents" reason). Coding-agent
+sessions are untouched. **While live mode is on, Gemini Live *is* the chat's model**, not a relay
+in front of the planner LLM: it hears the user, speaks its own replies, and calls the agent's
+existing planner tools. So none of the PA-84/85/89 machinery is on that path (`<speak>`, held
+untagged text, the TTS drain budget, the utterance harness, live-stt). Server:
+`planner/gemini-live.ts` plus the `// ---- Gemini Live` block in `planner/chats.ts`; wire types:
+`packages/protocol/src/gemini-live.ts`; browser: `audio/gemini-live.ts` (controller, DOM) over
+`audio/gemini-live-protocol.ts` and `audio/pcm-stream.ts` (pure, tested).
+
+**Browser-direct with a constraint-locked ephemeral token, decided on the ticket** (the server
+relay was the documented alternative; see the exploration doc). The AI Studio key is a
+`secret-box` ciphertext in `settings` (`planner_gemini_api_key_enc`), with no reveal route; a
+blank save keeps it and `clearApiKey` removes it. `POCKETAGENT_SETTINGS_ENC_KEY` unset makes
+the feature unavailable without failing the boot. `POST /api/planner/chats/:id/live/token` mints
+a **single-use** token (1 minute to open, 30 to use) whose `bidiGenerateContentSetup` holds the
+model, audio-only output, the system instruction (live rules, persona, top-K memories) and the
+exact `toolsFor(workspaceId)` list. It is refused unless the chat's agent is set to
+`gemini-live`. Four things about the real service were found empirically and shape the code:
+- **No `fieldMask`** locks every field of the setup: a client `setup` naming another model or
+  instruction is overridden.
+- **Resuming consumes a token use, and a client-supplied resumption handle is silently
+  ignored.** So every reconnect (`goAway`, dropped socket) mints a fresh token with the handle
+  baked in (`resumeHandle`), and a resumed token carries no seed history.
+- Tool schemas pass verbatim as **`parametersJsonSchema`**: all built-in tools were accepted,
+  so there is no conversion layer.
+- **`turnComplete` arrives right after a `toolCall`, before it is answered.**
+  `LiveTurnTracker` therefore closes a turn only after the reply that follows the tool.
+
+**The tool bridge is the approval gate, shared rather than copied.** `gateToolCall` is the
+single "may this run?" for both `processToolCalls` and `runLiveToolCalls`: unknown/disabled
+(global and per agent), remembered decisions, yolo, `skipToolApprovalsEnabled`. So is
+`applyApprovalDecision` for resolving one. A call needing approval is parked as a
+`PendingLiveToolCall` in the **same `pendingTurns` map**, which is what makes PA-69's drain,
+the chat's `busy` flag and chat deletion cover it for free. It has no LLM continuation: Gemini
+is answered at once with `LIVE_AWAITING_APPROVAL_MESSAGE`, so no synchronous tool response is
+held across its ~10-minute socket. After `POST .../approvals/:id` the result is persisted and
+the page relays it to Gemini as `clientContent`. The persisted `tool_use.id` is minted
+server-side (`live_<uuid>`) because Gemini's ids restart per session and would collide in a
+long transcript.
+
+**One model drives a chat at a time.** `busyWithPlannerLoop` refuses the token, the bridge and
+transcript writes while a planner turn is running or parked (live work is counted separately in
+`liveWork`, so a second Gemini call is not refused by the first). A parked live approval blocks a
+typed message exactly as a parked planner approval does. Subagent **wake turns are deferred, not
+dropped**, while a chat has a live session (`liveSessions`, released by `POST .../live/end` or a
+10-minute activity TTL), because a wake runs the planner LLM.
+
+**The transcript is the ordinary event log.** `POST .../live/transcript` takes a deliberately
+narrow shape (`userText`, `modelText`, `turnComplete` with Gemini's `usageMetadata` tokens) and
+writes `user_prompt`/`text`/`turn_complete`. The page can report what was *said*, never a tool
+event; those are written by the bridge from the gate's own decisions. A reopened chat replays
+through `applyEvents`, and turning live mode off hands the same history to the planner LLM.
+Before resolving a live approval the page flushes what Gemini said while waiting
+(`flushSpeech`), so that line lands before the result.
+
+Browser details. Playback is **not** `TtsPlaybackQueue`: Gemini sends dozens of ~40ms chunks per
+second, and chaining them on `onended` clicks between every one. `StreamingPcmPlayer` schedules
+them on the audio clock instead (`scheduleChunk`). Mic audio uses `StreamingResampler`, because
+resampling each 128-frame worklet quantum independently buzzes at the quantum rate. A dead socket
+turns the mic indicator off (PA-83), and there are at most three resume attempts. The idle
+auto-off defaults to 5 minutes, because Gemini bills audio for as long as the socket is open.
+Typed messages go to Gemini (`realtimeInput.text`) while live. The disclosure renders on every
+visit to a chat whose agent uses Gemini Live.
+
+Known limitations: images cannot be sent while live. Resume-after-`goAway` is exercised by the
+unit suite and was verified against the service in a spike, but a real `goAway` is not forced by
+the demo. Subagent completion notices are not spoken to Gemini; they wake the planner once live
+mode ends.
+
 ### The home screen
 
 `projects/index.ts` composes `GET /api/projects`: live sessions and on-disk conversations
@@ -2175,6 +2249,15 @@ These are load-bearing. Several were bugs first.
   already be playing, and PA-84's tag-first rule exists precisely so it is. Asserted in
   `apps/server/tests/voice-spoken-text-extractor.test.ts`, `voice-spoken-text.test.ts`
   and `voice-tts-service.test.ts`.
+- **A Gemini Live tool call gets exactly the planner's own gate, and Gemini can never approve**
+  (PA-96). The bridge request carries calls only. Whether each runs is `gateToolCall`, the same
+  function `processToolCalls` uses, and resolution is the same `applyApprovalDecision`. Gemini
+  is given no approve tool, and its instruction says a spoken "yes" is not an approval. There is
+  no timeout on a parked live call, which sits in `pendingTurns` so a restart refuses while it
+  waits. The API key never leaves the server: no reveal route, not in any response, not in any log
+  line (the mint is logged by chat id only). The browser gets a single-use token locked to the
+  server's own setup, with no `fieldMask`, because a mask would unlock whatever it does not name.
+  Asserted in `apps/server/tests/gemini-live.test.ts`, and end to end by `pnpm demo:gemini-live-ui`.
 - **Containment is decided with `fs.realpath` + `path.relative`, never a string prefix**
   (`workspaces/index.ts`). Resolve the whole path first, *then* test containment, or a
   symlink inside a root escapes it.

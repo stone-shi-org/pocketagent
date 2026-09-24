@@ -1334,6 +1334,15 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE agent_defaults ADD COLUMN last_latest_version TEXT;
   ALTER TABLE agent_defaults ADD COLUMN last_has_update INTEGER;
   `,
+
+  // PA-96: which live-stream implementation a Pocket Agent uses. `pipeline`
+  // for every existing agent — the live-stt path they already had — so
+  // upgrading changes nothing until an operator picks Gemini Live for one.
+  // Repaired by a `PRAGMA table_info` probe in `openDatabase` too, the same
+  // positional-migration hazard every block below this array records.
+  `
+  ALTER TABLE planner_workspaces ADD COLUMN live_provider TEXT NOT NULL DEFAULT 'pipeline';
+  `,
 ];
 
 /**
@@ -1583,6 +1592,16 @@ export function openDatabase(databasePath: string): Db {
   if (plannerChatColumns.size > 0 && !plannerChatColumns.has('parent_chat_id')) {
     db.exec('ALTER TABLE planner_chats ADD COLUMN parent_chat_id TEXT REFERENCES planner_chats(id) ON DELETE SET NULL');
     db.exec('CREATE INDEX IF NOT EXISTS idx_planner_chats_parent ON planner_chats (parent_chat_id)');
+  }
+  // PA-96, same positional-migration hazard: a database that took another
+  // branch's migration at this index skipped the `live_provider` column.
+  const plannerWorkspaceColumns = new Set(
+    (db.prepare('PRAGMA table_info(planner_workspaces)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (plannerWorkspaceColumns.size > 0 && !plannerWorkspaceColumns.has('live_provider')) {
+    db.exec("ALTER TABLE planner_workspaces ADD COLUMN live_provider TEXT NOT NULL DEFAULT 'pipeline'");
   }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 

@@ -4,6 +4,7 @@ import type {
   ModelInfo,
   PlannerChat,
   PlannerContextPreviewResponse,
+  PlannerLiveProvider,
   PlannerModel,
   PlannerToolApprovalChoice,
   PromptImage,
@@ -22,6 +23,7 @@ import { vadOptionsForSensitivity, type VadOptions } from '../audio/vad.js';
 import { isSkipCommand } from '../audio/voice-commands.js';
 import { judgeUtterance } from '../audio/utterance-harness.js';
 import { MIC_CHANGE_EVENT } from '../audio/devices.js';
+import { GeminiLiveController, type GeminiLiveState } from '../audio/gemini-live.js';
 
 
 
@@ -181,6 +183,14 @@ export function PlannerChatPage({
   const [liveListenNotice, setLiveListenNotice] = useState<string | null>(null);
   const [reviewText, setReviewText] = useState<{ items: { text: string; seq: number }[] } | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  // PA-96: this chat's agent's live-stream provider, and whether Gemini Live
+  // is usable on this server (a key is stored and decrypts).
+  const [liveProvider, setLiveProvider] = useState<PlannerLiveProvider>('pipeline');
+  const [geminiAvailable, setGeminiAvailable] = useState(false);
+  const [geminiState, setGeminiState] = useState<GeminiLiveState>('stopped');
+  const [geminiHeard, setGeminiHeard] = useState('');
+  const [geminiSaid, setGeminiSaid] = useState('');
+  const geminiRef = useRef<GeminiLiveController | null>(null);
 
   const reviewSeqRef = useRef(0);
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -222,6 +232,29 @@ export function PlannerChatPage({
       cancelled = true;
     };
   }, [api]);
+  // PA-96: which live-stream implementation this chat's agent uses. Re-read
+  // whenever the chat (and so possibly its agent) changes; a failure leaves
+  // the default pipeline, which is what every agent had before this existed.
+  const chatWorkspaceId = chat?.workspaceId ?? null;
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([api.listPlannerWorkspaces(), api.getGeminiLiveSettings()])
+      .then(([{ workspaces }, gemini]) => {
+        if (cancelled) return;
+        const agent = workspaces.find((w) => w.id === chatWorkspaceId);
+        setLiveProvider(agent?.liveProvider ?? 'pipeline');
+        setGeminiAvailable(gemini.available);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [api, chatWorkspaceId]);
+  const geminiSelected = liveProvider === 'gemini-live';
+  /** Live mode on this page means Gemini Live, not the live-stt pipeline. */
+  const geminiMode = geminiSelected && geminiAvailable;
+  const geminiLive = geminiMode && liveListenActive;
+
   const seenPermanentKeys = useRef<Set<string>>(new Set());
   const seenEphemeralKeys = useRef<Map<string, number>>(new Map());
   const liveEventsBuffer = useRef<AgentEvent[]>([]);
@@ -441,6 +474,12 @@ export function PlannerChatPage({
         ttsQueueRef.current?.enqueue(event.chunk.data, event.chunk.sampleRateHz);
         return;
       }
+      // PA-96: a call Gemini made was parked on approval and a human just
+      // decided it. The resolution stream and the observer stream both carry
+      // this event; the controller relays it once and ignores the repeat.
+      if (event.kind === 'tool_result') {
+        geminiRef.current?.relayApprovalOutcome(event.toolUseId, event.content, event.isError);
+      }
       if (loadingRef.current) {
         liveEventsBuffer.current.push(event);
       }
@@ -489,13 +528,33 @@ export function PlannerChatPage({
 
   const pending = transcript?.pending[0] ?? null;
   const isChatBusy = sending || (chat?.busy ?? false) || (transcript?.busy ?? false);
-  const disabled = isChatBusy || pending !== null;
+  // PA-96: while Gemini Live is on, typing goes to Gemini and is never
+  // blocked by a Gemini turn in progress — only by an approval waiting on the
+  // human, the same as a typed turn.
+  const disabled = geminiLive ? pending !== null : isChatBusy || pending !== null;
 
   /** `PromptBox.onSend` is synchronous by contract (see its own props doc):
       a `true` return clears the composer immediately, matching how a real
       session's prompt clears on submit rather than waiting for a reply. */
   const handleSend = (content: string, image?: PromptImage): boolean => {
     const trimmed = content.trim();
+    // PA-96: one model drives the chat at a time — while Gemini Live is on, a
+    // typed message is Gemini's to answer, and the server records it in the
+    // transcript as if it had been heard.
+    if (geminiLive) {
+      if (pending !== null || !trimmed) return false;
+      if (image) {
+        setError('Images cannot be sent while Gemini Live is on. Turn live mode off to attach one.');
+        return false;
+      }
+      if (!trimmed.startsWith('/')) {
+        if (!geminiRef.current?.sendText(trimmed)) {
+          setError('Gemini Live is still connecting. Try again in a moment.');
+          return false;
+        }
+        return true;
+      }
+    }
     if ((!trimmed && !image) || isChatBusy || pending !== null) return false;
 
     // Handle slash commands without sending to LLM:
@@ -603,15 +662,22 @@ export function PlannerChatPage({
     handleSendRef.current = handleSend;
   }, [handleSend]);
 
-  const handleToggleLiveListen = useCallback((enabled: boolean) => {
-    if (!enabled) {
-      ttsQueueRef.current?.stop();
-    }
-    setLiveListenActive(enabled);
-  }, []);
+  const handleToggleLiveListen = useCallback(
+    (enabled: boolean) => {
+      if (!enabled) {
+        ttsQueueRef.current?.stop();
+      } else if (geminiMode) {
+        // Inside the click, so iOS lets the playback context start.
+        GeminiLiveController.prime();
+      }
+      setLiveListenActive(enabled);
+    },
+    [geminiMode],
+  );
 
   const handleStopSpeaking = useCallback(() => {
     ttsQueueRef.current?.stop();
+    geminiRef.current?.stopSpeaking();
   }, []);
 
   const [micVersion, setMicVersion] = useState(0);
@@ -627,9 +693,64 @@ export function PlannerChatPage({
     };
   }, []);
 
+  // PA-96: Gemini Live replaces the whole pipeline below for an agent set to
+  // it — no VAD, no utterance harness, no live-stt, no `<speak>` talk-back.
   useEffect(() => {
-    if (!liveListenActive || !shouldStream) {
+    if (!geminiLive || !shouldStream) return;
+    let cancelled = false;
+    const controller = new GeminiLiveController({
+      chatId,
+      api,
+      onState: (state) => {
+        if (!cancelled) setGeminiState(state);
+      },
+      onHeard: (text) => {
+        if (!cancelled) setGeminiHeard(text);
+      },
+      onSaid: (text) => {
+        if (!cancelled) setGeminiSaid(text);
+      },
+      onLevel: (level) => {
+        if (!cancelled) setMicLevel(level);
+      },
+      onSpeaking: (speaking) => {
+        if (!cancelled) setIsSpeaking(speaking);
+      },
+      onError: (message) => {
+        if (cancelled) return;
+        // A dead socket turns the mic indicator off (PA-83) rather than
+        // leaving it looking like it is listening to nothing.
+        setLiveListenError(message);
+        setLiveListenActive(false);
+      },
+      onNotice: (message) => {
+        if (cancelled) return;
+        showLiveListenNotice(message);
+        if (message.startsWith('Gemini Live turned off')) setLiveListenActive(false);
+      },
+    });
+    geminiRef.current = controller;
+    setLiveListenError(null);
+    controller.start().catch((err: unknown) => {
+      if (cancelled) return;
+      setLiveListenError(err instanceof Error ? err.message : 'Could not start Gemini Live.');
+      setLiveListenActive(false);
+    });
+    return () => {
+      cancelled = true;
+      if (geminiRef.current === controller) geminiRef.current = null;
+      void controller.stop();
+      setGeminiState('stopped');
+      setGeminiHeard('');
+      setGeminiSaid('');
       setMicLevel(0);
+      setIsSpeaking(false);
+    };
+  }, [geminiLive, shouldStream, chatId, api, showLiveListenNotice, micVersion]);
+
+  useEffect(() => {
+    if (!liveListenActive || !shouldStream || geminiMode) {
+      if (!geminiMode) setMicLevel(0);
       return;
     }
 
@@ -736,7 +857,7 @@ export function PlannerChatPage({
       }
       setMicLevel(0);
     };
-  }, [liveListenActive, shouldStream, chatId, api, showLiveListenNotice, micVersion]);
+  }, [liveListenActive, shouldStream, geminiMode, chatId, api, showLiveListenNotice, micVersion]);
 
   const decide = (decision: PlannerToolApprovalChoice): void => {
     const pending = transcript?.pending[0];
@@ -745,6 +866,9 @@ export function PlannerChatPage({
     setError(null);
     void (async () => {
       try {
+        // PA-96: see `GeminiLiveController.flushSpeech` — keeps what Gemini
+        // said while waiting ahead of the result in the transcript.
+        if (geminiRef.current?.hasParkedCalls()) await geminiRef.current.flushSpeech();
         await api.resolvePlannerApproval(chatId, pending.id, decision, onStreamEvent);
       } catch (err) {
         onApiError(err);
@@ -841,6 +965,45 @@ export function PlannerChatPage({
         <div className="warn-callout" role="status">
           Tool approvals are bypassed in this chat. It was started by a trigger
           configured to skip them, so its file and command tools run without asking.
+        </div>
+      )}
+
+      {geminiSelected && (
+        // PA-96 disclosure, on every visit to a chat whose agent uses Gemini
+        // Live — the same "persistently, not just when it was switched on"
+        // rule the approval-bypass callout above follows. A Pocket Agent
+        // already sends its context to a configured LLM endpoint; what is new
+        // is *which company* receives it, and that it includes the user's
+        // voice.
+        <div className="warn-callout planner-gemini-disclosure" role="status">
+          {geminiAvailable
+            ? 'Live mode in this chat uses Gemini Live. While it is on, your voice, this conversation and tool results (such as files it reads and session output) are sent to Google. Gemini bills audio for as long as the mic is open.'
+            : 'This agent is set to use Gemini Live for live mode, but no usable Gemini API key is configured on this server, so live mode is unavailable here. Add one in Settings → Pocket Agent.'}
+        </div>
+      )}
+
+      {geminiLive && (
+        <div className="planner-gemini-strip" role="status" aria-live="polite">
+          <div className="planner-gemini-strip-state">
+            Gemini Live ·{' '}
+            {geminiState === 'live'
+              ? 'listening'
+              : geminiState === 'reconnecting'
+                ? 'reconnecting…'
+                : geminiState === 'connecting'
+                  ? 'connecting…'
+                  : 'off'}
+          </div>
+          {geminiHeard && (
+            <p className="planner-gemini-strip-line">
+              <span className="planner-gemini-strip-who">You</span> {geminiHeard}
+            </p>
+          )}
+          {geminiSaid && (
+            <p className="planner-gemini-strip-line">
+              <span className="planner-gemini-strip-who">Gemini</span> {geminiSaid}
+            </p>
+          )}
         </div>
       )}
 
@@ -1084,7 +1247,7 @@ export function PlannerChatPage({
             ? (audio) => api.transcribeVoice(chatId, audio).then((res) => res.text)
             : undefined
         }
-        supportsLiveListen={voiceEnabled}
+        supportsLiveListen={geminiSelected ? geminiAvailable : voiceEnabled}
         liveListenActive={liveListenActive}
         onSetLiveListen={handleToggleLiveListen}
         micLevel={micLevel}
@@ -1097,7 +1260,7 @@ export function PlannerChatPage({
         models={toModelInfos(models)}
         currentModel={chat?.lastModelId ?? null}
         onSetModel={changeModel}
-        busy={isChatBusy}
+        busy={geminiLive ? false : isChatBusy}
       />
     </div>
   );

@@ -90,6 +90,9 @@ export async function createTestApp(
   /** PA-70: injected so a test can read the audit trail — see
       `BuildAppOptions.loggerStream` for why the log is the only observable. */
   loggerStream?: NodeJS.WritableStream,
+  /** PA-96: injected so minting a Gemini Live token never makes a real
+      network call. */
+  geminiFetch?: typeof fetch,
 ): Promise<TestApp> {
   const ws = makeWorkspace();
   const config = makeConfig({
@@ -119,6 +122,7 @@ export async function createTestApp(
     ...(telegramFetch ? { telegramFetch } : {}),
     ...(agentInstallRunner ? { agentInstallRunner } : {}),
     ...(loggerStream ? { loggerStream } : {}),
+    ...(geminiFetch ? { geminiFetch } : {}),
     // Fast enough for a test to assert against without a real 10s wait,
     // slow enough not to spin the CPU during tests that never touch Telegram.
     telegramReconcileIntervalMs: 200,

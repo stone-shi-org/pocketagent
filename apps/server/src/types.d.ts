@@ -25,6 +25,7 @@ import type { PlannerMemoryService } from './planner/memory.js';
 import type { McpRegistryService } from './planner/mcp/registry-service.js';
 import type { SkillRegistryService } from './planner/skills.js';
 import type { TelegramBotStore } from './telegram/bots-store.js';
+import type { GeminiLiveService } from './planner/gemini-live.js';
 import type { TelegramLinksStore } from './telegram/links-store.js';
 import type { AdminService } from './admin/index.js';
 import type { VoiceTtsService } from './voice/tts-service.js';
@@ -81,6 +82,8 @@ export interface PocketContext {
       (`routes/telegram.ts`) never makes a real network call — same reasoning
       as `plannerLlmFetch`. */
   telegramFetch?: typeof fetch;
+  /** PA-96: the encrypted Gemini API key and ephemeral-token minting. */
+  geminiLive: GeminiLiveService;
   db: Db;
   backend: ProcessBackend;
   push: PushService;

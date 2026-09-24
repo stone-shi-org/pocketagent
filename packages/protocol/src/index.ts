@@ -15,6 +15,7 @@ export * from './cron.js';
 export * from './webhook-template.js';
 export * from './webhooks.js';
 export * from './planner.js';
+export * from './gemini-live.js';
 export * from './planner-memory.js';
 export * from './mcp-registry.js';
 export * from './telegram.js';

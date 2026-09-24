@@ -3,6 +3,7 @@ import { LIMITS } from './limits.js';
 import { AgentEvent } from './agent-events.js';
 import { PromptImage } from './prompt-image.js';
 import { SessionInfo } from './session.js';
+import { PlannerLiveProvider } from './gemini-live.js';
 
 /**
  * PA-6, phase 1 (foundation): the planner — an LLM chat (any OpenAI-compatible
@@ -82,6 +83,14 @@ export const PlannerWorkspace = z.object({
    * route a call to; nothing reads it that way yet.
    */
   identityPrompt: z.string().nullable(),
+  /**
+   * PA-96: which live-stream implementation this agent's chats use when live
+   * mode is switched on — see `PlannerLiveProvider`. Per agent rather than a
+   * global voice setting, for the same "real multiple agents" reason
+   * `defaultModelId` is (PA-6 round 4). `pipeline` for every agent that
+   * predates the column.
+   */
+  liveProvider: PlannerLiveProvider,
 });
 export type PlannerWorkspace = z.infer<typeof PlannerWorkspace>;
 
@@ -157,6 +166,9 @@ export const UpdatePlannerWorkspaceRequest = z.object({
       "empty string means unset" convention this app's other nullable-text
       settings use); trivially reversible, so no confirmation step. */
   identityPrompt: z.string().max(4000).nullable().optional(),
+  /** PA-96: see `PlannerWorkspace.liveProvider`. Trivially reversible, so no
+      confirmation step — the disclosure lives in the chat, where it applies. */
+  liveProvider: PlannerLiveProvider.optional(),
 });
 export type UpdatePlannerWorkspaceRequest = z.infer<typeof UpdatePlannerWorkspaceRequest>;
 

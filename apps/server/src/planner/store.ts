@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { PlannerChat, PlannerMemory, PlannerMemoryTier } from '@pocketagent/protocol';
+import type { PlannerChat, PlannerLiveProvider, PlannerMemory, PlannerMemoryTier } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import { readSetting, writeSetting } from '../db/index.js';
 import type { PlannerWorkspaceRow, PlannerWorkspaceStore } from './workspaces.js';
@@ -25,6 +25,13 @@ interface PlannerWorkspaceDbRow {
   last_consolidated_at: number | null;
   mcp_enabled: number;
   identity_prompt: string | null;
+  live_provider: string | null;
+}
+
+/** Anything unrecognised reads as the default rather than throwing — a row
+    written by a newer build must not stop an older one listing its agents. */
+function toLiveProvider(raw: string | null): PlannerLiveProvider {
+  return raw === 'gemini-live' ? 'gemini-live' : 'pipeline';
 }
 
 function fromDbRow(row: PlannerWorkspaceDbRow): PlannerWorkspaceRow {
@@ -39,6 +46,7 @@ function fromDbRow(row: PlannerWorkspaceDbRow): PlannerWorkspaceRow {
     lastConsolidatedAt: row.last_consolidated_at,
     mcpEnabled: row.mcp_enabled === 1,
     identityPrompt: row.identity_prompt,
+    liveProvider: toLiveProvider(row.live_provider),
   };
 }
 
@@ -51,8 +59,8 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
     insert: (row) => {
       db.prepare(
         `INSERT INTO planner_workspaces
-           (id, name, path, is_default, created_at, default_model_id, memory_enabled, last_consolidated_at, mcp_enabled, identity_prompt)
-         VALUES (@id, @name, @path, @isDefault, @createdAt, @defaultModelId, @memoryEnabled, @lastConsolidatedAt, @mcpEnabled, @identityPrompt)`,
+           (id, name, path, is_default, created_at, default_model_id, memory_enabled, last_consolidated_at, mcp_enabled, identity_prompt, live_provider)
+         VALUES (@id, @name, @path, @isDefault, @createdAt, @defaultModelId, @memoryEnabled, @lastConsolidatedAt, @mcpEnabled, @identityPrompt, @liveProvider)`,
       ).run({
         id: row.id,
         name: row.name,
@@ -64,6 +72,7 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
         lastConsolidatedAt: row.lastConsolidatedAt,
         mcpEnabled: row.mcpEnabled ? 1 : 0,
         identityPrompt: row.identityPrompt,
+        liveProvider: row.liveProvider,
       });
     },
     delete: (id) => db.prepare('DELETE FROM planner_workspaces WHERE id = ?').run(id).changes > 0,
@@ -84,6 +93,9 @@ export function createPlannerWorkspaceStore(db: Db): PlannerWorkspaceStore {
     },
     setIdentityPrompt: (id, identityPrompt) => {
       db.prepare('UPDATE planner_workspaces SET identity_prompt = ? WHERE id = ?').run(identityPrompt, id);
+    },
+    setLiveProvider: (id, provider) => {
+      db.prepare('UPDATE planner_workspaces SET live_provider = ? WHERE id = ?').run(provider, id);
     },
     setLastConsolidatedAt: (id, at) => {
       db.prepare('UPDATE planner_workspaces SET last_consolidated_at = ? WHERE id = ?').run(at, id);

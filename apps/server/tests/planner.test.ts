@@ -47,6 +47,10 @@ function makeStore(): PlannerWorkspaceStore {
       const row = rows.find((r) => r.id === id);
       if (row) row.identityPrompt = identityPrompt;
     },
+    setLiveProvider: (id, provider) => {
+      const row = rows.find((r) => r.id === id);
+      if (row) row.liveProvider = provider;
+    },
     isSeeded: () => seeded,
     markSeeded: () => {
       seeded = true;
@@ -232,6 +236,19 @@ describe('PlannerWorkspaceRegistry', () => {
 
     const cleared = registry.setIdentityPrompt(row.id, null);
     expect(cleared.identityPrompt).toBeNull();
+  });
+
+  // ---- PA-96: per-agent live-stream provider ---------------------------------
+
+  it('defaults a new agent to the existing pipeline and switches it per agent', async () => {
+    const registry = new PlannerWorkspaceRegistry(makeStore());
+    const a = await registry.create(root, 'Voice');
+    const b = await registry.create(root, 'Typing');
+    expect(a.liveProvider).toBe('pipeline');
+    expect(registry.setLiveProvider(a.id, 'gemini-live').liveProvider).toBe('gemini-live');
+    expect(registry.get(a.id)?.liveProvider).toBe('gemini-live');
+    expect(registry.get(b.id)?.liveProvider).toBe('pipeline');
+    expect(() => registry.setLiveProvider('does-not-exist', 'pipeline')).toThrow(PlannerWorkspaceError);
   });
 
   it('throws setting an identity prompt on an unknown workspace', () => {

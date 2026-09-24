@@ -7414,3 +7414,37 @@ button.chat-rate-limit-badge {
 .hub-tpl-items li.warn {
   color: var(--warn);
 }
+
+/* PA-96: what Gemini Live heard and said this turn, above the composer. The
+   persisted transcript is the record; this is the live view of the turn in
+   progress, so it is quiet (dim, small) rather than another message bubble. */
+.planner-gemini-disclosure {
+  margin: 0 16px 8px;
+}
+
+.planner-gemini-strip {
+  margin: 0 16px 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.planner-gemini-strip-state {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.planner-gemini-strip-line {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.planner-gemini-strip-who {
+  color: var(--text-dim);
+  font-weight: 600;
+  margin-right: 4px;
+}

@@ -6,6 +6,10 @@ import {
   CreatePlannerChatRequest,
   CreatePlannerModelRequest,
   CreatePlannerWorkspaceRequest,
+  GeminiLiveTokenRequest,
+  GeminiLiveToolCallsRequest,
+  GeminiLiveTranscriptRequest,
+  UpdateGeminiLiveSettingsRequest,
   LIST_MCP_TOOLS_NAME,
   PlannerMemoryTier,
   ImportPlannerSkillRequest,
@@ -25,6 +29,9 @@ import {
   type AgentEvent,
   type DeleteAllPlannerChatsResponse,
   type DiscoverPlannerModelsResponse,
+  type GeminiLiveSettingsDto,
+  type GeminiLiveTokenResponse,
+  type GeminiLiveToolCallsResponse,
   type PlannerAgentMcpRegistriesResponse,
   type PlannerAgentSkillsResponse,
   type PlannerAgentToolsResponse,
@@ -50,6 +57,7 @@ import {
 import type { Db } from '../db/index.js';
 import { PlannerWorkspaceError } from '../planner/workspaces.js';
 import { PlannerChatError } from '../planner/chats.js';
+import { GEMINI_LIVE_WS_URL, GeminiLiveError } from '../planner/gemini-live.js';
 import { PlannerLlmClient, PlannerLlmError } from '../planner/llm-client.js';
 import { PLANNER_TOOLS, postJsonToIntegration } from '../planner/tools.js';
 import { SkillRegistryError, type SkillSummary } from '../planner/skills.js';
@@ -119,6 +127,13 @@ function mapWorkspaceError(reply: FastifyReply, err: unknown): FastifyReply | ne
     return reply.code(status).send({ error: { code: err.code, message: err.message } });
   }
   throw err;
+}
+
+function mapGeminiError(reply: FastifyReply, err: unknown): FastifyReply | never {
+  if (err instanceof GeminiLiveError) {
+    return reply.code(err.statusCode).send({ error: { code: err.code, message: err.message } });
+  }
+  return mapChatError(reply, err);
 }
 
 function mapChatError(reply: FastifyReply, err: unknown): FastifyReply | never {
@@ -436,6 +451,12 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       // above — this agent's own persona/capability text.
       if (parsed.data.identityPrompt !== undefined) {
         row = app.pocket.plannerWorkspaces.setIdentityPrompt(id, parsed.data.identityPrompt);
+      }
+      // PA-96: same trivially-reversible posture. The disclosure that voice
+      // and tool results go to Google is rendered in the chat on every visit,
+      // which is where it applies, rather than gating this switch.
+      if (parsed.data.liveProvider !== undefined) {
+        row = app.pocket.plannerWorkspaces.setLiveProvider(id, parsed.data.liveProvider);
       }
       auditConfigChange(request, 'pocket agent updated', {
         workspace: id,
@@ -1343,6 +1364,139 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       voiceMode: parsed.data.voiceMode,
       config: app.pocket.config,
     });
+  });
+
+  // ---- Gemini Live (PA-96) --------------------------------------------------
+
+  /**
+   * The feature's settings. Never the key: there is no reveal route for it,
+   * the same posture a custom Claude provider's key and a Telegram bot token
+   * have — nothing outside this server ever needs to read it back.
+   */
+  app.get('/api/planner/gemini-live', async (_request, reply) => {
+    const dto: GeminiLiveSettingsDto = app.pocket.geminiLive.settings();
+    return noStore(reply).send(dto);
+  });
+
+  app.patch('/api/planner/gemini-live', async (request, reply) => {
+    const parsed = UpdateGeminiLiveSettingsRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    try {
+      const dto = app.pocket.geminiLive.update(parsed.data);
+      // Field names only, never values — `apiKey` is one of them, and an audit
+      // line must not be one step away from recovering a credential.
+      auditConfigChange(request, 'gemini live settings updated', {
+        fields: Object.keys(parsed.data).filter((k) => k !== 'apiKey' || !!parsed.data.apiKey?.trim()),
+      });
+      return noStore(reply).send(dto);
+    } catch (err) {
+      return mapGeminiError(reply, err);
+    }
+  });
+
+  /**
+   * Mints the constraint-locked ephemeral token a browser opens its Gemini
+   * Live WebSocket with, seeded with this chat's real context. Refused unless
+   * the chat's agent is set to Gemini Live — the per-agent setting is the
+   * gate, not merely a UI preference — and while the planner LLM owns the
+   * chat. Rate-limited because each call is an outbound request billed to
+   * the operator's key; logged by chat id, never the token.
+   */
+  app.post(
+    '/api/planner/chats/:id/live/token',
+    { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const parsed = GeminiLiveTokenRequest.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+      }
+      const { plannerChats, plannerWorkspaces, geminiLive } = app.pocket;
+      const chat = plannerChats.get(id);
+      if (!chat) return notFound(reply, 'Chat not found.');
+      const workspace = chat.workspaceId ? plannerWorkspaces.get(chat.workspaceId) : undefined;
+      if (workspace?.liveProvider !== 'gemini-live') {
+        return reply.code(409).send({
+          error: { code: 'not_gemini_live', message: "This chat's agent is not set to use Gemini Live." },
+        });
+      }
+      try {
+        const resumed = parsed.data.resumeHandle !== undefined;
+        const setup = await plannerChats.liveSetup(id, { resumed });
+        const minted = await geminiLive.mintToken({
+          systemInstruction: setup.systemInstruction,
+          functionDeclarations: setup.functionDeclarations,
+          ...(parsed.data.resumeHandle ? { resumeHandle: parsed.data.resumeHandle } : {}),
+        });
+        app.log.info(
+          { chatId: id, model: minted.model, resumed, tools: setup.functionDeclarations.length },
+          'gemini live token minted',
+        );
+        const response: GeminiLiveTokenResponse = {
+          token: minted.token,
+          wsUrl: GEMINI_LIVE_WS_URL,
+          model: minted.model,
+          expiresAt: minted.expiresAt,
+          newSessionExpiresAt: minted.newSessionExpiresAt,
+          seedTurns: setup.seedTurns,
+          resumed,
+          idleMinutes: geminiLive.idleMinutes(),
+        };
+        return noStore(reply).send(response);
+      } catch (err) {
+        return mapGeminiError(reply, err);
+      }
+    },
+  );
+
+  /**
+   * The tool bridge. Gemini's `toolCall` arrives in the browser, which
+   * forwards it here; each call runs through the planner's own gate and
+   * `executeTool` — see `PlannerChatService.runLiveToolCalls`. The request
+   * carries calls only, so the browser has no way to claim an approval.
+   */
+  app.post('/api/planner/chats/:id/live/tool-calls', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = GeminiLiveToolCallsRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    try {
+      const response: GeminiLiveToolCallsResponse = {
+        results: await app.pocket.plannerChats.runLiveToolCalls(id, parsed.data.calls),
+      };
+      return noStore(reply).send(response);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  /** What Gemini heard and said, persisted into the chat's transcript. */
+  app.post('/api/planner/chats/:id/live/transcript', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = GeminiLiveTranscriptRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    try {
+      await app.pocket.plannerChats.recordLiveTranscript(id, parsed.data);
+      return reply.code(204).send();
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  /** Best-effort "live mode is off" — releases deferred subagent wakes. */
+  app.post('/api/planner/chats/:id/live/end', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      app.pocket.plannerChats.endLive(id);
+      return reply.code(204).send();
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
   });
 
   /**

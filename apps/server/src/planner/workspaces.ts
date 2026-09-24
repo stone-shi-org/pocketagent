@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import type { PlannerLiveProvider } from '@pocketagent/protocol';
 import { isContained } from '../workspaces/index.js';
 
 export class PlannerWorkspaceError extends Error {
@@ -37,6 +38,8 @@ export interface PlannerWorkspaceRow {
       `PlannerWorkspace.identityPrompt` (protocol package) for the full
       reasoning. `null` until an operator writes one (or clears it back). */
   identityPrompt: string | null;
+  /** PA-96: see `PlannerWorkspace.liveProvider` (protocol package). */
+  liveProvider: PlannerLiveProvider;
 }
 
 /** Persistence seam, so the registry stays testable without a database. */
@@ -58,6 +61,8 @@ export interface PlannerWorkspaceStore {
   setMcpEnabled(id: string, enabled: boolean): void;
   /** PA-45: this agent's own persona/capability text, or `null` to clear it. */
   setIdentityPrompt(id: string, identityPrompt: string | null): void;
+  /** PA-96: this agent's live-stream provider. */
+  setLiveProvider(id: string, provider: PlannerLiveProvider): void;
   /** PA-29 phase 3: written by `MemoryConsolidationService` after it
       finishes processing this agent (including a cycle with nothing new to
       fold — see that service's own doc comment for why the marker still
@@ -132,6 +137,7 @@ export class PlannerWorkspaceRegistry {
       lastConsolidatedAt: null,
       mcpEnabled: true,
       identityPrompt: null,
+      liveProvider: 'pipeline',
     };
     this.store.insert(row);
     this.rows = [...this.rows, row];
@@ -197,6 +203,7 @@ export class PlannerWorkspaceRegistry {
       lastConsolidatedAt: null,
       mcpEnabled: true,
       identityPrompt: null,
+      liveProvider: 'pipeline',
     };
     this.store.insert(row);
     this.rows = [...this.rows, row];
@@ -301,6 +308,23 @@ export class PlannerWorkspaceRegistry {
     if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
     this.store.setIdentityPrompt(id, identityPrompt);
     const updated = { ...row, identityPrompt };
+    this.rows = this.rows.map((r) => (r.id === id ? updated : r));
+    return updated;
+  }
+
+  /**
+   * PA-96: pick which live-stream implementation this agent's chats use.
+   * Trivially reversible and affects no directory or transcript, same posture
+   * as `setMcpEnabled`. Whether Gemini Live is actually *usable* (a key is
+   * stored) is decided at token-mint time rather than here, so an agent can be
+   * configured before the key is entered, and removing the key later degrades
+   * the chat to "unavailable" instead of silently rewriting every agent.
+   */
+  setLiveProvider(id: string, provider: PlannerLiveProvider): PlannerWorkspaceRow {
+    const row = this.get(id);
+    if (!row) throw new PlannerWorkspaceError('Workspace not found.', 'not_found');
+    this.store.setLiveProvider(id, provider);
+    const updated = { ...row, liveProvider: provider };
     this.rows = this.rows.map((r) => (r.id === id ? updated : r));
     return updated;
   }

@@ -17,6 +17,7 @@ import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js'
 import { McpRegistriesSection } from '../components/McpRegistriesSection.js';
 import { SkillsSection } from '../components/SkillsSection.js';
 import { useHostApi } from '../hosts/HostContext.js';
+import { GeminiLiveSettingsSection } from '../components/GeminiLiveSettingsSection.js';
 
 interface Props {
   onApiError: (error: unknown) => void;
@@ -955,6 +956,8 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
           </p>
         )}
       </div>
+
+      <GeminiLiveSettingsSection onApiError={onApiError} />
 
       <div className="planner-section">
         <h3>About you</h3>

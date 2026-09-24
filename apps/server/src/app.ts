@@ -60,6 +60,7 @@ import { plannerRoutes } from './routes/planner.js';
 import { mcpRegistryRoutes } from './routes/mcp-registries.js';
 import { telegramRoutes } from './routes/telegram.js';
 import { AdminService } from './admin/index.js';
+import { GeminiLiveService } from './planner/gemini-live.js';
 import { TelegramBotStore } from './telegram/bots-store.js';
 import { TelegramLinksStore } from './telegram/links-store.js';
 import { TelegramBridge } from './telegram/bridge.js';
@@ -223,6 +224,9 @@ export interface BuildAppOptions {
       practice this never fires in a test unless the test itself creates a
       `telegram_bots` row, since an empty bot list polls nothing. */
   telegramFetch?: typeof fetch;
+  /** PA-96: injected in tests so minting a Gemini Live token never makes a
+      real network call. */
+  geminiFetch?: typeof fetch;
   /**
    * PA-68: injected so a test never runs a real `npm install`. The same
    * injection seam `plannerLlmFetch`/`telegramFetch` use, and for a sharper
@@ -496,6 +500,14 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // `PlannerChatService.executeTool`) needs both stores.
   const telegramBots = new TelegramBotStore({ db, encKey: config.settingsEncKey, logger: app.log });
   const telegramLinks = new TelegramLinksStore(db);
+  // PA-96: the Gemini API key (secret-box, so it needs the same encryption
+  // key the provider and bot stores do) and the ephemeral-token minting.
+  const geminiLive = new GeminiLiveService({
+    db,
+    encKey: config.settingsEncKey,
+    logger: app.log,
+    ...(options.geminiFetch ? { fetchImpl: options.geminiFetch } : {}),
+  });
 
   const plannerChats = new PlannerChatService({
     db,
@@ -691,6 +703,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     telegramBots,
     telegramLinks,
     ...(options.telegramFetch ? { telegramFetch: options.telegramFetch } : {}),
+    geminiLive,
     db,
     backend,
     push,

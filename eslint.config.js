@@ -64,6 +64,7 @@ export default tseslint.config(
     // browser, so DOM globals are legitimately in scope there.
     files: [
       'apps/server/scripts/browser-demo.mjs',
+      'apps/server/scripts/gemini-live-ui-demo.mjs',
       'apps/server/scripts/native-ui-demo.mjs',
       'apps/server/scripts/resume-adopt-ui-demo.mjs',
       'apps/server/scripts/home-ui-demo.mjs',

@@ -7,6 +7,7 @@ import {
   type PlannerMemory,
   type PlannerMemoryTier,
   type PlannerModel,
+  type PlannerLiveProvider,
   type PlannerWorkspace,
 } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
@@ -58,6 +59,10 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
   const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState('');
   const [editImportance, setEditImportance] = useState(3);
+  // PA-96: whether each live-stream provider is configured on this server,
+  // to decide whether the picker is worth showing at all.
+  const [geminiAvailable, setGeminiAvailable] = useState(false);
+  const [pipelineConfigured, setPipelineConfigured] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -89,6 +94,27 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([api.getGeminiLiveSettings().catch(() => null), api.getSettings().catch(() => null)]).then(
+      ([gemini, runtime]) => {
+        if (cancelled) return;
+        setGeminiAvailable(gemini?.available ?? false);
+        setPipelineConfigured((runtime?.settings.liveSttUrl ?? '') !== '');
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+
+  /** PA-96: which live-stream implementation this agent's chats use. Trivially
+      reversible; the disclosure that voice goes to Google is shown in the
+      chat itself, on every visit, which is where it applies. */
+  const setLiveProvider = (liveProvider: PlannerLiveProvider): void => {
+    void withBusy(() => api.updatePlannerWorkspace(agentId, { liveProvider }));
+  };
 
   /** PA-29 phase 4: this agent's own memories, one tier at a time — kept
       separate from `load` above so switching tiers doesn't re-fetch the
@@ -364,6 +390,31 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
           ))}
         </select>
       </div>
+
+      {(geminiAvailable || agent.liveProvider === 'gemini-live') && (
+        // Shown once Gemini Live is configured (or this agent already uses
+        // it, so it can always be switched back). With only the pipeline
+        // there is nothing to choose between.
+        <div className="planner-section">
+          <h3>Live mode</h3>
+          <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+            What answers when live mode is switched on in this agent’s chats. Gemini Live talks to you
+            directly, with native barge-in, and calls this agent’s tools; your voice, the conversation
+            and tool results then go to Google. Tool approvals still happen on screen here either way.
+          </p>
+          <select
+            value={agent.liveProvider}
+            disabled={busy}
+            onChange={(e) => setLiveProvider(e.target.value as PlannerLiveProvider)}
+            aria-label="Live mode provider"
+          >
+            <option value="pipeline">
+              Own pipeline (live-stt + this agent’s model){pipelineConfigured ? '' : ' — not configured'}
+            </option>
+            <option value="gemini-live">Gemini Live{geminiAvailable ? '' : ' — no usable key'}</option>
+          </select>
+        </div>
+      )}
 
       <div className="planner-section">
         <h3>Tools</h3>

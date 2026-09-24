@@ -1,8 +1,13 @@
 import crypto from 'node:crypto';
 import {
   appendSpokenSummaryInstruction,
+  stripSpokenSummary,
   stripSpokenSummaryInstruction,
   type AgentEvent,
+  type GeminiLiveSeedTurn,
+  type GeminiLiveToolCall,
+  type GeminiLiveToolCallResult,
+  type GeminiLiveTranscriptRequest,
   type PlannerChat,
   type PlannerContextPreviewResponse,
   type PlannerMemory,
@@ -77,6 +82,7 @@ import type { TelegramBotStore } from '../telegram/bots-store.js';
 import type { TelegramLinksStore } from '../telegram/links-store.js';
 import { TelegramClient } from '../telegram/client.js';
 import { estimateTokens } from './token-estimate.js';
+import type { GeminiFunctionDeclaration } from './gemini-live.js';
 
 export class PlannerChatError extends Error {
   override readonly name = 'PlannerChatError';
@@ -218,6 +224,7 @@ export interface InFlightPlannerTurn {
 }
 
 interface PendingPlannerTurn {
+  kind: 'loop';
   chatId: string;
   workspaceId: string | null;
   modelId: string;
@@ -230,6 +237,77 @@ interface PendingPlannerTurn {
       zero when a batch resumes. */
   stats: PlannerTurnStats;
 }
+
+/**
+ * PA-96: one Gemini Live tool call parked on the approval gate. Unlike a
+ * `PendingPlannerTurn` there is no LLM continuation to resume — Gemini holds
+ * its own conversation, and was already answered with a holding message so no
+ * synchronous tool response sits open across its ~10-minute socket. Resolving
+ * this runs (or refuses) the one call and persists the result; the browser
+ * relays that result to Gemini as ordinary conversation.
+ *
+ * Kept in the same `pendingTurns` map on purpose: PA-69's drain check, the
+ * chat's `busy` flag and chat deletion all read that map, so a parked live
+ * approval blocks a restart and is cleaned up with its chat with no second
+ * code path to forget.
+ */
+interface PendingLiveToolCall {
+  kind: 'live';
+  chatId: string;
+  workspaceId: string | null;
+  call: PlannerLlmToolCall;
+}
+
+type PendingApproval = PendingPlannerTurn | PendingLiveToolCall;
+
+/** What one tool call is allowed to do, decided once for both callers. */
+type ToolGateDecision =
+  | { kind: 'unavailable'; message: string }
+  | { kind: 'denied' }
+  | {
+      kind: 'needs_approval';
+      tool: PlannerToolDefinition;
+      mcpIdentity: { name: string; displayName: string; readOnly: boolean } | null;
+    }
+  | { kind: 'run'; tool: PlannerToolDefinition };
+
+/**
+ * PA-96: what Gemini hears back, at once, for a call parked on approval. It
+ * must never read as the tool having run — the whole point is that Gemini
+ * keeps talking while the human decides, and says so, instead of either
+ * holding a synchronous response open or inventing an outcome.
+ */
+export const LIVE_AWAITING_APPROVAL_MESSAGE =
+  'Not run yet: this action is waiting for the user to approve or deny it on screen. ' +
+  'Tell the user it is waiting for their approval on screen, and do not claim it has run. ' +
+  'You will be sent the real result once they decide. You cannot approve it yourself, ' +
+  'and the user saying yes out loud does not approve it.';
+
+/**
+ * PA-96: the live-mode rules, prepended to the persona in the Gemini session's
+ * system instruction (which the ephemeral token locks, so the page cannot
+ * swap it out).
+ */
+export const LIVE_MODE_SYSTEM_INSTRUCTION =
+  'You are talking with the user by voice, in real time. Keep spoken replies short and ' +
+  'conversational. Never read out code, file contents, long lists, paths or URLs verbatim: ' +
+  'summarise them in a sentence. You can call the tools you have been given. Some tools change ' +
+  'things and need the user to approve them on screen; if a tool result says it is waiting for ' +
+  'approval, tell the user briefly and do not claim it ran. The real result arrives later as a ' +
+  'message. You can never approve a tool yourself, and the user saying "yes" out loud is not an ' +
+  'approval — only the on-screen button is.';
+
+/** Caps what one tool result contributes to a live session's seed history. */
+const LIVE_SEED_TOOL_RESULT_CHARS = 1500;
+/** Caps the whole seed, oldest turns dropped first. */
+const LIVE_SEED_MAX_CHARS = 60_000;
+/**
+ * PA-96: how long after its last sign of life a chat still counts as having a
+ * Gemini Live session open, for deferring subagent wake turns. The browser
+ * says so explicitly on the way out (`endLive`); this only bounds a tab that
+ * vanished without saying goodbye.
+ */
+const LIVE_ACTIVITY_TTL_MS = 10 * 60 * 1000;
 
 /**
  * Running per-turn stats for the settings-page-adjacent "small text after
@@ -327,7 +405,24 @@ interface TurnPollRecord {
  */
 export class PlannerChatService {
   private readonly tools: readonly PlannerToolDefinition[];
-  private readonly pendingTurns = new Map<string, PendingPlannerTurn>();
+  private readonly pendingTurns = new Map<string, PendingApproval>();
+  /**
+   * PA-96: Gemini Live work being done for a chat right now — bridged tool
+   * calls and resolutions of parked live approvals. Also counted in
+   * `activeTurns` (so PA-69's drain sees it), and counted separately here only
+   * so `busyWithPlannerLoop` can tell "the planner LLM is mid-turn" from
+   * "Gemini is running a tool", which must not refuse each other's follow-up
+   * calls.
+   */
+  private readonly liveWork = new Map<string, number>();
+  /** PA-96: per-chat serialisation of live bridge/transcript writes, so the
+      JSONL keeps the order the browser reported things in even when two
+      requests overlap. */
+  private readonly liveQueues = new Map<string, Promise<unknown>>();
+  /** PA-96: chats with a Gemini Live session believed open → last activity.
+      See `LIVE_ACTIVITY_TTL_MS`. */
+  private readonly liveSessions = new Map<string, number>();
+  private readonly liveExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /**
    * PA-10: side-channel observers of one chat's persisted events, keyed by
    * chat id.
@@ -519,6 +614,8 @@ export class PlannerChatService {
       for (const timer of timers) clearTimeout(timer);
     }
     this.scheduledWakeTimersByChat.clear();
+    for (const timer of this.liveExpiryTimers.values()) clearTimeout(timer);
+    this.liveExpiryTimers.clear();
     for (const timer of this.drainRetryTimeouts.values()) {
       clearTimeout(timer);
     }
@@ -600,7 +697,7 @@ export class PlannerChatService {
       this.mailboxByChat.set(chatId, list);
     }
     list.push(message);
-    if (!this.isBusy(chatId)) {
+    if (!this.isBusy(chatId) && !this.isLiveActive(chatId)) {
       void this.drainMailbox(chatId);
     }
   }
@@ -616,6 +713,10 @@ export class PlannerChatService {
     }
 
     if (this.isBusy(chatId)) return;
+    // PA-96: a wake turn runs the planner LLM, and while Gemini Live is this
+    // chat's model that would put two models in one conversation. Deferred,
+    // not dropped: `endLive` (or the activity TTL lapsing) drains it.
+    if (this.isLiveActive(chatId)) return;
     const messages = this.mailboxByChat.get(chatId);
     if (!messages || messages.length === 0) return;
     const queued = [...messages];
@@ -774,6 +875,12 @@ export class PlannerChatService {
       this.drainRetryTimeouts.delete(id);
     }
     this.drainRetryAttempts.delete(id);
+    this.liveSessions.delete(id);
+    const liveTimer = this.liveExpiryTimers.get(id);
+    if (liveTimer) {
+      clearTimeout(liveTimer);
+      this.liveExpiryTimers.delete(id);
+    }
     return deletePlannerChat(this.opts.db, id);
   }
 
@@ -1208,72 +1315,27 @@ export class PlannerChatService {
     // from `pendingTurns` (deleted above) to `activeTurns` here, and PA-69's
     // drain check sees it continuously across the handover rather than
     // briefly reading as idle in between.
-    const endTurn = this.beginTurn(chatId);
+    const endTurn = pending.kind === 'live' ? this.beginLiveWork(chatId) : this.beginTurn(chatId);
     try {
       const chat = this.requireChat(chatId);
       const workspacePath = this.workspacePathFor(chat);
-      const call = pending.toolCalls[pending.index]!;
-      const tool = this.resolveEnabledTool(pending.workspaceId, call.function.name);
-      // PA-37: same real-identity resolution `processToolCalls` used to decide
-      // to pause in the first place — recomputed here (deterministically, from
-      // the same unchanged `call`) rather than threaded through
-      // `PendingPlannerTurn`, so "remember" persists against the underlying MCP
-      // tool, never the wrapper's own name.
-      const mcpIdentity = this.effectiveMcpToolIdentity(pending.workspaceId, call);
-      const gateName = mcpIdentity?.name ?? call.function.name;
+      const call = pending.kind === 'live' ? pending.call : pending.toolCalls[pending.index]!;
+      yield* this.applyApprovalDecision(chat, workspacePath, approvalId, pending.workspaceId, call, choice);
 
-      if (choice !== 'allow_once') {
-        rememberDecisionIfAsked(this.opts.db, choice, gateName, pending.workspaceId);
+      // PA-96: a live call has no continuation to resume — Gemini drives its
+      // own conversation, and the browser relays the `tool_result` just
+      // emitted. A planner turn carries on with the rest of its batch.
+      if (pending.kind === 'loop') {
+        yield* this.processToolCalls(
+          chat,
+          workspacePath,
+          pending.modelId,
+          pending.toolCalls,
+          pending.index + 1,
+          pending.iteration,
+          pending.stats,
+        );
       }
-
-      if (choice === 'deny' || !tool) {
-        yield* this.emit(workspacePath, chat.id, {
-          kind: 'permission_resolved',
-          id: approvalId,
-          decision: 'deny',
-          message: null,
-        });
-        yield* this.emit(workspacePath, chat.id, {
-          kind: 'tool_result',
-          id: crypto.randomUUID(),
-          toolUseId: call.id,
-          content: choice === 'deny' ? 'Denied by the user.' : this.toolUnavailableMessage(pending.workspaceId, call.function.name),
-          truncated: false,
-          isError: true,
-        });
-      } else {
-        yield* this.emit(workspacePath, chat.id, {
-          kind: 'permission_resolved',
-          id: approvalId,
-          // `PermissionDecision` has no `allow_workspace`/`allow_global` of its
-          // own (that finer grain is a planner-only concept the shared union
-          // does not need) — the reducer only ever reads `decision === 'deny'`
-          // to flip a tool card's `denied` flag, so collapsing every allow
-          // variant to `'allow'` here is lossless for rendering. `message`
-          // carries the scope for a human reading the raw event.
-          decision: 'allow',
-          message: scopeMessage(choice),
-        });
-        const resultText = await this.executeTool(tool, call.function.arguments, chat);
-        yield* this.emit(workspacePath, chat.id, {
-          kind: 'tool_result',
-          id: crypto.randomUUID(),
-          toolUseId: call.id,
-          content: resultText,
-          truncated: false,
-          isError: false,
-        });
-      }
-
-      yield* this.processToolCalls(
-        chat,
-        workspacePath,
-        pending.modelId,
-        pending.toolCalls,
-        pending.index + 1,
-        pending.iteration,
-        pending.stats,
-      );
     } finally {
       endTurn();
       if (!this.isBusy(chatId)) {
@@ -1284,11 +1346,86 @@ export class PlannerChatService {
     }
   }
 
+  /**
+   * The resolution half of the gate, shared by a parked planner turn and a
+   * parked Gemini Live call (PA-96), so "what happens when a human answers"
+   * cannot differ between the two models.
+   */
+  private async *applyApprovalDecision(
+    chat: PlannerChat,
+    workspacePath: string,
+    approvalId: string,
+    workspaceId: string | null,
+    call: PlannerLlmToolCall,
+    choice: PlannerToolApprovalChoice,
+  ): AsyncGenerator<AgentEvent> {
+    // Re-resolved rather than remembered: a tool disabled while the approval
+    // sat waiting is refused now, whatever the human says.
+    const tool = this.resolveEnabledTool(workspaceId, call.function.name);
+    // PA-37: same real-identity resolution the gate used to decide to pause in
+    // the first place — recomputed here (deterministically, from the same
+    // unchanged `call`) rather than threaded through the pending entry, so
+    // "remember" persists against the underlying MCP tool, never the
+    // wrapper's own name.
+    const mcpIdentity = this.effectiveMcpToolIdentity(workspaceId, call);
+    const gateName = mcpIdentity?.name ?? call.function.name;
+
+    if (choice !== 'allow_once') {
+      rememberDecisionIfAsked(this.opts.db, choice, gateName, workspaceId);
+    }
+
+    if (choice === 'deny' || !tool) {
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'permission_resolved',
+        id: approvalId,
+        decision: 'deny',
+        message: null,
+      });
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'tool_result',
+        id: crypto.randomUUID(),
+        toolUseId: call.id,
+        content: choice === 'deny' ? 'Denied by the user.' : this.toolUnavailableMessage(workspaceId, call.function.name),
+        truncated: false,
+        isError: true,
+      });
+      return;
+    }
+    yield* this.emit(workspacePath, chat.id, {
+      kind: 'permission_resolved',
+      id: approvalId,
+      // `PermissionDecision` has no `allow_workspace`/`allow_global` of its
+      // own (that finer grain is a planner-only concept the shared union
+      // does not need) — the reducer only ever reads `decision === 'deny'`
+      // to flip a tool card's `denied` flag, so collapsing every allow
+      // variant to `'allow'` here is lossless for rendering. `message`
+      // carries the scope for a human reading the raw event.
+      decision: 'allow',
+      message: scopeMessage(choice),
+    });
+    const resultText = await this.executeTool(tool, call.function.arguments, chat);
+    yield* this.emit(workspacePath, chat.id, {
+      kind: 'tool_result',
+      id: crypto.randomUUID(),
+      toolUseId: call.id,
+      content: resultText,
+      truncated: false,
+      isError: false,
+    });
+  }
+
   /** Persist then yield — every event this service produces goes through here, so the two never drift apart. */
   private async *emit(workspacePath: string, chatId: string, event: AgentEvent): AsyncGenerator<AgentEvent> {
+    await this.persist(workspacePath, chatId, event);
+    yield event;
+  }
+
+  /** The non-generator half of `emit`, for callers with no stream to yield
+      onto (the Gemini Live bridge, PA-96). The same two steps in the same
+      order, so an observer can never see an event the transcript lacks. */
+  private async persist(workspacePath: string, chatId: string, event: AgentEvent): Promise<void> {
     await appendTranscriptEvent(workspacePath, chatId, event);
     this.notify(chatId, event);
-    yield event;
   }
 
   /** Ends a turn: emits the final `text` (or nothing, if `text` is empty) and `turn_complete`, and updates the chat row. */
@@ -1475,75 +1612,47 @@ export class PlannerChatService {
   ): AsyncGenerator<AgentEvent> {
     for (let index = startIndex; index < toolCalls.length; index++) {
       const call = toolCalls[index]!;
-      const tool = this.resolveEnabledTool(chat.workspaceId, call.function.name);
+      const gate = this.gateToolCall(chat, call);
 
-      if (!tool) {
+      if (gate.kind === 'unavailable') {
         yield* this.emit(workspacePath, chat.id, {
           kind: 'tool_result',
           id: crypto.randomUUID(),
           toolUseId: call.id,
-          content: this.toolUnavailableMessage(chat.workspaceId, call.function.name),
+          content: gate.message,
+          truncated: false,
+          isError: true,
+        });
+        continue;
+      }
+      if (gate.kind === 'needs_approval') {
+        const approvalId = crypto.randomUUID();
+        this.pendingTurns.set(approvalId, {
+          kind: 'loop',
+          chatId: chat.id,
+          workspaceId: chat.workspaceId,
+          modelId,
+          toolCalls,
+          index,
+          iteration,
+          stats,
+        });
+        yield* this.emit(workspacePath, chat.id, permissionRequestEvent(approvalId, call, gate.tool, gate.mcpIdentity));
+        return; // paused — the rest of this batch waits for `resolveApproval`
+      }
+      if (gate.kind === 'denied') {
+        yield* this.emit(workspacePath, chat.id, {
+          kind: 'tool_result',
+          id: crypto.randomUUID(),
+          toolUseId: call.id,
+          content: 'Denied by a remembered decision.',
           truncated: false,
           isError: true,
         });
         continue;
       }
 
-      // PA-37: a `call_mcp_tool` invocation's real risk lives in *which*
-      // underlying MCP tool it names, never in the wrapper's own static
-      // `readOnly` — see `effectiveMcpToolIdentity`'s own doc comment.
-      const mcpIdentity = this.effectiveMcpToolIdentity(chat.workspaceId, call);
-      const gateName = mcpIdentity?.name ?? tool.name;
-      const gateReadOnly = mcpIdentity?.readOnly ?? tool.readOnly;
-
-      if (!gateReadOnly) {
-        const decision = resolveApprovalStatus(
-          this.opts.db,
-          gateName,
-          chat.workspaceId,
-          chat.skipToolApprovalsEnabled,
-        );
-        if (decision === null) {
-          const approvalId = crypto.randomUUID();
-          this.pendingTurns.set(approvalId, {
-            chatId: chat.id,
-            workspaceId: chat.workspaceId,
-            modelId,
-            toolCalls,
-            index,
-            iteration,
-            stats,
-          });
-          const args = safeParseArgs(call.function.arguments);
-          yield* this.emit(workspacePath, chat.id, {
-            kind: 'permission_request',
-            id: approvalId,
-            toolName: gateName,
-            input: args,
-            title: mcpIdentity ? `Run MCP tool ${mcpIdentity.displayName}` : `Run ${tool.name}`,
-            displayName: mcpIdentity?.displayName ?? null,
-            filePath: extractFilePath(args),
-            reason: null,
-            canAllowForSession: false,
-            questions: null,
-          });
-          return; // paused — the rest of this batch waits for `resolveApproval`
-        }
-        if (decision === 'deny') {
-          yield* this.emit(workspacePath, chat.id, {
-            kind: 'tool_result',
-            id: crypto.randomUUID(),
-            toolUseId: call.id,
-            content: 'Denied by a remembered decision.',
-            truncated: false,
-            isError: true,
-          });
-          continue;
-        }
-        // decision === 'allow': fall through and execute below.
-      }
-
-      const resultText = await this.executeTool(tool, call.function.arguments, chat);
+      const resultText = await this.executeTool(gate.tool, call.function.arguments, chat);
       yield* this.emit(workspacePath, chat.id, {
         kind: 'tool_result',
         id: crypto.randomUUID(),
@@ -1556,6 +1665,294 @@ export class PlannerChatService {
 
     // Every call in this batch resolved — ask the model what's next.
     yield* this.driveLoop(chat, workspacePath, modelId, iteration, stats, undefined);
+  }
+
+  /**
+   * The approval gate's decision for one call — the single place both the
+   * planner loop and the Gemini Live bridge (PA-96) ask "may this run?", so a
+   * call coming from Google's model gets exactly the refusals, remembered
+   * decisions, yolo and `skipToolApprovalsEnabled` handling a call from the
+   * planner LLM does, and neither can drift from the other.
+   */
+  private gateToolCall(chat: PlannerChat, call: PlannerLlmToolCall): ToolGateDecision {
+    const tool = this.resolveEnabledTool(chat.workspaceId, call.function.name);
+    if (!tool) {
+      return { kind: 'unavailable', message: this.toolUnavailableMessage(chat.workspaceId, call.function.name) };
+    }
+    // PA-37: a `call_mcp_tool` invocation's real risk lives in *which*
+    // underlying MCP tool it names, never in the wrapper's own static
+    // `readOnly` — see `effectiveMcpToolIdentity`'s own doc comment.
+    const mcpIdentity = this.effectiveMcpToolIdentity(chat.workspaceId, call);
+    const gateName = mcpIdentity?.name ?? tool.name;
+    const gateReadOnly = mcpIdentity?.readOnly ?? tool.readOnly;
+    if (gateReadOnly) return { kind: 'run', tool };
+    const decision = resolveApprovalStatus(this.opts.db, gateName, chat.workspaceId, chat.skipToolApprovalsEnabled);
+    if (decision === null) return { kind: 'needs_approval', tool, mcpIdentity };
+    if (decision === 'deny') return { kind: 'denied' };
+    return { kind: 'run', tool };
+  }
+
+  // ---- Gemini Live (PA-96) --------------------------------------------------
+
+  /** Marks Gemini Live work for a chat; returns the release for a `finally`. */
+  private beginLiveWork(chatId: string): () => void {
+    const endTurn = this.beginTurn(chatId);
+    this.liveWork.set(chatId, (this.liveWork.get(chatId) ?? 0) + 1);
+    return () => {
+      const remaining = (this.liveWork.get(chatId) ?? 1) - 1;
+      if (remaining > 0) this.liveWork.set(chatId, remaining);
+      else this.liveWork.delete(chatId);
+      endTurn();
+    };
+  }
+
+  /**
+   * True while the *planner LLM* owns this chat: a typed or wake turn being
+   * driven, or one parked on an approval. Gemini Live refuses to start or act
+   * then, because two models writing one transcript is exactly what "only one
+   * model drives the chat at a time" rules out. Live work of its own does not
+   * count, or a second tool call in the same Gemini turn would refuse itself.
+   */
+  private busyWithPlannerLoop(chatId: string): boolean {
+    const active = (this.activeTurns.get(chatId) ?? 0) - (this.liveWork.get(chatId) ?? 0);
+    if (active > 0) return true;
+    for (const pending of this.pendingTurns.values()) {
+      if (pending.chatId === chatId && pending.kind === 'loop') return true;
+    }
+    return false;
+  }
+
+  private isLiveActive(chatId: string): boolean {
+    const last = this.liveSessions.get(chatId);
+    if (last === undefined) return false;
+    if (Date.now() - last < LIVE_ACTIVITY_TTL_MS) return true;
+    this.liveSessions.delete(chatId);
+    return false;
+  }
+
+  private touchLive(chatId: string): void {
+    this.liveSessions.set(chatId, Date.now());
+    // One timer per chat, re-armed on activity: when the TTL lapses with no
+    // `endLive`, the deferred mailbox still gets drained rather than waiting
+    // for some unrelated future event.
+    const previous = this.liveExpiryTimers.get(chatId);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      this.liveExpiryTimers.delete(chatId);
+      if (!this.isLiveActive(chatId) && !this.isBusy(chatId)) void this.drainMailbox(chatId);
+    }, LIVE_ACTIVITY_TTL_MS + 1000);
+    timer.unref?.();
+    this.liveExpiryTimers.set(chatId, timer);
+  }
+
+  /** The browser left live mode (best effort — a vanished tab is covered by
+      the TTL). Releases anything `drainMailbox` deferred for it. */
+  endLive(chatId: string): void {
+    this.requireChat(chatId);
+    this.liveSessions.delete(chatId);
+    const timer = this.liveExpiryTimers.get(chatId);
+    if (timer) {
+      clearTimeout(timer);
+      this.liveExpiryTimers.delete(chatId);
+    }
+    this.spawnsThisTurnByChat.delete(chatId);
+    if (!this.isBusy(chatId)) void this.drainMailbox(chatId);
+  }
+
+  private serializeLive<T>(chatId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.liveQueues.get(chatId) ?? Promise.resolve();
+    const next = previous.then(work, work);
+    const settled = next.catch(() => undefined);
+    this.liveQueues.set(chatId, settled);
+    void settled.then(() => {
+      if (this.liveQueues.get(chatId) === settled) this.liveQueues.delete(chatId);
+    });
+    return next;
+  }
+
+  /**
+   * Everything the Gemini session is seeded with, from the chat's real
+   * context: the live-mode rules plus this agent's persona and its most
+   * relevant memories (the system instruction the token locks), the exact
+   * tool list the planner would offer this agent, and the rolling-window
+   * history as replayable turns. Refuses while the planner LLM owns the chat.
+   */
+  async liveSetup(
+    chatId: string,
+    opts: { resumed: boolean },
+  ): Promise<{
+    systemInstruction: string;
+    functionDeclarations: GeminiFunctionDeclaration[];
+    seedTurns: GeminiLiveSeedTurn[];
+  }> {
+    const chat = this.requireChat(chatId);
+    if (this.busyWithPlannerLoop(chatId)) {
+      throw new PlannerChatError(
+        'A Pocket Agent turn is still running in this chat. Wait for it to finish before going live.',
+        'busy',
+      );
+    }
+    const workspacePath = this.workspacePathFor(chat);
+    const events = await readTranscriptEvents(workspacePath, chat.id);
+    // The same window `previewContext` shows and a real turn sends, taken
+    // without folding: minting a token must not write memories as a side
+    // effect of a human merely switching the mic on.
+    const turns = splitIntoTurns(events);
+    const inWindow = turns.slice(Math.max(0, turns.length - ROLLING_WINDOW_TURNS)).flat();
+
+    const settings = readPlannerSettings(this.opts.db);
+    const workspace = chat.workspaceId ? this.opts.plannerWorkspaces.get(chat.workspaceId) : undefined;
+    const parts: string[] = [LIVE_MODE_SYSTEM_INSTRUCTION];
+    const persona = buildPersonaSystemMessage(workspace ?? null, settings);
+    if (persona) parts.push(persona);
+    if (this.memoryEnabledFor(chat.workspaceId) && chat.workspaceId) {
+      const results = await this.opts.memory.search(chat.workspaceId, lastUserPromptText(events), {
+        limit: MEMORY_INJECT_TOP_K,
+      });
+      if (results.length > 0) parts.push(buildMemorySystemMessage(results.map((r) => r.memory)));
+    }
+
+    const functionDeclarations = this.toolsFor(chat.workspaceId).map((t) => ({
+      name: t.name,
+      description: t.description,
+      parametersJsonSchema: t.parameters,
+    }));
+    this.touchLive(chatId);
+    return {
+      systemInstruction: parts.join('\n\n'),
+      functionDeclarations,
+      seedTurns: opts.resumed ? [] : eventsToSeedTurns(inWindow),
+    };
+  }
+
+  /**
+   * The Gemini Live tool bridge: each call goes through `gateToolCall` and
+   * `executeTool`, exactly as a planner-LLM call does in `processToolCalls`,
+   * and everything is persisted as the same `tool_use` / `permission_request`
+   * / `tool_result` events. A call needing approval is parked
+   * (`PendingLiveToolCall`) and answered at once with
+   * `LIVE_AWAITING_APPROVAL_MESSAGE`; nothing about it runs until
+   * `POST .../approvals/:id`, and there is no timeout.
+   *
+   * The persisted `tool_use` id is minted here rather than taken from Gemini:
+   * Gemini's ids are short and restart with each session, and a collision with
+   * an earlier call in the same transcript would pair a later result with the
+   * wrong call when the planner LLM reads the history back.
+   */
+  async runLiveToolCalls(chatId: string, calls: readonly GeminiLiveToolCall[]): Promise<GeminiLiveToolCallResult[]> {
+    const chat = this.requireChat(chatId);
+    if (this.busyWithPlannerLoop(chatId)) {
+      throw new PlannerChatError('A Pocket Agent turn is running in this chat.', 'busy');
+    }
+    this.touchLive(chatId);
+    return this.serializeLive(chatId, async () => {
+      const release = this.beginLiveWork(chatId);
+      if (!this.turnStartedAtByChat.has(chatId)) this.turnStartedAtByChat.set(chatId, Date.now());
+      try {
+        const workspacePath = this.workspacePathFor(chat);
+        const llmCalls: PlannerLlmToolCall[] = calls.map((c) => ({
+          id: `live_${crypto.randomUUID()}`,
+          type: 'function',
+          function: { name: c.name, arguments: JSON.stringify(c.args ?? {}) },
+        }));
+        for (const call of llmCalls) {
+          const args = safeParseArgs(call.function.arguments);
+          await this.persist(workspacePath, chat.id, {
+            kind: 'tool_use',
+            id: call.id,
+            name: call.function.name,
+            input: args,
+            summary: summarizeToolCall(call.function.name, args),
+            filePath: extractFilePath(args),
+          });
+        }
+        const results: GeminiLiveToolCallResult[] = [];
+        for (let i = 0; i < llmCalls.length; i++) {
+          const call = llmCalls[i]!;
+          const base = { callId: calls[i]!.id, name: call.function.name, toolUseId: call.id };
+          const gate = this.gateToolCall(chat, call);
+          if (gate.kind === 'needs_approval') {
+            const approvalId = crypto.randomUUID();
+            this.pendingTurns.set(approvalId, { kind: 'live', chatId: chat.id, workspaceId: chat.workspaceId, call });
+            await this.persist(workspacePath, chat.id, permissionRequestEvent(approvalId, call, gate.tool, gate.mcpIdentity));
+            results.push({ ...base, status: 'awaiting_approval', output: LIVE_AWAITING_APPROVAL_MESSAGE, approvalId });
+            continue;
+          }
+          let output: string;
+          let isError: boolean;
+          if (gate.kind === 'unavailable') {
+            output = gate.message;
+            isError = true;
+          } else if (gate.kind === 'denied') {
+            output = 'Denied by a remembered decision.';
+            isError = true;
+          } else {
+            output = await this.executeTool(gate.tool, call.function.arguments, chat);
+            isError = false;
+          }
+          await this.persist(workspacePath, chat.id, {
+            kind: 'tool_result',
+            id: crypto.randomUUID(),
+            toolUseId: call.id,
+            content: output,
+            truncated: false,
+            isError,
+          });
+          results.push({ ...base, status: isError ? 'refused' : 'completed', output, approvalId: null });
+        }
+        return results;
+      } finally {
+        release();
+      }
+    });
+  }
+
+  /**
+   * Persists what Gemini heard and said as the ordinary events a typed turn
+   * produces. `turn_complete` carries Gemini's own `usageMetadata` token
+   * counts and the time the model spent answering, so the existing
+   * `TurnFooter` renders it with no new frontend code.
+   */
+  async recordLiveTranscript(chatId: string, req: GeminiLiveTranscriptRequest): Promise<void> {
+    const chat = this.requireChat(chatId);
+    if (this.busyWithPlannerLoop(chatId)) {
+      throw new PlannerChatError('A Pocket Agent turn is running in this chat.', 'busy');
+    }
+    this.touchLive(chatId);
+    await this.serializeLive(chatId, async () => {
+      const workspacePath = this.workspacePathFor(chat);
+      const userText = req.userText?.trim();
+      if (userText) {
+        if (this.get(chatId)?.title === null) {
+          const title = deriveChatTitle(userText);
+          if (title) updatePlannerChat(this.opts.db, chat.id, { title });
+        }
+        await this.persist(workspacePath, chat.id, { kind: 'user_prompt', id: crypto.randomUUID(), text: userText });
+      }
+      const modelText = req.modelText?.trim();
+      if (modelText) {
+        await this.persist(workspacePath, chat.id, { kind: 'text', id: crypto.randomUUID(), text: modelText });
+      }
+      if (req.turnComplete) {
+        await this.persist(workspacePath, chat.id, {
+          kind: 'turn_complete',
+          stopReason: req.turnComplete.interrupted ? 'interrupted' : 'end_turn',
+          isError: false,
+          numTurns: null,
+          durationMs: req.turnComplete.durationMs,
+          costUsd: null,
+          inputTokens: req.turnComplete.inputTokens,
+          outputTokens: req.turnComplete.outputTokens,
+          completedAt: Date.now(),
+        });
+        // A Gemini turn is this chat's turn for the per-turn budgets the tools
+        // keep (spawns, poll short-circuits), the same reset `finishTurn` does.
+        this.spawnsThisTurnByChat.delete(chat.id);
+        this.turnPollChecksByChat.delete(chat.id);
+        this.turnStartedAtByChat.delete(chat.id);
+      }
+      updatePlannerChat(this.opts.db, chat.id, { lastActivityAt: Date.now() });
+    });
   }
 
   private async executeTool(tool: PlannerToolDefinition, rawArguments: string, chat: PlannerChat): Promise<string> {
@@ -2105,6 +2502,79 @@ export class PlannerChatService {
   }
 }
 
+
+/** The `permission_request` a parked call emits — shared by the planner loop
+    and the Gemini Live bridge (PA-96) so the approval card reads the same
+    whichever model asked. */
+function permissionRequestEvent(
+  approvalId: string,
+  call: PlannerLlmToolCall,
+  tool: PlannerToolDefinition,
+  mcpIdentity: { name: string; displayName: string } | null,
+): AgentEvent {
+  const args = safeParseArgs(call.function.arguments);
+  return {
+    kind: 'permission_request',
+    id: approvalId,
+    toolName: mcpIdentity?.name ?? tool.name,
+    input: args,
+    title: mcpIdentity ? `Run MCP tool ${mcpIdentity.displayName}` : `Run ${tool.name}`,
+    displayName: mcpIdentity?.displayName ?? null,
+    filePath: extractFilePath(args),
+    reason: null,
+    canAllowForSession: false,
+    questions: null,
+  };
+}
+
+/**
+ * PA-96: a chat's windowed transcript as the text turns a Gemini Live session
+ * is seeded with. Tool calls become a line of model-side narration rather than
+ * Gemini `functionCall`/`functionResponse` parts — the ids would not match
+ * anything in the new session, and a model reading "I called X and got Y" has
+ * everything it needs. Consecutive same-role entries are merged, and the
+ * oldest turns go first when the whole thing exceeds `LIVE_SEED_MAX_CHARS`.
+ */
+export function eventsToSeedTurns(events: readonly AgentEvent[]): GeminiLiveSeedTurn[] {
+  const turns: GeminiLiveSeedTurn[] = [];
+  const push = (role: GeminiLiveSeedTurn['role'], text: string): void => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const last = turns[turns.length - 1];
+    if (last && last.role === role) last.text = `${last.text}\n${trimmed}`;
+    else turns.push({ role, text: trimmed });
+  };
+  const toolNames = new Map<string, string>();
+  for (const event of events) {
+    switch (event.kind) {
+      case 'user_prompt':
+        push('user', stripSpokenSummaryInstruction(event.text) || (event.image ? '[sent an image]' : ''));
+        break;
+      case 'text':
+        push('model', stripSpokenSummary(event.text));
+        break;
+      case 'tool_use':
+        toolNames.set(event.id, event.summary || event.name);
+        break;
+      case 'tool_result': {
+        const call = toolNames.get(event.toolUseId) ?? 'a tool';
+        const content =
+          event.content.length > LIVE_SEED_TOOL_RESULT_CHARS
+            ? `${event.content.slice(0, LIVE_SEED_TOOL_RESULT_CHARS)}…`
+            : event.content;
+        push('model', `[I called ${call}${event.isError ? ', which failed' : ''}: ${content}]`);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  let total = turns.reduce((sum, t) => sum + t.text.length, 0);
+  while (total > LIVE_SEED_MAX_CHARS && turns.length > 1) {
+    total -= turns.shift()!.text.length;
+  }
+  return turns;
+}
 
 /** Best-effort title from a chat's first prompt: the first non-empty line,
     truncated to 80 characters — see `sendMessage`'s doc comment for why this

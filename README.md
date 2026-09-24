@@ -163,7 +163,7 @@ running keeps running.
 | `POCKETAGENT_OPENCODE_BIN` | `opencode` | Opencode CLI executable, resolved on `PATH`. |
 | `POCKETAGENT_CODEX_BIN` | `codex` | OpenAI Codex CLI executable, resolved on `PATH`. |
 | `POCKETAGENT_PI_BIN` | `pi` | Pi CLI binary, resolved on `PATH`. |
-| `POCKETAGENT_SETTINGS_ENC_KEY` | — | Base64 of 32 random bytes, encrypting each custom Claude provider's API key at rest. Unset disables that feature (it is not a boot error); set-but-invalid is. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
+| `POCKETAGENT_SETTINGS_ENC_KEY` | — | Base64 of 32 random bytes, encrypting each custom Claude provider's API key (and the Gemini Live key, Telegram bot tokens) at rest. Unset disables that feature (it is not a boot error); set-but-invalid is. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
 | `POCKETAGENT_PUSH_CONTACT` | `mailto:pocketagent@localhost` | VAPID contact email/URI for Web Push notifications. |
 | `POCKETAGENT_CODE_SERVER_URL` | unset | Base URL for code-server deep links. |
 | `POCKETAGENT_DEEPSEEK_*`, `POCKETAGENT_OMNIROUTE_*` | — | **Deprecated.** Read once on the first boot after upgrading, to import the old built-in variants as custom Claude providers, then never again. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
@@ -1180,6 +1180,33 @@ did, and its agent id changes (`claude-deepseek` becomes `custom-claude:deepseek
 chat's row keeps naming the old id and can no longer be continued on it — continue that
 conversation on the imported provider from the "Continue as…" picker instead. Deleting the
 imported provider in Settings is permanent; the still-present variables will not resurrect it.
+
+### Gemini Live in a Pocket Agent chat
+
+A Pocket Agent can use Google's **Gemini Live** for live mode instead of the built-in
+live-stt pipeline. It hears you directly, answers out loud with native barge-in, and calls
+that agent's own tools. Turn it on in two places:
+
+1. **Settings → Pocket Agent → Gemini Live.** Paste an AI Studio (Gemini API) key. Vertex keys
+   do not work, because the short-lived tokens used here are an AI Studio feature. Storing the
+   key needs `POCKETAGENT_SETTINGS_ENC_KEY`, the same as a custom Claude provider. The model,
+   voice and idle auto-off are set there too.
+2. **The agent's editor → Live mode → Gemini Live.** This is per agent. Every other agent, and
+   every coding session, keeps the built-in pipeline.
+
+What changes about where your data goes, and what does not:
+
+- **Your voice, the conversation and tool results** (files the agent reads, session output) are
+  sent to Google while live mode is on. The chat says so on every visit.
+- **The API key never leaves this server.** It is stored encrypted, never returned by any route
+  and never logged. The browser gets a single-use token that expires within 30 minutes and is
+  locked to that agent's instructions and tools. A copied token cannot be turned into a general
+  Gemini session on your key.
+- **Approvals do not change.** Every tool call Gemini makes goes through this server's approval
+  gate, exactly as a typed turn's would. Mutating tools still wait for the on-screen button,
+  with no timeout, and saying "yes" out loud does not approve anything.
+- **Cost.** Gemini bills audio for as long as the mic is open, including silence. Live mode turns
+  itself off after 5 minutes without speech by default.
 
 ### Inbound webhooks, and what they change
 

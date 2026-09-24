@@ -62,6 +62,13 @@ import type {
   TestPlannerModelResponse,
   PlannerEmbeddingApiKeyRevealResponse,
   PlannerSettingsDto,
+  GeminiLiveSettingsDto,
+  GeminiLiveTokenRequest,
+  GeminiLiveTokenResponse,
+  GeminiLiveToolCall,
+  GeminiLiveToolCallsResponse,
+  GeminiLiveTranscriptRequest,
+  UpdateGeminiLiveSettingsRequest,
   TestPlannerEmbeddingResponse,
   TestPlannerUrlFetchResponse,
   TestPlannerWebSearchResponse,
@@ -914,6 +921,38 @@ export function createApiClient(endpoint: HostEndpoint) {
         method: 'PATCH',
         body: JSON.stringify(patch),
       }),
+
+    /** PA-96: Gemini Live settings. Never carries the key back. */
+    getGeminiLiveSettings: () => request<GeminiLiveSettingsDto>('/api/planner/gemini-live'),
+
+    updateGeminiLiveSettings: (patch: UpdateGeminiLiveSettingsRequest) =>
+      request<GeminiLiveSettingsDto>('/api/planner/gemini-live', {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+
+    /** PA-96: a single-use, constraint-locked Gemini token for this chat. */
+    mintGeminiLiveToken: (chatId: string, body: GeminiLiveTokenRequest = {}) =>
+      request<GeminiLiveTokenResponse>(`/api/planner/chats/${encodeURIComponent(chatId)}/live/token`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+
+    /** PA-96: the tool bridge — the server's gate decides, never the page. */
+    runGeminiLiveToolCalls: (chatId: string, calls: GeminiLiveToolCall[]) =>
+      request<GeminiLiveToolCallsResponse>(`/api/planner/chats/${encodeURIComponent(chatId)}/live/tool-calls`, {
+        method: 'POST',
+        body: JSON.stringify({ calls }),
+      }),
+
+    recordGeminiLiveTranscript: (chatId: string, body: GeminiLiveTranscriptRequest) =>
+      request<void>(`/api/planner/chats/${encodeURIComponent(chatId)}/live/transcript`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+
+    endGeminiLive: (chatId: string) =>
+      request<void>(`/api/planner/chats/${encodeURIComponent(chatId)}/live/end`, { method: 'POST' }),
 
     /** POST, not GET — same CSRF/caching reasoning as `revealWebhookSecret`. */
     revealPlannerApiKey: () =>
