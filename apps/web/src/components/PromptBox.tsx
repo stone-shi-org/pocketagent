@@ -719,19 +719,39 @@ export function PromptBox({
           )}
         </div>
       )}
+      {/* PA-91: keep the attach trigger mounted (disabled) while recording
+          or transcribing so the mic button immediately beside it does not jump
+          under the user's held finger or pointer. */}
+      {supportsImageAttachment && (
+        <AttachButton
+          inputRef={fileInputRef}
+          onFile={(file) => void attach(file)}
+          disabled={disabled || isVoiceRecording || isTranscribing}
+        />
+      )}
       {/*
-        PA-20's persistent "mic is live" indicator: rendered inline, always,
-        whenever this session's live-listen mode is actually on — never only
-        transiently (e.g. tucked inside the picker-gated preview above,
-        which a slash-command picker would hide). This mode removes
-        push-to-talk's implicit privacy guarantee (mic can't be listening
-        unless a finger is down), so the UI has to make that trade-off
-        honest on every render, not just at the moment the toggle was
-        clicked. The level meter is deliberately the *only* extra feedback —
-        no live captions, no partials, per the ticket.
+        PA-20 & PA-97: live stream component consolidated as a unified capsule
+        taking the left part of the prompt box, perfectly aligned with the buttons
+        and textarea baseline (no fragmented controls or sandwiched attach button).
+        The broadcast icon button at the front acts as the active toggle to turn off.
       */}
-      {!isVoiceRecording && liveListenActive && (
+      {!isVoiceRecording && !isTranscribing && supportsLiveListen && onSetLiveListen && liveListenActive && (
         <div className="live-listen-indicator" role="status" aria-live="polite">
+          <button
+            type="button"
+            className="live-listen-btn active"
+            onClick={() => onSetLiveListen(false)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMicPickerOpen((v) => !v);
+            }}
+            disabled={disabled}
+            aria-pressed={true}
+            aria-label="Turn off live listening"
+            title="Turn off live listening"
+          >
+            <Icon name="live-listen" size={17} />
+          </button>
           {isSpeaking ? (
             // PA-83 #4: while the reply is actually being read aloud, this
             // replaces the meter with a dedicated stop control — "otherwise
@@ -739,8 +759,7 @@ export function PromptBox({
             // waiting to detect the user's own speech (barge-in) is not the
             // only way to want it to stop.
             <>
-              <span className="live-listen-dot" aria-hidden="true" />
-              <span>Speaking…</span>
+              <span className="live-listen-status">Speaking…</span>
               {onStopSpeaking && (
                 <button
                   type="button"
@@ -756,8 +775,7 @@ export function PromptBox({
             </>
           ) : (
             <>
-              <span className="live-listen-dot" aria-hidden="true" />
-              <span>Listening…</span>
+              <span className="live-listen-status">Listening…</span>
               <span className="live-listen-meter" aria-hidden="true">
                 <span
                   className="live-listen-meter-fill"
@@ -784,16 +802,6 @@ export function PromptBox({
               live-listen is on. */}
           {liveListenNotice && <span className="live-listen-notice">{liveListenNotice}</span>}
         </div>
-      )}
-      {/* PA-91: keep the attach trigger mounted (disabled) while recording
-          or transcribing so the mic button immediately beside it does not jump
-          under the user's held finger or pointer. */}
-      {supportsImageAttachment && (
-        <AttachButton
-          inputRef={fileInputRef}
-          onFile={(file) => void attach(file)}
-          disabled={disabled || isVoiceRecording || isTranscribing}
-        />
       )}
       {supportsVoiceInput && onTranscribeVoice && !liveListenActive && (
         <div className="mic-control-group">
@@ -860,18 +868,18 @@ export function PromptBox({
         </div>
       ) : (
         <>
-          {supportsLiveListen && onSetLiveListen && (
+          {supportsLiveListen && onSetLiveListen && !liveListenActive && (
             <button
               type="button"
-              className={liveListenActive ? 'live-listen-btn active' : 'live-listen-btn'}
-              onClick={() => onSetLiveListen(!liveListenActive)}
+              className="live-listen-btn"
+              onClick={() => onSetLiveListen(true)}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setMicPickerOpen((v) => !v);
               }}
               disabled={disabled}
-              aria-pressed={liveListenActive}
-              aria-label={liveListenActive ? 'Turn off live listening' : 'Turn on live listening (hands-free)'}
+              aria-pressed={false}
+              aria-label="Turn on live listening (hands-free)"
             >
               <Icon name="live-listen" size={19} />
             </button>

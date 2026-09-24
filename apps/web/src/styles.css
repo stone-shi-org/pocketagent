@@ -1221,14 +1221,39 @@ input[type='number']::-webkit-outer-spin-button {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
-  margin-bottom: 6px;
+  height: 32px;
+  box-sizing: border-box;
+  padding: 0 10px 0 0;
   border-radius: 999px;
-  background: var(--bg-elev-2);
+  background: var(--bg-elev);
   border: 1px solid var(--border);
   font-size: 12.5px;
   color: var(--text-dim);
-  align-self: flex-start;
+  align-self: flex-end;
+  flex: none;
+}
+
+.live-listen-indicator .live-listen-btn {
+  width: 30px;
+  height: 30px;
+  margin: 0;
+  flex: none;
+  align-self: center;
+  border-radius: 50%;
+  background: var(--danger);
+  color: #fff;
+}
+
+.live-listen-indicator .live-listen-btn:hover:not(:disabled) {
+  opacity: 0.9;
+  background: var(--danger);
+}
+
+.live-listen-status {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
 }
 
 /* PA-85: the harness explaining itself — "Ignored — filler only (\"oh\")".
@@ -1315,17 +1340,18 @@ input[type='number']::-webkit-outer-spin-button {
   gap: 4px;
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: var(--bg-elev);
+  background: var(--bg-elev-2);
   color: var(--text-dim);
   padding: 2px 7px 2px 5px;
   font-size: 11.5px;
   line-height: 1;
   cursor: pointer;
-  max-width: 160px;
+  max-width: 150px;
+  flex: none;
 }
 
 .live-listen-mic-btn:hover {
-  background: var(--bg-elev-2);
+  background: var(--bg-elev);
   color: var(--text);
   border-color: var(--border-strong, var(--border));
 }
@@ -1334,7 +1360,20 @@ input[type='number']::-webkit-outer-spin-button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 100px;
+  max-width: 90px;
+}
+
+@media (max-width: 600px) {
+  .live-listen-indicator {
+    gap: 6px;
+    padding-right: 6px;
+  }
+  .live-listen-mic-name {
+    max-width: 60px;
+  }
+  .live-listen-meter {
+    width: 24px;
+  }
 }
 
 

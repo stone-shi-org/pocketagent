@@ -149,4 +149,80 @@ describe('PromptBox microphone selection (PA-94)', () => {
   });
 });
 
+describe('PromptBox live stream component alignment and layout (PA-97)', () => {
+  it('renders AttachButton before live-listen-indicator so AttachButton is never sandwiched', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+
+    const html = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-test-pa97-active"
+        onSend={() => true}
+        disabled={false}
+        supportsImageAttachment={true}
+        supportsLiveListen={true}
+        liveListenActive={true}
+        onSetLiveListen={() => {}}
+      />,
+    );
+
+    const attachIdx = html.indexOf('class="attach-btn"');
+    const indicatorIdx = html.indexOf('class="live-listen-indicator"');
+    expect(attachIdx).toBeGreaterThan(-1);
+    expect(indicatorIdx).toBeGreaterThan(-1);
+    // AttachButton must precede live-listen-indicator in the DOM
+    expect(attachIdx).toBeLessThan(indicatorIdx);
+
+    // Active toggle button is inside live-listen-indicator, not rendered as a standalone button outside it
+    const activeBtnIdx = html.indexOf('class="live-listen-btn active"');
+    expect(activeBtnIdx).toBeGreaterThan(indicatorIdx);
+
+    // No second live-listen button exists
+    const lastBtnIdx = html.lastIndexOf('class="live-listen-btn');
+    expect(lastBtnIdx).toBe(activeBtnIdx);
+  });
+
+  it('renders standalone inactive live-listen button when live listen is off', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+
+    const html = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-test-pa97-inactive"
+        onSend={() => true}
+        disabled={false}
+        supportsImageAttachment={true}
+        supportsLiveListen={true}
+        liveListenActive={false}
+        onSetLiveListen={() => {}}
+      />,
+    );
+
+    expect(html).not.toContain('class="live-listen-indicator"');
+    expect(html).toContain('class="live-listen-btn"');
+    expect(html).not.toContain('class="live-listen-btn active"');
+  });
+
+  it('renders live-listen-indicator at the start when image attachment is not supported', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+
+    const html = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-test-pa97-no-attach"
+        onSend={() => true}
+        disabled={false}
+        supportsImageAttachment={false}
+        supportsLiveListen={true}
+        liveListenActive={true}
+        onSetLiveListen={() => {}}
+      />,
+    );
+
+    expect(html).not.toContain('class="attach-btn"');
+    expect(html).toContain('class="live-listen-indicator"');
+    expect(html).toContain('class="live-listen-btn active"');
+  });
+});
+
 
