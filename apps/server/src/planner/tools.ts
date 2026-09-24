@@ -1312,8 +1312,9 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
   {
     name: 'start_subagent_session',
     description:
-      'Start a new subagent and hand it a task: either a fresh coding-agent session in an ' +
-      'already-configured project workspace, or a new chat with another configured Pocket Agent. ' +
+      'Start a new subagent session for long-running software development or autonomous codebase modifications ' +
+      'in a project workspace. Do NOT use subagents for running shell commands, SSH, system queries, diagnostics, ' +
+      'or simple scripts — use the "bash" tool directly instead. ' +
       'Call list_subagents first to see what is configured. Returns a handle immediately — the ' +
       'subagent runs asynchronously in the background. Completion is delivered automatically as a wake ' +
       'notification to this chat; do NOT poll get_subagent_status, list_sessions, or read_session_output in a loop — ' +
@@ -1698,8 +1699,10 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
   {
     name: 'bash',
     description:
-      'Execute a bash shell command on the host (e.g. ssh, git, curl, build tools, linux utilities). ' +
-      'Output is captured and size-capped, and the command is killed after the configured timeout if it has not finished.',
+      'Execute a bash shell command directly on the host (e.g. ssh, curl, git, zfs, system diagnostics, ' +
+      'linux utilities, scripts). Output is captured and size-capped, and the command is killed after the ' +
+      'configured timeout if it has not finished. Always prefer calling this tool directly for running ' +
+      'commands, checking remote servers via SSH, or running scripts, rather than spawning a subagent.',
     parameters: {
       type: 'object',
       properties: {

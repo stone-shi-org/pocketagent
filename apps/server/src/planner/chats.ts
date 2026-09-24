@@ -991,6 +991,12 @@ export class PlannerChatService {
     if (this.opts.skills.listKnownSkills(workspaceId).length === 0) {
       tools = tools.filter((t) => t.name !== LIST_SKILLS_NAME && t.name !== USE_SKILL_NAME);
     }
+
+    // PA-95: when `bash` is enabled, omit legacy `exec_command` from what is sent to the LLM
+    // so models are not presented with conflicting or duplicate command tools.
+    if (tools.some((t) => t.name === 'bash')) {
+      tools = tools.filter((t) => t.name !== 'exec_command');
+    }
     return tools;
   }
 
@@ -1041,7 +1047,12 @@ export class PlannerChatService {
    * server's decision to trust unchecked.
    */
   private resolveEnabledTool(workspaceId: string | null, name: string): PlannerToolDefinition | undefined {
-    return this.toolsFor(workspaceId).find((t) => t.name === name);
+    const direct = this.toolsFor(workspaceId).find((t) => t.name === name);
+    if (direct) return direct;
+    if (name === 'exec_command') {
+      return this.toolsFor(workspaceId).find((t) => t.name === 'bash');
+    }
+    return undefined;
   }
 
   /** Distinguishes three outcomes for the same "a tool call can't run"

@@ -1994,6 +1994,46 @@ describe('planner chat routes over HTTP', () => {
       await liveStt.close();
     }
   });
+
+  it('omits legacy exec_command from LLM tool specs when bash is active and resolves exec_command calls to bash', async () => {
+    let capturedTools: Array<{ function: { name: string } }> = [];
+    const fetchImpl = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string) as {
+        tools?: Array<{ function: { name: string } }>;
+        messages: Array<{ role: string; content: string | null }>;
+      };
+      if (body.tools) {
+        capturedTools = body.tools;
+      }
+      const hasToolResult = body.messages.some((m) => m.role === 'tool');
+      if (!hasToolResult) {
+        // Return legacy exec_command call to verify resolveEnabledTool handles it
+        return fakeToolCallResponse('exec_command', { command: 'echo resolved_via_exec_command' });
+      }
+      return fakeCompletionResponse('finished execution');
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const { events } = await sendMessage(t, chat.id, 'run a test command');
+
+    // Verify bash is in LLM tool specs but exec_command is omitted
+    const toolNames = capturedTools.map((t) => t.function.name);
+    expect(toolNames).toContain('bash');
+    expect(toolNames).not.toContain('exec_command');
+
+    // Verify exec_command executed successfully via bash alias
+    const toolResult = events.find((e) => e.kind === 'tool_result') as {
+      content: string;
+      isError: boolean;
+    };
+    expect(toolResult).toBeDefined();
+    expect(toolResult.isError).toBe(false);
+    expect(toolResult.content).toContain('resolved_via_exec_command');
+  });
 });
+
 
 
