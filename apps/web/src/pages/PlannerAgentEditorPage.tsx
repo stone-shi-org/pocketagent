@@ -15,6 +15,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import { useHostApi } from '../hosts/HostContext.js';
+import { getToolShortDescription, groupToolsByCategory } from '../agent/planner-tools-metadata.js';
 
 interface Props {
   /** Always an existing agent's id — creating a new one is still
@@ -426,22 +427,38 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
         {tools === null ? (
           <div className="spinner">Loading…</div>
         ) : (
-          tools.map((t) => (
-            <label key={t.name} className="planner-checkbox-row" style={{ marginBottom: 6 }}>
-              <input
-                type="checkbox"
-                checked={t.enabled}
-                disabled={busy || t.disabledGlobally}
-                onChange={(e) => toggleTool(t.name, e.target.checked)}
-              />
-              <span>
-                <code>{t.name}</code>
-                {t.readOnly && <span className="planner-row-meta"> (read-only)</span>}
-                {t.disabledGlobally && <span className="planner-row-meta"> — disabled globally</span>}
-                <br />
-                <span className="planner-row-meta">{t.description}</span>
-              </span>
-            </label>
+          groupToolsByCategory(tools).map((group) => (
+            <div key={group.category} className="planner-tool-group" style={{ marginBottom: 14 }}>
+              <h4
+                className="planner-tool-group-title"
+                style={{
+                  fontSize: '12.5px',
+                  fontWeight: 600,
+                  color: 'var(--text-dim)',
+                  marginBottom: 6,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.04em',
+                }}
+              >
+                {group.category}
+              </h4>
+              {group.tools.map((t) => (
+                <label key={t.name} className="planner-checkbox-row" style={{ marginBottom: 6 }} title={t.description}>
+                  <input
+                    type="checkbox"
+                    checked={t.enabled}
+                    disabled={busy || t.disabledGlobally}
+                    onChange={(e) => toggleTool(t.name, e.target.checked)}
+                  />
+                  <span>
+                    <code>{t.name}</code>
+                    {t.readOnly && <span className="planner-row-meta"> (read-only)</span>}
+                    {t.disabledGlobally && <span className="planner-row-meta"> — disabled globally</span>}
+                    <span className="planner-row-meta"> — {getToolShortDescription(t.name, t.description)}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
           ))
         )}
       </div>

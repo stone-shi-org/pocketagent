@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getVoiceDirectSendPref, getVoiceMicDeviceIdPref, setVoiceDirectSendPref, setVoiceMicDeviceIdPref } from './voice-prefs.js';
+import {
+  getGeminiLivePref,
+  getVoiceDirectSendPref,
+  getVoiceMicDeviceIdPref,
+  setGeminiLivePref,
+  setVoiceDirectSendPref,
+  setVoiceMicDeviceIdPref,
+} from './voice-prefs.js';
 
 /** A minimal in-memory stand-in for the real `localStorage`. */
 function fakeStorage(): Storage {
@@ -79,6 +86,35 @@ describe('voice mic device id preference (PA-94)', () => {
     vi.stubGlobal('localStorage', undefined);
     expect(() => setVoiceMicDeviceIdPref('device-mic-123')).not.toThrow();
     expect(getVoiceMicDeviceIdPref()).toBe('');
+  });
+});
+
+describe('gemini live preference (PA-98)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('defaults to false when unset', () => {
+    vi.stubGlobal('localStorage', fakeStorage());
+    expect(getGeminiLivePref()).toBe(false);
+    expect(getGeminiLivePref('chat-1')).toBe(false);
+  });
+
+  it('remembers global and per-chat preference', () => {
+    vi.stubGlobal('localStorage', fakeStorage());
+    setGeminiLivePref(true, 'chat-1');
+    expect(getGeminiLivePref('chat-1')).toBe(true);
+    expect(getGeminiLivePref()).toBe(true);
+
+    setGeminiLivePref(false, 'chat-1');
+    expect(getGeminiLivePref('chat-1')).toBe(false);
+    expect(getGeminiLivePref()).toBe(false);
+  });
+
+  it('degrades to false without throwing when storage is unavailable', () => {
+    vi.stubGlobal('localStorage', undefined);
+    expect(() => setGeminiLivePref(true, 'chat-1')).not.toThrow();
+    expect(getGeminiLivePref('chat-1')).toBe(false);
   });
 });
 

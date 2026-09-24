@@ -18,6 +18,7 @@ import { McpRegistriesSection } from '../components/McpRegistriesSection.js';
 import { SkillsSection } from '../components/SkillsSection.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { GeminiLiveSettingsSection } from '../components/GeminiLiveSettingsSection.js';
+import { getToolShortDescription, groupToolsByCategory } from '../agent/planner-tools-metadata.js';
 
 interface Props {
   onApiError: (error: unknown) => void;
@@ -1071,21 +1072,37 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
           away from every agent, regardless of that agent's own setting — use an agent's own editor
           to restrict a tool for just that one instead.
         </p>
-        {tools.map((t) => (
-          <label key={t.name} className="planner-checkbox-row" style={{ marginBottom: 6 }}>
-            <input
-              type="checkbox"
-              checked={t.enabled}
-              disabled={busy}
-              onChange={(e) => toggleGlobalTool(t.name, e.target.checked)}
-            />
-            <span>
-              <code>{t.name}</code>
-              {t.readOnly && <span className="planner-row-meta"> (read-only)</span>}
-              <br />
-              <span className="planner-row-meta">{t.description}</span>
-            </span>
-          </label>
+        {groupToolsByCategory(tools).map((group) => (
+          <div key={group.category} className="planner-tool-group" style={{ marginBottom: 14 }}>
+            <h4
+              className="planner-tool-group-title"
+              style={{
+                fontSize: '12.5px',
+                fontWeight: 600,
+                color: 'var(--text-dim)',
+                marginBottom: 6,
+                textTransform: 'uppercase',
+                letterSpacing: '0.04em',
+              }}
+            >
+              {group.category}
+            </h4>
+            {group.tools.map((t) => (
+              <label key={t.name} className="planner-checkbox-row" style={{ marginBottom: 6 }} title={t.description}>
+                <input
+                  type="checkbox"
+                  checked={t.enabled}
+                  disabled={busy}
+                  onChange={(e) => toggleGlobalTool(t.name, e.target.checked)}
+                />
+                <span>
+                  <code>{t.name}</code>
+                  {t.readOnly && <span className="planner-row-meta"> (read-only)</span>}
+                  <span className="planner-row-meta"> — {getToolShortDescription(t.name, t.description)}</span>
+                </span>
+              </label>
+            ))}
+          </div>
         ))}
       </div>
 

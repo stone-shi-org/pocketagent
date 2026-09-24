@@ -330,21 +330,24 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
                 <br />
                 {r.description && (
                   <>
-                    <span className="planner-row-meta">{r.description}</span>
+                    <span className="planner-row-meta planner-mcp-desc" title={r.description}>
+                      {r.description.length > 70 ? `${r.description.slice(0, 67)}…` : r.description}
+                    </span>
                     <br />
                   </>
                 )}
                 {!r.description && r.reportedInstructions && (
                   <>
-                    <span className="planner-row-meta">
-                      No description set. The server itself suggests: "{r.reportedInstructions}"{' '}
+                    <span className="planner-row-meta planner-mcp-desc" title={r.reportedInstructions}>
+                      Server suggestion available.{' '}
                       <button
                         type="button"
                         className="planner-btn"
+                        style={{ padding: '1px 6px', fontSize: '11px', marginLeft: 4 }}
                         disabled={busy}
                         onClick={() => void useReportedInstructions(r)}
                       >
-                        Use this as description
+                        Use as description
                       </button>
                     </span>
                     <br />

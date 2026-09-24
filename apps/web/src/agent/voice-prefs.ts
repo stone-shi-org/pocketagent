@@ -55,3 +55,33 @@ export function setVoiceMicDeviceIdPref(deviceId: string): void {
   }
 }
 
+/**
+ * Browser preference: whether Gemini Live hands-free live stream is enabled
+ * for Pocket Agent chats (PA-98).
+ */
+const GEMINI_LIVE_KEY = 'pocketagent:gemini-live-enabled';
+
+export function getGeminiLivePref(chatId?: string): boolean {
+  try {
+    if (chatId) {
+      const perChat = localStorage.getItem(`${GEMINI_LIVE_KEY}:${chatId}`);
+      if (perChat !== null) return perChat === 'true';
+    }
+    return localStorage.getItem(GEMINI_LIVE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export function setGeminiLivePref(value: boolean, chatId?: string): void {
+  try {
+    const str = value ? 'true' : 'false';
+    localStorage.setItem(GEMINI_LIVE_KEY, str);
+    if (chatId) {
+      localStorage.setItem(`${GEMINI_LIVE_KEY}:${chatId}`, str);
+    }
+  } catch {
+    /* private browsing or storage disabled */
+  }
+}
+

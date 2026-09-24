@@ -1988,7 +1988,7 @@ input[type='number']::-webkit-outer-spin-button {
 .answer pre {
   background: var(--console);
   color: var(--console-text);
-  border: 1px solid transparent;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px;
   overflow-x: auto;
@@ -1996,6 +1996,85 @@ input[type='number']::-webkit-outer-spin-button {
   line-height: 1.5;
 }
 .answer pre code { background: none; padding: 0; font-size: inherit; }
+
+/* PA-98: modern code block container with header, language badge, and copy button */
+.code-block-container {
+  margin: 10px 0;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev-2, #181b20);
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.code-block-lang {
+  font-weight: 500;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+}
+
+.code-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.code-copy-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.code-copy-btn.copied {
+  color: var(--success, #10b981);
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.code-copy-btn .copy-icon {
+  flex-shrink: 0;
+}
+
+.code-block-container pre {
+  margin: 0;
+  padding: 12px 14px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--console-text, #e2e8f0);
+}
+
+.code-block-container pre code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 .answer blockquote {
   border-left: 3px solid var(--border);
   margin: 8px 0;
@@ -7454,11 +7533,59 @@ button.chat-rate-limit-badge {
   color: var(--warn);
 }
 
-/* PA-96: what Gemini Live heard and said this turn, above the composer. The
-   persisted transcript is the record; this is the live view of the turn in
-   progress, so it is quiet (dim, small) rather than another message bubble. */
+/* PA-98: Gemini Live header toggler and compact disclosure */
+.gemini-live-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  margin-left: 6px;
+  font-size: 12px;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.gemini-live-toggle:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--bg-elev-2);
+}
+
+.gemini-live-toggle.active {
+  background: rgba(59, 130, 246, 0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.gemini-live-toggle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: auto;
+}
+
 .planner-gemini-disclosure {
-  margin: 0 16px 8px;
+  margin: 0 16px 6px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+}
+
+/* PA-98: compact MCP description in registry cards */
+.planner-mcp-desc {
+  display: inline-block;
+  max-width: 520px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
 }
 
 .planner-gemini-strip {

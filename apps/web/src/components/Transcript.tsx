@@ -4,6 +4,7 @@ import type { TranscriptItem, TranscriptState, TurnNode } from '../agent/transcr
 import { groupIntoTurns } from '../agent/transcript.js';
 import { promptHeadline } from '../agent/prompt-headline.js';
 import { renderMarkdown } from '../agent/markdown.js';
+import { enhanceCodeBlocks, handleCodeBlockClick } from '../agent/code-blocks.js';
 import { ToolCard } from './ToolCard.js';
 import { CopyButton } from './CopyButton.js';
 import { Icon } from './Icon.js';
@@ -425,8 +426,18 @@ function AssistantText({ item }: { item: TranscriptItem & { type: 'text' } }): J
 
 function Markdown({ text, streaming }: { text: string; streaming: boolean }): JSX.Element {
   const html = useMemo(() => renderMarkdown(text), [text]);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    enhanceCodeBlocks(containerRef.current);
+  }, [html]);
+
   return (
-    <div className={`answer ${streaming ? 'streaming' : ''}`}>
+    <div
+      ref={containerRef}
+      className={`answer ${streaming ? 'streaming' : ''}`}
+      onClick={handleCodeBlockClick}
+    >
       {/* Sanitized in renderMarkdown; the agent's output is untrusted content. */}
       <div dangerouslySetInnerHTML={{ __html: html }} />
     </div>

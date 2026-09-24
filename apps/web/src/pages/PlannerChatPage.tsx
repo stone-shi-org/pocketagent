@@ -25,6 +25,7 @@ import { isSkipCommand } from '../audio/voice-commands.js';
 import { judgeUtterance } from '../audio/utterance-harness.js';
 import { MIC_CHANGE_EVENT } from '../audio/devices.js';
 import { GeminiLiveController, type GeminiLiveState } from '../audio/gemini-live.js';
+import { getGeminiLivePref, setGeminiLivePref } from '../agent/voice-prefs.js';
 
 
 
@@ -255,6 +256,19 @@ export function PlannerChatPage({
   /** Live mode on this page means Gemini Live, not the live-stt pipeline. */
   const geminiMode = geminiSelected && geminiAvailable;
   const geminiLive = geminiMode && liveListenActive;
+  const isGeminiConfigured = geminiAvailable && geminiSelected;
+
+  // PA-98: Restore saved Gemini Live preference if configured for this chat
+  const restoredPrefRef = useRef(false);
+  useEffect(() => {
+    if (restoredPrefRef.current) return;
+    if (geminiAvailable !== false && liveProvider !== null) {
+      restoredPrefRef.current = true;
+      if (geminiSelected && geminiAvailable && getGeminiLivePref(chatId)) {
+        setLiveListenActive(true);
+      }
+    }
+  }, [geminiAvailable, liveProvider, geminiSelected, chatId]);
 
   const seenPermanentKeys = useRef<Set<string>>(new Set());
   const seenEphemeralKeys = useRef<Map<string, number>>(new Map());
@@ -673,8 +687,11 @@ export function PlannerChatPage({
         if (geminiMode) GeminiLiveController.prime();
       }
       setLiveListenActive(enabled);
+      if (geminiSelected && geminiAvailable) {
+        setGeminiLivePref(enabled, chatId);
+      }
     },
-    [geminiMode],
+    [geminiMode, geminiSelected, geminiAvailable, chatId],
   );
 
   const handleStopSpeaking = useCallback(() => {
@@ -936,6 +953,34 @@ export function PlannerChatPage({
             <button type="button" className="planner-btn" onClick={startEditingTitle} aria-label="Rename chat">
               <Icon name="edit" size={14} />
             </button>
+            <button
+              type="button"
+              className={`planner-btn gemini-live-toggle${geminiLive ? ' active' : ''}${!isGeminiConfigured ? ' disabled' : ''}`}
+              disabled={!isGeminiConfigured}
+              onClick={() => handleToggleLiveListen(!liveListenActive)}
+              aria-label={
+                !geminiAvailable
+                  ? 'Gemini Live is not configured (requires API key in Settings)'
+                  : !geminiSelected
+                    ? 'Gemini Live is not configured for this agent'
+                    : geminiLive
+                      ? 'Turn off Gemini Live'
+                      : 'Turn on Gemini Live'
+              }
+              title={
+                !geminiAvailable
+                  ? 'Gemini Live is not configured on this server (add Gemini API key in Settings → Pocket Agent)'
+                  : !geminiSelected
+                    ? 'Gemini Live is not enabled for this agent (select Gemini Live in agent settings)'
+                    : geminiLive
+                      ? 'Gemini Live is active (listening) — click to turn off'
+                      : 'Gemini Live is configured — click to enable hands-free live mode'
+              }
+            >
+              <Icon name="live-listen" size={14} />
+              <span>Gemini Live</span>
+              {geminiLive && <span className="live-listen-dot" aria-hidden="true" />}
+            </button>
           </>
         )}
       </div>
@@ -972,12 +1017,8 @@ export function PlannerChatPage({
 
       {geminiSelected && (
         // PA-96 disclosure, on every visit to a chat whose agent uses Gemini
-        // Live — the same "persistently, not just when it was switched on"
-        // rule the approval-bypass callout above follows. A Pocket Agent
-        // already sends its context to a configured LLM endpoint; what is new
-        // is *which company* receives it, and that it includes the user's
-        // voice.
-        <div className="warn-callout planner-gemini-disclosure" role="status">
+        // Live — rendered compactly per PA-98.
+        <div className="planner-gemini-disclosure" role="status">
           {geminiAvailable
             ? 'Live mode in this chat uses Gemini Live. While it is on, your voice, this conversation and tool results (such as files it reads and session output) are sent to Google. Gemini bills audio for as long as the mic is open.'
             : 'This agent is set to use Gemini Live for live mode, but no usable Gemini API key is configured on this server, so live mode is unavailable here. Add one in Settings → Pocket Agent.'}
