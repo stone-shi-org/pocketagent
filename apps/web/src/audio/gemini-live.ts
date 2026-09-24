@@ -8,6 +8,7 @@ import type {
 import { floatTo16BitPcm, int16ArrayToBase64, base64ToInt16Array, int16ToFloat32 } from './pcm.js';
 import { rms } from './vad.js';
 import { SampleBatcher, StreamingResampler, scheduleChunk } from './pcm-stream.js';
+import { getSharedAudioContext, unlockAudioContext } from './audio-context.js';
 import {
   GEMINI_INPUT_SAMPLE_RATE,
   LiveTurnTracker,
@@ -84,16 +85,7 @@ export class GeminiLiveError extends Error {
   override readonly name = 'GeminiLiveError';
 }
 
-/** One `AudioContext` for playback, created inside a user gesture when
-    possible — iOS only lets a context start from one. */
-let sharedPlaybackContext: AudioContext | null = null;
-
-function playbackContext(): AudioContext {
-  if (!sharedPlaybackContext || sharedPlaybackContext.state === 'closed') {
-    sharedPlaybackContext = new AudioContext();
-  }
-  return sharedPlaybackContext;
-}
+const playbackContext = getSharedAudioContext;
 
 /**
  * Plays Gemini's streamed PCM gaplessly by scheduling each chunk on the audio
@@ -151,6 +143,7 @@ class MicStream {
   private stream: MediaStream | null = null;
   private context: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
+  private silentGain: GainNode | null = null;
 
   constructor(
     private readonly onChunk: (base64: string) => void,
@@ -180,7 +173,10 @@ class MicStream {
     }
     this.context = new AudioContext();
     if (this.context.state === 'suspended') await this.context.resume().catch(() => {});
-    await this.context.audioWorklet.addModule('/pcm-worklet-processor.js');
+    const workletUrl = typeof window !== 'undefined'
+      ? new URL('/pcm-worklet-processor.js', window.location.href).href
+      : '/pcm-worklet-processor.js';
+    await this.context.audioWorklet.addModule(workletUrl);
     const source = this.context.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.context, 'pcm-capture-processor');
     const resampler = new StreamingResampler(this.context.sampleRate, GEMINI_INPUT_SAMPLE_RATE);
@@ -191,11 +187,22 @@ class MicStream {
       if (batch) this.onChunk(int16ArrayToBase64(batch));
     };
     source.connect(this.node);
+
+    // iOS Safari / WebKit: WebAudio engine is pull-based from the output
+    // destination. AudioWorkletProcessor.process() is only invoked if the node
+    // graph leads to destination. A muted GainNode completes the pull path
+    // without playing mic audio back through speakers.
+    this.silentGain = this.context.createGain();
+    this.silentGain.gain.setValueAtTime(0, this.context.currentTime);
+    this.node.connect(this.silentGain);
+    this.silentGain.connect(this.context.destination);
   }
 
   async stop(): Promise<void> {
     this.node?.port.close();
     this.node?.disconnect();
+    this.silentGain?.disconnect();
+    this.silentGain = null;
     this.stream?.getTracks().forEach((track) => track.stop());
     await this.context?.close().catch(() => {});
     this.node = null;
@@ -234,12 +241,7 @@ export class GeminiLiveController {
   /** Call synchronously inside the click that turns live mode on, so iOS
       lets the playback context start. Harmless anywhere else. */
   static prime(): void {
-    try {
-      const context = playbackContext();
-      if (context.state === 'suspended') void context.resume().catch(() => {});
-    } catch {
-      // No Web Audio at all; `start()` reports it properly.
-    }
+    void unlockAudioContext();
   }
 
   static isSupported(): boolean {

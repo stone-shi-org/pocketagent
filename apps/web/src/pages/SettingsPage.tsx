@@ -13,6 +13,7 @@ import { getVoiceDirectSendPref, setVoiceDirectSendPref } from '../agent/voice-p
 import { formatBuildInfo } from '../version.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
+import { unlockAudioContext } from '../audio/audio-context.js';
 import { useAudioInputDevices } from '../audio/devices.js';
 
 
@@ -124,6 +125,7 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
 
   const runTestTts = async (): Promise<void> => {
     if (!data?.settings.liveSttUrl) return;
+    void unlockAudioContext();
     setTestingTts(true);
     setTtsResult(null);
     try {

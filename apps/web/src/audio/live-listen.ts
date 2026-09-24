@@ -64,6 +64,7 @@ export class LiveListenController {
   private stream: MediaStream | null = null;
   private context: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
+  private silentGain: GainNode | null = null;
   private readonly endpointer: SpeechEndpointer;
   private chunks: Float32Array[] = [];
   private speechStartedAtMs = 0;
@@ -131,11 +132,23 @@ export class LiveListenController {
     if (this.context.state === 'suspended') {
       await this.context.resume();
     }
-    await this.context.audioWorklet.addModule('/pcm-worklet-processor.js');
+    const workletUrl = typeof window !== 'undefined'
+      ? new URL('/pcm-worklet-processor.js', window.location.href).href
+      : '/pcm-worklet-processor.js';
+    await this.context.audioWorklet.addModule(workletUrl);
     const source = this.context.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.context, 'pcm-capture-processor');
     this.node.port.onmessage = (event: MessageEvent<Float32Array>) => this.onFrame(event.data);
     source.connect(this.node);
+
+    // iOS Safari / WebKit: WebAudio engine is pull-based from the output
+    // destination. AudioWorkletProcessor.process() is only invoked if the node
+    // graph leads to destination. A muted GainNode completes the pull path
+    // without playing mic audio back through speakers.
+    this.silentGain = this.context.createGain();
+    this.silentGain.gain.setValueAtTime(0, this.context.currentTime);
+    this.node.connect(this.silentGain);
+    this.silentGain.connect(this.context.destination);
   }
 
   private onFrame(frame: Float32Array): void {
@@ -227,6 +240,8 @@ export class LiveListenController {
   async stop(): Promise<void> {
     this.node?.port.close();
     this.node?.disconnect();
+    this.silentGain?.disconnect();
+    this.silentGain = null;
     this.stream?.getTracks().forEach((track) => track.stop());
     await this.context?.close();
     this.node = null;

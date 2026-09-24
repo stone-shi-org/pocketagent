@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type PointerEvent } from 'react';
 import { PushToTalkRecorder, VoiceCaptureError, type RecordedUtterance } from '../audio/capture.js';
+import { unlockAudioContext } from '../audio/audio-context.js';
 import { Icon } from './Icon.js';
 
 export interface MicButtonProps {
@@ -112,6 +113,7 @@ export const MicButton = forwardRef<MicButtonHandle, MicButtonProps>(function Mi
 
   async function begin(event: PointerEvent<HTMLButtonElement>): Promise<void> {
     if (disabled || event.button !== 0) return;
+    void unlockAudioContext();
 
     // If already recording (from a tap), a second click/tap stops and sends.
     if (stateRef.current === 'recording') {

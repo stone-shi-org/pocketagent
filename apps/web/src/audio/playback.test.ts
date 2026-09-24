@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { int16ArrayToBase64 } from './pcm.js';
 import { TtsPlaybackQueue } from './playback.js';
+import { resetSharedAudioContext } from './audio-context.js';
 
 /**
  * A minimal Web Audio stand-in. `TtsPlaybackQueue` only ever creates a
@@ -62,9 +63,11 @@ describe('TtsPlaybackQueue', () => {
   beforeEach(() => {
     FakeAudioContext.started = 0;
     (globalThis as unknown as { AudioContext: unknown }).AudioContext = FakeAudioContext;
+    resetSharedAudioContext();
   });
 
   afterEach(() => {
+    resetSharedAudioContext();
     delete (globalThis as unknown as { AudioContext?: unknown }).AudioContext;
   });
 
@@ -155,9 +158,11 @@ describe('TtsPlaybackQueue pause/resume (PA-85)', () => {
   beforeEach(() => {
     FakeAudioContext.started = 0;
     (globalThis as unknown as { AudioContext: unknown }).AudioContext = FakeAudioContext;
+    resetSharedAudioContext();
   });
 
   afterEach(() => {
+    resetSharedAudioContext();
     delete (globalThis as unknown as { AudioContext?: unknown }).AudioContext;
   });
 
