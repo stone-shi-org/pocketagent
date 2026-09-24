@@ -1143,6 +1143,15 @@ in would drop a half-arrived `<spea` and then concatenate its `k>` onto
 already-stripped text, corrupting the reply for the rest of the turn. A
 `user_prompt` arrives whole, so it has no such state to break.
 
+**A tag inside markdown code is a mention, not a tag.** Both sides find tags through one
+`SpeakTagScanner` (`spoken-text.ts`), which ignores `<speak>` inside an inline span or a fence.
+Before it, prod session `Axd2XlzNSf5d` — a reply *explaining* this feature — wrote
+`` `<speak>` `` with no closing tag, and the chat cut the reply off at that backtick (492 of
+8,452 characters shown) while the extractor would have read everything after it aloud as the
+summary. And an unclosed block is hidden only while `stripSpokenSummary(text, { streaming })`
+says the reply may still close it: once finished, it is shown, because a message cut off with
+no sign anything was cut is the worst way this can fail.
+
 **Hidden is not the same as unreachable.** The paraphrase is the one thing in a
 turn that exists *only* as sound: stripped from the reply, gone after playback.
 So an assistant message that carried one gets a small speaker button beside

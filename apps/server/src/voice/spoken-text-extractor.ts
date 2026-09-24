@@ -1,4 +1,4 @@
-import { SPEAK_CLOSE_TAG, SPEAK_OPEN_TAG } from '@pocketagent/protocol';
+import { SPEAK_CLOSE_TAG, SPEAK_OPEN_TAG, SpeakTagScanner, type SpeakToken } from '@pocketagent/protocol';
 
 /**
  * PA-84: turns a streamed reply into the text that should actually be spoken.
@@ -37,6 +37,16 @@ import { SPEAK_CLOSE_TAG, SPEAK_OPEN_TAG } from '@pocketagent/protocol';
  * accepted cost: the alternative is buffering every reply until a tag might
  * still show up, which reintroduces exactly the latency this avoids.
  *
+ * ## A tag inside code is not a tag
+ *
+ * Tags are found by the shared `SpeakTagScanner` (`packages/protocol`), which
+ * ignores any `<speak>` inside an inline code span or a fence. A reply that
+ * merely *mentions* the tag (prod session `Axd2XlzNSf5d` explained this
+ * feature and wrote `` `<speak>` `` with no closing tag) otherwise flipped
+ * this into tagged mode and read out everything after the mention as the
+ * summary. The browser's `stripSpokenSummary` reads the same scanner, so the
+ * two sides cannot disagree about where a block starts.
+ *
  * ## Why fallback tracks lines, and still streams within one
  *
  * A fence can open in one `text_delta` and close in another, and a delta
@@ -74,10 +84,10 @@ type LineState = 'pending' | 'speaking' | 'skipping';
 
 export class SpokenTextExtractor {
   private mode: Mode = 'deciding';
-  /** Held text while `mode === 'deciding'`. At most `<speak>`'s own length. */
+  /** Finds the real tags. Holds back only a trailing partial tag. */
+  private readonly scanner = new SpeakTagScanner();
+  /** Text seen while `mode === 'deciding'`, all whitespace so far. */
   private pending = '';
-  /** Held text that might be a partial `<speak>`/`</speak>` in tagged mode. */
-  private tagBuffer = '';
   private insideTag = false;
   /** Unreleased text of the current line in fallback mode. */
   private lineBuffer = '';
@@ -90,45 +100,56 @@ export class SpokenTextExtractor {
   /** Feed one `text_delta`'s text. Returns the text to speak, possibly ''. */
   push(delta: string): string {
     if (delta.length === 0) return '';
+    return this.consume(this.scanner.push(delta));
+  }
+
+  /**
+   * Routes one delta's tokens by mode. The mode decision looks at a whole
+   * delta's tokens at once, so a tag arriving in the same delta as a short
+   * preamble ("Sure! <speak>…") still counts as leading.
+   */
+  private consume(tokens: SpeakToken[]): string {
+    let out = '';
+    let i = 0;
 
     if (this.mode === 'deciding') {
-      this.pending += delta;
-      const trimmed = this.pending.trimStart();
-
-      if (trimmed.includes(SPEAK_OPEN_TAG)) {
+      const openAt = tokens.findIndex((t) => t.kind === 'open');
+      if (openAt !== -1) {
         this.mode = 'tagged';
-        return this.pushTagged(this.takePending());
+        this.pending = '';
+        i = openAt;
+      } else {
+        for (const t of tokens) if (t.kind === 'text') this.pending += t.text;
+        if (this.pending.trim().length === 0) return '';
+        this.mode = 'fallback';
+        return this.pushFallback(this.takePending());
       }
-      // Still possibly the opening tag, one character at a time.
-      if (SPEAK_OPEN_TAG.startsWith(trimmed)) return '';
-
-      this.mode = 'fallback';
-      return this.pushFallback(this.takePending());
     }
 
-    if (this.mode === 'fallback') {
-      // A tag that arrives late still wins. `lineBuffer` is included because
-      // an opening tag can straddle a delta boundary, and an unreleased line
-      // tail is exactly where its first half would be sitting — testing
-      // `delta` alone would miss `<spe` + `ak>`. (`lineBuffer + delta`
-      // subsumes `delta`, so there is no second check to make.)
-      const combined = this.lineBuffer + delta;
-      if (combined.includes(SPEAK_OPEN_TAG)) {
-        this.mode = 'tagged';
-        // Every scrap of fallback line state is dropped with the mode: a
-        // half-classified line, a part-spoken one, or an unclosed fence left
-        // over from the prose would otherwise leak into the tagged pass and
-        // silently swallow the summary this switch exists to catch.
-        this.lineBuffer = '';
-        this.lineState = 'pending';
-        this.emittedInLine = false;
-        this.inFence = false;
-        return this.pushTagged(combined);
+    for (; i < tokens.length; i++) {
+      const token = tokens[i]!;
+      if (this.mode === 'fallback') {
+        if (token.kind === 'text') {
+          out += this.pushFallback(token.text);
+        } else if (token.kind === 'open') {
+          // A tag that arrives late still wins. Every scrap of fallback line
+          // state is dropped with the mode: a half-classified line, a
+          // part-spoken one, or an unclosed fence left over from the prose
+          // would otherwise leak into the tagged pass and silently swallow the
+          // summary this switch exists to catch.
+          this.mode = 'tagged';
+          this.lineBuffer = '';
+          this.lineState = 'pending';
+          this.emittedInLine = false;
+          this.inFence = false;
+          this.insideTag = true;
+        }
+        // A stray `</speak>` in prose is markup and is never pronounced.
+        continue;
       }
-      return this.pushFallback(delta);
+      out += this.pushTagged(token);
     }
-
-    return this.pushTagged(delta);
+    return out;
   }
 
   /**
@@ -146,27 +167,26 @@ export class SpokenTextExtractor {
    *  whatever is still held: a trailing clause with no newline, or a reply so
    *  short it never left the decision phase. */
   flush(): string {
+    const held = this.scanner.finish();
     if (this.mode === 'deciding') {
       this.mode = 'fallback';
-      const held = this.takePending();
-      return `${this.pushFallback(held)}${this.flushFallback()}`.trimEnd();
+      const text = this.takePending() + held;
+      return `${this.pushFallback(text)}${this.flushFallback()}`.trimEnd();
     }
     if (this.mode === 'tagged') {
-      // Text inside an unclosed tag is genuinely spoken text; a partial tag
-      // left in the buffer is markup and is dropped.
-      const tail = this.insideTag ? this.tagBuffer : '';
-      this.tagBuffer = '';
-      return tail.trim();
+      // A partial tag left over is markup, and is dropped: inside a block it
+      // could only have been the start of `</speak>`.
+      return '';
     }
-    return this.flushFallback().trimEnd();
+    return `${this.pushFallback(held)}${this.flushFallback()}`.trimEnd();
   }
 
   /** Discard all state — a new turn, a stop, or an interrupt. Must clear the
    *  fence and tag flags, or the next turn inherits them and goes silent. */
   reset(): void {
     this.mode = 'deciding';
+    this.scanner.reset();
     this.pending = '';
-    this.tagBuffer = '';
     this.insideTag = false;
     this.lineBuffer = '';
     this.lineState = 'pending';
@@ -181,49 +201,24 @@ export class SpokenTextExtractor {
   }
 
   /**
-   * Emits only the text between `<speak>` and `</speak>`. Tags may be split
-   * across deltas, so a tail that could still become a tag is held rather than
-   * emitted — otherwise a `<spea` would be spoken as letters. Several blocks
-   * in one reply are all spoken, in order.
+   * Speaks only the text between `<speak>` and `</speak>`. The scanner has
+   * already resolved tags split across deltas, so a `<spea` is never spoken as
+   * letters. Several blocks in one reply are all spoken, in order.
    */
-  private pushTagged(chunk: string): string {
-    this.tagBuffer += chunk;
-    let out = '';
-
-    for (;;) {
-      if (!this.insideTag) {
-        const open = this.tagBuffer.indexOf(SPEAK_OPEN_TAG);
-        if (open === -1) {
-          // Untagged text is never spoken in this mode; keep only what might
-          // still become an opening tag.
-          const keep = partialTailLength(this.tagBuffer, SPEAK_OPEN_TAG);
-          this.tagBuffer = this.tagBuffer.slice(this.tagBuffer.length - keep);
-          break;
-        }
-        this.tagBuffer = this.tagBuffer.slice(open + SPEAK_OPEN_TAG.length);
-        this.insideTag = true;
-        continue;
-      }
-
-      const close = this.tagBuffer.indexOf(SPEAK_CLOSE_TAG);
-      if (close === -1) {
-        const keep = partialTailLength(this.tagBuffer, SPEAK_CLOSE_TAG);
-        out += this.tagBuffer.slice(0, this.tagBuffer.length - keep);
-        this.tagBuffer = this.tagBuffer.slice(this.tagBuffer.length - keep);
-        break;
-      }
-      const content = this.tagBuffer.slice(0, close);
-      out += content;
+  private pushTagged(token: SpeakToken): string {
+    if (token.kind === 'open') {
+      this.insideTag = true;
+      return '';
+    }
+    if (token.kind === 'close') {
+      this.insideTag = false;
       // A closing tag ends a sentence as far as the chunker is concerned: its
       // splitter needs literal whitespace *after* the punctuation, so two
       // adjacent blocks would otherwise fuse into one utterance and be spoken
       // as "done.Second".
-      if (content.length > 0 && !/\s$/.test(content)) out += ' ';
-      this.tagBuffer = this.tagBuffer.slice(close + SPEAK_CLOSE_TAG.length);
-      this.insideTag = false;
+      return ' ';
     }
-
-    return out;
+    return this.insideTag ? token.text : '';
   }
 
   private pushFallback(chunk: string): string {
@@ -383,16 +378,4 @@ function hasOpenInlineConstruct(text: string): boolean {
   const backticks = text.split('`').length - 1;
   if (backticks % 2 === 1) return true;
   return text.lastIndexOf('[') > text.lastIndexOf(')');
-}
-
-/**
- * Length of the longest proper prefix of `tag` that `buf` ends with — how much
- * of the buffer has to be held back because it might still become a tag.
- */
-function partialTailLength(buf: string, tag: string): number {
-  const max = Math.min(buf.length, tag.length - 1);
-  for (let len = max; len > 0; len--) {
-    if (buf.endsWith(tag.slice(0, len))) return len;
-  }
-  return 0;
 }

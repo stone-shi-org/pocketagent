@@ -374,7 +374,12 @@ function Item({ item }: { item: TranscriptItem }): JSX.Element | null {
  * text, so what you copy is what you saw.
  */
 function AssistantText({ item }: { item: TranscriptItem & { type: 'text' } }): JSX.Element {
-  const shown = useMemo(() => stripSpokenSummary(item.text), [item.text]);
+  // `streaming` matters for a finished reply: a `<speak>` the model opened and
+  // never closed is hidden only while it may still close, and shown after.
+  const shown = useMemo(
+    () => stripSpokenSummary(item.text, { streaming: item.streaming }),
+    [item.text, item.streaming],
+  );
   const spoken = useMemo(() => extractSpokenSummary(item.text), [item.text]);
   const [spokenOpen, setSpokenOpen] = useState(false);
 

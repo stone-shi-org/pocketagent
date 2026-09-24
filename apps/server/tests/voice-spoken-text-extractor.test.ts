@@ -95,6 +95,34 @@ describe('SpokenTextExtractor — tagged replies', () => {
   });
 });
 
+describe('SpokenTextExtractor — a tag in code is only a mention', () => {
+  // The server half of prod session Axd2XlzNSf5d: a mention used to flip the
+  // extractor into tagged mode, so talk-back read everything after it aloud as
+  // though it were the summary.
+  it('does not switch modes on a mention in inline code', () => {
+    const out = speak(new SpokenTextExtractor(), chop(
+      'The prompt gets the `<speak>` instruction appended.\n```ts\nconst x = 1;\n```\nThat is all.\n',
+      3,
+    ));
+    expect(out).toContain('The prompt gets the');
+    expect(out).toContain('That is all.');
+    expect(out).not.toContain('const x');
+  });
+
+  it('keeps speaking only the lede when the written reply mentions the tag', () => {
+    const out = speak(new SpokenTextExtractor(), chop(
+      '<speak>I explained the tag.</speak>\n\nThe `<speak>` tag comes first, and everything after it is shown.\n',
+      4,
+    ));
+    expect(out.trim()).toBe('I explained the tag.');
+  });
+
+  it('does not treat a reply that opens with the tag in backticks as tagged', () => {
+    const out = speak(new SpokenTextExtractor(), ['`<speak>` is the tag we use.\n']);
+    expect(out).toContain('is the tag we use.');
+  });
+});
+
 describe('SpokenTextExtractor — untagged fallback', () => {
   it('speaks prose mid-turn, before any turn_complete (PA-20 stays incremental)', () => {
     // The regression that matters most: a reply must not be held back waiting

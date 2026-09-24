@@ -95,11 +95,233 @@ export function stripSpokenSummaryInstruction(text: string): string {
 }
 
 /**
- * Matches a *partial* tag left at the end of a still-streaming buffer, so a
- * half-arrived `<spea` never flashes on screen before its next delta lands.
- * Anchored to the end and allows nothing after the prefix.
+ * One piece of a reply as the tag grammar sees it: prose, or a real tag.
  */
-const TRAILING_PARTIAL_TAG = /<\/?(?:s(?:p(?:e(?:a(?:k)?)?)?)?)?$/;
+export type SpeakToken =
+  | { kind: 'text'; text: string }
+  | { kind: 'open' }
+  | { kind: 'close' };
+
+/**
+ * Finds `<speak>`/`</speak>` in streamed text, **ignoring any that sit inside
+ * markdown code** — an inline span or a fenced block.
+ *
+ * This exists because a tag found by `indexOf` is also a tag the model merely
+ * *mentioned*. Prod session `Axd2XlzNSf5d` explained this very feature and
+ * wrote "with the `` `<speak>` `` instruction added in `ws/index.ts`" with no
+ * closing tag anywhere, so the browser read it as an opened, still-streaming
+ * summary and hid the other 94% of the reply, cutting it off on screen at the
+ * backtick. The server's extractor had the same flaw the other way round: a
+ * mention switched talk-back into tagged mode and read the rest of the reply
+ * aloud as though it were the summary. A mention of the tag is nearly always
+ * in code, because a bare `<speak>` in markdown would be eaten by the HTML
+ * sanitizer and the model knows to quote it; a real tag, per
+ * `SPOKEN_SUMMARY_INSTRUCTION`, is never in code. So "outside code" is the
+ * whole rule, and a mention in plain prose is still read as a tag.
+ *
+ * Incremental because the server feeds it one `text_delta` at a time and a
+ * tag, a fence or a backtick run can straddle any delta boundary. The browser
+ * feeds it the whole text at once; both get the same answer, which is the
+ * point of it living here. Text is released as soon as it cannot be part of a
+ * tag. The only thing ever held back is a trailing partial tag such as `<spe`,
+ * which `pendingTag` exposes so each caller decides what a turn that ended on
+ * one means.
+ *
+ * The markdown is approximated, not parsed, and the approximations err toward
+ * "this is code", which means "show the text / do not switch mode":
+ * - A fence is a line of 3+ backticks or tildes after at most three spaces of
+ *   indentation, closed by a line of the same character at least as long.
+ *   Indented code blocks are not tracked, because they cannot be told apart
+ *   from list continuations without a real parser.
+ * - An inline span opens on a run of N backticks and closes on the next run of
+ *   exactly N. A blank line ends it, as a paragraph break does in CommonMark.
+ *   An unclosed span counts as code to the end of its paragraph, since
+ *   mid-stream its closing backtick may simply not have arrived yet.
+ */
+export class SpeakTagScanner {
+  /** The open fence's character and length, or null outside a fence. */
+  private fence: { char: string; len: number } | null = null;
+  /** Leading spaces and fence characters of the current line, until a
+   *  different character settles whether the line is a fence line. `null`
+   *  once the line's head has been settled. */
+  private lineHead: string | null = '';
+  /** The current line has only whitespace so far (paragraph-break detection). */
+  private lineBlank = true;
+  /** Length of the backtick run being read, not yet settled. */
+  private tickRun = 0;
+  /** Length of the run that opened the current inline span, or 0. */
+  private spanLen = 0;
+  /** A possible partial tag, only ever held outside code. */
+  private tagBuf = '';
+  private tokens: SpeakToken[] = [];
+  private text = '';
+
+  push(chunk: string): SpeakToken[] {
+    for (const ch of chunk) this.step(ch);
+    return this.drain();
+  }
+
+  /** The partial tag held at the end of the input, if any, e.g. `<spe`. */
+  get pendingTag(): string {
+    return this.tagBuf;
+  }
+
+  /** Ends the input. Returns the held partial tag and discards it, so the
+   *  caller decides whether a turn that ended on `<spe` shows it or not. */
+  finish(): string {
+    const held = this.tagBuf;
+    this.tagBuf = '';
+    return held;
+  }
+
+  reset(): void {
+    this.fence = null;
+    this.lineHead = '';
+    this.lineBlank = true;
+    this.tickRun = 0;
+    this.spanLen = 0;
+    this.tagBuf = '';
+    this.tokens = [];
+    this.text = '';
+  }
+
+  private drain(): SpeakToken[] {
+    this.flushText();
+    const out = this.tokens;
+    this.tokens = [];
+    return out;
+  }
+
+  private flushText(): void {
+    if (this.text.length === 0) return;
+    this.tokens.push({ kind: 'text', text: this.text });
+    this.text = '';
+  }
+
+  private emitTag(kind: 'open' | 'close'): void {
+    this.flushText();
+    this.tokens.push({ kind });
+  }
+
+  /** Releases a held partial tag as ordinary text. */
+  private releaseTagBuf(): void {
+    this.text += this.tagBuf;
+    this.tagBuf = '';
+  }
+
+  private step(ch: string): void {
+    if (ch === '\n') {
+      this.releaseTagBuf();
+      this.settleLineHead();
+      this.settleTickRun();
+      if (this.lineBlank && this.fence === null) this.spanLen = 0;
+      this.text += ch;
+      this.lineHead = '';
+      this.lineBlank = true;
+      return;
+    }
+    if (!/\s/.test(ch)) this.lineBlank = false;
+
+    if (this.lineHead !== null) {
+      if (this.extendsLineHead(ch)) {
+        this.lineHead += ch;
+        this.text += ch;
+        return;
+      }
+      this.settleLineHead();
+    }
+
+    if (this.fence !== null) {
+      this.text += ch;
+      return;
+    }
+
+    if (ch === '`') {
+      this.releaseTagBuf();
+      this.tickRun++;
+      this.text += ch;
+      return;
+    }
+    this.settleTickRun();
+
+    if (this.spanLen > 0) {
+      this.text += ch;
+      return;
+    }
+
+    if (this.tagBuf.length === 0 && ch !== '<') {
+      this.text += ch;
+      return;
+    }
+    this.tagBuf += ch;
+    if (this.tagBuf === SPEAK_OPEN_TAG) {
+      this.tagBuf = '';
+      this.emitTag('open');
+      return;
+    }
+    if (this.tagBuf === SPEAK_CLOSE_TAG) {
+      this.tagBuf = '';
+      this.emitTag('close');
+      return;
+    }
+    // Keep the longest suffix that could still become a tag; everything before
+    // it is text. (`<<speak>` releases the first `<`.)
+    let start = 0;
+    while (start < this.tagBuf.length && !isTagPrefix(this.tagBuf.slice(start))) start++;
+    this.text += this.tagBuf.slice(0, start);
+    this.tagBuf = this.tagBuf.slice(start);
+  }
+
+  /** Whether `ch` can still belong to a fence marker at the start of a line. */
+  private extendsLineHead(ch: string): boolean {
+    const head = this.lineHead ?? '';
+    const marker = head.trimStart();
+    if (marker.length === 0) {
+      if (ch === ' ') return head.length < 3;
+      return ch === '`' || ch === '~';
+    }
+    return ch === marker[0];
+  }
+
+  /**
+   * The line's head is complete: decide whether it was a fence line. A head
+   * that was not one is ordinary text, and its backticks, if any, are an
+   * inline run to be read as such.
+   */
+  private settleLineHead(): void {
+    const head = this.lineHead;
+    this.lineHead = null;
+    if (head === null) return;
+    const marker = head.trimStart();
+    const char = marker[0];
+    if (marker.length >= 3 && (char === '`' || char === '~')) {
+      if (this.fence === null) {
+        this.fence = { char, len: marker.length };
+        this.spanLen = 0;
+        this.tickRun = 0;
+        return;
+      }
+      if (this.fence.char === char && marker.length >= this.fence.len) {
+        this.fence = null;
+        return;
+      }
+    }
+    if (this.fence === null && char === '`') this.tickRun += marker.length;
+  }
+
+  /** A backtick run has ended: it opens a span, closes one, or is inert. */
+  private settleTickRun(): void {
+    const run = this.tickRun;
+    if (run === 0) return;
+    this.tickRun = 0;
+    if (this.spanLen === 0) this.spanLen = run;
+    else if (this.spanLen === run) this.spanLen = 0;
+  }
+}
+
+function isTagPrefix(s: string): boolean {
+  return SPEAK_OPEN_TAG.startsWith(s) || SPEAK_CLOSE_TAG.startsWith(s);
+}
 
 /**
  * One pass over a reply, splitting it into what is spoken and what is shown.
@@ -114,35 +336,35 @@ interface ScannedReply {
   outside: string;
   /** The content of each *closed* block, in order. */
   spoken: string[];
-  /** A block was opened and its closing tag has not arrived — the reply is
-   *  still streaming its summary, which wants the opposite treatment from a
-   *  model that closed a block around its entire reply. */
-  unclosed: boolean;
+  /** Text of a block that was opened and never closed, or `null`. */
+  unclosed: string | null;
+  /** A trailing partial tag (`<spe`) the scanner held back. */
+  pendingTag: string;
 }
 
 function scanReply(text: string): ScannedReply {
+  const scanner = new SpeakTagScanner();
+  const tokens = scanner.push(text);
+  const pendingTag = scanner.finish();
+
   let outside = '';
   const spoken: string[] = [];
-  let unclosed = false;
-  let cursor = 0;
-
-  for (;;) {
-    const open = text.indexOf(SPEAK_OPEN_TAG, cursor);
-    if (open === -1) {
-      outside += text.slice(cursor);
-      break;
+  let inside: string | null = null;
+  for (const token of tokens) {
+    if (token.kind === 'text') {
+      if (inside === null) outside += token.text;
+      else inside += token.text;
+    } else if (token.kind === 'open') {
+      // A nested open inside a block is just more of the block.
+      if (inside === null) inside = '';
+    } else if (inside !== null) {
+      spoken.push(inside.trim());
+      inside = null;
     }
-    outside += text.slice(cursor, open);
-    const close = text.indexOf(SPEAK_CLOSE_TAG, open + SPEAK_OPEN_TAG.length);
-    if (close === -1) {
-      unclosed = true;
-      break;
-    }
-    spoken.push(text.slice(open + SPEAK_OPEN_TAG.length, close).trim());
-    cursor = close + SPEAK_CLOSE_TAG.length;
+    // A stray `</speak>` outside a block is markup, and is dropped.
   }
 
-  return { outside, spoken, unclosed };
+  return { outside, spoken, unclosed: inside, pendingTag };
 }
 
 /**
@@ -165,8 +387,23 @@ export function extractSpokenSummary(text: string): string | null {
   return joined.length > 0 ? joined : null;
 }
 
+export interface StripSpokenSummaryOptions {
+  /**
+   * Whether more text may still arrive. Defaults to `true`, which is the
+   * cautious reading for a caller that does not know.
+   *
+   * While streaming, an unclosed block is a lede still being written, so it
+   * is hidden, and so is a trailing partial tag. Once the reply is finished
+   * neither can be completed any more, so both are *shown*. A block the model
+   * never closed is still a reply the user is owed; hiding it would cut the
+   * message off with no sign anything was cut.
+   */
+  streaming?: boolean;
+}
+
 /**
  * Removes `<speak>` blocks (tags *and* their content) from a reply for display.
+ * A tag inside markdown code is ordinary text (see `SpeakTagScanner`).
  *
  * Safe to call on a partially-streamed reply, which is the normal case: an
  * unclosed `<speak>` means the spoken lede is still arriving, so everything
@@ -177,19 +414,32 @@ export function extractSpokenSummary(text: string): string | null {
  * failed one — so in that case the tags alone are removed and the content is
  * shown. Tag compliance costs the user nothing on screen either way.
  */
-export function stripSpokenSummary(text: string): string {
-  if (!text.includes(SPEAK_OPEN_TAG)) {
-    return text.replace(TRAILING_PARTIAL_TAG, '');
+export function stripSpokenSummary(text: string, opts: StripSpokenSummaryOptions = {}): string {
+  const streaming = opts.streaming ?? true;
+  // Fast path, and it has to stay exact: a reply with no tag in it is shown
+  // byte-for-byte as written.
+  if (!text.includes('<')) return text;
+
+  const { outside, spoken, unclosed, pendingTag } = scanReply(text);
+  if (spoken.length === 0 && unclosed === null) {
+    // No real tag. Only a half-arrived one at the very end is hidden.
+    return streaming ? text.slice(0, text.length - pendingTag.length) : text;
   }
 
-  const { outside, unclosed } = scanReply(text);
-  const cleaned = outside.replace(TRAILING_PARTIAL_TAG, '').replace(/\n{3,}/g, '\n\n').trim();
+  let shown = outside;
+  if (!streaming) {
+    // A partial tag *inside* an unclosed block can only have been the start
+    // of its `</speak>`, which is markup; outside one, it is the reply's text.
+    if (unclosed !== null) shown += unclosed;
+    else shown += pendingTag;
+  }
+  const cleaned = shown.replace(/\n{3,}/g, '\n\n').trim();
   if (cleaned.length > 0) return cleaned;
 
   // Nothing outside the tag. Either the spoken summary is still streaming and
   // the written reply has not started (show nothing yet — it is one keystroke
   // away), or the model wrapped its entire reply and hiding it would leave a
   // blank turn, which reads as a failed one.
-  if (unclosed) return '';
-  return text.split(SPEAK_OPEN_TAG).join('').split(SPEAK_CLOSE_TAG).join('').trim();
+  if (streaming && unclosed !== null) return '';
+  return spoken.join('\n\n').trim();
 }

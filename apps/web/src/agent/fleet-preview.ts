@@ -131,7 +131,8 @@ export function applyFleetEvent(state: FleetPreviewState, event: AgentEvent): Fl
       // PA-84: `<speak>` content is for the speaker, not the screen — and it
       // leads the reply, so previewing it raw would show the paraphrase
       // instead of the answer.
-      return pushLine(state, lastLine(stripSpokenSummary(event.text)));
+      // A `text` event is a finished block, so nothing in it is still arriving.
+      return pushLine(state, lastLine(stripSpokenSummary(event.text, { streaming: false })));
 
     case 'thinking':
       return pushLine(state, 'Thinking…');

@@ -4,6 +4,7 @@ import {
   SPEAK_OPEN_TAG,
   SPOKEN_SUMMARY_INSTRUCTION,
   appendSpokenSummaryInstruction,
+  SpeakTagScanner,
   extractSpokenSummary,
   stripSpokenSummary,
   stripSpokenSummaryInstruction,
@@ -53,6 +54,78 @@ describe('stripSpokenSummary', () => {
   it('handles several blocks in one reply', () => {
     const reply = `${SPEAK_OPEN_TAG}A${SPEAK_CLOSE_TAG}first${SPEAK_OPEN_TAG}B${SPEAK_CLOSE_TAG}second`;
     expect(stripSpokenSummary(reply)).toBe('firstsecond');
+  });
+});
+
+describe('stripSpokenSummary — a tag in code is only a mention', () => {
+  // Prod session Axd2XlzNSf5d: a reply explaining this feature mentioned the
+  // tag in inline code with no closing tag, and the chat cut it off at the
+  // backtick — 492 of 8,452 characters shown. This is that reply's shape.
+  const mention =
+    'The pipeline:\n\n' +
+    '3. **The prompt:** it goes into the agent, with the `<speak>` instruction added in `ws/index.ts`.\n' +
+    '4. **Speech back:** `VoiceTtsService` pulls out the `<speak>` text and synthesizes it.\n\n' +
+    'If you want, I can start on Phase 1.';
+
+  it('shows a reply that mentions the tag in inline code, whole', () => {
+    expect(stripSpokenSummary(mention)).toBe(mention);
+    expect(stripSpokenSummary(mention, { streaming: false })).toBe(mention);
+    expect(extractSpokenSummary(mention)).toBeNull();
+  });
+
+  it('never hides a mention at any streaming prefix', () => {
+    // While streaming, only a *trailing* partial tag may be hidden, and a
+    // mention inside an open backtick span is not one.
+    for (let i = 1; i <= mention.length; i++) {
+      const prefix = mention.slice(0, i);
+      expect(stripSpokenSummary(prefix).length).toBeGreaterThanOrEqual(prefix.length - 1);
+    }
+  });
+
+  it('ignores a tag inside a fenced block, and a fence of tildes or longer ticks', () => {
+    for (const fence of ['```', '~~~', '````']) {
+      const reply = `Example:\n\n${fence}html\n<speak>Hi</speak>\n<speak>unclosed\n${fence}\n\nDone.`;
+      expect(stripSpokenSummary(reply)).toBe(reply);
+    }
+  });
+
+  it('ignores a tag inside a double-backtick span', () => {
+    const reply = 'Wrap it as ``<speak>`...`` and move on.';
+    expect(stripSpokenSummary(reply)).toBe(reply);
+  });
+
+  it('still honours a real lede in a reply that later mentions the tag', () => {
+    const reply = `${SPEAK_OPEN_TAG}I explained the tag.${SPEAK_CLOSE_TAG}\n\nThe \`<speak>\` tag leads the reply.`;
+    expect(stripSpokenSummary(reply)).toBe('The `<speak>` tag leads the reply.');
+    expect(extractSpokenSummary(reply)).toBe('I explained the tag.');
+  });
+
+  it('an inline span closes at a paragraph break, so a later real tag still counts', () => {
+    const reply = `A stray \` backtick.\n\n${SPEAK_OPEN_TAG}Said.${SPEAK_CLOSE_TAG}Shown.`;
+    expect(stripSpokenSummary(reply)).toBe('A stray ` backtick.\n\nShown.');
+  });
+});
+
+describe('stripSpokenSummary — a finished reply is never cut off', () => {
+  it('shows an unclosed block once the reply has stopped streaming', () => {
+    const reply = `Intro. ${SPEAK_OPEN_TAG}the model never closed this`;
+    expect(stripSpokenSummary(reply)).toBe('Intro.');
+    expect(stripSpokenSummary(reply, { streaming: false })).toBe('Intro. the model never closed this');
+  });
+
+  it('shows a trailing partial tag once finished, and hides it while streaming', () => {
+    expect(stripSpokenSummary('Compare a < b and <spe')).toBe('Compare a < b and ');
+    expect(stripSpokenSummary('Compare a < b and <spe', { streaming: false })).toBe('Compare a < b and <spe');
+  });
+});
+
+describe('SpeakTagScanner', () => {
+  it('finds a tag split across chunks, and none inside a span split across chunks', () => {
+    const scanner = new SpeakTagScanner();
+    const tokens = ['<spe', 'ak>Hi</sp', 'eak> use `', '<speak', '>` here'].flatMap((c) => scanner.push(c));
+    expect(tokens.filter((t) => t.kind !== 'text').map((t) => t.kind)).toEqual(['open', 'close']);
+    const text = tokens.map((t) => (t.kind === 'text' ? t.text : '|')).join('');
+    expect(text).toBe('|Hi| use `<speak>` here');
   });
 });
 
