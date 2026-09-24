@@ -66,6 +66,15 @@ export interface RunSpec {
    * issue and was created by the first delivery. Still re-resolved for
    * containment — a path that was inside a project folder last week is not
    * automatically inside one now.
+   *
+   * A reused directory that has since been *deleted* is not a failure when the
+   * spec also asks for a worktree (PA-98): the worktree was only ever a
+   * disposable checkout — a human removed it after merging, or cleaned up
+   * `.worktrees/` — and the issue still deserves its run. The executor then
+   * makes one exactly as a first delivery would, from `cwd` and `worktree`.
+   * `resume` survives only if that lands on the same path, because a Claude
+   * Code transcript is keyed by cwd and resuming it anywhere else finds
+   * nothing; otherwise the run starts a fresh conversation.
    */
   reuseCwd?: string;
   /** Message recorded when the adapter hands back a terminal session. */
@@ -226,9 +235,32 @@ export class RunExecutor {
     // 1. Re-validate the directory. A folder can be removed from the workspace
     //    list, unmounted, or deleted long after the trigger was saved, and an
     //    unattended run is the last place to weaken containment.
+    //    PA-98: a reused worktree that has been deleted is recreated rather
+    //    than failed — see `RunSpec.reuseCwd`. Only `not_found` qualifies: a
+    //    path that now resolves *outside* every project folder, or to a file,
+    //    is a containment answer, and those still fail below. The fallback goes
+    //    through the same resolve, against the project folder, so nothing
+    //    about containment is relaxed.
+    let reuseCwd = spec.reuseCwd;
+    let resume = spec.resume;
+    let recreatedFrom: string | null = null;
     let projectCwd: string;
     try {
-      projectCwd = await this.opts.workspaces.resolveWorkspacePath(spec.reuseCwd ?? spec.cwd);
+      try {
+        projectCwd = await this.opts.workspaces.resolveWorkspacePath(reuseCwd ?? spec.cwd);
+      } catch (err) {
+        if (
+          reuseCwd === undefined ||
+          spec.worktree.mode === 'none' ||
+          !(err instanceof WorkspaceError) ||
+          err.code !== 'not_found'
+        ) {
+          throw err;
+        }
+        recreatedFrom = reuseCwd;
+        reuseCwd = undefined;
+        projectCwd = await this.opts.workspaces.resolveWorkspacePath(spec.cwd);
+      }
     } catch (err) {
       if (err instanceof WorkspaceError) {
         const reason =
@@ -248,7 +280,7 @@ export class RunExecutor {
     //    supplied `reuseCwd`: that directory already *is* a worktree, made by
     //    an earlier run that owns it.
     let cwd = projectCwd;
-    if (spec.reuseCwd === undefined && spec.worktree.mode !== 'none') {
+    if (reuseCwd === undefined && spec.worktree.mode !== 'none') {
       const worktree = spec.worktree;
       try {
         const created = await this.opts.worktrees.create({
@@ -263,6 +295,22 @@ export class RunExecutor {
         if (err instanceof WorktreeError) return fail(`Could not create a worktree: ${err.message}`);
         throw err;
       }
+    }
+    if (recreatedFrom !== null) {
+      const samePath = cwd === recreatedFrom;
+      if (!samePath) resume = undefined;
+      this.opts.logger?.info(
+        {
+          label: this.opts.label,
+          runId,
+          previousCwd: recreatedFrom,
+          cwd,
+          resumed: resume !== undefined,
+        },
+        samePath
+          ? `${this.opts.label ?? 'run'} recreated its deleted worktree`
+          : `${this.opts.label ?? 'run'} recreated its deleted worktree at a new path; starting a fresh conversation`,
+      );
     }
     sink.onCwd(cwd);
 
@@ -283,8 +331,8 @@ export class RunExecutor {
         ...(spec.model !== undefined && spec.model !== null ? { model: spec.model } : {}),
         // Only pass the key at all when the caller set it — see `RunSpec.effort`.
         ...('effort' in spec ? { effort: spec.effort } : {}),
-        ...(spec.resume !== undefined
-          ? { resumeAgentSessionId: spec.resume.agentSessionId, forkSession: false }
+        ...(resume !== undefined
+          ? { resumeAgentSessionId: resume.agentSessionId, forkSession: false }
           : {}),
       });
       if (created.transport !== 'structured') {

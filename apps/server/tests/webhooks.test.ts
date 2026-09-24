@@ -2355,6 +2355,114 @@ describe('webhook Jira component worktrees', () => {
   });
 });
 
+describe('webhook per-issue conversation whose worktree was deleted (PA-98)', () => {
+  // Reported: "Task and feature" refused to deliver PA-98 with "The project
+  // folder no longer exists." — the issue's cached conversation pointed at a
+  // `.worktrees/feature-ui` a human had removed after merging. A worktree is a
+  // disposable checkout, so the run recreates it rather than failing.
+  const initRepo = (): void => {
+    execFileSync('git', ['init', '-q'], { cwd: ctx.projectDir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: ctx.projectDir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: ctx.projectDir });
+    fs.writeFileSync(path.join(ctx.projectDir, 'file.txt'), 'initial\n');
+    execFileSync('git', ['add', 'file.txt'], { cwd: ctx.projectDir });
+    execFileSync('git', ['commit', '-q', '-m', 'initial'], { cwd: ctx.projectDir });
+  };
+
+  const payloadWithComponents = (components: string[]): string =>
+    JSON.stringify({
+      ...(JIRA_SAMPLE_PAYLOAD as object),
+      timestamp: Date.now(),
+      issue: {
+        ...((JIRA_SAMPLE_PAYLOAD as { issue: Record<string, unknown> }).issue),
+        key: 'PA-98',
+        fields: {
+          ...((JIRA_SAMPLE_PAYLOAD as { issue: { fields: Record<string, unknown> } }).issue.fields),
+          components: components.map((name) => ({ name })),
+        },
+      },
+    });
+
+  const cacheConversation = (webhookId: string, cwd: string): void => {
+    upsertWebhookIssueSession(ctx.db, {
+      webhook_id: webhookId,
+      issue_key: 'PA-98',
+      agent_session_id: 'claude-conversation-98',
+      session_id: null,
+      planner_chat_id: null,
+      agent: 'claude',
+      cwd,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+    });
+  };
+
+  const perIssueWorktreeHook = () =>
+    createWebhook({
+      worktreeMode: 'new-branch',
+      conversationMode: 'per-issue',
+      overlapPolicy: 'allow',
+      directoryPolicy: 'allow',
+      maxConcurrent: 5,
+    });
+
+  it('recreates a deleted component worktree at the same path and resumes the conversation', async () => {
+    initRepo();
+    const hook = await perIssueWorktreeHook();
+    // Never created on disk: the state after `git worktree remove`.
+    const goneTree = path.join(ctx.projectDir, '.worktrees', 'feature-UI');
+    cacheConversation(hook.id, goneTree);
+
+    const res = await deliver(SLUG, payloadWithComponents(['UI']), { secret: hook.secret });
+    const outcome = res.json();
+    expect(outcome.status, res.body).toBe('running');
+
+    const session = ctx.context.sessions.get(outcome.sessionId);
+    expect(fs.realpathSync(session!.spec.cwd)).toBe(fs.realpathSync(goneTree));
+    // Same path, so the cwd-keyed transcript is still findable: continue it.
+    expect(session?.spec.resumeAgentSessionId).toBe('claude-conversation-98');
+  });
+
+  it('starts a fresh conversation when the recreated worktree lands somewhere else', async () => {
+    initRepo();
+    const hook = await perIssueWorktreeHook();
+    // No component: the branch name is minted per delivery, so the recreated
+    // tree cannot be the old path, and a transcript keyed by that path would
+    // resume nothing.
+    const goneTree = path.join(ctx.projectDir, '.worktrees', 'webhook-old-branch');
+    cacheConversation(hook.id, goneTree);
+
+    const res = await deliver(SLUG, payloadWithComponents([]), { secret: hook.secret });
+    const outcome = res.json();
+    expect(outcome.status, res.body).toBe('running');
+
+    const session = ctx.context.sessions.get(outcome.sessionId);
+    expect(session?.spec.cwd).toContain('.worktrees');
+    expect(fs.existsSync(session!.spec.cwd)).toBe(true);
+    expect(session?.spec.cwd).not.toBe(goneTree);
+    expect(session?.spec.resumeAgentSessionId).toBeUndefined();
+    await vi.waitFor(() => {
+      expect(readWebhookIssueSession(ctx.db, hook.id, 'PA-98')?.cwd).toBe(session?.spec.cwd);
+    });
+  });
+
+  it('still fails when the missing directory is the project folder itself', async () => {
+    // `worktreeMode: none` reuses the project folder, which is not disposable:
+    // there is nothing to recreate it from.
+    const hook = await createWebhook({
+      worktreeMode: 'none',
+      conversationMode: 'per-issue',
+      overlapPolicy: 'allow',
+      directoryPolicy: 'allow',
+      maxConcurrent: 5,
+    });
+    cacheConversation(hook.id, path.join(ctx.projectDir, 'gone-subdir'));
+
+    const res = await deliver(SLUG, payloadWithComponents([]), { secret: hook.secret });
+    expect(res.json().status).toBe('failed');
+  });
+});
+
 describe('webhook delivery: agent_session_id for synchronous backends (PA-27)', () => {
   it('stamps agent_session_id for an opencode-backed delivery, not just claude/agy', async () => {
     // `pi`/`opencode` report their `agentSessionId` synchronously, inline,
