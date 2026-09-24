@@ -943,6 +943,18 @@ describe('planner chat routes over HTTP', () => {
     expect(reread.maxSubagentSpawnsPerTurn).toBe(7);
   });
 
+  it('commandTimeoutSeconds defaults to 300 and is configurable over the settings route', async () => {
+    t = await createTestApp();
+    const initial = (await get(t, '/api/planner/settings')).json();
+    expect(initial.commandTimeoutSeconds).toBe(300);
+
+    const updated = (await patch(t, '/api/planner/settings', { commandTimeoutSeconds: 600 })).json();
+    expect(updated.commandTimeoutSeconds).toBe(600);
+
+    const reread = (await get(t, '/api/planner/settings')).json();
+    expect(reread.commandTimeoutSeconds).toBe(600);
+  });
+
   it('a second turn sends the full prior history to the LLM', async () => {
     const fetchImpl = vi
       .fn()

@@ -28,6 +28,7 @@ import type { PlannerWorkspaceRegistry } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
 import type { McpRegistryService } from './mcp/registry-service.js';
 import { SkillRegistryError, type SkillRegistryService } from './skills.js';
+import { DEFAULT_COMMAND_TIMEOUT_SECONDS } from './store.js';
 import type { Db } from '../db/index.js';
 import type { Config } from '../config/index.js';
 import {
@@ -127,6 +128,10 @@ export interface PlannerToolDeps {
    * their own "can't resolve what this needs" cases.
    */
   workspaceId: string | null;
+  /** PA-95: configured timeout in seconds for `bash`/`exec_command`. */
+  commandTimeoutSeconds?: number;
+  /** PA-95: the active workspace path for the calling chat, used as default cwd. */
+  workspacePath?: string;
   /**
    * PA-31: the `web_search`/`url_fetch` tools' own provider config, read
    * fresh per call by `PlannerChatService.executeTool` (like
@@ -420,15 +425,15 @@ const MAX_TOOL_RESULT_CHARS = 20_000;
 export const MAX_FILE_READ_BYTES = 200_000;
 const MAX_FILE_WRITE_CHARS = 200_000;
 /** A chat turn is a synchronous HTTP request/response — a runaway command
-    must not hang it forever. */
-const EXEC_TIMEOUT_MS = 60_000;
-/** PA-31: same reasoning as `EXEC_TIMEOUT_MS`, shorter — a third-party
+    must not hang it forever. Default fallback if not passed via deps. */
+const DEFAULT_EXEC_TIMEOUT_MS = DEFAULT_COMMAND_TIMEOUT_SECONDS * 1000;
+/** PA-31: same reasoning as `DEFAULT_EXEC_TIMEOUT_MS`, shorter — a third-party
     search/fetch call has no reason to run anywhere near a minute, and a
     tighter cap keeps one slow provider from stalling a whole chat turn. */
 const TOOL_HTTP_TIMEOUT_MS = 20_000;
 /** PA-44: `grep_files`/`find_files` walk a real directory tree rather than
     calling out to a network, so this is closer to `TOOL_HTTP_TIMEOUT_MS`
-    than to `EXEC_TIMEOUT_MS` — a search that hasn't finished in 20s is far
+    than to `DEFAULT_EXEC_TIMEOUT_MS` — a search that hasn't finished in 20s is far
     more likely mis-scoped (too shallow a `path`, too broad a pattern) than
     genuinely still working. */
 const SEARCH_TIMEOUT_MS = 20_000;
@@ -606,6 +611,30 @@ async function resolveExistingPathWithin(deps: PlannerToolDeps, requested: strin
     throw new Error(`${requested} is outside every project workspace and every planner workspace.`);
   }
   return real;
+}
+
+/**
+ * PA-95: Resolves a cwd for shell command execution (`bash`/`exec_command`).
+ * When omitted or empty, defaults to the chat's active workspace (`deps.workspacePath`),
+ * the calling workspace (`deps.workspaceId`), the default planner workspace, or the first
+ * project workspace root. When provided, enforces the containment check via
+ * `resolveExistingPathWithin`.
+ */
+async function resolveExecutionCwd(deps: PlannerToolDeps, requestedCwd?: string): Promise<string> {
+  const trimmed = requestedCwd ? String(requestedCwd).trim() : '';
+  if (!trimmed) {
+    if (deps.workspacePath) return deps.workspacePath;
+    if (deps.workspaceId) {
+      const ws = deps.plannerWorkspaces.get(deps.workspaceId);
+      if (ws) return ws.path;
+    }
+    const fallback = deps.plannerWorkspaces.getDefault();
+    if (fallback) return fallback.path;
+    const roots = deps.workspaces.getRoots();
+    if (roots.length > 0 && roots[0]) return roots[0];
+    return process.cwd();
+  }
+  return resolveExistingPathWithin(deps, trimmed);
 }
 
 /**
@@ -1667,35 +1696,59 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     },
   },
   {
-    name: 'exec_command',
+    name: 'bash',
     description:
-      'Run a shell command inside a project or planner workspace. Output is captured and size-capped, ' +
-      `and the command is killed after ${EXEC_TIMEOUT_MS / 1000}s if it has not finished.`,
+      'Execute a bash shell command on the host (e.g. ssh, git, curl, build tools, linux utilities). ' +
+      'Output is captured and size-capped, and the command is killed after the configured timeout if it has not finished.',
     parameters: {
       type: 'object',
       properties: {
-        cwd: { type: 'string', description: 'Directory to run the command in.' },
         command: { type: 'string', description: 'The shell command line to run.' },
+        cwd: {
+          type: 'string',
+          description:
+            'Directory to run the command in. Defaults to the active planner workspace if omitted.',
+        },
+        timeout: {
+          type: 'integer',
+          description:
+            'Optional timeout in seconds for this command (capped at the configured command timeout).',
+        },
       },
-      required: ['cwd', 'command'],
+      required: ['command'],
       additionalProperties: false,
     },
     readOnly: false,
-    async execute(deps, args) {
-      const requestedCwd = String(args.cwd ?? '');
-      const command = String(args.command ?? '').trim();
-      if (!command) return 'No command provided.';
-
-      let cwd: string;
-      try {
-        cwd = await resolveExistingPathWithin(deps, requestedCwd);
-      } catch (err) {
-        return (err as Error).message;
-      }
-      const stat = await fs.stat(cwd);
-      if (!stat.isDirectory()) return `${requestedCwd} is not a directory.`;
-
-      return runShellCommand(deps.shell, command, cwd);
+    execute(deps, args) {
+      return executeShellCommand(deps, args);
+    },
+  },
+  {
+    name: 'exec_command',
+    description:
+      'Run a shell command inside a project or planner workspace. Legacy alias for bash. ' +
+      'Output is captured and size-capped, and the command is killed after the configured timeout if it has not finished.',
+    parameters: {
+      type: 'object',
+      properties: {
+        cwd: {
+          type: 'string',
+          description:
+            'Directory to run the command in. Defaults to the active planner workspace if omitted.',
+        },
+        command: { type: 'string', description: 'The shell command line to run.' },
+        timeout: {
+          type: 'integer',
+          description:
+            'Optional timeout in seconds for this command (capped at the configured command timeout).',
+        },
+      },
+      required: ['command'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    execute(deps, args) {
+      return executeShellCommand(deps, args);
     },
   },
 
@@ -2356,13 +2409,45 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
 ];
 
 /**
+ * PA-95: Common execution handler for `bash` and `exec_command`.
+ */
+async function executeShellCommand(
+  deps: PlannerToolDeps,
+  args: Record<string, unknown>,
+): Promise<string> {
+  const command = String(args.command ?? '').trim();
+  if (!command) return 'No command provided.';
+
+  let cwd: string;
+  try {
+    cwd = await resolveExecutionCwd(deps, args.cwd !== undefined ? String(args.cwd) : undefined);
+  } catch (err) {
+    return (err as Error).message;
+  }
+  const stat = await fs.stat(cwd);
+  if (!stat.isDirectory()) return `${cwd} is not a directory.`;
+
+  const configuredTimeoutSec = deps.commandTimeoutSeconds ?? DEFAULT_COMMAND_TIMEOUT_SECONDS;
+  let timeoutSec = configuredTimeoutSec;
+  if (typeof args.timeout === 'number' && Number.isFinite(args.timeout) && args.timeout > 0) {
+    timeoutSec = Math.min(Math.floor(args.timeout), configuredTimeoutSec);
+  }
+  return runShellCommand(deps.shell, command, cwd, timeoutSec * 1000);
+}
+
+/**
  * Runs one command through the configured shell, with the same env-stripping
  * every other child process this server spawns already gets
  * (`sessions/env.ts` — `POCKETAGENT_*` must never reach a spawned process,
  * including one started by the planner). No PTY: this is one-shot output
  * capture, not an interactive terminal.
  */
-function runShellCommand(shell: string, command: string, cwd: string): Promise<string> {
+function runShellCommand(
+  shell: string,
+  command: string,
+  cwd: string,
+  timeoutMs: number = DEFAULT_EXEC_TIMEOUT_MS,
+): Promise<string> {
   return new Promise((resolve) => {
     let child;
     try {
@@ -2384,11 +2469,11 @@ function runShellCommand(shell: string, command: string, cwd: string): Promise<s
     child.stdout?.on('data', onChunk);
     child.stderr?.on('data', onChunk);
 
+    let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGKILL');
-    }, EXEC_TIMEOUT_MS);
-    let timedOut = false;
+    }, timeoutMs);
 
     child.on('error', (err) => {
       clearTimeout(timer);
@@ -2397,7 +2482,7 @@ function runShellCommand(shell: string, command: string, cwd: string): Promise<s
     child.on('close', (code, signal) => {
       clearTimeout(timer);
       const status = timedOut
-        ? `timed out after ${EXEC_TIMEOUT_MS / 1000}s and was killed`
+        ? `timed out after ${timeoutMs / 1000}s and was killed`
         : signal
           ? `killed by ${signal}`
           : `exit code ${code}`;

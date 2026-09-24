@@ -87,6 +87,7 @@ import {
   writePlannerEmbeddingModelId,
   writePlannerMaxToolIterations,
   writePlannerMaxSubagentSpawnsPerTurn,
+  writePlannerCommandTimeoutSeconds,
   writePlannerMcpEnabled,
   writePlannerMeInstruction,
   writePlannerToolsInstruction,
@@ -560,6 +561,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       toolsInstruction,
       maxToolIterations,
       maxSubagentSpawnsPerTurn,
+      commandTimeoutSeconds,
     } = parsed.data;
     if (baseUrl !== undefined) writePlannerBaseUrl(db, baseUrl);
     if (apiKey !== undefined) writePlannerApiKey(db, apiKey.length > 0 ? apiKey : null);
@@ -591,6 +593,9 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     if (maxToolIterations !== undefined) writePlannerMaxToolIterations(db, maxToolIterations);
     if (maxSubagentSpawnsPerTurn !== undefined) {
       writePlannerMaxSubagentSpawnsPerTurn(db, maxSubagentSpawnsPerTurn);
+    }
+    if (commandTimeoutSeconds !== undefined) {
+      writePlannerCommandTimeoutSeconds(db, commandTimeoutSeconds);
     }
     // PA-70: the planner endpoint is the one *singleton* a Hub can provision,
     // so this line matters more than the others — it records a change that

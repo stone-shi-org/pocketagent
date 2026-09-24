@@ -7,6 +7,7 @@ import {
   type PlannerWorkspaceRow,
   type PlannerWorkspaceStore,
 } from '../src/planner/workspaces.js';
+import { resolveApprovalStatus } from '../src/planner/approval.js';
 import { makeWorkspace, authHeaders, createTestApp, type TestApp } from './helpers.js';
 
 /**
@@ -717,7 +718,16 @@ describe('planner routes over HTTP', () => {
       maxToolIterations: 20,
       // PA-74: configurable spawn cap per turn (default 3).
       maxSubagentSpawnsPerTurn: 3,
+      // PA-95: configurable command timeout in seconds (default 300).
+      commandTimeoutSeconds: 300,
     });
+  });
+
+  it('PATCH updates commandTimeoutSeconds and persists it', async () => {
+    const res = await patch('/api/planner/settings', { commandTimeoutSeconds: 600 });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().commandTimeoutSeconds).toBe(600);
+    expect((await get('/api/planner/settings')).json().commandTimeoutSeconds).toBe(600);
   });
 
   // ---- PA-31: the web_search/url_fetch tool providers' own settings ------
@@ -1090,6 +1100,20 @@ describe('planner routes over HTTP', () => {
     const list = (await get('/api/planner/tool-approvals')).json().approvals;
     expect(list).toHaveLength(1);
     expect(list[0].decision).toBe('deny');
+  });
+
+  it('falls back between bash and exec_command for remembered approvals', async () => {
+    expect(resolveApprovalStatus(t.context.db, 'bash', null)).toBeNull();
+    expect(resolveApprovalStatus(t.context.db, 'exec_command', null)).toBeNull();
+
+    await post('/api/planner/tool-approvals', {
+      scope: 'global',
+      toolName: 'exec_command',
+      decision: 'allow',
+    });
+
+    expect(resolveApprovalStatus(t.context.db, 'bash', null)).toBe('allow');
+    expect(resolveApprovalStatus(t.context.db, 'exec_command', null)).toBe('allow');
   });
 
   it('404s deleting an unknown remembered decision', async () => {

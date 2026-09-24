@@ -150,6 +150,7 @@ describe('PLANNER_TOOLS catalog', () => {
     );
     expect(mutatingNames).toEqual(
       [
+        'bash',
         'call_mcp_tool',
         'delete_worktree',
         'exec_command',
@@ -872,6 +873,64 @@ describe('exec_command', () => {
     const tool = findPlannerTool('exec_command')!;
     const result = await tool.execute(depsFor(t), { cwd: target, command: 'echo hi' });
     expect(result).toMatch(/is not a directory/);
+  });
+});
+
+describe('bash', () => {
+  let t: TestApp;
+  afterEach(async () => {
+    if (t) await t.cleanup();
+  });
+
+  it('runs command with explicit cwd', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('bash')!;
+    const result = await tool.execute(depsFor(t), { cwd: t.projectDir, command: 'echo hello from bash' });
+    expect(result).toContain('exit code 0');
+    expect(result).toContain('hello from bash');
+  });
+
+  it('defaults cwd to workspacePath when omitted', async () => {
+    t = await createTestApp();
+    await fs.writeFile(path.join(t.projectDir, 'bash-marker.txt'), 'content');
+    const tool = findPlannerTool('bash')!;
+    const deps = depsFor(t, undefined, { workspacePath: t.projectDir });
+    const result = await tool.execute(deps, { command: 'ls' });
+    expect(result).toContain('exit code 0');
+    expect(result).toContain('bash-marker.txt');
+  });
+
+  it('defaults cwd to default planner workspace when omitted and workspacePath not set', async () => {
+    t = await createTestApp();
+    const defaultWs = t.context.plannerWorkspaces.getDefault()!;
+    await fs.writeFile(path.join(defaultWs.path, 'default-ws-marker.txt'), 'content');
+    const tool = findPlannerTool('bash')!;
+    const result = await tool.execute(depsFor(t), { command: 'ls' });
+    expect(result).toContain('exit code 0');
+    expect(result).toContain('default-ws-marker.txt');
+  });
+
+  it('times out when command exceeds configured commandTimeoutSeconds', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('bash')!;
+    const deps = depsFor(t, undefined, { commandTimeoutSeconds: 1, workspacePath: t.projectDir });
+    const result = await tool.execute(deps, { command: 'sleep 3' });
+    expect(result).toContain('timed out after 1s and was killed');
+  });
+
+  it('respects per-command timeout argument capped by configured timeout', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('bash')!;
+    const deps = depsFor(t, undefined, { commandTimeoutSeconds: 10, workspacePath: t.projectDir });
+    const result = await tool.execute(deps, { command: 'sleep 3', timeout: 1 });
+    expect(result).toContain('timed out after 1s and was killed');
+  });
+
+  it('refuses a cwd outside every workspace', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('bash')!;
+    const result = await tool.execute(depsFor(t), { cwd: '/etc', command: 'echo hi' });
+    expect(result).toMatch(/outside every project workspace/);
   });
 });
 

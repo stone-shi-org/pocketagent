@@ -441,6 +441,14 @@ export const DEFAULT_MAX_TOOL_ITERATIONS = 20;
 export const PLANNER_MAX_SUBAGENT_SPAWNS_PER_TURN_KEY = 'planner_max_subagent_spawns_per_turn';
 export const DEFAULT_MAX_SUBAGENT_SPAWNS_PER_TURN = 3;
 
+/**
+ * PA-95: Maximum duration (in seconds) a planner shell command (`bash`/`exec_command`)
+ * may run before being killed. Stored as a string in settings, parsed with Number(...)
+ * and clamped defensively in [1, 3600].
+ */
+export const PLANNER_COMMAND_TIMEOUT_SECONDS_KEY = 'planner_command_timeout_seconds';
+export const DEFAULT_COMMAND_TIMEOUT_SECONDS = 300;
+
 export interface PlannerSettingsSnapshot {
   baseUrl: string | null;
   hasApiKey: boolean;
@@ -460,6 +468,7 @@ export interface PlannerSettingsSnapshot {
   toolsInstruction: string | null;
   maxToolIterations: number;
   maxSubagentSpawnsPerTurn: number;
+  commandTimeoutSeconds: number;
 }
 
 export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
@@ -483,6 +492,7 @@ export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
     toolsInstruction: readSetting(db, PLANNER_TOOLS_INSTRUCTION_KEY) || null,
     maxToolIterations: readMaxToolIterations(db),
     maxSubagentSpawnsPerTurn: readMaxSubagentSpawnsPerTurn(db),
+    commandTimeoutSeconds: readCommandTimeoutSeconds(db),
   };
 }
 
@@ -499,6 +509,14 @@ function readMaxSubagentSpawnsPerTurn(db: Db): number {
   if (raw === null) return DEFAULT_MAX_SUBAGENT_SPAWNS_PER_TURN;
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 50) return DEFAULT_MAX_SUBAGENT_SPAWNS_PER_TURN;
+  return parsed;
+}
+
+function readCommandTimeoutSeconds(db: Db): number {
+  const raw = readSetting(db, PLANNER_COMMAND_TIMEOUT_SECONDS_KEY);
+  if (raw === null) return DEFAULT_COMMAND_TIMEOUT_SECONDS;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 3600) return DEFAULT_COMMAND_TIMEOUT_SECONDS;
   return parsed;
 }
 
@@ -527,6 +545,11 @@ export function writePlannerMaxToolIterations(db: Db, n: number): void {
 /** PA-74: see `PLANNER_MAX_SUBAGENT_SPAWNS_PER_TURN_KEY`'s own doc comment. */
 export function writePlannerMaxSubagentSpawnsPerTurn(db: Db, n: number): void {
   writeSetting(db, PLANNER_MAX_SUBAGENT_SPAWNS_PER_TURN_KEY, String(n));
+}
+
+/** PA-95: see `PLANNER_COMMAND_TIMEOUT_SECONDS_KEY`'s own doc comment. */
+export function writePlannerCommandTimeoutSeconds(db: Db, n: number): void {
+  writeSetting(db, PLANNER_COMMAND_TIMEOUT_SECONDS_KEY, String(n));
 }
 
 export function writePlannerBaseUrl(db: Db, baseUrl: string | null): void {

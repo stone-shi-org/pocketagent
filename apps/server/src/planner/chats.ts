@@ -1566,6 +1566,8 @@ export class PlannerChatService {
           mcpRegistry: this.opts.mcpRegistry,
           skills: this.opts.skills,
           workspaceId: chat.workspaceId,
+          workspacePath: this.workspacePathFor(chat),
+          commandTimeoutSeconds: settings.commandTimeoutSeconds,
           webSearch: {
             enabled: settings.webSearchEnabled,
             baseUrl: settings.webSearchBaseUrl,

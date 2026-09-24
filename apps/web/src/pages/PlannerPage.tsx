@@ -92,6 +92,8 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   const [maxToolIterationsInput, setMaxToolIterationsInput] = useState('20');
   // PA-74: see `PlannerSettingsDto.maxSubagentSpawnsPerTurn`'s doc comment.
   const [maxSubagentSpawnsPerTurnInput, setMaxSubagentSpawnsPerTurnInput] = useState('3');
+  // PA-95: see `PlannerSettingsDto.commandTimeoutSeconds`'s doc comment.
+  const [commandTimeoutSecondsInput, setCommandTimeoutSecondsInput] = useState('300');
 
   const load = useCallback(async () => {
     try {
@@ -114,6 +116,7 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       setToolsInstructionInput(se.toolsInstruction ?? '');
       setMaxToolIterationsInput(String(se.maxToolIterations));
       setMaxSubagentSpawnsPerTurnInput(String(se.maxSubagentSpawnsPerTurn ?? 3));
+      setCommandTimeoutSecondsInput(String(se.commandTimeoutSeconds ?? 300));
       setTools(to.tools);
       setApprovals(ap.approvals);
       setError(null);
@@ -188,6 +191,18 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       return;
     }
     void withBusy(() => api.updatePlannerSettings({ maxSubagentSpawnsPerTurn: parsed }));
+  };
+
+  // PA-95: How many seconds a planner shell command (bash/exec_command) may run
+  // before being killed — see `PlannerSettingsDto.commandTimeoutSeconds`'s doc comment.
+  // Clamped client-side to `[1, 3600]`.
+  const saveCommandTimeoutSeconds = (): void => {
+    const parsed = Number(commandTimeoutSecondsInput);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 3600) {
+      setCommandTimeoutSecondsInput(String(settings?.commandTimeoutSeconds ?? 300));
+      return;
+    }
+    void withBusy(() => api.updatePlannerSettings({ commandTimeoutSeconds: parsed }));
   };
 
   const saveApiKey = (): void => {
@@ -1134,6 +1149,25 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
         <p className="planner-row-meta" style={{ marginTop: 4 }}>
           Maximum subagents (Pocket Agent chats or coding agents) a single turn may spawn before
           refusing further spawns. Stops a runaway or confused agent from repeatedly spawning subagents.
+        </p>
+
+        <div className="planner-field" style={{ marginTop: 14, maxWidth: 160 }}>
+          <label htmlFor="planner-command-timeout-seconds">Command timeout (seconds)</label>
+          <input
+            id="planner-command-timeout-seconds"
+            type="number"
+            min={1}
+            max={3600}
+            step={1}
+            value={commandTimeoutSecondsInput}
+            disabled={busy}
+            onChange={(e) => setCommandTimeoutSecondsInput(e.target.value)}
+            onBlur={saveCommandTimeoutSeconds}
+          />
+        </div>
+        <p className="planner-row-meta" style={{ marginTop: 4 }}>
+          Maximum duration (in seconds) a planner shell command (bash/exec_command) may run before
+          being killed. Default is 300s (5 minutes).
         </p>
 
         <h3 style={{ marginTop: 14 }}>Remembered decisions</h3>

@@ -323,6 +323,11 @@ export const PlannerSettingsDto = z.object({
    * to stop runaway spawn loops within a single turn.
    */
   maxSubagentSpawnsPerTurn: z.number().int().min(1).max(50),
+  /**
+   * PA-95: Maximum duration (in seconds) a planner shell command (`bash`/`exec_command`)
+   * may run before being killed. Configurable (default 300s, previously hardcoded 60s).
+   */
+  commandTimeoutSeconds: z.number().int().min(1).max(3600),
 });
 export type PlannerSettingsDto = z.infer<typeof PlannerSettingsDto>;
 
@@ -365,6 +370,8 @@ export const UpdatePlannerSettingsRequest = z.object({
   maxToolIterations: z.number().int().min(1).max(200).optional(),
   /** See `PlannerSettingsDto.maxSubagentSpawnsPerTurn`'s doc comment. */
   maxSubagentSpawnsPerTurn: z.number().int().min(1).max(50).optional(),
+  /** See `PlannerSettingsDto.commandTimeoutSeconds`'s doc comment. */
+  commandTimeoutSeconds: z.number().int().min(1).max(3600).optional(),
 });
 export type UpdatePlannerSettingsRequest = z.infer<typeof UpdatePlannerSettingsRequest>;
 

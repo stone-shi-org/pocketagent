@@ -39,6 +39,12 @@ export type PlannerToolApprovalChoice = 'allow_once' | 'allow_workspace' | 'allo
  * been individually approved.
  */
 
+function aliasForTool(toolName: string): string | null {
+  if (toolName === 'bash') return 'exec_command';
+  if (toolName === 'exec_command') return 'bash';
+  return null;
+}
+
 /**
  * Checked before ever pausing a turn. Yolo wins outright; otherwise a
  * workspace-scoped remembered row wins over a global one.
@@ -67,11 +73,21 @@ export function resolveApprovalStatus(
 ): 'allow' | 'deny' | null {
   if (chatSkipsApprovals) return 'allow';
   if (readPlannerSettings(db).yoloEnabled) return 'allow';
+  const alias = aliasForTool(toolName);
   if (workspaceId) {
     const scoped = readPlannerToolApproval(db, 'workspace', workspaceId, toolName);
     if (scoped) return scoped;
+    if (alias) {
+      const aliasScoped = readPlannerToolApproval(db, 'workspace', workspaceId, alias);
+      if (aliasScoped) return aliasScoped;
+    }
   }
-  return readPlannerToolApproval(db, 'global', null, toolName);
+  const globalChoice = readPlannerToolApproval(db, 'global', null, toolName);
+  if (globalChoice) return globalChoice;
+  if (alias) {
+    return readPlannerToolApproval(db, 'global', null, alias);
+  }
+  return null;
 }
 
 /** A no-op for `allow_once` / `deny` — there is nothing to persist for a one-off decision. */
