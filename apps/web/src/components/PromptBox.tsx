@@ -11,6 +11,7 @@ import { readImageFile } from '../agent/image-attachment.js';
 import { resolveCurrentModel } from '../agent/transcript.js';
 import { getVoiceDirectSendPref } from '../agent/voice-prefs.js';
 import type { RecordedUtterance } from '../audio/capture.js';
+import { unlockAudioContext } from '../audio/audio-context.js';
 import { AttachButton } from './AttachButton.js';
 import { Icon } from './Icon.js';
 import { MicButton, type MicButtonHandle } from './MicButton.js';
@@ -444,6 +445,7 @@ export function PromptBox({
   function send(): void {
     const value = text;
     if ((value.length === 0 && !attachedImage) || disabled) return;
+    void unlockAudioContext();
     if (onSend(value, attachedImage ?? undefined)) {
       setText('');
       setAttachedImage(null);
@@ -488,6 +490,7 @@ export function PromptBox({
       return;
     }
     if (getVoiceDirectSendPref()) {
+      void unlockAudioContext();
       const fullText = text.trim() ? `${text.trim()} ${trimmed}` : trimmed;
       if (onSend(fullText, attachedImage ?? undefined)) {
         setText('');

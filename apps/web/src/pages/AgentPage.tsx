@@ -32,6 +32,7 @@ import { takePendingPrompt, setPendingPrompt } from '../agent/pending-prompt.js'
 import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
 import { LiveListenController } from '../audio/live-listen.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
+import { unlockAudioContext } from '../audio/audio-context.js';
 import { vadOptionsForSensitivity, type VadOptions } from '../audio/vad.js';
 import { isSkipCommand } from '../audio/voice-commands.js';
 import { judgeUtterance } from '../audio/utterance-harness.js';
@@ -223,8 +224,12 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
       // still in flight, or a controller that never came up because the
       // mic failed). Switching the stream off means nothing is talking,
       // full stop; switching it on re-arms a queue an earlier stop muted.
-      if (shouldBeOn) ttsQueue.arm();
-      else ttsQueue.stop();
+      if (shouldBeOn) {
+        ttsQueue.arm();
+        void unlockAudioContext();
+      } else {
+        ttsQueue.stop();
+      }
       // A start already in flight will re-check `desiredLiveListen` itself
       // the moment it settles (see the `finally` block below) — calling in
       // again here would race it rather than help it.
@@ -788,6 +793,8 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
     if (!enabled) {
       ttsQueueRef.current?.stop();
       connRef.current?.sendStopSpeech();
+    } else {
+      void unlockAudioContext();
     }
     connRef.current?.sendVoiceMode(enabled);
   }, []);

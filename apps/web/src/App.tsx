@@ -1,4 +1,5 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { registerAudioUnlockListeners } from './audio/audio-context.js';
 import { ApiError } from './api/client.js';
 import { useHashRoute, type Route } from './hooks/useHashRoute.js';
 import { LoginPage } from './pages/LoginPage.js';
@@ -52,6 +53,10 @@ export function App(): JSX.Element {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    return registerAudioUnlockListeners();
   }, []);
 
   if (auth === 'checking') {

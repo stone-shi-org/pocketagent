@@ -19,6 +19,7 @@ import { applyEvent, applyEvents, emptyTranscript, type TranscriptState } from '
 import { useHostApi } from '../hosts/HostContext.js';
 import { LiveListenController } from '../audio/live-listen.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
+import { unlockAudioContext } from '../audio/audio-context.js';
 import { vadOptionsForSensitivity, type VadOptions } from '../audio/vad.js';
 import { isSkipCommand } from '../audio/voice-commands.js';
 import { judgeUtterance } from '../audio/utterance-harness.js';
@@ -666,9 +667,10 @@ export function PlannerChatPage({
     (enabled: boolean) => {
       if (!enabled) {
         ttsQueueRef.current?.stop();
-      } else if (geminiMode) {
+      } else {
         // Inside the click, so iOS lets the playback context start.
-        GeminiLiveController.prime();
+        void unlockAudioContext();
+        if (geminiMode) GeminiLiveController.prime();
       }
       setLiveListenActive(enabled);
     },

@@ -53,6 +53,7 @@ export class PushToTalkRecorder {
   private stream: MediaStream | null = null;
   private context: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
+  private silentGain: GainNode | null = null;
   private chunks: Float32Array[] = [];
   private startedAt = 0;
 
@@ -107,7 +108,10 @@ export class PushToTalkRecorder {
     if (this.context.state === 'suspended') {
       await this.context.resume();
     }
-    await this.context.audioWorklet.addModule('/pcm-worklet-processor.js');
+    const workletUrl = typeof window !== 'undefined'
+      ? new URL('/pcm-worklet-processor.js', window.location.href).href
+      : '/pcm-worklet-processor.js';
+    await this.context.audioWorklet.addModule(workletUrl);
     const source = this.context.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.context, 'pcm-capture-processor');
     this.node.port.onmessage = (event: MessageEvent<Float32Array>) => {
@@ -115,6 +119,15 @@ export class PushToTalkRecorder {
       this.opts?.onLevel?.(rms(event.data));
     };
     source.connect(this.node);
+
+    // iOS Safari / WebKit: WebAudio engine is pull-based from the output
+    // destination. AudioWorkletProcessor.process() is only invoked if the node
+    // graph leads to destination. A muted GainNode completes the pull path
+    // without playing mic audio back through speakers.
+    this.silentGain = this.context.createGain();
+    this.silentGain.gain.setValueAtTime(0, this.context.currentTime);
+    this.node.connect(this.silentGain);
+    this.silentGain.connect(this.context.destination);
   }
 
   /**
@@ -124,6 +137,8 @@ export class PushToTalkRecorder {
   async cancel(): Promise<void> {
     this.node?.port.close();
     this.node?.disconnect();
+    this.silentGain?.disconnect();
+    this.silentGain = null;
     this.stream?.getTracks().forEach((track) => track.stop());
     await this.context?.close();
 
@@ -145,6 +160,8 @@ export class PushToTalkRecorder {
 
     this.node?.port.close();
     this.node?.disconnect();
+    this.silentGain?.disconnect();
+    this.silentGain = null;
     this.stream?.getTracks().forEach((track) => track.stop());
     await this.context?.close();
 

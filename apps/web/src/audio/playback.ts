@@ -1,4 +1,5 @@
 import { base64ToInt16Array, int16ToFloat32 } from './pcm.js';
+import { getSharedAudioContext, unlockAudioContext } from './audio-context.js';
 
 /**
  * Plays a structured session's `tts_audio` chunks (PA-20 Phase 3) in order,
@@ -79,7 +80,18 @@ export class TtsPlaybackQueue {
    */
   private pumpActive = false;
 
-  constructor(private readonly onPlaybackStateChange?: (playing: boolean) => void) {}
+  constructor(
+    private readonly onPlaybackStateChange?: (playing: boolean) => void,
+    private readonly getContext: () => AudioContext = getSharedAudioContext,
+  ) {}
+
+  /**
+   * PA-54: Unlocks playback audio within a user gesture (tap/click/send).
+   * Ensures Mobile Safari allows subsequent asynchronous TTS playback.
+   */
+  static prime(): Promise<boolean> {
+    return unlockAudioContext();
+  }
 
   /** Enqueue one chunk's base64 PCM16 (empty `data` on a `done` marker is a
    *  no-op — nothing to play, it exists only as an end-of-turn signal). */
@@ -192,7 +204,9 @@ export class TtsPlaybackQueue {
 
   private async playChunk(chunk: { pcm: Int16Array; sampleRateHz: number }): Promise<void> {
     if (this.stopped) return;
-    this.context ??= new AudioContext();
+    if (!this.context || this.context.state === 'closed') {
+      this.context = this.getContext();
+    }
     if (this.context.state === 'suspended') {
       try {
         // Raced against a timeout: on iOS Safari a `resume()` awaiting a user
