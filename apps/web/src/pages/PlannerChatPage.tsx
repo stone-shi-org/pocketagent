@@ -207,6 +207,14 @@ export function PlannerChatPage({
 
   const vadOptionsRef = useRef<VadOptions | undefined>(undefined);
   const ttsQueueRef = useRef<TtsPlaybackQueue | null>(null);
+  const sendAbortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      sendAbortControllerRef.current?.abort();
+      sendAbortControllerRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     const queue = new TtsPlaybackQueue((playing) => setIsSpeaking(playing));
@@ -543,10 +551,9 @@ export function PlannerChatPage({
 
   const pending = transcript?.pending[0] ?? null;
   const isChatBusy = sending || (chat?.busy ?? false) || (transcript?.busy ?? false);
-  // PA-96: while Gemini Live is on, typing goes to Gemini and is never
-  // blocked by a Gemini turn in progress — only by an approval waiting on the
-  // human, the same as a typed turn.
-  const disabled = geminiLive ? pending !== null : isChatBusy || pending !== null;
+  // PA-99: PromptBox manages its own busy state (swapping send into stop) — disabled
+  // only blocks interaction while an approval decision is pending from the human.
+  const disabled = pending !== null;
 
   /** `PromptBox.onSend` is synchronous by contract (see its own props doc):
       a `true` return clears the composer immediately, matching how a real
@@ -649,15 +656,23 @@ export function PlannerChatPage({
     // spot that needs to notice "this was the first message" and re-fetch
     // afterward for the new title to show up without a manual reload.
     const wasUntitled = chat?.title == null;
+    const controller = new AbortController();
+    sendAbortControllerRef.current = controller;
     void (async () => {
       try {
         ttsQueueRef.current?.arm();
-        await api.sendPlannerMessage(chatId, { content: trimmed, image, voiceMode: liveListenActive }, onStreamEvent);
+        await api.sendPlannerMessage(
+          chatId,
+          { content: trimmed, image, voiceMode: liveListenActive },
+          onStreamEvent,
+          controller.signal,
+        );
         if (wasUntitled) {
           const { chats } = await api.listPlannerChats();
           setChat((prev) => chats.find((c) => c.id === chatId) ?? prev);
         }
       } catch (err) {
+        if (controller.signal.aborted || (err as Error)?.name === 'AbortError') return;
         onApiError(err);
         setError(
           err instanceof ApiError
@@ -665,6 +680,9 @@ export function PlannerChatPage({
             : 'Could not reach Pocket Agent. Your message was not sent.',
         );
       } finally {
+        if (sendAbortControllerRef.current === controller) {
+          sendAbortControllerRef.current = null;
+        }
         setSending(false);
         void refreshSubagents();
       }
@@ -698,6 +716,16 @@ export function PlannerChatPage({
     ttsQueueRef.current?.stop();
     geminiRef.current?.stopSpeaking();
   }, []);
+
+  const handleInterrupt = useCallback(() => {
+    sendAbortControllerRef.current?.abort();
+    sendAbortControllerRef.current = null;
+    ttsQueueRef.current?.stop();
+    void api.interruptPlannerChat(chatId).catch((err) => {
+      onApiError(err);
+    });
+    setSending(false);
+  }, [api, chatId, onApiError]);
 
   const [micVersion, setMicVersion] = useState(0);
   useEffect(() => {
@@ -1304,6 +1332,7 @@ export function PlannerChatPage({
         currentModel={chat?.lastModelId ?? null}
         onSetModel={changeModel}
         busy={geminiLive ? false : isChatBusy}
+        onInterrupt={handleInterrupt}
       />
     </div>
   );

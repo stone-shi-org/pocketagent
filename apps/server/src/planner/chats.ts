@@ -534,6 +534,7 @@ export class PlannerChatService {
    * the drain check cannot disagree about what "a turn is running" means.
    */
   private readonly activeTurns = new Map<string, number>();
+  private readonly turnAbortControllers = new Map<string, AbortController>();
 
   /** Marks a turn as running; returns the release callback for a `finally`. */
   private beginTurn(chatId: string): () => void {
@@ -678,6 +679,63 @@ export class PlannerChatService {
       if (pending.chatId === chatId) return true;
     }
     return false;
+  }
+
+  /**
+   * PA-99: Interrupts an in-flight planner turn or dismisses a pending approval.
+   * Emits `turn_complete` with `stopReason: 'interrupted'` and returns `true`
+   * if an active or pending turn was stopped; `false` if nothing was in flight.
+   */
+  async interrupt(chatId: string): Promise<boolean> {
+    let stopped = false;
+    const controller = this.turnAbortControllers.get(chatId);
+    if (controller) {
+      controller.abort();
+      this.turnAbortControllers.delete(chatId);
+      stopped = true;
+    }
+
+    for (const [approvalId, pending] of this.pendingTurns.entries()) {
+      if (pending.chatId === chatId) {
+        this.pendingTurns.delete(approvalId);
+        const chat = this.get(chatId);
+        if (chat) {
+          const workspacePath = this.workspacePathFor(chat);
+          const call = pending.kind === 'live' ? pending.call : pending.toolCalls[pending.index]!;
+          await this.persist(workspacePath, chatId, {
+            kind: 'permission_resolved',
+            id: approvalId,
+            decision: 'deny',
+            message: 'Turn interrupted by the user.',
+          });
+          await this.persist(workspacePath, chatId, {
+            kind: 'tool_result',
+            id: crypto.randomUUID(),
+            toolUseId: call.id,
+            content: 'Turn interrupted by the user.',
+            truncated: false,
+            isError: true,
+          });
+          await this.persist(workspacePath, chatId, {
+            kind: 'turn_complete',
+            stopReason: 'interrupted',
+            isError: false,
+            numTurns: null,
+            durationMs: pending.kind === 'loop' ? pending.stats.elapsedMs : null,
+            costUsd: null,
+            inputTokens: pending.kind === 'loop' ? pending.stats.inputTokens : null,
+            outputTokens: pending.kind === 'loop' ? pending.stats.outputTokens : null,
+            completedAt: Date.now(),
+          });
+          this.turnStartedAtByChat.delete(chatId);
+          this.turnPollChecksByChat.delete(chatId);
+          void this.drainMailbox(chatId);
+        }
+        stopped = true;
+      }
+    }
+
+    return stopped;
   }
 
   private isWakeTurnActive(chatId: string): boolean {
@@ -858,6 +916,11 @@ export class PlannerChatService {
       this.subagentSessionsByChat.delete(id);
     }
     this.spawnsThisTurnByChat.delete(id);
+    const abortController = this.turnAbortControllers.get(id);
+    if (abortController) {
+      abortController.abort();
+      this.turnAbortControllers.delete(id);
+    }
     this.activeTurns.delete(id);
     this.activeWakeTurns.delete(id);
     this.mailboxByChat.delete(id);
@@ -1255,6 +1318,13 @@ export class PlannerChatService {
       this.wakeActionBudgetByChat.set(id, maxSpawns);
     }
 
+    const abortController = new AbortController();
+    if (opts.signal) {
+      if (opts.signal.aborted) abortController.abort();
+      else opts.signal.addEventListener('abort', () => abortController.abort(), { once: true });
+    }
+    this.turnAbortControllers.set(chat.id, abortController);
+
     const endTurn = this.beginTurn(chat.id);
     this.turnStartedAtByChat.set(chat.id, Date.now());
     this.turnPollChecksByChat.set(chat.id, new Map());
@@ -1280,8 +1350,9 @@ export class PlannerChatService {
       };
       yield* this.emit(workspacePath, chat.id, userEvent);
 
-      yield* this.driveLoop(chat, workspacePath, modelId, 0, EMPTY_TURN_STATS, opts.signal);
+      yield* this.driveLoop(chat, workspacePath, modelId, 0, EMPTY_TURN_STATS, abortController.signal);
     } finally {
+      this.turnAbortControllers.delete(chat.id);
       endTurn();
       this.activeWakeTurns.delete(chat.id);
       if (!this.isBusy(chat.id)) {
@@ -1315,6 +1386,8 @@ export class PlannerChatService {
     // from `pendingTurns` (deleted above) to `activeTurns` here, and PA-69's
     // drain check sees it continuously across the handover rather than
     // briefly reading as idle in between.
+    const abortController = new AbortController();
+    this.turnAbortControllers.set(chatId, abortController);
     const endTurn = pending.kind === 'live' ? this.beginLiveWork(chatId) : this.beginTurn(chatId);
     try {
       const chat = this.requireChat(chatId);
@@ -1334,9 +1407,11 @@ export class PlannerChatService {
           pending.index + 1,
           pending.iteration,
           pending.stats,
+          abortController.signal,
         );
       }
     } finally {
+      this.turnAbortControllers.delete(chatId);
       endTurn();
       if (!this.isBusy(chatId)) {
         this.turnStartedAtByChat.delete(chatId);
@@ -1436,13 +1511,14 @@ export class PlannerChatService {
     text: string,
     isError: boolean,
     stats: PlannerTurnStats,
+    stopReason?: string,
   ): AsyncGenerator<AgentEvent> {
     if (text.length > 0) {
       yield* this.emit(workspacePath, chat.id, { kind: 'text', id: crypto.randomUUID(), text });
     }
     yield* this.emit(workspacePath, chat.id, {
       kind: 'turn_complete',
-      stopReason: isError ? 'error' : 'end_turn',
+      stopReason: stopReason ?? (isError ? 'error' : 'end_turn'),
       isError,
       numTurns: null,
       durationMs: stats.elapsedMs,
@@ -1498,6 +1574,11 @@ export class PlannerChatService {
     stats: PlannerTurnStats,
     signal?: AbortSignal,
   ): AsyncGenerator<AgentEvent> {
+    if (signal?.aborted) {
+      yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'interrupted');
+      return;
+    }
+
     const settings = readPlannerSettings(this.opts.db);
     if (iteration >= settings.maxToolIterations) {
       yield* this.finishTurn(chat, workspacePath, modelId, GIVE_UP_MESSAGE, true, stats);
@@ -1548,6 +1629,10 @@ export class PlannerChatService {
         }
       }
     } catch (err) {
+      if (signal?.aborted) {
+        yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'interrupted');
+        return;
+      }
       this.opts.logger?.warn({ err, chat: chat.id, model: modelId }, 'planner LLM call failed');
       const message = err instanceof PlannerLlmError ? err.message : (err as Error).message;
       const failedStats = { ...stats, elapsedMs: stats.elapsedMs + (Date.now() - llmStartedAt) };
@@ -1558,6 +1643,11 @@ export class PlannerChatService {
       { ...stats, elapsedMs: stats.elapsedMs + (Date.now() - llmStartedAt) },
       completion?.usage ?? null,
     );
+
+    if (signal?.aborted) {
+      yield* this.finishTurn(chat, workspacePath, modelId, '', false, nextStats, 'interrupted');
+      return;
+    }
 
     if (!completion) {
       // Should not happen — `streamComplete` always yields exactly one
@@ -1591,7 +1681,7 @@ export class PlannerChatService {
       });
     }
 
-    yield* this.processToolCalls(chat, workspacePath, modelId, completion.toolCalls, 0, iteration + 1, nextStats);
+    yield* this.processToolCalls(chat, workspacePath, modelId, completion.toolCalls, 0, iteration + 1, nextStats, signal);
   }
 
   /**
@@ -1609,8 +1699,13 @@ export class PlannerChatService {
     startIndex: number,
     iteration: number,
     stats: PlannerTurnStats,
+    signal?: AbortSignal,
   ): AsyncGenerator<AgentEvent> {
     for (let index = startIndex; index < toolCalls.length; index++) {
+      if (signal?.aborted) {
+        yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'interrupted');
+        return;
+      }
       const call = toolCalls[index]!;
       const gate = this.gateToolCall(chat, call);
 
@@ -1661,10 +1756,19 @@ export class PlannerChatService {
         truncated: false,
         isError: false,
       });
+      if (signal?.aborted) {
+        yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'interrupted');
+        return;
+      }
+    }
+
+    if (signal?.aborted) {
+      yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'interrupted');
+      return;
     }
 
     // Every call in this batch resolved — ask the model what's next.
-    yield* this.driveLoop(chat, workspacePath, modelId, iteration, stats, undefined);
+    yield* this.driveLoop(chat, workspacePath, modelId, iteration, stats, signal);
   }
 
   /**

@@ -225,4 +225,44 @@ describe('PromptBox live stream component alignment and layout (PA-97)', () => {
   });
 });
 
+describe('PromptBox stop button state (PA-99)', () => {
+  it('renders enabled stop button when busy is true and disabled is false', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+
+    const html = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-test-pa99-busy"
+        onSend={() => true}
+        disabled={false}
+        busy={true}
+        onInterrupt={() => {}}
+      />,
+    );
+
+    expect(html).toContain('class="primary stop"');
+    expect(html).toContain('aria-label="Stop generating"');
+    // Button must NOT have a disabled attribute
+    expect(html).not.toMatch(/<button[^>]+class="primary stop"[^>]*\sdisabled/);
+  });
+
+  it('renders disabled stop button when busy is true and disabled is true (e.g. pending approval)', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+
+    const html = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-test-pa99-busy-disabled"
+        onSend={() => true}
+        disabled={true}
+        busy={true}
+        onInterrupt={() => {}}
+      />,
+    );
+
+    expect(html).toContain('class="primary stop"');
+    expect(html).toMatch(/<button[^>]+class="primary stop"[^>]*\sdisabled/);
+  });
+});
+
 

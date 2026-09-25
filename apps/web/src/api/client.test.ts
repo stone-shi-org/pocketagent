@@ -202,3 +202,37 @@ describe('api voice test methods (PA-81)', () => {
     expect(res.models).toHaveLength(1);
   });
 });
+
+describe('api.interruptPlannerChat (PA-99)', () => {
+  it('posts to /api/planner/chats/:id/interrupt', async () => {
+    const { calls } = mockFetch(200, { ok: true, interrupted: true });
+    const res = await api.interruptPlannerChat('chat-abc');
+
+    expect(calls[0]?.url).toBe('/api/planner/chats/chat-abc/interrupt');
+    expect(calls[0]?.init?.method).toBe('POST');
+    expect(res).toEqual({ ok: true, interrupted: true });
+  });
+
+  it('passes signal to sendPlannerMessage fetch and handles abort cleanly', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let abortedSignalPassed = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        if (init?.signal?.aborted) abortedSignalPassed = true;
+        const err = new DOMException('Aborted', 'AbortError');
+        throw err;
+      }),
+    );
+
+    // Should return cleanly without throwing when aborted
+    await api.sendPlannerMessage(
+      'chat-1',
+      { content: 'hi' },
+      () => {},
+      controller.signal,
+    );
+    expect(abortedSignalPassed).toBe(true);
+  });
+});

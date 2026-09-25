@@ -32,6 +32,7 @@ import {
   type GeminiLiveSettingsDto,
   type GeminiLiveTokenResponse,
   type GeminiLiveToolCallsResponse,
+  type InterruptPlannerChatResponse,
   type PlannerAgentMcpRegistriesResponse,
   type PlannerAgentSkillsResponse,
   type PlannerAgentToolsResponse,
@@ -1364,6 +1365,18 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       voiceMode: parsed.data.voiceMode,
       config: app.pocket.config,
     });
+  });
+
+  /**
+   * PA-99: Interrupts an in-flight planner turn or dismisses a pending approval.
+   */
+  app.post('/api/planner/chats/:id/interrupt', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const chat = app.pocket.plannerChats.get(id);
+    if (!chat) return notFound(reply, 'Chat not found.');
+    const interrupted = await app.pocket.plannerChats.interrupt(id);
+    const response: InterruptPlannerChatResponse = { ok: true, interrupted };
+    return noStore(reply).send(response);
   });
 
   // ---- Gemini Live (PA-96) --------------------------------------------------

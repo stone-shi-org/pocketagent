@@ -79,6 +79,7 @@ import type {
   CreatePlannerChatRequest,
   UpdatePlannerChatRequest,
   DeleteAllPlannerChatsResponse,
+  InterruptPlannerChatResponse,
   PlannerChatHistoryResponse,
   PlannerChatSubagentsResponse,
   PlannerContextPreviewResponse,
@@ -190,13 +191,21 @@ async function streamSseAt<T>(
   path: string,
   body: unknown,
   onEvent: (event: T) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(hostUrl(endpoint, path), {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    response = await fetch(hostUrl(endpoint, path), {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
+    });
+  } catch (err) {
+    if (signal?.aborted || (err as Error)?.name === 'AbortError') return;
+    throw err;
+  }
 
   if (!response.ok) {
     const text = await response.text();
@@ -218,26 +227,31 @@ async function streamSseAt<T>(
   if (!reader) return;
   const decoder = new TextDecoder();
   let buffer = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let boundary = buffer.indexOf('\n\n');
-    while (boundary >= 0) {
-      const frame = buffer.slice(0, boundary).trim();
-      buffer = buffer.slice(boundary + 2);
-      if (frame.length > 0) {
-        const jsonText = frame.startsWith('data:') ? frame.slice(5).trim() : frame;
-        try {
-          onEvent(JSON.parse(jsonText) as T);
-        } catch {
-          // A malformed frame is dropped rather than aborting the rest of
-          // the stream — the turn already in flight server-side keeps going
-          // either way.
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary >= 0) {
+        const frame = buffer.slice(0, boundary).trim();
+        buffer = buffer.slice(boundary + 2);
+        if (frame.length > 0) {
+          const jsonText = frame.startsWith('data:') ? frame.slice(5).trim() : frame;
+          try {
+            onEvent(JSON.parse(jsonText) as T);
+          } catch {
+            // A malformed frame is dropped rather than aborting the rest of
+            // the stream — the turn already in flight server-side keeps going
+            // either way.
+          }
         }
+        boundary = buffer.indexOf('\n\n');
       }
-      boundary = buffer.indexOf('\n\n');
     }
+  } catch (err) {
+    if (signal?.aborted || (err as Error)?.name === 'AbortError') return;
+    throw err;
   }
 }
 
@@ -257,7 +271,8 @@ export function createApiClient(endpoint: HostEndpoint) {
     path: string,
     body: unknown,
     onEvent: (event: AgentEvent) => void,
-  ): Promise<void> => streamSseAt<AgentEvent>(endpoint, path, body, onEvent);
+    signal?: AbortSignal,
+  ): Promise<void> => streamSseAt<AgentEvent>(endpoint, path, body, onEvent, signal);
 
   return {
     login: (token: string) =>
@@ -1019,8 +1034,21 @@ export function createApiClient(endpoint: HostEndpoint) {
      * mutating tool call with no remembered decision (`permission_request`
      * with no matching `permission_resolved` yet).
      */
-    sendPlannerMessage: (id: string, body: PlannerSendMessageRequest, onEvent: (event: AgentEvent) => void) =>
-      streamPlannerEvents(`/api/planner/chats/${encodeURIComponent(id)}/messages`, body, onEvent),
+    sendPlannerMessage: (
+      id: string,
+      body: PlannerSendMessageRequest,
+      onEvent: (event: AgentEvent) => void,
+      signal?: AbortSignal,
+    ) =>
+      streamPlannerEvents(`/api/planner/chats/${encodeURIComponent(id)}/messages`, body, onEvent, signal),
+
+    /**
+     * PA-99: Interrupts an in-flight planner turn or dismisses a pending approval.
+     */
+    interruptPlannerChat: (id: string) =>
+      request<InterruptPlannerChatResponse>(`/api/planner/chats/${encodeURIComponent(id)}/interrupt`, {
+        method: 'POST',
+      }),
 
     /**
      * Subscribes to live SSE events for a planner chat (e.g. background turns

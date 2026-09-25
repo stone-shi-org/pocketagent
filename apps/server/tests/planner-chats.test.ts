@@ -2033,6 +2033,138 @@ describe('planner chat routes over HTTP', () => {
     expect(toolResult.isError).toBe(false);
     expect(toolResult.content).toContain('resolved_via_exec_command');
   });
+
+  it('interrupts an in-flight LLM stream and emits turn_complete with stopReason interrupted (PA-99)', async () => {
+    let streamSignal: AbortSignal | undefined;
+    const fetchImpl = vi.fn().mockImplementation((_url: string | URL, init?: RequestInit) => {
+      streamSignal = init?.signal;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              `data: ${JSON.stringify({ choices: [{ delta: { content: 'starting response...' } }] })}\n\n`,
+            ),
+          );
+          init?.signal?.addEventListener('abort', () => {
+            controller.error(new DOMException('Aborted', 'AbortError'));
+          });
+        },
+      });
+      return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const gen = t.context.plannerChats.sendMessage(chat.id, 'do something');
+    const first = await gen.next();
+    expect(first.value?.kind).toBe('user_prompt');
+
+    // Advance into driveLoop to start streaming from the LLM
+    const second = await gen.next();
+    expect(second.value?.kind).toBe('text_delta');
+
+    // The chat is currently busy
+    expect(t.context.plannerChats.isBusy(chat.id)).toBe(true);
+
+    // Call interrupt
+    const interrupted = await t.context.plannerChats.interrupt(chat.id);
+    expect(interrupted).toBe(true);
+    expect(streamSignal?.aborted).toBe(true);
+
+    // Drain remaining events
+    const remaining: Array<{ kind: string; [key: string]: unknown }> = [];
+    for await (const event of gen) remaining.push(event);
+
+    const complete = remaining.find((e) => e.kind === 'turn_complete') as {
+      kind: string;
+      stopReason: string | null;
+      isError: boolean;
+    };
+    expect(complete).toBeDefined();
+    expect(complete.stopReason).toBe('interrupted');
+    expect(complete.isError).toBe(false);
+
+    // The chat is no longer busy
+    expect(t.context.plannerChats.isBusy(chat.id)).toBe(false);
+  });
+
+  it('interrupts an active turn via POST /api/planner/chats/:id/interrupt (PA-99)', async () => {
+    const fetchImpl = vi.fn().mockImplementation((_url: string | URL, init?: RequestInit) => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              `data: ${JSON.stringify({ choices: [{ delta: { content: 'chunk 1' } }] })}\n\n`,
+            ),
+          );
+          init?.signal?.addEventListener('abort', () => {
+            controller.error(new DOMException('Aborted', 'AbortError'));
+          });
+        },
+      });
+      return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    // Idle chat returns interrupted: false
+    const idleRes = await post(t, `/api/planner/chats/${chat.id}/interrupt`);
+    expect(idleRes.statusCode).toBe(200);
+    expect(idleRes.json()).toEqual({ ok: true, interrupted: false });
+
+    // Start a turn
+    const gen = t.context.plannerChats.sendMessage(chat.id, 'do something');
+    await gen.next(); // user_prompt
+    expect(t.context.plannerChats.isBusy(chat.id)).toBe(true);
+
+    // Interrupt via HTTP route
+    const busyRes = await post(t, `/api/planner/chats/${chat.id}/interrupt`);
+    expect(busyRes.statusCode).toBe(200);
+    expect(busyRes.json()).toEqual({ ok: true, interrupted: true });
+
+    // Drain
+    for await (const _ of gen) {
+      // drain
+    }
+    expect(t.context.plannerChats.isBusy(chat.id)).toBe(false);
+  });
+
+  it('interrupts a turn waiting on tool approval and emits turn_complete (PA-99)', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async () => {
+      return fakeToolCallResponse('bash', { command: 'rm -rf /tmp/test' });
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    // Start turn with mutating tool needing approval
+    const { events } = await sendMessage(t, chat.id, 'run rm');
+    const permReq = events.find((e) => e.kind === 'permission_request');
+    expect(permReq).toBeDefined();
+    expect(t.context.plannerChats.isBusy(chat.id)).toBe(true);
+
+    // Interrupt while paused on approval
+    const res = await post(t, `/api/planner/chats/${chat.id}/interrupt`);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, interrupted: true });
+
+    expect(t.context.plannerChats.isBusy(chat.id)).toBe(false);
+
+    // History should have permission_resolved deny and turn_complete interrupted
+    const history = (await get(t, `/api/planner/chats/${chat.id}/history`)).json().events;
+    const resolved = history.find((e: { kind: string }) => e.kind === 'permission_resolved');
+    expect(resolved).toBeDefined();
+    expect(resolved.decision).toBe('deny');
+
+    const complete = history.find((e: { kind: string }) => e.kind === 'turn_complete');
+    expect(complete).toBeDefined();
+    expect(complete.stopReason).toBe('interrupted');
+  });
 });
 
 

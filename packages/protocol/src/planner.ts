@@ -907,3 +907,9 @@ export const PlannerChatSubagentsResponse = z.object({
 });
 export type PlannerChatSubagentsResponse = z.infer<typeof PlannerChatSubagentsResponse>;
 
+export const InterruptPlannerChatResponse = z.object({
+  ok: z.literal(true),
+  interrupted: z.boolean(),
+});
+export type InterruptPlannerChatResponse = z.infer<typeof InterruptPlannerChatResponse>;
+
