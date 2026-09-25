@@ -1318,7 +1318,10 @@ export function PlannerChatPage({
             ? (audio) => api.transcribeVoice(chatId, audio).then((res) => res.text)
             : undefined
         }
-        supportsLiveListen={geminiSelected ? geminiAvailable : voiceEnabled}
+        // PA-98: Gemini Live is controlled exclusively by the dedicated header
+        // toggler button; PromptBox's live streaming button is reserved strictly
+        // for the self-made live-stt stream pipeline.
+        supportsLiveListen={!geminiSelected && voiceEnabled}
         liveListenActive={liveListenActive}
         onSetLiveListen={handleToggleLiveListen}
         micLevel={micLevel}

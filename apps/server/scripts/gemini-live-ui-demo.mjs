@@ -191,7 +191,7 @@ check(
 await page.screenshot({ path: path.join(SHOTS, 'pa96-1-disclosure.png') });
 
 heading('Live mode connects straight to Google with a minted token');
-await page.click('button[aria-label="Turn on live listening (hands-free)"]');
+await page.click('button[aria-label="Turn on Gemini Live"]');
 const listening = await until(() => page.locator('.planner-gemini-strip-state', { hasText: 'listening' }).isVisible(), 15000);
 check(listening, 'the strip reads "Gemini Live · listening"');
 const geminiSocket = sockets.find((u) => u.includes('BidiGenerateContentConstrained'));
@@ -239,7 +239,7 @@ const typedAnswered = await until(async () => {
 check(typedAnswered, 'Gemini answered the typed message, and it was persisted');
 
 heading('Turn live mode off');
-await page.click('button[aria-label="Turn off live listening"]');
+await page.click('button[aria-label="Turn off Gemini Live"]');
 check(await until(() => page.locator('.planner-gemini-strip').isHidden()), 'the strip is gone');
 
 heading('The chat transcript holds the whole exchange as ordinary events');
