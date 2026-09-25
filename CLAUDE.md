@@ -342,7 +342,14 @@ could see. Three things replaced that, and each is load-bearing:
   variant, since this list exposes no command line), and the setup dialog can remove an
   `install-prefix` copy with an argv-only `npm uninstall --prefix=<that prefix>` behind a
   confirmation. Any other copy (`/usr/bin/codex`) is report-only. Nothing is ever deleted
-  silently.
+  silently. The container image's own baked-in copy is a third kind, `image` (its real path is
+  under `AGENT_IMAGE_HOME`): the image layer is read-only, so the first Update in a container
+  necessarily writes a second copy into the mounted `$HOME`, which then runs for the server and
+  a login shell alike and survives restarts and image pulls. The baked-in copy is a superseded
+  baseline, shown as such — the first cut told test01's operator to "remove it on the host",
+  which cannot be done to an image layer. Consequence worth knowing: once `$HOME` holds an
+  updated copy, pulling a newer image does not change which copy runs; the agents' own
+  self-update is what keeps that copy current.
 - **An unwritable official location is refused up front, with the fix named**
   (`homeWritabilityProblem`). Before an official install or update runs, the `$HOME`
   directories its catalog entry declares (`homeDirs`) must be writable by this process — a

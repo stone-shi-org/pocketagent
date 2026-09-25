@@ -211,6 +211,12 @@ export interface CopyNotice {
   copy: AgentBinaryCopy;
   /** True for a copy in the install prefix, which the server may remove on request. */
   removable: boolean;
+  /**
+   * True when the copy is expected and needs nothing from the operator — the
+   * container image's own superseded baseline. Rendered muted, and does not
+   * make a row ask for review.
+   */
+  informational: boolean;
   message: string;
 }
 
@@ -227,17 +233,30 @@ export interface CopyNotice {
 export function otherCopyNotices(agent: Partial<Pick<AgentInfo, 'otherCopies'>>): CopyNotice[] {
   return (agent.otherCopies ?? []).map((copy) => {
     const where = copy.realPath !== copy.path ? `${copy.path} (→ ${copy.realPath})` : copy.path;
-    return copy.kind === 'install-prefix'
-      ? {
-          copy,
-          removable: true,
-          message: `Leftover copy at ${where}, from an earlier install through this page. It does not run, but it is a second, stale copy.`,
-        }
-      : {
-          copy,
-          removable: false,
-          message: `Another copy at ${where} does not run. This server does not manage it; remove or update it on the host if it is stale.`,
-        };
+    if (copy.kind === 'install-prefix') {
+      return {
+        copy,
+        removable: true,
+        informational: false,
+        message: `Leftover copy at ${where}, from an earlier install through this page. It does not run, but it is a second, stale copy.`,
+      };
+    }
+    if (copy.kind === 'image') {
+      // Expected after the first update in a container: the image layer is
+      // read-only, so the update went to $HOME and superseded this one.
+      return {
+        copy,
+        removable: false,
+        informational: true,
+        message: `The image's built-in copy at ${where} is superseded by the updated copy above and is not used. It is part of the container image, so it cannot be removed here; a newer image updates it.`,
+      };
+    }
+    return {
+      copy,
+      removable: false,
+      informational: false,
+      message: `Another copy at ${where} does not run. This server does not manage it; remove or update it on the host if it is stale.`,
+    };
   });
 }
 

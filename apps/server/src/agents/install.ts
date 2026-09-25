@@ -646,6 +646,7 @@ export function agentBinaryReport(
   const running = candidates[0];
   if (running === undefined) return none;
   const prefixBins = new Set(installPrefixBinDirs().map((d) => path.resolve(d)));
+  const imageHome = agentImageHome();
   const seen = new Set([running.realPath]);
   const otherCopies: AgentBinaryCopy[] = [];
   for (const copy of candidates.slice(1)) {
@@ -654,7 +655,11 @@ export function agentBinaryReport(
     otherCopies.push({
       path: copy.path,
       realPath: copy.realPath,
-      kind: prefixBins.has(path.dirname(copy.path)) ? 'install-prefix' : 'other',
+      kind: prefixBins.has(path.dirname(copy.path))
+        ? 'install-prefix'
+        : imageHome !== null && copy.realPath.startsWith(`${imageHome}${path.sep}`)
+          ? 'image'
+          : 'other',
     });
   }
   return {
@@ -662,6 +667,24 @@ export function agentBinaryReport(
     officialInstall: isOfficialInstallPath(installable, running.realPath),
     otherCopies,
   };
+}
+
+/**
+ * Where the container image keeps its baked-in agent installs, or null outside
+ * the image. Read from raw `process.env` rather than `Config`, like
+ * `POCKETAGENT_BUILD_VERSION`: it is the image's own identity (`ENV` in
+ * `docker/Dockerfile`), not something an operator chooses.
+ *
+ * It exists so an image copy can be told apart from a stray one. After the
+ * first "Update" in a container the running copy moves into the mounted
+ * `$HOME` (the image layer is read-only, so it cannot be updated in place),
+ * and the baked-in copy is simply superseded; reporting it as "another copy,
+ * remove it on the host" — as the first cut did on test01 — was advice that
+ * cannot be followed.
+ */
+function agentImageHome(): string | null {
+  const raw = process.env.AGENT_IMAGE_HOME?.trim();
+  return raw ? path.resolve(raw) : null;
 }
 
 /**

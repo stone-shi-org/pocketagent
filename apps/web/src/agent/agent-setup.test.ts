@@ -227,8 +227,31 @@ describe('other copies (PA-104)', () => {
       ],
     });
     expect(notices.map((n) => n.removable)).toEqual([true, false]);
+    expect(notices.map((n) => n.informational)).toEqual([false, false]);
     expect(notices[0]?.message).toContain('/home/u/.npm-global/bin/codex (→ /home/u/.npm-global/lib/node_modules/@openai/codex/bin/codex.js)');
     expect(notices[1]?.message).toMatch(/does not manage it/);
+  });
+
+  /**
+   * test01: after the first Update in a container the running copy moves to
+   * $HOME and the image's baked-in copy is superseded. That is expected, it
+   * cannot be removed (read-only image layer), and it must not be presented
+   * as a stray to "remove on the host".
+   */
+  it('presents the image’s superseded copy as informational, not as something to remove', () => {
+    const [notice] = otherCopyNotices({
+      otherCopies: [
+        {
+          path: '/usr/local/bin/claude',
+          realPath: '/opt/pocketagent-agents/.local/share/claude/versions/2.1.274',
+          kind: 'image',
+        },
+      ],
+    });
+    expect(notice?.removable).toBe(false);
+    expect(notice?.informational).toBe(true);
+    expect(notice?.message).toMatch(/superseded/);
+    expect(notice?.message).not.toMatch(/remove or update it on the host/);
   });
 
   /** An older host sends none of these fields; absence is not a problem to report. */

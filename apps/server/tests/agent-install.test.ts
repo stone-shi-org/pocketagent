@@ -336,6 +336,31 @@ describe('executable resolution (PA-104)', () => {
     ]);
   });
 
+  /**
+   * A container's baked-in copy (under AGENT_IMAGE_HOME) is its own kind: after
+   * an update the running copy is the one in $HOME, and the image's is an
+   * expected, unremovable baseline rather than a stray.
+   */
+  it('classifies the image’s baked-in copy as image, not other', () => {
+    const imageHome = mkdtempSync(path.join(os.tmpdir(), 'pa104-img-'));
+    const orig = process.env.AGENT_IMAGE_HOME;
+    process.env.AGENT_IMAGE_HOME = imageHome;
+    try {
+      host.link('.local/bin/claude', '.local/share/claude/versions/2.1.283');
+      host.exe('.local/share/claude/versions/2.1.283', '2.1.283');
+      const baked = host.exe(path.join(imageHome, '.local/share/claude/versions/2.1.274'), '2.1.274');
+      const onPath = path.join(host.pathDir, 'claude');
+      symlinkSync(baked, onPath);
+      const report = agentBinaryReport('claude', 'claude');
+      expect(report.resolvedPath).toBe(path.join(host.home, '.local/bin/claude'));
+      expect(report.otherCopies).toEqual([{ path: onPath, realPath: baked, kind: 'image' }]);
+    } finally {
+      if (orig === undefined) delete process.env.AGENT_IMAGE_HOME;
+      else process.env.AGENT_IMAGE_HOME = orig;
+      rmSync(imageHome, { recursive: true, force: true });
+    }
+  });
+
   it('says a non-official copy is not official', () => {
     host.exe('.npm-global/bin/claude');
     expect(agentBinaryReport('claude', 'claude').officialInstall).toBe(false);

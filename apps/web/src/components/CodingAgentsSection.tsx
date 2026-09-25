@@ -126,7 +126,9 @@ export function CodingAgentsSection({ onApiError }: Props): JSX.Element {
           // they describe was invisible for as long as nobody opened a dialog.
           const copies = otherCopyNotices(a);
           const unofficial = unofficialCopyWarning(a);
-          const needsReview = copies.length > 0 || unofficial !== null;
+          // The image's own superseded copy is expected after an update in a
+          // container and needs nothing from anyone, so it never asks for review.
+          const needsReview = copies.some((n) => !n.informational) || unofficial !== null;
           return (
             <div key={a.id} className="planner-model-row">
               <span>
@@ -186,7 +188,10 @@ export function CodingAgentsSection({ onApiError }: Props): JSX.Element {
                 {copies.map((notice) => (
                   <span key={notice.copy.path}>
                     <br />
-                    <span className="planner-row-meta" style={{ color: 'var(--tone-warn, #d97706)', wordBreak: 'break-all' }}>
+                    <span
+                      className="planner-row-meta"
+                      style={{ ...(notice.informational ? {} : { color: 'var(--tone-warn, #d97706)' }), wordBreak: 'break-all' }}
+                    >
                       {notice.message}
                     </span>
                   </span>

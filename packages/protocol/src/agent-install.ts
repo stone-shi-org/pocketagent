@@ -159,14 +159,21 @@ export type InstallAgentRequest = z.infer<typeof InstallAgentRequest>;
  *
  * A copy earlier in the search order is the bug this ticket is about, so the
  * server reports every other copy rather than silently picking one. `kind`
- * says whether this server may remove it: `install-prefix` is inside
- * `agentInstallPrefix` (a pre-PA-104 Settings install); `other` is anything
- * else (`/usr/bin/codex` from a system npm) and is report-only.
+ * says what it is and whether this server may remove it:
+ *
+ * - `install-prefix`: inside `agentInstallPrefix` (a pre-PA-104 Settings
+ *   install). Removable on request.
+ * - `image`: the container image's own baked-in install (the `claude`/`all`
+ *   tags, under `AGENT_IMAGE_HOME`). It lives in a read-only image layer, so an
+ *   update necessarily lands in the mounted `$HOME` instead and supersedes it —
+ *   this is the expected state after the first update in a container, not a
+ *   stray, and nothing can or should remove it. Informational only.
+ * - `other`: anything else (`/usr/bin/codex` from a system npm). Report-only.
  */
 export const AgentBinaryCopy = z.object({
   path: z.string(),
   realPath: z.string(),
-  kind: z.enum(['install-prefix', 'other']),
+  kind: z.enum(['install-prefix', 'image', 'other']),
 });
 export type AgentBinaryCopy = z.infer<typeof AgentBinaryCopy>;
 
