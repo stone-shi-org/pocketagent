@@ -407,13 +407,23 @@ export const TOOL_INTEGRATION_DISABLED: ToolIntegrationConfig = {
   apiKey: null,
 };
 
+/**
+ * PA-101: A structured tool execution outcome allowing tools (like `call_mcp_tool`)
+ * to signal failure with `isError: true` so the transcript and turn loop capture
+ * server/tool errors accurately.
+ */
+export interface PlannerToolResult {
+  content: string;
+  isError?: boolean;
+}
+
 export interface PlannerToolDefinition {
   name: string;
   description: string;
   /** JSON Schema, sent to the LLM verbatim as the function's `parameters`. */
   parameters: Record<string, unknown>;
   readOnly: boolean;
-  execute: (deps: PlannerToolDeps, args: Record<string, unknown>) => Promise<string>;
+  execute: (deps: PlannerToolDeps, args: Record<string, unknown>) => Promise<string | PlannerToolResult>;
 }
 
 /** Caps how much of a tool's result is fed back to the LLM — a runaway
@@ -1971,24 +1981,39 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     },
     // Static fallback only — see this section's own doc comment above.
     readOnly: false,
-    async execute(deps, args) {
+    async execute(deps, args): Promise<PlannerToolResult> {
       const toolName = String(args.tool ?? '').trim();
-      if (!toolName) return 'No MCP tool name provided. Call list_mcp_tools first to find one.';
+      if (!toolName) {
+        return {
+          content: 'No MCP tool name provided. Call list_mcp_tools first to find one.',
+          isError: true,
+        };
+      }
       const callArgs =
         args.arguments && typeof args.arguments === 'object' ? (args.arguments as Record<string, unknown>) : {};
 
       const enabled = deps.mcpRegistry.listEnabledTools(deps.workspaceId);
       if (!enabled.some((t) => t.qualifiedName === toolName)) {
-        return deps.mcpRegistry.resolveTool(toolName)
-          ? `MCP tool "${toolName}" is disabled.`
-          : `Unknown MCP tool: ${toolName}. Call list_mcp_tools to see what's available.`;
+        const resolved = deps.mcpRegistry.resolveTool(toolName);
+        return {
+          content: resolved
+            ? `MCP tool "${toolName}" is disabled.`
+            : `Unknown MCP tool: ${toolName}. Call list_mcp_tools to see what's available.`,
+          isError: true,
+        };
       }
       try {
         const result = await deps.mcpRegistry.callTool(toolName, callArgs);
         const text = result.text.length > 0 ? result.text : '(empty result)';
-        return truncate(result.isError ? `Error from ${toolName}: ${text}` : text, MAX_TOOL_RESULT_CHARS);
+        return {
+          content: truncate(result.isError ? `Error from ${toolName}: ${text}` : text, MAX_TOOL_RESULT_CHARS),
+          isError: result.isError,
+        };
       } catch (err) {
-        return `Error calling MCP tool "${toolName}": ${(err as Error).message}`;
+        return {
+          content: `Error calling MCP tool "${toolName}": ${(err as Error).message}`,
+          isError: true,
+        };
       }
     },
   },

@@ -97,6 +97,9 @@ export const McpRegistrySummary = z.object({
       than hidden — the same "never fired" posture a webhook row already
       takes for its own delivery history. */
   lastError: z.string().nullable(),
+  /** PA-101: Milliseconds epoch timestamp until which calls to this registry
+      are short-circuited due to connection timeout/failure, or null if healthy. */
+  cooldownUntil: z.number().int().nullable().default(null),
   createdAt: z.number().int(),
   updatedAt: z.number().int(),
 });

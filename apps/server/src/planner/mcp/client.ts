@@ -104,18 +104,49 @@ export class McpClientError extends Error {
   override readonly name = 'McpClientError';
 }
 
+export interface McpClientOptions {
+  connectTimeoutMs?: number;
+  callTimeoutMs?: number;
+  customTransport?: Transport;
+}
+
 export class McpClient {
   private client: Client | null = null;
+  private readonly connectTimeoutMs: number;
+  private readonly callTimeoutMs: number;
+  private readonly customTransport?: Transport;
 
-  constructor(private readonly config: McpConnectionConfig) {}
+  constructor(
+    private readonly config: McpConnectionConfig,
+    optionsOrTransport?: Transport | McpClientOptions,
+  ) {
+    if (optionsOrTransport && 'start' in optionsOrTransport) {
+      this.customTransport = optionsOrTransport;
+      this.connectTimeoutMs = MCP_CONNECT_TIMEOUT_MS;
+      this.callTimeoutMs = MCP_CALL_TIMEOUT_MS;
+    } else if (optionsOrTransport) {
+      this.customTransport = optionsOrTransport.customTransport;
+      this.connectTimeoutMs = optionsOrTransport.connectTimeoutMs ?? MCP_CONNECT_TIMEOUT_MS;
+      this.callTimeoutMs = optionsOrTransport.callTimeoutMs ?? MCP_CALL_TIMEOUT_MS;
+    } else {
+      this.connectTimeoutMs = MCP_CONNECT_TIMEOUT_MS;
+      this.callTimeoutMs = MCP_CALL_TIMEOUT_MS;
+    }
+  }
 
   async connect(): Promise<void> {
-    const transport = buildTransport(this.config);
+    const transport = this.customTransport ?? buildTransport(this.config);
     const client = new Client({ name: 'pocketagent', version: '1.0.0' }, { capabilities: {} });
+    let timer: NodeJS.Timeout | undefined;
     try {
-      await client.connect(transport, { timeout: MCP_CONNECT_TIMEOUT_MS });
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('MCP error -32001: Request timed out')), this.connectTimeoutMs);
+      });
+      await Promise.race([client.connect(transport, { timeout: this.connectTimeoutMs }), timeoutPromise]);
     } catch (err) {
       throw new McpClientError(`Could not connect: ${(err as Error).message}`);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
     this.client = client;
   }
@@ -135,7 +166,7 @@ export class McpClient {
     if (!this.client) throw new McpClientError('Not connected.');
     let result;
     try {
-      result = await this.client.listTools(undefined, { timeout: MCP_CALL_TIMEOUT_MS });
+      result = await this.client.listTools(undefined, { timeout: this.callTimeoutMs });
     } catch (err) {
       throw new McpClientError(`tools/list failed: ${(err as Error).message}`);
     }
@@ -152,7 +183,7 @@ export class McpClient {
     let result;
     try {
       result = await this.client.callTool({ name, arguments: args }, undefined, {
-        timeout: MCP_CALL_TIMEOUT_MS,
+        timeout: this.callTimeoutMs,
       });
     } catch (err) {
       throw new McpClientError(`tools/call failed: ${(err as Error).message}`);

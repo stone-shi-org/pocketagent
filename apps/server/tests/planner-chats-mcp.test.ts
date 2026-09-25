@@ -73,8 +73,8 @@ describe('call_mcp_tool approval gating', () => {
 
   /** Registers a real MCP registry against a real test server and populates
       its tool cache, returning the registry id. */
-  async function registerRegistry(name = 'Jira MCP'): Promise<string> {
-    mcpServer = await startStreamableHttpTestServer();
+  async function registerRegistry(name = 'Jira MCP', options?: { includeFailTool?: boolean }): Promise<string> {
+    mcpServer = await startStreamableHttpTestServer(options);
     const created = (
       await post('/api/mcp-registries', { name, transport: 'streamable_http', url: mcpServer.url, authKind: 'none' })
     ).json();
@@ -228,4 +228,39 @@ describe('call_mcp_tool approval gating', () => {
     expect(findEvent(events, 'permission_request')).toBeUndefined();
     expect(findEvent(events, 'text')?.text).toBe('Deleted z.');
   });
+
+  it('saves failed call_mcp_tool results with isError: true in the chat transcript', async () => {
+    const fetchImpl = vi.fn();
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch('/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    const registryId = await registerRegistry('Jira MCP', { includeFailTool: true });
+
+    fetchImpl
+      .mockResolvedValueOnce(
+        fakeToolCallResponse(CALL_MCP_TOOL_NAME, {
+          tool: `mcp__${registryId}__fail_tool`,
+          arguments: { message: 'email server down' },
+        }),
+      )
+      .mockResolvedValueOnce(fakeCompletionResponse('Tool failed as expected.'));
+
+    const chat = (await post('/api/planner/chats', { modelId: 'gpt-4o' })).json();
+    const { events } = await sendMessage(chat.id, 'trigger failure');
+
+    const toolResultEvent = findEvent(events, 'tool_result');
+    expect(toolResultEvent).toBeDefined();
+    expect(toolResultEvent).toMatchObject({
+      kind: 'tool_result',
+      isError: true,
+      content: expect.stringContaining('email server down'),
+    });
+    expect(findEvent(events, 'text')?.text).toBe('Tool failed as expected.');
+
+    // Also verify persisted transcript in chat history route
+    const historyRes = await get(`/api/planner/chats/${chat.id}/history`);
+    const historyEvents = historyRes.json().events as Array<{ kind: string; isError?: boolean }>;
+    const historyToolResult = historyEvents.find((e) => e.kind === 'tool_result');
+    expect(historyToolResult?.isError).toBe(true);
+  });
 });
+

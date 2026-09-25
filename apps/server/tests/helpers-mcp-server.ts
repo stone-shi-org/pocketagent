@@ -30,6 +30,8 @@ export interface TestMcpServerOptions {
       lets a test prove `McpRegistryService` captures and refreshes it (a
       registry's own `reportedInstructions`) when one actually does. */
   instructions?: string;
+  /** If set, registers an extra tool (`fail_tool`) that returns isError: true. */
+  includeFailTool?: boolean;
 }
 
 export interface TestMcpServerHandle {
@@ -62,6 +64,20 @@ function buildMcpServer(opts: TestMcpServerOptions = {}): McpServer {
     },
     async ({ id }: { id: string }) => ({ content: [{ type: 'text' as const, text: `deleted ${id}` }] }),
   );
+  if (opts.includeFailTool) {
+    server.registerTool(
+      'fail_tool',
+      {
+        description: 'Simulates a tool failure returning isError.',
+        inputSchema: { message: z.string() },
+        annotations: { readOnlyHint: true },
+      },
+      async ({ message }: { message: string }) => ({
+        content: [{ type: 'text' as const, text: `Tool error: ${message}` }],
+        isError: true,
+      }),
+    );
+  }
   return server;
 }
 

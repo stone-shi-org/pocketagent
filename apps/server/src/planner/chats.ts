@@ -1478,14 +1478,14 @@ export class PlannerChatService {
       decision: 'allow',
       message: scopeMessage(choice),
     });
-    const resultText = await this.executeTool(tool, call.function.arguments, chat);
+    const result = await this.executeTool(tool, call.function.arguments, chat);
     yield* this.emit(workspacePath, chat.id, {
       kind: 'tool_result',
       id: crypto.randomUUID(),
       toolUseId: call.id,
-      content: resultText,
+      content: result.content,
       truncated: false,
-      isError: false,
+      isError: result.isError,
     });
   }
 
@@ -1747,14 +1747,14 @@ export class PlannerChatService {
         continue;
       }
 
-      const resultText = await this.executeTool(gate.tool, call.function.arguments, chat);
+      const result = await this.executeTool(gate.tool, call.function.arguments, chat);
       yield* this.emit(workspacePath, chat.id, {
         kind: 'tool_result',
         id: crypto.randomUUID(),
         toolUseId: call.id,
-        content: resultText,
+        content: result.content,
         truncated: false,
-        isError: false,
+        isError: result.isError,
       });
       if (signal?.aborted) {
         yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'interrupted');
@@ -1991,8 +1991,9 @@ export class PlannerChatService {
             output = 'Denied by a remembered decision.';
             isError = true;
           } else {
-            output = await this.executeTool(gate.tool, call.function.arguments, chat);
-            isError = false;
+            const result = await this.executeTool(gate.tool, call.function.arguments, chat);
+            output = result.content;
+            isError = result.isError;
           }
           await this.persist(workspacePath, chat.id, {
             kind: 'tool_result',
@@ -2059,14 +2060,18 @@ export class PlannerChatService {
     });
   }
 
-  private async executeTool(tool: PlannerToolDefinition, rawArguments: string, chat: PlannerChat): Promise<string> {
+  private async executeTool(
+    tool: PlannerToolDefinition,
+    rawArguments: string,
+    chat: PlannerChat,
+  ): Promise<{ content: string; isError: boolean }> {
     const args = safeParseArgs(rawArguments);
     // PA-31: read fresh on every call, like `resolveModelId`'s own
     // `readPlannerSettings` above — a provider toggled or rekeyed in
     // Settings must take effect on the very next tool call.
     const settings = readPlannerSettings(this.opts.db);
     try {
-      return await tool.execute(
+      const raw = await tool.execute(
         {
           workspaces: this.opts.workspaces,
           plannerWorkspaces: this.opts.plannerWorkspaces,
@@ -2180,9 +2185,13 @@ export class PlannerChatService {
         },
         args,
       );
+      if (typeof raw === 'object' && raw !== null && 'content' in raw) {
+        return { content: raw.content, isError: Boolean(raw.isError) };
+      }
+      return { content: String(raw), isError: false };
     } catch (err) {
       this.opts.logger?.warn({ err, tool: tool.name, chat: chat.id }, 'planner tool execution failed');
-      return `Error running tool "${tool.name}": ${(err as Error).message}`;
+      return { content: `Error running tool "${tool.name}": ${(err as Error).message}`, isError: true };
     }
   }
 

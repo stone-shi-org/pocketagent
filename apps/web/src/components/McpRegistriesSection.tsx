@@ -362,6 +362,11 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
                     ? `${r.toolCount} tool(s), last connected ${new Date(r.lastConnectedAt).toLocaleString()}`
                     : 'Never connected'}
                   {r.lastError && ` — last error: ${r.lastError}`}
+                  {r.cooldownUntil && r.cooldownUntil > Date.now() && (
+                    <span className="settings-badge" style={{ marginLeft: 6 }}>
+                      Cooling down until {new Date(r.cooldownUntil).toLocaleTimeString()}
+                    </span>
+                  )}
                 </span>
                 {result && result !== 'testing' && (
                   <>

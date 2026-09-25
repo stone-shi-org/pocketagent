@@ -25,7 +25,12 @@ import { findPlannerTool, TOOL_INTEGRATION_DISABLED, type PlannerToolDeps } from
  * actually works end to end.
  */
 
-function depsFor(t: TestApp, workspaceId?: string | null): PlannerToolDeps {
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
+import { McpClient } from '../src/planner/mcp/client.js';
+import { McpRegistryService } from '../src/planner/mcp/registry-service.js';
+
+function depsFor(t: TestApp, workspaceId?: string | null, customMcpRegistry?: McpRegistryService): PlannerToolDeps {
   const { workspaces, plannerWorkspaces, sessions, worktrees, conversations, agyTranscripts, piTranscripts } =
     t.context;
   return {
@@ -36,7 +41,7 @@ function depsFor(t: TestApp, workspaceId?: string | null): PlannerToolDeps {
     historyDeps: { sessions, conversations, agyTranscripts, piTranscripts },
     shell: t.context.config.shell,
     memory: t.context.plannerMemory,
-    mcpRegistry: t.context.mcpRegistry,
+    mcpRegistry: customMcpRegistry ?? t.context.mcpRegistry,
     skills: t.context.skills,
     workspaceId: workspaceId === undefined ? (t.context.plannerWorkspaces.getDefault()?.id ?? null) : workspaceId,
     webSearch: TOOL_INTEGRATION_DISABLED,
@@ -113,9 +118,15 @@ describe('list_mcp_tools / call_mcp_tool', () => {
     const id = await registerRegistry('Arr MCP', 'Manages the *arr stack — TV, movie, and music downloads.');
     const tool = findPlannerTool(LIST_MCP_TOOLS_NAME)!;
     const result = await tool.execute(depsFor(t), {});
-    const parsed = JSON.parse(result) as { id: string; name: string; description: string | null; toolCount: number }[];
+    const parsed = JSON.parse(result) as { id: string; name: string; host: string; description: string | null; toolCount: number }[];
     expect(parsed).toEqual([
-      { id, name: 'Arr MCP', description: 'Manages the *arr stack — TV, movie, and music downloads.', toolCount: 2 },
+      {
+        id,
+        name: 'Arr MCP',
+        host: expect.any(String),
+        description: 'Manages the *arr stack — TV, movie, and music downloads.',
+        toolCount: 2,
+      },
     ]);
     // Never a tool schema or qualified tool name at this tier.
     expect(result).not.toContain('mcp__');
@@ -273,7 +284,7 @@ describe('list_mcp_tools / call_mcp_tool', () => {
       tool: `mcp__${id}__echo`,
       arguments: { text: 'hello there' },
     });
-    expect(result).toBe('echo: hello there');
+    expect(result).toEqual({ content: 'echo: hello there', isError: false });
   });
 
   it('call_mcp_tool refuses an unknown tool name', async () => {
@@ -281,7 +292,10 @@ describe('list_mcp_tools / call_mcp_tool', () => {
     await registerRegistry();
     const tool = findPlannerTool(CALL_MCP_TOOL_NAME)!;
     const result = await tool.execute(depsFor(t), { tool: 'mcp__nope__nothing' });
-    expect(result).toMatch(/unknown mcp tool/i);
+    expect(result).toMatchObject({
+      content: expect.stringMatching(/unknown mcp tool/i),
+      isError: true,
+    });
   });
 
   it('call_mcp_tool refuses every tool for an agent with MCP disabled, even though the registry itself is fine', async () => {
@@ -299,18 +313,24 @@ describe('list_mcp_tools / call_mcp_tool', () => {
       tool: `mcp__${id}__delete_thing`,
       arguments: { id: 'x' },
     });
-    expect(result).toMatch(/is disabled/i);
+    expect(result).toMatchObject({
+      content: expect.stringMatching(/is disabled/i),
+      isError: true,
+    });
     // An orphaned chat (no workspace) is unaffected — only the global switch
     // (still on) governs it.
     const okResult = await tool.execute(depsFor(t, null), { tool: `mcp__${id}__echo`, arguments: { text: 'hi' } });
-    expect(okResult).toBe('echo: hi');
+    expect(okResult).toEqual({ content: 'echo: hi', isError: false });
   });
 
   it('call_mcp_tool with no tool name asks the model to call list_mcp_tools first', async () => {
     t = await createTestApp();
     const tool = findPlannerTool(CALL_MCP_TOOL_NAME)!;
     const result = await tool.execute(depsFor(t), {});
-    expect(result).toMatch(/no mcp tool name provided/i);
+    expect(result).toMatchObject({
+      content: expect.stringMatching(/no mcp tool name provided/i),
+      isError: true,
+    });
   });
 
   // PA-37 follow-up round two: disabling one registry for an agent hides
@@ -348,10 +368,10 @@ describe('list_mcp_tools / call_mcp_tool', () => {
     const callTool = findPlannerTool(CALL_MCP_TOOL_NAME)!;
     expect(
       await callTool.execute(depsFor(t, workspaceId), { tool: `mcp__${jiraId}__echo`, arguments: { text: 'hi' } }),
-    ).toBe('echo: hi');
+    ).toEqual({ content: 'echo: hi', isError: false });
     expect(
       await callTool.execute(depsFor(t, workspaceId), { tool: `mcp__${bambooId}__echo`, arguments: { text: 'hi' } }),
-    ).toMatch(/is disabled/i);
+    ).toMatchObject({ content: expect.stringMatching(/is disabled/i), isError: true });
 
     // A second, unrelated agent never touched the per-agent setting, so it
     // still sees Bamboo's tools — this is per-agent, not global.
@@ -367,4 +387,179 @@ describe('list_mcp_tools / call_mcp_tool', () => {
     ) as { tool: string }[];
     expect(otherTools.map((p) => p.tool)).toContain(`mcp__${bambooId}__echo`);
   });
+
+  // PA-101: Error reporting and backoff cooldown
+
+  it('call_mcp_tool marks server-reported errors as isError: true', async () => {
+    t = await createTestApp();
+    mcpServer = await startStreamableHttpTestServer({ includeFailTool: true });
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/mcp-registries',
+      headers: authHeaders(t.cookie),
+      payload: { name: 'Failing Registry', transport: 'streamable_http', url: mcpServer.url, authKind: 'none' },
+    });
+    const id = created.json().id as string;
+    const tool = findPlannerTool(CALL_MCP_TOOL_NAME)!;
+    const result = await tool.execute(depsFor(t), {
+      tool: `mcp__${id}__fail_tool`,
+      arguments: { message: 'database locked' },
+    });
+    expect(result).toEqual({
+      content: `Error from mcp__${id}__fail_tool: Tool error: database locked`,
+      isError: true,
+    });
+  });
+
+  it('call_mcp_tool backs off from unreachable servers after connect timeout without redialing', async () => {
+    t = await createTestApp({
+      POCKETAGENT_SETTINGS_ENC_KEY: Buffer.alloc(32, 1).toString('base64'),
+    });
+
+    class ControllableFakeTransport implements Transport {
+      public startCalls = 0;
+      public hang = false;
+
+      async start(): Promise<void> {
+        this.startCalls++;
+        if (this.hang) {
+          return new Promise(() => {});
+        }
+      }
+
+      async send(message: JSONRPCMessage): Promise<void> {
+        if (this.hang) return;
+        if ('method' in message) {
+          if (message.method === 'initialize') {
+            this.onmessage?.({
+              jsonrpc: '2.0',
+              id: message.id,
+              result: {
+                protocolVersion: '2024-11-05',
+                capabilities: { tools: {} },
+                serverInfo: { name: 'controllable-server', version: '1.0.0' },
+              },
+            });
+          } else if (message.method === 'tools/list') {
+            this.onmessage?.({
+              jsonrpc: '2.0',
+              id: message.id,
+              result: {
+                tools: [
+                  {
+                    name: 'fetch_and_process_unread',
+                    description: 'Fetches emails',
+                    inputSchema: { type: 'object', properties: {} },
+                    annotations: { readOnlyHint: true },
+                  },
+                ],
+              },
+            });
+          } else if (message.method === 'tools/call') {
+            this.onmessage?.({
+              jsonrpc: '2.0',
+              id: message.id,
+              result: {
+                content: [{ type: 'text', text: 'email processed' }],
+              },
+            });
+          }
+        }
+      }
+
+      async close(): Promise<void> {}
+      onclose?: () => void;
+      onerror?: (error: Error) => void;
+      onmessage?: (message: JSONRPCMessage) => void;
+    }
+
+    const fakeTransport = new ControllableFakeTransport();
+    let mockTime = 1_700_000_000_000;
+
+    const customMcpRegistry = new McpRegistryService({
+      db: t.context.db,
+      encKey: t.context.config.settingsEncKey,
+      logger: t.app.log,
+      now: () => mockTime,
+      clientFactory: (cfg) => new McpClient(cfg, { customTransport: fakeTransport, connectTimeoutMs: 50, callTimeoutMs: 50 }),
+    });
+
+    // 1. Initial healthy creation caches tools
+    const summary = customMcpRegistry.create({
+      name: 'Email Triage',
+      transport: 'streamable_http',
+      url: 'http://10.100.0.50:4003/mcp?token=leakme#frag',
+      authKind: 'bearer',
+      bearerToken: 'secret-bearer-token-12345',
+    });
+    const tested = await customMcpRegistry.checkConnection(summary.id);
+    expect(tested.ok).toBe(true);
+    expect(fakeTransport.startCalls).toBe(1);
+
+    const callTool = findPlannerTool(CALL_MCP_TOOL_NAME)!;
+    const toolName = `mcp__${summary.id}__fetch_and_process_unread`;
+
+    // 2. The server freezes: fake transport now hangs on connect
+    fakeTransport.hang = true;
+
+    // First call: connect times out
+    const failResult1 = await callTool.execute(depsFor(t, undefined, customMcpRegistry), {
+      tool: toolName,
+      arguments: {},
+    });
+    expect(fakeTransport.startCalls).toBe(2);
+    expect(failResult1).toMatchObject({
+      isError: true,
+      content: expect.stringContaining('MCP server "Email Triage" (10.100.0.50:4003, streamable_http)'),
+    });
+    // Ensure sensitive tokens/query/path/headers are NEVER leaked into error text
+    const content1 = typeof failResult1 === 'string' ? failResult1 : failResult1.content;
+    expect(content1).not.toContain('secret-bearer-token-12345');
+    expect(content1).not.toContain('leakme');
+    expect(content1).not.toContain('Bearer');
+
+    // 3. Second call immediately within cooldown window (cooldown is 30s):
+    // Must return immediately WITHOUT redialing (startCalls must remain 2)
+    mockTime += 5_000; // 5s later
+    const failResult2 = await callTool.execute(depsFor(t, undefined, customMcpRegistry), {
+      tool: toolName,
+      arguments: {},
+    });
+    expect(fakeTransport.startCalls).toBe(2); // Dial did not happen!
+    expect(failResult2).toMatchObject({
+      isError: true,
+      content: expect.stringMatching(/MCP server "Email Triage" \(10\.100\.0\.50:4003\) is unreachable \(last error 5s ago: .*\)\. Not retrying until .*/),
+    });
+
+    // 4. Advance time past the 30s cooldown:
+    mockTime += 26_000; // now 31s since failure
+    const failResult3 = await callTool.execute(depsFor(t, undefined, customMcpRegistry), {
+      tool: toolName,
+      arguments: {},
+    });
+    // Cooldown expired, so it attempts to connect again!
+    expect(fakeTransport.startCalls).toBe(3);
+    expect(failResult3).toMatchObject({
+      isError: true,
+      content: expect.stringContaining('MCP server "Email Triage" (10.100.0.50:4003, streamable_http)'),
+    });
+
+    // 5. Restore server health:
+    fakeTransport.hang = false;
+    mockTime += 61_000; // wait past exponential backoff cooldown (streak 2 = 60s)
+    const successResult = await callTool.execute(depsFor(t, undefined, customMcpRegistry), {
+      tool: toolName,
+      arguments: {},
+    });
+    expect(fakeTransport.startCalls).toBe(4);
+    expect(successResult).toEqual({
+      content: 'email processed',
+      isError: false,
+    });
+
+    // Verify streak and cooldown are reset
+    const refreshedSummary = customMcpRegistry.get(summary.id);
+    expect(refreshedSummary.cooldownUntil).toBeNull();
+  });
 });
+

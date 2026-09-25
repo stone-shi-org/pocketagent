@@ -19,7 +19,7 @@ export class McpRegistryError extends Error {
   override readonly name = 'McpRegistryError';
   constructor(
     message: string,
-    readonly code: 'not_found' | 'invalid' | 'encryption_unavailable',
+    readonly code: 'not_found' | 'invalid' | 'encryption_unavailable' | 'unreachable',
     readonly statusCode: number,
   ) {
     super(message);
@@ -56,6 +56,10 @@ interface Row {
 interface LiveRegistry {
   row: Row;
   tools: McpToolDescriptor[] | null;
+  /** PA-101: consecutive connection/timeout failure streak. */
+  failureStreak?: number;
+  /** PA-101: epoch ms until which calls to this registry short-circuit. */
+  cooldownUntil?: number | null;
 }
 
 /** One entry of `listKnownTools()` — enough for the planner's tool-catalog
@@ -84,6 +88,7 @@ export interface McpKnownTool {
 export interface McpRegistryDirectoryEntry {
   id: string;
   name: string;
+  host: string;
   description: string | null;
   toolCount: number;
 }
@@ -95,6 +100,10 @@ export interface McpRegistryServiceOptions {
       'none'` needs no key and works either way. */
   encKey: Buffer | undefined;
   logger: FastifyBaseLogger;
+  /** Injected in tests so clock can be advanced deterministically. Defaults to Date.now. */
+  now?: () => number;
+  /** Injected in tests to mock or supply fake transports. Defaults to new McpClient(config). */
+  clientFactory?: (config: McpConnectionConfig) => McpClient;
 }
 
 /**
@@ -115,6 +124,8 @@ export class McpRegistryService {
   private readonly db: Db;
   private readonly encKey: Buffer | undefined;
   private readonly logger: FastifyBaseLogger;
+  private readonly now: () => number;
+  private readonly clientFactory?: (config: McpConnectionConfig) => McpClient;
   private readonly live = new Map<string, LiveRegistry>();
 
   /**
@@ -154,6 +165,8 @@ export class McpRegistryService {
     this.db = opts.db;
     this.encKey = opts.encKey;
     this.logger = opts.logger;
+    this.now = opts.now ?? (() => Date.now());
+    this.clientFactory = opts.clientFactory;
     const rows = this.db
       .prepare('SELECT * FROM mcp_registries ORDER BY name COLLATE NOCASE, created_at')
       .all() as Row[];
@@ -165,7 +178,7 @@ export class McpRegistryService {
           'encrypted it is configured.',
       );
     }
-    for (const row of rows) this.live.set(row.id, { row, tools: null });
+    for (const row of rows) this.live.set(row.id, { row, tools: null, failureStreak: 0, cooldownUntil: null });
 
     const enabledIds = rows.filter((r) => r.enabled === 1).map((r) => r.id);
     this.warmupComplete =
@@ -183,21 +196,28 @@ export class McpRegistryService {
           });
   }
 
+  private createClient(row: Row): McpClient {
+    const config = this.connectionConfig(row);
+    if (this.clientFactory) return this.clientFactory(config);
+    return new McpClient(config);
+  }
+
   get encryptionAvailable(): boolean {
     return this.encKey !== undefined;
   }
 
   list(): McpRegistrySummary[] {
-    return [...this.live.values()].map((l) => toSummary(l.row)).sort((a, b) => a.name.localeCompare(b.name));
+    return [...this.live.values()].map((l) => toSummary(l.row, l, this.now())).sort((a, b) => a.name.localeCompare(b.name));
   }
 
   get(id: string): McpRegistrySummary {
-    return toSummary(this.liveOrThrow(id).row);
+    const live = this.liveOrThrow(id);
+    return toSummary(live.row, live, this.now());
   }
 
   create(req: CreateMcpRegistryRequest): McpRegistrySummary {
     const key = req.authKind === 'none' ? undefined : this.requireKey();
-    const now = Date.now();
+    const now = this.now();
     const id = mintRegistryId(req.name, new Set(this.live.keys()));
     const row: Row = {
       id,
@@ -220,12 +240,13 @@ export class McpRegistryService {
       reported_instructions: null,
     };
     this.insert(row);
-    this.live.set(row.id, { row, tools: null });
+    const live: LiveRegistry = { row, tools: null, failureStreak: 0, cooldownUntil: null };
+    this.live.set(row.id, live);
     this.logger.info(
       { registry: row.id, transport: row.transport, authKind: row.auth_kind },
       'MCP registry created',
     );
-    return toSummary(row);
+    return toSummary(row, live, this.now());
   }
 
   /**
@@ -268,19 +289,26 @@ export class McpRegistryService {
               ? existing.header_value_ciphertext
               : null,
       enabled: req.enabled === undefined ? existing.enabled : req.enabled ? 1 : 0,
-      updated_at: Date.now(),
+      updated_at: this.now(),
       // Omitted keeps the stored value; an empty (or whitespace-only) string
       // clears it back to `null` — same "blank means unset" convention as a
       // chat title edit, and safe to round-trip unlike a secret field.
       description: req.description === undefined ? existing.description : req.description.trim() || null,
     };
     this.persist(row);
-    this.live.set(row.id, { row, tools: this.live.get(row.id)?.tools ?? null });
+    const prevLive = this.live.get(row.id);
+    const live: LiveRegistry = {
+      row,
+      tools: prevLive?.tools ?? null,
+      failureStreak: prevLive?.failureStreak ?? 0,
+      cooldownUntil: prevLive?.cooldownUntil ?? null,
+    };
+    this.live.set(row.id, live);
     this.logger.info(
       { registry: row.id, rekeyed: rekeyingBearer || rekeyingHeader, enabled: row.enabled === 1 },
       'MCP registry updated',
     );
-    return toSummary(row);
+    return toSummary(row, live, this.now());
   }
 
   /**
@@ -320,8 +348,8 @@ export class McpRegistryService {
    */
   async checkConnection(id: string): Promise<TestMcpRegistryResponse> {
     const live = this.liveOrThrow(id);
-    const startedAt = Date.now();
-    const client = new McpClient(this.connectionConfig(live.row));
+    const startedAt = this.now();
+    const client = this.createClient(live.row);
     try {
       await client.connect();
       const tools = await client.listTools();
@@ -329,13 +357,15 @@ export class McpRegistryService {
       return {
         ok: true,
         message: `Connected — ${tools.length} tool${tools.length === 1 ? '' : 's'} available.`,
-        latencyMs: Date.now() - startedAt,
+        latencyMs: this.now() - startedAt,
         toolCount: tools.length,
       };
     } catch (err) {
-      const message = err instanceof McpClientError ? err.message : (err as Error).message;
-      this.recordFailure(id, message);
-      return { ok: false, message, latencyMs: Date.now() - startedAt, toolCount: null };
+      const rawMessage = err instanceof McpClientError ? err.message : (err as Error).message;
+      const host = extractHost(live.row.url);
+      const formattedMessage = formatMcpErrorMessage(live.row.name, host, live.row.transport, rawMessage);
+      this.recordFailure(id, formattedMessage);
+      return { ok: false, message: formattedMessage, latencyMs: this.now() - startedAt, toolCount: null };
     } finally {
       await client.close();
     }
@@ -436,6 +466,7 @@ export class McpRegistryService {
       .map((l) => ({
         id: l.row.id,
         name: l.row.name,
+        host: extractHost(l.row.url),
         description: l.row.description ?? l.row.reported_instructions ?? null,
         toolCount: l.row.tool_count,
       }))
@@ -536,14 +567,32 @@ export class McpRegistryService {
     if (!live || live.row.enabled !== 1) {
       throw new McpRegistryError(`The MCP registry for "${qualifiedName}" is not available.`, 'not_found', 404);
     }
-    const client = new McpClient(this.connectionConfig(live.row));
+
+    if (live.cooldownUntil && live.cooldownUntil > this.now()) {
+      const host = extractHost(live.row.url);
+      const lastErrorAgo = live.row.updated_at ? Math.max(0, Math.floor((this.now() - live.row.updated_at) / 1000)) : null;
+      const agoText = lastErrorAgo !== null ? ` (last error ${lastErrorAgo}s ago: ${live.row.last_error ?? 'unknown error'})` : '';
+      const retryTime = new Date(live.cooldownUntil).toISOString();
+      throw new McpRegistryError(
+        `MCP server "${live.row.name}" (${host}) is unreachable${agoText}. Not retrying until ${retryTime}.`,
+        'unreachable',
+        503,
+      );
+    }
+
+    const client = this.createClient(live.row);
     try {
       await client.connect();
-      return await client.callTool(parsed.toolName, args);
+      const result = await client.callTool(parsed.toolName, args);
+      // Tool call connected and responded — clear any failure streak and cooldown
+      this.recordSuccess(parsed.registryId, live.tools ?? [], live.row.reported_instructions);
+      return result;
     } catch (err) {
-      const message = err instanceof McpClientError ? err.message : (err as Error).message;
-      this.recordFailure(parsed.registryId, message);
-      throw new McpRegistryError(message, 'not_found', 502);
+      const rawMessage = err instanceof McpClientError ? err.message : (err as Error).message;
+      const host = extractHost(live.row.url);
+      const formattedMessage = formatMcpErrorMessage(live.row.name, host, live.row.transport, rawMessage);
+      this.recordFailure(parsed.registryId, formattedMessage);
+      throw new McpRegistryError(formattedMessage, 'not_found', 502);
     } finally {
       await client.close();
     }
@@ -596,7 +645,9 @@ export class McpRegistryService {
   private recordSuccess(id: string, tools: McpToolDescriptor[], reportedInstructions: string | null): void {
     const live = this.live.get(id);
     if (!live) return;
-    const now = Date.now();
+    const now = this.now();
+    live.failureStreak = 0;
+    live.cooldownUntil = null;
     this.db
       .prepare(
         'UPDATE mcp_registries SET tool_count = ?, last_connected_at = ?, last_error = NULL, ' +
@@ -621,7 +672,11 @@ export class McpRegistryService {
   private recordFailure(id: string, message: string): void {
     const live = this.live.get(id);
     if (!live) return;
-    const now = Date.now();
+    const now = this.now();
+    const streak = (live.failureStreak ?? 0) + 1;
+    live.failureStreak = streak;
+    const cooldownMs = Math.min(30_000 * Math.pow(2, streak - 1), 300_000);
+    live.cooldownUntil = now + cooldownMs;
     this.db.prepare('UPDATE mcp_registries SET last_error = ?, updated_at = ? WHERE id = ?').run(message, now, id);
     live.row = { ...live.row, last_error: message, updated_at: now };
   }
@@ -672,7 +727,8 @@ export class McpRegistryService {
   }
 }
 
-function toSummary(row: Row): McpRegistrySummary {
+function toSummary(row: Row, live?: LiveRegistry, now: number = Date.now()): McpRegistrySummary {
+  const cooldown = live?.cooldownUntil && live.cooldownUntil > now ? live.cooldownUntil : null;
   return {
     id: row.id,
     name: row.name,
@@ -686,9 +742,45 @@ function toSummary(row: Row): McpRegistrySummary {
     toolCount: row.tool_count,
     lastConnectedAt: row.last_connected_at,
     lastError: row.last_error,
+    cooldownUntil: cooldown,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/**
+ * PA-101: Extract only the host (hostname and optional port) from a URL.
+ * Strictly avoids path, query string, fragment, or credentials.
+ */
+export function extractHost(urlStr: string): string {
+  try {
+    const parsed = new URL(urlStr);
+    return parsed.host;
+  } catch {
+    const withoutScheme = urlStr.replace(/^[a-zA-Z]+:\/\//, '');
+    const firstSlash = withoutScheme.indexOf('/');
+    const hostAndPath = firstSlash >= 0 ? withoutScheme.slice(0, firstSlash) : withoutScheme;
+    const firstQuestion = hostAndPath.indexOf('?');
+    return firstQuestion >= 0 ? hostAndPath.slice(0, firstQuestion) : hostAndPath;
+  }
+}
+
+/**
+ * PA-101: Format MCP error message naming the registry, host, and transport,
+ * while preventing leakage of tokens or secret headers.
+ */
+export function formatMcpErrorMessage(name: string, host: string, transport: string, rawMessage: string): string {
+  const isTimeout = /timed? ?out/i.test(rawMessage);
+  if (isTimeout) {
+    if (/connect/i.test(rawMessage)) {
+      return `MCP server "${name}" (${host}, ${transport}) timed out on connect: ${rawMessage}`;
+    }
+    if (/tools\/list/i.test(rawMessage)) {
+      return `MCP server "${name}" (${host}, ${transport}) timed out on tools/list: ${rawMessage}`;
+    }
+    return `MCP server "${name}" (${host}, ${transport}) timed out on tools/call: ${rawMessage}`;
+  }
+  return `MCP server "${name}" (${host}, ${transport}): ${rawMessage}`;
 }
 
 /**
