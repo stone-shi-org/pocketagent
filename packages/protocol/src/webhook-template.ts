@@ -245,7 +245,7 @@ Workflow Instructions:
    - Understand what needs to be fixed from the summary, description, comments, and recent changes.
    - When the ticket is assigned or reassigned to you by a user (e.g. {{user.displayName}}), treat this event and the attached latest comment as active instructions from the user to proceed (not a stale echo).
 2. Execution Phase (When Approved / Ready):
-   - If the user commented "go ahead" / "fix it" / "approve", or if the issue has the tag/label "agent-ready" or "approved":
+   - If the user commented "go ahead" / "fix it" / "approve", or if the issue has the label "approve", "approved" or "approval" (the "agent-ready" label alone is NOT approval):
       - Implement the fix in the codebase and run verification tests.
       - Before committing, rebase your branch onto the latest main/master branch.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Fix: ...").
@@ -283,7 +283,7 @@ Workflow Instructions:
    - Wait for review and approval.
 2. Execution Phase (Once Approved):
    - When the ticket is assigned or reassigned to you by a user (e.g. {{user.displayName}}), treat this event and the attached latest comment as active instructions from the user to proceed (not a stale echo).
-   - Once a user comments "go ahead" or "approve", or adds the tag/label "agent-ready" or "approved":
+   - Once a user comments "go ahead" or "approve", or adds the label "approve", "approved" or "approval" (the "agent-ready" label alone is NOT approval):
       - Execute the implementation plan carefully across the codebase.
       - Verify with relevant test suites.
       - Before committing, rebase your branch onto the latest main/master branch.
@@ -320,14 +320,14 @@ Workflow Instructions:
    - When the ticket is assigned or reassigned to you by a user (e.g. {{user.displayName}}), treat this event and the attached latest comment as active instructions from the user to proceed (not a stale echo).
    - If the task is complex, you may optionally post your findings or proposed plan as a comment on Jira ticket {{issue.key}} before starting.
 2. Execution Phase (Once Approved / Ready):
-   - If the user commented "go ahead" or "approve", or if the issue has the tag/label "agent-ready" or "approved":
+   - If the user commented "go ahead" or "approve", or if the issue has the label "approve", "approved" or "approval" (the "agent-ready" label alone is NOT approval):
       - Implement the requested task directly across the codebase.
       - Verify with relevant test suites.
       - Before committing, rebase your branch onto the latest main/master branch.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Task: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review").
-   - If not yet approved and not tagged "agent-ready", post a brief assessment or plan on {{issue.key}} without modifying code.`;
+   - If not yet approved (no "go ahead"/"approve" comment and none of the labels "approve", "approved" or "approval"), post a brief assessment or plan on {{issue.key}} without modifying code.`;
 
 export const JIRA_PROMPT_TEMPLATE_IMPROVEMENT = `A Jira improvement event arrived: {{event}}.
 
@@ -358,14 +358,14 @@ Workflow Instructions:
    - When the ticket is assigned or reassigned to you by a user (e.g. {{user.displayName}}), treat this event and the attached latest comment as active instructions from the user to proceed (not a stale echo).
    - If the improvement is complex, you may optionally post your findings or proposed plan as a comment on Jira ticket {{issue.key}} before starting.
 2. Execution Phase (Once Approved / Ready):
-   - If the user commented "go ahead" or "approve", or if the issue has the tag/label "agent-ready" or "approved":
+   - If the user commented "go ahead" or "approve", or if the issue has the label "approve", "approved" or "approval" (the "agent-ready" label alone is NOT approval):
       - Implement the requested improvement directly across the codebase.
       - Verify with relevant test suites.
       - Before committing, rebase your branch onto the latest main/master branch.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Improvement: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review").
-   - If not yet approved and not tagged "agent-ready", post a brief assessment or plan on {{issue.key}} without modifying code.`;
+   - If not yet approved (no "go ahead"/"approve" comment and none of the labels "approve", "approved" or "approval"), post a brief assessment or plan on {{issue.key}} without modifying code.`;
 
 export interface JiraPromptTemplatePreset {
   id: string;
@@ -384,25 +384,25 @@ export const JIRA_PROMPT_TEMPLATES: readonly JiraPromptTemplatePreset[] = [
   {
     id: 'task',
     name: 'Task (Direct Execution on Approval)',
-    description: 'Execute task; when approved ("go ahead", "approved", "agent-ready"), implement, verify, commit, post summary of changes comment with commit rev ID, and mark in-review.',
+    description: 'Execute task; when approved ("go ahead"/"approve" comment, or approve/approved/approval label), implement, verify, commit, post summary of changes comment with commit rev ID, and mark in-review.',
     template: JIRA_PROMPT_TEMPLATE_TASK,
   },
   {
     id: 'improvement',
     name: 'Improvement (Direct Execution on Approval)',
-    description: 'Execute improvement; when approved ("go ahead", "approved", "agent-ready"), implement, verify, commit, post summary of changes comment with commit rev ID, and mark in-review.',
+    description: 'Execute improvement; when approved ("go ahead"/"approve" comment, or approve/approved/approval label), implement, verify, commit, post summary of changes comment with commit rev ID, and mark in-review.',
     template: JIRA_PROMPT_TEMPLATE_IMPROVEMENT,
   },
   {
     id: 'fix-issue',
     name: 'Fix Issue (Triage + Auto-Fix & Commit on Approval)',
-    description: 'Triage bug; when approved ("go ahead", "fix it", "agent-ready"), implement fix, commit with ticket key, post summary of changes comment with commit rev ID, and mark in-review.',
+    description: 'Triage bug; when approved ("go ahead"/"fix it"/"approve" comment, or approve/approved/approval label), implement fix, commit with ticket key, post summary of changes comment with commit rev ID, and mark in-review.',
     template: JIRA_PROMPT_TEMPLATE_FIX_ISSUE,
   },
   {
     id: 'new-feature',
     name: 'New Feature (Plan & Attach -> Execute on Approval)',
-    description: 'Generate plan md, mark in-progress, wait; when approved ("go ahead", "approved", "agent-ready"), implement, commit with ticket key, post summary of changes comment with commit rev ID, and mark in-review.',
+    description: 'Generate plan md, mark in-progress, wait; when approved ("go ahead"/"approve" comment, or approve/approved/approval label), implement, commit with ticket key, post summary of changes comment with commit rev ID, and mark in-review.',
     template: JIRA_PROMPT_TEMPLATE_NEW_FEATURE,
   },
 ];

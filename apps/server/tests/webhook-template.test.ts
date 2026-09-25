@@ -334,4 +334,21 @@ describe('renderJiraTemplate: sanitization', () => {
       expect(r.missing).toHaveLength(0);
     }
   });
+
+  // PA-102: `agent-ready` is a trigger-filter label, not an approval. Only an
+  // approve/approved/approval label (or an approving comment) authorizes an
+  // execute-on-approval preset to modify code.
+  it('approval presets accept only approve/approved/approval labels, never agent-ready', async () => {
+    const { JIRA_PROMPT_TEMPLATES } = await import('@pocketagent/protocol');
+    const approvalPresets = JIRA_PROMPT_TEMPLATES.filter((p) => p.id !== 'triage-only');
+    expect(approvalPresets.length).toBeGreaterThanOrEqual(4);
+    for (const preset of approvalPresets) {
+      expect(preset.template, preset.id).toContain('"approve", "approved" or "approval"');
+      expect(preset.template, preset.id).toContain('"go ahead"');
+      expect(preset.template, preset.id).not.toMatch(/label "agent-ready" or/);
+      expect(preset.template, preset.id).not.toMatch(/not tagged "agent-ready"/);
+      expect(preset.description, preset.id).not.toContain('agent-ready');
+      expect(preset.description, preset.id).toContain('approve/approved/approval');
+    }
+  });
 });
