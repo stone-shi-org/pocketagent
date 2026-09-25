@@ -355,25 +355,32 @@ function addUsage(stats: PlannerTurnStats, usage: PlannerLlmUsage | null): Plann
  * the parent chat. Coalesces multiple subagent completions into one turn.
  */
 export function buildWakePrompt(messages: MailboxMessage[]): string {
-  if (messages.length === 1) {
-    const m = messages[0]!;
-    if (m.kind === 'timer') {
-      return `[Timer Notification]\n${m.summary} Check on subagents or wait again if still working.`;
-    }
+  const timerMessages = messages.filter((m) => m.kind === 'timer');
+  const subagentMessages = messages.filter((m) => m.kind !== 'timer');
+
+  if (subagentMessages.length === 0 && timerMessages.length > 0) {
+    const latestTimer = timerMessages[timerMessages.length - 1]!;
+    return `[Timer Notification]\n${latestTimer.summary} Check on subagents or wait again if still working.`;
+  }
+
+  if (subagentMessages.length === 1 && timerMessages.length === 0) {
+    const m = subagentMessages[0]!;
     const label = m.kind === 'coding_agent' ? 'Coding subagent' : 'Pocket agent subagent';
     return `[Subagent Notification]\n${label} "${m.subagentId}" has finished with status: ${m.status}.\n\nResult:\n${m.summary}`;
   }
-  const countLine = messages.some((m) => m.kind === 'timer')
-    ? `${messages.length} notifications queued:\n`
-    : `${messages.length} subagents have finished:\n`;
+
+  const totalCount = subagentMessages.length + (timerMessages.length > 0 ? 1 : 0);
+  const countLine = timerMessages.length > 0
+    ? `${totalCount} notifications queued:\n`
+    : `${totalCount} subagents have finished:\n`;
   const lines: string[] = ['[Subagent Notifications]', countLine];
-  for (const m of messages) {
-    if (m.kind === 'timer') {
-      lines.push(`- Timer (${m.status}): ${m.summary}\n`);
-    } else {
-      const label = m.kind === 'coding_agent' ? 'Coding subagent' : 'Pocket agent subagent';
-      lines.push(`- ${label} "${m.subagentId}" (${m.status}):\n${m.summary}\n`);
-    }
+  if (timerMessages.length > 0) {
+    const latestTimer = timerMessages[timerMessages.length - 1]!;
+    lines.push(`- Timer (${latestTimer.status}): ${latestTimer.summary}\n`);
+  }
+  for (const m of subagentMessages) {
+    const label = m.kind === 'coding_agent' ? 'Coding subagent' : 'Pocket agent subagent';
+    lines.push(`- ${label} "${m.subagentId}" (${m.status}):\n${m.summary}\n`);
   }
   return lines.join('\n');
 }
@@ -506,6 +513,11 @@ export class PlannerChatService {
    * PA-78: Per-turn poll check state for short-circuiting unchanged repeat calls (status and output).
    */
   private readonly turnPollChecksByChat = new Map<string, Map<string, TurnPollRecord>>();
+  /**
+   * PA-100: Chat IDs that have executed check_back_in during the current turn.
+   * Enforces ending the turn after this round and refusing any subsequent tool calls.
+   */
+  private readonly checkBackInScheduledThisTurn = new Set<string>();
 
   /**
    * PA-69: how many turns are being driven right now, per chat id.
@@ -623,6 +635,7 @@ export class PlannerChatService {
     this.drainRetryTimeouts.clear();
     this.drainRetryAttempts.clear();
     this.turnPollChecksByChat.clear();
+    this.checkBackInScheduledThisTurn.clear();
     this.supervisor.dispose();
   }
 
@@ -740,6 +753,28 @@ export class PlannerChatService {
 
   private isWakeTurnActive(chatId: string): boolean {
     return this.activeWakeTurns.has(chatId);
+  }
+
+  /**
+   * PA-100: Cancels any pending check_back_in timers and removes queued timer
+   * notifications from the mailbox for a chat. Used when a turn ends in an
+   * error or when scheduling a new timer replaces existing ones.
+   */
+  private clearTimersForChat(chatId: string): void {
+    const timers = this.scheduledWakeTimersByChat.get(chatId);
+    if (timers) {
+      for (const timer of timers) clearTimeout(timer);
+      this.scheduledWakeTimersByChat.delete(chatId);
+    }
+    const mailbox = this.mailboxByChat.get(chatId);
+    if (mailbox) {
+      const filtered = mailbox.filter((m) => m.kind !== 'timer');
+      if (filtered.length === 0) {
+        this.mailboxByChat.delete(chatId);
+      } else {
+        this.mailboxByChat.set(chatId, filtered);
+      }
+    }
   }
 
   /**
@@ -931,6 +966,7 @@ export class PlannerChatService {
       this.scheduledWakeTimersByChat.delete(id);
     }
     this.turnPollChecksByChat.delete(id);
+    this.checkBackInScheduledThisTurn.delete(id);
     this.turnStartedAtByChat.delete(id);
     const retryTimer = this.drainRetryTimeouts.get(id);
     if (retryTimer) {
@@ -1328,6 +1364,7 @@ export class PlannerChatService {
     const endTurn = this.beginTurn(chat.id);
     this.turnStartedAtByChat.set(chat.id, Date.now());
     this.turnPollChecksByChat.set(chat.id, new Map());
+    this.checkBackInScheduledThisTurn.delete(chat.id);
     try {
       const modelId = this.resolveModelId(chat, opts.modelId);
       const workspacePath = this.workspacePathFor(chat);
@@ -1355,6 +1392,7 @@ export class PlannerChatService {
       this.turnAbortControllers.delete(chat.id);
       endTurn();
       this.activeWakeTurns.delete(chat.id);
+      this.checkBackInScheduledThisTurn.delete(chat.id);
       if (!this.isBusy(chat.id)) {
         this.turnStartedAtByChat.delete(chat.id);
         this.turnPollChecksByChat.delete(chat.id);
@@ -1413,6 +1451,7 @@ export class PlannerChatService {
     } finally {
       this.turnAbortControllers.delete(chatId);
       endTurn();
+      this.checkBackInScheduledThisTurn.delete(chatId);
       if (!this.isBusy(chatId)) {
         this.turnStartedAtByChat.delete(chatId);
         this.turnPollChecksByChat.delete(chatId);
@@ -1513,6 +1552,11 @@ export class PlannerChatService {
     stats: PlannerTurnStats,
     stopReason?: string,
   ): AsyncGenerator<AgentEvent> {
+    if (isError) {
+      // PA-100: Cancel pending and queued timers when a turn ends in an error
+      // (tool-call limit, LLM error). The next turn should come from a human.
+      this.clearTimersForChat(chat.id);
+    }
     if (text.length > 0) {
       yield* this.emit(workspacePath, chat.id, { kind: 'text', id: crypto.randomUUID(), text });
     }
@@ -1532,6 +1576,7 @@ export class PlannerChatService {
     this.spawnsThisTurnByChat.delete(chat.id);
     this.turnPollChecksByChat.delete(chat.id);
     this.turnStartedAtByChat.delete(chat.id);
+    this.checkBackInScheduledThisTurn.delete(chat.id);
   }
 
   /**
@@ -1707,6 +1752,20 @@ export class PlannerChatService {
         return;
       }
       const call = toolCalls[index]!;
+
+      // PA-100: If check_back_in already ran in this turn, refuse any further tool calls
+      if (this.checkBackInScheduledThisTurn.has(chat.id)) {
+        yield* this.emit(workspacePath, chat.id, {
+          kind: 'tool_result',
+          id: crypto.randomUUID(),
+          toolUseId: call.id,
+          content: 'check_back_in ends the turn; subsequent tool calls in this turn are refused.',
+          truncated: false,
+          isError: true,
+        });
+        continue;
+      }
+
       const gate = this.gateToolCall(chat, call);
 
       if (gate.kind === 'unavailable') {
@@ -1764,6 +1823,13 @@ export class PlannerChatService {
 
     if (signal?.aborted) {
       yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'interrupted');
+      return;
+    }
+
+    // PA-100: If check_back_in was scheduled in this round/turn, finish the turn now
+    // with stopReason: 'end_turn'. Do not call driveLoop to ask the model what's next.
+    if (this.checkBackInScheduledThisTurn.has(chat.id)) {
+      yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'end_turn');
       return;
     }
 
@@ -2445,21 +2511,20 @@ export class PlannerChatService {
   }
 
   /**
-   * PA-78: Schedule a non-blocking self-wake timer.
+   * PA-78, PA-100: Schedule a non-blocking self-wake timer.
+   * PA-100: Exactly one timer per chat. A new check_back_in replaces any existing
+   * pending timer and purges stale timer notifications from the mailbox.
+   * Also flags the chat so the current turn ends after this round.
    */
   private scheduleCheckBackInForChat(chatId: string, seconds: number): { ok: true } | { ok: false; error: string } {
     const chat = readPlannerChat(this.opts.db, chatId);
     if (!chat) return { ok: false, error: 'Chat not found' };
 
-    let timers = this.scheduledWakeTimersByChat.get(chatId);
-    if (!timers) {
-      timers = new Set();
-      this.scheduledWakeTimersByChat.set(chatId, timers);
-    }
-    const MAX_ACTIVE_TIMERS = 3;
-    if (timers.size >= MAX_ACTIVE_TIMERS) {
-      return { ok: false, error: `Too many active timers for this chat (maximum ${MAX_ACTIVE_TIMERS}).` };
-    }
+    // PA-100: Cancel any existing pending timer and queued timer notifications for this chat
+    this.clearTimersForChat(chatId);
+
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    this.scheduledWakeTimersByChat.set(chatId, timers);
 
     const timer = setTimeout(() => {
       const set = this.scheduledWakeTimersByChat.get(chatId);
@@ -2468,6 +2533,15 @@ export class PlannerChatService {
         if (set.size === 0) {
           this.scheduledWakeTimersByChat.delete(chatId);
         }
+      }
+      // PA-100: Drop a timer that fires while the turn that scheduled it (or any turn)
+      // is still running, rather than queueing it for an unrequested wake.
+      if (this.isBusy(chatId)) {
+        this.opts.logger?.warn?.(
+          { chatId, seconds },
+          'check_back_in timer fired while turn is still busy; dropping timer to prevent unrequested wake',
+        );
+        return;
       }
       this.enqueueMailbox(chatId, {
         subagentId: `timer-${seconds}s`,
@@ -2478,6 +2552,9 @@ export class PlannerChatService {
     }, seconds * 1000);
     timer.unref?.();
     timers.add(timer);
+
+    // PA-100: Flag this chat so processToolCalls finishes the turn after this round
+    this.checkBackInScheduledThisTurn.add(chatId);
     return { ok: true };
   }
 

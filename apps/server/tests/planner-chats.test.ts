@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PlannerLlmClient, PlannerLlmError } from '../src/planner/llm-client.js';
+import { buildWakePrompt } from '../src/planner/chats.js';
 import { authHeaders, createTestApp, type TestApp } from './helpers.js';
 
 function startFakeLiveStt(
@@ -50,6 +51,24 @@ function fakeToolCallResponse(name: string, args: Record<string, unknown>, callI
         {
           delta: {
             tool_calls: [{ index: 0, id: callId, function: { name, arguments: JSON.stringify(args) } }],
+          },
+        },
+      ],
+    }),
+  ]);
+}
+
+function fakeMultiToolCallResponse(calls: Array<{ name: string; args: Record<string, unknown>; id?: string }>): Response {
+  return sseResponse([
+    JSON.stringify({
+      choices: [
+        {
+          delta: {
+            tool_calls: calls.map((c, i) => ({
+              index: i,
+              id: c.id ?? `call_${i + 1}`,
+              function: { name: c.name, arguments: JSON.stringify(c.args) },
+            })),
           },
         },
       ],
@@ -1637,6 +1656,136 @@ describe('planner chat routes over HTTP', () => {
       await new Promise((r) => setTimeout(r, 50));
     }
     expect(wakeTurnSeen).toBe(true);
+  });
+
+  it('PA-100: check_back_in ends the turn immediately and refuses subsequent tool calls in the round', async () => {
+    let secondRoundRequested = false;
+    const fetchImpl = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string) as {
+        messages: Array<{ role: string; content: string | null; tool_call_id?: string }>;
+      };
+      const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+      const toolResults = body.messages.filter((m) => m.role === 'tool');
+
+      if (lastUser?.content === 'wait and run' && toolResults.length === 0) {
+        return fakeMultiToolCallResponse([
+          { name: 'check_back_in', args: { seconds: 10 }, id: 'call_cb' },
+          { name: 'list_workspaces', args: {}, id: 'call_extra' },
+        ]);
+      }
+      if (lastUser?.content === 'wait and run' && toolResults.length > 0) {
+        secondRoundRequested = true;
+        return fakeCompletionResponse('should not happen');
+      }
+      return fakeCompletionResponse('ok');
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', yoloEnabled: true });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const { events } = await sendMessage(t, chat.id, 'wait and run');
+    const results = events.filter((e) => e.kind === 'tool_result');
+    expect(results).toHaveLength(2);
+    expect(String(results[0]?.content)).toContain('Timer scheduled to wake in 10 second(s)');
+    expect(results[0]?.isError).toBe(false);
+    expect(String(results[1]?.content)).toContain('check_back_in ends the turn; subsequent tool calls in this turn are refused.');
+    expect(results[1]?.isError).toBe(true);
+
+    const turnComplete = events.find((e) => e.kind === 'turn_complete');
+    expect(turnComplete?.stopReason).toBe('end_turn');
+    expect(turnComplete?.isError).toBe(false);
+    expect(secondRoundRequested).toBe(false);
+  });
+
+  it('PA-100: two check_back_in calls in one chat leave exactly one pending timer', async () => {
+    t = await createTestApp();
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const res1 = (t.context.plannerChats as any).scheduleCheckBackInForChat(chat.id, 20);
+    expect(res1.ok).toBe(true);
+    expect((t.context.plannerChats as any).scheduledWakeTimersByChat.get(chat.id)?.size).toBe(1);
+
+    const res2 = (t.context.plannerChats as any).scheduleCheckBackInForChat(chat.id, 5);
+    expect(res2.ok).toBe(true);
+    expect((t.context.plannerChats as any).scheduledWakeTimersByChat.get(chat.id)?.size).toBe(1);
+  });
+
+  it('PA-100: a turn that ends in an error does not wake from timers it scheduled', async () => {
+    let wakeTurnSeen = false;
+    const fetchImpl = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(init!.body as string) as {
+        messages: Array<{ role: string; content: string | null; tool_call_id?: string }>;
+      };
+      const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+
+      if (lastUser?.content?.includes('[Timer Notification]')) {
+        wakeTurnSeen = true;
+        return fakeCompletionResponse('timer wake processed');
+      }
+      return fakeToolCallResponse('list_workspaces', {}, 'call_loop');
+    });
+
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com', maxToolIterations: 1 });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    (t.context.plannerChats as any).scheduleCheckBackInForChat(chat.id, 1);
+    expect((t.context.plannerChats as any).scheduledWakeTimersByChat.get(chat.id)?.size).toBe(1);
+
+    const { events } = await sendMessage(t, chat.id, 'loop forever');
+    const turnComplete = events.find((e) => e.kind === 'turn_complete');
+    expect(turnComplete?.isError).toBe(true);
+    expect(turnComplete?.stopReason).toBe('error');
+
+    // Timer was cancelled on error
+    expect((t.context.plannerChats as any).scheduledWakeTimersByChat.get(chat.id)).toBeUndefined();
+    expect((t.context.plannerChats as any).mailboxByChat.get(chat.id)).toBeUndefined();
+
+    // Wait past timer duration to confirm no wake occurs
+    await new Promise((r) => setTimeout(r, 1200));
+    expect(wakeTurnSeen).toBe(false);
+  });
+
+  it('PA-100: a timer that fires while turn is still busy is dropped rather than queued for wake', async () => {
+    t = await createTestApp();
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    // Mark chat busy
+    (t.context.plannerChats as any).activeTurns.set(chat.id, 1);
+
+    // Schedule 1s timer
+    (t.context.plannerChats as any).scheduleCheckBackInForChat(chat.id, 1);
+
+    // Wait 1.2s for timer to fire
+    await new Promise((r) => setTimeout(r, 1200));
+
+    // Because chat was busy, timer was dropped rather than queued into mailbox
+    expect((t.context.plannerChats as any).mailboxByChat.get(chat.id)).toBeUndefined();
+
+    // Clean up busy flag
+    (t.context.plannerChats as any).activeTurns.delete(chat.id);
+  });
+
+  it('PA-100: buildWakePrompt merges multiple timer notifications into a single line', () => {
+    const prompt1 = buildWakePrompt([
+      { subagentId: 'timer-5s', kind: 'timer', status: 'fired', summary: 'Timer check_back_in fired after 5s.' },
+      { subagentId: 'timer-10s', kind: 'timer', status: 'fired', summary: 'Timer check_back_in fired after 10s.' },
+    ]);
+    expect(prompt1).toContain('[Timer Notification]');
+    expect(prompt1).toContain('Timer check_back_in fired after 10s.');
+    expect(prompt1).not.toContain('notifications queued');
+
+    const prompt2 = buildWakePrompt([
+      { subagentId: 'timer-5s', kind: 'timer', status: 'fired', summary: 'Timer check_back_in fired after 5s.' },
+      { subagentId: 'timer-10s', kind: 'timer', status: 'fired', summary: 'Timer check_back_in fired after 10s.' },
+      { subagentId: 'sub-1', kind: 'coding_agent', status: 'idle', summary: 'Work done' },
+    ]);
+    expect(prompt2).toContain('[Subagent Notifications]');
+    expect(prompt2).toContain('2 notifications queued:');
+    const timerMatches = prompt2.match(/- Timer/g);
+    expect(timerMatches).toHaveLength(1);
+    expect(prompt2).toContain('- Coding subagent "sub-1"');
   });
 
   it('stop_subagent terminates a live coding subagent session', async () => {
