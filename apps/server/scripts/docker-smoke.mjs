@@ -602,6 +602,27 @@ heading('A pinned agent CLI survives the $HOME mount (if that tag is built)');
   }
 }
 
+heading('No image ships files the app user cannot write into $HOME (PA-104)');
+{
+  // Docker copies an image directory into an *empty named volume* on first
+  // mount, so anything under /home/pocketagent in the image lands in the
+  // operator's home volume. test01 got a root-owned ~/.local that way (from
+  // the `all` stage's build-time `--version` checks), and `claude update`
+  // from Settings then failed on a brand-new deployment. The Dockerfile now
+  // refuses to build like that; this checks every tag present locally.
+  for (const suffix of ['', '-claude', '-all']) {
+    const tag = `${IMAGE}:latest${suffix}`;
+    if (tryRun('docker', ['image', 'inspect', '-f', '{{.Id}}', tag]).status !== 0) {
+      ok(`skipped — ${tag} not built locally`);
+      continue;
+    }
+    const foreign = tryRun('docker', [
+      'run', '--rm', '--entrypoint', 'sh', tag, '-c', 'find /home/pocketagent ! -user pocketagent',
+    ]);
+    check(foreign.status === 0 && foreign.stdout === '', `${tag}: everything under /home/pocketagent is the app user's`, foreign.stdout.split('\n').slice(0, 3).join(', '));
+  }
+}
+
 heading('AC3: the documented extension example builds and starts');
 {
   run('docker', [

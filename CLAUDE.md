@@ -53,6 +53,13 @@ load-bearing and easy to undo by accident:
   the official layout, the pinned version — because `claude --version` passes wherever the
   binary landed. A run-time update writes into the *real* `$HOME`, whose official directories
   precede `/usr/local/bin` for the server and a login shell alike, so both move to it together.
+  **Every command in those stages runs under the build-time `HOME`, `--version` checks included,
+  and each stage fails the build if anything under `/home/pocketagent` is not the app user's.**
+  Docker copies an image directory into an *empty named volume* on first mount, so a root-owned
+  file there lands in the operator's home volume: the first cut of the `all` stage ran
+  `opencode --version`/`codex --version` as root with the image's `HOME`, shipped root-owned
+  `~/.local`, `~/.config`, `~/.codex` and `~/.cache`, and `claude update` from Settings then
+  failed on a brand-new test01 deployment. `docker-smoke.mjs` checks every locally built tag.
 
 The entrypoint's own rule: **it never chowns a mounted volume.** It remaps the `pocketagent`
 account to `PUID`/`PGID` (so `git` can match the owner of a bind-mounted repo — a uid mismatch
@@ -336,6 +343,16 @@ could see. Three things replaced that, and each is load-bearing:
   `install-prefix` copy with an argv-only `npm uninstall --prefix=<that prefix>` behind a
   confirmation. Any other copy (`/usr/bin/codex`) is report-only. Nothing is ever deleted
   silently.
+- **An unwritable official location is refused up front, with the fix named**
+  (`homeWritabilityProblem`). Before an official install or update runs, the `$HOME`
+  directories its catalog entry declares (`homeDirs`) must be writable by this process — a
+  missing one judged by its nearest existing parent — or the request is a 409
+  `home_not_writable` naming the directory, its owner and the exact `chown`, persisted to the
+  row. The installer's own failure is opaque *and partial* (test01's `claude update` downloaded
+  2.1.283, then exited 1 unable to create `~/.local/bin`), and the container entrypoint
+  deliberately never chowns a mounted volume, so naming the fix is the only honest move. A
+  failed job's persisted error also carries the tail of the command's own output
+  (`outputTail`): "exited with code 1, see the log above" is useless once the dialog is closed.
 
 **Pins exist only for image builds** (PA-104). Every agent updates itself, so a Settings pin stops
 being true within a day of the first run; Settings installs the vendor's current release, and the

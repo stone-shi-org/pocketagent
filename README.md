@@ -1821,6 +1821,13 @@ the repository outright, so the diff views and every worktree operation fail too
 will not silently chown. The message names the directory and the exact `chown` to run on the
 host; `docker logs <name>` has it.
 
+**Settings → Set up agents says "The installer cannot write its official location".** A
+directory in the mounted `$HOME` (usually `~/.local`) is owned by root, so the vendor's
+installer cannot write there; nothing was installed. It is left by a `docker exec` without
+`--user` (which runs as root), or by a `-all` image built before this was fixed. Run the
+`chown` the message names as root, for example
+`docker exec -u 0 <container> chown -R 1000:1000 /home/pocketagent/.local`, then retry.
+
 **Docker: an agent CLI you installed is gone after a restart.** It was installed outside the
 mounted `$HOME`. Most likely that was a `docker exec` without `--user`, which runs as root and
 writes where the server (running as you) cannot read. Install from **Settings → Set up agents**,

@@ -105,6 +105,12 @@ export interface OfficialScriptEntry {
    * was one.
    */
   legacyNpmPackage: string | null;
+  /**
+   * Directories under `$HOME` the installer or update writes, checked for
+   * writability before anything runs (`homeWritabilityProblem`). Read off each
+   * script and from what a real run created.
+   */
+  homeDirs: readonly string[];
   selfUpdating: boolean;
   notes: readonly string[];
 }
@@ -146,6 +152,7 @@ const CATALOG: Readonly<Record<InstallableAgentId, CatalogEntry>> = Object.freez
     update: { kind: 'binary', args: ['update'], description: 'Runs `claude update` on the copy that runs.' },
     officialPathFragments: ['/.local/share/claude/versions/'],
     legacyNpmPackage: '@anthropic-ai/claude-code',
+    homeDirs: ['.local', '.local/bin', '.local/share', '.local/state', '.claude', '.cache'],
     selfUpdating: true,
     notes: ['Installs a native binary under ~/.local/share/claude and links ~/.local/bin/claude.'],
   },
@@ -171,6 +178,7 @@ const CATALOG: Readonly<Record<InstallableAgentId, CatalogEntry>> = Object.freez
     update: { kind: 'script', description: 'Re-runs the official installer, which updates the standalone copy in place.' },
     officialPathFragments: ['/.codex/packages/standalone/'],
     legacyNpmPackage: '@openai/codex',
+    homeDirs: ['.local', '.local/bin', '.codex'],
     selfUpdating: true,
     notes: [
       'Installs to ~/.codex/packages/standalone and links ~/.local/bin/codex.',
@@ -192,6 +200,7 @@ const CATALOG: Readonly<Record<InstallableAgentId, CatalogEntry>> = Object.freez
     update: { kind: 'script', description: 'Re-runs the official installer, which replaces ~/.opencode/bin/opencode in place.' },
     officialPathFragments: ['/.opencode/bin/opencode'],
     legacyNpmPackage: 'opencode-ai',
+    homeDirs: ['.opencode', '.local', '.local/share', '.local/state', '.config', '.cache'],
     selfUpdating: true,
     notes: [
       'Installs ~/.opencode/bin/opencode.',
@@ -214,6 +223,7 @@ const CATALOG: Readonly<Record<InstallableAgentId, CatalogEntry>> = Object.freez
     update: { kind: 'binary', args: ['update'], description: 'Runs `agy update` on the copy that runs.' },
     officialPathFragments: ['/.local/bin/agy'],
     legacyNpmPackage: null,
+    homeDirs: ['.local', '.local/bin', '.cache'],
     selfUpdating: true,
     notes: [
       'Always installs the latest release; the version cannot be chosen.',
@@ -249,6 +259,7 @@ const CATALOG: Readonly<Record<InstallableAgentId, CatalogEntry>> = Object.freez
     // the pre-PA-104 Settings copy this ticket exists to stop running.
     officialPathFragments: ['/.pi/agent/', '/.local/lib/node_modules/@earendil-works/pi-coding-agent/'],
     legacyNpmPackage: '@earendil-works/pi-coding-agent',
+    homeDirs: ['.pi', '.local', '.local/bin'],
     selfUpdating: false,
     notes: [
       'Needs Node.js 22.19 or newer and npm on the server’s PATH.',

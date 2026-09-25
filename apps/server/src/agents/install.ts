@@ -132,7 +132,7 @@ export type ScriptFetcher = (url: string) => Promise<{ body: Buffer; finalUrl: s
 export class AgentInstallError extends Error {
   constructor(
     message: string,
-    readonly code: 'busy' | 'prefix_undetectable' | 'nothing_to_remove',
+    readonly code: 'busy' | 'prefix_undetectable' | 'nothing_to_remove' | 'home_not_writable',
     readonly status: number,
   ) {
     super(message);
@@ -238,6 +238,16 @@ export class AgentInstallService {
         'prefix_undetectable',
         409,
       );
+    }
+    if (entry.method === 'official-script' && action !== 'remove-prefix-copy') {
+      const problem = homeWritabilityProblem(entry.homeDirs);
+      if (problem !== null) {
+        // Persisted as well as answered, so the Settings row still says why
+        // after the dialog is closed — this is not a transient condition.
+        recordAgentInstall(this.deps.db, id, { ok: false, error: problem });
+        this.deps.logger?.warn({ agent: id, action, error: problem }, 'agent CLI job refused');
+        throw new AgentInstallError(problem, 'home_not_writable', 409);
+      }
     }
     const plan = this.planFor(id, entry, action);
 
@@ -389,6 +399,14 @@ export class AgentInstallService {
               ? `${command} (running the official installer)`
               : describeCommand(job);
         job.error = installFailure(outcome, what);
+        if (job.error !== null && outcome.startError === null) {
+          // The one-line summary alone ("exited with code 1") is useless once
+          // the dialog is closed — test01's failure read exactly that, with
+          // the real cause only in a log nobody could see any more. The
+          // command's own last words are the diagnosis, so they are kept.
+          const tail = outputTail(job.log.replayAfter(0).data);
+          if (tail !== '') job.error = `${job.error} Last output: ${tail}`;
+        }
         if (job.error === null) job.error = this.verify(job, entry, emitLog);
       }
     } finally {
@@ -644,6 +662,77 @@ export function agentBinaryReport(
     officialInstall: isOfficialInstallPath(installable, running.realPath),
     otherCopies,
   };
+}
+
+/**
+ * The last few non-empty lines of a job's output, ANSI-stripped and capped —
+ * enough to name the cause, short enough to live in one settings row.
+ */
+export function outputTail(output: string, maxLines = 3, maxChars = 400): string {
+  const lines = output
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+    .split(/\r?\n|\r/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  const tail = lines.slice(-maxLines).join(' / ');
+  return tail.length > maxChars ? `…${tail.slice(-maxChars)}` : tail;
+}
+
+/**
+ * Whether the directories an official installer writes under `$HOME` are
+ * writable by this process, and if not, the sentence that says how to fix it
+ * (PA-104). Null when everything is writable.
+ *
+ * Checked *before* running anything because the installer's own failure is
+ * opaque and, worse, partial: on test01 `claude update` downloaded 2.1.283 and
+ * then exited 1 unable to create `~/.local/bin`, because the image had shipped
+ * root-owned `~/.local`, `~/.config`, `~/.codex` and `~/.cache` into
+ * `/home/pocketagent` and Docker copied them into the empty home volume. The
+ * container entrypoint deliberately never chowns a mounted volume, so the fix
+ * has to be named rather than applied — and a root `docker exec` without
+ * `--user` leaves exactly the same state, so this is not only that one bug.
+ *
+ * A path that does not exist yet is judged by its nearest existing parent,
+ * which is what the installer will actually have to write into.
+ */
+export function homeWritabilityProblem(relDirs: readonly string[]): string | null {
+  const home = os.homedir();
+  const blocked = new Map<string, number | null>();
+  for (const rel of ['', ...relDirs]) {
+    let dir = path.join(home, rel);
+    while (!fs.existsSync(dir) && dir !== path.dirname(dir)) dir = path.dirname(dir);
+    try {
+      fs.accessSync(dir, fs.constants.W_OK);
+    } catch {
+      let owner: number | null = null;
+      try {
+        owner = fs.statSync(dir).uid;
+      } catch {
+        // Unreadable too; the owner is simply unknown.
+      }
+      blocked.set(dir, owner);
+    }
+  }
+  if (blocked.size === 0) return null;
+  // Report only the outermost offenders: a chown of `~/.local` covers
+  // `~/.local/share` beneath it.
+  const roots = [...blocked.keys()].filter(
+    (d) => ![...blocked.keys()].some((o) => o !== d && d.startsWith(`${o}${path.sep}`)),
+  );
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const gid = typeof process.getgid === 'function' ? process.getgid() : null;
+  const who = uid !== null ? `uid ${uid}` : 'this server’s user';
+  const owners = roots.map((d) => {
+    const o = blocked.get(d);
+    return `${d}${o === null || o === undefined ? '' : ` (owned by uid ${o}${o === 0 ? ', root' : ''})`}`;
+  });
+  const ids = uid !== null && gid !== null ? `${uid}:${gid}` : '<uid>:<gid>';
+  return (
+    `The installer cannot write its official location: ${owners.join(', ')} is not writable by ${who}. ` +
+    `This is usually left by a \`docker exec\` without \`--user\` (it runs as root), or by a pocketagent-server ` +
+    `image from before PA-104's fix. Fix the ownership, as root: \`chown -R ${ids} ${roots.join(' ')}\` — in a ` +
+    `container, run it through \`docker exec -u 0 <container> …\`. Nothing was installed.`
+  );
 }
 
 /**

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -10,8 +10,10 @@ import { catalogEntry, installableAgents, isOfficialInstallPath } from '../src/a
 import { deriveSetupState } from '../src/agents/auth-probe.js';
 import {
   agentBinaryReport,
+  homeWritabilityProblem,
   installFailure,
   officialInstallerPath,
+  outputTail,
   type InstallRunner,
   type ScriptFetcher,
 } from '../src/agents/install.js';
@@ -345,6 +347,41 @@ describe('executable resolution (PA-104)', () => {
       officialInstall: null,
       otherCopies: [],
     });
+  });
+});
+
+describe('home writability preflight (PA-104)', () => {
+  let host: FakeHost;
+  beforeEach(() => {
+    host = fakeHost();
+  });
+  afterEach(() => host.restore());
+
+  it('passes a writable home, including directories that do not exist yet', () => {
+    expect(homeWritabilityProblem(['.local', '.local/bin', '.codex'])).toBeNull();
+  });
+
+  it.skipIf(process.getuid?.() === 0)('names only the outermost unwritable directory', () => {
+    const local = path.join(host.home, '.local');
+    mkdirSync(path.join(local, 'share'), { recursive: true });
+    chmodSync(path.join(local, 'share'), 0o555);
+    chmodSync(local, 0o555);
+    try {
+      const problem = homeWritabilityProblem(['.local', '.local/bin', '.local/share']);
+      expect(problem).toContain(`chown -R ${process.getuid?.()}:${process.getgid?.()} ${local}\``);
+      // ~/.local/bin does not exist, so it is judged by ~/.local; and
+      // ~/.local/share is covered by the chown of ~/.local.
+      expect(problem?.split(local).length).toBe(3);
+    } finally {
+      chmodSync(path.join(local, 'share'), 0o755);
+      chmodSync(local, 0o755);
+    }
+  });
+
+  it('keeps the useful tail of noisy output', () => {
+    expect(outputTail('a\n\n\x1b[1mb\x1b[0m\r\nc\nd\n')).toBe('b / c / d');
+    expect(outputTail('x'.repeat(1000))).toHaveLength(401);
+    expect(outputTail('')).toBe('');
   });
 });
 
@@ -817,6 +854,51 @@ describe('install routes', () => {
     const row = (agents.json().agents as AgentInfo[]).find((a) => a.id === 'pi');
     expect(row?.lastInstallOk).toBe(false);
     expect(row?.lastInstallError).toMatch(/exited with code 1/);
+  });
+
+  /**
+   * test01: a fresh volume inherited a root-owned ~/.local from the image, and
+   * `claude update` exited 1 with its reason only in a closed dialog's log.
+   * Now the job is refused before anything runs, the refusal names the
+   * directory and the chown, and it is persisted for the Settings row.
+   */
+  it.skipIf(process.getuid?.() === 0)('refuses to start when the official location is not writable, naming the fix', async () => {
+    const local = path.join(host.home, '.local');
+    mkdirSync(path.join(local, 'share'), { recursive: true });
+    chmodSync(local, 0o555);
+    try {
+      const res = await post({ id: 'claude', target: 'update' });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe('home_not_writable');
+      expect(res.json().error.message).toContain(local);
+      expect(res.json().error.message).toMatch(/chown -R \d+:\d+ /);
+      expect(calls).toEqual([]);
+      expect(fetched).toEqual([]);
+      const agents = await t.app.inject({ method: 'GET', url: '/api/agents', headers: authHeaders(t.cookie) });
+      const row = (agents.json().agents as AgentInfo[]).find((a) => a.id === 'claude');
+      expect(row?.lastInstallOk).toBe(false);
+      expect(row?.lastInstallError).toContain(local);
+    } finally {
+      chmodSync(local, 0o755);
+    }
+  });
+
+  /** The persisted error carries the command's own last words, not "see the log above". */
+  it('keeps the tail of the output in the persisted failure', async () => {
+    behaviour = async (onOutput) => {
+      onOutput('\x1b[31mCurrent version: 2.1.274\x1b[0m\n');
+      onOutput('Error: EACCES: permission denied, mkdir /home/pocketagent/.local/bin\n');
+      return { code: 1, timedOut: false, startError: null };
+    };
+    installClaude('2.1.274');
+    const res = await post({ id: 'claude', target: 'update' });
+    const finished = parseEvents(res.payload).find((e) => e.kind === 'install_finished');
+    expect(finished?.kind === 'install_finished' && finished.error).toMatch(
+      /exited with code 1\..*Last output: Current version: 2\.1\.274 \/ Error: EACCES: permission denied, mkdir \/home\/pocketagent\/\.local\/bin$/,
+    );
+    const agents = await t.app.inject({ method: 'GET', url: '/api/agents', headers: authHeaders(t.cookie) });
+    const row = (agents.json().agents as AgentInfo[]).find((a) => a.id === 'claude');
+    expect(row?.lastInstallError).toContain('EACCES');
   });
 
   it('reports a failure when the interpreter cannot be started at all', async () => {

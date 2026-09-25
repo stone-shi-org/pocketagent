@@ -313,6 +313,16 @@ FROM runtime AS claude
 # user and the entrypoint re-chowns it on a PUID remap (it is an image path,
 # never a mount).
 #
+# Every command here that runs an agent — the `--version` checks included —
+# runs with the build-time HOME, and each stage ends by *failing the build* if
+# anything under /home/pocketagent is not owned by the app user. That check
+# exists because it shipped broken (PA-104, test01): `opencode --version` and
+# `codex --version` run as root with the image's HOME wrote root-owned
+# ~/.local, ~/.config, ~/.codex and ~/.cache into /home/pocketagent, Docker
+# copies an image directory into an *empty named volume* on first mount, and
+# the app user then could not create ~/.local/bin — so `claude update` from
+# Settings failed on a perfectly fresh deployment.
+#
 # Each installer is downloaded to a file and run as `<interpreter> <file>`,
 # never piped — the same shape as the server's own runner — and each block
 # ends with checks that fail the build: `test -x` on the link, the resolved
@@ -331,9 +341,11 @@ RUN test -n "${CLAUDE_CODE_VERSION}" \
     && ln -sf "$AGENT_IMAGE_HOME/.local/bin/claude" /usr/local/bin/claude \
     && test -x /usr/local/bin/claude \
     && readlink -f /usr/local/bin/claude | grep -q "^$AGENT_IMAGE_HOME/.local/share/claude/versions/" \
-    && /usr/local/bin/claude --version | grep -qF "${CLAUDE_CODE_VERSION}" \
+    && HOME="$AGENT_IMAGE_HOME" /usr/local/bin/claude --version | grep -qF "${CLAUDE_CODE_VERSION}" \
     && rm -rf "$AGENT_IMAGE_HOME/.claude/downloads" \
-    && chown -R pocketagent:pocketagent "$AGENT_IMAGE_HOME"
+    && chown -R pocketagent:pocketagent "$AGENT_IMAGE_HOME" \
+    && { test -z "$(find /home/pocketagent ! -user pocketagent -print -quit)" \
+         || { echo "root-owned files leaked into /home/pocketagent:" >&2; find /home/pocketagent ! -user pocketagent >&2; exit 1; }; }
 
 # ---------------------------------------------------------------------------
 # all — every agent CLI with an official installer
@@ -369,12 +381,14 @@ RUN test -n "${CODEX_VERSION}" && test -n "${OPENCODE_VERSION}" \
     && readlink -f /usr/local/bin/opencode | grep -q "^$A/.opencode/bin/opencode$" \
     && readlink -f /usr/local/bin/agy | grep -q "^$A/.local/bin/agy$" \
     && readlink -f /usr/local/bin/pi | grep -q "^$A/.pi/agent/" \
-    && /usr/local/bin/codex --version | grep -qF "${CODEX_VERSION}" \
-    && /usr/local/bin/opencode --version | grep -qF "${OPENCODE_VERSION}" \
-    && /usr/local/bin/agy --version \
-    && /usr/local/bin/pi --version \
+    && HOME="$A" /usr/local/bin/codex --version | grep -qF "${CODEX_VERSION}" \
+    && HOME="$A" /usr/local/bin/opencode --version | grep -qF "${OPENCODE_VERSION}" \
+    && HOME="$A" /usr/local/bin/agy --version \
+    && HOME="$A" /usr/local/bin/pi --version \
     && rm -rf "$A/.cache" "$A/.pi/agent/install/staging" /root/.npm \
-    && chown -R pocketagent:pocketagent "$A"
+    && chown -R pocketagent:pocketagent "$A" \
+    && { test -z "$(find /home/pocketagent ! -user pocketagent -print -quit)" \
+         || { echo "root-owned files leaked into /home/pocketagent:" >&2; find /home/pocketagent ! -user pocketagent >&2; exit 1; }; }
 
 # ---------------------------------------------------------------------------
 # hub-deps — production dependencies for the Hub alone
