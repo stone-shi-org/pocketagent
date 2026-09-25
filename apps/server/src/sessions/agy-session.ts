@@ -643,7 +643,7 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
     this.suppressCloseNotice = false;
 
     const rl = readline.createInterface({ input: child.stdout });
-    rl.on('line', (line) => this.handleChildLine(line));
+    rl.on('line', (line) => this.handleChildLine(child, line));
     child.stderr.on('data', (chunk: Buffer) => {
       this.stderrTail = (this.stderrTail + chunk.toString()).slice(-4000);
     });
@@ -673,7 +673,8 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
   }
 
   /** One NDJSON line from the long-lived child. */
-  private handleChildLine(line: string): void {
+  private handleChildLine(child: ChildProcessWithoutNullStreams, line: string): void {
+    if (this.closed || child !== this.child) return;
     const trimmed = line.trim();
     if (!trimmed) return;
     this._lastActivityAt = Date.now();
@@ -1167,22 +1168,38 @@ export class AgySession extends EventEmitter<StructuredSessionEvents> {
 
     const child = this.child;
     if (!child) return;
-    // agy exits on stdin EOF (confirmed live), which is a cleaner shutdown
-    // than a signal — it gets to close its conversation out rather than being
-    // cut off mid-write. SIGTERM still follows immediately: a child mid-turn
-    // will not notice EOF until that turn ends, and terminate() cannot wait
-    // for a turn that may be blocked on a long background task.
+    // agy exits cleanly (exit code 0, no error) on stdin EOF when idle —
+    // confirmed live (~700ms to close conversation and state). If we hit it with
+    // SIGTERM while idle, Go's context cancellation triggers "stream input
+    // cancelled: context canceled" with exit code 1.
+    //
+    // So on idle, close stdin and give agy a grace period to exit cleanly.
+    // Only if a turn is actively in-flight (which won't read stdin until it
+    // finishes) do we send SIGTERM immediately to abort in-flight execution.
     try {
       child.stdin.end();
     } catch {
       /* already gone */
     }
-    child.kill('SIGTERM');
-    if (graceMs && graceMs > 0) {
+
+    const effectiveGrace = graceMs && graceMs > 0 ? graceMs : 1500;
+    if (this.activeTurn) {
+      child.kill('SIGTERM');
       const killer = setTimeout(() => {
         if (this.child === child) child.kill('SIGKILL');
-      }, graceMs);
+      }, effectiveGrace);
       killer.unref?.();
+    } else {
+      const termTimer = setTimeout(() => {
+        if (this.child === child) {
+          child.kill('SIGTERM');
+          const killer = setTimeout(() => {
+            if (this.child === child) child.kill('SIGKILL');
+          }, effectiveGrace);
+          killer.unref?.();
+        }
+      }, effectiveGrace);
+      termTimer.unref?.();
     }
   }
 

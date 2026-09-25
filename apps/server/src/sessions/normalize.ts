@@ -610,7 +610,9 @@ function normalizeAgyResult(message: Record<string, unknown>): AgentEvent[] {
       // account-level `/usage` cache without guessing from error prose.
       events.push({ kind: 'rate_limit', provider: 'agy', resetsAt: null, limitType: null, resetsAtLabel: null });
     }
-    events.push({ kind: 'notice', level: 'error', text: errorText });
+    if (!isAgyStreamCancelledError(errorText)) {
+      events.push({ kind: 'notice', level: 'error', text: errorText });
+    }
   }
   events.push({
     kind: 'turn_complete',
@@ -628,6 +630,10 @@ function normalizeAgyResult(message: Record<string, unknown>): AgentEvent[] {
 
 function isAgyQuotaError(error: string): boolean {
   return /\bresource_exhausted\b|\bquota\b|\bcode\s*429\b|\brate[ -]?limit(?:ed)?\b/i.test(error);
+}
+
+function isAgyStreamCancelledError(error: string): boolean {
+  return /stream input cancel/i.test(error);
 }
 
 /**

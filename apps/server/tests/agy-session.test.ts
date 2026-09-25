@@ -727,7 +727,7 @@ describe('AgySession', () => {
     await waitFor(() => session?.busy === false);
   });
 
-  it('terminate() kills an in-flight process and marks the session killed', async () => {
+  it('terminate() kills an in-flight process and marks the session killed without error notice', async () => {
     session = new AgySession(makeSpec());
     await session.start();
     const events = collect(session);
@@ -739,7 +739,29 @@ describe('AgySession', () => {
     expect(session.status).toBe('killed');
     expect(session.isAlive()).toBe(false);
 
+    // Teardown must not emit error notices like "stream input cancelled: context canceled".
+    expect(events.some((e) => e.kind === 'notice' && e.level === 'error')).toBe(false);
+
     // A prompt after termination is refused rather than silently queued.
     expect(session.prompt('too late')).toBe(false);
+  });
+
+  it('terminate() on an idle session shuts down cleanly with no error notice', async () => {
+    session = new AgySession(makeSpec());
+    await session.start();
+    const events = collect(session);
+
+    session.prompt('hello');
+    await waitFor(() => events.some((e) => e.kind === 'turn_complete'));
+    expect(session.busy).toBe(false);
+
+    session.terminate();
+    expect(session.status).toBe('killed');
+    expect(session.isAlive()).toBe(false);
+
+    // Wait a brief moment to ensure any child exit / stdout events would have settled.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(events.some((e) => e.kind === 'notice' && e.level === 'error')).toBe(false);
+    expect(session.prompt('after idle terminate')).toBe(false);
   });
 });

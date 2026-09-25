@@ -146,6 +146,14 @@ function runStreamMode() {
   // agy exits on stdin EOF — confirmed live, and what `terminate()` relies on
   // for a clean shutdown ahead of its SIGTERM.
   rl.on('close', () => process.exit(0));
+
+  // If SIGTERM arrives (e.g. terminating mid-turn or escalating after grace timeout),
+  // agy's Go context cancellation aborts the stream input with context canceled.
+  process.on('SIGTERM', () => {
+    process.stderr.write('error: stream input cancelled: context canceled\n');
+    emitErrorResult('stream input cancelled: context canceled');
+    process.exit(1);
+  });
 }
 
 /** One `-p <prompt>` invocation: one turn, then the process is done. */

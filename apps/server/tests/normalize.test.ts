@@ -902,6 +902,23 @@ describe('normalizeAgyMessage: result', () => {
     });
     expect(events).toHaveLength(1);
   });
+
+  it('does not emit an error notice for stream input cancelled teardown error', () => {
+    const events = normalizeAgyMessage({
+      event: 'result',
+      result: {
+        conversation_id: 'conv-1',
+        status: 'ERROR',
+        error: 'stream input cancelled: context canceled',
+        usage: {},
+      },
+    });
+    // The notice is suppressed, only the turn_complete event is emitted.
+    expect(events.some((e) => e.kind === 'notice')).toBe(false);
+    expect(events).toEqual([
+      expect.objectContaining({ kind: 'turn_complete', isError: true, stopReason: 'ERROR' }),
+    ]);
+  });
 });
 
 describe('normalizeAgyMessage: command_result', () => {
