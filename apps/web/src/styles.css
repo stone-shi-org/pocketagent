@@ -2001,56 +2001,57 @@ input[type='number']::-webkit-outer-spin-button {
 .code-block-container {
   margin: 10px 0;
   border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg-elev-2, #181b20);
+  border: 1px solid #282c34;
+  background: var(--console, #0b0e13);
   overflow: hidden;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
 }
 
 .code-block-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 5px 12px;
-  background: rgba(255, 255, 255, 0.03);
-  border-bottom: 1px solid var(--border);
+  padding: 6px 12px;
+  background: #161b22;
+  border-bottom: 1px solid #282c34;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11.5px;
-  color: var(--text-dim);
+  color: #8b949e;
   user-select: none;
 }
 
 .code-block-lang {
-  font-weight: 500;
+  font-weight: 600;
   text-transform: lowercase;
   letter-spacing: 0.02em;
-  opacity: 0.85;
+  color: #8b949e;
 }
 
 .code-copy-btn {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 2px 7px;
+  padding: 3px 8px;
   font-size: 11px;
   font-family: inherit;
-  color: var(--text-dim);
-  background: transparent;
-  border: 1px solid transparent;
+  color: #c9d1d9;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 4px;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
 .code-copy-btn:hover {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.2);
 }
 
 .code-copy-btn.copied {
-  color: var(--success, #10b981);
-  background: rgba(16, 185, 129, 0.1);
+  color: #3fb950;
+  background: rgba(46, 160, 67, 0.15);
+  border-color: rgba(46, 160, 67, 0.3);
 }
 
 .code-copy-btn .copy-icon {
@@ -2066,14 +2067,15 @@ input[type='number']::-webkit-outer-spin-button {
   overflow-x: auto;
   font-size: 12.5px;
   line-height: 1.5;
-  color: var(--console-text, #e2e8f0);
+  color: var(--console-text, #e6edf3);
 }
 
 .code-block-container pre code {
   background: none;
   padding: 0;
   font-size: inherit;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: 'JetBrainsMono Nerd Font Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: inherit;
 }
 .answer blockquote {
   border-left: 3px solid var(--border);
