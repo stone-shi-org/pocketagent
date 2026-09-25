@@ -179,7 +179,8 @@ export function PlannerChatPage({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [voiceEnabled, setVoiceEnabled] = useState(false);
-  const [liveListenActive, setLiveListenActive] = useState(false);
+  const [geminiLiveActive, setGeminiLiveActive] = useState(false);
+  const [pipelineLiveActive, setPipelineLiveActive] = useState(false);
   const [micLevel, setMicLevel] = useState(0);
   const [liveListenError, setLiveListenError] = useState<string | null>(null);
   const [liveListenNotice, setLiveListenNotice] = useState<string | null>(null);
@@ -263,7 +264,7 @@ export function PlannerChatPage({
   const geminiSelected = liveProvider === 'gemini-live';
   /** Live mode on this page means Gemini Live, not the live-stt pipeline. */
   const geminiMode = geminiSelected && geminiAvailable;
-  const geminiLive = geminiMode && liveListenActive;
+  const geminiLive = geminiMode && geminiLiveActive;
   const isGeminiConfigured = geminiAvailable && geminiSelected;
 
   // PA-98: Restore saved Gemini Live preference if configured for this chat
@@ -273,7 +274,7 @@ export function PlannerChatPage({
     if (geminiAvailable !== false && liveProvider !== null) {
       restoredPrefRef.current = true;
       if (geminiSelected && geminiAvailable && getGeminiLivePref(chatId)) {
-        setLiveListenActive(true);
+        setGeminiLiveActive(true);
       }
     }
   }, [geminiAvailable, liveProvider, geminiSelected, chatId]);
@@ -663,7 +664,7 @@ export function PlannerChatPage({
         ttsQueueRef.current?.arm();
         await api.sendPlannerMessage(
           chatId,
-          { content: trimmed, image, voiceMode: liveListenActive },
+          { content: trimmed, image, voiceMode: pipelineLiveActive },
           onStreamEvent,
           controller.signal,
         );
@@ -695,21 +696,42 @@ export function PlannerChatPage({
     handleSendRef.current = handleSend;
   }, [handleSend]);
 
-  const handleToggleLiveListen = useCallback(
+  const handleToggleGeminiLive = useCallback(
+    (enabled: boolean) => {
+      if (!enabled) {
+        ttsQueueRef.current?.stop();
+        geminiRef.current?.stopSpeaking();
+      } else {
+        // Inside the click, so iOS lets the playback context start.
+        void unlockAudioContext();
+        if (geminiMode) GeminiLiveController.prime();
+        // PA-98: Turn off self-made pipeline if user switches to Gemini Live
+        setPipelineLiveActive(false);
+      }
+      setGeminiLiveActive(enabled);
+      if (geminiSelected && geminiAvailable) {
+        setGeminiLivePref(enabled, chatId);
+      }
+    },
+    [geminiMode, geminiSelected, geminiAvailable, chatId],
+  );
+
+  const handleTogglePipelineLive = useCallback(
     (enabled: boolean) => {
       if (!enabled) {
         ttsQueueRef.current?.stop();
       } else {
         // Inside the click, so iOS lets the playback context start.
         void unlockAudioContext();
-        if (geminiMode) GeminiLiveController.prime();
+        // PA-98: Turn off Gemini Live if user switches to self-made pipeline
+        setGeminiLiveActive(false);
+        if (geminiSelected && geminiAvailable) {
+          setGeminiLivePref(false, chatId);
+        }
       }
-      setLiveListenActive(enabled);
-      if (geminiSelected && geminiAvailable) {
-        setGeminiLivePref(enabled, chatId);
-      }
+      setPipelineLiveActive(enabled);
     },
-    [geminiMode, geminiSelected, geminiAvailable, chatId],
+    [geminiSelected, geminiAvailable, chatId],
   );
 
   const handleStopSpeaking = useCallback(() => {
@@ -768,12 +790,12 @@ export function PlannerChatPage({
         // A dead socket turns the mic indicator off (PA-83) rather than
         // leaving it looking like it is listening to nothing.
         setLiveListenError(message);
-        setLiveListenActive(false);
+        setGeminiLiveActive(false);
       },
       onNotice: (message) => {
         if (cancelled) return;
         showLiveListenNotice(message);
-        if (message.startsWith('Gemini Live turned off')) setLiveListenActive(false);
+        if (message.startsWith('Gemini Live turned off')) setGeminiLiveActive(false);
       },
     });
     geminiRef.current = controller;
@@ -781,7 +803,7 @@ export function PlannerChatPage({
     controller.start().catch((err: unknown) => {
       if (cancelled) return;
       setLiveListenError(err instanceof Error ? err.message : 'Could not start Gemini Live.');
-      setLiveListenActive(false);
+      setGeminiLiveActive(false);
     });
     return () => {
       cancelled = true;
@@ -796,8 +818,8 @@ export function PlannerChatPage({
   }, [geminiLive, shouldStream, chatId, api, showLiveListenNotice, micVersion]);
 
   useEffect(() => {
-    if (!liveListenActive || !shouldStream || geminiMode) {
-      if (!geminiMode) setMicLevel(0);
+    if (!pipelineLiveActive || !shouldStream) {
+      if (!geminiLive) setMicLevel(0);
       return;
     }
 
@@ -872,7 +894,7 @@ export function PlannerChatPage({
         onLevel: setMicLevel,
         onError: (message) => {
           setLiveListenError(message);
-          setLiveListenActive(false);
+          setPipelineLiveActive(false);
           setMicLevel(0);
           ttsQueueRef.current?.stop();
         },
@@ -889,7 +911,7 @@ export function PlannerChatPage({
       } catch (err) {
         if (!cancelled) {
           setLiveListenError(err instanceof Error ? err.message : 'Could not start live listening.');
-          setLiveListenActive(false);
+          setPipelineLiveActive(false);
         }
       }
     };
@@ -902,9 +924,9 @@ export function PlannerChatPage({
         void controller.stop();
         controller = null;
       }
-      setMicLevel(0);
+      if (!geminiLive) setMicLevel(0);
     };
-  }, [liveListenActive, shouldStream, geminiMode, chatId, api, showLiveListenNotice, micVersion]);
+  }, [pipelineLiveActive, shouldStream, geminiLive, chatId, api, showLiveListenNotice, micVersion]);
 
   const decide = (decision: PlannerToolApprovalChoice): void => {
     const pending = transcript?.pending[0];
@@ -985,7 +1007,7 @@ export function PlannerChatPage({
               type="button"
               className={`planner-btn gemini-live-toggle${geminiLive ? ' active' : ''}${!isGeminiConfigured ? ' disabled' : ''}`}
               disabled={!isGeminiConfigured}
-              onClick={() => handleToggleLiveListen(!liveListenActive)}
+              onClick={() => handleToggleGeminiLive(!geminiLiveActive)}
               aria-label={
                 !geminiAvailable
                   ? 'Gemini Live is not configured (requires API key in Settings)'
@@ -1318,12 +1340,11 @@ export function PlannerChatPage({
             ? (audio) => api.transcribeVoice(chatId, audio).then((res) => res.text)
             : undefined
         }
-        // PA-98: Gemini Live is controlled exclusively by the dedicated header
-        // toggler button; PromptBox's live streaming button is reserved strictly
-        // for the self-made live-stt stream pipeline.
-        supportsLiveListen={!geminiSelected && voiceEnabled}
-        liveListenActive={liveListenActive}
-        onSetLiveListen={handleToggleLiveListen}
+        // PA-98: Both Gemini Live (in header) and self-made live stream (in PromptBox)
+        // are available so the user can pick whichever live experience they want.
+        supportsLiveListen={voiceEnabled}
+        liveListenActive={pipelineLiveActive}
+        onSetLiveListen={handleTogglePipelineLive}
         micLevel={micLevel}
         liveListenError={liveListenError}
         liveListenNotice={liveListenNotice}
