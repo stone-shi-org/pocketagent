@@ -63,12 +63,23 @@ interface TelegramCall {
   body: Record<string, unknown>;
 }
 
-function fakeTelegramTransport(): { fetchImpl: typeof fetch; calls: TelegramCall[] } {
+/** `rejectHtml` makes every `parse_mode` send fail the way Telegram does
+    when it cannot parse the markup (PA-105's fallback path). */
+function fakeTelegramTransport(opts: { rejectHtml?: boolean } = {}): {
+  fetchImpl: typeof fetch;
+  calls: TelegramCall[];
+} {
   const calls: TelegramCall[] = [];
   const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
     const method = url.toString().split('/').pop() ?? '';
     const body = init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : {};
     calls.push({ method, body });
+    if (opts.rejectHtml && body.parse_mode) {
+      return new Response(
+        JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: can't parse entities: test" }),
+        { status: 400 },
+      );
+    }
     if (method === 'getMe') {
       return new Response(JSON.stringify({ ok: true, result: { id: 1, username: 'test_bot' } }));
     }
@@ -111,13 +122,17 @@ function quietAppLevelTelegramFetch(): typeof fetch {
 /** Build a fully-wired app (real `PlannerChatService`, mocked LLM transport)
     and a `TelegramBridge` against its live services, plus a fake Telegram
     transport to assert outbound calls against. */
-async function setup(llmFetch?: ReturnType<typeof vi.fn>): Promise<{
+async function setup(
+  llmFetch?: ReturnType<typeof vi.fn>,
+  transportOpts: { rejectHtml?: boolean } = {},
+): Promise<{
   t: TestApp;
   bridge: TelegramBridge;
   botId: string;
   workspaceId: string;
   client: TelegramClient;
   calls: TelegramCall[];
+  logger: { warn: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn> };
 }> {
   const t = await createTestApp(
     { POCKETAGENT_SETTINGS_ENC_KEY: ENC_KEY },
@@ -146,14 +161,16 @@ async function setup(llmFetch?: ReturnType<typeof vi.fn>): Promise<{
     headers: authHeaders(t.cookie),
     payload: { defaultModelId: 'gpt-4o' },
   });
+  const logger = { warn: vi.fn(), info: vi.fn() };
   const bridge = new TelegramBridge({
     links: t.context.telegramLinks,
     plannerChats: t.context.plannerChats,
     mcpRegistry: t.context.mcpRegistry,
+    logger,
   });
-  const { fetchImpl, calls } = fakeTelegramTransport();
+  const { fetchImpl, calls } = fakeTelegramTransport(transportOpts);
   const client = new TelegramClient({ token: 'unused', fetchImpl });
-  return { t, bridge, botId, workspaceId, client, calls };
+  return { t, bridge, botId, workspaceId, client, calls, logger };
 }
 
 describe('TelegramBridge', () => {
@@ -283,5 +300,79 @@ describe('TelegramBridge', () => {
     expect(calls.some((c) => String(c.body.text ?? '').includes('Approval needed'))).toBe(false);
     const stat = await fs.stat(targetDir);
     expect(stat.isDirectory()).toBe(true);
+  });
+
+  // ---- PA-105: rich text ---------------------------------------------------
+
+  it('sends an assistant reply as Telegram HTML', async () => {
+    const llmFetch = vi.fn().mockResolvedValueOnce(fakeCompletionResponse('## Done\n\nRan **3** tests in `a<b>.ts`.'));
+    const { t, bridge, botId, workspaceId, client, calls } = await setup(llmFetch);
+    current = t;
+    t.context.telegramLinks.create(botId, { telegramChatId: '555', workspaceId });
+
+    await bridge.handleUpdate(botId, messageUpdate('555', 'status?'), client);
+    await waitFor(() => calls.some((c) => c.method === 'sendMessage' && String(c.body.text).includes('tests')));
+    const reply = calls.find((c) => String(c.body.text ?? '').includes('tests'))!;
+    expect(reply.body.parse_mode).toBe('HTML');
+    expect(reply.body.text).toBe('<b>Done</b>\n\nRan <b>3</b> tests in <code>a&lt;b&gt;.ts</code>.');
+  });
+
+  it('shows the tool arguments in an escaped <pre> on an approval prompt', async () => {
+    const llmFetch = vi.fn().mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: '<x>&y' }));
+    const { t, bridge, botId, workspaceId, client, calls } = await setup(llmFetch);
+    current = t;
+    t.context.telegramLinks.create(botId, { telegramChatId: '666', workspaceId });
+
+    await bridge.handleUpdate(botId, messageUpdate('666', 'make it'), client);
+    await waitFor(() => calls.some((c) => String(c.body.text ?? '').includes('Approval needed')));
+    const prompt = calls.find((c) => String(c.body.text ?? '').includes('Approval needed'))!;
+    expect(prompt.body.parse_mode).toBe('HTML');
+    expect(String(prompt.body.text)).toMatch(/^Approval needed: <b>Run mkdir<\/b>\n<pre>/);
+    expect(String(prompt.body.text)).toContain('"path": "&lt;x&gt;&amp;y"');
+    expect(prompt.body.reply_markup).toBeTruthy();
+  });
+
+  it('falls back to plain text when Telegram rejects the markup, keeping the reply and the buttons', async () => {
+    const llmFetch = vi
+      .fn()
+      .mockResolvedValueOnce(fakeToolCallResponse('mkdir', { path: 'p' }))
+      .mockResolvedValueOnce(fakeCompletionResponse('Stopped **there**.'));
+    const { t, bridge, botId, workspaceId, client, calls, logger } = await setup(llmFetch, { rejectHtml: true });
+    current = t;
+    t.context.telegramLinks.create(botId, { telegramChatId: '777', workspaceId });
+
+    await bridge.handleUpdate(botId, messageUpdate('777', 'make it'), client);
+    await waitFor(() => calls.some((c) => !c.body.parse_mode && String(c.body.text ?? '').startsWith('Approval needed')));
+    const plainPrompt = calls.find((c) => !c.body.parse_mode && String(c.body.text ?? '').startsWith('Approval needed'))!;
+    expect(String(plainPrompt.body.text)).toContain('Run mkdir');
+    const deny = (plainPrompt.body.reply_markup as { inline_keyboard: { callback_data: string }[][] }).inline_keyboard
+      .flat()
+      .find((b) => b.callback_data.endsWith(':deny'))!;
+
+    await bridge.handleUpdate(botId, callbackUpdate('777', deny.callback_data, 2), client);
+    await waitFor(() => calls.some((c) => !c.body.parse_mode && c.body.text === 'Stopped **there**.'));
+    expect(logger.warn).toHaveBeenCalledWith(expect.anything(), expect.stringMatching(/plain text/));
+  });
+
+  it('splits a reply over 4096 characters into several messages, none breaking a fence', async () => {
+    const code = Array.from({ length: 500 }, (_, i) => `line ${i} of the log`).join('\n');
+    const long = `Here is the log:\n\n\`\`\`\n${code}\n\`\`\`\n\nThat is all.`;
+    expect(long.length).toBeGreaterThan(4096);
+    const llmFetch = vi.fn().mockResolvedValueOnce(fakeCompletionResponse(long));
+    const { t, bridge, botId, workspaceId, client, calls } = await setup(llmFetch);
+    current = t;
+    t.context.telegramLinks.create(botId, { telegramChatId: '888', workspaceId });
+
+    await bridge.handleUpdate(botId, messageUpdate('888', 'show log'), client);
+    await waitFor(() => calls.some((c) => String(c.body.text ?? '').includes('That is all.')));
+    const sends = calls.filter((c) => c.method === 'sendMessage');
+    expect(sends.length).toBeGreaterThan(1);
+    for (const s of sends) {
+      const text = String(s.body.text);
+      expect(text.replace(/<[^>]*>/g, '').length).toBeLessThanOrEqual(4096);
+      expect(text.split('<pre>').length).toBe(text.split('</pre>').length);
+    }
+    const lines = sends.flatMap((s) => String(s.body.text).replace(/<[^>]*>/g, '').split('\n'));
+    expect(lines.filter((l) => l.startsWith('line '))).toEqual(code.split('\n'));
   });
 });

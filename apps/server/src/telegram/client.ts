@@ -42,10 +42,23 @@ export interface TelegramInlineKeyboardButton {
 
 export interface TelegramSendMessageOptions {
   replyMarkup?: { inline_keyboard: TelegramInlineKeyboardButton[][] };
+  /** PA-105: omitted sends plain text, exactly as before. `send.ts` is the
+      only caller that sets it, because it is the one that knows how to fall
+      back when Telegram rejects the markup. */
+  parseMode?: 'HTML';
 }
 
 export class TelegramApiError extends Error {
   override readonly name = 'TelegramApiError';
+  /** The HTTP status, when Telegram answered at all. PA-105's plain-text
+      fallback keys on a 400 plus the description, and must not fire for a
+      401 (revoked token) or a network failure. */
+  constructor(
+    message: string,
+    readonly status: number | null = null,
+  ) {
+    super(message);
+  }
 }
 
 /** Long-poll timeout, in seconds, sent to `getUpdates`. Telegram holds the
@@ -106,6 +119,7 @@ export class TelegramClient {
     await this.call('sendMessage', {
       chat_id: chatId,
       text,
+      ...(opts.parseMode ? { parse_mode: opts.parseMode } : {}),
       ...(opts.replyMarkup ? { reply_markup: opts.replyMarkup } : {}),
     });
   }
@@ -143,6 +157,7 @@ export class TelegramClient {
       if (!res.ok || !json || json.ok !== true) {
         throw new TelegramApiError(
           json?.description ?? `Telegram API ${method} failed with HTTP ${res.status}.`,
+          res.status,
         );
       }
       return json.result;

@@ -1018,6 +1018,35 @@ that only exercises `execute()` with a known-good id; the fix is a real tool for
 call, not a better sentence, and `planner-tools.test.ts` now pins the description to the tool
 name it actually points at so the two cannot drift apart silently again.
 
+**Replies are rich text, and a formatting bug may lose the formatting but never the message**
+(PA-105). Telegram renders formatting only when `sendMessage` is given a `parse_mode`, and its
+subset has no headings, tables or real lists. `telegram/format.ts` converts the model's
+Markdown into Telegram's **HTML** subset rather than MarkdownV2, because MarkdownV2 needs 18
+characters escaped outside formatting and one missed `.` is a `400 can't parse entities` that
+delivers nothing. HTML needs only `&`, `<` and `>`. The converter is an **emit-only allowlist**:
+every run of source text is escaped before any tag exists, the only tags in the output are the
+ones it writes (`b i s code pre a blockquote`), and `href` is written only for `http(s)`. That is
+why it is hand-rolled rather than `marked`. Rendering everything and then sanitising back down
+is the posture it exists to avoid, since a webhook-driven chat can carry Jira text. Headings
+become `<b>`, lists become a literal `•`/`1.`, and tables become an aligned `<pre>`. Two
+decisions carry the rest:
+
+- **Split the Markdown, then convert each piece.** Every tag opens and closes in one call, so
+  the output is balanced by construction, and `splitMarkdownForTelegram` cuts on block
+  boundaries. It never cuts inside a fence (an oversized one becomes several complete fences
+  with the same language), repeats a table's header on every piece, and measures a piece by the
+  *larger* of its raw length (what the fallback sends) and its converted visible length (what
+  Telegram counts). A padded table can outgrow its source. The old code sliced raw text every
+  3800 characters, straight through fences and words.
+- **`send.ts` is the only formatted sender.** A 400 `can't parse entities` resends *that
+  chunk's original Markdown* as plain text, with the inline keyboard kept, and logs Telegram's
+  description (never the message text). Any other failure is not formatting's fault, would fail
+  the same way again, and propagates as before. Assistant `text`, approval prompts (the title
+  in `<b>`, the tool input in an escaped `<pre>`, which the prompt did not show at all before)
+  and `send_telegram_message` all go through it. The last was a single unsplit call, so any
+  message over 4096 characters was rejected. Notices, `Error:` lines and slash-command replies
+  stay plain (`sendPlainText`). There is no setting: the fallback is what makes always-on safe.
+
 ### The live-listen utterance harness (PA-85)
 
 Voice input has two modes: push-to-talk (a finger is down, so intent is

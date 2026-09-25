@@ -1812,7 +1812,8 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     description:
       'Send a message to a Telegram user who has paired their chat with a Pocket Agent. Only ids ' +
       'already paired in Settings -> Telegram may be addressed; call list_telegram_links first if ' +
-      'you do not already know which id to address.',
+      'you do not already know which id to address. Markdown (bold, italics, code, fenced code, ' +
+      'links, lists, headings, tables) is rendered; long messages are split automatically.',
     parameters: {
       type: 'object',
       properties: {

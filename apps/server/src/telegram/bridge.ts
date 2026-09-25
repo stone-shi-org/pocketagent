@@ -4,12 +4,23 @@ import type { McpRegistryService } from '../planner/mcp/registry-service.js';
 import type { TelegramLinksStore } from './links-store.js';
 import { interceptSlashCommand } from './slash-commands.js';
 import type { TelegramCallbackQuery, TelegramClient, TelegramMessage, TelegramUpdate } from './client.js';
+import { escapeHtml } from './format.js';
+import { sendHtmlWithPlainFallback, sendMarkdown, sendPlainText } from './send.js';
 
-/** Leaves room below Telegram's own 4096-character hard cap on one message's
-    text rather than splitting at exactly that limit, so a
-    chunk boundary landing mid multi-byte character (Telegram counts UTF-16
-    code units, not bytes) has slack either side. */
-const CHUNK_SIZE = 3800;
+/** How much of a tool call's input an approval prompt shows. It is the
+    model's own argument, so it can be arbitrarily long, and the prompt has to
+    fit one message because the buttons ride on it. */
+const APPROVAL_INPUT_MAX = 3000;
+const APPROVAL_TITLE_MAX = 300;
+
+/** Truncate without splitting a surrogate pair. */
+function truncate(s: string, max: number): string {
+  if (s.length <= max) return s;
+  let cut = max;
+  const code = s.charCodeAt(cut - 1);
+  if (code >= 0xd800 && code <= 0xdbff) cut--;
+  return `${s.slice(0, cut)}\n… (truncated)`;
+}
 
 export interface TelegramBridgeDeps {
   links: TelegramLinksStore;
@@ -66,7 +77,9 @@ export class TelegramBridge {
     const command = interceptSlashCommand(text);
     if (command) {
       const reply = await this.runSlashCommand(command, link.plannerChatId, link.workspaceId);
-      await this.sendChunked(client, telegramChatId, reply);
+      // Plain text: these replies are ours, not the model's, and carry no
+      // Markdown worth rendering (PA-105).
+      await sendPlainText(client, telegramChatId, reply);
       return;
     }
 
@@ -193,7 +206,8 @@ export class TelegramBridge {
   ): Promise<void> {
     try {
       if (event.kind === 'text' && event.text.trim().length > 0) {
-        await this.sendChunked(client, telegramChatId, event.text);
+        // PA-105: the model writes Markdown; Telegram renders its HTML subset.
+        await sendMarkdown(client, telegramChatId, event.text, { logger: this.deps.logger });
       } else if (event.kind === 'permission_request') {
         await this.sendApprovalPrompt(telegramChatId, event, client);
       } else if (event.kind === 'notice' && event.level !== 'info') {
@@ -214,7 +228,16 @@ export class TelegramBridge {
         text: label,
         callback_data: approvalCallbackData(event.id, choice),
       }));
-    await client.sendMessage(telegramChatId, `Approval needed: ${event.title}`, {
+    // PA-105: the title and the arguments are both the model's tool input, so
+    // both are escaped before any tag is added. The arguments go in `<pre>`
+    // because a human is being asked to approve exactly this call, and
+    // before PA-105 the prompt did not show them at all.
+    const title = truncate(event.title, APPROVAL_TITLE_MAX);
+    const input = Object.keys(event.input).length > 0 ? truncate(JSON.stringify(event.input, null, 2), APPROVAL_INPUT_MAX) : '';
+    const html = `Approval needed: <b>${escapeHtml(title)}</b>` + (input ? `\n<pre>${escapeHtml(input)}</pre>` : '');
+    const plain = `Approval needed: ${title}` + (input ? `\n${input}` : '');
+    await sendHtmlWithPlainFallback(client, telegramChatId, html, plain, {
+      logger: this.deps.logger,
       replyMarkup: {
         inline_keyboard: [
           row([
@@ -228,14 +251,6 @@ export class TelegramBridge {
         ],
       },
     });
-  }
-
-  private async sendChunked(client: TelegramClient, telegramChatId: string, text: string): Promise<void> {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    for (let i = 0; i < trimmed.length; i += CHUNK_SIZE) {
-      await client.sendMessage(telegramChatId, trimmed.slice(i, i + CHUNK_SIZE));
-    }
   }
 
   /**

@@ -81,6 +81,7 @@ import type { SkillRegistryService } from './skills.js';
 import type { TelegramBotStore } from '../telegram/bots-store.js';
 import type { TelegramLinksStore } from '../telegram/links-store.js';
 import { TelegramClient } from '../telegram/client.js';
+import { sendMarkdown } from '../telegram/send.js';
 import { estimateTokens } from './token-estimate.js';
 import type { GeminiFunctionDeclaration } from './gemini-live.js';
 
@@ -2240,7 +2241,10 @@ export class PlannerChatService {
                 ...(this.opts.telegramFetch ? { fetchImpl: this.opts.telegramFetch } : {}),
               });
               try {
-                await client.sendMessage(telegramChatId, text);
+                // PA-105: formatted and split exactly as the bridge's own
+                // replies are. Before this it was one unsplit call, so any
+                // message over 4096 characters was rejected outright.
+                await sendMarkdown(client, telegramChatId, text, { logger: this.opts.logger });
                 return { ok: true };
               } catch (err) {
                 return { ok: false, error: (err as Error).message };
