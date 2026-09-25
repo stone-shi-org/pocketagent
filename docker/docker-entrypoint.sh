@@ -126,7 +126,10 @@ if [ "$(id -u)" = '0' ]; then
     # two the remap can strand, and each is skipped the moment it turns out to
     # be a mount — at which point ownership is the operator's to set and
     # require_writable below is what reports it.
-    for dir in "$HOME" "${POCKETAGENT_DATA_DIR:-/data}"; do
+    # PA-104: the `claude`/`all` targets install agent CLIs under
+    # AGENT_IMAGE_HOME (an image path, never a volume) and pi updates its
+    # managed install there in place, so it must follow the remapped uid too.
+    for dir in "$HOME" "${POCKETAGENT_DATA_DIR:-/data}" ${AGENT_IMAGE_HOME:+"$AGENT_IMAGE_HOME"}; do
         [ -d "$dir" ] || continue
         if is_mount_point "$dir"; then
             log "$dir is a mount point; leaving its ownership alone"

@@ -144,7 +144,7 @@ running keeps running.
 | `POCKETAGENT_AUTH_TOKEN` | — | **Required.** Min 24 chars. |
 | `POCKETAGENT_WORKSPACE_ROOTS` | — | Optional. Seeds project folders on a fresh database only. |
 | `POCKETAGENT_DATA_DIR` | `<checkout>/data` | Where the database and the Pocket Agent scratch/skills directories live. Refused if it resolves inside a project folder. See [The data root](#the-data-root). |
-| `POCKETAGENT_AGENT_INSTALL_PREFIX` | `~/.npm-global` | Where **Set up agents** installs an agent CLI. Must be a directory the server searches for agent binaries. See [Installing agents](#installing-agents). |
+| `POCKETAGENT_AGENT_INSTALL_PREFIX` | `~/.npm-global` | Where an npm-method install would land. No current agent uses it: **Set up agents** uses each vendor's official installer and location. It is searched *last*, and copies left there by older versions are listed in Settings. See [Installing agents](#installing-agents). |
 | `POCKETAGENT_SESSION_TTL_HOURS` | `720` | How long a browser stays signed in. |
 | `POCKETAGENT_COOKIE_SECURE` | auto | `Secure` cookie flag; defaults to on when `NODE_ENV=production`. |
 | `POCKETAGENT_ALLOWED_ORIGINS` | same-origin | Comma-separated Origin allowlist. |
@@ -278,18 +278,23 @@ stale within days.
 | Tag | Contains |
 | --- | --- |
 | `:<semver>`, `:<major>.<minor>`, `:latest` | Node, git, tmux, bash, the server. **No agent CLIs.** |
-| `:<semver>-claude`, `:<major>.<minor>-claude`, `:latest-claude` | The above plus a pinned `claude`. The common case. |
-| `:<semver>-all`, `:<major>.<minor>-all`, `:latest-all` | Plus pinned `codex`, `opencode` and `pi`, for air-gapped or byte-reproducible installs. |
+| `:<semver>-claude`, `:<major>.<minor>-claude`, `:latest-claude` | The above plus a pinned `claude`, installed by its official installer. The common case. |
+| `:<semver>-all`, `:<major>.<minor>-all`, `:latest-all` | Plus pinned `codex` and `opencode`, and `agy` and `pi` at their release of the build date, for air-gapped installs. |
 
 `:<major>.<minor>` is the "give me patches of the minor I qualified" subscription and `:latest`
 is the unpinned default; both move, and only a **stable** release moves them — see
 [Releases](#releases). Neither is a substitute for pinning by digest.
 
-Pins live in `docker/agent-versions.env`. **`agy` is deliberately absent from `-all`**: it is
-distributed as a Google-published binary with no npm package, and the registry names that look
-right (`agy`, `antigravity-cli`) are unrelated 0.0.x placeholders, so pinning one would be a
-supply-chain hazard dressed up as completeness. Install it into the mounted agent prefix
-instead.
+Every baked-in CLI is installed with its **vendor's official installer**, the same one Settings
+runs, so it has the official layout and updates the way any official install does. The
+official locations are all under `$HOME`, which is a mount point at run time, so the image
+installs them under a build-time home, `/opt/pocketagent-agents`, and links them into
+`/usr/local/bin`. Pins live in `docker/agent-versions.env`, and only where the installer
+accepts a version: `claude`, `codex` and `opencode`. **`agy` and `pi` are unpinned**: their
+official installers always take the current release, so `-all` gets whatever was current when
+it was built. The agents update themselves after the first run. An update is written into the
+mounted `$HOME`, which comes before `/usr/local/bin` on `PATH`, so the updated copy is the one
+that runs and it survives a restart.
 
 "Thin" means *no agent CLIs on PATH*, not *small*. The image is ~900 MB, most of which is one
 of the server's own dependencies: `@anthropic-ai/claude-agent-sdk` ships a ~291 MB
@@ -302,15 +307,16 @@ Stable, and meant to be extended against.
 | Container path | Selected by | Holds | Must match the host path? |
 | --- | --- | --- | --- |
 | `/data` | `POCKETAGENT_DATA_DIR` | `pocketagent.db`, `planner-workspaces/`, `planner-skills/` | No |
-| `/home/pocketagent` | `HOME` | agent CLI credentials and config, the transcript stores (`~/.claude/projects`, `~/.gemini/…`, `~/.pi/…`), **and the agent prefix** | No |
-| `$HOME/.npm-global` | `NPM_CONFIG_PREFIX` | agent CLIs installed on demand | No |
+| `/home/pocketagent` | `HOME` | agent CLI credentials and config, the transcript stores (`~/.claude/projects`, `~/.gemini/…`, `~/.pi/…`), **and every agent CLI installed or updated from Settings** (their official locations: `~/.local`, `~/.codex`, `~/.opencode`, `~/.pi`) | No |
 | your repositories | `POCKETAGENT_WORKSPACE_ROOTS` | your code | **Yes** |
 
-The agent prefix needs no separate mount: it is inside `$HOME`, and
-`~/.npm-global/bin`, `~/.local/bin` and `~/.cargo/bin` are already on the agent-binary search
-path. They come *before* `/usr/local/bin` on `PATH`, so a CLI you install on demand overrides
-the one an image pinned — deliberately, since an explicit install should beat an image
-default, and it is also how you move off a pin without rebuilding.
+Installed agents need no separate mount: their official locations are inside `$HOME`. The
+server and a login shell search the same directories in the same order: `~/.opencode/bin`,
+`~/.local/bin` and `~/.pi/agent/bin` first, then the system `PATH` (where the image's
+baked-in CLIs are linked), then `~/.cargo/bin`, and `~/.npm-global/bin` last. An agent you
+install or update from Settings therefore overrides the one the image pinned. That is
+deliberate: an explicit install should beat an image default, and it is how you move off a pin
+without rebuilding.
 
 **Mount your repositories at the same absolute path they have on the host.** `-v
 /home/me/src:/home/me/src`, never `-v /home/me/src:/workspace`. The second one appears to work
@@ -641,7 +647,7 @@ whatever the next patch release moves that tag to.
 
 Rebuilding the same tag gives you the same **semver, the same dependency tree** (the build
 installs with `--frozen-lockfile`) and the same pinned agent CLI versions from
-`docker/agent-versions.env`. It does **not** give a byte-identical image, and nothing here
+`docker/agent-versions.env` (for the agents whose installers can be pinned; see above). It does **not** give a byte-identical image, and nothing here
 claims it does: the web bundle embeds a build timestamp for display, the base image is
 referenced by tag, and three native modules are compiled during the build. Pin by digest when
 you need "the exact image that was tested" — that is what the digest list is for.
@@ -785,7 +791,7 @@ reads lives outside the checkout too, and none of it is configurable:
 | `~/.claude/projects` | Claude Code transcript discovery | Mount `$HOME`. |
 | `~/.gemini/antigravity-cli/brain` | agy transcript discovery | Mount `$HOME`. |
 | `~/.pi/agent/sessions` | pi transcript discovery | Mount `$HOME`. |
-| `~/.local/bin`, `~/.cargo/bin`, `~/.npm-global/bin` | agent binary discovery | Nothing extra: they are inside `$HOME`. Pin the CLIs in the image (`-claude`/`-all`) or install them into the mounted prefix. |
+| `~/.opencode/bin`, `~/.local/bin`, `~/.pi/agent/bin`, `~/.cargo/bin`, `~/.npm-global/bin` | agent binary discovery, in that order | Nothing extra: they are inside `$HOME`. Pin the CLIs in the image (`-claude`/`-all`) or install them from Settings. |
 
 The three transcript directories are deliberately *not* configurable. They are other
 programs' private state and PocketAgent is only a reader; a setting pointing somewhere the
@@ -1618,47 +1624,94 @@ agent-specific.
 
 Two optional fields are worth adding if the CLI supports them. `bin` declares the configured
 executable, which is what lets the UI warn when it is pinned to an absolute path (that bypasses
-the install prefix). `authProbe` declares how to ask the CLI whether it is signed in — argv plus
+resolution entirely, so an install would not be found). `authProbe` declares how to ask the CLI whether it is signed in — argv plus
 a pure `interpret` function. If the CLI has no non-interactive way to answer, leave it out: the
 row then reports *Sign-in unknown*, which is the honest answer and is handled everywhere.
 
-To make an agent installable from the UI, add it to `apps/server/src/agents/catalog.ts` with a
-pinned npm version, add its id to `INSTALLABLE_AGENT_IDS` in
-`packages/protocol/src/agent-install.ts`, and add the matching pin to
-`docker/agent-versions.env` — a test fails if those last two disagree. An agent with no npm
-package should stay out of the catalog rather than acquire a `curl | sh` install path; see the
-note about `agy` in either file.
+To make an agent installable from the UI, add an `official-script` entry to
+`apps/server/src/agents/catalog.ts` and its id to `INSTALLABLE_AGENT_IDS` in
+`packages/protocol/src/agent-install.ts`. The entry needs:
+
+- the vendor's installer URL and interpreter;
+- the arguments that pin a version, if the installer takes any (then add the pin to
+  `docker/agent-versions.env` and the Dockerfile's `all` stage; a test fails if the file and the
+  catalog disagree);
+- how an update works;
+- the path fragments that identify an official install.
+
+Read the installer script itself for these. Don't rely on its documentation: the entries in
+the catalog record what each script actually does. Use the `npm` method only for an agent with
+no official installer.
 
 ### Installing agents
 
 The thin container image ships no agent CLIs, so a freshly deployed backend can run nothing
 until one is installed. **Settings → Coding Agents → Set up agents…** lists what this host has,
-what state each one is in, and offers to install the missing ones. Install runs on the backend
-and streams npm's output as it goes.
+what state each one is in, and offers to install the missing ones or update the installed ones.
+The job runs on the backend and streams its output as it goes.
+
+Each agent is installed with its **vendor's official installer**, into the **vendor's official
+location**, the same place it lands when you run the installer yourself:
+
+| Agent | Installer | Lands in | Update runs |
+| --- | --- | --- | --- |
+| Claude Code | `https://claude.ai/install.sh` | `~/.local/share/claude/versions/`, linked from `~/.local/bin/claude` | `claude update` |
+| Codex | `https://chatgpt.com/codex/install.sh` | `~/.codex/packages/standalone/`, linked from `~/.local/bin/codex` | the installer again (updates in place) |
+| opencode | `https://opencode.ai/install` | `~/.opencode/bin/opencode` | the installer again (updates in place) |
+| Antigravity CLI | `https://antigravity.google/cli/install.sh` | `~/.local/bin/agy` | `agy update` |
+| pi | `https://pi.dev/install.sh` | `~/.pi/agent/`, linked from `~/.local/bin/pi` | `pi update --self` |
+
+This matters because the server has to run **the same binary you get from a login shell on
+that host**. Earlier versions installed a second, npm-managed copy into `~/.npm-global` and ran
+that one. A Settings "upgrade" then changed nothing you could see from `ssh`, while the official
+copies kept updating themselves and the npm copy never did. Now:
+
+- The server searches the official directories first. The npm prefix comes **last**, so a
+  leftover copy there never shadows an official one.
+- An update updates **the copy that runs**, in place, through the agent's own update path. It
+  never installs a second copy.
+- Every install or update ends by checking that the copy that runs is the official install. If
+  it isn't, the job **fails** and names the copy that runs instead.
+- Each row shows the binary the server runs (**Runs …**; compare it with
+  `bash -lc 'command -v claude'`) and lists every **other copy** on the host. A leftover copy in
+  `~/.npm-global` can be removed from the dialog, after a confirmation. Any other copy (for
+  example a stale `/usr/bin/codex` from a system npm) is only reported, because this server does
+  not manage it. Nothing is ever deleted silently.
+
+Upgrading from an older version that left `~/.npm-global/bin/{claude,codex,pi}` behind needs no
+action. Those copies stop running as soon as the server restarts, and Settings lists them for
+removal.
+
+Installers write their own "add to PATH" line to your shell profile when their directory is not
+already on `PATH`, just as they do when you run them by hand. opencode writes it to `~/.bashrc`
+for bash, which a stock `.bashrc` skips for non-interactive shells. So `bash -lc opencode` may
+not find it while an interactive login does. The server searches `~/.opencode/bin` either way.
 
 Each row is one of four states, and the distinction matters:
 
 | State | Meaning |
 | --- | --- |
-| **Not installed** | No such executable on this host. Installable unless it has no npm package. |
-| **Not signed in** | Installed, and the CLI reports it has no credentials. Open a Shell session on that host and sign in — there is no way to do it from here, and the dialog says so rather than pretending. |
-| **Sign-in unknown** | Installed, but the CLI cannot be asked non-interactively. Not an error; it may work, including via an environment variable this server cannot see. |
+| **Not installed** | No such executable on this host. |
+| **Not signed in** | Installed, and the CLI reports it has no credentials. Open a Shell session on that host and sign in. There is no way to do it from here, and the dialog says so rather than pretending. |
+| **Sign-in unknown** | Installed, but the CLI cannot be asked non-interactively. Not an error: it may work, including via an environment variable this server cannot see. |
 | **Ready** | Installed and signed in. |
 
-Three properties are deliberate. The browser sends only an **id from the server's own catalog** —
-never a package name, version or registry — because installing is arbitrary code execution as the
-server's user (`npm install` runs the package's install scripts); versions are pinned for the
-same reason. There is **no auto-install**: choosing an uninstalled agent in the composer opens
-this dialog rather than fetching anything, so a mistyped id cannot install a package. And the
-install **is not tied to the browser** — closing the dialog leaves it running, and reopening
-attaches to it and replays the log, because a half-installed package tree is worse than either
-outcome.
+Four properties are deliberate:
 
-Installs land in `POCKETAGENT_AGENT_INSTALL_PREFIX` (default `~/.npm-global`), which must be a
-directory the server searches for agent binaries — otherwise an install would succeed and the
-binary would never be found, so the dialog refuses to offer one and tells you to fix the setting.
-In the container image that path is inside the mounted `$HOME`, which is what makes an installed
-agent **survive a restart** with nothing extra to mount.
+- **The browser sends only an id and an action from the server's own lists.** Never a URL,
+  package name, version or path. Installing is arbitrary code execution as the server's user: an
+  installer script downloads and runs a vendor binary. So the installer URLs are fixed in the
+  server, and a script is downloaded to a private file (its sha256 goes in the log) and run as
+  `bash <file>` with fixed arguments, never piped into a shell.
+- **Settings installs the vendor's current release.** Every one of these agents updates itself,
+  so a pin would stop being true within a day. Pins exist only for the Docker image.
+- **There is no auto-install.** Choosing an uninstalled agent in the composer opens this dialog
+  rather than fetching anything.
+- **The job is not tied to the browser.** Closing the dialog leaves it running, and reopening
+  attaches to it and replays the log.
+
+In the container image the official locations are inside the mounted `$HOME`, which is what
+makes an installed agent **survive a restart** with nothing extra to mount.
 
 ### Layout
 
@@ -1769,10 +1822,10 @@ will not silently chown. The message names the directory and the exact `chown` t
 host; `docker logs <name>` has it.
 
 **Docker: an agent CLI you installed is gone after a restart.** It was installed outside the
-mounted prefix — most likely by a `docker exec` without `--user`, which runs as root and
-writes where the server (running as you) cannot read. Install with
-`docker exec --user "$(id -u):$(id -g)" …`, which lands in `$HOME/.npm-global/bin` on the
-mounted volume.
+mounted `$HOME`. Most likely that was a `docker exec` without `--user`, which runs as root and
+writes where the server (running as you) cannot read. Install from **Settings → Set up agents**,
+or with `docker exec --user "$(id -u):$(id -g)" …` and the vendor's own installer. Either one
+lands in `$HOME/.local/bin` (or `$HOME/.opencode/bin`) on the mounted volume.
 
 **403 `forbidden_origin`.** The `Origin` header does not match. Behind a proxy, set
 `POCKETAGENT_ALLOWED_ORIGINS=https://your.domain`.

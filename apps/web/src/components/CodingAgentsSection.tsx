@@ -7,6 +7,8 @@ import { AgentSetupDialog } from './AgentSetupDialog.js';
 import {
   hasUpdateOf,
   isInstallable,
+  otherCopyNotices,
+  unofficialCopyWarning,
   setupBadge,
   setupHint,
   setupStateOf,
@@ -40,13 +42,12 @@ interface Props {
  * request to that agent's own CLI/daemon, and batching all five behind one
  * button is simpler than five spinners for a page nobody watches live.
  *
- * No *installed* CLI version is shown, deliberately: no adapter here has a
- * confirmed `--version` invocation, and fabricating one would be exactly the
- * kind of unverified CLI assumption this codebase's adapters go out of their
- * way not to make (see e.g. `normalizeAgyModelList`'s doc comment on agy's own
- * `--effort` flag). PA-68 does not change that — the version the setup dialog
- * shows is the one this server *would install*, which is a pin we own rather
- * than a fact about the host, and the two are deliberately not conflated.
+ * The version badge is the *installed* CLI's own `--version` (PA-90), probed
+ * on Refresh and after an install. Since PA-104 there is no second number to
+ * confuse it with: Settings installs the vendor's current release rather than
+ * a pin, and each row also says which binary the server runs and lists every
+ * other copy found — a leftover `~/.npm-global` copy running instead of the
+ * official one is the bug PA-104 fixed, and it was invisible here until then.
  *
  * PA-68 replaces the old "Not on PATH" badge with the four-state setup badge,
  * because `available` alone could not express "installed but not signed in" —
@@ -120,6 +121,12 @@ export function CodingAgentsSection({ onApiError }: Props): JSX.Element {
           const uBadge = updateBadge(a);
           const hasUpdate = hasUpdateOf(a);
           const canInstall = isInstallable(a.id);
+          // PA-104: the copies that do not run, and a copy that runs but is
+          // not the official install, are shown on the list itself — the bug
+          // they describe was invisible for as long as nobody opened a dialog.
+          const copies = otherCopyNotices(a);
+          const unofficial = unofficialCopyWarning(a);
+          const needsReview = copies.length > 0 || unofficial !== null;
           return (
             <div key={a.id} className="planner-model-row">
               <span>
@@ -160,8 +167,32 @@ export function CodingAgentsSection({ onApiError }: Props): JSX.Element {
                     <span className="planner-row-meta">{setupHint(a)}</span>
                   </>
                 )}
+                {a.resolvedPath && (
+                  <>
+                    <br />
+                    <span className="planner-row-meta" style={{ wordBreak: 'break-all' }}>
+                      Runs <code>{a.resolvedPath}</code>
+                    </span>
+                  </>
+                )}
+                {unofficial !== null && (
+                  <>
+                    <br />
+                    <span className="planner-row-meta" style={{ color: 'var(--tone-warn, #d97706)' }}>
+                      {unofficial}
+                    </span>
+                  </>
+                )}
+                {copies.map((notice) => (
+                  <span key={notice.copy.path}>
+                    <br />
+                    <span className="planner-row-meta" style={{ color: 'var(--tone-warn, #d97706)', wordBreak: 'break-all' }}>
+                      {notice.message}
+                    </span>
+                  </span>
+                ))}
               </span>
-              {hasUpdate && canInstall && (
+              {(hasUpdate || needsReview) && canInstall && (
                 <div className="planner-row-actions">
                   <button
                     type="button"
@@ -171,7 +202,7 @@ export function CodingAgentsSection({ onApiError }: Props): JSX.Element {
                       setSetupOpen(true);
                     }}
                   >
-                    Update
+                    {hasUpdate ? 'Update' : 'Review'}
                   </button>
                 </div>
               )}

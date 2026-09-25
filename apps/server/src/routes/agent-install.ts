@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { InstallAgentRequest, type InstallableAgentListResponse } from '@pocketagent/protocol';
+import { InstallAgentRequest, installActionFor, type InstallableAgentListResponse } from '@pocketagent/protocol';
 import { AgentInstallError, type InstallSubscribe } from '../agents/install.js';
 import { openSseStream } from './sse.js';
 
@@ -27,8 +27,8 @@ export const agentInstallRoutes: FastifyPluginAsync = async (app) => {
 
   /**
    * The server-declared catalog. Disclosure, not input: the operator sees the
-   * package and the pinned version they would be agreeing to run, and the
-   * prefix it lands in, before pressing anything.
+   * installer URL they would be agreeing to run, how an update works, and
+   * anything else the installer does, before pressing anything.
    */
   app.get('/api/agents/installable', async () => {
     const response: InstallableAgentListResponse = {
@@ -43,11 +43,12 @@ export const agentInstallRoutes: FastifyPluginAsync = async (app) => {
    * Start an install (or attach to one already running for the same agent) and
    * stream its progress.
    *
-   * The body is `{ id }` where `id` is a `z.enum` over the catalog, so an
-   * arbitrary package name is refused *here*, by request validation, before
-   * any handler logic runs — see `packages/protocol/src/agent-install.ts` for
-   * why the closed id set lives in the protocol rather than only in the
-   * server's catalog module.
+   * The body is `{ id, target? }` where `id` is a `z.enum` over the catalog
+   * and `target` a `z.enum` of actions (install / update / remove the
+   * install-prefix copy), so an arbitrary package name, URL or path is refused
+   * *here*, by request validation, before any handler logic runs — see
+   * `packages/protocol/src/agent-install.ts` for why the closed sets live in
+   * the protocol rather than only in the server's catalog module.
    *
    * Rate-limited because an install is by far the most expensive thing a
    * single authenticated request can start, following the same per-route
@@ -75,7 +76,7 @@ export const agentInstallRoutes: FastifyPluginAsync = async (app) => {
       // past `openSseStream` the headers are sent and there is no status left.
       let started: { attached: boolean; subscribe: InstallSubscribe };
       try {
-        started = agentInstall.start(parsed.data.id, parsed.data.target ?? 'pinned');
+        started = agentInstall.start(parsed.data.id, installActionFor(parsed.data.target));
       } catch (err) {
         if (err instanceof AgentInstallError) {
           return reply.code(err.status).send({ error: { code: err.code, message: err.message } });

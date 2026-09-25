@@ -3,7 +3,7 @@ import path from 'node:path';
 import Fastify, { LogController, type FastifyInstance, type FastifyReply } from 'fastify';
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
-import { AgentInstallService, type InstallRunner } from './agents/install.js';
+import { AgentInstallService, type InstallRunner, type ScriptFetcher } from './agents/install.js';
 import { adminRoutes } from './routes/admin.js';
 import { agentInstallRoutes } from './routes/agent-install.js';
 import websocket from '@fastify/websocket';
@@ -24,7 +24,7 @@ import {
 } from './db/index.js';
 import { WorkspaceRegistry, createWorkspaceStore } from './workspaces/index.js';
 import { applyRuntimeSettings } from './settings/index.js';
-import { createDefaultRegistry } from './agents/registry.js';
+import { createDefaultRegistry, setAgentInstallPrefixSource } from './agents/registry.js';
 import type { AgentAdapter } from './agents/types.js';
 import { CustomClaudeProviderStore } from './agents/custom-providers-store.js';
 import { createBackend, DirectPtyBackend } from './backends/index.js';
@@ -234,6 +234,11 @@ export interface BuildAppOptions {
    * from the public registry.
    */
   agentInstallRunner?: InstallRunner;
+  /**
+   * PA-104: injected so a test never downloads an official installer script.
+   * Paired with `agentInstallRunner` — the runner is what would execute it.
+   */
+  agentInstallFetchScript?: ScriptFetcher;
   /** Injected in tests to make the poller's reconcile tick fast enough to
       assert against without a real 10s wait. */
   telegramReconcileIntervalMs?: number;
@@ -576,11 +581,17 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // second stream to an install already running. `installPrefix` is a closure
   // over the live config so the setting applies to the next install without a
   // restart, which is what `live: true` in `settings/fields.ts` promises.
+  // PA-104: `resolveExecutable` searches the install prefix *last* and must
+  // know the live one to demote it from wherever PATH put it — see
+  // `installPrefixBinDirs`. A closure over the live config for the same
+  // no-restart reason as `installPrefix` below.
+  setAgentInstallPrefixSource(() => [config.agentInstallPrefix]);
   const agentInstall = new AgentInstallService({
     db,
     agents,
     installPrefix: () => config.agentInstallPrefix,
     ...(options.agentInstallRunner ? { runner: options.agentInstallRunner } : {}),
+    ...(options.agentInstallFetchScript ? { fetchScript: options.agentInstallFetchScript } : {}),
     logger: app.log,
   });
 

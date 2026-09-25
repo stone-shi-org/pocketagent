@@ -1,4 +1,12 @@
-import type { AgentInfo, AgentInstallEvent, AgentSetupState, InstallableAgentId } from '@pocketagent/protocol';
+import type {
+  AgentBinaryCopy,
+  AgentInfo,
+  AgentInstallEvent,
+  AgentSetupState,
+  InstallAgentAction,
+  InstallableAgent,
+  InstallableAgentId,
+} from '@pocketagent/protocol';
 import { INSTALLABLE_AGENT_IDS, UNINSTALLABLE_AGENT_NOTES } from '@pocketagent/protocol';
 
 /**
@@ -21,8 +29,8 @@ export function isInstallable(agentId: string): agentId is InstallableAgentId {
 
 /**
  * Why an agent that is missing cannot be installed from here, or null when it
- * can. Today this is `agy` only, and the reason is a real one worth showing
- * rather than leaving the row looking broken.
+ * can. Empty since PA-104 made `agy` installable through its official
+ * installer; kept because an older host still sends its note.
  */
 export function uninstallableReason(agentId: string): string | null {
   return UNINSTALLABLE_AGENT_NOTES[agentId] ?? null;
@@ -140,9 +148,9 @@ export function setupHint(agent: {
     const reason = uninstallableReason(agent.id);
     if (reason !== null) return reason;
     if (agent.binOverridden === true) {
-      // An explicit path bypasses the install prefix entirely, so offering an
-      // install here would appear to do nothing. Say so instead.
-      return `${agent.displayName} is configured with an explicit binary path, so installing it here would not be found. Fix the path in Settings, or clear it to use the install prefix.`;
+      // An explicit path bypasses resolution entirely, so offering an install
+      // here would appear to do nothing. Say so instead.
+      return `${agent.displayName} is configured with an explicit binary path, so installing it here would not be found. Fix the path in Settings, or clear it to use the official install.`;
     }
     return isInstallable(agent.id)
       ? `${agent.displayName} is not installed on this host. Install it below.`
@@ -161,27 +169,96 @@ export function setupHint(agent: {
 }
 
 /**
- * True when this agent should offer an Install action.
+ * True when this agent should offer an Install or Update action.
  *
- * Note it is offered for an agent that is already installed too — that is a
- * reinstall/upgrade to the pinned version, which is a legitimate thing to want
- * and the server allows it. What suppresses the action is an agent the catalog
- * does not cover, or one whose binary is pinned to a path where the result
- * would be invisible.
+ * Offered for an installed agent too — that is an update, done in place
+ * through the agent's own update path (PA-104). What suppresses it is an agent
+ * the catalog does not cover, or one whose binary is pinned to an explicit
+ * path, where the result would be invisible. The npm install prefix only
+ * matters for an npm-method entry: an official installer never writes there.
+ * An older host's catalog has no `method`, and everything it offered was npm.
  */
-export function canOfferInstall(agent: {
-  id: string;
-  binOverridden?: boolean;
-}, prefixDetectable: boolean): boolean {
+export function canOfferInstall(
+  agent: { id: string; binOverridden?: boolean },
+  entry: Pick<InstallableAgent, 'method'> | Partial<Pick<InstallableAgent, 'method'>> | undefined,
+  prefixDetectable: boolean,
+): boolean {
   if (!isInstallable(agent.id)) return false;
   if (agent.binOverridden === true) return false;
-  return prefixDetectable;
+  if (entry === undefined) return false;
+  return entry.method === 'official-script' ? true : prefixDetectable;
+}
+
+/**
+ * Which action the row's button runs, and what it says.
+ *
+ * Installed means "Update", always — not only when a newer version is known:
+ * agy has no version source at all, and for the others the npm registry is
+ * only a hint (PA-104). The update path itself decides whether there is
+ * anything to do, and never installs a second copy.
+ */
+export function primaryInstallAction(agent: Pick<AgentInfo, 'available'> & Partial<Pick<AgentInfo, 'setupState'>>): {
+  action: InstallAgentAction;
+  label: string;
+  busyLabel: string;
+} {
+  return setupStateOf(agent) === 'not-installed'
+    ? { action: 'install', label: 'Install', busyLabel: 'Installing…' }
+    : { action: 'update', label: 'Update', busyLabel: 'Updating…' };
+}
+
+export interface CopyNotice {
+  copy: AgentBinaryCopy;
+  /** True for a copy in the install prefix, which the server may remove on request. */
+  removable: boolean;
+  message: string;
+}
+
+/**
+ * Every copy of an agent that does *not* run, as sentences (PA-104).
+ *
+ * A leftover `~/.npm-global` copy is the bug PA-104 fixed, so it is shown
+ * rather than silently outranked — a second, stale copy is still something a
+ * human might run by full path, and on the next host it might not be outranked
+ * at all. Only an install-prefix copy is removable from here; anything else
+ * (`/usr/bin/codex` from a system npm) is the host's to manage, and the text
+ * says so. Tolerates an older host that sends no `otherCopies`.
+ */
+export function otherCopyNotices(agent: Partial<Pick<AgentInfo, 'otherCopies'>>): CopyNotice[] {
+  return (agent.otherCopies ?? []).map((copy) => {
+    const where = copy.realPath !== copy.path ? `${copy.path} (→ ${copy.realPath})` : copy.path;
+    return copy.kind === 'install-prefix'
+      ? {
+          copy,
+          removable: true,
+          message: `Leftover copy at ${where}, from an earlier install through this page. It does not run, but it is a second, stale copy.`,
+        }
+      : {
+          copy,
+          removable: false,
+          message: `Another copy at ${where} does not run. This server does not manage it; remove or update it on the host if it is stale.`,
+        };
+  });
+}
+
+/**
+ * The one-line warning when the copy that runs is *not* the official install,
+ * or null. Null for an older host that does not report it — absence is not
+ * evidence of a problem.
+ */
+export function unofficialCopyWarning(
+  agent: { displayName: string } & Partial<Pick<AgentInfo, 'resolvedPath' | 'officialInstall'>>,
+): string | null {
+  if (agent.officialInstall !== false || !agent.resolvedPath) return null;
+  return `${agent.displayName} runs from ${agent.resolvedPath}, which is not its official install, so a login shell on this host may run a different copy. Update installs the official one, which then takes precedence.`;
 }
 
 /** Progressive state of the install dialog, driven by the event stream. */
 export interface InstallProgress {
   status: 'idle' | 'running' | 'succeeded' | 'failed';
-  /** Newest last, capped — an operator wants the tail, not a full npm log. */
+  /** What the job is doing; a newer host confirms it in `install_started`. */
+  action: InstallAgentAction;
+  /** Newest last, capped — an operator wants the tail, not a full installer log. */
   lines: string[];
   error: string | null;
   /** True when this view attached to an install that was already running. */
@@ -192,12 +269,28 @@ export interface InstallProgress {
   truncated: boolean;
 }
 
-export function emptyInstallProgress(): InstallProgress {
-  return { status: 'idle', lines: [], error: null, attached: false, lastSeq: 0, truncated: false };
+export function emptyInstallProgress(action: InstallAgentAction = 'install'): InstallProgress {
+  return { status: 'idle', action, lines: [], error: null, attached: false, lastSeq: 0, truncated: false };
+}
+
+/** The heading over the progress log. */
+export function installProgressTitle(progress: InstallProgress): string {
+  const noun = { install: 'Install', update: 'Update', 'remove-prefix-copy': 'Removal' }[progress.action];
+  const verb = { install: 'Installing', update: 'Updating', 'remove-prefix-copy': 'Removing leftover copy' }[progress.action];
+  switch (progress.status) {
+    case 'running':
+      return progress.attached ? `${noun} already in progress` : verb;
+    case 'succeeded':
+      return `${noun} finished`;
+    case 'failed':
+      return `${noun} failed`;
+    default:
+      return verb;
+  }
 }
 
 /**
- * Keeps the rendered log bounded. npm can emit thousands of lines and the
+ * Keeps the rendered log bounded. An installer can emit thousands of lines and the
  * dialog is a progress view, not a log viewer — the same "keep the tail"
  * reasoning `fleet-preview.ts` applies to an agent card, with a larger window
  * because this one is a scrolling box rather than five fixed rows.
@@ -213,7 +306,14 @@ const MAX_LINES = 200;
 export function applyInstallEvent(state: InstallProgress, event: AgentInstallEvent): InstallProgress {
   switch (event.kind) {
     case 'install_started':
-      return { ...state, status: 'running', attached: event.attached, error: null };
+      return {
+        ...state,
+        status: 'running',
+        attached: event.attached,
+        error: null,
+        // An older host's event has no `action`; keep the one the dialog asked for.
+        action: event.action ?? state.action,
+      };
     case 'install_log': {
       // A replayed frame concatenates several chunks, so split rather than
       // treating one frame as one line.

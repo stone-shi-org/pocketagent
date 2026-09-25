@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { EffortLevel, ModelInfo, RateLimitEvent, SessionTransport } from './agent-events.js';
-import { AgentSetupState } from './agent-install.js';
+import { AgentBinaryCopy, AgentSetupState } from './agent-install.js';
 import { CronJobSummary } from './cron.js';
 import { WebhookSummary } from './webhooks.js';
 import { ProtocolRange } from './protocol-negotiation.js';
@@ -374,14 +374,38 @@ export const AgentInfo = z.object({
    */
   installedVersion: z.string().nullable(),
   /**
-   * PA-90: Latest available version from npm registry or pinned catalog,
-   * e.g. "2.1.280". Null when unknown or never probed yet.
+   * PA-90: Latest available version, e.g. "2.1.280". Null when unknown or
+   * never probed yet. Since PA-104 the npm registry is only a *version-number
+   * source* here (these vendors publish the same numbers to npm and to their
+   * own installers); nothing is ever installed from it for an official-script
+   * agent.
    */
   latestVersion: z.string().nullable(),
   /**
    * PA-90: True when a newer version is known to be available.
    */
   hasUpdate: z.boolean(),
+  /**
+   * PA-104: the absolute path of the executable this server runs for this
+   * agent, or null when none resolves. It is what `bash -lc 'command -v
+   * <agent>'` should print for a human on the same host, and showing it is how
+   * an operator checks that. Reported only for agents in the install catalog:
+   * this list otherwise exposes no command line (the shell's, a variant's).
+   */
+  resolvedPath: z.string().nullable(),
+  /**
+   * PA-104: whether `resolvedPath` is the agent's official install (e.g. under
+   * `~/.local/share/claude/versions/`) rather than some other copy. Null for
+   * an agent with no official location to compare against (shell, variants,
+   * not installed).
+   */
+  officialInstall: z.boolean().nullable(),
+  /**
+   * PA-104: every *other* executable of the same name on this host — the
+   * copies that do not run. A leftover `~/.npm-global/bin/codex` is the bug
+   * PA-104 fixes, so it is surfaced rather than silently outranked.
+   */
+  otherCopies: z.array(AgentBinaryCopy),
 });
 export type AgentInfo = z.infer<typeof AgentInfo>;
 

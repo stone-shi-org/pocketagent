@@ -174,7 +174,7 @@ Build images using `docker/build.sh` (never bare `docker build`, which misses pi
 | `POCKETAGENT_OPENCODE_BIN` | `opencode` | Path to Opencode CLI binary. |
 | `POCKETAGENT_CODEX_BIN` | `codex` | Path to OpenAI Codex CLI binary. |
 | `POCKETAGENT_PI_BIN` | `pi` | Path to Pi CLI binary. |
-| `POCKETAGENT_AGENT_INSTALL_PREFIX` | `~/.npm-global` | Destination directory for on-demand agent CLI installations. |
+| `POCKETAGENT_AGENT_INSTALL_PREFIX` | `~/.npm-global` | npm-fallback install prefix. Since PA-104, agents are installed by their official installers into their official locations; this prefix is searched last, and leftover copies here are reported in Settings. |
 | `POCKETAGENT_SETTINGS_ENC_KEY` | unset | Base64-encoded 32-byte key to encrypt custom provider API keys at rest. |
 | `POCKETAGENT_PUSH_CONTACT` | `mailto:pocketagent@localhost` | VAPID contact email/URI for Web Push notifications. |
 | `POCKETAGENT_CODE_SERVER_URL` | unset | Base URL for code-server deep links. |

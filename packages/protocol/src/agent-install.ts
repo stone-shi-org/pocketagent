@@ -12,98 +12,163 @@ import { z } from 'zod';
  *
  * "The browser never supplies an executable or argv" is a standing invariant,
  * and installing an agent is arbitrary code execution as the server's user —
- * `npm install` runs the package's own `postinstall` scripts, and
- * `--ignore-scripts` would break most of these CLIs. So the request body may
- * not carry a package name, a version, a registry or a URL; it carries an id
- * out of a closed set, and the server owns the mapping from that id to an
- * argv.
+ * an official installer script downloads and runs a vendor binary, and an
+ * `npm install` runs a package's own `postinstall` scripts. So the request
+ * body may not carry a package name, a version, a registry, a URL or a path;
+ * it carries an id out of a closed set plus an *action* out of another, and
+ * the server owns the mapping from those to an argv.
  *
  * Putting the *ids* in the protocol (rather than only in the server's own
  * catalog module) is what lets `InstallAgentRequest` be a `z.enum`, so an
  * arbitrary package name is refused by request validation before any handler
  * runs. That is a stronger guarantee than a handler lookup: it cannot be
  * bypassed by a future refactor that forgets the check, and it is the form the
- * acceptance criterion asks for. The install *payload* — package name and
- * pinned version — deliberately stays server-side in
- * `apps/server/src/agents/catalog.ts`; the browser never needs it and never
- * sees it except as the human-readable `packageName`/`version` on the catalog
- * response, which is disclosure rather than input.
+ * acceptance criterion asks for. The install *payload* — installer URL,
+ * interpreter, fixed arguments — deliberately stays server-side in
+ * `apps/server/src/agents/catalog.ts`; the browser sees it only as the
+ * human-readable `source` on the catalog response, which is disclosure rather
+ * than input.
  */
-export const INSTALLABLE_AGENT_IDS = ['claude', 'codex', 'opencode', 'pi'] as const;
+export const INSTALLABLE_AGENT_IDS = ['claude', 'codex', 'opencode', 'agy', 'pi'] as const;
 export type InstallableAgentId = (typeof INSTALLABLE_AGENT_IDS)[number];
 
 /**
- * `agy` is deliberately absent, and for a reason worth keeping written down:
- * Google's Antigravity CLI is distributed as a Google-published binary with no
- * npm package, and the registry names that look right (`agy`,
- * `antigravity-cli`) are unrelated 0.0.x placeholders. Pinning one would be a
- * supply-chain hazard disguised as completeness. `docker/agent-versions.env`
- * made the same call for the image's baked-in CLIs; this is the same decision
- * for on-demand installs, so the two cannot disagree about it.
+ * Agents this server knows about but cannot install, with the reason shown in
+ * the setup dialog.
+ *
+ * Empty since PA-104: `agy` was here because it has no npm package, and it
+ * became installable the moment installs stopped being npm-only and started
+ * using each agent's official installer. The map is kept because a future
+ * adapter with neither an official installer nor a trustworthy package needs
+ * exactly this, and the browser already renders it.
  */
-export const UNINSTALLABLE_AGENT_NOTES: Readonly<Record<string, string>> = Object.freeze({
-  agy: 'Antigravity CLI is published by Google as a binary with no npm package, so it cannot be installed from here. Install it on the host and it will be detected automatically.',
-});
+export const UNINSTALLABLE_AGENT_NOTES: Readonly<Record<string, string>> = Object.freeze({});
 
-/** The only install mechanism there is. See `AgentInstallMethod`'s doc comment. */
-export const AgentInstallMethod = z.enum(['npm']);
+/**
+ * How an agent is installed (PA-104).
+ *
+ * `official-script` is the vendor's own installer (`claude.ai/install.sh`,
+ * `chatgpt.com/codex/install.sh`, …), fetched from a fixed HTTPS URL the server
+ * owns and run as `[interpreter, file, ...fixedArgs]`. It installs into the
+ * agent's *official* location — the same one a human gets from a login shell —
+ * which is the whole point: before PA-104, Settings put a second copy into
+ * `~/.npm-global`, the server ran that one, and a human at the same shell ran
+ * a different binary.
+ *
+ * `npm` remains only as the fallback for an agent with no official installer.
+ * No agent currently in the catalog uses it.
+ */
+export const AgentInstallMethod = z.enum(['official-script', 'npm']);
 export type AgentInstallMethod = z.infer<typeof AgentInstallMethod>;
 
 /**
- * One entry of the server-declared catalog.
+ * One entry of the server-declared catalog. Disclosure, never input.
  *
- * `version` is the version this server would *install* — a pin the operator is
- * entitled to see before agreeing to run it. It is deliberately not the
- * version of an already-installed CLI: no adapter here has a verified
- * `--version` invocation, and `CodingAgentsSection` already declines to show
- * one rather than fabricate it. The two are different facts and conflating
- * them would make the dialog lie after the first upgrade.
+ * `source` is what the operator is agreeing to run: the installer URL for
+ * `official-script`, the package name for `npm`. `version` is non-null only
+ * when Settings would install a *specific* version; since PA-104 Settings
+ * installs the vendor's current release for every official-script agent,
+ * because they all update themselves and a pin would stop being true within a
+ * day of the first run (`selfUpdating`). Pins survive only in
+ * `docker/agent-versions.env`, for image builds, and only where the installer
+ * accepts one (`pinnable`).
  */
 export const InstallableAgent = z.object({
   id: z.enum(INSTALLABLE_AGENT_IDS),
   displayName: z.string(),
   method: AgentInstallMethod,
-  /** npm package name, shown so the operator can see what would be fetched. */
+  source: z.string(),
+  /** Kept for older bundles, which render `packageName@version`. Equal to `source`. */
   packageName: z.string(),
-  /** Pinned version, mirroring `docker/agent-versions.env`. */
-  version: z.string(),
+  version: z.string().nullable(),
+  /** Whether the official installer can install a specific version (image builds use this). */
+  pinnable: z.boolean(),
+  /** Whether the agent updates itself once installed. */
+  selfUpdating: z.boolean(),
+  /** How "Update" works for this agent, in words — e.g. "runs `claude update`". */
+  updateDescription: z.string(),
+  /** Anything else the installer does that an operator should know before pressing Install. */
+  notes: z.array(z.string()),
 });
 export type InstallableAgent = z.infer<typeof InstallableAgent>;
 
 export const InstallableAgentListResponse = z.object({
   agents: z.array(InstallableAgent),
   /**
-   * Absolute directory installs land in. Disclosed because it is the one thing
-   * that decides whether an install survives a container restart (it must be
-   * volume-backed) and whether the server will find the result at all —
-   * `agents/registry.ts` searches a fixed set of directories.
+   * Where npm-method installs land (`agentInstallPrefix`). Since PA-104 no
+   * catalogued agent installs there; it is still reported because it is where
+   * leftover pre-PA-104 copies live, and those are what `otherCopies` flags.
    */
   prefix: z.string(),
   /**
-   * True when an install would be written somewhere `resolveExecutable` does
-   * not search, so the UI can refuse to offer it rather than run a install
-   * whose result is invisible.
+   * True when an npm-method install into `prefix` would be found by the
+   * server. Official-script installs do not depend on it.
    */
   prefixDetectable: z.boolean(),
 });
 export type InstallableAgentListResponse = z.infer<typeof InstallableAgentListResponse>;
 
-export const InstallAgentTarget = z.enum(['pinned', 'latest']);
+/**
+ * What a request asks for (PA-104).
+ *
+ * - `install`: run the official installer.
+ * - `update`: update the copy that actually runs, in place — the agent's own
+ *   update command (`claude update`, `codex update`, `agy update`,
+ *   `pi update --self`), or the official installer again where there is none.
+ *   Never a second copy somewhere else.
+ * - `remove-prefix-copy`: `npm uninstall` a leftover copy from
+ *   `agentInstallPrefix` — the pre-PA-104 Settings install, which is exactly
+ *   the copy that caused this bug. Only ever that prefix, and only on an
+ *   explicit click: copies elsewhere (`/usr/bin/codex`) are reported, never
+ *   touched.
+ *
+ * `pinned` and `latest` are PA-90's values, accepted for one release as
+ * aliases of `install` and `update`, because a browser bundle and a backend
+ * behind a Hub can be briefly out of step.
+ */
+export const InstallAgentTarget = z.enum(['install', 'update', 'remove-prefix-copy', 'pinned', 'latest']);
 export type InstallAgentTarget = z.infer<typeof InstallAgentTarget>;
+export type InstallAgentAction = 'install' | 'update' | 'remove-prefix-copy';
+
+export function installActionFor(target: InstallAgentTarget | undefined): InstallAgentAction {
+  switch (target) {
+    case 'update':
+    case 'latest':
+      return 'update';
+    case 'remove-prefix-copy':
+      return 'remove-prefix-copy';
+    default:
+      return 'install';
+  }
+}
 
 /**
- * What a client may send to request an install or update. See this module's doc
- * comment for why `id` is a `z.enum` rather than a string the handler validates.
+ * What a client may send to request an install, update or removal. See this
+ * module's doc comment for why `id` is a `z.enum` rather than a string the
+ * handler validates. `target` names an *action*, never a version or a path.
  */
 export const InstallAgentRequest = z.object({
   id: z.enum(INSTALLABLE_AGENT_IDS),
-  /**
-   * PA-90: Whether to install the server-pinned catalog version or the
-   * newest upstream release ('latest'). Defaults to 'pinned'.
-   */
   target: InstallAgentTarget.optional(),
 });
 export type InstallAgentRequest = z.infer<typeof InstallAgentRequest>;
+
+/**
+ * One copy of an agent's executable found on this host that is *not* the one
+ * the server runs (PA-104).
+ *
+ * A copy earlier in the search order is the bug this ticket is about, so the
+ * server reports every other copy rather than silently picking one. `kind`
+ * says whether this server may remove it: `install-prefix` is inside
+ * `agentInstallPrefix` (a pre-PA-104 Settings install); `other` is anything
+ * else (`/usr/bin/codex` from a system npm) and is report-only.
+ */
+export const AgentBinaryCopy = z.object({
+  path: z.string(),
+  realPath: z.string(),
+  kind: z.enum(['install-prefix', 'other']),
+});
+export type AgentBinaryCopy = z.infer<typeof AgentBinaryCopy>;
 
 /**
  * Four states, not the three the ticket asked for.
@@ -139,8 +204,12 @@ export type AgentSetupState = z.infer<typeof AgentSetupState>;
 export const AgentInstallStartedEvent = z.object({
   kind: z.literal('install_started'),
   id: z.enum(INSTALLABLE_AGENT_IDS),
+  /** Kept for older bundles; equal to `source`. */
   packageName: z.string(),
-  version: z.string(),
+  /** Installer URL, package name, or the update command being run. */
+  source: z.string(),
+  action: z.enum(['install', 'update', 'remove-prefix-copy']),
+  version: z.string().nullable(),
   /** True when this stream attached to an install already in flight. */
   attached: z.boolean(),
 });

@@ -95,10 +95,9 @@ const RawEnv = z.object({
   POCKETAGENT_CODEX_BIN: z.string().default('codex'),
   POCKETAGENT_PI_BIN: z.string().default('pi'),
   /**
-   * Where on-demand agent installs land (PA-68). Default `~/.npm-global`,
-   * which `agents/registry.ts` already searches and which the container
-   * image already mounts and puts first on PATH — so the default agrees
-   * with the image by construction rather than by a second decision.
+   * Where an npm-method (fallback) agent install lands (PA-68). Since PA-104
+   * official-installer agents never install here; see
+   * `resolveAgentInstallPrefix`. Default `~/.npm-global`.
    */
   POCKETAGENT_AGENT_INSTALL_PREFIX: z.string().optional(),
   POCKETAGENT_WEB_DIST: z.string().optional(),
@@ -413,22 +412,21 @@ function realpathUncreated(target: string): string {
  * data root, and nothing re-checks at that point.
  */
 /**
- * Where `POST /api/agents/install` writes (PA-68).
+ * Where an npm-method `POST /api/agents/install` writes (PA-68, narrowed by
+ * PA-104).
  *
- * Defaults to `~/.npm-global` rather than `~/.local` for one reason that
- * matters more than taste: `agents/registry.ts` searches both, but the
- * container image already sets `NPM_CONFIG_PREFIX=$HOME/.npm-global`, mounts
- * `$HOME` as a volume and puts that prefix *first* on PATH ahead of the
- * image's own pinned CLIs. Defaulting here to the same directory means the
- * bare-metal default and the image agree by construction instead of by a
- * second decision someone has to keep in sync — and it is what makes "an
- * installed agent survives a container restart" true without the operator
- * configuring anything.
+ * Since PA-104 no catalogued agent installs here: every one uses its vendor's
+ * official installer and official location (`agents/catalog.ts`), because a
+ * Settings install into this prefix is exactly what made the server run a
+ * different binary from a human's login shell. The prefix stays for two
+ * reasons — the npm fallback for a future agent with no official installer,
+ * and finding the copies pre-PA-104 installs left here, which
+ * `agents/registry.ts` searches *last* (demoting it from wherever `PATH` put
+ * it) and reports as leftovers the setup dialog can remove.
  *
- * Not validated for existence: npm creates the prefix, and a directory that
- * does not exist yet is the normal case on a host that has never installed a
- * global package. Whether the server will actually *find* the result is a
- * separate question, answered by `agentInstallPrefixDetectable`.
+ * Defaults to `~/.npm-global` because that is where every pre-PA-104 install
+ * went, bare metal and container alike. Not validated for existence: npm
+ * creates it, and most hosts will never have one again.
  */
 function resolveAgentInstallPrefix(raw: string | undefined): string {
   const configured = raw?.trim();

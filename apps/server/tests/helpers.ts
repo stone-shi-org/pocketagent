@@ -9,7 +9,16 @@ import type { AgyTranscriptStore } from '../src/conversations/agy.js';
 import type { PiTranscriptStore } from '../src/conversations/pi.js';
 import type { PocketContext } from '../src/types.js';
 import type { AgentAdapter } from '../src/agents/types.js';
-import type { InstallRunner } from '../src/agents/install.js';
+import type { InstallRunner, ScriptFetcher } from '../src/agents/install.js';
+
+/**
+ * PA-104: what every test app downloads instead of a real official installer.
+ * A test that wants to assert on the fetch passes its own.
+ */
+export const stubInstallerFetch: ScriptFetcher = async (url) => ({
+  body: Buffer.from('#!/bin/sh\necho stub installer\n'),
+  finalUrl: url,
+});
 
 export const TEST_TOKEN = 'test-token-that-is-long-enough-1234567890';
 
@@ -93,6 +102,8 @@ export async function createTestApp(
   /** PA-96: injected so minting a Gemini Live token never makes a real
       network call. */
   geminiFetch?: typeof fetch,
+  /** PA-104: defaults to a stub, so no test can ever download a real installer. */
+  agentInstallFetchScript: ScriptFetcher = stubInstallerFetch,
 ): Promise<TestApp> {
   const ws = makeWorkspace();
   const config = makeConfig({
@@ -121,6 +132,7 @@ export async function createTestApp(
     ...(plannerLlmFetch ? { plannerLlmFetch } : {}),
     ...(telegramFetch ? { telegramFetch } : {}),
     ...(agentInstallRunner ? { agentInstallRunner } : {}),
+    agentInstallFetchScript,
     ...(loggerStream ? { loggerStream } : {}),
     ...(geminiFetch ? { geminiFetch } : {}),
     // Fast enough for a test to assert against without a real 10s wait,

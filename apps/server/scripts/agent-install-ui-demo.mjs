@@ -9,13 +9,17 @@
  * visibly instead of sitting behind a silent spinner. The `web` vitest project
  * has no DOM at all, so this is the only level at which either can be checked.
  *
- * **Point this at a scratch server.** It installs nothing real — the catalog
- * ids it exercises are refused before any package is fetched, and the one
- * install it does run is driven against whatever the host already has — but it
- * logs in, opens Settings and reads the live agent list, so it wants a
- * throwaway `POCKETAGENT_DATA_DIR` like every other `PA_BASE` demo.
+ * **Point this at a scratch server with a throwaway `HOME`.** It presses the
+ * first row's Install/Update button, which since PA-104 runs that agent's
+ * *official* installer (or its own update command) for real, into the server
+ * process's `$HOME` — so start the scratch server with `HOME` pointing at a
+ * throwaway directory as well as a throwaway `POCKETAGENT_DATA_DIR`, or it
+ * will update the agents your own shell runs:
  *
+ *   S=$(mktemp -d) && cp /etc/skel/.profile "$S/" && \
+ *   HOME=$S POCKETAGENT_DATA_DIR=$S/data PORT=8793 node apps/server/dist/server.js & SRV=$!
  *   PA_TOKEN=... PA_BASE=http://127.0.0.1:8793 pnpm demo:agent-install-ui
+ *   kill "$SRV"
  */
 import { chromium } from 'playwright';
 import fs from 'node:fs';
@@ -100,12 +104,17 @@ try {
   const rows = await section.locator('.planner-model-row').count();
   check(rows > 0, 'one row per coding agent', `${rows}`);
 
-  const badges = await section.locator('.settings-badge').allInnerTexts();
+  // PA-90 added a version badge ("v2.1.282") and an "Update available" badge
+  // beside the state badge; this check is about the state badge alone.
+  const badges = (await section.locator('.settings-badge').allInnerTexts()).filter(
+    (b) => !/^v\d/i.test(b.trim()) && !/^update available/i.test(b.trim()),
+  );
   check(badges.length === rows, 'every row carries a state badge', badges.join(', '));
   // The point of the four-state model: none of them may read as a bare tick.
   const known = ['Not installed', 'Not signed in', 'Ready', 'Sign-in unknown'];
   check(
-    badges.every((b) => known.includes(b.trim())),
+    // `.settings-badge` is text-transformed, so innerText comes back upper-case.
+    badges.every((b) => known.some((k) => k.toLowerCase() === b.trim().toLowerCase())),
     'and every badge is one of the four documented states',
   );
   // `unknown` must not be coloured as success — that is the whole reason it is
@@ -128,25 +137,31 @@ try {
     'titled so it is obvious what it is for',
   );
 
-  heading('Every installable row discloses what would be fetched');
-  const metas = await dialog.locator('.planner-row-meta').allInnerTexts();
-  const pinned = metas.filter((m) => /@\d+\.\d+\.\d+/.test(m));
-  check(pinned.length > 0, 'a pinned package@version is shown before anything runs', pinned[0] ?? '');
-  check(
-    pinned.every((m) => !m.includes('latest')),
-    'and nothing floats on "latest"',
+  heading('Every installable row discloses the official installer it would run');
+  // The rows render once the dialog's own list request returns.
+  await until(async () =>
+    (await dialog.locator('.planner-row-meta').allInnerTexts()).some((m) => m.startsWith('Official installer:')),
   );
-  // `agy` has no npm package, so its row must explain that rather than offer a
-  // button that cannot work.
+  const metas = await dialog.locator('.planner-row-meta').allInnerTexts();
+  const installers = metas.filter((m) => /^Official installer: https:\/\//.test(m));
+  check(installers.length > 0, 'the installer URL is shown before anything runs', installers[0] ?? '');
+  check(
+    metas.every((m) => !/npm-global|@anthropic-ai\/claude-code@/.test(m) || /Leftover copy/.test(m)),
+    'and no row offers an npm install (PA-104)',
+  );
+  // PA-104: agy has an official installer now, so it is offered like the rest,
+  // with its one real limitation disclosed.
   const agyRow = dialog.locator('.planner-model-row').filter({ hasText: 'Antigravity' });
   if ((await agyRow.count()) > 0) {
     const agyText = await agyRow.innerText();
     check(
-      !/\bInstall\b/.test(await agyRow.locator('.planner-row-actions').innerText().catch(() => '')),
-      'agy offers no Install action',
+      /\b(Install|Update)\b/.test(await agyRow.locator('.planner-row-actions').innerText().catch(() => '')),
+      'agy offers Install or Update',
     );
-    check(/npm package/i.test(agyText), 'and says why', agyText.split('\n').pop()?.slice(0, 60));
+    check(/cannot be chosen/i.test(agyText), 'and says its version cannot be pinned');
   }
+  const runs = metas.filter((m) => /^Runs \//.test(m));
+  console.log(`  ·  ${runs.length} row(s) show the binary the server runs${runs[0] ? `, e.g. ${runs[0]}` : ''}`);
   await page.screenshot({ path: path.join(SHOTS, 'agent-setup-dialog.png') });
 
   heading('A signed-out agent points at a Shell session rather than a dead end');
@@ -161,7 +176,7 @@ try {
   const installButtons = dialog.locator('.planner-row-actions button');
   const count = await installButtons.count();
   if (count === 0) {
-    console.log('  ·  nothing installable here (prefix not detectable?) — install not exercised');
+    console.log('  ·  nothing installable here (binaries pinned to explicit paths?) — install not exercised');
   } else {
     await installButtons.first().click();
     // The log box must appear promptly; that is the acceptance criterion this
@@ -183,7 +198,7 @@ try {
     check(
       await until(async () => {
         const h3 = await dialog.locator('.planner-section h3').innerText().catch(() => '');
-        return /Install finished|Install failed/.test(h3);
+        return /(Install|Update) (finished|failed)/.test(h3);
       }, 300_000),
       'it finishes rather than spinning forever',
     );

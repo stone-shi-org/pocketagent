@@ -17,6 +17,7 @@ import { WorkspaceError } from '../workspaces/index.js';
 import { readAgentDefaults } from '../db/index.js';
 import { deriveSetupState, refreshAgentAuthStates } from '../agents/auth-probe.js';
 import { refreshAgentVersions } from '../agents/version-probe.js';
+import { agentBinaryReport } from '../agents/install.js';
 import { resolveWorkspaceCwdOrReply } from './shared.js';
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
@@ -80,6 +81,11 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
           installedVersion: agent.available ? (cached?.last_version ?? null) : null,
           latestVersion: cached?.last_latest_version ?? null,
           hasUpdate: agent.available && cached?.last_has_update === 1,
+          // PA-104: which binary runs, whether it is the official install, and
+          // every other copy on the host. Filesystem reads only — no
+          // subprocess — so it stays inside the budget `available` already
+          // spends on this route.
+          ...agentBinaryReport(agent.id, agents.get(agent.id)?.bin),
         };
       }),
     };

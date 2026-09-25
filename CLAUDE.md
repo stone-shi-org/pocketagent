@@ -37,15 +37,22 @@ load-bearing and easy to undo by accident:
   taking `.env` loading, the `webDistPath` default and the data-dir default with it.
 - **`/etc/profile.d/10-pocketagent-path.sh` is not redundant with `ENV PATH`.** Debian's
   `/etc/profile` overwrites `PATH` unconditionally, and `exec_command` runs `$SHELL -lc`, so
-  without it an agent installed into the mounted prefix is invisible to exactly the surface
-  most likely to look for it. `docker-smoke.mjs` asserts the login-shell `PATH`.
-- **A pinned agent CLI goes in `/usr/local/bin`, never the default npm prefix.**
-  `NPM_CONFIG_PREFIX` points into `$HOME`, which is a *mount point* at run time, so an install
-  that lands there is hidden by the volume on first run. npm reads its env config
-  case-insensitively, so the inherited `NPM_CONFIG_PREFIX` beats a lowercase
-  `npm_config_prefix=…` on the command — hence `env -u NPM_CONFIG_PREFIX … --prefix
-  /usr/local`, plus a `test -x` that fails the build, because `claude --version` passes either
-  way and this shipped broken once.
+  without it an agent installed into `$HOME` is invisible to exactly the surface most likely to
+  look for it. Its order is `agents/registry.ts`'s search order — official agent directories,
+  system `PATH`, `~/.cargo/bin`, the npm prefix last (PA-104) — and `agent-install.test.ts`
+  fails if `ENV PATH`, the two login-shell snippets and the resolver disagree.
+  `docker-smoke.mjs` asserts the login-shell `PATH`.
+- **A baked-in agent CLI is an official install under `/opt/pocketagent-agents`, linked into
+  `/usr/local/bin` — never anything under `$HOME`** (PA-104). The `claude`/`all` targets run each
+  vendor's *official* installer (the same one Settings runs), and every official location is under
+  `$HOME`, which is a *mount point* at run time — an install there is hidden by the volume on
+  first run, which is how the old npm version of this stage shipped broken once. So each
+  installer runs with a build-time `HOME=/opt/pocketagent-agents` (`AGENT_IMAGE_HOME`), keeping
+  the official layout under a different home, and its launcher is linked into `/usr/local/bin`.
+  Each block ends with checks that fail the build — `test -x`, the `readlink -f` target inside
+  the official layout, the pinned version — because `claude --version` passes wherever the
+  binary landed. A run-time update writes into the *real* `$HOME`, whose official directories
+  precede `/usr/local/bin` for the server and a login shell alike, so both move to it together.
 
 The entrypoint's own rule: **it never chowns a mounted volume.** It remaps the `pocketagent`
 account to `PUID`/`PGID` (so `git` can match the owner of a bind-mounted repo — a uid mismatch
@@ -282,14 +289,67 @@ nothing until one is installed. `agents/catalog.ts` declares what may be install
 is the "browser never supplies an executable or argv" invariant — see the invariants list, which
 is where the security reasoning lives rather than here.
 
-**Detection really was nearly free; the third state was not.** `resolveExecutable` already
-searched `~/.local/bin`, `~/.cargo/bin` and `~/.npm-global/bin`, so pointing the install prefix at
-one of those needs no detection code at all — and the container image already sets
-`NPM_CONFIG_PREFIX=$HOME/.npm-global`, mounts `$HOME` and puts that prefix *first* on PATH, so
-`config.agentInstallPrefix` defaults to the same directory and the bare-metal default agrees with
-the image by construction rather than by a second decision. (`~/.opencode/bin` was added to that
-search list in the same work: opencode's own installer puts the binary there and nothing else
-does, so a host with a perfectly working `opencode` reported it missing.)
+**Official installers, official locations (PA-104).** PA-68 installed every agent with
+`npm install --prefix ~/.npm-global`, and PA-92 then put that prefix *first* in
+`resolveExecutable`. On stone-dev01 that produced two independent sets of CLIs: the server ran the
+npm copies, a human's login shell (`~/.opencode/bin:~/.local/bin:…`, no `~/.npm-global/bin` at
+all) ran the vendors' official installs, the official copies updated themselves and the npm copy
+never did — so a Settings "upgrade" reported success and changed nothing a human at the same shell
+could see. Three things replaced that, and each is load-bearing:
+
+- **Resolution follows a login shell, not the service's `PATH`.** `executableSearchDirs`
+  (`agents/registry.ts`) is the one search order everything uses — sessions, probes, `available`,
+  post-install verification: the official directories (`~/.opencode/bin`, `~/.local/bin`,
+  `~/.pi/agent/bin`) first, then `PATH`, then `~/.cargo/bin`, then the install prefix
+  (`~/.npm-global/bin` plus the configured `agentInstallPrefix`) **last**, removed from wherever
+  `PATH` put it. Official-first rather than `PATH`-first because a systemd `PATH` carries
+  `/usr/bin`, where stale system-npm copies live (`/usr/bin/codex` 0.147.0 beside an official
+  0.157.0). Prefix-last is "no `~/.npm-global` copy may shadow the official one" stated as an
+  ordering: such a copy runs only when nothing else exists, and is otherwise *reported*.
+- **Install and update use the vendor's own path.** `agents/catalog.ts` holds, per agent, the
+  official installer's fixed `https://` URL, its interpreter, the arguments that read off the
+  script itself (claude's `[stable|latest|VERSION]`, codex's `--release`, opencode's `--version`;
+  agy's and pi's take none), and how an update works: `claude update`, `agy update`,
+  `pi update --self` on the *resolved official binary*, or re-running the installer for codex and
+  opencode, whose installers update in place and whose own update subcommands could not be
+  verified to run without a terminal. `update` on an agent with no official copy is a fresh
+  official install, never an update of a stray one. The installer runs in its own session
+  (`detached`) with no controlling terminal — codex's and pi's installers prompt on `/dev/tty`
+  when they can open one, and a server started from a terminal would otherwise hand them one to
+  wait on — plus `CODEX_NON_INTERACTIVE=1`, under which codex's installer also declines its own
+  offer to `npm uninstall` a conflicting copy. `NPM_CONFIG_PREFIX` is unset for every official
+  job (the image sets it, and pi's legacy `npm -g` would land in the old prefix). The installer's
+  `PATH` is login-like on purpose (`officialInstallerPath`): the prefix removed (opencode's
+  installer no-ops when *any* `opencode` on PATH has the version; pi's refuses to pass a pi it
+  does not manage), `~/.local/bin` added (pi links into the first candidate directory on PATH),
+  and the vendor directories *not* added — found by running the real installer: with
+  `~/.opencode/bin` listed, opencode's installer decided the shell was configured and never wrote
+  its PATH line.
+- **Verification is the rule, not a log line.** After every job the copy that runs must pass
+  `isOfficialInstallPath` — a path fragment matched against the *real* path
+  (`/.local/share/claude/versions/`, `/.codex/packages/standalone/`, …), so one rule covers
+  `$HOME` and the image's build-time home — or the job **fails** naming the copy that runs
+  instead. PA-68 only logged that case as a warning; it fired for pi on 2026-09-23 and nobody saw
+  it. `GET /api/agents` reports `resolvedPath`, `officialInstall` and `otherCopies` for catalog
+  agents (filesystem reads only, the budget `available` already spends; never for the shell or a
+  variant, since this list exposes no command line), and the setup dialog can remove an
+  `install-prefix` copy with an argv-only `npm uninstall --prefix=<that prefix>` behind a
+  confirmation. Any other copy (`/usr/bin/codex`) is report-only. Nothing is ever deleted
+  silently.
+
+**Pins exist only for image builds** (PA-104). Every agent updates itself, so a Settings pin stops
+being true within a day of the first run; Settings installs the vendor's current release, and the
+npm registry survives only as a *version-number source* for the "update available" hint (these
+vendors publish the same numbers there). `docker/agent-versions.env` pins only agents whose
+installer accepts a version, and `agent-install.test.ts` fails in both directions if the file and
+the catalog's `imagePinVar` disagree. `agy` is installable now — it was excluded only for having
+no npm package — and is disclosed as unpinnable, as is pi. The installer script itself is not
+hash-pinned: vendors edit them without notice and they fetch "latest" themselves (verifying the
+artifact against a checksum from the same release), so the log and the audit line record the
+sha256 of what actually ran instead.
+
+(`~/.opencode/bin` was added to the search list in PA-68: opencode's own installer puts the binary
+there and nothing else does, so a host with a perfectly working `opencode` reported it missing.)
 
 What was *not* free is that **installed is not authenticated**. `AgentSetupState` has four values,
 not the three the ticket asked for, and the fourth is the interesting one. Only some of these CLIs
@@ -327,24 +387,23 @@ writer both routes now share; the heartbeat and close handler are opt-in so the 
 keeps its tested behaviour, with `x-accel-buffering: no` the one unconditional change (nginx
 buffers proxied responses by default, which defeats SSE for both).
 
-Two things the install does that npm's exit code does not cover. The prefix must be a directory
-`resolveExecutable` actually searches, or an install succeeds and stays invisible — so
-`prefixDetectable` refuses up front rather than letting the UI offer it. And success is confirmed
-by re-resolving the binary (`verifyInstalled`), because a zero exit into the wrong prefix is
-exactly what `docker/Dockerfile`'s own `test -x` exists to catch, having shipped broken once; a
-binary that resolves from *outside* the prefix is not a failure but is logged, since it means an
-older copy earlier on PATH will run and the operator's upgrade silently did nothing.
+An installer's exit code is necessary but not sufficient, which is the whole verification rule
+above; a zero exit into the wrong place is exactly what `docker/Dockerfile`'s own checks exist to
+catch, having shipped broken once. `prefixDetectable` now gates only the npm fallback, which no
+catalogued agent uses.
 
 Timeouts: the installer is bounded at 10 minutes and one install runs at a time (a second for a
 different agent is refused, not queued — `RunQueue` keys on working trees and an install has
 none). A subprocess timeout here is *not* a breach of the standing no-decay rule: that rule is
-about an approval, which is a decision a human has not made yet, whereas a wedged `npm install`
-is nobody's decision and holds the only install slot.
+about an approval, which is a decision a human has not made yet, whereas a wedged installer is
+nobody's decision and holds the only install slot.
 
-Known limitation: the catalog's pins are duplicated from `docker/agent-versions.env` rather than
-read from it, because the runtime image does not ship `docker/`. `agent-install.test.ts` parses
-that file and fails when the two disagree — the same drift guard PA-65 uses for the four
-`package.json` versions.
+Known limitation: an installer decides where to write its PATH line, not this server. opencode's
+writes to `~/.bashrc` for bash, and a stock Ubuntu `.bashrc` returns early for non-interactive
+shells, so `bash -lc opencode` misses it while an interactive login finds the same copy the server
+runs (the server searches `~/.opencode/bin` regardless). Also: no catalogued agent lets its
+official location be chosen, so an agent whose official location is not under `$HOME` would need
+a catalog entry of its own shape.
 
 ### Process backends — where the process lives
 
@@ -2268,23 +2327,30 @@ These are load-bearing. Several were bugs first.
   server's user can; that is a deliberate widening and the cost of picking any folder.
 - **The browser never supplies an executable or argv.** Adoption and resume both take their
   `cwd` from the server-validated target. **PA-68 extends this to installing one**, which is the
-  sharpest case yet: `POST /api/agents/install` takes an id out of a closed set and nothing else
-  — never a package name, version, registry or URL. The id set lives in
-  `packages/protocol/src/agent-install.ts` precisely so the request schema can be a `z.enum`, so
-  an arbitrary package is refused by *request validation* rather than by a handler check a future
-  refactor could drop; `agents/catalog.ts` is the only thing that turns an id into an argv, and it
-  is a frozen table with pinned versions and no create/edit route. Worth being exact about what
-  that buys, because an enum reads like a safety proof and is not one: `npm install` runs the
-  package's own `postinstall` scripts as the server's user and `--ignore-scripts` breaks these
-  CLIs, so an install is arbitrary code execution *by design*. The id check bounds **which**
-  package runs, not what it may do. The real boundary is the pinned catalog plus a human
-  deliberately pressing the button — which is why versions are pinned rather than floating, why
-  the installer is argv-only with no shell anywhere, why no unattended trigger and no planner tool
-  can reach `AgentInstallService`, and why there is no lazy auto-install on session start (a typo
-  in an agent id must never become a package installation; the composer offers the setup dialog
-  instead). `agy` is deliberately absent from the catalog: it has no npm package and the registry
-  names that look right are unrelated placeholders, so pinning one would be a supply-chain hazard
-  dressed up as completeness — the same call `docker/agent-versions.env` already made.
+  sharpest case yet: `POST /api/agents/install` takes an id out of a closed set plus an *action*
+  out of another (`install` | `update` | `remove-prefix-copy`, PA-104) and nothing else — never a
+  package name, version, registry, URL or path. Both sets live in
+  `packages/protocol/src/agent-install.ts` precisely so the request schema is two `z.enum`s, so an
+  arbitrary package or URL is refused by *request validation* rather than by a handler check a
+  future refactor could drop; `agents/catalog.ts` is the only thing that turns an id into an argv,
+  and it is a frozen table with no create/edit route. Worth being exact about what that buys,
+  because an enum reads like a safety proof and is not one: since PA-104 an install runs the
+  vendor's *official installer script*, which downloads and runs a vendor binary as the server's
+  user — arbitrary code execution *by design*, exactly as npm's `postinstall` was before it. The
+  id check bounds **which** vendor's code runs, not what it may do. **PA-104 deliberately amends
+  "argv-only with no shell anywhere"**: the script *is* a shell program, so the rule is now that
+  nothing this server builds is a shell command — the script is fetched from the catalog's fixed
+  `https://` URL (the final URL after redirects must be `https:` too, and the body must start
+  `#!`), written to a private temp file, its sha256 recorded, and run as
+  `[interpreter, file, ...fixedArgs]` with no `-c`, no pipeline and no client value anywhere in
+  it. An update runs the *resolved* binary with fixed arguments, and a removal is
+  `npm uninstall --prefix=<install prefix>` of a copy the server itself found there — never a
+  system npm directory. The real boundary is still the frozen catalog plus a human deliberately
+  pressing the button — which is why no unattended trigger and no planner tool can reach
+  `AgentInstallService`, and why there is no lazy auto-install on session start (a typo in an
+  agent id must never become an installation; the composer offers the setup dialog instead).
+  Versions are no longer pinned for Settings installs (every agent updates itself, so a pin
+  would lie within a day); `docker/agent-versions.env` pins the image where the installer can.
 - **A third-party provider variant is disclosed, and is unattended only by explicit
   per-provider opt-in** (PA-19; the opt-in is PA-28). This is an override of the *attended-use*
   rule, not of the approval rule — `skipPermissions` is untouched by it, and a provider running
@@ -2480,12 +2546,13 @@ transcript stores read other programs' private state — `~/.claude/projects`
 `~/.pi/agent/sessions` (`conversations/pi.ts`) — and a config knob there would only let this
 server look somewhere the owning CLI never writes, which fails as "no history" rather than as
 an error; each already takes a constructor override, which is how tests point at a fixture.
-`agents/registry.ts`'s `~/.local/bin`, `~/.cargo/bin`, `~/.npm-global/bin`, `~/.opencode/bin` are
-not a mount decision at all — they are PATH discovery for agent binaries. Those belong in the
-image, *except* the one an operator installs on demand (PA-68):
-`POCKETAGENT_AGENT_INSTALL_PREFIX` defaults to `~/.npm-global`, which is inside `$HOME` and so
-already on the documented volume, which is what makes an installed agent survive a container
-restart with nothing extra to mount.
+`agents/registry.ts`'s `~/.opencode/bin`, `~/.local/bin`, `~/.pi/agent/bin`, `~/.cargo/bin` and
+`~/.npm-global/bin` are not a mount decision at all — they are PATH discovery for agent binaries,
+in that order with the npm prefix last (PA-104). The first three are the agents' *official*
+install locations, all inside `$HOME` and so already on the documented volume, which is what makes
+an agent installed or self-updated from Settings survive a container restart with nothing extra to
+mount. `POCKETAGENT_AGENT_INSTALL_PREFIX` (default `~/.npm-global`) is now only the npm-fallback
+prefix and where pre-PA-104 installs left copies, which Settings reports and can remove.
 
 **A workspace root must be mounted at the same absolute path it has on the host.** Claude Code
 derives a transcript directory name from the cwd (`~/.claude/projects/<encoded-cwd>/`, `/` →

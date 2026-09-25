@@ -5,8 +5,12 @@ import {
   canOfferInstall,
   emptyInstallProgress,
   hasUpdateOf,
+  installProgressTitle,
   installedVersionOf,
   isInstallable,
+  otherCopyNotices,
+  primaryInstallAction,
+  unofficialCopyWarning,
   setupBadge,
   setupHint,
   setupStateOf,
@@ -129,19 +133,20 @@ describe('setupHint', () => {
   });
 
   /**
-   * `agy` has no npm package, so a "not installed" row must explain that
-   * rather than look like a broken install button.
+   * PA-104: `agy` used to be the one agent that could not be installed from
+   * here (no npm package). It has an official installer, so it now gets the
+   * same "install it below" hint as every other agent.
    */
-  it('explains an agent that cannot be installed from here', () => {
+  it('offers agy like any other agent now that it has an official installer', () => {
     const hint = setupHint({ id: 'agy', displayName: 'Antigravity CLI', available: false });
-    expect(hint).toMatch(/no npm package/i);
-    expect(uninstallableReason('agy')).not.toBeNull();
+    expect(hint).toMatch(/Install it below/);
+    expect(uninstallableReason('agy')).toBeNull();
     expect(uninstallableReason('claude')).toBeNull();
   });
 
   /**
-   * An explicit binary path bypasses the install prefix in
-   * `resolveExecutable`, so an install would succeed and stay invisible. The
+   * An explicit binary path bypasses resolution in `resolveExecutable`, so an
+   * install would succeed and stay invisible. The
    * hint has to say that instead of inviting a click that appears to do
    * nothing — and the browser only knows because the server tells it.
    */
@@ -163,26 +168,82 @@ describe('setupHint', () => {
 });
 
 describe('isInstallable / canOfferInstall', () => {
-  it('covers exactly the four npm-published agents', () => {
+  /** PA-104: every agent with an official installer, agy included. */
+  it('covers every agent with an official installer', () => {
     expect(isInstallable('claude')).toBe(true);
     expect(isInstallable('codex')).toBe(true);
     expect(isInstallable('opencode')).toBe(true);
     expect(isInstallable('pi')).toBe(true);
-    expect(isInstallable('agy')).toBe(false);
+    expect(isInstallable('agy')).toBe(true);
     expect(isInstallable('shell')).toBe(false);
     expect(isInstallable('custom-claude:abc')).toBe(false);
   });
 
-  it('offers a reinstall for an agent that is already present', () => {
-    // Upgrading to the pinned version is a legitimate thing to want, and the
-    // server allows it, so the UI must not hide the action behind "missing".
-    expect(canOfferInstall({ id: 'claude' }, true)).toBe(true);
+  const official = { method: 'official-script' as const };
+  const npm = { method: 'npm' as const };
+
+  it('offers the action for an agent that is already present (it becomes an update)', () => {
+    expect(canOfferInstall({ id: 'claude' }, official, true)).toBe(true);
   });
 
-  it('suppresses the action when the result would be invisible', () => {
-    expect(canOfferInstall({ id: 'claude', binOverridden: true }, true)).toBe(false);
-    expect(canOfferInstall({ id: 'claude' }, false)).toBe(false);
-    expect(canOfferInstall({ id: 'agy' }, true)).toBe(false);
+  /** An official installer never writes to the npm prefix, so the prefix cannot gate it. */
+  it('ignores the npm prefix for an official installer, but not for npm', () => {
+    expect(canOfferInstall({ id: 'claude' }, official, false)).toBe(true);
+    expect(canOfferInstall({ id: 'claude' }, npm, false)).toBe(false);
+    expect(canOfferInstall({ id: 'claude' }, npm, true)).toBe(true);
+  });
+
+  it('suppresses the action when the result would be invisible or the catalog has no entry', () => {
+    expect(canOfferInstall({ id: 'claude', binOverridden: true }, official, true)).toBe(false);
+    expect(canOfferInstall({ id: 'shell' }, official, true)).toBe(false);
+    expect(canOfferInstall({ id: 'claude' }, undefined, true)).toBe(false);
+  });
+});
+
+describe('primaryInstallAction', () => {
+  /**
+   * Installed means Update — always, not only when a newer version is known:
+   * agy has no version source, and the update path decides whether there is
+   * anything to do. It must never read "Reinstall", which suggested a second
+   * copy.
+   */
+  it('installs what is missing and updates what is present', () => {
+    expect(primaryInstallAction({ available: false }).action).toBe('install');
+    expect(primaryInstallAction({ available: true, setupState: 'ready' })).toEqual({
+      action: 'update',
+      label: 'Update',
+      busyLabel: 'Updating…',
+    });
+    expect(primaryInstallAction({ available: true }).action).toBe('update');
+  });
+});
+
+describe('other copies (PA-104)', () => {
+  it('offers removal only for an install-prefix copy', () => {
+    const notices = otherCopyNotices({
+      otherCopies: [
+        { path: '/home/u/.npm-global/bin/codex', realPath: '/home/u/.npm-global/lib/node_modules/@openai/codex/bin/codex.js', kind: 'install-prefix' },
+        { path: '/usr/bin/codex', realPath: '/usr/bin/codex', kind: 'other' },
+      ],
+    });
+    expect(notices.map((n) => n.removable)).toEqual([true, false]);
+    expect(notices[0]?.message).toContain('/home/u/.npm-global/bin/codex (→ /home/u/.npm-global/lib/node_modules/@openai/codex/bin/codex.js)');
+    expect(notices[1]?.message).toMatch(/does not manage it/);
+  });
+
+  /** An older host sends none of these fields; absence is not a problem to report. */
+  it('reports nothing for an older host', () => {
+    expect(otherCopyNotices({})).toEqual([]);
+    expect(unofficialCopyWarning({ displayName: 'Codex' })).toBeNull();
+  });
+
+  it('warns when the copy that runs is not the official install', () => {
+    expect(
+      unofficialCopyWarning({ displayName: 'Claude Code', resolvedPath: '/home/u/.npm-global/bin/claude', officialInstall: false }),
+    ).toMatch(/not its official install/);
+    expect(
+      unofficialCopyWarning({ displayName: 'Claude Code', resolvedPath: '/home/u/.local/bin/claude', officialInstall: true }),
+    ).toBeNull();
   });
 });
 
@@ -190,9 +251,25 @@ describe('applyInstallEvent', () => {
   const started = (attached = false): AgentInstallEvent => ({
     kind: 'install_started',
     id: 'pi',
-    packageName: '@earendil-works/pi-coding-agent',
-    version: '0.85.1',
+    packageName: 'https://pi.dev/install.sh',
+    source: 'https://pi.dev/install.sh',
+    action: 'install',
+    version: null,
     attached,
+  });
+
+  it('carries the action into the heading', () => {
+    const updating = applyInstallEvent(emptyInstallProgress('update'), { ...started(), action: 'update' } as AgentInstallEvent);
+    expect(installProgressTitle(updating)).toBe('Updating');
+    const done = applyInstallEvent(updating, { kind: 'install_finished', ok: false, error: 'x', setupState: 'ready' });
+    expect(installProgressTitle(done)).toBe('Update failed');
+    expect(installProgressTitle(emptyInstallProgress('remove-prefix-copy'))).toBe('Removing leftover copy');
+  });
+
+  /** An older host's `install_started` has no `action`; the dialog's own choice stands. */
+  it('keeps the requested action when an older host omits it', () => {
+    const legacy = { kind: 'install_started', id: 'pi', packageName: 'x', version: '1.0.0', attached: false } as unknown as AgentInstallEvent;
+    expect(applyInstallEvent(emptyInstallProgress('update'), legacy).action).toBe('update');
   });
 
   it('folds a whole stream into the same view as watching it live', () => {

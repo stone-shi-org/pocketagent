@@ -524,14 +524,15 @@ export function createApiClient(endpoint: HostEndpoint) {
     /**
      * The server-declared catalog of installable agents. Read-only
      * disclosure: the ids it returns are the *only* values `installAgent`
-     * accepts, and the package name and pinned version are shown so an
+     * accepts, and each entry's installer URL (`source`) is shown so an
      * operator can see what they are agreeing to run.
      */
     listInstallableAgents: () =>
       request<InstallableAgentListResponse>('/api/agents/installable'),
 
     /**
-     * Install one catalogued agent, streaming npm's output as it arrives.
+     * Install, update, or remove the leftover install-prefix copy of one
+     * catalogued agent (`target`, PA-104), streaming the output as it arrives.
      *
      * Takes an `InstallableAgentId`, never a package name — the type is the
      * client-side half of the server's `z.enum`, so "the browser never

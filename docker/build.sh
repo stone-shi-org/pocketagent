@@ -118,7 +118,6 @@ args+=(
     --build-arg "CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}"
     --build-arg "CODEX_VERSION=${CODEX_VERSION}"
     --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}"
-    --build-arg "PI_VERSION=${PI_VERSION}"
 )
 
 if [[ -n "${PA_PLATFORM:-}" ]]; then

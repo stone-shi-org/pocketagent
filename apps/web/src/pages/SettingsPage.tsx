@@ -537,11 +537,12 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
               busy={busy('piBin')}
               onChange={(v) => saveDebounced('piBin', v)}
             />
-            {/* PA-68. Kept in this section rather than next to "Coding Agents"
-                because it belongs with the other five paths: it is where an
-                on-demand install writes, and it only works if it is a directory
-                `agents/registry.ts` already searches — which is why the setup
-                dialog refuses to offer an install when it is not. */}
+            {/* PA-68, narrowed by PA-104. Since PA-104 every catalogued agent
+                is installed by its vendor's official installer into its
+                official location, so this prefix is only where an npm-method
+                (fallback) install would write — and where pre-PA-104 installs
+                left copies, which the server searches *last* and reports as
+                leftovers rather than running. */}
             <TextRow
               label="Agent install prefix"
               restart={restart.has('agentInstallPrefix')}

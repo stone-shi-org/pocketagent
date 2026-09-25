@@ -121,9 +121,9 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   str('opencodeBin', 'opencode_bin', false),
   str('codexBin', 'codex_bin', false),
   str('piBin', 'pi_bin', false),
-  // PA-68. `live` because nothing caches it: `AgentInstallService` reads
-  // `config.agentInstallPrefix` when it builds the argv for one install, so a
-  // change applies to the next install with no restart.
+  // PA-68. `live` because nothing caches it: `AgentInstallService` and
+  // `resolveExecutable` (PA-104, which demotes it to last) both read
+  // `config.agentInstallPrefix` per call, so a change applies with no restart.
   str('agentInstallPrefix', 'agent_install_prefix', true),
   str('webDistPath', 'web_dist_path', false),
   str('backend', 'backend', false),

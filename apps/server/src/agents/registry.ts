@@ -134,6 +134,9 @@ export class AgentRegistry {
     | 'installedVersion'
     | 'latestVersion'
     | 'hasUpdate'
+    | 'resolvedPath'
+    | 'officialInstall'
+    | 'otherCopies'
   >[] {
     return this.ordered().map((a) => ({
       id: a.id,
@@ -208,55 +211,149 @@ export function isExplicitPath(bin: string | undefined): boolean {
 }
 
 /**
- * Directories searched after `PATH` for a bare executable name.
+ * Where the agents' *official* installers put their launchers, in the order a
+ * login shell sees them (PA-104).
  *
- * Exported because PA-68's install prefix has to be one of these or an install
- * lands somewhere this server never looks — `GET /api/agents/installable`
- * reports that as `prefixDetectable: false` instead of offering an install
- * that cannot work, and the setup dialog says so.
+ * These come **before** the server's own `PATH`, and that is the fix for
+ * PA-104 rather than a preference. The server has to run the same binary a
+ * human gets from `bash -lc <agent>` on the same host, and the official
+ * installers make that true for a login shell by prepending exactly these
+ * directories (opencode's installer writes `~/.opencode/bin` into the shell
+ * rc; claude's, codex's and agy's link into `~/.local/bin`; pi's managed mode
+ * links into `~/.local/bin`, or `~/.pi/agent/bin` when nothing better is on
+ * PATH). A service manager's `PATH` usually lacks all of them and carries
+ * `/usr/bin` instead — where stale system-npm copies live (`/usr/bin/codex`
+ * 0.147.0 on stone-dev01, while the official copy was 0.157.0) — so trusting
+ * `PATH` first would pick the wrong copy for the same reason PA-92's
+ * "install prefix first" rule did.
  *
- * `~/.opencode/bin` is here because opencode's own installer puts the binary
- * there and nothing else does: without it a host with a perfectly working
- * `opencode` reports the agent as missing, which was true on the development
- * machine while this was being written. `~/.bun/bin` and `~/.deno/bin` are
- * deliberately absent — no agent here installs to either, and this list should
- * grow on evidence rather than on speculation about package managers.
+ * `~/.opencode/bin` precedes `~/.local/bin` because that is the order the
+ * installers leave in a login PATH; no agent currently installs into both.
  */
-export function agentBinSearchDirs(): string[] {
+export function officialAgentBinDirs(): string[] {
   const home = os.homedir();
   return [
-    path.join(home, '.npm-global', 'bin'),
-    path.join(home, '.local', 'bin'),
-    path.join(home, '.cargo', 'bin'),
     path.join(home, '.opencode', 'bin'),
+    path.join(home, '.local', 'bin'),
+    path.join(home, '.pi', 'agent', 'bin'),
   ];
 }
 
-/** Resolve a bare name against PATH and standard user bin dirs, or validate an absolute path. */
+/**
+ * The live `agentInstallPrefix`, supplied by `app.ts` after the config exists
+ * (a module-level default, because `resolveExecutable` is called from adapter
+ * code with no config in scope). Read on every resolution, so changing the
+ * setting takes effect without a restart — the same `live: true` promise the
+ * install service's own `installPrefix` closure keeps.
+ */
+let installPrefixes: () => string[] = () => [];
+
+export function setAgentInstallPrefixSource(source: () => string[]): void {
+  installPrefixes = source;
+}
+
+/**
+ * `<prefix>/bin` for npm-method installs: `~/.npm-global/bin` always (the
+ * default prefix, and where every pre-PA-104 Settings install went) plus the
+ * configured `agentInstallPrefix` when it differs.
+ *
+ * These are searched **last**, after `PATH`, and are removed from their
+ * position in `PATH` if a deployment put them there (the container image
+ * used to put `~/.npm-global/bin` first). That is PA-104's "no
+ * `~/.npm-global` copy may shadow the official one", stated as an ordering:
+ * a copy here is found only when nothing else is, which is exactly the
+ * npm-fallback case, and otherwise it is reported as an extra copy.
+ */
+export function installPrefixBinDirs(): string[] {
+  const home = os.homedir();
+  // An operator who pointed the prefix at `~/.local` must not thereby demote
+  // `~/.local/bin`, which is where the official installs live.
+  const official = new Set(officialAgentBinDirs().map(normalizeDir));
+  return unique([
+    path.join(home, '.npm-global', 'bin'),
+    ...installPrefixes().map((p) => path.join(p.replace(/\/+$/, ''), 'bin')),
+  ]).filter((dir) => !official.has(normalizeDir(dir)));
+}
+
+/**
+ * Directories searched in addition to `PATH` for a bare executable name.
+ *
+ * Exported because an npm-method install prefix has to be one of these or an
+ * install lands somewhere this server never looks — `GET
+ * /api/agents/installable` reports that as `prefixDetectable: false`.
+ * `~/.cargo/bin` is kept from before; `~/.bun/bin` and `~/.deno/bin` stay
+ * absent — this list grows on evidence, not on speculation.
+ */
+export function agentBinSearchDirs(): string[] {
+  const home = os.homedir();
+  return unique([...officialAgentBinDirs(), path.join(home, '.cargo', 'bin'), ...installPrefixBinDirs()]);
+}
+
+/**
+ * The full search order for a bare name: official locations, then `PATH`
+ * (minus the install-prefix directories), then `~/.cargo/bin`, then the
+ * install prefix. One function so resolution, the "other copies" report and
+ * post-install verification cannot disagree about which copy runs.
+ */
+export function executableSearchDirs(): string[] {
+  const home = os.homedir();
+  const prefixBins = installPrefixBinDirs();
+  const demoted = new Set(prefixBins.map(normalizeDir));
+  const pathDirs = (process.env.PATH ?? '')
+    .split(path.delimiter)
+    .filter(Boolean)
+    .filter((dir) => !demoted.has(normalizeDir(dir)));
+  return unique([...officialAgentBinDirs(), ...pathDirs, path.join(home, '.cargo', 'bin'), ...prefixBins]);
+}
+
+/** Resolve a bare name against the search order above, or validate an explicit path. */
 export function resolveExecutable(bin: string): string | null {
+  return findExecutableCandidates(bin)[0]?.path ?? null;
+}
+
+/**
+ * Every executable a bare name resolves to, in search order — the first is the
+ * one that runs (PA-104). An explicit path yields at most itself.
+ *
+ * Deduplicated by directory, not by real path: two entries that resolve to the
+ * same file are both returned, so a caller can tell "a second copy" (different
+ * `realPath`) from "a second link to the same copy" and only report the first.
+ */
+export function findExecutableCandidates(bin: string): { path: string; realPath: string }[] {
   const expanded = bin.startsWith('~') ? path.join(os.homedir(), bin.slice(1)) : bin;
   if (isExplicitPath(bin)) {
-    return isExecutable(expanded) ? path.resolve(expanded) : null;
+    return isExecutable(expanded) ? [withRealPath(path.resolve(expanded))] : [];
   }
-  const home = os.homedir();
-  const installBin = path.join(home, '.npm-global', 'bin');
-  const pathEnv = process.env.PATH ?? '';
-  // The on-demand agent install prefix comes first so an agent installed or
-  // updated on this host is the one that actually runs, rather than an older
-  // copy earlier on system PATH shadowing it. The container image puts that
-  // prefix first on PATH for this exact reason (see config/index.ts).
-  const searchDirs = Array.from(
-    new Set([
-      installBin,
-      ...pathEnv.split(path.delimiter).filter(Boolean),
-      ...agentBinSearchDirs(),
-    ]),
-  );
-  for (const dir of searchDirs) {
+  const found: { path: string; realPath: string }[] = [];
+  for (const dir of executableSearchDirs()) {
     const candidate = path.join(dir, expanded);
-    if (isExecutable(candidate)) return candidate;
+    if (isExecutable(candidate)) found.push(withRealPath(candidate));
   }
-  return null;
+  return found;
+}
+
+function withRealPath(candidate: string): { path: string; realPath: string } {
+  try {
+    return { path: candidate, realPath: fs.realpathSync(candidate) };
+  } catch {
+    return { path: candidate, realPath: candidate };
+  }
+}
+
+function normalizeDir(dir: string): string {
+  return path.resolve(dir).replace(/\/+$/, '');
+}
+
+function unique(dirs: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const dir of dirs) {
+    const key = normalizeDir(dir);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(dir);
+  }
+  return out;
 }
 
 function isExecutable(candidate: string): boolean {

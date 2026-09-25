@@ -118,6 +118,14 @@ export async function fetchLatestNpmVersion(
 
 /**
  * Checks what the latest available version is for an agent and whether an update is available.
+ *
+ * Since PA-104 the npm registry is consulted only as a *version-number
+ * source*: claude, codex, opencode and pi publish the same release numbers to
+ * npm as to their own installers, and it is the one uniform, unauthenticated
+ * "what is latest?" endpoint all four share. Nothing is ever installed from it
+ * for an official-script agent — "Update" runs the vendor's own update path
+ * (`catalog.ts`). `agy` has no npm package, so it gets no hint and the UI
+ * offers "Update now" regardless.
  */
 export async function checkAgentLatestVersion(
   agentId: string,
@@ -128,9 +136,11 @@ export async function checkAgentLatestVersion(
     return { latestVersion: null, hasUpdate: false };
   }
   const entry = catalogEntry(agentId);
-  let latest = await npmFetcher(entry.packageName);
-  if (!latest) {
-    // If npm registry query fails or offline, fallback to server's pinned version
+  const versionSource = entry.method === 'npm' ? entry.packageName : entry.legacyNpmPackage;
+  if (versionSource === null) return { latestVersion: null, hasUpdate: false };
+  let latest = await npmFetcher(versionSource);
+  if (!latest && entry.method === 'npm') {
+    // Offline: an npm-method entry still has its own pin to compare against.
     latest = entry.version;
   }
   if (!currentVersion || !latest) {

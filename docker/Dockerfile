@@ -188,12 +188,17 @@ ENV NODE_ENV=production \
     LANGUAGE=en_US:en \
     LC_ALL=en_US.UTF-8
 
-# The mounted agent prefix comes *before* /usr/local/bin, so an agent the
-# operator installs on demand (PA-68) overrides the one this image pinned
-# rather than being silently shadowed by it. `agents/registry.ts` searches PATH
-# before it falls back to these same three directories, so without the
-# ordering being stated somewhere an upgrade appears to do nothing.
-ENV PATH=/home/pocketagent/.npm-global/bin:/home/pocketagent/.local/bin:/home/pocketagent/.cargo/bin:$PATH
+# PA-104: the same order `agents/registry.ts`'s `executableSearchDirs` uses —
+# the agents' *official* install locations first (all inside the mounted
+# $HOME, so an agent installed or self-updated at run time survives a
+# restart and outranks the copy this image baked in), then the system PATH
+# (where the `claude`/`all` targets link their build-time installs, in
+# /usr/local/bin), then ~/.cargo/bin, and the npm install prefix *last*. It
+# used to be first, and on a bare-metal host the same rule in the resolver is
+# what made the server run a leftover Settings copy while a human's shell ran
+# the official one. `agent-install.test.ts` fails if this line, the two
+# login-shell snippets below and the resolver disagree.
+ENV PATH=/home/pocketagent/.opencode/bin:/home/pocketagent/.local/bin:/home/pocketagent/.pi/agent/bin:$PATH:/home/pocketagent/.cargo/bin:/home/pocketagent/.npm-global/bin
 
 # `HOST` defaults to 127.0.0.1 in config/index.ts, which inside a network
 # namespace means "unreachable" rather than "safe". Binding the container's own
@@ -211,15 +216,15 @@ ENV HOST=0.0.0.0
 # tool call and the server itself agreeing about where agent binaries live.
 # Verified by docker-smoke.mjs rather than assumed.
 RUN printf '%s\n' \
-    '# PocketAgent: re-apply the agent prefix that /etc/profile just discarded.' \
-    'PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"' \
+    '# PocketAgent: re-apply the agent directories that /etc/profile just discarded.' \
+    'PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH:$HOME/.cargo/bin:$HOME/.npm-global/bin"' \
     'export PATH' \
     > /etc/profile.d/10-pocketagent-path.sh \
     && chmod 0644 /etc/profile.d/10-pocketagent-path.sh \
     && mkdir -p /etc/zsh \
     && printf '%s\n' \
-    '# PocketAgent: ensure the agent prefix is in PATH for all zsh invocations.' \
-    'PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"' \
+    '# PocketAgent: ensure the agent directories are in PATH for all zsh invocations.' \
+    'PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH:$HOME/.cargo/bin:$HOME/.npm-global/bin"' \
     'export PATH' \
     >> /etc/zsh/zshenv \
     && chmod 0644 /etc/zsh/zshenv
@@ -286,56 +291,90 @@ CMD ["node", "apps/server/dist/server.js"]
 # ---------------------------------------------------------------------------
 FROM runtime AS claude
 
-# Installed into /usr/local, NOT the default prefix. NPM_CONFIG_PREFIX above
-# points at $HOME/.npm-global, which is a *mount point* at run time — a CLI
-# installed there is hidden by the volume on the first `docker run`, which
-# would silently defeat the entire purpose of this tag.
+# PA-104: agent CLIs are installed with each vendor's *official* installer —
+# the same one Settings uses (`apps/server/src/agents/catalog.ts`) and the one
+# a human runs by hand — so a baked-in agent has the official layout and
+# `claude update` / `codex`'s installer / `agy update` update it the way they
+# update any other install. npm is no longer involved.
 #
-# Getting that right takes both halves. `env -u` is required because npm reads
-# its environment config case-insensitively, so the inherited
-# NPM_CONFIG_PREFIX and a lowercase `npm_config_prefix=...` prefixed to the
-# command are the *same* setting — and the inherited one wins. `--prefix` is
-# belt and braces (a CLI flag outranks env). The `test -x` afterwards is the
-# part that actually keeps this fixed: `claude --version` alone passes whether
-# the binary landed in /usr/local/bin or in the doomed directory, which is how
-# this shipped broken the first time.
+# The official locations are all under $HOME, and $HOME is a *mount point* at
+# run time: anything installed there now would be hidden by the volume on the
+# first `docker run`, which is exactly how the npm version of this stage
+# shipped broken once. So each installer runs with a build-time HOME of
+# /opt/pocketagent-agents — every one of them installs relative to $HOME —
+# and its launcher is linked into /usr/local/bin, which is on PATH and not
+# under any mount. The tree stays in the official layout (under a different
+# home), which is what `isOfficialInstallPath` recognises.
+#
+# At run time an update writes into the *real* $HOME (claude and codex install
+# relative to it), whose official directories precede /usr/local/bin for both
+# the server and a login shell, so both switch to the updated copy together.
+# pi updates its managed install in place, so the tree is owned by the app
+# user and the entrypoint re-chowns it on a PUID remap (it is an image path,
+# never a mount).
+#
+# Each installer is downloaded to a file and run as `<interpreter> <file>`,
+# never piped — the same shape as the server's own runner — and each block
+# ends with checks that fail the build: `test -x` on the link, the resolved
+# target inside the official layout, and the pinned version where there is
+# one. `claude --version` alone passes whatever directory the binary landed
+# in, which is how the npm stage shipped broken the first time.
+ENV AGENT_IMAGE_HOME=/opt/pocketagent-agents
 ARG CLAUDE_CODE_VERSION
 RUN test -n "${CLAUDE_CODE_VERSION}" \
     || { echo "CLAUDE_CODE_VERSION is unset. Build via docker/build.sh, which reads docker/agent-versions.env." >&2; exit 1; } \
-    && env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr/local --no-fund --no-audit \
-        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-    && npm cache clean --force \
+    && install -d -m 0755 "$AGENT_IMAGE_HOME" \
+    && curl -fsSL https://claude.ai/install.sh -o /tmp/claude-install.sh \
+    && env -u NPM_CONFIG_PREFIX HOME="$AGENT_IMAGE_HOME" \
+        bash /tmp/claude-install.sh "${CLAUDE_CODE_VERSION}" \
+    && rm -f /tmp/claude-install.sh \
+    && ln -sf "$AGENT_IMAGE_HOME/.local/bin/claude" /usr/local/bin/claude \
     && test -x /usr/local/bin/claude \
-    && /usr/local/bin/claude --version
+    && readlink -f /usr/local/bin/claude | grep -q "^$AGENT_IMAGE_HOME/.local/share/claude/versions/" \
+    && /usr/local/bin/claude --version | grep -qF "${CLAUDE_CODE_VERSION}" \
+    && rm -rf "$AGENT_IMAGE_HOME/.claude/downloads" \
+    && chown -R pocketagent:pocketagent "$AGENT_IMAGE_HOME"
 
 # ---------------------------------------------------------------------------
-# all — every agent CLI with a pinnable, redistributable install channel
+# all — every agent CLI with an official installer
 # ---------------------------------------------------------------------------
-# `agy` (Google's Antigravity CLI) is deliberately absent, and this is the
-# reason rather than an oversight: it is distributed as a Google-published
-# binary with no npm package. The names that look plausible on the registry
-# (`agy`, `antigravity-cli`) are unrelated 0.0.x placeholders, so pinning one
-# would be a supply-chain hazard dressed up as completeness. An operator who
-# wants `agy` installs it into the mounted agent prefix, which is what that
-# prefix is for. README's Docker section lists what each tag contains.
+# Pinned where the official installer accepts a version (codex's `--release`,
+# opencode's `--version`); `agy` and `pi` are installed from their current
+# release because their installers cannot take one (see
+# docker/agent-versions.env). `agy` was absent from this target before PA-104
+# because it has no npm package; it has an official installer, which is now
+# the only channel this image uses.
 FROM claude AS all
 
 ARG CODEX_VERSION
 ARG OPENCODE_VERSION
-ARG PI_VERSION
-RUN test -n "${CODEX_VERSION}" && test -n "${OPENCODE_VERSION}" && test -n "${PI_VERSION}" \
+RUN test -n "${CODEX_VERSION}" && test -n "${OPENCODE_VERSION}" \
     || { echo "Agent versions are unset. Build via docker/build.sh, which reads docker/agent-versions.env." >&2; exit 1; } \
-    && env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr/local --no-fund --no-audit \
-        "@openai/codex@${CODEX_VERSION}" \
-        "opencode-ai@${OPENCODE_VERSION}" \
-        "@earendil-works/pi-coding-agent@${PI_VERSION}" \
-    && npm cache clean --force \
-    && test -x /usr/local/bin/codex \
-    && test -x /usr/local/bin/opencode \
-    && test -x /usr/local/bin/pi \
-    && /usr/local/bin/codex --version \
-    && /usr/local/bin/opencode --version \
-    && /usr/local/bin/pi --version
+    && A="$AGENT_IMAGE_HOME" \
+    && curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/codex-install.sh \
+    && env -u NPM_CONFIG_PREFIX HOME="$A" CODEX_NON_INTERACTIVE=1 sh /tmp/codex-install.sh --release "${CODEX_VERSION}" \
+    && curl -fsSL https://opencode.ai/install -o /tmp/opencode-install.sh \
+    && env -u NPM_CONFIG_PREFIX HOME="$A" bash /tmp/opencode-install.sh --version "${OPENCODE_VERSION}" --no-modify-path \
+    && curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh \
+    && env -u NPM_CONFIG_PREFIX HOME="$A" bash /tmp/agy-install.sh \
+    && curl -fsSL https://pi.dev/install.sh -o /tmp/pi-install.sh \
+    && env -u NPM_CONFIG_PREFIX HOME="$A" sh /tmp/pi-install.sh \
+    && rm -f /tmp/codex-install.sh /tmp/opencode-install.sh /tmp/agy-install.sh /tmp/pi-install.sh \
+    && ln -sf "$A/.local/bin/codex" /usr/local/bin/codex \
+    && ln -sf "$A/.opencode/bin/opencode" /usr/local/bin/opencode \
+    && ln -sf "$A/.local/bin/agy" /usr/local/bin/agy \
+    && ln -sf "$A/.pi/agent/bin/pi" /usr/local/bin/pi \
+    && for bin in codex opencode agy pi; do test -x "/usr/local/bin/$bin" || { echo "$bin was not installed" >&2; exit 1; }; done \
+    && readlink -f /usr/local/bin/codex | grep -q "^$A/.codex/packages/standalone/" \
+    && readlink -f /usr/local/bin/opencode | grep -q "^$A/.opencode/bin/opencode$" \
+    && readlink -f /usr/local/bin/agy | grep -q "^$A/.local/bin/agy$" \
+    && readlink -f /usr/local/bin/pi | grep -q "^$A/.pi/agent/" \
+    && /usr/local/bin/codex --version | grep -qF "${CODEX_VERSION}" \
+    && /usr/local/bin/opencode --version | grep -qF "${OPENCODE_VERSION}" \
+    && /usr/local/bin/agy --version \
+    && /usr/local/bin/pi --version \
+    && rm -rf "$A/.cache" "$A/.pi/agent/install/staging" /root/.npm \
+    && chown -R pocketagent:pocketagent "$A"
 
 # ---------------------------------------------------------------------------
 # hub-deps — production dependencies for the Hub alone

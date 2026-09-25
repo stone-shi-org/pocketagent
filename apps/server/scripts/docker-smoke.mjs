@@ -307,43 +307,50 @@ heading('It runs as the host uid, not root');
   check(homeOwner.stdout === String(HOST_UID), 'HOME is owned by that uid');
 }
 
-heading('A login shell still has the agent prefix on PATH');
-{
+// PA-104: the order `agents/registry.ts` resolves agents in — official
+// locations first, npm install prefix last. A login shell has to agree with
+// the server or a human and the server run different binaries, which is the
+// bug PA-104 exists to fix.
+const OFFICIAL_DIRS = [
+  '/home/pocketagent/.opencode/bin',
+  '/home/pocketagent/.local/bin',
+  '/home/pocketagent/.pi/agent/bin',
+];
+const PREFIX_BIN = '/home/pocketagent/.npm-global/bin';
+
+function checkLoginPath(shell) {
   // /etc/profile overwrites PATH unconditionally on bash login shells, and
   // planner/tools.ts runs exec_command as `$SHELL -lc`. Without
-  // /etc/profile.d/10-pocketagent-path.sh an agent installed into the mounted
-  // prefix is invisible to exactly the surface most likely to look for it.
+  // /etc/profile.d/10-pocketagent-path.sh an agent installed into $HOME is
+  // invisible to exactly the surface most likely to look for it.
   const loginPath = tryRun('docker', [
-    'exec', '--user', `${HOST_UID}:${HOST_GID}`, CONTAINER, 'bash', '-lc', 'echo "$PATH"',
+    'exec', '--user', `${HOST_UID}:${HOST_GID}`, CONTAINER, shell, '-lc', 'echo "$PATH"',
   ]);
-  check(
-    loginPath.stdout.startsWith('/home/pocketagent/.npm-global/bin:'),
-    'login shell PATH starts with the mounted agent prefix',
-    loginPath.stdout.split(':').slice(0, 2).join(':'),
-  );
   const order = loginPath.stdout.split(':');
   check(
-    order.indexOf('/home/pocketagent/.npm-global/bin') < order.indexOf('/usr/local/bin'),
-    'mounted prefix precedes /usr/local/bin (an on-demand install wins)',
+    OFFICIAL_DIRS.every((dir, i) => order[i] === dir),
+    `${shell}: login shell PATH starts with the official agent directories`,
+    order.slice(0, 3).join(':'),
+  );
+  check(
+    order.indexOf('/home/pocketagent/.local/bin') < order.indexOf('/usr/local/bin'),
+    `${shell}: official directories precede /usr/local/bin (a run-time install or self-update wins over the image's copy)`,
+  );
+  // The snippet can be applied more than once in one login (profile.d and an
+  // rc file both), so PATH may repeat itself; what matters is where the
+  // prefix *first* appears — after every system directory.
+  check(
+    order.indexOf(PREFIX_BIN) > order.lastIndexOf('/usr/local/bin') &&
+      order.indexOf(PREFIX_BIN) > order.lastIndexOf('/usr/bin'),
+    `${shell}: the npm install prefix comes after the system PATH (it can never shadow an official copy)`,
   );
 }
 
-heading('A zsh login shell still has the agent prefix on PATH (PA-79)');
-{
-  const zshLoginPath = tryRun('docker', [
-    'exec', '--user', `${HOST_UID}:${HOST_GID}`, CONTAINER, 'zsh', '-lc', 'echo "$PATH"',
-  ]);
-  check(
-    zshLoginPath.stdout.startsWith('/home/pocketagent/.npm-global/bin:'),
-    'zsh login shell PATH starts with the mounted agent prefix',
-    zshLoginPath.stdout.split(':').slice(0, 2).join(':'),
-  );
-  const zshOrder = zshLoginPath.stdout.split(':');
-  check(
-    zshOrder.indexOf('/home/pocketagent/.npm-global/bin') < zshOrder.indexOf('/usr/local/bin'),
-    'zsh: mounted prefix precedes /usr/local/bin (an on-demand install wins)',
-  );
-}
+heading('A login shell has the agent directories on PATH, in the resolver\'s order');
+checkLoginPath('bash');
+
+heading('A zsh login shell has them too (PA-79)');
+checkLoginPath('zsh');
 
 heading('Ubuntu 26.04 base and zsh shell environment (PA-79)');
 {
@@ -485,18 +492,19 @@ heading('AC2: files the agent wrote are owned by the host user, not root');
   }
 }
 
-heading('Install an "agent" into the mounted prefix');
+heading('Install an "agent" into its official location in $HOME');
 {
-  // A stand-in binary rather than a 100 MB npm install: what is under test is
-  // that the prefix is a volume and stays on PATH, not npm.
+  // A stand-in binary rather than a real vendor installer: what is under test
+  // is that ~/.local/bin — where the official installers link claude, codex
+  // and agy (PA-104) — is on the mounted volume and on PATH.
   const install = inContainer(
-    'mkdir -p "$NPM_CONFIG_PREFIX/bin" && ' +
-      'printf "#!/bin/sh\\necho fake-agent-2.0\\n" > "$NPM_CONFIG_PREFIX/bin/fake-agent" && ' +
-      'chmod +x "$NPM_CONFIG_PREFIX/bin/fake-agent" && fake-agent',
+    'mkdir -p "$HOME/.local/bin" && ' +
+      'printf "#!/bin/sh\\necho fake-agent-2.0\\n" > "$HOME/.local/bin/fake-agent" && ' +
+      'chmod +x "$HOME/.local/bin/fake-agent" && fake-agent',
   );
   check(install.status === 0 && install.stdout.includes('fake-agent-2.0'), 'installed and resolvable on PATH');
   check(
-    fs.existsSync(path.join(homeDir, '.npm-global/bin/fake-agent')),
+    fs.existsSync(path.join(homeDir, '.local/bin/fake-agent')),
     'landed in the mounted $HOME volume, not a layer',
   );
 }
@@ -559,7 +567,15 @@ heading('A pinned agent CLI survives the $HOME mount (if that tag is built)');
     ok(`skipped — ${tag} not built locally (docker/build.sh claude)`);
   } else {
     const where = tryRun('docker', ['run', '--rm', '--entrypoint', 'sh', tag, '-c', 'command -v claude']);
-    check(where.stdout === '/usr/local/bin/claude', 'pinned CLI lives in /usr/local/bin', where.stdout);
+    check(where.stdout === '/usr/local/bin/claude', 'pinned CLI is linked into /usr/local/bin', where.stdout);
+    // PA-104: installed by the official installer, in the official layout
+    // (under the image's build-time HOME, outside every mount).
+    const target = tryRun('docker', ['run', '--rm', '--entrypoint', 'sh', tag, '-c', 'readlink -f "$(command -v claude)"']);
+    check(
+      target.stdout.startsWith('/opt/pocketagent-agents/.local/share/claude/versions/'),
+      'pinned CLI is an official install, not an npm copy',
+      target.stdout,
+    );
 
     // Started with the *same* mounts as the thin container above, so $HOME is
     // a populated volume that could shadow a badly placed install.
