@@ -2986,6 +2986,13 @@ button.chat-rate-limit-badge {
   opacity: 0.85;
 }
 
+.scheduled-jobs-group .chats-more-hint {
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 6px 10px 6px 29px;
+  font-style: italic;
+}
+
 .queued-line {
   display: flex;
   align-items: center;

@@ -1190,6 +1190,13 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     return response;
   });
 
+  app.get('/api/planner/chats/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const chat = app.pocket.plannerChats.get(id);
+    if (!chat) return notFound(reply, 'Chat not found.');
+    return reply.send(chat);
+  });
+
   app.post('/api/planner/chats', async (request, reply) => {
     const parsed = CreatePlannerChatRequest.safeParse(request.body);
     if (!parsed.success) {

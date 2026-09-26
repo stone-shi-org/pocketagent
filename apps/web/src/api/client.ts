@@ -999,6 +999,9 @@ export function createApiClient(endpoint: HostEndpoint) {
         `/api/planner/chats${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ''}`,
       ),
 
+    getPlannerChat: (id: string) =>
+      request<PlannerChat>(`/api/planner/chats/${encodeURIComponent(id)}`),
+
     createPlannerChat: (body: CreatePlannerChatRequest) =>
       request<PlannerChat>('/api/planner/chats', { method: 'POST', body: JSON.stringify(body) }),
 

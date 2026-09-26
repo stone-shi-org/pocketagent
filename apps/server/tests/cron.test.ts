@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { CronService } from '../src/cron/index.js';
+import { CronService, formatCronRunTitle } from '../src/cron/index.js';
 import {
   MIGRATIONS,
   insertCronJob,
@@ -553,8 +553,12 @@ describe('cron worktree mode', () => {
     const db = openDatabase(':memory:');
     const clock = Date.parse('2026-08-28T12:00:00Z');
     let sentMessage = '';
+    let createdArgs: any = null;
     const plannerChats = {
-      create: () => ({ id: 'chat-456' }),
+      create: (args: any) => {
+        createdArgs = args;
+        return { id: 'chat-456' };
+      },
       sendMessage: async function* (_chatId: string, content: string) {
         sentMessage = content;
         yield { kind: 'turn_complete', id: 'evt-1', isError: false, completedAt: clock };
@@ -606,6 +610,8 @@ describe('cron worktree mode', () => {
     await cron.init();
 
     expect(sentMessage).toBe('Check notes and draft summary.');
+    expect(createdArgs.title).toBe('Pocket Agent Routine (2026-08-28 12:00)');
+    expect(createdArgs.cronJobId).toBe('job-pocket');
     const runs = readCronRuns(db, { jobId: 'job-pocket', limit: 10 });
     expect(runs).toHaveLength(1);
     expect(runs[0]?.agent).toBe('pocketagent');
@@ -613,6 +619,12 @@ describe('cron worktree mode', () => {
     expect(runs[0]?.agent_session_id).toBe('chat-456');
     expect(runs[0]?.status).toBe('succeeded');
     db.close();
+  });
+
+  it('formatCronRunTitle produces title with date-time suffix in specified timeZone', () => {
+    const timestamp = Date.parse('2026-09-26T00:30:00Z');
+    expect(formatCronRunTitle('Nightly Job', 'UTC', timestamp)).toBe('Nightly Job (2026-09-26 00:30)');
+    expect(formatCronRunTitle('Nightly Job', 'America/New_York', timestamp)).toBe('Nightly Job (2026-09-25 20:30)');
   });
 });
 

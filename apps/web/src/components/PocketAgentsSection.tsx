@@ -46,6 +46,7 @@ export function PocketAgentsSection({
 }: Props): JSX.Element | null {
   const api = useHostApi();
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [cronCollapsed, setCronCollapsed] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState<Set<string>>(() => new Set());
   // Which workspace's "..." menu is open, keyed by workspace id — same
   // one-at-a-time, keyed-by-owner pattern `ProjectList`'s `menuFor` uses.
@@ -70,6 +71,31 @@ export function PocketAgentsSection({
       else next.add(id);
       return next;
     });
+
+  const toggleCron = (id: string): void =>
+    setCronCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  // Auto-expand scheduled jobs if activeChatId belongs to a scheduled job chat
+  useEffect(() => {
+    if (activeChatId) {
+      for (const ws of workspaces ?? []) {
+        const wsChats = chats.filter((c) => c.workspaceId === ws.id);
+        if (wsChats.some((c) => c.id === activeChatId && Boolean(c.cronJobId))) {
+          setCronCollapsed((prev) => {
+            if (!prev.has(ws.id)) return prev;
+            const next = new Set(prev);
+            next.delete(ws.id);
+            return next;
+          });
+        }
+      }
+    }
+  }, [activeChatId, workspaces, chats]);
 
   const newChat = (workspaceId: string): void => {
     setBusy((prev) => new Set(prev).add(workspaceId));
@@ -152,8 +178,66 @@ export function PocketAgentsSection({
         const isCollapsed = collapsed.has(ws.id);
         const wsChats = chats.filter((c) => c.workspaceId === ws.id);
         const mainChats = wsChats.filter((c) => !c.parentChatId);
+        const cronChats = mainChats.filter((c) => Boolean(c.cronJobId));
+        const regularChats = mainChats.filter((c) => !c.cronJobId);
+        const isCronExpanded = !cronCollapsed.has(ws.id);
+        const visibleCronChats = cronChats.slice(0, 10);
         const mainChatIds = new Set(mainChats.map((c) => c.id));
         const orphanSubagentChats = wsChats.filter((c) => c.parentChatId && !mainChatIds.has(c.parentChatId));
+
+        const renderChatGroup = (chat: PlannerChat) => {
+          const children = wsChats.filter((c) => c.parentChatId === chat.id);
+          return (
+            <div key={chat.id} className="planner-chat-group">
+              <div className="chat-line master-chat-line">
+                <button
+                  type="button"
+                  className={`chat-row${activeChatId === chat.id ? ' active' : ''}`}
+                  onClick={() => onOpenChat(chat.id)}
+                  title={chat.title ?? 'Untitled chat'}
+                >
+                  <span className="chat-title">{chat.title ?? 'Untitled chat'}</span>
+                </button>
+                <button
+                  type="button"
+                  className="chat-remove"
+                  onClick={() => removeChat(chat.id)}
+                  aria-label={`Delete ${chat.title ?? 'Untitled chat'}`}
+                  title="Delete chat"
+                >
+                  <Icon name="close" size={14} />
+                </button>
+              </div>
+              {children.map((sub) => (
+                <div key={sub.id} className="chat-line subagent-chat-line">
+                  <button
+                    type="button"
+                    className={`chat-row subagent-chat-row${activeChatId === sub.id ? ' active' : ''}`}
+                    onClick={() => onOpenChat(sub.id)}
+                    title={sub.title ?? 'Untitled chat'}
+                  >
+                    <span className="chat-title">
+                      <span className="chat-planner-badge" title="Subagent chat">
+                        <Icon name="agent-generic" size={13} />
+                      </span>
+                      {sub.title ?? 'Untitled chat'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="chat-remove"
+                    onClick={() => removeChat(sub.id)}
+                    aria-label={`Delete ${sub.title ?? 'Untitled chat'}`}
+                    title="Delete chat"
+                  >
+                    <Icon name="close" size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          );
+        };
+
         return (
           <div key={ws.id}>
             <div className="project-head">
@@ -208,62 +292,43 @@ export function PocketAgentsSection({
                 </>
               )}
             </div>
-            {!isCollapsed && wsChats.length === 0 && (
+            {!isCollapsed && regularChats.length === 0 && cronChats.length === 0 && (
               <div className="project-empty">No chats yet</div>
             )}
-            {!isCollapsed &&
-              mainChats.map((chat) => {
-                const children = wsChats.filter((c) => c.parentChatId === chat.id);
-                return (
-                  <div key={chat.id} className="planner-chat-group">
-                    <div className="chat-line master-chat-line">
-                      <button
-                        type="button"
-                        className={`chat-row${activeChatId === chat.id ? ' active' : ''}`}
-                        onClick={() => onOpenChat(chat.id)}
-                        title={chat.title ?? 'Untitled chat'}
-                      >
-                        <span className="chat-title">{chat.title ?? 'Untitled chat'}</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="chat-remove"
-                        onClick={() => removeChat(chat.id)}
-                        aria-label={`Delete ${chat.title ?? 'Untitled chat'}`}
-                        title="Delete chat"
-                      >
-                        <Icon name="close" size={14} />
-                      </button>
-                    </div>
-                    {children.map((sub) => (
-                      <div key={sub.id} className="chat-line subagent-chat-line">
-                        <button
-                          type="button"
-                          className={`chat-row subagent-chat-row${activeChatId === sub.id ? ' active' : ''}`}
-                          onClick={() => onOpenChat(sub.id)}
-                          title={sub.title ?? 'Untitled chat'}
-                        >
-                          <span className="chat-title">
-                            <span className="chat-planner-badge" title="Subagent chat">
-                              <Icon name="agent-generic" size={13} />
-                            </span>
-                            {sub.title ?? 'Untitled chat'}
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          className="chat-remove"
-                          onClick={() => removeChat(sub.id)}
-                          aria-label={`Delete ${sub.title ?? 'Untitled chat'}`}
-                          title="Delete chat"
-                        >
-                          <Icon name="close" size={14} />
-                        </button>
+            {!isCollapsed && regularChats.map(renderChatGroup)}
+            {!isCollapsed && cronChats.length > 0 && (
+              <div className="subagents-group scheduled-jobs-group">
+                <div className="subagents-head project-head">
+                  <button
+                    type="button"
+                    className="project-name subagents-toggle"
+                    onClick={() => toggleCron(ws.id)}
+                    aria-expanded={isCronExpanded}
+                    title="Scheduled jobs"
+                  >
+                    <span className="project-icon">
+                      <Icon name="clock" className="folder" />
+                    </span>
+                    <span className="project-label">Scheduled jobs</span>
+                    <Icon
+                      name="chevron-down"
+                      className={`project-caret${isCronExpanded ? '' : ' closed'}`}
+                    />
+                    <span className="project-count">{cronChats.length}</span>
+                  </button>
+                </div>
+                {isCronExpanded && (
+                  <>
+                    {visibleCronChats.map(renderChatGroup)}
+                    {cronChats.length > 10 && (
+                      <div className="chats-more-hint" title="Older runs can be opened from the Scheduled Job page">
+                        Showing latest 10 runs
                       </div>
-                    ))}
-                  </div>
-                );
-              })}
+                    )}
+                  </>
+                )}
+              </div>
+            )}
             {!isCollapsed &&
               orphanSubagentChats.map((chat) => (
                 <div key={chat.id} className="chat-line subagent-chat-line">

@@ -879,6 +879,10 @@ export class PlannerChatService {
      * PA-75: provenance for planner-spawned subagent chats.
      */
     parentChatId?: string | null;
+    /**
+     * PA-106: provenance for scheduled-job chats.
+     */
+    cronJobId?: string | null;
   }): PlannerChat {
     const workspace = input.workspaceId
       ? this.opts.plannerWorkspaces.get(input.workspaceId)
@@ -899,6 +903,7 @@ export class PlannerChatService {
       lastActivityAt: now,
       skipToolApprovalsEnabled: input.skipToolApprovals === true,
       parentChatId: input.parentChatId ?? null,
+      cronJobId: input.cronJobId ?? null,
       busy: false,
     };
     insertPlannerChat(this.opts.db, chat);

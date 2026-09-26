@@ -1343,6 +1343,13 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE planner_workspaces ADD COLUMN live_provider TEXT NOT NULL DEFAULT 'pipeline';
   `,
+
+  // PA-106: provenance for planner chats spawned by scheduled jobs. Links a
+  // Pocket Agent chat back to the cron job that created it.
+  `
+  ALTER TABLE planner_chats ADD COLUMN cron_job_id TEXT REFERENCES cron_jobs(id) ON DELETE SET NULL;
+  CREATE INDEX IF NOT EXISTS idx_planner_chats_cron ON planner_chats (cron_job_id);
+  `,
 ];
 
 /**
@@ -1602,6 +1609,29 @@ export function openDatabase(databasePath: string): Db {
   );
   if (plannerWorkspaceColumns.size > 0 && !plannerWorkspaceColumns.has('live_provider')) {
     db.exec("ALTER TABLE planner_workspaces ADD COLUMN live_provider TEXT NOT NULL DEFAULT 'pipeline'");
+  }
+  // PA-106, same positional-migration hazard: probe planner_chats.cron_job_id
+  if (plannerChatColumns.size > 0 && !plannerChatColumns.has('cron_job_id')) {
+    db.exec('ALTER TABLE planner_chats ADD COLUMN cron_job_id TEXT REFERENCES cron_jobs(id) ON DELETE SET NULL');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_planner_chats_cron ON planner_chats (cron_job_id)');
+  }
+  // Backfill cron_job_id for historical runs where cron_runs recorded agent_session_id
+  if (plannerChatColumns.size > 0) {
+    db.exec(`
+      UPDATE planner_chats
+         SET cron_job_id = (
+           SELECT job_id FROM cron_runs
+            WHERE cron_runs.agent_session_id = planner_chats.id
+              AND job_id IS NOT NULL
+            LIMIT 1
+         )
+       WHERE cron_job_id IS NULL
+         AND EXISTS (
+           SELECT 1 FROM cron_runs
+            WHERE cron_runs.agent_session_id = planner_chats.id
+              AND job_id IS NOT NULL
+         )
+    `);
   }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 

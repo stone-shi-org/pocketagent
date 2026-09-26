@@ -395,7 +395,14 @@ export function PlannerChatPage({
         api.plannerChatHistory(chatId),
         api.listPlannerChatSubagents(chatId).catch(() => ({ subagents: [], plannerChats: [] })),
       ]);
-      const found = chats.find((c) => c.id === chatId) ?? null;
+      let found = chats.find((c) => c.id === chatId) ?? null;
+      if (!found) {
+        try {
+          found = await api.getPlannerChat(chatId);
+        } catch {
+          // not found
+        }
+      }
       setChat(found);
       setMissing(found === null);
       setModels(modelList);
@@ -669,8 +676,13 @@ export function PlannerChatPage({
           controller.signal,
         );
         if (wasUntitled) {
-          const { chats } = await api.listPlannerChats();
-          setChat((prev) => chats.find((c) => c.id === chatId) ?? prev);
+          try {
+            const updated = await api.getPlannerChat(chatId);
+            setChat(updated);
+          } catch {
+            const { chats } = await api.listPlannerChats();
+            setChat((prev) => chats.find((c) => c.id === chatId) ?? prev);
+          }
         }
       } catch (err) {
         if (controller.signal.aborted || (err as Error)?.name === 'AbortError') return;

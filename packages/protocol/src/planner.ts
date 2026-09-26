@@ -484,6 +484,11 @@ export const PlannerChat = z.object({
    */
   parentChatId: z.string().nullable().optional(),
   /**
+   * PA-106: provenance for scheduled-job chats. Points to the cron job that
+   * created this chat.
+   */
+  cronJobId: z.string().nullable().optional(),
+  /**
    * PA-76: true when a turn is currently executing or waiting for a decision on this chat.
    */
   busy: z.boolean().default(false),

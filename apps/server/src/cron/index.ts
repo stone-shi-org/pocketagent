@@ -499,12 +499,14 @@ export class CronService {
       return readCronRun(this.db, runId) as CronRunRow;
     }
 
+    const title = formatCronRunTitle(job.name, job.time_zone, startedAt);
     let chat: ReturnType<PlannerChatService['create']>;
     try {
       chat = plannerChats.create({
         workspaceId: ws.id,
-        title: job.name,
+        title,
         modelId: job.model ?? undefined,
+        cronJobId: job.id,
       });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -583,7 +585,7 @@ export class CronService {
     return {
       cwd: job.cwd,
       agent: job.agent,
-      title: job.name,
+      title: formatCronRunTitle(job.name, job.time_zone, scheduledFor),
       prompt: job.prompt,
       skipPermissions: job.skip_permissions === 1,
       model: job.model,
@@ -884,6 +886,29 @@ function parsePreset(json: string | null): CronSchedulePreset | null {
     return JSON.parse(json) as CronSchedulePreset;
   } catch {
     return null;
+  }
+}
+
+/**
+ * PA-106: Mint a human-readable session title with timestamp suffix in the job's timezone,
+ * e.g. "Nightly Sync (2026-09-26 00:00)".
+ */
+export function formatCronRunTitle(name: string, timeZone: string, timestamp: number): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(new Date(timestamp));
+    const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '00';
+    return `${name} (${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')})`;
+  } catch {
+    const d = new Date(timestamp);
+    return `${name} (${d.toISOString().slice(0, 16).replace('T', ' ')})`;
   }
 }
 

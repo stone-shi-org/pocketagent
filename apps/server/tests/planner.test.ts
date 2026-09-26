@@ -704,6 +704,16 @@ describe('planner routes over HTTP', () => {
     expect(chats.find((c: { id: string }) => c.id === chat.id).lastModelId).toBe('gpt-4o');
   });
 
+  it('GET /api/planner/chats/:id returns chat by id or 404', async () => {
+    const chat = (await post('/api/planner/chats', { title: 'Test Chat' })).json();
+    const fetched = (await get(`/api/planner/chats/${chat.id}`)).json();
+    expect(fetched.id).toBe(chat.id);
+    expect(fetched.title).toBe('Test Chat');
+
+    const notFound = await get('/api/planner/chats/non-existent-id');
+    expect(notFound.statusCode).toBe(404);
+  });
+
   it('settings default to unconfigured, off, and no remembered model', async () => {
     const res = await get('/api/planner/settings');
     expect(res.statusCode).toBe(200);

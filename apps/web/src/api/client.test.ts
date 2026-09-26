@@ -236,3 +236,13 @@ describe('api.interruptPlannerChat (PA-99)', () => {
     expect(abortedSignalPassed).toBe(true);
   });
 });
+
+describe('api.getPlannerChat (PA-106)', () => {
+  it('fetches /api/planner/chats/:id with URL encoding', async () => {
+    const { calls } = mockFetch(200, { id: 'chat/123', title: 'Test Chat' });
+    const res = await api.getPlannerChat('chat/123');
+
+    expect(calls[0]?.url).toBe('/api/planner/chats/chat%2F123');
+    expect(res.title).toBe('Test Chat');
+  });
+});

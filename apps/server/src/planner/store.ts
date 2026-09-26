@@ -664,6 +664,7 @@ interface PlannerChatDbRow {
   last_activity_at: number;
   skip_tool_approvals: number;
   parent_chat_id?: string | null;
+  cron_job_id?: string | null;
 }
 
 function chatFromDbRow(row: PlannerChatDbRow): PlannerChat {
@@ -677,6 +678,7 @@ function chatFromDbRow(row: PlannerChatDbRow): PlannerChat {
     lastActivityAt: row.last_activity_at,
     skipToolApprovalsEnabled: row.skip_tool_approvals === 1,
     parentChatId: row.parent_chat_id ?? null,
+    cronJobId: row.cron_job_id ?? null,
     busy: false,
   };
 }
@@ -710,13 +712,14 @@ export function insertPlannerChat(db: Db, chat: PlannerChat): void {
   db.prepare(
     `INSERT INTO planner_chats
        (id, workspace_id, workspace_name, title, last_model_id, created_at, last_activity_at,
-        skip_tool_approvals, parent_chat_id)
+        skip_tool_approvals, parent_chat_id, cron_job_id)
      VALUES (@id, @workspaceId, @workspaceName, @title, @lastModelId, @createdAt, @lastActivityAt,
-        @skipToolApprovals, @parentChatId)`,
+        @skipToolApprovals, @parentChatId, @cronJobId)`,
   ).run({
     ...chat,
     skipToolApprovals: chat.skipToolApprovalsEnabled ? 1 : 0,
     parentChatId: chat.parentChatId ?? null,
+    cronJobId: chat.cronJobId ?? null,
   });
 }
 
