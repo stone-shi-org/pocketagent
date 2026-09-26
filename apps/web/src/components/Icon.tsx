@@ -193,12 +193,16 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
 
-  // A server chassis with status LEDs and drive slots: "a remote host/backend".
+  // One machine: a single rounded unit with a status LED and a slot (PA-107).
+  // Deliberately the same vocabulary as `agents` — rounded rect, a filled dot
+  // — so a host tile and the rail's "All" tile read as one family at 18px.
+  // The two-bay chassis it replaced (still `server`) was busy at that size.
+  // Used for a host everywhere one is drawn: rail, sheet and header chip.
   host: (
     <>
-      <rect x="3" y="4.5" width="18" height="6.5" rx="1.5" />
-      <rect x="3" y="13" width="18" height="6.5" rx="1.5" />
-      <path d="M7 7.75h.01M14 7.75h3M7 16.25h.01M14 16.25h3" />
+      <rect x="3.5" y="6" width="17" height="12" rx="2.5" />
+      <circle cx="8" cy="12" r="1" fill="currentColor" stroke="none" />
+      <path d="M12 12h4.5" />
     </>
   ),
 

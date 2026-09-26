@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { isHubHostId } from '@pocketagent/protocol';
 import { hostEndpoint, normalizeBasePath } from '../api/host.js';
 import {
   addLocalHost,
   defaultBasePathFor,
+  generateHostId,
   loadLocalHosts,
   localHostProblem,
   removeLocalHost,
   saveLocalHosts,
+  slugifyHostName,
 } from './registry.js';
 
 /** A minimal in-memory stand-in for the real `localStorage`. */
@@ -116,5 +119,49 @@ describe('localHostProblem', () => {
     expect(localHostProblem({ id: 'dev03', label: 'x', basePath: ' / ' }, existing, ['local'])).toContain(
       'cannot be empty',
     );
+  });
+});
+
+describe('generateHostId (PA-107)', () => {
+  it('slugifies the name a human typed', () => {
+    expect(generateHostId('Second workstation', [])).toBe('second-workstation');
+    expect(generateHostId('  Stone’s Dev-01!! ', [])).toBe('stone-s-dev-01');
+    expect(generateHostId('Büro Rechner', [])).toBe('buro-rechner');
+  });
+
+  it('truncates to the id pattern, never ending on a hyphen', () => {
+    const id = generateHostId(`${'a'.repeat(39)} b`, []);
+    expect(id.length).toBeLessThanOrEqual(40);
+    expect(isHubHostId(id)).toBe(true);
+    expect(id).toBe('a'.repeat(39));
+  });
+
+  it('suffixes past a collision, including the reserved default id', () => {
+    expect(generateHostId('dev', ['dev'])).toBe('dev-2');
+    expect(generateHostId('dev', ['dev', 'dev-2', 'dev-3'])).toBe('dev-4');
+    expect(generateHostId('Local', ['local'])).toBe('local-2');
+  });
+
+  it('keeps a suffixed long id inside 40 characters', () => {
+    const long = 'x'.repeat(40);
+    const id = generateHostId(long, [long]);
+    expect(id).toBe(`${'x'.repeat(38)}-2`);
+    expect(isHubHostId(id)).toBe(true);
+  });
+
+  it('falls back to a random slug when nothing survives slugifying', () => {
+    expect(slugifyHostName('開発機')).toBe('');
+    let n = 0;
+    const seq = [0, 0, 0, 0, 0, 0, 0.99, 0.99, 0.99, 0.99, 0.99, 0.99];
+    const random = (): number => seq[n++ % seq.length]!;
+    // The first candidate is taken, so the second draw is used.
+    expect(generateHostId('開発機', ['host-aaaaaa'], random)).toBe('host-999999');
+    expect(isHubHostId(generateHostId('!!!', []))).toBe(true);
+  });
+
+  it('always produces a valid id', () => {
+    for (const name of ['a', '-', 'A--B', '9', 'ü', 'x'.repeat(300), 'dev 02 (backup)']) {
+      expect(isHubHostId(generateHostId(name, []))).toBe(true);
+    }
   });
 });

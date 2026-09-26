@@ -307,6 +307,7 @@ export function ProjectsPage({
       {showHostSheet && (
         <HostSheet
           hosts={hosts}
+          hubVersion={directory.hubVersion}
           selectedHostId={selected}
           onSelectAll={() => nav.goToHost(null)}
           onSelect={(hostId) => nav.goToHost(hostId)}

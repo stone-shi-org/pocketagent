@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  HealthResponse,
   HostListResponse,
   HubHostListResponse,
   type HubHostEntry,
@@ -22,6 +23,7 @@ import { backoffMs, isDue, PROBE_TIMEOUT_MS, STATUS_MS } from './poll-policy.js'
 import {
   addLocalHost,
   defaultBasePathFor,
+  generateHostId,
   loadLocalHosts,
   localHostProblem,
   removeLocalHost,
@@ -62,12 +64,30 @@ export interface HostDirectory {
   readonly canManage: boolean;
   /** Disclosure shown in the add dialog — the two sources promise different things. */
   readonly manageHint: string;
-  /** Adds a host. Resolves to an error message, or null on success. */
+  /**
+   * The id `add` would give a host with this name right now (PA-107): a slug
+   * of the name, suffixed past whatever this directory already holds. A
+   * preview only — local mode derives the default path prefix from it, and
+   * the dialog shows it — because `add` itself re-derives on a Hub conflict.
+   */
+  readonly proposeId: (label: string) => string;
+  /**
+   * Adds a host under `id` (normally `proposeId(label)`). Resolves to the id
+   * it was actually stored under — which differs from the one passed only when
+   * another browser took that id on the Hub first — or to an error message.
+   */
   readonly add: (entry: {
     id: string;
     label: string;
     basePath: string;
-  }) => Promise<string | null>;
+  }) => Promise<{ id: string; error: null } | { id: null; error: string }>;
+  /**
+   * The Hub's own build version, from its `/health` (PA-107) — null in local
+   * mode, where there is no Hub, and until the Hub has answered. The bundle
+   * this page runs is the Hub's too, but reading the process says which
+   * build is *running* rather than which one was once shipped to this tab.
+   */
+  readonly hubVersion: string | null;
   readonly remove: (hostId: string) => Promise<string | null>;
   /**
    * Exchanges a backend's master token for a scoped `pah_` credential.
@@ -186,6 +206,8 @@ async function probeHubRegistry(): Promise<{
 interface Entry {
   readonly endpoint: HostEndpoint;
   readonly label: string;
+  /** See `hostRecordFor`'s `labelIsPlaceholder`. */
+  readonly labelIsPlaceholder?: boolean;
   readonly isDefault: boolean;
   readonly canRemove: boolean;
   /** Set when the Hub says this host is registered but switched off. */
@@ -203,7 +225,13 @@ interface Entry {
 
 function entriesFromLocal(local: readonly LocalHostEntry[], defaultLabel: string): Entry[] {
   return [
-    { endpoint: DEFAULT_HOST, label: defaultLabel, isDefault: true, canRemove: false },
+    {
+      endpoint: DEFAULT_HOST,
+      label: defaultLabel,
+      labelIsPlaceholder: true,
+      isDefault: true,
+      canRemove: false,
+    },
     ...local.map((row) => ({
       endpoint: hostEndpoint(row.id, row.basePath),
       label: row.label,
@@ -348,6 +376,7 @@ export function useHostDirectory(): HostDirectory {
           hostRecordFor({
             endpoint: entry.endpoint,
             label: entry.label,
+            ...(entry.labelIsPlaceholder ? { labelIsPlaceholder: true } : {}),
             probe: probes[entry.endpoint.id],
             isDefault: entry.isDefault,
             canRemove: entry.canRemove,
@@ -377,30 +406,93 @@ export function useHostDirectory(): HostDirectory {
     );
   }, [hosts]);
 
+  // Every id this directory already routes, plus the reserved default one. In
+  // hub mode the registry's own row ids too: the default host is aliased to
+  // `local` there, so its real id would otherwise look free.
+  const takenIds = useMemo<string[]>(
+    () => [
+      DEFAULT_HOST_ID,
+      ...entries.map((entry) => entry.endpoint.id),
+      ...entries.flatMap((entry) => (entry.hubHostId ? [entry.hubHostId] : [])),
+    ],
+    [entries],
+  );
+
+  const proposeId = useCallback(
+    (label: string): string => generateHostId(label, takenIds),
+    [takenIds],
+  );
+
   const add = useCallback(
-    async (entry: { id: string; label: string; basePath: string }): Promise<string | null> => {
+    async (entry: {
+      id: string;
+      label: string;
+      basePath: string;
+    }): Promise<{ id: string; error: null } | { id: null; error: string }> => {
       if (source === 'hub') {
-        try {
-          const response = await fetch('/api/hub/hosts', {
+        const post = (id: string): Promise<Response> =>
+          fetch('/api/hub/hosts', {
             method: 'POST',
             credentials: 'same-origin',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ id: entry.id, label: entry.label, baseUrl: entry.basePath }),
+            body: JSON.stringify({ id, label: entry.label, baseUrl: entry.basePath }),
           });
-          if (!response.ok) return 'The Hub refused that host.';
+        const refusal = async (response: Response): Promise<string> => {
+          const body = (await response.json().catch(() => null)) as {
+            error?: { message?: string };
+          } | null;
+          return body?.error?.message ?? 'The Hub refused that host.';
+        };
+        try {
+          let id = entry.id;
+          let response = await post(id);
+          if (response.status === 409) {
+            // Someone else took the proposed id between our last registry read
+            // and this POST. Re-derive against the fresh list, once — a second
+            // clash in the same instant is not worth a loop.
+            const fresh = await probeHubRegistry();
+            applyRegistry(fresh);
+            id = generateHostId(entry.label, [
+              ...takenIds,
+              ...(fresh?.hosts.map((host) => host.id) ?? []),
+              id,
+            ]);
+            response = await post(id);
+          }
+          if (!response.ok) return { id: null, error: await refusal(response) };
           applyRegistry(await probeHubRegistry());
-          return null;
+          return { id, error: null };
         } catch {
-          return 'Could not reach the Hub.';
+          return { id: null, error: 'Could not reach the Hub.' };
         }
       }
       const problem = localHostProblem(entry, local, [DEFAULT_HOST_ID]);
-      if (problem) return problem;
+      if (problem) return { id: null, error: problem };
       setLocal(addLocalHost(entry, local));
-      return null;
+      return { id: entry.id, error: null };
     },
-    [source, local, applyRegistry],
+    [source, local, applyRegistry, takenIds],
   );
+
+  // The Hub's own version (PA-107), read once the source is known to be a Hub.
+  // In hub mode the bare `/health` is the Hub's — the default host is mounted
+  // at `/api/*` only — so this is unambiguous; in local mode the same URL is
+  // the backend's, which is exactly why it is not read there.
+  const [hubVersion, setHubVersion] = useState<string | null>(null);
+  useEffect(() => {
+    if (source !== 'hub') return;
+    let cancelled = false;
+    void fetch('/health', { credentials: 'same-origin', headers: { accept: 'application/json' } })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body: unknown) => {
+        const parsed = HealthResponse.safeParse(body);
+        if (!cancelled && parsed.success) setHubVersion(parsed.data.version);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [source]);
 
   const remove = useCallback(
     async (hostId: string): Promise<string | null> => {
@@ -508,7 +600,9 @@ export function useHostDirectory(): HostDirectory {
     // hints. What would *not* be honest is offering nothing until PA-66 lands.
     canManage: true,
     manageHint: source === 'hub' ? HUB_HINT : LOCAL_HINT,
+    proposeId,
     add,
+    hubVersion: source === 'hub' ? hubVersion : null,
     remove,
     bind,
     update,

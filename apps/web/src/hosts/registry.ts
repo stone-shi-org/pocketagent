@@ -131,3 +131,74 @@ export function removeLocalHost(id: string, existing: readonly LocalHostEntry[])
   saveLocalHosts(next);
   return next;
 }
+
+/** `HUB_HOST_ID_PATTERN`'s length bound, restated for the truncation below. */
+const MAX_HOST_ID_LENGTH = 40;
+
+/**
+ * A routing id derived from the name a human typed (PA-107).
+ *
+ * The id is a URL slug (`#/h/<id>/`, `/h/<id>/api/**`), and asking a person
+ * to invent one next to a free-text name was asking them to name the same
+ * thing twice. So it is generated here, **once**, at add time — and never
+ * again: renaming a host edits `label` only, because every bookmark, deep
+ * link, persisted tab (`t:<hostId>:<sessionId>`) and Hub-push deep link keys
+ * on the id. Re-deriving it on rename would silently break all of them.
+ *
+ * Generated in the browser rather than by the Hub, and deliberately so: the
+ * local directory has no server to ask, so the browser needs this generator
+ * regardless, and one generator for both sources means one set of rules. It
+ * also leaves `CreateHubHostRequest.id` required and the Hub's schema
+ * untouched, so an older bundle keeps working against a newer Hub and vice
+ * versa. The Hub still refuses a duplicate (409), which is what covers two
+ * browsers adding at once — `directory.add` re-derives against the fresh list
+ * and retries once.
+ *
+ * Rules: NFKD-fold and drop diacritics ("Büro" → "buro"), lowercase, collapse
+ * every other run to `-`, trim hyphens, and truncate so the result *plus any
+ * collision suffix* still fits the pattern. A clash gets `-2`, `-3`, … A name
+ * with nothing slug-able in it (e.g. only CJK) gets `host-<random>`, because a
+ * transliteration table is not worth carrying for an id nobody has to read.
+ */
+export function generateHostId(
+  name: string,
+  existingIds: Iterable<string>,
+  random: () => number = Math.random,
+): string {
+  const taken = new Set(existingIds);
+  const base = slugifyHostName(name);
+  if (base === '') {
+    for (;;) {
+      const candidate = `host-${randomSuffix(random)}`;
+      if (!taken.has(candidate)) return candidate;
+    }
+  }
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n += 1) {
+    const suffix = `-${n}`;
+    const stem = trimHyphens(base.slice(0, MAX_HOST_ID_LENGTH - suffix.length));
+    const candidate = `${stem}${suffix}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/** The slug half of `generateHostId`, exported for its tests. Empty when nothing survives. */
+export function slugifyHostName(name: string): string {
+  const folded = name
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-');
+  return trimHyphens(trimHyphens(folded).slice(0, MAX_HOST_ID_LENGTH));
+}
+
+function trimHyphens(value: string): string {
+  return value.replace(/^-+|-+$/g, '');
+}
+
+function randomSuffix(random: () => number): string {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let out = '';
+  for (let i = 0; i < 6; i += 1) out += alphabet[Math.floor(random() * alphabet.length)];
+  return out;
+}

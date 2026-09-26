@@ -52,8 +52,16 @@ export interface HostProbe {
 export interface HostRecord {
   /** Address, and the id that appears in `#/h/<id>/...`. */
   readonly endpoint: HostEndpoint;
-  /** What to show: the host's own reported name once known, else its id. */
+  /**
+   * What to call this host, everywhere it is named: the name a human gave it
+   * when registering it (PA-107). The backend's reported hostname is
+   * `reportedName`, secondary text only — the one exception is the local-mode
+   * default host, which has no stored name at all, so its hostname still
+   * stands in for the placeholder `local`.
+   */
   readonly label: string;
+  /** `HostInfo.name` — the machine's own hostname — once a probe has returned it. */
+  readonly reportedName: string | null;
   readonly status: HostStatus;
   readonly compatibility: HostCompatibility | null;
   /**
@@ -196,6 +204,12 @@ export function hostMessageFor(
 export function hostRecordFor(entry: {
   endpoint: HostEndpoint;
   label: string;
+  /**
+   * True when `label` is a placeholder rather than a name anyone chose — the
+   * local-mode default host, which is not a registry row and so has only its
+   * id. Only then may the backend's hostname replace it.
+   */
+  labelIsPlaceholder?: boolean;
   probe?: HostProbe | undefined;
   isDefault?: boolean;
   canRemove?: boolean;
@@ -212,12 +226,18 @@ export function hostRecordFor(entry: {
     ? { status: entry.forced.status, compatibility: null }
     : hostStatusFor(entry.probe);
   const info = entry.probe?.info ?? null;
-  // The host's own name wins once known: an operator recognises `stone-dev01`,
-  // not the slug they happened to type when registering it.
-  const label = info?.name ?? entry.label;
+  // The registered name wins (PA-107). It used to be the other way round —
+  // "an operator recognises `stone-dev01`, not the slug they typed" — which
+  // was true while the dialog asked for a slug, and made the name field a
+  // no-op the moment a probe came back. With the id generated, the label is
+  // the one thing the user chose, so it is what they see. The hostname stays
+  // available as `reportedName`, and still stands in for a placeholder.
+  const reportedName = info?.name ?? null;
+  const label = entry.labelIsPlaceholder ? (reportedName ?? entry.label) : entry.label;
   return {
     endpoint: entry.endpoint,
     label,
+    reportedName,
     status,
     compatibility,
     message:
@@ -283,6 +303,16 @@ export function hostDriftMessage(record: HostRecord): string | null {
   return describeVersionDrift(record.label, record.drift);
 }
 
+/**
+ * A host's tooltip-sized self-description: its name, then the machine's own
+ * hostname when that says something the name does not (PA-107).
+ */
+export function hostTitle(record: HostRecord): string {
+  return record.reportedName !== null && record.reportedName !== record.label
+    ? `${record.label} (${record.reportedName})`
+    : record.label;
+}
+
 /** Short text beside a dot: "3 running", "offline", "v-mismatch", "…". */
 export function hostStatusSummary(record: HostRecord): string {
   switch (record.status) {
@@ -315,4 +345,40 @@ export function hostDotClass(status: HostStatus): string {
     default:
       return 'host-dot';
   }
+}
+
+/**
+ * The "Server …" half of the build-version line (PA-107).
+ *
+ * That line used to be the *web bundle's* version with no label, which reads
+ * as "the server's version" and is only true standalone: behind a Hub the Hub
+ * serves the bundle. So it now names the component and reads the selected
+ * host's own `HostInfo.version`. In the aggregated view no single host is
+ * "the" server, so it summarises instead — one version if the fleet agrees,
+ * a count if it does not (the per-host figures are in `detail`).
+ *
+ * `text` is null only when nothing has reported a version yet.
+ */
+export function serverVersionLine(
+  hosts: readonly HostRecord[],
+  selected: HostRecord | null,
+): { text: string | null; detail: string | null } {
+  if (selected !== null) {
+    return {
+      text: selected.version === null ? null : `Server ${selected.version}`,
+      detail: null,
+    };
+  }
+  const reported = hosts.filter((host) => host.version !== null);
+  const versions = [...new Set(reported.map((host) => host.version!))];
+  const detail =
+    reported.length === 0 ? null : reported.map((host) => `${host.label}: ${host.version}`).join('\n');
+  if (versions.length === 0) return { text: null, detail };
+  if (versions.length === 1) {
+    return {
+      text: hosts.length > 1 ? `Servers ${versions[0]} (all ${hosts.length})` : `Server ${versions[0]}`,
+      detail,
+    };
+  }
+  return { text: `Servers: ${versions.length} versions`, detail };
 }

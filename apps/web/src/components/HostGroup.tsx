@@ -3,6 +3,7 @@ import {
   hostDotClass,
   hostDriftMessage,
   hostStatusSummary,
+  hostTitle,
   type HostRecord,
 } from '../hosts/host-status.js';
 
@@ -73,7 +74,9 @@ export function HostGroup({
         </button>
         <button type="button" className="host-group-name" onClick={onSelect}>
           <span className={hostDotClass(host.status)} aria-hidden="true" />
-          <span className="host-name">{host.label}</span>
+          <span className="host-name" title={hostTitle(host)}>
+            {host.label}
+          </span>
           <span className="host-group-summary">{hostStatusSummary(host)}</span>
           {/* PA-69: drift is advisory, so it rides on the host row as a quiet
               badge rather than as a notice competing with the unusable

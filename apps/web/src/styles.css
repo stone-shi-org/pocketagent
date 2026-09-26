@@ -3554,14 +3554,43 @@ button.chat-rate-limit-badge {
 }
 
 /* Same size/color family as `.version-footer` (Settings' own copy of this
-   string), just left-aligned and not stacked below a whole dialog. */
+   string), just left-aligned and not stacked below a whole dialog. One line
+   per component (PA-107): the single `nowrap` + ellipsis line this replaced
+   cut the build date off, and the full strings are short enough to stack. */
 .sidebar-version {
   font-size: 11px;
   color: var(--text-dim);
   opacity: 0.75;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Each line is one component's version; a very narrow sidebar may still clip
+   one, but never mid-way into another, and the tooltip holds everything. */
+.sidebar-version .build-version-line {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.build-version-update {
+  color: var(--accent);
+}
+
+.version-footer .build-version-line {
+  display: block;
+}
+
+.host-sheet-hub-version {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.host-id-preview code {
+  font-size: 11.5px;
 }
 
 .sidebar-head .menu {
@@ -7240,6 +7269,20 @@ button.chat-rate-limit-badge {
   flex: 1;
   min-width: 0;
   flex-wrap: wrap;
+}
+
+/* A host row reads dot · icon · name · detail on one line (PA-107), with only
+   the problem/drift sentences (`flex-basis: 100%`) wrapping below. The base
+   `.sheet-option` is a column, which stacked every one of those on its own
+   line — tolerable with a dot and a name, not with a glyph added between. */
+.host-sheet .sheet-option {
+  flex-direction: row;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.host-sheet .host-sheet-status {
+  margin-left: auto;
 }
 
 .host-sheet-problem {

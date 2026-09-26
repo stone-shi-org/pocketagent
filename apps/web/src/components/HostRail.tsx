@@ -3,6 +3,7 @@ import {
   hostDotClass,
   hostDriftMessage,
   hostStatusSummary,
+  hostTitle,
   type HostRecord,
 } from '../hosts/host-status.js';
 
@@ -69,7 +70,7 @@ export function HostRail({
           // exactly the case the tile has no room to spell out. It cannot
           // collide with `host.message`: a host with a message is offline or
           // incompatible, and `hostDriftMessage` is null for both.
-          title={host.message ?? drift ?? `${host.label} — ${hostStatusSummary(host)}`}
+          title={host.message ?? drift ?? `${hostTitle(host)} — ${hostStatusSummary(host)}`}
         >
           <div className="host-tile-icon">
             <Icon name="host" size={18} />

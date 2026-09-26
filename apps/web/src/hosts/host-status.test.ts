@@ -7,6 +7,8 @@ import {
   hostDotClass,
   hostDriftMessage,
   hostRecordFor,
+  hostTitle,
+  serverVersionLine,
   hostStatusFor,
   hostStatusSummary,
   withVersionDrift,
@@ -59,13 +61,30 @@ describe('hostStatusFor', () => {
 });
 
 describe('hostRecordFor', () => {
-  it('prefers the host own reported name over the registered label', () => {
+  it('keeps the registered name over the host own reported name (PA-107)', () => {
     const record = hostRecordFor({
       endpoint: hostEndpoint('dev02', '/h/dev02'),
-      label: 'dev02',
+      label: 'Second workstation',
       probe: probeOk({ name: 'stone-dev02' }),
     });
-    expect(record.label).toBe('stone-dev02');
+    expect(record.label).toBe('Second workstation');
+    expect(record.reportedName).toBe('stone-dev02');
+    expect(hostTitle(record)).toBe('Second workstation (stone-dev02)');
+  });
+
+  it('lets the hostname replace a placeholder label, and only a placeholder', () => {
+    const record = hostRecordFor({
+      endpoint: DEFAULT_HOST,
+      label: 'local',
+      labelIsPlaceholder: true,
+      probe: probeOk({ name: 'stone-dev01' }),
+    });
+    expect(record.label).toBe('stone-dev01');
+    expect(hostTitle(record)).toBe('stone-dev01');
+    // Before a probe answers there is nothing better than the placeholder.
+    expect(
+      hostRecordFor({ endpoint: DEFAULT_HOST, label: 'local', labelIsPlaceholder: true }).label,
+    ).toBe('local');
   });
 
   it('records the backend own id as an alias, so a sha-spelled bookmark resolves', () => {
@@ -112,7 +131,7 @@ describe('hostRecordFor', () => {
       probe: probeOk({ name: 'old-box', protocol: { min: 1, max: 2 } }),
     });
     expect(record.status).toBe('incompatible');
-    expect(record.message).toContain('old-box');
+    expect(record.message).toContain('dev02');
     expect(record.message).toContain(`v${PROTOCOL_VERSION}`);
   });
 
@@ -205,6 +224,7 @@ describe('version drift (PA-69)', () => {
         hostRecordFor({
           endpoint: DEFAULT_HOST,
           label: 'local',
+          labelIsPlaceholder: true,
           probe: probeOk({ name: 'stone-dev01', version: '1.4.2' }),
         }),
       ],
@@ -263,5 +283,28 @@ describe('version drift (PA-69)', () => {
     // it. This is that promise, from the other side.
     const [dev] = fleet('0.0.0-dev', '0.1.0');
     expect(dev!.drift.state).toBe('behind');
+  });
+});
+
+describe('serverVersionLine (PA-107)', () => {
+  const at = (id: string, version: string | null): HostRecord =>
+    hostRecordFor({
+      endpoint: hostEndpoint(id, `/h/${id}`),
+      label: id,
+      ...(version === null ? {} : { probe: probeOk({ name: id, version }) }),
+    });
+
+  it('names the selected host server version, not the bundle', () => {
+    expect(serverVersionLine([at('a', '1.2.0')], at('a', '1.2.0')).text).toBe('Server 1.2.0');
+    expect(serverVersionLine([at('a', null)], at('a', null)).text).toBeNull();
+  });
+
+  it('summarises the aggregated view instead of picking one host', () => {
+    expect(serverVersionLine([at('a', '1.2.0'), at('b', '1.2.0')], null).text).toBe(
+      'Servers 1.2.0 (all 2)',
+    );
+    const mixed = serverVersionLine([at('a', '1.2.0'), at('b', '1.3.0'), at('c', null)], null);
+    expect(mixed.text).toBe('Servers: 2 versions');
+    expect(mixed.detail).toBe('a: 1.2.0\nb: 1.3.0');
   });
 });

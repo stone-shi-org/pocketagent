@@ -19,7 +19,8 @@ import { HostSheet } from '../components/HostSheet.js';
 import { AddHostDialog } from '../components/AddHostDialog.js';
 import { BindHostDialog } from '../components/BindHostDialog.js';
 import { EditHostDialog } from '../components/EditHostDialog.js';
-import { findHostByManageId } from '../hosts/host-status.js';
+import { findHostByManageId, hostDriftMessage, serverVersionLine } from '../hosts/host-status.js';
+import { BuildVersions } from '../components/BuildVersions.js';
 import { HostProvider } from '../hosts/HostContext.js';
 import { useHostFleet } from '../hosts/useHostFleet.js';
 import { currentHostId, visibleHosts } from '../hosts/selected-host.js';
@@ -31,7 +32,6 @@ import { PocketAgentsSection } from '../components/PocketAgentsSection.js';
 import { ShellSection } from '../components/ShellSection.js';
 import { TabBar, type Tab } from '../components/TabBar.js';
 import { UsageBar } from '../components/UsageBar.js';
-import { formatBuildInfo } from '../version.js';
 import { OverflowMenu } from './ProjectsPage.js';
 import { ComposerPage } from './ComposerPage.js';
 import {
@@ -669,12 +669,27 @@ export function DesktopShell({
               compatibility={hereState.hostCompatibility}
               allHosts={nav.selection.mode === 'all' && !singleHost}
             />
-            {/* Which exact build is running, at a glance — same string
-                Settings shows (`formatBuildInfo`), but visible without
-                opening a dialog. Desktop-only: the phone header's
-                `.home-title` reuses the same `HostChip` but has no room for
-                a second line without wrapping the host name. */}
-            <span className="sidebar-version">{formatBuildInfo()}</span>
+            {/* Which exact builds are running, at a glance and labelled by
+                component (PA-107) — see `BuildVersions`. Desktop-only: the
+                phone header's `.home-title` reuses the same `HostChip` but
+                has no room for more lines; the phone's host sheet carries
+                the Hub line instead. */}
+            {(() => {
+              const allView = nav.selection.mode === 'all' && !singleHost;
+              const selectedRecord = allView
+                ? null
+                : (hosts.find((candidate) => candidate.endpoint.id === here) ?? null);
+              const line = serverVersionLine(hosts, selectedRecord);
+              return (
+                <BuildVersions
+                  className="sidebar-version"
+                  server={line.text}
+                  serverDetail={line.detail}
+                  drift={selectedRecord ? hostDriftMessage(selectedRecord) : null}
+                  hubVersion={directory.hubVersion}
+                />
+              );
+            })()}
           </div>
           <PushToggle compact />
           <button
@@ -938,7 +953,11 @@ export function DesktopShell({
                   // this same tab exactly as it did when these were their own
                   // full-pane routes below — only the container changed.
                   <Suspense fallback={<PageFallback />}>
-                    <SettingsPage onBack={() => closeTab(tab.id)} onApiError={onApiError} />
+                    <SettingsPage
+                      onBack={() => closeTab(tab.id)}
+                      onApiError={onApiError}
+                      hubVersion={directory.hubVersion}
+                    />
                   </Suspense>
                 ) : tab.route.name === 'cron' ? (
                   <Suspense fallback={<PageFallback />}>
@@ -1080,6 +1099,7 @@ export function DesktopShell({
       {showHostSheet && (
         <HostSheet
           hosts={hosts}
+          hubVersion={directory.hubVersion}
           selectedHostId={selectedHostId}
           onSelectAll={() => nav.goToHost(null)}
           onSelect={(hostId) => nav.goToHost(hostId)}

@@ -29,6 +29,12 @@ interface Props {
    * on screen, so it passes nothing here. Same split as `AgentsFleetPage`.
    */
   onBack?: () => void;
+  /**
+   * The Hub's own version, or null standalone (PA-107). A prop rather than a
+   * fetch because only the directory knows whether a Hub is present — this
+   * page is host-scoped, and its `/health` would be that *host's*.
+   */
+  hubVersion?: string | null;
 }
 
 /**
@@ -45,8 +51,24 @@ interface Props {
  * into its own constructor closure at boot and won't notice until the next
  * one — see `settings/fields.ts` for exactly why each one is or isn't live.
  */
-export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
+export function SettingsPage({ onApiError, onBack, hubVersion = null }: Props): JSX.Element {
   const api = useHostApi();
+  // This host's own build (PA-107). `/api/hosts` rather than `/health`: behind
+  // a Hub the default host is mounted at `/api/*` only, so a bare `/health`
+  // there is the Hub's, not this host's.
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listHosts()
+      .then((response) => {
+        if (!cancelled) setServerVersion(response.hosts[0]?.version ?? null);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
   const [data, setData] = useState<SettingsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<Set<string>>(new Set());
@@ -757,7 +779,11 @@ export function SettingsPage({ onApiError, onBack }: Props): JSX.Element {
         </div>
       </div>
 
-      <p className="version-footer">{formatBuildInfo()}</p>
+      <p className="version-footer">
+        <span className="build-version-line">Server {serverVersion ?? '…'}</span>
+        {hubVersion !== null && <span className="build-version-line">Hub {hubVersion}</span>}
+        <span className="build-version-line">Web UI {formatBuildInfo()}</span>
+      </p>
     </div>
   );
 }

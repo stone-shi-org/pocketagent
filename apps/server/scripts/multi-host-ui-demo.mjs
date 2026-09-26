@@ -35,9 +35,13 @@ const TOKEN = process.env.PA_TOKEN;
 const REPO = new URL('../../../', import.meta.url).pathname;
 const SHOTS = path.join(REPO, 'screenshots');
 
-/** The second host's id and prefix. Nothing serves this; that is the point. */
-const OTHER_ID = 'dev02';
+/**
+ * The second host's name, and the id the Add dialog derives from it (PA-107:
+ * the dialog asks for a name only). Nothing serves `/h/<id>`; that is the point.
+ */
 const OTHER_LABEL = 'Second box';
+const OTHER_ID = 'second-box';
+const RENAMED_LABEL = 'Renamed box';
 
 let failures = 0;
 let step = 0;
@@ -123,10 +127,18 @@ async function login(page) {
 
 /** Registers the unreachable second host through the UI being tested. */
 async function addHostThroughDialog(page) {
-  await page.waitForSelector('[role="dialog"][aria-label="Add host"]');
-  await page.fill('[role="dialog"][aria-label="Add host"] .field:nth-of-type(1) input', OTHER_ID);
-  await page.fill('[role="dialog"][aria-label="Add host"] .field:nth-of-type(2) input', OTHER_LABEL);
-  await page.click('[role="dialog"][aria-label="Add host"] button:has-text("Add host")');
+  const dialog = '[role="dialog"][aria-label="Add host"]';
+  await page.waitForSelector(dialog);
+  check(
+    (await page.locator(`${dialog} .field span:has-text("Host id")`).count()) === 0,
+    'the Add dialog asks for no id (PA-107)',
+  );
+  await page.fill(`${dialog} .field:nth-of-type(1) input`, OTHER_LABEL);
+  const preview = await until(async () =>
+    (await page.locator(`${dialog} .host-id-preview`).innerText()).includes(`#/h/${OTHER_ID}/`),
+  );
+  check(preview, 'and shows the id it derived from the name', `#/h/${OTHER_ID}/`);
+  await page.click(`${dialog} button:has-text("Add host")`);
   await until(async () => (await page.locator('[role="dialog"][aria-label="Add host"]').count()) === 0);
 }
 
@@ -197,7 +209,10 @@ try {
   if (sawProblem) {
     const text = (await problem.innerText()).trim();
     check(text.length > 0, 'with a legible reason', text.slice(0, 90));
-    check(/\/h\/dev02|did not answer|could not read/i.test(text), 'that names where it looked');
+    check(
+      text.includes(`/h/${OTHER_ID}`) || /did not answer|could not read/i.test(text),
+      'that names where it looked',
+    );
   }
   check(
     (await page.locator('.sidebar .chat-row').count()) > 0,
@@ -264,6 +279,58 @@ try {
     'and does not quietly open the session on another machine',
   );
   await page.screenshot({ path: path.join(SHOTS, 'multihost-unknown-host.png') });
+
+  heading('The sidebar names which component each version is (PA-107)');
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.desktop-shell', { timeout: 15_000 });
+  await until(async () => (await page.locator('.host-rail').count()) === 1);
+  // Tile 0 is "All"; tile 1 is the host serving this page, the one that answers.
+  await page.locator('.host-tile').nth(1).click();
+  const versionLabelled = await until(async () =>
+    /^Server \S+/.test((await page.locator('.sidebar-version .build-version-line').first().innerText()).trim()),
+  );
+  check(
+    versionLabelled,
+    'the first line is the selected host server version',
+    (await page.locator('.sidebar-version').innerText()).replace(/\n/g, ' | '),
+  );
+  const clipped = await page.$$eval('.sidebar-version .build-version-line', (lines) =>
+    lines.filter((line) => line.scrollWidth > line.clientWidth).length,
+  );
+  check(clipped === 0, 'and no line of it is truncated', `${clipped} clipped`);
+  check(
+    (await page.locator('.sidebar-version').getAttribute('title'))?.includes('Web UI') === true,
+    'with the web bundle build in the tooltip',
+  );
+
+  heading('A renamed host shows its new name everywhere, with no reload (PA-107)');
+  const loadsBeforeRename = loads;
+  await page.click('.sidebar-head .round-btn.plain');
+  await page.click('[role="menuitem"]:has-text("Hosts…")');
+  await page.waitForSelector('.host-sheet');
+  await page.click(`.host-sheet [aria-label="Edit ${OTHER_LABEL}"]`);
+  await page.waitForSelector('[role="dialog"][aria-label="Edit host"]');
+  await page.fill('[role="dialog"][aria-label="Edit host"] .field:nth-of-type(1) input', RENAMED_LABEL);
+  await page.click('[role="dialog"][aria-label="Edit host"] button:has-text("Save")');
+  await until(async () => (await page.locator('[role="dialog"][aria-label="Edit host"]').count()) === 0);
+  if ((await page.locator('.host-sheet').count()) > 0) await page.click('.host-sheet .sheet-cancel');
+  const tileRenamed = await until(
+    async () => (await page.locator(`.host-tile:has-text("${RENAMED_LABEL}")`).count()) === 1,
+  );
+  check(tileRenamed, 'the rail tile shows the new name');
+  await page.click('.host-tile:has-text("All")');
+  const headingRenamed = await until(
+    async () => (await page.locator(`.host-group-head:has-text("${RENAMED_LABEL}")`).count()) === 1,
+  );
+  check(headingRenamed, 'so does its group heading');
+  await page.click(`.host-tile:has-text("${RENAMED_LABEL}")`);
+  const chipRenamed = await until(async () =>
+    (await page.locator('.sidebar-brand .host-chip').innerText()).includes(RENAMED_LABEL),
+  );
+  check(chipRenamed, 'and the header chip');
+  check(page.url().includes(`/h/${OTHER_ID}`), 'while the id in the URL is unchanged', page.url().split('#')[1] ?? '');
+  check(loads === loadsBeforeRename, 'with no page load', `${loads - loadsBeforeRename}`);
+  await page.screenshot({ path: path.join(SHOTS, 'multihost-desktop-renamed.png') });
 
   heading('Removing a host works from the desktop layout');
   await page.goto(BASE, { waitUntil: 'domcontentloaded' });

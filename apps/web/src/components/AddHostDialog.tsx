@@ -38,6 +38,15 @@ import type { HostDirectory } from '../hosts/directory.js';
  * `/h/<id>` — the right default for local mode — would be actively wrong
  * advice in this one, so no default is offered here at all.
  *
+ * ## No id field (PA-107)
+ *
+ * The routing id (`#/h/<id>/`, `/h/<id>/api/**`) is generated from the name
+ * by `directory.proposeId` — see `generateHostId` for the rules and for why
+ * the browser rather than the Hub mints it. It is shown, not asked for: a
+ * user who pastes a deep link should be able to see where it points, but
+ * nobody should have to invent a URL slug beside a name. It is fixed at add
+ * time; `EditHostDialog` renames the label only.
+ *
  * ## The token field is Hub-only, and optional
  *
  * Adding a Hub host and binding it are still two different calls
@@ -58,7 +67,6 @@ export function AddHostDialog({
   directory: HostDirectory;
   onClose: () => void;
 }): JSX.Element {
-  const [id, setId] = useState('');
   const [label, setLabel] = useState('');
   const [basePath, setBasePath] = useState('');
   const [token, setToken] = useState('');
@@ -66,33 +74,37 @@ export function AddHostDialog({
   const [busy, setBusy] = useState(false);
 
   const isHub = directory.source === 'hub';
+  const trimmedLabel = label.trim();
+  // Empty until there is a name, so the preview does not flash `host-x3k9q2`
+  // (the empty-slug fallback) before anything has been typed.
+  const id = trimmedLabel === '' ? '' : directory.proposeId(trimmedLabel);
 
-  // Proposed, not forced, and *local mode only*: typing an id fills the
+  // Proposed, not forced, and *local mode only*: typing a name fills the
   // prefix, but an operator whose proxy mounts somewhere else can still say
   // so. In Hub mode `/h/<id>` is a path, not a reachable address, so there is
   // no sensible default to fall back to — an empty field stays empty and the
   // submit button below refuses it instead.
   const effectiveBasePath =
-    !isHub && basePath.trim() === '' ? directory.defaultBasePathFor(id.trim()) : basePath;
+    !isHub && basePath.trim() === '' ? directory.defaultBasePathFor(id) : basePath;
 
   const trimmedToken = token.trim();
 
   const submit = async (): Promise<void> => {
     setBusy(true);
     setError(null);
-    const trimmedId = id.trim();
-    const problem = await directory.add({
-      id: trimmedId,
-      label: label.trim() === '' ? trimmedId : label.trim(),
+    const added = await directory.add({
+      id,
+      label: trimmedLabel,
       basePath: effectiveBasePath,
     });
-    if (problem) {
+    if (added.error !== null) {
       setBusy(false);
-      setError(problem);
+      setError(added.error);
       return;
     }
     if (isHub && trimmedToken !== '') {
-      const bindProblem = await directory.bind(trimmedId, trimmedToken);
+      // `added.id`, not `id`: on a Hub conflict `add` re-derives it.
+      const bindProblem = await directory.bind(added.id, trimmedToken);
       setBusy(false);
       if (bindProblem) {
         // The host was added either way — only the bind half failed — so this
@@ -119,27 +131,20 @@ export function AddHostDialog({
         <div className="sheet-title">Add a host</div>
 
         <label className="field">
-          <span>Host id</span>
-          <input
-            type="text"
-            value={id}
-            onChange={(e) => setId(e.target.value)}
-            placeholder="dev02"
-            autoCapitalize="none"
-            autoCorrect="off"
-            spellCheck={false}
-          />
-        </label>
-
-        <label className="field">
           <span>Name</span>
           <input
             type="text"
             value={label}
             onChange={(e) => setLabel(e.target.value)}
             placeholder="Second workstation"
+            maxLength={200}
           />
         </label>
+        {id !== '' && (
+          <p className="hint host-id-preview">
+            Links to this host will use <code>#/h/{id}/</code>. It stays the same if you rename it.
+          </p>
+        )}
 
         <label className="field">
           <span>{isHub ? 'Backend address (as the Hub can reach it)' : 'Path prefix on this origin'}</span>
@@ -150,9 +155,9 @@ export function AddHostDialog({
             placeholder={
               isHub
                 ? 'http://dev02:8787'
-                : id.trim() === ''
-                  ? '/h/dev02'
-                  : directory.defaultBasePathFor(id.trim())
+                : id === ''
+                  ? '/h/second-workstation'
+                  : directory.defaultBasePathFor(id)
             }
             autoCapitalize="none"
             autoCorrect="off"
@@ -195,7 +200,7 @@ export function AddHostDialog({
             // Hub mode has no default to fall back to (see `effectiveBasePath`),
             // so an empty field here is a missing required address, not a
             // "use the convention" signal the way it is in local mode.
-            disabled={busy || id.trim() === '' || (isHub && basePath.trim() === '')}
+            disabled={busy || trimmedLabel === '' || (isHub && basePath.trim() === '')}
           >
             {busy ? (isHub && trimmedToken !== '' ? 'Adding & binding…' : 'Adding…') : 'Add host'}
           </button>

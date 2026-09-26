@@ -40,8 +40,15 @@ export function HostSheet({
   onEdit,
   onClose,
   canManage,
+  hubVersion = null,
 }: {
   hosts: readonly HostRecord[];
+  /**
+   * The Hub's own version, or null standalone (PA-107). Shown as a footer
+   * because the phone has no sidebar version line, and the sheet is where a
+   * phone user is already looking at "which machines, which builds".
+   */
+  hubVersion?: string | null;
   selectedHostId: string | null;
   onSelectAll: () => void;
   onSelect: (hostId: string) => void;
@@ -111,8 +118,15 @@ export function HostSheet({
                 }}
               >
                 <span className={hostDotClass(host.status)} aria-hidden="true" />
+                <Icon name="host" size={18} />
                 <span>{host.label}</span>
-                <span className="sheet-option-detail">{hostStatusSummary(host)}</span>
+                {/* The machine's own hostname, secondary (PA-107): the name the
+                    user gave it is primary, but a phone has no tooltip to put
+                    "which box is this" in. */}
+                {host.reportedName !== null && host.reportedName !== host.label && (
+                  <span className="sheet-option-detail host-sheet-hostname">{host.reportedName}</span>
+                )}
+                <span className="sheet-option-detail host-sheet-status">{hostStatusSummary(host)}</span>
                 {/* The full sentence, not a tooltip: a phone has no hover, so
                     an unusable host has to explain itself in place. */}
                 {host.message && <span className="host-sheet-problem">{host.message}</span>}
@@ -196,6 +210,7 @@ export function HostSheet({
             </button>
           )}
         </div>
+        {hubVersion !== null && <p className="host-sheet-hub-version">Hub {hubVersion}</p>}
         <button type="button" className="sheet-cancel" onClick={onClose}>
           Close
         </button>

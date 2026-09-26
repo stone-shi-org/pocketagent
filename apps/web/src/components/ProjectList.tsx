@@ -1590,12 +1590,18 @@ export function HostChip({
       : host === null || host.online
         ? ''
         : ' offline';
-  const name = allHosts ? 'All hosts' : (host?.name ?? record?.label ?? '');
+  // The registered name wins (PA-107): `record.label` is the one the user
+  // typed. `host.name` — the machine's hostname — is only the fallback before
+  // the fleet record exists, and a tooltip otherwise.
+  const name = allHosts ? 'All hosts' : (record?.label ?? host?.name ?? '');
+  const hostname = !allHosts && host?.name && host.name !== name ? host.name : null;
   const body = (
     <>
       {!allHosts && <span className={`host-dot${dotClass}`} aria-hidden="true" />}
-      <Icon name={allHosts ? 'agents' : 'terminal'} />
-      <span className="host-name">{name}</span>
+      <Icon name={allHosts ? 'agents' : 'host'} />
+      <span className="host-name" title={hostname ? `${name} (${hostname})` : undefined}>
+        {name}
+      </span>
       {!allHosts && incompatible && <span className="host-warn">incompatible</span>}
     </>
   );

@@ -226,6 +226,7 @@ function AuthenticatedApp({ onAnonymous }: { onAnonymous: () => void }): JSX.Ele
         route={route}
         navigate={navigate}
         onApiError={handleApiError}
+        hubVersion={directory.hubVersion}
       />
     </HostProvider>
   );
@@ -243,10 +244,13 @@ function PhoneRoute({
   route,
   navigate,
   onApiError,
+  hubVersion,
 }: {
   route: Route;
   navigate: (route: Route, opts?: { hostId?: string | null }) => void;
   onApiError: (error: unknown) => void;
+  /** `HostDirectory.hubVersion`, for Settings' version footer (PA-107). */
+  hubVersion: string | null;
 }): JSX.Element {
   if (route.name === 'terminal') {
     return (
@@ -297,7 +301,11 @@ function PhoneRoute({
   if (route.name === 'settings') {
     return (
       <Suspense fallback={<PageFallback />}>
-        <SettingsPage onBack={() => navigate({ name: 'list' })} onApiError={onApiError} />
+        <SettingsPage
+          onBack={() => navigate({ name: 'list' })}
+          onApiError={onApiError}
+          hubVersion={hubVersion}
+        />
       </Suspense>
     );
   }

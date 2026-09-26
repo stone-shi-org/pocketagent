@@ -1514,6 +1514,25 @@ those come from one cheap `GET /api/hosts` per host per 30 s (that is what
 8 s `AbortController` — `request()` itself stays timeout-free, but a poll that hangs forever is
 the "spinner that never resolves" an offline host must never become.
 
+**A host's id is generated once; its name is what the user typed** (PA-107). The Add dialog
+asks for a name and an address only. `generateHostId` (`hosts/registry.ts`) turns the name into
+the routing slug: NFKD-folded, lowercase, `-`-joined, at most 40 characters, `-2`/`-3`/… past
+any id the directory already holds, and `host-<random>` when nothing slug-able survives. The
+**browser** mints it rather than the Hub, on purpose: local mode has no server to ask, so the
+generator is needed anyway, and `CreateHubHostRequest.id` stays required so the schema and old
+bundles are untouched. A Hub 409 re-derives the id against a fresh registry read and retries
+once. The id never changes after that. A rename edits `label` only, because bookmarks,
+`t:<hostId>:…` tabs and Hub-push deep links all key on the id. `HostRecord.label` is therefore
+the registered name everywhere a host is named. It used to be `HostInfo.name ?? label`, so the
+name field was a no-op once a probe answered. The hostname is `reportedName`, which is
+secondary text and tooltips (`hostTitle`), and it replaces only the local-mode default host's
+placeholder `local` (`labelIsPlaceholder`). The version line under the sidebar brand names its
+component (`BuildVersions`): **Server** is the selected host's `HostInfo.version` (a summary in
+the all-hosts view), and **Hub** comes from the Hub's own bare `/health` and appears only in hub
+mode, where that URL is the Hub's rather than a backend's. The web bundle's
+`formatBuildInfo()` moved to the tooltip. It used to be the whole line, unlabelled, and so read
+as the server's version even behind a Hub, which serves the bundle itself.
+
 **Tab identity is host-qualified, and that was the sharpest bug in the feature.** `tabIdFor`
 emits `t:<hostId>:<sessionId>` (and one admin-page singleton *per host*), because two machines
 can hand out the same session id and an unqualified id renders one host's transcript in the
