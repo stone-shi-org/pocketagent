@@ -1350,6 +1350,11 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE planner_chats ADD COLUMN cron_job_id TEXT REFERENCES cron_jobs(id) ON DELETE SET NULL;
   CREATE INDEX IF NOT EXISTS idx_planner_chats_cron ON planner_chats (cron_job_id);
   `,
+
+  // PA-106: retention/expiration policy for cron jobs and their runs/sessions.
+  `
+  ALTER TABLE cron_jobs ADD COLUMN retention_days INTEGER NOT NULL DEFAULT 10;
+  `,
 ];
 
 /**
@@ -1448,6 +1453,9 @@ export function openDatabase(databasePath: string): Db {
   }
   if (!cronColumns.has('delete_after_run')) {
     db.exec('ALTER TABLE cron_jobs ADD COLUMN delete_after_run INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!cronColumns.has('retention_days')) {
+    db.exec('ALTER TABLE cron_jobs ADD COLUMN retention_days INTEGER NOT NULL DEFAULT 10');
   }
   // Same positional-migration hazard as above, but for `webhooks`: the
   // `auto_select_agent_model` migration was inserted mid-array (between the
@@ -1952,6 +1960,7 @@ export interface CronJobRow {
   prompt: string;
   /** `'skip' | 'allow'`. */
   overlap_policy: string;
+  retention_days: number;
   resume_agent_session_id: string | null;
   delete_after_run: number;
   created_at: number;
@@ -1988,23 +1997,52 @@ export function readCronJob(db: Db, id: string): CronJobRow | null {
   return (db.prepare('SELECT * FROM cron_jobs WHERE id = ?').get(id) as CronJobRow | undefined) ?? null;
 }
 
-export function insertCronJob(db: Db, row: CronJobRow): void {
+export function insertCronJob(
+  db: Db,
+  row: Partial<CronJobRow> &
+    Pick<
+      CronJobRow,
+      | 'id'
+      | 'name'
+      | 'enabled'
+      | 'cron_expr'
+      | 'time_zone'
+      | 'schedule_kind'
+      | 'cwd'
+      | 'agent'
+      | 'prompt'
+      | 'created_at'
+      | 'updated_at'
+    >,
+): void {
   db.prepare(
     `INSERT INTO cron_jobs (
        id, name, enabled, cron_expr, time_zone, schedule_kind, preset_json,
        cwd, agent, worktree_mode, model, effort, effort_set, skip_permissions,
-       prompt, overlap_policy, created_at, updated_at, next_run_at, last_run_at,
+       prompt, overlap_policy, retention_days, created_at, updated_at, next_run_at, last_run_at,
        last_run_status, last_error, resume_agent_session_id, delete_after_run
      ) VALUES (
        @id, @name, @enabled, @cron_expr, @time_zone, @schedule_kind, @preset_json,
        @cwd, @agent, @worktree_mode, @model, @effort, @effort_set, @skip_permissions,
-       @prompt, @overlap_policy, @created_at, @updated_at, @next_run_at, @last_run_at,
+       @prompt, @overlap_policy, @retention_days, @created_at, @updated_at, @next_run_at, @last_run_at,
        @last_run_status, @last_error, @resume_agent_session_id, @delete_after_run
      )`,
   ).run({
+    preset_json: null,
+    worktree_mode: 'none',
+    model: null,
+    effort: null,
+    effort_set: 0,
+    skip_permissions: 1,
+    overlap_policy: 'skip',
+    next_run_at: null,
+    last_run_at: null,
+    last_run_status: null,
+    last_error: null,
     ...row,
     resume_agent_session_id: row.resume_agent_session_id ?? null,
     delete_after_run: row.delete_after_run ?? 0,
+    retention_days: row.retention_days ?? 10,
   });
 }
 

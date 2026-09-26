@@ -85,6 +85,7 @@ export function CronJobEditorPage({
   const [effort, setEffort] = useState('');
   const [skipPermissions, setSkipPermissions] = useState(true);
   const [overlapPolicy, setOverlapPolicy] = useState<'skip' | 'allow'>('skip');
+  const [retentionDays, setRetentionDays] = useState(10);
   const [enabled, setEnabled] = useState(true);
   const [timeZone, setTimeZone] = useState(serverTimeZone());
 
@@ -157,6 +158,7 @@ export function CronJobEditorPage({
       setEffort(job.effort ?? '');
       setSkipPermissions(job.skipPermissionsEnabled);
       setOverlapPolicy(job.overlapPolicy);
+      setRetentionDays(job.retentionDays ?? 10);
       setEnabled(job.enabled);
       setTimeZone(job.timeZone);
       setCronExpr(job.cronExpr);
@@ -285,6 +287,7 @@ export function CronJobEditorPage({
           prompt,
           worktreeMode,
           overlapPolicy,
+          retentionDays,
           skipPermissions,
           timeZone,
           // On create, an empty field is left absent so the agent's own cached
@@ -303,6 +306,7 @@ export function CronJobEditorPage({
           prompt,
           worktreeMode,
           overlapPolicy,
+          retentionDays,
           skipPermissions,
           timeZone,
           // Explicit `null` rather than omitted: an emptied field means
@@ -623,7 +627,7 @@ export function CronJobEditorPage({
         )}
       </SectionCard>
 
-      <SectionCard title="Approvals" icon="shield">
+      <SectionCard title="Execution & Approvals" icon="shield">
         <div className="settings-row">
           <div className="settings-row-main">
             <div className="settings-row-info">
@@ -668,6 +672,16 @@ export function CronJobEditorPage({
               : undefined
           }
           onChange={(v) => setOverlapPolicy(v as 'skip' | 'allow')}
+        />
+        <NumberRow
+          label="Retention"
+          unit="days"
+          value={retentionDays}
+          min={0}
+          max={365}
+          busy={busy}
+          help="Automatically delete runs and sessions older than this. 10 days by default (0 keeps indefinitely)."
+          onChange={setRetentionDays}
         />
       </SectionCard>
 

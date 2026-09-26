@@ -105,6 +105,7 @@ export async function resolveCronJobUpdatePatch(
     ...(body.skipPermissions !== undefined ? { skipPermissions: body.skipPermissions } : {}),
     ...(body.prompt !== undefined ? { prompt: body.prompt } : {}),
     ...(body.overlapPolicy !== undefined ? { overlapPolicy: body.overlapPolicy } : {}),
+    ...(body.retentionDays !== undefined ? { retentionDays: body.retentionDays } : {}),
     ...(body.preset !== undefined
       ? { schedule: { kind: 'preset' as const, preset: body.preset } }
       : body.cronExpr !== undefined
@@ -190,6 +191,7 @@ export const cronRoutes: FastifyPluginAsync = async (app) => {
       skipPermissions: body.skipPermissions,
       prompt: body.prompt,
       overlapPolicy: body.overlapPolicy,
+      retentionDays: body.retentionDays ?? 10,
     };
 
     try {

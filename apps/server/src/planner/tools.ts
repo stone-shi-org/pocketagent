@@ -2300,7 +2300,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
           description:
             'Partial patch — any subset of the fields read_settings shows for this job (name, enabled, ' +
             'preset or cronExpr, timeZone, cwd, agent, worktreeMode, model, effort, skipPermissions, prompt, ' +
-            'overlapPolicy).',
+            'overlapPolicy, retentionDays).',
           additionalProperties: true,
         },
       },

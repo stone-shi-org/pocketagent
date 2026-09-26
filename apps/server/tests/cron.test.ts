@@ -128,6 +128,23 @@ describe('cron job routes', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it('defaults retentionDays to 10 and allows setting custom retentionDays', async () => {
+    const job = (await post(validJob())).json();
+    expect(job.retentionDays).toBe(10);
+
+    const custom = (await post(validJob({ name: 'Short retention', retentionDays: 3 }))).json();
+    expect(custom.retentionDays).toBe(3);
+
+    const patchRes = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/cron/jobs/${custom.id}`,
+      headers: authHeaders(ctx.cookie),
+      payload: { retentionDays: 14 },
+    });
+    expect(patchRes.statusCode).toBe(200);
+    expect(patchRes.json().retentionDays).toBe(14);
+  });
+
   it('patches a field without clobbering the others', async () => {
     const job = (await post(validJob())).json();
     const res = await ctx.app.inject({
@@ -621,6 +638,86 @@ describe('cron worktree mode', () => {
     db.close();
   });
 
+  it('automatically deletes runs and planner chats older than retentionDays', () => {
+    const db = openDatabase(':memory:');
+    const clock = 100 * 86_400_000;
+    const removedChats: string[] = [];
+
+    const cron = new CronService({
+      db,
+      sessions: {
+        find: () => undefined,
+        forget: () => {},
+        hideChat: () => {},
+      } as unknown as SessionManager,
+      workspaces: { labelFor: () => 'workspace' } as unknown as WorkspaceRegistry,
+      worktrees: {} as unknown as WorktreeService,
+      agents: { get: () => ({ displayName: 'Pocket Agent' }) } as unknown as AgentRegistry,
+      plannerChats: {
+        remove: (id: string) => {
+          removedChats.push(id);
+          db.prepare('DELETE FROM planner_chats WHERE id = ?').run(id);
+          return true;
+        },
+      } as unknown as any,
+      now: () => clock,
+    });
+
+    insertCronJob(db, {
+      id: 'job-retention',
+      name: 'Retention test job',
+      enabled: 1,
+      cron_expr: '0 * * * *',
+      time_zone: 'UTC',
+      schedule_kind: 'expression',
+      cwd: '/workspace',
+      agent: 'pocketagent',
+      prompt: 'do work',
+      retention_days: 10,
+      created_at: clock,
+      updated_at: clock,
+    });
+
+    const fifteenDaysAgo = clock - 15 * 86_400_000;
+    const fiveDaysAgo = clock - 5 * 86_400_000;
+
+    // Seed expired run and chat (15 days old)
+    db.prepare(
+      `INSERT INTO planner_chats (id, workspace_name, title, created_at, last_activity_at, cron_job_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run('chat-old', 'Default', 'Old Chat', fifteenDaysAgo, fifteenDaysAgo, 'job-retention');
+
+    db.prepare(
+      `INSERT INTO cron_runs (id, job_id, job_name, agent, status, trigger, scheduled_for, started_at, finished_at, session_id, agent_session_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run('run-old', 'job-retention', 'Retention test job', 'pocketagent', 'succeeded', 'schedule', fifteenDaysAgo, fifteenDaysAgo, fifteenDaysAgo, 'planner_chat-old', 'chat-old');
+
+    // Seed recent run and chat (5 days old)
+    db.prepare(
+      `INSERT INTO planner_chats (id, workspace_name, title, created_at, last_activity_at, cron_job_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run('chat-recent', 'Default', 'Recent Chat', fiveDaysAgo, fiveDaysAgo, 'job-retention');
+
+    db.prepare(
+      `INSERT INTO cron_runs (id, job_id, job_name, agent, status, trigger, scheduled_for, started_at, finished_at, session_id, agent_session_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run('run-recent', 'job-retention', 'Retention test job', 'pocketagent', 'succeeded', 'schedule', fiveDaysAgo, fiveDaysAgo, fiveDaysAgo, 'planner_chat-recent', 'chat-recent');
+
+    // Execute cleanup
+    cron.cleanupExpiredRunsAndSessions();
+
+    expect(removedChats).toContain('chat-old');
+    expect(removedChats).not.toContain('chat-recent');
+
+    const remainingRuns = readCronRuns(db, { jobId: 'job-retention', limit: 10 });
+    expect(remainingRuns.map((r) => r.id)).toEqual(['run-recent']);
+
+    const remainingChats = db.prepare('SELECT id FROM planner_chats').all() as { id: string }[];
+    expect(remainingChats.map((c) => c.id)).toEqual(['chat-recent']);
+
+    db.close();
+  });
+
   it('formatCronRunTitle produces title with date-time suffix in specified timeZone', () => {
     const timestamp = Date.parse('2026-09-26T00:30:00Z');
     expect(formatCronRunTitle('Nightly Job', 'UTC', timestamp)).toBe('Nightly Job (2026-09-26 00:30)');
@@ -683,6 +780,7 @@ describe('cron migration', () => {
     const columns = upgraded.prepare('PRAGMA table_info(cron_jobs)').all() as { name: string }[];
     expect(columns.map((column) => column.name)).toContain('resume_agent_session_id');
     expect(columns.map((column) => column.name)).toContain('delete_after_run');
+    expect(columns.map((column) => column.name)).toContain('retention_days');
     // Every later migration replayed cleanly on top, which is the property the
     // old fixture accidentally stopped checking.
     expect(

@@ -104,6 +104,7 @@ export interface CronJobSpec {
   skipPermissions: boolean;
   prompt: string;
   overlapPolicy: 'skip' | 'allow';
+  retentionDays?: number;
 }
 
 export interface LimitContinuationSpec {
@@ -314,11 +315,95 @@ export class CronService {
         }
       }
 
+      this.cleanupExpiredRunsAndSessions();
       pruneOldCronRuns(this.db, KEEP_RUNS_PER_JOB);
     } catch (err) {
       this.opts.logger?.warn({ err }, 'cron tick failed');
     } finally {
       this.ticking = false;
+    }
+  }
+
+  /**
+   * Automatically delete runs and associated conversation sessions that have exceeded
+   * their job's retention period.
+   *
+   * Runs on every tick. Runs and sessions are deleted once they are older than
+   * `retention_days` (default 10 days). A value of 0 disables automatic expiration.
+   */
+  cleanupExpiredRunsAndSessions(): void {
+    const now = this.now();
+    const jobs = readCronJobs(this.db);
+    for (const job of jobs) {
+      const retentionDays = job.retention_days ?? 10;
+      if (retentionDays <= 0) continue;
+      const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
+
+      // 1. Find all finished runs for this job older than cutoff
+      const expiredRuns = this.db
+        .prepare(
+          `SELECT id, session_id, agent_session_id, agent FROM cron_runs
+            WHERE job_id = ?
+              AND status NOT IN ('starting', 'running')
+              AND started_at < ?`,
+        )
+        .all(job.id, cutoff) as Pick<CronRunRow, 'id' | 'session_id' | 'agent_session_id' | 'agent'>[];
+
+      for (const run of expiredRuns) {
+        if (run.agent === 'pocketagent' || run.session_id?.startsWith('planner_')) {
+          const chatId =
+            run.agent_session_id ??
+            (run.session_id?.startsWith('planner_') ? run.session_id.slice('planner_'.length) : null);
+          if (chatId) {
+            if (this.opts.plannerChats) {
+              try {
+                this.opts.plannerChats.remove(chatId);
+              } catch (err) {
+                this.opts.logger?.warn({ chatId, err }, 'failed to remove expired planner chat');
+              }
+            } else {
+              this.db.prepare('DELETE FROM planner_chats WHERE id = ?').run(chatId);
+            }
+          }
+        } else {
+          if (run.session_id) {
+            try {
+              this.opts.sessions.forget(run.session_id);
+            } catch {
+              // Ignore if already deleted or unknown
+            }
+          }
+          if (run.agent_session_id) {
+            try {
+              this.opts.sessions.hideChat(run.agent_session_id);
+            } catch {
+              // Ignore
+            }
+          }
+        }
+        this.db.prepare('DELETE FROM cron_runs WHERE id = ?').run(run.id);
+      }
+
+      // 2. Also clean up any planner_chats linked to this cron_job_id created before cutoff
+      const expiredChats = this.db
+        .prepare(
+          `SELECT id FROM planner_chats
+            WHERE cron_job_id = ?
+              AND created_at < ?`,
+        )
+        .all(job.id, cutoff) as { id: string }[];
+
+      for (const chat of expiredChats) {
+        if (this.opts.plannerChats) {
+          try {
+            this.opts.plannerChats.remove(chat.id);
+          } catch (err) {
+            this.opts.logger?.warn({ chatId: chat.id, err }, 'failed to remove expired planner chat');
+          }
+        } else {
+          this.db.prepare('DELETE FROM planner_chats WHERE id = ?').run(chat.id);
+        }
+      }
     }
   }
 
@@ -650,6 +735,7 @@ export class CronService {
       overlap_policy: spec.overlapPolicy,
       resume_agent_session_id: null,
       delete_after_run: 0,
+      retention_days: spec.retentionDays ?? 10,
       created_at: now,
       updated_at: now,
       next_run_at: null,
@@ -728,6 +814,7 @@ export class CronService {
       row.effort_set = patch.effort === undefined ? 0 : 1;
     }
     if (patch.skipPermissions !== undefined) row.skip_permissions = patch.skipPermissions ? 1 : 0;
+    if (patch.retentionDays !== undefined) row.retention_days = patch.retentionDays;
     if (patch.prompt !== undefined) row.prompt = patch.prompt;
     if (patch.overlapPolicy !== undefined) row.overlap_policy = patch.overlapPolicy;
     if (patch.timeZone !== undefined) row.time_zone = patch.timeZone;
@@ -832,6 +919,7 @@ export class CronService {
       skipPermissionsEnabled: row.skip_permissions === 1,
       prompt: row.prompt,
       overlapPolicy: row.overlap_policy as CronJob['overlapPolicy'],
+      retentionDays: row.retention_days ?? 10,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       nextRunAt: row.next_run_at,

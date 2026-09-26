@@ -129,6 +129,7 @@ export const CronJob = z.object({
   skipPermissionsEnabled: z.boolean(),
   prompt: z.string(),
   overlapPolicy: CronOverlapPolicy,
+  retentionDays: z.number().int().min(0).max(3650),
   createdAt: z.number().int(),
   updatedAt: z.number().int(),
   /** Null when disabled, or when the schedule has no next occurrence at all. */
@@ -220,6 +221,7 @@ const CronJobFields = z
     skipPermissions: z.boolean(),
     prompt: z.string().min(1).max(LIMITS.maxInputChars),
     overlapPolicy: CronOverlapPolicy,
+    retentionDays: z.number().int().min(0).max(3650),
   })
   .partial({
     preset: true,
@@ -227,6 +229,7 @@ const CronJobFields = z
     timeZone: true,
     model: true,
     effort: true,
+    retentionDays: true,
   });
 
 const notBothSchedules = (v: { preset?: unknown; cronExpr?: unknown }): boolean =>
@@ -239,6 +242,7 @@ export const CreateCronJobRequest = CronJobFields.extend({
   enabled: z.boolean().default(true),
   worktreeMode: CronWorktreeMode.default('none'),
   overlapPolicy: CronOverlapPolicy.default('skip'),
+  retentionDays: z.number().int().min(0).max(3650).default(10),
   /**
    * Defaults to **true**, and this is the one place in the codebase where a
    * skip-permissions default is on rather than off.
