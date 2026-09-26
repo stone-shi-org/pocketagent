@@ -124,7 +124,11 @@ export const MicButton = forwardRef<MicButtonHandle, MicButtonProps>(function Mi
     if (stateRef.current !== 'idle') return;
     stateRef.current = 'starting';
     pointerDownAtRef.current = performance.now();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture can fail on mobile touchscreens if the tap was very fast; non-fatal.
+    }
 
     const recorder = new PushToTalkRecorder({ onLevel, deviceId });
     try {
@@ -182,6 +186,12 @@ export const MicButton = forwardRef<MicButtonHandle, MicButtonProps>(function Mi
 
   async function handlePointerCancel(): Promise<void> {
     if (stateRef.current === 'idle') return;
+    const heldMs = performance.now() - pointerDownAtRef.current;
+    if (heldMs < HOLD_THRESHOLD_MS && stateRef.current === 'starting') {
+      // On mobile WebKit, a fast tap can trigger pointercancel along with or instead of
+      // pointerup. Do not abort tap-to-record mode.
+      return;
+    }
     await cancelRecording();
   }
 

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PushToTalkRecorder } from './capture.js';
 import { LiveListenController } from './live-listen.js';
+import { resetSharedAudioContext } from './audio-context.js';
 
 class MockGainNode {
   readonly gain = {
@@ -45,9 +46,10 @@ class MockAudioContext {
     }),
   };
 
-  createMediaStreamSource(_stream: unknown): { connect: (dest: unknown) => void } {
+  createMediaStreamSource(_stream: unknown): { connect: (dest: unknown) => void; disconnect: () => void } {
     return {
       connect: (_dest: unknown) => {},
+      disconnect: vi.fn(),
     };
   }
 
@@ -74,6 +76,7 @@ describe('WebKit AudioWorklet pull-sink graph (PA-54)', () => {
   };
 
   beforeEach(() => {
+    resetSharedAudioContext();
     mockContextInstance = null;
     mockTrack.stop.mockClear();
 
@@ -96,6 +99,7 @@ describe('WebKit AudioWorklet pull-sink graph (PA-54)', () => {
   });
 
   afterEach(() => {
+    resetSharedAudioContext();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -134,6 +138,31 @@ describe('WebKit AudioWorklet pull-sink graph (PA-54)', () => {
       await recorder.cancel();
       expect(gain.disconnect).toHaveBeenCalled();
     });
+
+    it('does not close the shared AudioContext on stop() or cancel()', async () => {
+      const recorder = new PushToTalkRecorder();
+      await recorder.start();
+      expect(mockContextInstance!.state).toBe('running');
+
+      await recorder.stop();
+      expect(mockContextInstance!.state).toBe('running');
+
+      await recorder.start();
+      await recorder.cancel();
+      expect(mockContextInstance!.state).toBe('running');
+    });
+
+    it('loads worklet module via ensureAudioWorkletModule once across multiple recordings', async () => {
+      const recorder1 = new PushToTalkRecorder();
+      await recorder1.start();
+      await recorder1.stop();
+
+      const recorder2 = new PushToTalkRecorder();
+      await recorder2.start();
+      await recorder2.stop();
+
+      expect(mockContextInstance!.modulesAdded.length).toBe(1);
+    });
   });
 
   describe('LiveListenController', () => {
@@ -158,6 +187,29 @@ describe('WebKit AudioWorklet pull-sink graph (PA-54)', () => {
       expect(gain.disconnect).toHaveBeenCalled();
       expect(worklet.disconnect).toHaveBeenCalled();
       expect(mockTrack.stop).toHaveBeenCalled();
+    });
+
+    it('does not close the shared AudioContext on stop()', async () => {
+      const controller = new LiveListenController({
+        onUtterance: () => {},
+      });
+      await controller.start();
+      expect(mockContextInstance!.state).toBe('running');
+
+      await controller.stop();
+      expect(mockContextInstance!.state).toBe('running');
+    });
+
+    it('loads worklet module via ensureAudioWorkletModule once across multiple starts', async () => {
+      const controller1 = new LiveListenController({ onUtterance: () => {} });
+      await controller1.start();
+      await controller1.stop();
+
+      const controller2 = new LiveListenController({ onUtterance: () => {} });
+      await controller2.start();
+      await controller2.stop();
+
+      expect(mockContextInstance!.modulesAdded.length).toBe(1);
     });
   });
 });

@@ -2,6 +2,7 @@ import { floatTo16BitPcm, int16ArrayToBase64, resampleLinear } from './pcm.js';
 import { DEFAULT_VAD_OPTIONS, rms, SpeechEndpointer, type VadOptions } from './vad.js';
 import type { RecordedUtterance } from './capture.js';
 import { getVoiceMicDeviceIdPref } from '../agent/voice-prefs.js';
+import { ensureAudioWorkletModule, getSharedAudioContext, unlockAudioContext } from './audio-context.js';
 
 
 /** `live-stt` requires exactly this — see the PA-20 implementation plan's §5.1. */
@@ -46,6 +47,8 @@ export interface LiveListenOptions {
   onError?: (message: string) => void;
   /** Specific microphone device ID. Defaults to the stored preference or system default (PA-94). */
   deviceId?: string;
+  /** AudioContext to use. Defaults to getSharedAudioContext() (PA-54). */
+  context?: AudioContext;
 }
 
 /**
@@ -63,11 +66,13 @@ export interface LiveListenOptions {
 export class LiveListenController {
   private stream: MediaStream | null = null;
   private context: AudioContext | null = null;
+  private source: MediaStreamAudioSourceNode | null = null;
   private node: AudioWorkletNode | null = null;
   private silentGain: GainNode | null = null;
   private readonly endpointer: SpeechEndpointer;
   private chunks: Float32Array[] = [];
   private speechStartedAtMs = 0;
+  private ownsContext = false;
 
   constructor(private readonly opts: LiveListenOptions) {
     this.endpointer = new SpeechEndpointer({ ...DEFAULT_VAD_OPTIONS, ...opts.vad });
@@ -128,18 +133,24 @@ export class LiveListenController {
       track.onended = () => this.opts.onError?.('Microphone was disconnected.');
     }
 
-    this.context = new AudioContext();
+    if (this.opts.context) {
+      this.context = this.opts.context;
+      this.ownsContext = false;
+    } else {
+      this.context = getSharedAudioContext();
+      this.ownsContext = false;
+    }
     if (this.context.state === 'suspended') {
-      await this.context.resume();
+      await unlockAudioContext(this.context);
     }
     const workletUrl = typeof window !== 'undefined'
       ? new URL('/pcm-worklet-processor.js', window.location.href).href
       : '/pcm-worklet-processor.js';
-    await this.context.audioWorklet.addModule(workletUrl);
-    const source = this.context.createMediaStreamSource(this.stream);
+    await ensureAudioWorkletModule(this.context, workletUrl);
+    this.source = this.context.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.context, 'pcm-capture-processor');
     this.node.port.onmessage = (event: MessageEvent<Float32Array>) => this.onFrame(event.data);
-    source.connect(this.node);
+    this.source.connect(this.node);
 
     // iOS Safari / WebKit: WebAudio engine is pull-based from the output
     // destination. AudioWorkletProcessor.process() is only invoked if the node
@@ -242,8 +253,12 @@ export class LiveListenController {
     this.node?.disconnect();
     this.silentGain?.disconnect();
     this.silentGain = null;
+    this.source?.disconnect();
+    this.source = null;
     this.stream?.getTracks().forEach((track) => track.stop());
-    await this.context?.close();
+    if (this.ownsContext) {
+      await this.context?.close();
+    }
     this.node = null;
     this.context = null;
     this.stream = null;

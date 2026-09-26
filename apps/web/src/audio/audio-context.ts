@@ -118,3 +118,29 @@ export function resetSharedAudioContext(): void {
   sharedPlaybackContext = null;
   isUnlocked = false;
 }
+
+const modulePromisesByContext = new WeakMap<AudioContext, Map<string, Promise<void>>>();
+
+/**
+ * Ensures an AudioWorklet processor module is only loaded once per AudioContext.
+ * Re-registering the same processor name on the same AudioWorkletGlobalScope throws
+ * a NotSupportedError in the Web Audio API specification.
+ */
+export async function ensureAudioWorkletModule(context: AudioContext, url: string): Promise<void> {
+  let moduleMap = modulePromisesByContext.get(context);
+  if (!moduleMap) {
+    moduleMap = new Map<string, Promise<void>>();
+    modulePromisesByContext.set(context, moduleMap);
+  }
+  const existing = moduleMap.get(url);
+  if (existing) {
+    return existing;
+  }
+  const promise = context.audioWorklet.addModule(url).catch((err) => {
+    moduleMap?.delete(url);
+    throw err;
+  });
+  moduleMap.set(url, promise);
+  return promise;
+}
+

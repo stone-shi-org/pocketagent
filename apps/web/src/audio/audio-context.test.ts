@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  ensureAudioWorkletModule,
   getSharedAudioContext,
   unlockAudioContext,
   registerAudioUnlockListeners,
@@ -119,4 +120,21 @@ describe('audio-context (PA-54)', () => {
       (globalThis as unknown as { window: unknown }).window = originalWindow;
     }
   });
+
+  it('deduplicates ensureAudioWorkletModule calls on the same AudioContext', async () => {
+    let addCount = 0;
+    const fakeContext = {
+      audioWorklet: {
+        addModule: async () => {
+          addCount++;
+        },
+      },
+    } as unknown as AudioContext;
+
+    await ensureAudioWorkletModule(fakeContext, '/pcm-worklet-processor.js');
+    await ensureAudioWorkletModule(fakeContext, '/pcm-worklet-processor.js');
+
+    expect(addCount).toBe(1);
+  });
 });
+

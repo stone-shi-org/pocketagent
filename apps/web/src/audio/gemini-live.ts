@@ -8,7 +8,7 @@ import type {
 import { floatTo16BitPcm, int16ArrayToBase64, base64ToInt16Array, int16ToFloat32 } from './pcm.js';
 import { rms } from './vad.js';
 import { SampleBatcher, StreamingResampler, scheduleChunk } from './pcm-stream.js';
-import { getSharedAudioContext, unlockAudioContext } from './audio-context.js';
+import { ensureAudioWorkletModule, getSharedAudioContext, unlockAudioContext } from './audio-context.js';
 import {
   GEMINI_INPUT_SAMPLE_RATE,
   LiveTurnTracker,
@@ -176,7 +176,7 @@ class MicStream {
     const workletUrl = typeof window !== 'undefined'
       ? new URL('/pcm-worklet-processor.js', window.location.href).href
       : '/pcm-worklet-processor.js';
-    await this.context.audioWorklet.addModule(workletUrl);
+    await ensureAudioWorkletModule(this.context, workletUrl);
     const source = this.context.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.context, 'pcm-capture-processor');
     const resampler = new StreamingResampler(this.context.sampleRate, GEMINI_INPUT_SAMPLE_RATE);
