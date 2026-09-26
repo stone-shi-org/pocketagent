@@ -1,9 +1,11 @@
+import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 /**
  * This Hub build's identity, resolved exactly as `apps/server/src/version.ts`
  * resolves the backend's: `POCKETAGENT_BUILD_VERSION` → this package's own
- * `package.json` → `0.0.0-dev`.
+ * `package.json` (+ short git sha if in a git checkout) → `0.0.0-dev`.
  *
  * Same variable, deliberately. One image build stamps both, and the repo's
  * four (now six) `package.json` versions are kept identical by
@@ -29,19 +31,47 @@ function versionFromPackageJson(): string | null {
   }
 }
 
-export function resolveHubVersion(env: NodeJS.ProcessEnv = process.env): {
+function gitShortSha(): string | null {
+  try {
+    const raw = execSync('git rev-parse --short=8 HEAD', {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8',
+      timeout: 1000,
+    }).trim();
+    return /^[0-9a-fA-F]{7,40}$/.test(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+function withGitSha(version: string, gitSha: () => string | null): string {
+  if (version.includes('+')) return version;
+  const sha = gitSha();
+  return sha ? `${version}+${sha}` : version;
+}
+
+export function resolveHubVersion(
+  env: NodeJS.ProcessEnv = process.env,
+  gitSha: () => string | null = gitShortSha,
+): {
   version: string;
   warning: string | null;
 } {
   const override = env.POCKETAGENT_BUILD_VERSION?.trim();
   if (override !== undefined && override !== '') {
     if (SEMVER.test(override)) return { version: override, warning: null };
+    const base = versionFromPackageJson();
     return {
-      version: versionFromPackageJson() ?? FALLBACK_VERSION,
+      version: base ? withGitSha(base, gitSha) : FALLBACK_VERSION,
       warning: `POCKETAGENT_BUILD_VERSION is not a valid semver (${override}); ignoring it`,
     };
   }
-  return { version: versionFromPackageJson() ?? FALLBACK_VERSION, warning: null };
+  const base = versionFromPackageJson();
+  return {
+    version: base ? withGitSha(base, gitSha) : FALLBACK_VERSION,
+    warning: null,
+  };
 }
 
 const resolved = resolveHubVersion();

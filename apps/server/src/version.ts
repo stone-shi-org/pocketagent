@@ -1,7 +1,9 @@
+import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 /**
- * This build's identity, as a real semver string (PA-61).
+ * This build's identity, as a real semver string (PA-61, PA-108).
  *
  * `VERSION` used to be the literal `'0.1.0'` in `app.ts`, which made
  * `HostInfo.version` and `/health` decorative: every host in a fleet reported
@@ -21,9 +23,10 @@ import { readFileSync } from 'node:fs';
  * ## Resolution order
  *
  * The env var comes first so the CI image build can stamp it without touching
- * a tracked file. `package.json` is the fallback so a source checkout still
- * reports something true rather than something invented, and `0.0.0-dev` is
- * the last resort — deliberately a *valid* semver that sorts below every real
+ * a tracked file. `package.json` is the fallback, suffixed with the short git
+ * revision hash (`+<sha>`) when running in a git checkout, so a source
+ * checkout reports the exact commit it is running from. `0.0.0-dev` is the
+ * last resort — deliberately a *valid* semver that sorts below every real
  * release, so a drift check comparing versions never has to special-case it.
  *
  * Resolved once at module load: the answer cannot change while the process
@@ -59,6 +62,30 @@ function versionFromPackageJson(): string | null {
 }
 
 /**
+ * Reads the short git revision hash when running from a git checkout.
+ * Falls back to null when not in a git repository or git is unavailable.
+ */
+function gitShortSha(): string | null {
+  try {
+    const raw = execSync('git rev-parse --short=8 HEAD', {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8',
+      timeout: 1000,
+    }).trim();
+    return /^[0-9a-fA-F]{7,40}$/.test(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+function withGitSha(version: string, gitSha: () => string | null): string {
+  if (version.includes('+')) return version;
+  const sha = gitSha();
+  return sha ? `${version}+${sha}` : version;
+}
+
+/**
  * Picks the version string this process reports.
  *
  * Exported for the tests, which need to exercise the precedence without
@@ -69,19 +96,27 @@ function versionFromPackageJson(): string | null {
  * mistake into an outage. It is still worth surfacing, hence the returned
  * `warning` — `app.ts` logs it once at boot rather than swallowing it.
  */
-export function resolveServerVersion(env: NodeJS.ProcessEnv = process.env): {
+export function resolveServerVersion(
+  env: NodeJS.ProcessEnv = process.env,
+  gitSha: () => string | null = gitShortSha,
+): {
   version: string;
   warning: string | null;
 } {
   const override = env.POCKETAGENT_BUILD_VERSION?.trim();
   if (override !== undefined && override !== '') {
     if (SEMVER.test(override)) return { version: override, warning: null };
+    const base = versionFromPackageJson();
     return {
-      version: versionFromPackageJson() ?? FALLBACK_VERSION,
+      version: base ? withGitSha(base, gitSha) : FALLBACK_VERSION,
       warning: `POCKETAGENT_BUILD_VERSION is not a valid semver (${override}); ignoring it`,
     };
   }
-  return { version: versionFromPackageJson() ?? FALLBACK_VERSION, warning: null };
+  const base = versionFromPackageJson();
+  return {
+    version: base ? withGitSha(base, gitSha) : FALLBACK_VERSION,
+    warning: null,
+  };
 }
 
 const resolved = resolveServerVersion();

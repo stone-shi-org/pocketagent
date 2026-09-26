@@ -38,6 +38,18 @@ describe('resolveServerVersion', () => {
     // missing key, so this is the common case rather than an edge one.
     expect(resolveServerVersion({ POCKETAGENT_BUILD_VERSION: '  ' }).warning).toBeNull();
   });
+
+  it('appends git short sha when unstamped in a git checkout (PA-108)', () => {
+    const { version, warning } = resolveServerVersion({}, () => 'b8f907bc');
+    expect(version).toMatch(/^\d+\.\d+\.\d+\+b8f907bc$/);
+    expect(warning).toBeNull();
+  });
+
+  it('falls back to plain package.json version when git sha is unavailable (PA-108)', () => {
+    const { version, warning } = resolveServerVersion({}, () => null);
+    expect(version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(warning).toBeNull();
+  });
 });
 
 describe('GET /health', () => {
