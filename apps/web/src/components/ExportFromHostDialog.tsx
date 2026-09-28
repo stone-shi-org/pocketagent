@@ -360,19 +360,13 @@ export function ExportFromHostDialog({
             )}
 
             {exportAll ? (
-              <div className="settings-row">
-                <div className="settings-row-main">
-                  <div className="settings-row-info">
-                    <label className="settings-row-label">Templates to create</label>
-                  </div>
-                  <div className="settings-row-control">
-                    <span className="planner-row-meta" style={{ display: 'block', paddingTop: 6 }}>
-                      Will create {items?.length ?? 0} template{(items?.length ?? 0) === 1 ? '' : 's'}:{' '}
-                      <strong>{items?.map((i) => i.label).join(', ')}</strong>.
-                      Each template will be named after its corresponding item.
-                    </span>
-                  </div>
-                </div>
+              <div className="settings-row settings-row-stacked">
+                <label className="settings-row-label">Templates to create</label>
+                <p className="transport-hint">
+                  Will create {items?.length ?? 0} template{(items?.length ?? 0) === 1 ? '' : 's'}:{' '}
+                  <strong>{items?.map((i) => i.label).join(', ')}</strong>.
+                  Each template will be named after its corresponding item.
+                </p>
               </div>
             ) : !isSingleton ? (
               <div className="settings-row">
