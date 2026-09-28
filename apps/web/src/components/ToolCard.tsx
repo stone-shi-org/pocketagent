@@ -3,6 +3,7 @@ import type { ToolItem } from '../agent/transcript.js';
 import { collapseContext, diffFromToolInput, diffLines, diffStat } from '../agent/diff.js';
 import { renderMarkdown } from '../agent/markdown.js';
 import { planFromToolInput } from '../agent/plan.js';
+import { todosFromToolInput, type TodoItem } from '../agent/todo.js';
 import {
   QUIET_TOOLS,
   formatToolInput,
@@ -23,7 +24,8 @@ const LONG_RUNNING_MS = 60_000;
 export function ToolCard({ item }: { item: ToolItem }): JSX.Element {
   const [open, setOpen] = useState(false);
   const plan = planFromToolInput(item.name, item.input);
-  const diff = plan ? null : diffFromToolInput(item.name, item.input);
+  const todos = plan ? null : todosFromToolInput(item.name, item.input);
+  const diff = plan || todos ? null : diffFromToolInput(item.name, item.input);
   const lines = diff ? diffLines(diff.before, diff.after) : null;
   const stat = lines ? diffStat(lines) : null;
 
@@ -95,6 +97,8 @@ export function ToolCard({ item }: { item: ToolItem }): JSX.Element {
         <div className="tool-body">
           {plan ? (
             <div className="tool-plan answer" dangerouslySetInnerHTML={{ __html: renderMarkdown(plan) }} />
+          ) : todos ? (
+            <TodoListView todos={todos} />
           ) : lines ? (
             <DiffView lines={lines} />
           ) : (
@@ -143,4 +147,33 @@ function formatElapsed(ms: number): string | null {
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+function TodoListView({ todos }: { todos: TodoItem[] }): JSX.Element {
+  const completedCount = todos.filter((t) => t.status === 'completed').length;
+  return (
+    <div className="tool-todo-list" role="list" aria-label="Task list">
+      <div className="tool-todo-progress">
+        <span>
+          {completedCount} of {todos.length} completed
+        </span>
+        <div className="tool-todo-progress-bar">
+          <div
+            className="tool-todo-progress-fill"
+            style={{ width: `${todos.length > 0 ? (completedCount / todos.length) * 100 : 0}%` }}
+          />
+        </div>
+      </div>
+      <ul className="tool-todo-items">
+        {todos.map((todo, idx) => (
+          <li key={idx} className={`tool-todo-item ${todo.status}`}>
+            <span className={`tool-todo-checkbox ${todo.status}`} aria-hidden="true">
+              {todo.status === 'completed' ? '✓' : todo.status === 'in_progress' ? '●' : '○'}
+            </span>
+            <span className="tool-todo-text">{todo.content}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }

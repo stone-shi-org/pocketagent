@@ -355,6 +355,7 @@ describe('normalizeSdkMessage: result', () => {
       costUsd: 0.2579,
       inputTokens: 5,
       outputTokens: 174,
+      completedAt: expect.any(Number),
     });
   });
 });
@@ -843,6 +844,7 @@ describe('normalizeAgyMessage: result', () => {
         costUsd: null,
         inputTokens: 34619,
         outputTokens: 1710,
+        completedAt: expect.any(Number),
       },
     ]);
   });

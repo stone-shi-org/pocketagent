@@ -160,6 +160,10 @@ export const TurnCompleteEvent = z.object({
    * without the timestamp bit rather than failing to parse.
    */
   completedAt: z.number().int().optional(),
+  /**
+   * Optional follow-up question suggestions generated at turn completion.
+   */
+  suggestions: z.array(z.string()).optional(),
 });
 
 /** Anything worth surfacing that is not part of the conversation proper. */

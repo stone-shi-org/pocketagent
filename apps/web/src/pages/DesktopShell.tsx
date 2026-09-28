@@ -68,6 +68,8 @@ import { fallbackAfterClose, isTabRoute, tabIdFor, tabListReducer, type TabRoute
 import {
   clampSidebarWidth,
   DEFAULT_SIDEBAR_WIDTH,
+  MIN_SIDEBAR_WIDTH,
+  MAX_SIDEBAR_WIDTH,
   getSidebarWidthPref,
   setSidebarWidthPref,
 } from '../agent/sidebar-width-pref.js';
@@ -643,6 +645,33 @@ export function DesktopShell({
     setSidebarWidthPref(DEFAULT_SIDEBAR_WIDTH);
   }, []);
 
+  const handleResizerKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      const step = e.shiftKey ? 32 : 16;
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const next = clampSidebarWidth(sidebarWidth - step);
+        setSidebarWidth(next);
+        setSidebarWidthPref(next);
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        const next = clampSidebarWidth(sidebarWidth + step);
+        setSidebarWidth(next);
+        setSidebarWidthPref(next);
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        setSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+        setSidebarWidthPref(DEFAULT_SIDEBAR_WIDTH);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        const next = sidebarWidth > DEFAULT_SIDEBAR_WIDTH + 50 ? DEFAULT_SIDEBAR_WIDTH : 450;
+        setSidebarWidth(next);
+        setSidebarWidthPref(next);
+      }
+    },
+    [sidebarWidth],
+  );
+
   // The rail is chrome, not a category, so it is a *third grid column* rather
   // than anything inside the sidebar — which is what lets the three shared
   // home-screen categories stay identical to the phone's, in the same order,
@@ -676,10 +705,15 @@ export function DesktopShell({
           className={`sidebar-resizer${isResizing ? ' resizing' : ''}`}
           onMouseDown={handleResizerMouseDown}
           onDoubleClick={handleResizerDoubleClick}
+          onKeyDown={handleResizerKeyDown}
+          tabIndex={0}
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize sidebar"
-          title="Drag to resize sidebar, double-click to reset"
+          aria-valuenow={sidebarWidth}
+          aria-valuemin={MIN_SIDEBAR_WIDTH}
+          aria-valuemax={MAX_SIDEBAR_WIDTH}
+          title="Drag or use arrow keys to resize sidebar (double-click or Home to reset)"
         />
         <header className="sidebar-head">
           <div className="sidebar-brand">

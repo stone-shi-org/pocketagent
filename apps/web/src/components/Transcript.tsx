@@ -5,8 +5,10 @@ import { groupIntoTurns } from '../agent/transcript.js';
 import { promptHeadline } from '../agent/prompt-headline.js';
 import { renderMarkdown } from '../agent/markdown.js';
 import { enhanceCodeBlocks, handleCodeBlockClick } from '../agent/code-blocks.js';
+import { copyText } from '../agent/clipboard.js';
 import { ToolCard } from './ToolCard.js';
 import { CopyButton } from './CopyButton.js';
+import { FollowUpChips } from './FollowUpChips.js';
 import { Icon } from './Icon.js';
 
 /**
@@ -50,15 +52,22 @@ const GLASS_BRIDGE = 16;
 export function Transcript({
   state,
   history,
+  starterPrompts,
+  onSelectPrompt,
 }: {
   state: TranscriptState;
   /** Messages from the conversation being resumed, shown above this session. */
   history?: TranscriptItem[];
+  /** Clickable prompt chips shown when the conversation is empty. */
+  starterPrompts?: string[];
+  /** Called when a starter prompt chip or follow-up suggestion is picked. */
+  onSelectPrompt?: (prompt: string) => void;
 }): JSX.Element {
   const endRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
   const [scrollTop, setScrollTop] = useState(0);
+  const [copiedExport, setCopiedExport] = useState(false);
 
   // Follow the tail, but stop fighting the user the moment they scroll up.
   useEffect(() => {
@@ -143,9 +152,31 @@ export function Transcript({
   }, [promptTurnIndices, stickyTurnIndices, heights]);
 
   return (
-    <div className="transcript" ref={scrollRef} onScroll={onScroll}>
+    <div
+      className="transcript"
+      ref={scrollRef}
+      onScroll={onScroll}
+      role="log"
+      aria-label="Conversation transcript"
+    >
       {past.length === 0 && state.items.length === 0 && (
-        <div className="empty">Send a prompt to start the conversation.</div>
+        <div className="empty">
+          <p className="empty-prompt-hint">Send a prompt to start the conversation.</p>
+          {starterPrompts && starterPrompts.length > 0 && onSelectPrompt && (
+            <div className="starter-prompts" aria-label="Starter prompts">
+              {starterPrompts.map((prompt) => (
+                <button
+                  key={prompt}
+                  type="button"
+                  className="starter-prompt-chip"
+                  onClick={() => onSelectPrompt(prompt)}
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
       {historyTurns.map((turn, i) => {
@@ -160,6 +191,8 @@ export function Transcript({
             height={sticky ? heights[turnIdx] : undefined}
             setHeaderRef={setHeaderRef(turnIdx)}
             onHeightChange={recompute}
+            onSelectPrompt={onSelectPrompt}
+            busy={state.busy}
           />
         );
       })}
@@ -181,23 +214,47 @@ export function Transcript({
             height={sticky ? heights[turnIdx] : undefined}
             setHeaderRef={setHeaderRef(turnIdx)}
             onHeightChange={recompute}
+            onSelectPrompt={onSelectPrompt}
+            busy={state.busy}
           />
         );
       })}
       {state.busy && <Working />}
       <div ref={endRef} />
-      {!pinned && (
-        <button
-          type="button"
-          className="jump-latest"
-          onClick={() => {
-            setPinned(true);
-            endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-          }}
-        >
-          ↓ Latest
-        </button>
-      )}
+      <div className="transcript-floating-actions">
+        {allTurns.length > 0 && (
+          <button
+            type="button"
+            className="export-transcript-btn"
+            onClick={() => {
+              const md = transcriptToMarkdown(historyTurns, liveTurns);
+              void copyText(md).then((ok) => {
+                if (ok) {
+                  setCopiedExport(true);
+                  setTimeout(() => setCopiedExport(false), 2000);
+                }
+              });
+            }}
+            title="Copy conversation transcript as Markdown"
+            aria-label="Copy conversation transcript as Markdown"
+          >
+            <Icon name={copiedExport ? 'check' : 'copy'} size={13} />
+            <span>{copiedExport ? 'Copied' : 'Export'}</span>
+          </button>
+        )}
+        {!pinned && (
+          <button
+            type="button"
+            className="jump-latest"
+            onClick={() => {
+              setPinned(true);
+              endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+            }}
+          >
+            ↓ Latest
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -262,6 +319,8 @@ function TurnPanel({
   height,
   setHeaderRef,
   onHeightChange,
+  onSelectPrompt,
+  busy,
 }: {
   turn: TurnNode;
   sticky: boolean;
@@ -269,6 +328,8 @@ function TurnPanel({
   height: number | undefined;
   setHeaderRef: ((el: HTMLDivElement | null) => void) | undefined;
   onHeightChange?: () => void;
+  onSelectPrompt?: (prompt: string) => void;
+  busy?: boolean;
 }): JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const promptText = turn.prompt?.text ?? '';
@@ -329,14 +390,22 @@ function TurnPanel({
       )}
       <div className="turn-body">
         {turn.leaves.map((leaf) => (
-          <Item key={leaf.key} item={leaf} />
+          <Item key={leaf.key} item={leaf} onSelectPrompt={onSelectPrompt} busy={busy} />
         ))}
       </div>
     </>
   );
 }
 
-function Item({ item }: { item: TranscriptItem }): JSX.Element | null {
+function Item({
+  item,
+  onSelectPrompt,
+  busy,
+}: {
+  item: TranscriptItem;
+  onSelectPrompt?: (prompt: string) => void;
+  busy?: boolean;
+}): JSX.Element | null {
   switch (item.type) {
     case 'text':
       // A user-role text item is always a turn's `prompt` — groupIntoTurns
@@ -352,7 +421,7 @@ function Item({ item }: { item: TranscriptItem }): JSX.Element | null {
     case 'command_output':
       return <div className="command-output">{item.text}</div>;
     case 'turn':
-      return <TurnFooter item={item} />;
+      return <TurnFooter item={item} onSelectPrompt={onSelectPrompt} busy={busy} />;
     default:
       return null;
   }
@@ -391,7 +460,11 @@ function AssistantText({ item }: { item: TranscriptItem & { type: 'text' } }): J
   const hasSpoken = spoken !== null && spoken !== shown;
 
   return (
-    <div className="message assistant">
+    <div
+      className="message assistant"
+      aria-live={item.streaming ? 'polite' : undefined}
+      aria-atomic={item.streaming ? 'false' : undefined}
+    >
       <Markdown text={shown} streaming={item.streaming} />
       {/* Nothing to copy until the block has stopped growing. */}
       {!item.streaming && (
@@ -467,7 +540,15 @@ function Working(): JSX.Element {
   );
 }
 
-function TurnFooter({ item }: { item: Extract<TranscriptItem, { type: 'turn' }> }): JSX.Element {
+function TurnFooter({
+  item,
+  onSelectPrompt,
+  busy,
+}: {
+  item: Extract<TranscriptItem, { type: 'turn' }>;
+  onSelectPrompt?: (prompt: string) => void;
+  busy?: boolean;
+}): JSX.Element {
   const bits: string[] = [];
   if (item.durationMs !== null) bits.push(`${(item.durationMs / 1000).toFixed(1)}s`);
   if (item.inputTokens !== null || item.outputTokens !== null) {
@@ -486,6 +567,45 @@ function TurnFooter({ item }: { item: Extract<TranscriptItem, { type: 'turn' }> 
   // (no explicit `timeZone` option) — never the server's.
   if (item.completedAt !== null) bits.push(new Date(item.completedAt).toLocaleTimeString());
 
-  if (bits.length === 0) return <div className="turn-sep" />;
-  return <div className="turn-footer">{bits.join(' · ')}</div>;
+  const hasChips = Boolean(item.suggestions && item.suggestions.length > 0 && onSelectPrompt);
+
+  return (
+    <div className="turn-footer-wrap">
+      {bits.length === 0 ? <div className="turn-sep" /> : <div className="turn-footer">{bits.join(' · ')}</div>}
+      {hasChips && (
+        <FollowUpChips
+          suggestions={item.suggestions!}
+          onPick={onSelectPrompt!}
+          disabled={busy}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Formats full conversation history and live turns into GitHub-flavored Markdown
+ * for export or clipboard copy.
+ */
+export function transcriptToMarkdown(historyTurns: TurnNode[], liveTurns: TurnNode[]): string {
+  const turns = [...historyTurns, ...liveTurns];
+  const parts: string[] = [];
+  for (const t of turns) {
+    if (t.prompt?.text) {
+      parts.push(`### User\n\n${t.prompt.text}`);
+    }
+    const assistantParts: string[] = [];
+    for (const leaf of t.leaves) {
+      if (leaf.type === 'text') {
+        const text = stripSpokenSummary(leaf.text);
+        if (text) assistantParts.push(text);
+      } else if (leaf.type === 'tool') {
+        assistantParts.push(`> **Tool:** \`${leaf.summary}\``);
+      }
+    }
+    if (assistantParts.length > 0) {
+      parts.push(`### Assistant\n\n${assistantParts.join('\n\n')}`);
+    }
+  }
+  return parts.join('\n\n---\n\n');
 }

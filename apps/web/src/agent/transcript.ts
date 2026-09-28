@@ -72,6 +72,8 @@ export interface TurnItem {
       timestamp. `null` for a backend that doesn't set it (see
       `TurnCompleteEvent.completedAt`'s own doc comment). */
   completedAt: number | null;
+  /** Follow-up suggestions generated at turn completion. */
+  suggestions?: string[];
 }
 
 /** Output from a slash command that resolved locally, without a model turn. */
@@ -316,6 +318,7 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
             inputTokens: event.inputTokens,
             outputTokens: event.outputTokens,
             completedAt: event.completedAt ?? null,
+            suggestions: event.suggestions,
           },
         ],
       };

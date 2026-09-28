@@ -316,6 +316,7 @@ function normalizeResult(message: Record<string, unknown>): AgentEvent {
     costUsd: num(message.total_cost_usd),
     inputTokens: num(usage.input_tokens),
     outputTokens: num(usage.output_tokens),
+    completedAt: Date.now(),
   };
 }
 
@@ -624,6 +625,7 @@ function normalizeAgyResult(message: Record<string, unknown>): AgentEvent[] {
     costUsd: null,
     inputTokens: num(usage.input_tokens),
     outputTokens: num(usage.output_tokens),
+    completedAt: Date.now(),
   });
   return events;
 }

@@ -265,4 +265,80 @@ describe('PromptBox stop button state (PA-99)', () => {
   });
 });
 
+describe('PromptBox PA-112 chat improvements', () => {
+  it('renders character counter when draft length exceeds 500 characters', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+
+    const storage = new Map<string, string>();
+    const fakeSessionStorage = {
+      getItem: (k: string) => storage.get(k) ?? null,
+      setItem: (k: string, v: string) => { storage.set(k, v); },
+      removeItem: (k: string) => { storage.delete(k); },
+    };
+    const originalStorage = globalThis.sessionStorage;
+    (globalThis as unknown as { sessionStorage: typeof fakeSessionStorage }).sessionStorage = fakeSessionStorage;
+
+    const sessionId = 'sess-pa112-counter';
+    const longText = 'a'.repeat(600);
+    fakeSessionStorage.setItem(`pocketagent:draft:${sessionId}`, longText);
+
+    try {
+      const html = renderToStaticMarkup(
+        <PromptBox
+          sessionId={sessionId}
+          onSend={() => true}
+          disabled={false}
+        />,
+      );
+      expect(html).toContain('class="char-counter"');
+      expect(html).toContain('600 / 131,072');
+    } finally {
+      if (originalStorage !== undefined) {
+        globalThis.sessionStorage = originalStorage;
+      } else {
+        delete (globalThis as unknown as { sessionStorage?: unknown }).sessionStorage;
+      }
+    }
+  });
+
+  it('renders character counter with exceeded class and disables send when draft exceeds maxInputChars', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+    const { LIMITS } = await import('@pocketagent/protocol');
+
+    const storage = new Map<string, string>();
+    const fakeSessionStorage = {
+      getItem: (k: string) => storage.get(k) ?? null,
+      setItem: (k: string, v: string) => { storage.set(k, v); },
+      removeItem: (k: string) => { storage.delete(k); },
+    };
+    const originalStorage = globalThis.sessionStorage;
+    (globalThis as unknown as { sessionStorage: typeof fakeSessionStorage }).sessionStorage = fakeSessionStorage;
+
+    const sessionId = 'sess-pa112-exceeded';
+    const overLimitText = 'x'.repeat(LIMITS.maxInputChars + 10);
+    fakeSessionStorage.setItem(`pocketagent:draft:${sessionId}`, overLimitText);
+
+    try {
+      const html = renderToStaticMarkup(
+        <PromptBox
+          sessionId={sessionId}
+          onSend={() => true}
+          disabled={false}
+        />,
+      );
+      expect(html).toContain('class="char-counter limit-exceeded"');
+      expect(html).toMatch(/<button[^>]+class="primary"[^>]*\sdisabled/);
+    } finally {
+      if (originalStorage !== undefined) {
+        globalThis.sessionStorage = originalStorage;
+      } else {
+        delete (globalThis as unknown as { sessionStorage?: unknown }).sessionStorage;
+      }
+    }
+  });
+});
+
+
 

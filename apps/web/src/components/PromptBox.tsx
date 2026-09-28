@@ -6,7 +6,13 @@ import {
   type ClipboardEvent,
   type KeyboardEvent,
 } from 'react';
-import type { EffortLevel, ModelInfo, PromptImage, SlashCommandInfo } from '@pocketagent/protocol';
+import {
+  LIMITS,
+  type EffortLevel,
+  type ModelInfo,
+  type PromptImage,
+  type SlashCommandInfo,
+} from '@pocketagent/protocol';
 import { readImageFile } from '../agent/image-attachment.js';
 import { resolveCurrentModel } from '../agent/transcript.js';
 import { getVoiceDirectSendPref } from '../agent/voice-prefs.js';
@@ -280,6 +286,9 @@ export function PromptBox({
   });
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sentHistoryRef = useRef<string[]>([]);
+  const historyIndexRef = useRef<number>(-1);
+  const draftBeforeHistoryRef = useRef<string>('');
   // Not persisted to sessionStorage like `text` — an attached image surviving
   // a reload but pointing at nothing the user can see again would be worse
   // than just losing the draft, since there would be no way to tell it was
@@ -444,9 +453,18 @@ export function PromptBox({
 
   function send(): void {
     const value = text;
-    if ((value.length === 0 && !attachedImage) || disabled) return;
+    if ((value.length === 0 && !attachedImage) || disabled || value.length > LIMITS.maxInputChars) return;
     void unlockAudioContext();
     if (onSend(value, attachedImage ?? undefined)) {
+      if (value.trim()) {
+        const trimmed = value.trim();
+        sentHistoryRef.current = [
+          ...sentHistoryRef.current.filter((h) => h !== trimmed),
+          trimmed,
+        ];
+        historyIndexRef.current = -1;
+        draftBeforeHistoryRef.current = '';
+      }
       setText('');
       setAttachedImage(null);
     }
@@ -556,6 +574,12 @@ export function PromptBox({
   const modelPickerVisible = modelPickerOpen && !pickerOpen && models.length > 0;
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    // Guard against IME composition: Enter/Tab during IME conversion must not
+    // send prompt or trigger slash command picker selection.
+    if (event.nativeEvent.isComposing || event.keyCode === 229) {
+      return;
+    }
+
     if (pickerOpen) {
       if (event.key === 'ArrowDown') {
         event.preventDefault();
@@ -577,6 +601,43 @@ export function PromptBox({
         event.preventDefault();
         setDismissed(true);
         return;
+      }
+    } else {
+      // Prompt history recall when slash picker is closed
+      if (event.key === 'ArrowUp') {
+        const isAtStart =
+          ref.current === null ||
+          (ref.current.selectionStart === 0 && ref.current.selectionEnd === 0);
+        if (isAtStart && sentHistoryRef.current.length > 0) {
+          event.preventDefault();
+          if (historyIndexRef.current === -1) {
+            draftBeforeHistoryRef.current = text;
+            historyIndexRef.current = sentHistoryRef.current.length - 1;
+          } else if (historyIndexRef.current > 0) {
+            historyIndexRef.current -= 1;
+          }
+          const recalled = sentHistoryRef.current[historyIndexRef.current];
+          if (recalled !== undefined) {
+            setText(recalled);
+          }
+          return;
+        }
+      }
+      if (event.key === 'ArrowDown') {
+        if (historyIndexRef.current >= 0) {
+          event.preventDefault();
+          if (historyIndexRef.current < sentHistoryRef.current.length - 1) {
+            historyIndexRef.current += 1;
+            const recalled = sentHistoryRef.current[historyIndexRef.current];
+            if (recalled !== undefined) {
+              setText(recalled);
+            }
+          } else {
+            historyIndexRef.current = -1;
+            setText(draftBeforeHistoryRef.current);
+          }
+          return;
+        }
       }
     }
 
@@ -917,6 +978,16 @@ export function PromptBox({
               <Icon name="chevron-down" size={14} />
             </button>
           )}
+          {text.length > 500 && (
+            <span
+              className={`char-counter${text.length > LIMITS.maxInputChars ? ' limit-exceeded' : text.length > LIMITS.maxInputChars * 0.9 ? ' limit-warning' : ''}`}
+              aria-label={`${text.length} of ${LIMITS.maxInputChars} characters`}
+            >
+              {text.length > LIMITS.maxInputChars
+                ? `${(text.length - LIMITS.maxInputChars).toLocaleString()} over limit`
+                : `${text.length.toLocaleString()} / ${LIMITS.maxInputChars.toLocaleString()}`}
+            </span>
+          )}
           {/* Stop, not send, while a turn is in flight — one control instead of a
               separate "Stop generating" chip elsewhere on the page (it used to
               live in `.agent-strip`, disconnected from the box the user is
@@ -927,7 +998,13 @@ export function PromptBox({
             type="button"
             className={busy ? 'primary stop' : 'primary'}
             onClick={busy ? onInterrupt : send}
-            disabled={busy ? disabled : disabled || (text.length === 0 && !attachedImage)}
+            disabled={
+              busy
+                ? disabled
+                : disabled ||
+                  (text.length === 0 && !attachedImage) ||
+                  text.length > LIMITS.maxInputChars
+            }
             aria-label={busy ? 'Stop generating' : 'Send prompt'}
           >
             <Icon name={busy ? 'stop' : 'arrow-up'} size={busy ? 16 : 18} />

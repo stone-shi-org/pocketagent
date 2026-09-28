@@ -57,6 +57,13 @@ const PLANNER_SLASH_COMMANDS: SlashCommandInfo[] = [
   },
 ];
 
+const PLANNER_STARTER_PROMPTS = [
+  'What tasks can you help me with?',
+  'Review git status and recent changes',
+  'Search open Jira issues',
+  'Check system health and status',
+];
+
 interface Props {
   chatId: string;
   active?: boolean;
@@ -1207,7 +1214,15 @@ export function PlannerChatPage({
         </div>
       )}
 
-      {transcript === null ? <div className="spinner">Loading…</div> : <Transcript state={transcript} />}
+      {transcript === null ? (
+        <div className="spinner">Loading…</div>
+      ) : (
+        <Transcript
+          state={transcript}
+          starterPrompts={PLANNER_STARTER_PROMPTS}
+          onSelectPrompt={(text) => void handleSend(text)}
+        />
+      )}
 
       {pending && (
         <div className="planner-approval-card" role="alertdialog" aria-label="Tool approval">

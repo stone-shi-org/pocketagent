@@ -55,6 +55,12 @@ interface Props {
   onResumed: (sessionId: string) => void;
 }
 
+const CODING_STARTER_PROMPTS = [
+  'Explain the architecture of this repo',
+  'Run the test suite and check for failures',
+  'Find TODOs and code quality issues',
+];
+
 /**
  * The structured counterpart to TerminalPage.
  *
@@ -1034,7 +1040,18 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         </div>
       ))}
 
-      <Transcript state={transcript} history={history} />
+      <Transcript
+        state={transcript}
+        history={history}
+        starterPrompts={CODING_STARTER_PROMPTS}
+        onSelectPrompt={(text) => {
+          if (alive) {
+            sendPrompt(text);
+          } else {
+            void resumeAndSend(text);
+          }
+        }}
+      />
 
       {pending && (
         <ApprovalSheet
