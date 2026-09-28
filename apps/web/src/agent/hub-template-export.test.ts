@@ -16,6 +16,7 @@ import {
   exportPlannerEndpointPayload,
   exportPocketAgentPayload,
   exportSkillPayload,
+  fetchAllHostExportDrafts,
   fetchHostExportDraft,
   listHostExportableItems,
 } from './hub-template-export.js';
@@ -300,4 +301,39 @@ describe('fetchHostExportDraft', () => {
       urlFetchBaseUrl: null,
     });
   });
+
+  it('fetches all drafts for mcp-registry', async () => {
+    const client = {
+      listMcpRegistries: vi.fn().mockResolvedValue({
+        registries: [
+          {
+            id: 'r1',
+            name: 'Jira MCP',
+            transport: 'streamable_http',
+            url: 'https://jira.internal',
+            authKind: 'none',
+            enabled: true,
+            description: 'Jira server',
+          },
+          {
+            id: 'r2',
+            name: 'Bamboo MCP',
+            transport: 'streamable_http',
+            url: 'https://bamboo.internal',
+            authKind: 'none',
+            enabled: false,
+            description: null,
+          },
+        ],
+      }),
+    } as unknown as ApiClient;
+
+    const drafts = await fetchAllHostExportDrafts(client, 'mcp-registry', 'HostA');
+    expect(drafts).toHaveLength(2);
+    expect(drafts[0]!.defaultName).toBe('Jira MCP');
+    expect(drafts[0]!.defaultDescription).toBe('Jira server');
+    expect(drafts[1]!.defaultName).toBe('Bamboo MCP');
+    expect(drafts[1]!.defaultDescription).toBe('Exported from HostA');
+  });
 });
+

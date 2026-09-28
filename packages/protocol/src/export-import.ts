@@ -232,6 +232,13 @@ function validateExportPayload(
       return { ok: true, data: parsed.data };
     }
     case 'mcp-registry': {
+      if (Array.isArray(data)) {
+        const parsed = z.array(McpRegistryTemplatePayload).safeParse(data);
+        if (!parsed.success) {
+          return { ok: false, error: `Invalid MCP registry data in array: ${parsed.error.issues[0]?.message ?? 'validation error'}` };
+        }
+        return { ok: true, data: parsed.data };
+      }
       const parsed = McpRegistryTemplatePayload.safeParse(data);
       if (!parsed.success) {
         return { ok: false, error: `Invalid MCP registry data: ${parsed.error.issues[0]?.message ?? 'validation error'}` };

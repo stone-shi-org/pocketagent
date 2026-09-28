@@ -6,6 +6,7 @@ import {
 } from '@pocketagent/protocol';
 import {
   exportEnvelopeToHubTemplate,
+  exportEnvelopeToHubTemplates,
   formatExportFilename,
   readJsonFile,
 } from './json-transfer.js';
@@ -157,4 +158,38 @@ describe('json-transfer', () => {
     const file = new File(['not valid json {{{'], 'bad.json', { type: 'application/json' });
     await expect(readJsonFile(file)).rejects.toThrow(/Failed to parse "bad\.json" as JSON/);
   });
+
+  it('validates and converts an array of MCP registries into multiple templates', () => {
+    const multiMcp = [
+      {
+        name: 'Jira MCP',
+        transport: 'streamable_http' as const,
+        url: 'https://jira.internal',
+        authKind: 'none' as const,
+        headerName: null,
+        description: 'Jira server',
+        enabled: true,
+      },
+      {
+        name: 'Bamboo MCP',
+        transport: 'streamable_http' as const,
+        url: 'https://bamboo.internal',
+        authKind: 'none' as const,
+        headerName: null,
+        description: null,
+        enabled: false,
+      },
+    ];
+    const envelope = createExportEnvelope('mcp-registry', multiMcp, 'all-mcp');
+    const parseRes = parseExportEnvelope(envelope, 'mcp-registry');
+    expect(parseRes.ok).toBe(true);
+
+    const templates = exportEnvelopeToHubTemplates(envelope);
+    expect(templates).toHaveLength(2);
+    expect(templates[0]!.name).toBe('Jira MCP');
+    expect(templates[0]!.description).toBe('Jira server');
+    expect(templates[1]!.name).toBe('Bamboo MCP');
+    expect(templates[1]!.description).toBeUndefined();
+  });
 });
+

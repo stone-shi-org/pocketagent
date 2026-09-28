@@ -1,9 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { McpAuthKind, McpRegistrySummary, McpTransportKind, TestMcpRegistryResponse } from '@pocketagent/protocol';
+import type {
+  McpAuthKind,
+  McpRegistrySummary,
+  McpTransportKind,
+  TestMcpRegistryResponse,
+} from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
+import { listHubTemplates } from '../api/hub.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
+import { ExportFromHostDialog } from './ExportFromHostDialog.js';
 import { Icon } from './Icon.js';
-import { useHostApi } from '../hosts/HostContext.js';
+import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
+import { exportMcpRegistryPayload } from '../agent/hub-template-export.js';
+import { exportToJsonFile } from '../agent/json-transfer.js';
+import { useJsonImport } from '../hooks/useJsonImport.js';
 
 interface Props {
   onApiError: (error: unknown) => void;
@@ -85,11 +95,89 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
   const [togglingMcpEnabled, setTogglingMcpEnabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const endpoint = useHostEndpoint();
+  const [hubAvailable, setHubAvailable] = useState(false);
+  const [exportTemplateOpen, setExportTemplateOpen] = useState(false);
+  const [importSuccess, setImportSuccess] = useState<string | null>(null);
   /** `null` = closed, `'new'` = create, otherwise the id being edited. */
   const [editing, setEditing] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(blankForm);
   const [confirmingDelete, setConfirmingDelete] = useState<McpRegistrySummary | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestMcpRegistryResponse | 'testing'>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    listHubTemplates()
+      .then(() => {
+        if (!cancelled) setHubAvailable(true);
+      })
+      .catch(() => {
+        if (!cancelled) setHubAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const { trigger: triggerImport, fileInputProps } = useJsonImport({
+    expectedKind: 'mcp-registry',
+    onSuccess: async ({ data }) => {
+      setError(null);
+      setImportSuccess(null);
+      setBusy(true);
+      try {
+        const list = Array.isArray(data) ? data : [data];
+        let importedCount = 0;
+        for (const rawItem of list) {
+          const item = rawItem as {
+            name: string;
+            transport: McpTransportKind;
+            url: string;
+            authKind: McpAuthKind;
+            headerName?: string | null;
+            description?: string | null;
+            enabled?: boolean;
+          };
+          await api.createMcpRegistry({
+            name: item.name,
+            transport: item.transport,
+            url: item.url,
+            authKind: 'none',
+            description: item.description ?? undefined,
+            enabled: item.enabled ?? true,
+          });
+          importedCount++;
+        }
+        await load();
+        onChanged();
+        setImportSuccess(
+          importedCount === 1
+            ? 'Imported 1 MCP registry successfully.'
+            : `Imported ${importedCount} MCP registries successfully.`,
+        );
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not import MCP registry.');
+      } finally {
+        setBusy(false);
+      }
+    },
+    onError: (err) => {
+      setError(err);
+      setImportSuccess(null);
+    },
+  });
+
+  const exportRegistry = (r: McpRegistrySummary): void => {
+    const payload = exportMcpRegistryPayload(r);
+    exportToJsonFile('mcp-registry', payload, r.name);
+  };
+
+  const exportAllRegistries = (): void => {
+    if (!registries || registries.length === 0) return;
+    const payloads = registries.map(exportMcpRegistryPayload);
+    exportToJsonFile('mcp-registry', payloads, 'all');
+  };
 
   const load = useCallback(async () => {
     try {
@@ -303,6 +391,14 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
         </div>
       )}
 
+      {importSuccess !== null && (
+        <div className="success-box" role="status">
+          {importSuccess}
+        </div>
+      )}
+
+      <input {...fileInputProps} />
+
       {registries === null ? (
         <div className="spinner">Loading…</div>
       ) : registries.length === 0 ? (
@@ -394,6 +490,15 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
                 >
                   Refresh tools
                 </button>
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={busy}
+                  title="Export to JSON"
+                  onClick={() => exportRegistry(r)}
+                >
+                  <Icon name="download" size={14} /> Export
+                </button>
                 <button type="button" className="planner-btn" disabled={busy} onClick={() => openEdit(r)}>
                   Edit
                 </button>
@@ -413,10 +518,36 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
       )}
 
       {editing === null ? (
-        <div className="planner-inline" style={{ marginTop: 12 }}>
+        <div className="planner-inline" style={{ marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
           <button type="button" className="planner-btn" disabled={busy} onClick={openCreate}>
-            Add MCP registry
+            <Icon name="plus" size={14} /> Add MCP registry
           </button>
+          <button
+            type="button"
+            className="planner-btn"
+            disabled={busy || !registries || registries.length === 0}
+            onClick={exportAllRegistries}
+          >
+            <Icon name="download" size={14} /> Export all JSON
+          </button>
+          <button
+            type="button"
+            className="planner-btn"
+            disabled={busy}
+            onClick={triggerImport}
+          >
+            <Icon name="upload" size={14} /> Import JSON
+          </button>
+          {hubAvailable && (
+            <button
+              type="button"
+              className="planner-btn"
+              disabled={busy || !registries || registries.length === 0}
+              onClick={() => setExportTemplateOpen(true)}
+            >
+              <Icon name="template" size={14} /> Export to template…
+            </button>
+          )}
         </div>
       ) : (
         <div className="planner-section" style={{ marginTop: 12 }}>
@@ -581,6 +712,18 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
           busy={busy}
           onConfirm={() => void remove(confirmingDelete)}
           onCancel={() => setConfirmingDelete(null)}
+        />
+      )}
+
+      {exportTemplateOpen && (
+        <ExportFromHostDialog
+          preselectedHostId={endpoint.id}
+          initialKind="mcp-registry"
+          onClose={() => setExportTemplateOpen(false)}
+          onExported={() => {
+            setImportSuccess('Exported MCP registry template(s) to Hub successfully.');
+          }}
+          onApiError={onApiError}
         />
       )}
     </>

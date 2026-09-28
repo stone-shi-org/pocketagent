@@ -90,13 +90,20 @@ export async function importFromJsonFile<T = unknown>(
   }
 }
 
+export interface HubTemplateDraft {
+  kind: HubTemplateKind;
+  name: string;
+  description?: string;
+  payload: unknown;
+}
+
 /**
  * Converts a compatible export envelope into a Hub Template creation payload.
  * Returns null if the export envelope kind cannot be made into a Hub template.
  */
 export function exportEnvelopeToHubTemplate(
   envelope: PocketAgentExportEnvelope,
-): { kind: HubTemplateKind; name: string; description?: string; payload: unknown } | null {
+): HubTemplateDraft | null {
   switch (envelope.kind) {
     case 'hub-template': {
       const data = envelope.data as { kind: HubTemplateKind; name: string; description?: string; payload: unknown };
@@ -139,6 +146,16 @@ export function exportEnvelopeToHubTemplate(
       };
     }
     case 'mcp-registry': {
+      if (Array.isArray(envelope.data)) {
+        const first = envelope.data[0] as { name: string; description?: string | null } | undefined;
+        if (!first) return null;
+        return {
+          kind: 'mcp-registry',
+          name: first.name,
+          ...(first.description ? { description: first.description } : {}),
+          payload: first,
+        };
+      }
       const data = envelope.data as { name: string; description?: string | null };
       return {
         kind: 'mcp-registry',
@@ -169,3 +186,23 @@ export function exportEnvelopeToHubTemplate(
       return null;
   }
 }
+
+/**
+ * Converts an export envelope into one or more Hub template drafts.
+ * Handles single-item exports as well as batch exports (such as all MCP registries).
+ */
+export function exportEnvelopeToHubTemplates(
+  envelope: PocketAgentExportEnvelope,
+): HubTemplateDraft[] {
+  if (envelope.kind === 'mcp-registry' && Array.isArray(envelope.data)) {
+    return (envelope.data as Array<{ name: string; description?: string | null }>).map((reg) => ({
+      kind: 'mcp-registry',
+      name: reg.name,
+      ...(reg.description ? { description: reg.description } : {}),
+      payload: reg,
+    }));
+  }
+  const single = exportEnvelopeToHubTemplate(envelope);
+  return single !== null ? [single] : [];
+}
+

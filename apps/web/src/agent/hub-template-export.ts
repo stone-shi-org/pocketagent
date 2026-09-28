@@ -246,3 +246,26 @@ export async function fetchHostExportDraft(
     }
   }
 }
+
+/**
+ * Fetches export drafts for all items of a given template kind on a host.
+ */
+export async function fetchAllHostExportDrafts(
+  client: ApiClient,
+  kind: HubTemplateKind,
+  hostLabel: string,
+): Promise<HostExportDraft[]> {
+  const items = await listHostExportableItems(client, kind);
+  const drafts: HostExportDraft[] = [];
+  for (const item of items) {
+    const draft = await fetchHostExportDraft(
+      client,
+      kind,
+      kind === 'planner-endpoint' ? null : item.id,
+      hostLabel,
+    );
+    drafts.push(draft);
+  }
+  return drafts;
+}
+

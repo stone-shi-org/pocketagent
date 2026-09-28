@@ -12,7 +12,7 @@ import {
   newTemplateId,
   outcomeTone,
 } from '../agent/hub-template-format.js';
-import { exportEnvelopeToHubTemplate, exportToJsonFile } from '../agent/json-transfer.js';
+import { exportEnvelopeToHubTemplates, exportToJsonFile } from '../agent/json-transfer.js';
 import { useJsonImport } from '../hooks/useJsonImport.js';
 
 interface Props {
@@ -96,8 +96,8 @@ export function HubTemplatesPage({ onOpenTemplate, onApiError, onBack }: Props):
   const { trigger: triggerImport, fileInputProps } = useJsonImport({
     expectedKind: undefined,
     onSuccess: async ({ envelope }) => {
-      const templateReq = exportEnvelopeToHubTemplate(envelope);
-      if (!templateReq) {
+      const templateReqs = exportEnvelopeToHubTemplates(envelope);
+      if (templateReqs.length === 0) {
         setError(
           `Cannot import: Hub templates only support Pocket Agents, LLM Endpoints, Skills, MCP Registries, and Claude Providers. This file contains a "${envelope.kind}" export.`,
         );
@@ -108,9 +108,15 @@ export function HubTemplatesPage({ onOpenTemplate, onApiError, onBack }: Props):
         setError(null);
         setImportSuccess(null);
         setBusy(true);
-        const created = await createHubTemplate(templateReq);
+        for (const req of templateReqs) {
+          await createHubTemplate(req);
+        }
         await load();
-        setImportSuccess(`Template "${created.name}" created from imported ${envelope.kind} configuration.`);
+        if (templateReqs.length === 1) {
+          setImportSuccess(`Template "${templateReqs[0]!.name}" created from imported ${envelope.kind} configuration.`);
+        } else {
+          setImportSuccess(`Successfully imported ${templateReqs.length} templates from ${envelope.kind} export.`);
+        }
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'Could not import template.');
       } finally {
