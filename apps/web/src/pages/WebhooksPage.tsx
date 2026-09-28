@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { Webhook } from '@pocketagent/protocol';
+import type { Webhook, WebhookExportData } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import { WebhookHistoryPanel } from '../components/WebhookHistoryPanel.js';
 import { useHostApi } from '../hosts/HostContext.js';
+import { exportToJsonFile } from '../agent/json-transfer.js';
+import { useJsonImport } from '../hooks/useJsonImport.js';
 
 const REFRESH_MS = 5000;
 
@@ -103,8 +105,80 @@ export function WebhooksPage({
     [withBusy],
   );
 
+  const [importSuccess, setImportSuccess] = useState<string | null>(null);
+
+  const { trigger: triggerImport, fileInputProps } = useJsonImport<WebhookExportData>({
+    expectedKind: 'webhook',
+    onSuccess: async ({ data: imported }) => {
+      try {
+        setError(null);
+        setImportSuccess(null);
+        const created = await api.createWebhook({
+          name: imported.name,
+          slug: imported.slug,
+          enabled: imported.enabled ?? true,
+          config: imported.config,
+          authMode: imported.authMode ?? 'hmac',
+          cwd: imported.cwd ?? '',
+          agent: imported.agent,
+          worktreeMode: imported.worktreeMode ?? 'none',
+          model: imported.model,
+          effort: imported.effort,
+          skipPermissions: imported.skipPermissions ?? false,
+          autoSelectAgentModel: imported.autoSelectAgentModel ?? false,
+          promptTemplate: imported.promptTemplate,
+          conversationMode: imported.conversationMode ?? 'per-delivery',
+          overlapPolicy: imported.overlapPolicy ?? 'skip',
+          directoryPolicy: imported.directoryPolicy ?? 'queue',
+          skipQueueLabelEnabled: imported.skipQueueLabelEnabled ?? false,
+          agentIdentity: imported.agentIdentity ?? '',
+          maxConcurrent: imported.maxConcurrent ?? 2,
+          storePayloads: imported.storePayloads ?? true,
+        });
+        await load();
+        setImportSuccess(`Webhook "${created.webhook.name}" imported successfully.`);
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : 'Could not import webhook.');
+      }
+    },
+    onError: (err) => {
+      setError(err);
+      setImportSuccess(null);
+    },
+  });
+
+  const exportWebhook = (hook: Webhook): void => {
+    exportToJsonFile(
+      'webhook',
+      {
+        name: hook.name,
+        slug: hook.slug,
+        enabled: hook.enabled,
+        config: hook.config,
+        authMode: hook.authMode,
+        cwd: hook.cwd,
+        agent: hook.agent,
+        worktreeMode: hook.worktreeMode,
+        model: hook.model,
+        effort: hook.effort,
+        skipPermissions: hook.skipPermissionsEnabled,
+        autoSelectAgentModel: hook.autoSelectAgentModel,
+        promptTemplate: hook.promptTemplate,
+        conversationMode: hook.conversationMode,
+        overlapPolicy: hook.overlapPolicy,
+        directoryPolicy: hook.directoryPolicy,
+        skipQueueLabelEnabled: hook.skipQueueLabelEnabled,
+        agentIdentity: hook.agentIdentity,
+        maxConcurrent: hook.maxConcurrent,
+        storePayloads: hook.storePayloads,
+      },
+      hook.name,
+    );
+  };
+
   const content = (
     <div className="cron-page">
+      <input {...fileInputProps} />
       <div className="cron-head">
         <div>
           <h2>Webhooks</h2>
@@ -112,7 +186,16 @@ export function WebhooksPage({
             Each webhook gives an outside system a URL. A matching event starts an agent here.
           </p>
         </div>
-        <div className="cron-head-actions">
+        <div className="cron-head-actions" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button
+            type="button"
+            className="cron-secondary"
+            onClick={triggerImport}
+            title="Import webhook from a JSON file"
+          >
+            <Icon name="upload" size={16} />
+            Import JSON
+          </button>
           <button type="button" className="cron-new" onClick={() => onOpenWebhook('new')}>
             <Icon name="plus" size={18} />
             New webhook
@@ -123,6 +206,11 @@ export function WebhooksPage({
       {error && (
         <div className="error-box" role="alert">
           {error}
+        </div>
+      )}
+      {importSuccess && (
+        <div className="success-box" role="status">
+          {importSuccess}
         </div>
       )}
       {hooks === null && <div className="spinner">Loading…</div>}
@@ -151,6 +239,18 @@ export function WebhooksPage({
                   )}
                 </div>
                 <div className="webhook-card-actions">
+                  <button
+                    type="button"
+                    className="round-btn plain"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      exportWebhook(hook);
+                    }}
+                    aria-label={`Export ${hook.name} to JSON`}
+                    title="Export to JSON"
+                  >
+                    <Icon name="download" size={15} />
+                  </button>
                   <button
                     type="button"
                     className="round-btn plain"

@@ -36,6 +36,9 @@ import { formatRelative, WebhookStatusIcon } from '../components/StatusBadge.js'
 import { flattenProjects } from '../agent/search.js';
 import { NumberRow, SectionCard, TextRow } from './SettingsPage.js';
 import { useHostApi } from '../hosts/HostContext.js';
+import type { WebhookExportData } from '@pocketagent/protocol';
+import { exportToJsonFile } from '../agent/json-transfer.js';
+import { useJsonImport } from '../hooks/useJsonImport.js';
 
 interface Props {
   /** `'new'` for an unsaved webhook. */
@@ -956,12 +959,128 @@ export function WebhookEditorPage({
     }
   };
 
+  const handleExport = (): void => {
+    exportToJsonFile(
+      'webhook',
+      {
+        name,
+        slug: slug || undefined,
+        enabled,
+        config:
+          type === 'bamboo'
+            ? {
+                type: 'bamboo' as const,
+                filter: bambooFilter,
+                planMap: effectivePlanMap,
+                promptTemplateMap: effectiveBambooPromptTemplateMap,
+              }
+            : {
+                type: 'jira' as const,
+                filter,
+                projectMap: effectiveProjectMap,
+                promptTemplateMap: effectivePromptTemplateMap,
+              },
+        authMode,
+        cwd,
+        agent,
+        worktreeMode: isPocketAgent ? ('none' as CronWorktreeMode) : worktreeMode,
+        model: model.trim() === '' ? null : model.trim(),
+        effort: isPocketAgent || effort.trim() === '' ? null : effort.trim(),
+        skipPermissions,
+        autoSelectAgentModel,
+        promptTemplate,
+        conversationMode,
+        overlapPolicy,
+        directoryPolicy,
+        skipQueueLabelEnabled,
+        agentIdentity: agentIdentity.trim(),
+        maxConcurrent,
+        storePayloads,
+      },
+      name,
+    );
+  };
+
+  const { trigger: triggerImport, fileInputProps } = useJsonImport<WebhookExportData>({
+    expectedKind: 'webhook',
+    onSuccess: ({ data: imported }) => {
+      setError(null);
+      setSaveStatus({ type: 'success', message: 'Webhook configuration imported.' });
+      setName(imported.name);
+      if (imported.slug) setSlug(imported.slug);
+      if (imported.enabled !== undefined) setEnabled(imported.enabled);
+      if (imported.config) {
+        if (imported.config.type === 'bamboo') {
+          setType('bamboo');
+          if (imported.config.filter?.planKeys) setPlanKeys(imported.config.filter.planKeys.join(', '));
+          if (imported.config.filter?.buildStates) setBuildStates(imported.config.filter.buildStates);
+          if (imported.config.filter?.notificationTypes) setNotificationTypes(imported.config.filter.notificationTypes.join(', '));
+          if (imported.config.filter?.excludeTriggerReasons) setExcludeTriggerReasons(imported.config.filter.excludeTriggerReasons.join(', '));
+          if (imported.config.planMap && imported.config.planMap.length > 0) {
+            setDirectoryMode('auto-map');
+            setPlanMap(imported.config.planMap.map((m) => ({ id: crypto.randomUUID(), ...m })));
+          } else {
+            setDirectoryMode('workspace');
+          }
+          if (imported.config.promptTemplateMap && imported.config.promptTemplateMap.length > 0) {
+            setPromptTemplateMode('by-issue-type');
+            setBambooPromptTemplateMap(imported.config.promptTemplateMap.map((m) => ({ id: crypto.randomUUID(), ...m })));
+          } else {
+            setPromptTemplateMode('single');
+          }
+        } else {
+          setType('jira');
+          if (imported.config.filter?.events) setEvents(imported.config.filter.events);
+          if (imported.config.filter?.projectKeys) setProjectKeys(imported.config.filter.projectKeys.join(', '));
+          if (imported.config.filter?.issueTypes) setIssueTypes(imported.config.filter.issueTypes.join(', '));
+          if (imported.config.filter?.assignees) setAssignees(imported.config.filter.assignees.join(', '));
+          if (imported.config.filter?.changedFields) setChangedFields(imported.config.filter.changedFields.join(', '));
+          if (imported.config.filter?.labels) setLabels(imported.config.filter.labels.join(', '));
+          if (imported.config.filter?.labelMode) setLabelMode(imported.config.filter.labelMode);
+          if (imported.config.filter?.excludeActors) setExcludeActors(imported.config.filter.excludeActors.join(', '));
+          if (imported.config.projectMap && imported.config.projectMap.length > 0) {
+            setDirectoryMode('auto-map');
+            setProjectMap(imported.config.projectMap.map((m) => ({ id: crypto.randomUUID(), ...m })));
+          } else {
+            setDirectoryMode('workspace');
+          }
+          if (imported.config.promptTemplateMap && imported.config.promptTemplateMap.length > 0) {
+            setPromptTemplateMode('by-issue-type');
+            setPromptTemplateMap(imported.config.promptTemplateMap.map((m) => ({ id: crypto.randomUUID(), ...m })));
+          } else {
+            setPromptTemplateMode('single');
+          }
+        }
+      }
+      if (imported.authMode) setAuthMode(imported.authMode);
+      if (imported.cwd) setCwd(imported.cwd);
+      if (imported.agent) setAgent(imported.agent);
+      if (imported.worktreeMode) setWorktreeMode(imported.worktreeMode);
+      if (imported.model !== undefined) setModel(imported.model ?? '');
+      if (imported.effort !== undefined) setEffort(imported.effort ?? '');
+      if (imported.skipPermissions !== undefined) setSkipPermissions(imported.skipPermissions);
+      if (imported.autoSelectAgentModel !== undefined) setAutoSelectAgentModel(imported.autoSelectAgentModel);
+      if (imported.promptTemplate) setPromptTemplate(imported.promptTemplate);
+      if (imported.conversationMode) setConversationMode(imported.conversationMode);
+      if (imported.overlapPolicy) setOverlapPolicy(imported.overlapPolicy);
+      if (imported.directoryPolicy) setDirectoryPolicy(imported.directoryPolicy);
+      if (imported.skipQueueLabelEnabled !== undefined) setSkipQueueLabelEnabled(imported.skipQueueLabelEnabled);
+      if (imported.agentIdentity !== undefined) setAgentIdentity(imported.agentIdentity);
+      if (imported.maxConcurrent !== undefined) setMaxConcurrent(imported.maxConcurrent);
+      if (imported.storePayloads !== undefined) setStorePayloads(imported.storePayloads);
+    },
+    onError: (err) => {
+      setError(err);
+    },
+  });
+
   const body = loading ? (
     <div className="settings-page webhook-editor-page">
       <div className="spinner">Loading…</div>
     </div>
   ) : (
     <div className="settings-page webhook-editor-page" ref={scrollContainerRef}>
+      <input {...fileInputProps} />
       {error !== null && (
         <div className="error-box" role="alert">
           {error}
@@ -979,6 +1098,26 @@ export function WebhookEditorPage({
               ? 'Starts an agent when Bamboo reports a build event.'
               : 'Starts an agent when Jira sends a matching issue event.'}
           </p>
+        </div>
+        <div className="settings-header-actions" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button
+            type="button"
+            className="settings-close-btn"
+            onClick={handleExport}
+            title="Export webhook to JSON file"
+          >
+            <Icon name="download" size={14} />
+            Export JSON
+          </button>
+          <button
+            type="button"
+            className="settings-close-btn"
+            onClick={triggerImport}
+            title="Import webhook from JSON file"
+          >
+            <Icon name="upload" size={14} />
+            Import JSON
+          </button>
         </div>
       </div>
 

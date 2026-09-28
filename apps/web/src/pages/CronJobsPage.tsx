@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { CronJob } from '@pocketagent/protocol';
+import type { CronJob, CronJobExportData } from '@pocketagent/protocol';
 import { describeCron } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import { formatCountdown } from '../agent/cron-format.js';
 import { useHostApi } from '../hosts/HostContext.js';
+import { exportToJsonFile } from '../agent/json-transfer.js';
+import { useJsonImport } from '../hooks/useJsonImport.js';
 
 const REFRESH_MS = 5000;
 
@@ -92,8 +94,67 @@ export function CronJobsPage({ onOpenJob, onApiError, onBack }: Props): JSX.Elem
     [withBusy],
   );
 
+  const [importSuccess, setImportSuccess] = useState<string | null>(null);
+
+  const { trigger: triggerImport, fileInputProps } = useJsonImport<CronJobExportData>({
+    expectedKind: 'cron-job',
+    onSuccess: async ({ data: imported }) => {
+      try {
+        setError(null);
+        setImportSuccess(null);
+        const created = await api.createCronJob({
+          name: imported.name,
+          enabled: imported.enabled ?? true,
+          preset: imported.preset,
+          cronExpr: imported.cronExpr,
+          timeZone: imported.timeZone,
+          cwd: imported.cwd ?? '',
+          agent: imported.agent,
+          worktreeMode: imported.worktreeMode ?? 'none',
+          model: imported.model,
+          effort: imported.effort,
+          skipPermissions: imported.skipPermissions ?? true,
+          prompt: imported.prompt,
+          overlapPolicy: imported.overlapPolicy ?? 'skip',
+          retentionDays: imported.retentionDays ?? 10,
+        });
+        await load();
+        setImportSuccess(`Job "${created.name}" imported successfully.`);
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : 'Could not import scheduled job.');
+      }
+    },
+    onError: (err) => {
+      setError(err);
+      setImportSuccess(null);
+    },
+  });
+
+  const exportJob = (job: CronJob): void => {
+    exportToJsonFile(
+      'cron-job',
+      {
+        name: job.name,
+        enabled: job.enabled,
+        cronExpr: job.cronExpr,
+        timeZone: job.timeZone,
+        cwd: job.cwd,
+        agent: job.agent,
+        worktreeMode: job.worktreeMode,
+        model: job.model,
+        effort: job.effort,
+        skipPermissions: job.skipPermissionsEnabled,
+        prompt: job.prompt,
+        overlapPolicy: job.overlapPolicy,
+        retentionDays: job.retentionDays,
+      },
+      job.name,
+    );
+  };
+
   const content = (
     <div className="cron-page">
+      <input {...fileInputProps} />
       <div className="cron-head">
         <div>
           <h2>Scheduled jobs</h2>
@@ -101,15 +162,31 @@ export function CronJobsPage({ onOpenJob, onApiError, onBack }: Props): JSX.Elem
             Each job starts an agent on its own schedule and sends it a prompt.
           </p>
         </div>
-        <button type="button" className="cron-new" onClick={() => onOpenJob('new')}>
-          <Icon name="plus" size={18} />
-          New job
-        </button>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button
+            type="button"
+            className="cron-secondary"
+            onClick={triggerImport}
+            title="Import job from a JSON file"
+          >
+            <Icon name="upload" size={16} />
+            Import JSON
+          </button>
+          <button type="button" className="cron-new" onClick={() => onOpenJob('new')}>
+            <Icon name="plus" size={18} />
+            New job
+          </button>
+        </div>
       </div>
 
       {error && (
         <div className="error-box" role="alert">
           {error}
+        </div>
+      )}
+      {importSuccess && (
+        <div className="success-box" role="status">
+          {importSuccess}
         </div>
       )}
       {jobs === null && <div className="spinner">Loading…</div>}
@@ -166,6 +243,15 @@ export function CronJobsPage({ onOpenJob, onApiError, onBack }: Props): JSX.Elem
           </button>
 
           <div className="cron-actions">
+            <button
+              type="button"
+              className="round-btn plain"
+              onClick={() => exportJob(job)}
+              aria-label={`Export ${job.name} to JSON`}
+              title="Export to JSON"
+            >
+              <Icon name="download" size={16} />
+            </button>
             <button
               type="button"
               className="round-btn plain"

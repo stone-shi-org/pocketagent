@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { HubHostEntry, HubTemplate } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
-import { deleteHubTemplate, listHubHosts, listHubTemplates } from '../api/hub.js';
+import { createHubTemplate, deleteHubTemplate, listHubHosts, listHubTemplates } from '../api/hub.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { ExportFromHostDialog } from '../components/ExportFromHostDialog.js';
 import { Icon } from '../components/Icon.js';
@@ -12,6 +12,8 @@ import {
   newTemplateId,
   outcomeTone,
 } from '../agent/hub-template-format.js';
+import { exportEnvelopeToHubTemplate, exportToJsonFile } from '../agent/json-transfer.js';
+import { useJsonImport } from '../hooks/useJsonImport.js';
 
 interface Props {
   /** Opens one template's editor. `newTemplateId(kind)` for an unsaved one. */
@@ -89,8 +91,54 @@ export function HubTemplatesPage({ onOpenTemplate, onApiError, onBack }: Props):
     }
   };
 
+  const [importSuccess, setImportSuccess] = useState<string | null>(null);
+
+  const { trigger: triggerImport, fileInputProps } = useJsonImport({
+    expectedKind: undefined,
+    onSuccess: async ({ envelope }) => {
+      const templateReq = exportEnvelopeToHubTemplate(envelope);
+      if (!templateReq) {
+        setError(
+          `Cannot import: Hub templates only support Pocket Agents, LLM Endpoints, Skills, MCP Registries, and Claude Providers. This file contains a "${envelope.kind}" export.`,
+        );
+        setImportSuccess(null);
+        return;
+      }
+      try {
+        setError(null);
+        setImportSuccess(null);
+        setBusy(true);
+        const created = await createHubTemplate(templateReq);
+        await load();
+        setImportSuccess(`Template "${created.name}" created from imported ${envelope.kind} configuration.`);
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : 'Could not import template.');
+      } finally {
+        setBusy(false);
+      }
+    },
+    onError: (err) => {
+      setError(err);
+      setImportSuccess(null);
+    },
+  });
+
+  const exportTemplate = (tpl: HubTemplate): void => {
+    exportToJsonFile(
+      'hub-template',
+      {
+        kind: tpl.kind,
+        name: tpl.name,
+        description: tpl.description,
+        payload: tpl.payload,
+      },
+      tpl.name,
+    );
+  };
+
   const content = (
     <div className="hub-tpl-page">
+      <input {...fileInputProps} />
       <div className="hub-tpl-head">
         <div>
           <h2>Config templates</h2>
@@ -110,6 +158,15 @@ export function HubTemplatesPage({ onOpenTemplate, onApiError, onBack }: Props):
             <Icon name="template" size={16} />
             Export from host…
           </button>
+          <button
+            type="button"
+            className="round-btn plain"
+            onClick={triggerImport}
+            title="Import a template from JSON export file"
+          >
+            <Icon name="upload" size={16} />
+            Import from JSON…
+          </button>
           <button type="button" className="cron-new" onClick={() => setChoosingKind((v) => !v)}>
             <Icon name="plus" size={18} />
             New template
@@ -120,6 +177,11 @@ export function HubTemplatesPage({ onOpenTemplate, onApiError, onBack }: Props):
       {error !== null && (
         <div className="error-box" role="alert">
           {error}
+        </div>
+      )}
+      {importSuccess !== null && (
+        <div className="success-box" role="status">
+          {importSuccess}
         </div>
       )}
 
@@ -198,6 +260,15 @@ export function HubTemplatesPage({ onOpenTemplate, onApiError, onBack }: Props):
             </span>
           </button>
           <div className="hub-tpl-actions">
+            <button
+              type="button"
+              className="round-btn plain"
+              onClick={() => exportTemplate(template)}
+              aria-label={`Export ${template.name} to JSON`}
+              title="Export this template to JSON"
+            >
+              <Icon name="download" size={16} />
+            </button>
             <button
               type="button"
               className="round-btn plain"

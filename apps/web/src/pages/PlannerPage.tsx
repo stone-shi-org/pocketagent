@@ -9,6 +9,8 @@ import type {
   TestPlannerModelResponse,
   TestPlannerUrlFetchResponse,
   TestPlannerWebSearchResponse,
+  PlannerEndpointTemplatePayload,
+  PocketAgentExportData,
 } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
@@ -19,6 +21,8 @@ import { SkillsSection } from '../components/SkillsSection.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { GeminiLiveSettingsSection } from '../components/GeminiLiveSettingsSection.js';
 import { getToolShortDescription, groupToolsByCategory } from '../agent/planner-tools-metadata.js';
+import { exportToJsonFile } from '../agent/json-transfer.js';
+import { useJsonImport } from '../hooks/useJsonImport.js';
 
 interface Props {
   onApiError: (error: unknown) => void;
@@ -531,8 +535,126 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   const workspaceName = (id: string | null): string =>
     (id && workspaces?.find((w) => w.id === id)?.name) || (id ? '(deleted workspace)' : '');
 
+  const [importSuccess, setImportSuccess] = useState<string | null>(null);
+
+  const handleExportEndpoint = (): void => {
+    exportToJsonFile(
+      'planner-endpoint',
+      {
+        baseUrl: baseUrlInput,
+        models: (models ?? []).map((m) => ({ modelId: m.modelId, label: m.label })),
+        embeddingBaseUrl: embeddingBaseUrlInput || null,
+        embeddingModelId: embeddingModelIdInput || null,
+        webSearchBaseUrl: webSearchBaseUrlInput || null,
+        urlFetchBaseUrl: urlFetchBaseUrlInput || null,
+      },
+      'planner-endpoint',
+    );
+  };
+
+  const { trigger: triggerImportEndpoint, fileInputProps: endpointFileInputProps } =
+    useJsonImport<PlannerEndpointTemplatePayload>({
+      expectedKind: 'planner-endpoint',
+      onSuccess: async ({ data: imported }) => {
+        try {
+          setError(null);
+          setImportSuccess(null);
+          setBusy(true);
+          await api.updatePlannerSettings({
+            baseUrl: imported.baseUrl,
+            embeddingBaseUrl: imported.embeddingBaseUrl,
+            embeddingModelId: imported.embeddingModelId,
+            webSearchBaseUrl: imported.webSearchBaseUrl,
+            urlFetchBaseUrl: imported.urlFetchBaseUrl,
+          });
+          const existingModelIds = new Set((models ?? []).map((m) => m.modelId));
+          for (const m of imported.models) {
+            if (!existingModelIds.has(m.modelId)) {
+              await api.createPlannerModel({ modelId: m.modelId, label: m.label });
+            }
+          }
+          await load();
+          setImportSuccess('LLM endpoint and model settings imported successfully.');
+        } catch (err) {
+          setError(err instanceof ApiError ? err.message : 'Could not import endpoint settings.');
+        } finally {
+          setBusy(false);
+        }
+      },
+      onError: (err) => {
+        setError(err);
+        setImportSuccess(null);
+      },
+    });
+
+  const { trigger: triggerImportAgent, fileInputProps: agentFileInputProps } =
+    useJsonImport<PocketAgentExportData>({
+      expectedKind: 'pocket-agent',
+      onSuccess: async ({ data: imported }) => {
+        try {
+          setError(null);
+          setImportSuccess(null);
+          setBusy(true);
+          const created = await api.createPlannerWorkspace(imported.name);
+          await api.updatePlannerWorkspace(created.id, {
+            defaultModelId: imported.defaultModelId,
+            identityPrompt: imported.identityPrompt,
+            memoryEnabled: imported.memoryEnabled,
+            mcpEnabled: imported.mcpEnabled,
+          });
+          if (imported.disabledTools && imported.disabledTools.length > 0) {
+            const disabledSet = new Set(imported.disabledTools);
+            const { tools: agentTools } = await api.listPlannerAgentTools(created.id);
+            for (const t of agentTools) {
+              if (disabledSet.has(t.name) && t.enabled) {
+                await api.setPlannerAgentTool(created.id, { toolName: t.name, enabled: false });
+              }
+            }
+          }
+          await load();
+          setImportSuccess(`Agent "${created.name}" imported successfully.`);
+        } catch (err) {
+          setError(err instanceof ApiError ? err.message : 'Could not import agent.');
+        } finally {
+          setBusy(false);
+        }
+      },
+      onError: (err) => {
+        setError(err);
+        setImportSuccess(null);
+      },
+    });
+
+  const exportAgent = async (ws: PlannerWorkspace): Promise<void> => {
+    try {
+      let disabledTools: string[] = [];
+      try {
+        const res = await api.listPlannerAgentTools(ws.id);
+        disabledTools = res.tools.filter((t) => !t.enabled).map((t) => t.name);
+      } catch {
+        // fallback to empty if list fails
+      }
+      exportToJsonFile(
+        'pocket-agent',
+        {
+          name: ws.name,
+          defaultModelId: ws.defaultModelId,
+          identityPrompt: ws.identityPrompt,
+          memoryEnabled: ws.memoryEnabled,
+          mcpEnabled: ws.mcpEnabled,
+          disabledTools,
+        },
+        ws.name,
+      );
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not export agent.');
+    }
+  };
+
   return (
     <div className="planner-page">
+      <input {...endpointFileInputProps} />
+      <input {...agentFileInputProps} />
       <div className="planner-head">
         <div>
           <h2>Pocket Agent settings</h2>
@@ -541,16 +663,41 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
             Agents" section on the home screen.
           </p>
         </div>
-        {onBack && (
-          <button type="button" className="planner-btn" onClick={onBack}>
-            Close
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button
+            type="button"
+            className="planner-btn"
+            onClick={handleExportEndpoint}
+            title="Export LLM endpoint and model settings to JSON"
+          >
+            <Icon name="download" size={14} />
+            Export endpoint JSON
           </button>
-        )}
+          <button
+            type="button"
+            className="planner-btn"
+            onClick={triggerImportEndpoint}
+            title="Import LLM endpoint and model settings from JSON"
+          >
+            <Icon name="upload" size={14} />
+            Import endpoint JSON
+          </button>
+          {onBack && (
+            <button type="button" className="planner-btn" onClick={onBack}>
+              Close
+            </button>
+          )}
+        </div>
       </div>
 
       {error && (
         <div className="error-box" role="alert">
           {error}
+        </div>
+      )}
+      {importSuccess && (
+        <div className="success-box" role="status">
+          {importSuccess}
         </div>
       )}
 
@@ -1016,6 +1163,15 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
               </span>
             </span>
             <div className="planner-row-actions">
+              <button
+                type="button"
+                className="planner-btn"
+                onClick={() => void exportAgent(ws)}
+                title={`Export ${ws.name} to JSON`}
+                aria-label={`Export ${ws.name} to JSON`}
+              >
+                <Icon name="download" size={14} />
+              </button>
               <button type="button" className="planner-btn" onClick={() => onOpenAgent(ws.id)}>
                 Edit
               </button>
@@ -1045,6 +1201,15 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
           />
           <button type="button" className="planner-btn" disabled={busy} onClick={addAgent}>
             <Icon name="plus" size={14} /> Add agent
+          </button>
+          <button
+            type="button"
+            className="planner-btn"
+            disabled={busy}
+            onClick={triggerImportAgent}
+            title="Import agent from a JSON file"
+          >
+            <Icon name="upload" size={14} /> Import agent
           </button>
         </div>
         {newAgentPath ? (

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   AgentInfo,
   CronJob,
+  CronJobExportData,
   CronJobRun,
   CronSchedulePreset,
   CronWorktreeMode,
@@ -20,6 +21,8 @@ import { hashForCurrentHost } from '../hooks/useHashRoute.js';
 import { SelectRowNative } from '../components/SelectRowNative.js';
 import { NumberRow, SectionCard, TextRow } from './SettingsPage.js';
 import { useHostApi } from '../hosts/HostContext.js';
+import { exportToJsonFile } from '../agent/json-transfer.js';
+import { useJsonImport } from '../hooks/useJsonImport.js';
 
 interface Props {
   /** `'new'` for an unsaved job. */
@@ -370,15 +373,91 @@ export function CronJobEditorPage({
     }
   };
 
+  const [importSuccess, setImportSuccess] = useState<string | null>(null);
+
+  const handleExport = (): void => {
+    exportToJsonFile(
+      'cron-job',
+      {
+        name,
+        enabled,
+        preset:
+          scheduleKind === 'preset'
+            ? {
+                every,
+                minute,
+                ...(every !== 'hour' ? { hour } : {}),
+                ...(every === 'week' ? { weekdays } : {}),
+                ...(every === 'month' ? { dayOfMonth } : {}),
+              }
+            : undefined,
+        cronExpr: scheduleKind === 'expression' ? cronExpr : undefined,
+        timeZone,
+        cwd,
+        agent,
+        worktreeMode,
+        model: model ? model : null,
+        effort: effort ? effort : null,
+        skipPermissions,
+        prompt,
+        overlapPolicy,
+        retentionDays,
+      },
+      name,
+    );
+  };
+
+  const { trigger: triggerImport, fileInputProps } = useJsonImport<CronJobExportData>({
+    expectedKind: 'cron-job',
+    onSuccess: ({ data: imported }) => {
+      setError(null);
+      setImportSuccess(null);
+      setName(imported.name);
+      if (imported.enabled !== undefined) setEnabled(imported.enabled);
+      if (imported.preset) {
+        setScheduleKind('preset');
+        setEvery(imported.preset.every);
+        setMinute(imported.preset.minute);
+        if ('hour' in imported.preset) setHour(imported.preset.hour);
+        if ('weekdays' in imported.preset) setWeekdays(imported.preset.weekdays);
+        if ('dayOfMonth' in imported.preset) setDayOfMonth(imported.preset.dayOfMonth);
+      } else if (imported.cronExpr) {
+        setScheduleKind('expression');
+        setCronExpr(imported.cronExpr);
+      }
+      if (imported.timeZone) setTimeZone(imported.timeZone);
+      if (imported.cwd !== undefined) setCwd(imported.cwd);
+      if (imported.agent) setAgent(imported.agent);
+      if (imported.worktreeMode) setWorktreeMode(imported.worktreeMode);
+      if (imported.model !== undefined) setModel(imported.model ?? '');
+      if (imported.effort !== undefined) setEffort(imported.effort ?? '');
+      if (imported.skipPermissions !== undefined) setSkipPermissions(imported.skipPermissions);
+      if (imported.prompt) setPrompt(imported.prompt);
+      if (imported.overlapPolicy) setOverlapPolicy(imported.overlapPolicy);
+      if (imported.retentionDays !== undefined) setRetentionDays(imported.retentionDays);
+      setImportSuccess('Cron job configuration imported.');
+    },
+    onError: (err) => {
+      setError(err);
+      setImportSuccess(null);
+    },
+  });
+
   const body = loading ? (
     <div className="settings-page">
       <div className="spinner">Loading…</div>
     </div>
   ) : (
     <div className="settings-page">
+      <input {...fileInputProps} />
       {error !== null && (
         <div className="error-box" role="alert">
           {error}
+        </div>
+      )}
+      {importSuccess !== null && (
+        <div className="success-box" role="status">
+          {importSuccess}
         </div>
       )}
 
@@ -391,6 +470,26 @@ export function CronJobEditorPage({
           <p className="settings-header-sub">
             Runs a prompt in a project on a repeating schedule, unattended.
           </p>
+        </div>
+        <div className="settings-header-actions" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button
+            type="button"
+            className="settings-close-btn"
+            onClick={handleExport}
+            title="Export job to JSON file"
+          >
+            <Icon name="download" size={14} />
+            Export JSON
+          </button>
+          <button
+            type="button"
+            className="settings-close-btn"
+            onClick={triggerImport}
+            title="Import job from JSON file"
+          >
+            <Icon name="upload" size={14} />
+            Import JSON
+          </button>
         </div>
       </div>
 

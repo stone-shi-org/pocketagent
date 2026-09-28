@@ -15,6 +15,8 @@ import { useHostApi } from '../hosts/HostContext.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
 import { unlockAudioContext } from '../audio/audio-context.js';
 import { useAudioInputDevices } from '../audio/devices.js';
+import { exportToJsonFile } from '../agent/json-transfer.js';
+import { useJsonImport } from '../hooks/useJsonImport.js';
 
 
 type Settings = SettingsResponse['settings'];
@@ -252,6 +254,33 @@ export function SettingsPage({ onApiError, onBack, hubVersion = null }: Props): 
     setConfirmingSkip(false);
   }
 
+  const [importSuccess, setImportSuccess] = useState<string | null>(null);
+
+  const handleExport = useCallback(() => {
+    if (!data) return;
+    exportToJsonFile('server-settings', data.settings, data.fixed.host);
+  }, [data]);
+
+  const { trigger: triggerImport, fileInputProps } = useJsonImport<UpdateSettingsRequest>({
+    expectedKind: 'server-settings',
+    onSuccess: async ({ data: importedSettings }) => {
+      try {
+        setError(null);
+        setImportSuccess(null);
+        await api.updateSettings(importedSettings);
+        const reloaded = await api.getSettings();
+        setData(reloaded);
+        setImportSuccess('Server settings imported successfully.');
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : 'Failed to apply imported settings.');
+      }
+    },
+    onError: (err) => {
+      setError(err);
+      setImportSuccess(null);
+    },
+  });
+
   if (error && !data) {
     return (
       <div className="settings-page">
@@ -286,9 +315,15 @@ export function SettingsPage({ onApiError, onBack, hubVersion = null }: Props): 
 
   return (
     <div className="settings-page">
+      <input {...fileInputProps} />
       {error && (
         <div className="error-box" role="alert">
           {error}
+        </div>
+      )}
+      {importSuccess && (
+        <div className="success-box" role="status">
+          {importSuccess}
         </div>
       )}
 
@@ -302,13 +337,31 @@ export function SettingsPage({ onApiError, onBack, hubVersion = null }: Props): 
             Manage server configurations, agent execution paths, timeouts, and device preferences.
           </p>
         </div>
-        {onBack && (
-          <div className="settings-header-actions">
+        <div className="settings-header-actions" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button
+            type="button"
+            className="settings-close-btn"
+            onClick={handleExport}
+            title="Export server settings to a JSON file"
+          >
+            <Icon name="download" size={14} />
+            Export JSON
+          </button>
+          <button
+            type="button"
+            className="settings-close-btn"
+            onClick={triggerImport}
+            title="Import server settings from a JSON file"
+          >
+            <Icon name="upload" size={14} />
+            Import JSON
+          </button>
+          {onBack && (
             <button type="button" className="settings-close-btn" onClick={onBack} aria-label="Close settings">
               Close
             </button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       <div className="settings-grid">

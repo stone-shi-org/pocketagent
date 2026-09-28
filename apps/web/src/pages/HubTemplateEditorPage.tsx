@@ -29,6 +29,8 @@ import {
   type TemplateDraft,
 } from '../agent/hub-template-format.js';
 import { BoolRow, SectionCard, SelectRow, TextRow } from './SettingsPage.js';
+import { exportEnvelopeToHubTemplate, exportToJsonFile } from '../agent/json-transfer.js';
+import { useJsonImport } from '../hooks/useJsonImport.js';
 
 interface Props {
   /** An existing template's id, or `newTemplateId(kind)` for an unsaved one. */
@@ -295,15 +297,73 @@ export function HubTemplateEditorPage({
     }
   };
 
+  const [importSuccess, setImportSuccess] = useState<string | null>(null);
+
+  const handleExport = (): void => {
+    const payload = payloadFrom(kind, draft);
+    exportToJsonFile(
+      'hub-template',
+      {
+        kind,
+        name,
+        description,
+        payload,
+      },
+      name,
+    );
+  };
+
+  const { trigger: triggerImport, fileInputProps } = useJsonImport({
+    expectedKind: undefined,
+    onSuccess: ({ envelope }) => {
+      const tpl = exportEnvelopeToHubTemplate(envelope);
+      if (!tpl) {
+        setError(
+          `Cannot import: Hub templates only support Pocket Agents, LLM Endpoints, Skills, MCP Registries, and Claude Providers. This file contains a "${envelope.kind}" export.`,
+        );
+        setImportSuccess(null);
+        return;
+      }
+      if (tpl.kind !== kind) {
+        setError(
+          `Cannot import: this template is for "${kindInfo(kind).label}", but the file is for "${kindInfo(tpl.kind).label}".`,
+        );
+        setImportSuccess(null);
+        return;
+      }
+      const parsed = parseTemplatePayload(kind, tpl.payload);
+      if (!parsed.ok) {
+        setError(`Invalid template payload: ${parsed.message}`);
+        setImportSuccess(null);
+        return;
+      }
+      setName(tpl.name);
+      if (tpl.description !== undefined) setDescription(tpl.description);
+      setDraft(draftFrom(parsed.value));
+      setError(null);
+      setImportSuccess('Template configuration imported into draft.');
+    },
+    onError: (err) => {
+      setError(err);
+      setImportSuccess(null);
+    },
+  });
+
   const body = loading ? (
     <div className="settings-page">
       <div className="spinner">Loading…</div>
     </div>
   ) : (
     <div className="settings-page">
+      <input {...fileInputProps} />
       {error !== null && (
         <div className="error-box" role="alert">
           {error}
+        </div>
+      )}
+      {importSuccess !== null && (
+        <div className="success-box" role="status">
+          {importSuccess}
         </div>
       )}
 
@@ -319,6 +379,26 @@ export function HubTemplateEditorPage({
             {' — '}
             {info.blurb}
           </p>
+        </div>
+        <div className="settings-header-actions" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button
+            type="button"
+            className="settings-close-btn"
+            onClick={handleExport}
+            title="Export template to JSON file"
+          >
+            <Icon name="download" size={14} />
+            Export JSON
+          </button>
+          <button
+            type="button"
+            className="settings-close-btn"
+            onClick={triggerImport}
+            title="Import template from JSON file"
+          >
+            <Icon name="upload" size={14} />
+            Import JSON
+          </button>
         </div>
       </div>
 

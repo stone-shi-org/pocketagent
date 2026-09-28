@@ -9,13 +9,18 @@ import {
   type PlannerModel,
   type PlannerLiveProvider,
   type PlannerWorkspace,
+  type PocketAgentExportData,
+  type UpdatePlannerWorkspaceRequest,
 } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
+import { Icon } from '../components/Icon.js';
 import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { getToolShortDescription, groupToolsByCategory } from '../agent/planner-tools-metadata.js';
+import { exportToJsonFile } from '../agent/json-transfer.js';
+import { useJsonImport } from '../hooks/useJsonImport.js';
 
 interface Props {
   /** Always an existing agent's id — creating a new one is still
@@ -303,8 +308,66 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
     );
   }
 
+  const [importSuccess, setImportSuccess] = useState<string | null>(null);
+
+  const handleExport = (): void => {
+    if (!agent) return;
+    const disabledTools = tools ? tools.filter((t) => !t.enabled).map((t) => t.name) : [];
+    exportToJsonFile(
+      'pocket-agent',
+      {
+        name: agent.name,
+        defaultModelId: agent.defaultModelId,
+        identityPrompt: agent.identityPrompt,
+        memoryEnabled: agent.memoryEnabled,
+        mcpEnabled: agent.mcpEnabled,
+        disabledTools,
+      },
+      agent.name,
+    );
+  };
+
+  const { trigger: triggerImport, fileInputProps } = useJsonImport<PocketAgentExportData>({
+    expectedKind: 'pocket-agent',
+    onSuccess: async ({ data: imported }) => {
+      try {
+        setError(null);
+        setImportSuccess(null);
+        setBusy(true);
+        const patch: UpdatePlannerWorkspaceRequest = {
+          name: imported.name,
+          defaultModelId: imported.defaultModelId,
+          identityPrompt: imported.identityPrompt,
+          memoryEnabled: imported.memoryEnabled,
+          mcpEnabled: imported.mcpEnabled,
+        };
+        await api.updatePlannerWorkspace(agentId, patch);
+        if (imported.disabledTools && tools) {
+          const disabledSet = new Set(imported.disabledTools);
+          for (const t of tools) {
+            const shouldEnable = !disabledSet.has(t.name);
+            if (t.enabled !== shouldEnable) {
+              await api.setPlannerAgentTool(agentId, { toolName: t.name, enabled: shouldEnable });
+            }
+          }
+        }
+        await load();
+        setImportSuccess('Agent configuration imported successfully.');
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : 'Could not import agent configuration.');
+      } finally {
+        setBusy(false);
+      }
+    },
+    onError: (err) => {
+      setError(err);
+      setImportSuccess(null);
+    },
+  });
+
   return (
     <div className="planner-page">
+      <input {...fileInputProps} />
       <div className="planner-head">
         <div>
           <h2>{agent.name}</h2>
@@ -312,14 +375,39 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
             This agent's own model, tools, and directory. Removing it lives on the agents list.
           </p>
         </div>
-        <button type="button" className="planner-btn" onClick={onBack ?? onDone}>
-          Done
-        </button>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button
+            type="button"
+            className="planner-btn"
+            onClick={handleExport}
+            title="Export agent configuration to JSON"
+          >
+            <Icon name="download" size={14} />
+            Export JSON
+          </button>
+          <button
+            type="button"
+            className="planner-btn"
+            onClick={triggerImport}
+            title="Import agent configuration from JSON"
+          >
+            <Icon name="upload" size={14} />
+            Import JSON
+          </button>
+          <button type="button" className="planner-btn" onClick={onBack ?? onDone}>
+            Done
+          </button>
+        </div>
       </div>
 
       {error && (
         <div className="error-box" role="alert">
           {error}
+        </div>
+      )}
+      {importSuccess && (
+        <div className="success-box" role="status">
+          {importSuccess}
         </div>
       )}
 

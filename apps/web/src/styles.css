@@ -263,6 +263,16 @@ input[type='number']::-webkit-outer-spin-button {
   margin-bottom: 14px;
 }
 
+.success-box {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--ok);
+  color: var(--ok);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+
 .warn-note {
   margin-top: 18px;
   font-size: 12px;
