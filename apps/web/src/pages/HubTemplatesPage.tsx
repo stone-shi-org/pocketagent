@@ -154,10 +154,10 @@ export function HubTemplatesPage({ onOpenTemplate, onApiError, onBack }: Props):
             copy: editing one never touches a host that already has it.
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <button
             type="button"
-            className="round-btn plain"
+            className="cron-secondary"
             onClick={() => setExporting(true)}
             title="Export template from a bound host"
           >
@@ -166,7 +166,7 @@ export function HubTemplatesPage({ onOpenTemplate, onApiError, onBack }: Props):
           </button>
           <button
             type="button"
-            className="round-btn plain"
+            className="cron-secondary"
             onClick={triggerImport}
             title="Import a template from JSON export file"
           >

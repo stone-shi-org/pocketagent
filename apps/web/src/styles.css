@@ -297,6 +297,7 @@ input[type='number']::-webkit-outer-spin-button {
   padding: 12px 14px;
   font-size: 13px;
   line-height: 1.5;
+  margin: 14px 0;
 }
 
 .warn-callout p {
@@ -5604,6 +5605,19 @@ button.chat-rate-limit-badge {
   flex-wrap: wrap;
   align-items: center;
   margin-bottom: 24px;
+}
+
+/* When a save bar sits inside a `.settings-section` (e.g. template instantiation),
+   it needs top separation from the preceding `.settings-row`, but should not duplicate
+   the bottom padding of the card shell. When immediately preceded by `.warn-callout`,
+   the callout's own bottom margin provides that separation. */
+.settings-section .cron-save-bar {
+  margin-top: 16px;
+  margin-bottom: 0;
+}
+
+.settings-section .warn-callout + .cron-save-bar {
+  margin-top: 0;
 }
 
 /* One run, styled to the exact rhythm of `.settings-row` (same padding and
