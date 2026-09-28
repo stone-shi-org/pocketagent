@@ -7585,6 +7585,29 @@ button.chat-rate-limit-badge {
   color: var(--warn);
 }
 
+/* PA-109: export template dialog */
+.export-template-dialog {
+  max-width: 560px;
+}
+
+.export-template-dialog h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.export-dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 14px;
+}
+
+.export-dialog-form .settings-row {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 0;
+}
+
 /* PA-98: Gemini Live header toggler and compact disclosure */
 .gemini-live-toggle {
   display: inline-flex;

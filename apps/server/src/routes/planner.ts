@@ -45,6 +45,7 @@ import {
   type PlannerMemoryListResponse,
   type PlannerModelListResponse,
   type PlannerSettingsDto,
+  type PlannerSkillDetailResponse,
   type PlannerSkillListResponse,
   type PlannerToolApprovalListResponse,
   type PlannerToolApprovalRow,
@@ -914,6 +915,29 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       skills: skills.listGlobalSkills().map((s) => toGlobalSkillInfo(s, globalDisabled)),
     };
     return response;
+  });
+
+  /**
+   * PA-109: returns one skill's metadata and body (frontmatter stripped).
+   * Needed by the Hub template exporter so an operator can turn an existing
+   * host-side global skill into a `skill` template without re-typing its body.
+   */
+  app.get('/api/planner/skills/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { db, skills } = app.pocket;
+    const summary = skills.get(id);
+    if (!summary) return notFound(reply, `Unknown skill: ${id}`);
+    try {
+      const body = await skills.loadSkillBody(id);
+      const globalDisabled = readGlobalDisabledSkillNames(db);
+      const response: PlannerSkillDetailResponse = {
+        ...toGlobalSkillInfo(summary, globalDisabled),
+        body,
+      };
+      return reply.send(response);
+    } catch (err) {
+      return mapSkillError(reply, err);
+    }
   });
 
   app.post('/api/planner/skills', async (request, reply) => {

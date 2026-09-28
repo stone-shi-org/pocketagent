@@ -98,6 +98,7 @@ import type {
   PlannerMemoryTier,
   UpdatePlannerMemoryRequest,
   PlannerSkillListResponse,
+  PlannerSkillDetailResponse,
   PlannerSkillInfo,
   RegisterPlannerSkillRequest,
   SetPlannerSkillEnabledRequest,
@@ -1167,6 +1168,9 @@ export function createApiClient(endpoint: HostEndpoint) {
       }),
 
     listPlannerSkills: () => request<PlannerSkillListResponse>('/api/planner/skills'),
+
+    getPlannerSkill: (id: string) =>
+      request<PlannerSkillDetailResponse>(`/api/planner/skills/${encodeURIComponent(id)}`),
 
     registerPlannerSkill: (body: RegisterPlannerSkillRequest) =>
       request<PlannerSkillInfo>('/api/planner/skills', { method: 'POST', body: JSON.stringify(body) }),

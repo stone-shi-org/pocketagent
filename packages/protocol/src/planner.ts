@@ -726,6 +726,14 @@ export type PlannerSkillInfo = z.infer<typeof PlannerSkillInfo>;
 export const PlannerSkillListResponse = z.object({ skills: z.array(PlannerSkillInfo) });
 export type PlannerSkillListResponse = z.infer<typeof PlannerSkillListResponse>;
 
+/**
+ * PA-109: one skill's metadata and body.
+ */
+export const PlannerSkillDetailResponse = PlannerSkillInfo.extend({
+  body: z.string(),
+});
+export type PlannerSkillDetailResponse = z.infer<typeof PlannerSkillDetailResponse>;
+
 export const SetPlannerSkillEnabledRequest = z.object({ enabled: z.boolean() });
 export type SetPlannerSkillEnabledRequest = z.infer<typeof SetPlannerSkillEnabledRequest>;
 

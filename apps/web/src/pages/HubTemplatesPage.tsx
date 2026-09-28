@@ -3,6 +3,7 @@ import type { HubHostEntry, HubTemplate } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { deleteHubTemplate, listHubHosts, listHubTemplates } from '../api/hub.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
+import { ExportFromHostDialog } from '../components/ExportFromHostDialog.js';
 import { Icon } from '../components/Icon.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import {
@@ -47,6 +48,7 @@ export function HubTemplatesPage({ onOpenTemplate, onApiError, onBack }: Props):
   const [hubHosts, setHubHosts] = useState<HubHostEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [choosingKind, setChoosingKind] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<HubTemplate | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -98,10 +100,21 @@ export function HubTemplatesPage({ onOpenTemplate, onApiError, onBack }: Props):
             copy: editing one never touches a host that already has it.
           </p>
         </div>
-        <button type="button" className="cron-new" onClick={() => setChoosingKind((v) => !v)}>
-          <Icon name="plus" size={18} />
-          New template
-        </button>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button
+            type="button"
+            className="round-btn plain"
+            onClick={() => setExporting(true)}
+            title="Export template from a bound host"
+          >
+            <Icon name="template" size={16} />
+            Export from host…
+          </button>
+          <button type="button" className="cron-new" onClick={() => setChoosingKind((v) => !v)}>
+            <Icon name="plus" size={18} />
+            New template
+          </button>
+        </div>
       </div>
 
       {error !== null && (
@@ -212,6 +225,17 @@ export function HubTemplatesPage({ onOpenTemplate, onApiError, onBack }: Props):
           busy={busy}
           onConfirm={() => void remove(confirmDelete)}
           onCancel={() => setConfirmDelete(null)}
+        />
+      )}
+
+      {exporting && (
+        <ExportFromHostDialog
+          onClose={() => setExporting(false)}
+          onExported={(newId) => {
+            setExporting(false);
+            onOpenTemplate(newId);
+          }}
+          onApiError={onApiError}
         />
       )}
     </div>

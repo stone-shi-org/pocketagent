@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { useHostEndpoint } from '../hosts/HostContext.js';
+import { ExportFromHostDialog } from './ExportFromHostDialog.js';
 import { Icon } from './Icon.js';
 import { listHubTemplates } from '../api/hub.js';
 import { locationToHash } from '../hooks/useHashRoute.js';
@@ -23,6 +25,8 @@ import { SectionCard } from '../pages/SettingsPage.js';
  */
 export function HubTemplatesSection(): JSX.Element | null {
   const [count, setCount] = useState<number | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const endpoint = useHostEndpoint();
 
   useEffect(() => {
     let cancelled = false;
@@ -60,7 +64,16 @@ export function HubTemplatesSection(): JSX.Element | null {
               LLM endpoint.
             </p>
           </div>
-          <div className="settings-row-control">
+          <div className="settings-row-control" style={{ display: 'flex', gap: '8px' }}>
+            <button
+              type="button"
+              className="round-btn plain"
+              onClick={() => setExporting(true)}
+              title="Export a configuration from this host into a template"
+            >
+              <Icon name="template" size={16} />
+              Export from this host…
+            </button>
             <button
               type="button"
               onClick={() => {
@@ -78,6 +91,23 @@ export function HubTemplatesSection(): JSX.Element | null {
           </div>
         </div>
       </div>
+
+      {exporting && (
+        <ExportFromHostDialog
+          preselectedHostId={endpoint.id}
+          onClose={() => setExporting(false)}
+          onExported={(newId) => {
+            setExporting(false);
+            void listHubTemplates()
+              .then((templates) => setCount(templates.length))
+              .catch(() => undefined);
+            window.location.hash = locationToHash(
+              { name: 'hub-template', templateId: newId },
+              null,
+            );
+          }}
+        />
+      )}
     </SectionCard>
   );
 }

@@ -297,6 +297,26 @@ describe('skill routes', () => {
     ]);
   });
 
+  it('GET /api/planner/skills/:id returns metadata and body of a skill, or 404', async () => {
+    t = await createTestApp();
+    await writeSkill(t.context.plannerSkillsRoot, 'greeter', { name: 'Greeter', description: 'Says hello.' }, 'Always say hi first.');
+    t.context.skills.refresh();
+    const res = await get('/api/planner/skills/global:greeter');
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body).toEqual(expect.objectContaining({
+      id: 'global:greeter',
+      slug: 'greeter',
+      name: 'Greeter',
+      description: 'Says hello.',
+      body: 'Always say hi first.',
+      enabled: true,
+    }));
+
+    const missing = await get('/api/planner/skills/global:nonexistent');
+    expect(missing.statusCode).toBe(404);
+  });
+
   it('POST /api/planner/skills registers from a trusted path, and refuses one outside every root', async () => {
     t = await createTestApp();
     const source = await writeSkill(t.projectDir, 'registered', { name: 'Registered', description: 'Via the route.' });
