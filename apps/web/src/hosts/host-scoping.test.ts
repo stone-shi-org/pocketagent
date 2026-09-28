@@ -39,10 +39,6 @@ const ALLOWED = new Map<string, string>([
     'PA-70: same Hub origin as the list page. Its one write that reaches a backend goes there through the Hub, which holds the per-host credential — this page never talks to a host directly, and must not be able to.',
   ],
   [
-    'components/HubTemplatesSection.tsx',
-    'PA-70: the Settings entry point to the above. Its single `GET /api/hub/templates` is also the gate that decides whether a Hub is answering at all, so it is Hub-origin by definition.',
-  ],
-  [
     'components/PushToggle.tsx',
     'PA-73: reads /api/push/status on the origin that served this bundle (Hub or standalone server). Push subscriptions and service workers belong to the origin, never to an individual host.',
   ],

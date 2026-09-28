@@ -27,6 +27,7 @@ import { currentHostId, visibleHosts } from '../hosts/selected-host.js';
 import { loadCollapsedHosts, toggleCollapsedHost } from '../hosts/collapsed-pref.js';
 import type { HostDirectory } from '../hosts/directory.js';
 import type { HostNav } from '../hosts/HostNav.js';
+import { overflowMenuItems, type MenuItem, type MenuItemId } from '../hosts/hub-view.js';
 
 interface Props {
   nav: HostNav;
@@ -49,6 +50,8 @@ interface Props {
   onOpenPlannerChat: (hostId: string, chatId: string) => void;
   onApiError: (error: unknown) => void;
   onLogout: () => void;
+  /** PA-110: the Hub's own view, offered from the host sheet when a Hub serves this page. */
+  onOpenHub?: () => void;
 }
 
 /**
@@ -84,6 +87,7 @@ export function ProjectsPage({
   onOpenPlannerChat,
   onApiError,
   onLogout,
+  onOpenHub,
 }: Props): JSX.Element {
   const [search, setSearch] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
@@ -162,53 +166,32 @@ export function ProjectsPage({
         {menuOpen && (
           <OverflowMenu
             onClose={() => setMenuOpen(false)}
-            onAdvanced={() => {
+            items={overflowMenuItems({
+              view: 'host',
+              source: directory.source,
+              layout: 'phone',
+              runningCount,
+            })}
+            handlers={menuHandlers((action) => {
               setMenuOpen(false);
-              setShowAdvanced(here);
-            }}
-            onRefresh={() => {
-              setMenuOpen(false);
-              void fleet.refreshAll();
-              directory.refresh();
-            }}
-            onHidden={() => {
-              setMenuOpen(false);
-              setShowHidden(here);
-            }}
-            onRunning={() => {
-              setMenuOpen(false);
-              setShowRunning(here);
-            }}
-            onHosts={() => {
-              setMenuOpen(false);
-              setShowHostSheet(true);
-            }}
-            onShell={() => {
-              setMenuOpen(false);
-              setShowShell(here);
-            }}
-            runningCount={runningCount}
-            onAgents={() => {
-              setMenuOpen(false);
-              onOpenAgents();
-            }}
-            onSettings={() => {
-              setMenuOpen(false);
-              onOpenSettings();
-            }}
-            onCron={() => {
-              setMenuOpen(false);
-              onOpenCron();
-            }}
-            onWebhooks={() => {
-              setMenuOpen(false);
-              onOpenWebhooks();
-            }}
-            onPlanner={() => {
-              setMenuOpen(false);
-              onOpenPlanner();
-            }}
-            onLogout={onLogout}
+              action();
+            }, {
+              refresh: () => {
+                void fleet.refreshAll();
+                directory.refresh();
+              },
+              shell: () => setShowShell(here),
+              hidden: () => setShowHidden(here),
+              running: () => setShowRunning(here),
+              hosts: () => setShowHostSheet(true),
+              agents: onOpenAgents,
+              cron: onOpenCron,
+              webhooks: onOpenWebhooks,
+              planner: onOpenPlanner,
+              advanced: () => setShowAdvanced(here),
+              settings: onOpenSettings,
+              signout: onLogout,
+            })}
           />
         )}
       </header>
@@ -309,6 +292,7 @@ export function ProjectsPage({
           hosts={hosts}
           hubVersion={directory.hubVersion}
           selectedHostId={selected}
+          hub={directory.source === 'hub' && onOpenHub ? { active: false, onSelect: onOpenHub } : null}
           onSelectAll={() => nav.goToHost(null)}
           onSelect={(hostId) => nav.goToHost(hostId)}
           onAdd={() => setShowAddHost(true)}
@@ -418,51 +402,25 @@ export function ProjectsPage({
   );
 }
 
+/**
+ * The header's overflow menu, in both layouts.
+ *
+ * Which items appear is `overflowMenuItems`' decision, not this component's
+ * (PA-110): the Hub view and a host view offer disjoint sets, and the rule
+ * lives in one tested function so the phone and desktop cannot drift apart
+ * on it. This only renders the list and wires each id to its handler — an id
+ * with no handler is skipped rather than rendered dead, so a caller that
+ * cannot offer something (the phone has no tab strip to open Settings in, say)
+ * simply omits it.
+ */
 export function OverflowMenu({
+  items,
+  handlers,
   onClose,
-  onAdvanced,
-  onRefresh,
-  onHidden,
-  onRunning,
-  onHosts,
-  onShell,
-  runningCount = 0,
-  onAgents,
-  onSettings,
-  onCron,
-  onWebhooks,
-  onPlanner,
-  onLogout,
 }: {
+  items: readonly MenuItem[];
+  handlers: Partial<Record<MenuItemId, () => void>>;
   onClose: () => void;
-  onAdvanced: () => void;
-  onRefresh: () => void;
-  onHidden: () => void;
-  onRunning: () => void;
-  /**
-   * Opens the host sheet (PA-67).
-   *
-   * The phone's header chip already opens it, but the desktop's own switcher
-   * is the rail — and the rail is hidden while there is only one host, which
-   * would otherwise leave a standalone desktop with no way to register a
-   * second one at all. Chrome that already exists, rather than a permanent
-   * column that earns its width only once it has something to switch between.
-   */
-  onHosts?: () => void;
-  onShell?: () => void;
-  /** Shown next to the menu item so a growing pile of live sessions is noticed before opening it. */
-  runningCount?: number;
-  /**
-   * Omitted on desktop, which already has a dedicated sidebar button for
-   * the same destination (`DesktopShell`'s `.agents-nav-btn`) — the phone
-   * shell has no such button, so this is its only way in.
-   */
-  onAgents?: () => void;
-  onSettings: () => void;
-  onCron: () => void;
-  onWebhooks: () => void;
-  onPlanner: () => void;
-  onLogout: () => void;
 }): JSX.Element {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -485,49 +443,37 @@ export function OverflowMenu({
           `position: relative`) instead. */}
       <div className="menu-backdrop" onClick={onClose} role="presentation" />
       <div className="menu" ref={ref} role="menu">
-        <button type="button" role="menuitem" onClick={onRefresh}>
-          Refresh
-        </button>
-        {onShell && (
-          <button type="button" role="menuitem" onClick={onShell}>
-            Shell (Tmux sessions)…
-          </button>
-        )}
-        <button type="button" role="menuitem" onClick={onHidden}>
-          Hidden projects…
-        </button>
-        <button type="button" role="menuitem" onClick={onRunning}>
-          Active sessions{runningCount > 0 ? ` (${runningCount})` : ''}…
-        </button>
-        {onHosts && (
-          <button type="button" role="menuitem" onClick={onHosts}>
-            Hosts…
-          </button>
-        )}
-        {onAgents && (
-          <button type="button" role="menuitem" onClick={onAgents}>
-            Agents…
-          </button>
-        )}
-        <button type="button" role="menuitem" onClick={onCron}>
-          Cron jobs…
-        </button>
-        <button type="button" role="menuitem" onClick={onWebhooks}>
-          Webhooks…
-        </button>
-        <button type="button" role="menuitem" onClick={onPlanner}>
-          Pocket Agent settings…
-        </button>
-        <button type="button" role="menuitem" onClick={onAdvanced}>
-          More session options…
-        </button>
-        <button type="button" role="menuitem" onClick={onSettings}>
-          Settings…
-        </button>
-        <button type="button" role="menuitem" className="danger" onClick={onLogout}>
-          Sign out
-        </button>
+        {items.map((item) => {
+          const handler = handlers[item.id];
+          if (!handler) return null;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              role="menuitem"
+              className={item.danger ? 'danger' : undefined}
+              onClick={handler}
+            >
+              {item.label}
+            </button>
+          );
+        })}
       </div>
     </>
   );
+}
+
+/**
+ * Wraps every handler so choosing an item closes the menu first — the one
+ * thing all of them share, written once rather than in fifteen closures.
+ */
+export function menuHandlers(
+  wrap: (action: () => void) => void,
+  actions: Partial<Record<MenuItemId, () => void>>,
+): Partial<Record<MenuItemId, () => void>> {
+  const out: Partial<Record<MenuItemId, () => void>> = {};
+  for (const [id, action] of Object.entries(actions) as [MenuItemId, (() => void) | undefined][]) {
+    if (action) out[id] = () => wrap(action);
+  }
+  return out;
 }

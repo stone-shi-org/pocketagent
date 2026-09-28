@@ -63,12 +63,20 @@ import type { HostDirectory } from '../hosts/directory.js';
 export function AddHostDialog({
   directory,
   onClose,
+  initial,
 }: {
   directory: HostDirectory;
   onClose: () => void;
+  /**
+   * Prefill, from a backend the Hub heard on the network (PA-110). Only a
+   * starting point: both fields stay editable, because the address a Hub
+   * *heard* an advertisement from is evidence of a route, not a promise that
+   * it is the one the operator wants to register.
+   */
+  initial?: { label?: string; basePath?: string };
 }): JSX.Element {
-  const [label, setLabel] = useState('');
-  const [basePath, setBasePath] = useState('');
+  const [label, setLabel] = useState(initial?.label ?? '');
+  const [basePath, setBasePath] = useState(initial?.basePath ?? '');
   const [token, setToken] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

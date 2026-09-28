@@ -7,7 +7,6 @@ import { CodingAgentsSection } from '../components/CodingAgentsSection.js';
 import { TelegramSection } from '../components/TelegramSection.js';
 import { HostAdminSection } from '../components/HostAdminSection.js';
 import { HubsSection } from '../components/HubsSection.js';
-import { HubTemplatesSection } from '../components/HubTemplatesSection.js';
 import { getTerminalFontOverride, setTerminalFontOverride } from '../agent/terminal-font-pref.js';
 import { getVoiceDirectSendPref, setVoiceDirectSendPref } from '../agent/voice-prefs.js';
 import { formatBuildInfo } from '../version.js';
@@ -651,9 +650,10 @@ export function SettingsPage({ onApiError, onBack, hubVersion = null }: Props): 
             <HubsSection onApiError={onApiError} />
           </SectionCard>
 
-          {/* PA-70. Renders nothing — not even the card — unless this origin is a
-              Hub, so a standalone install's Settings page is unchanged. */}
-          <HubTemplatesSection />
+          {/* PA-110: the Hub's config-templates card used to sit here, on a
+              *host's* Settings page, which mixed a Hub feature into server
+              settings. It lives on the Hub's own page now (`HubPage`). "Hubs"
+              above stays: it is this backend's list of Hubs bound to it. */}
 
           <SectionCard
             title="Telegram"

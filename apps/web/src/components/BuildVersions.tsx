@@ -26,7 +26,10 @@ export function BuildVersions({
   drift,
   hubVersion,
   className,
+  showServer = true,
 }: {
+  /** False in the Hub view (PA-110), which is about no one server. */
+  showServer?: boolean;
   /** E.g. "Server 1.2.3"; null until a host has reported one. */
   server: string | null;
   /** Per-host breakdown for the aggregated view, tooltip only. */
@@ -40,10 +43,12 @@ export function BuildVersions({
   const title = [serverDetail, drift, bundle].filter(Boolean).join('\n');
   return (
     <span className={className} title={title}>
-      <span className="build-version-line">
-        {server ?? 'Server …'}
-        {drift && <span className="build-version-update"> · update available</span>}
-      </span>
+      {showServer && (
+        <span className="build-version-line">
+          {server ?? 'Server …'}
+          {drift && <span className="build-version-update"> · update available</span>}
+        </span>
+      )}
       {hubVersion !== null && <span className="build-version-line">Hub {hubVersion}</span>}
     </span>
   );

@@ -32,27 +32,55 @@ export function HostRail({
   onSelect,
   onAdd,
   canManage,
+  hub = null,
 }: {
   hosts: readonly HostRecord[];
-  /** Null in the aggregated "all hosts" view. */
+  /** Null in the aggregated "all hosts" view — and while the Hub is selected. */
   selectedHostId: string | null;
+  /**
+   * The Hub's own tile (PA-110), present only when a Hub serves this page.
+   *
+   * First in the rail because it is what the others hang off, and because on
+   * a Hub with no hosts it is the only tile that leads anywhere. While it is
+   * active no host tile is — the Hub is a third selection beside "all" and
+   * "one", not a host — which is what lets the overflow menu offer Hub items
+   * only (see `overflowMenuItems`).
+   */
+  hub?: { active: boolean; onSelect: () => void } | null;
   onSelectAll: () => void;
   onSelect: (hostId: string) => void;
   onAdd: () => void;
   canManage: boolean;
 }): JSX.Element {
+  const hubActive = hub?.active === true;
+  const allActive = !hubActive && selectedHostId === null;
   return (
     <nav className="host-rail" aria-label="Hosts">
-      <button
-        type="button"
-        className={`host-tile${selectedHostId === null ? ' active' : ''}`}
-        onClick={onSelectAll}
-        aria-pressed={selectedHostId === null}
-        title="All hosts"
-      >
-        <Icon name="agents" size={18} />
-        <span className="host-tile-label">All</span>
-      </button>
+      {hub && (
+        <button
+          type="button"
+          className={`host-tile hub${hubActive ? ' active' : ''}`}
+          onClick={hub.onSelect}
+          aria-pressed={hubActive}
+          title="Hub — hosts, discovery and templates"
+        >
+          <Icon name="hub" size={18} />
+          <span className="host-tile-label">Hub</span>
+        </button>
+      )}
+      {/* Nothing to aggregate without a host; the Hub tile is the whole rail then. */}
+      {hosts.length > 0 && (
+        <button
+          type="button"
+          className={`host-tile${allActive ? ' active' : ''}`}
+          onClick={onSelectAll}
+          aria-pressed={allActive}
+          title="All hosts"
+        >
+          <Icon name="agents" size={18} />
+          <span className="host-tile-label">All</span>
+        </button>
+      )}
 
       {hosts.map((host) => {
         const drift = hostDriftMessage(host);
@@ -60,9 +88,9 @@ export function HostRail({
         <button
           key={host.endpoint.id}
           type="button"
-          className={`host-tile${selectedHostId === host.endpoint.id ? ' active' : ''}`}
+          className={`host-tile${!hubActive && selectedHostId === host.endpoint.id ? ' active' : ''}`}
           onClick={() => onSelect(host.endpoint.id)}
-          aria-pressed={selectedHostId === host.endpoint.id}
+          aria-pressed={!hubActive && selectedHostId === host.endpoint.id}
           // The tooltip carries the whole sentence for a host that cannot be
           // used; the tile itself only has room for a dot and a word, and a
           // phone-sized truth ("version") is not an explanation.

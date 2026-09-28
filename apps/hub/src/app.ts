@@ -6,7 +6,7 @@ import Fastify, { LogController, type FastifyInstance, type FastifyReply, type F
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
-import { isOriginAllowed } from '@pocketagent/node-kit';
+import { isOriginAllowed, type MdnsTransport } from '@pocketagent/node-kit';
 import { SERVER_PROTOCOL_RANGE, type HealthResponse } from '@pocketagent/protocol';
 import { HubAuthService, HUB_AUTH_COOKIE_NAME } from './auth.js';
 import type { HubConfig } from './config.js';
@@ -17,6 +17,8 @@ import { hubAuthRoutes } from './routes/auth.js';
 import { hubHostRoutes } from './routes/hosts.js';
 import { hubTemplateRoutes } from './routes/templates.js';
 import { hubPushRoutes } from './routes/push.js';
+import { hubDiscoveryRoutes } from './routes/discovery.js';
+import { DiscoveryService } from './discovery/service.js';
 import { HubPushService } from './push/service.js';
 import { PushNotificationRelay } from './push/relay.js';
 import { Provisioner } from './templates/provisioner.js';
@@ -76,6 +78,8 @@ export interface HubContext {
   /** PA-73: Hub Web Push service and bound backend notification relay. */
   readonly push: HubPushService;
   readonly pushRelay: PushNotificationRelay;
+  /** PA-110: backends heard advertising on mDNS — suggestions, never registry rows. */
+  readonly discovery: DiscoveryService;
 }
 
 declare module 'fastify' {
@@ -94,6 +98,18 @@ export interface BuildHubOptions {
   readonly startHealthPoller?: boolean;
   /** Disabled in tests that assert without a live push relay. */
   readonly startPushRelay?: boolean;
+  /**
+   * PA-110. `config.mdnsDiscovery` decides whether discovery exists at all;
+   * this only defers opening the socket. Test configs turn the former off
+   * (`makeHubConfig`), because port 5353 is shared machine state and a test
+   * must not depend on — or answer — whatever else is advertising on the LAN
+   * it happens to run on; a discovery suite injects `mdnsTransport` instead.
+   */
+  readonly startDiscovery?: boolean;
+  /** The mDNS socket, injected so a test can use an in-memory bus. */
+  readonly mdnsTransport?: () => Promise<MdnsTransport>;
+  /** How long `POST /api/hub/discovery/refresh` waits for answers. */
+  readonly discoveryRefreshWaitMs?: number;
 }
 
 export interface BuiltHub {
@@ -133,6 +149,12 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
   const push = new HubPushService(db, app.log);
   push.init(config.pushContact);
   const pushRelay = new PushNotificationRelay({ registry, pushService: push, fetchImpl, log: app.log });
+  const discovery = new DiscoveryService({
+    enabled: config.mdnsDiscovery,
+    registeredHosts: () => registry.list(),
+    ...(options.mdnsTransport ? { transport: options.mdnsTransport } : {}),
+    log: app.log,
+  });
 
   const context: HubContext = {
     config,
@@ -146,6 +168,7 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
     fetchImpl,
     push,
     pushRelay,
+    discovery,
   };
   app.decorate('hub', context);
 
@@ -230,6 +253,9 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
   await app.register(hubHostRoutes);
   await app.register(hubTemplateRoutes);
   await app.register(hubPushRoutes);
+  await app.register(hubDiscoveryRoutes, {
+    ...(options.discoveryRefreshWaitMs === undefined ? {} : { refreshWaitMs: options.discoveryRefreshWaitMs }),
+  });
 
   // ---- The proxy ------------------------------------------------------------
   /**
@@ -374,6 +400,7 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
   // until it does.
   if (options.startHealthPoller !== false) void health.start();
   if (options.startPushRelay !== false) void pushRelay.start();
+  if (options.startDiscovery !== false) await discovery.start();
 
   // `preClose`, not `onClose`: Fastify's internal shutdown calls the
   // underlying `http.Server.close()`, which does not resolve while a
@@ -392,6 +419,7 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
   app.addHook('onClose', async () => {
     health.stop();
     pushRelay.stop();
+    await discovery.stop();
     if (ownsDb) db.close();
   });
 

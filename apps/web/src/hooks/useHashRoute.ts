@@ -38,6 +38,12 @@ export type Route =
    * `{ hostId: null }` for that reason.
    */
   | { name: 'hub-templates' }
+  /**
+   * The Hub's own home (PA-110) — every registered host as a card, the ones
+   * heard on the network, templates. Host-less for the same reason
+   * `hub-templates` is, and the home screen of a Hub with no hosts at all.
+   */
+  | { name: 'hub' }
   /** One template's editor and its instantiate flow. `newTemplateId(kind)`
       for an unsaved one — the kind cannot be changed later, so it has to be
       chosen before the form exists and rides in this segment. */
@@ -164,6 +170,8 @@ function parse(hash: string): Route {
 
   if (/^#\/hub\/templates$/.exec(hash)) return { name: 'hub-templates' };
 
+  if (/^#\/hub$/.exec(hash)) return { name: 'hub' };
+
   if (/^#\/agents$/.exec(hash)) return { name: 'agents' };
 
   if (/^#\/settings$/.exec(hash)) return { name: 'settings' };
@@ -197,6 +205,8 @@ function toHash(route: Route): string {
       return `#/planner/${encodeURIComponent(route.chatId)}`;
     case 'planner-agent':
       return `#/planner/agent/${encodeURIComponent(route.agentId)}`;
+    case 'hub':
+      return '#/hub';
     case 'hub-templates':
       return '#/hub/templates';
     case 'hub-template':

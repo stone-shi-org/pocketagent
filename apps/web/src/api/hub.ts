@@ -1,4 +1,6 @@
 import {
+  HubDiscoveryResponse,
+  PushStatusResponse,
   HubHostListResponse,
   HubTemplateListResponse,
   InstantiateHubTemplateResponse,
@@ -149,4 +151,34 @@ export async function listHubHosts(): Promise<HubHostEntry[]> {
     throw new ApiError('This origin is not a PocketAgent Hub.', 404, 'not_a_hub');
   }
   return parsed.data.hosts;
+}
+
+/**
+ * Backends this Hub has heard advertising on the network (PA-110) —
+ * suggestions to add, never registry rows. Parsed rather than cast, for the
+ * reason `listHubTemplates` gives: a backend answers a JSON 404 here.
+ */
+export async function getHubDiscovery(): Promise<HubDiscoveryResponse> {
+  return HubDiscoveryResponse.parse(await hubRequest<unknown>('/api/hub/discovery'));
+}
+
+/** Sends a fresh mDNS query and answers once replies have had time to arrive. */
+export async function refreshHubDiscovery(): Promise<HubDiscoveryResponse> {
+  return HubDiscoveryResponse.parse(
+    await hubRequest<unknown>('/api/hub/discovery/refresh', { method: 'POST' }),
+  );
+}
+
+/**
+ * The Hub's push relay, per host (PA-73). The same origin route
+ * `PushToggle` reads; here so the Hub page can list every host's stream
+ * rather than only warn when one is down.
+ */
+export async function getHubPushStatus(): Promise<PushStatusResponse> {
+  return PushStatusResponse.parse(await hubRequest<unknown>('/api/push/status'));
+}
+
+/** Sends a test notification to every browser subscribed to this Hub. */
+export async function sendHubTestPush(): Promise<{ sent: number; pruned: number }> {
+  return hubRequest<{ sent: number; pruned: number }>('/api/push/test', { method: 'POST' });
 }

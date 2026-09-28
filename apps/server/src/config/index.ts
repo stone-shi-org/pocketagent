@@ -135,6 +135,8 @@ const RawEnv = z.object({
    * /api/settings`, the persisted value wins and this is ignored on later boots.
    */
   POCKETAGENT_GLOBAL_SKIP_PERMISSIONS: boolish(false),
+  /** PA-110: announce this backend on the LAN over mDNS, for a Hub to discover. */
+  POCKETAGENT_MDNS_ADVERTISE: boolish(false),
 
   POCKETAGENT_BACKEND: z.enum(['direct', 'tmux']).default('direct'),
   POCKETAGENT_PUSH_CONTACT: z.string().default('mailto:pocketagent@localhost'),
@@ -247,6 +249,12 @@ export interface Config {
   pushContact: string;
   /** True when bound to something other than loopback. */
   isNetworkExposed: boolean;
+  /**
+   * PA-110: advertise this backend over mDNS (`_pocketagent._tcp`) so a Hub
+   * on the same LAN can offer it as a one-click add. Off by default, and
+   * ignored — with a warning — on a loopback bind; see `discovery/mdns.ts`.
+   */
+  mdnsAdvertise: boolean;
   /**
    * Base URL of a code-server instance for this machine, or null if none is
    * configured. Varies per machine, so it rides on `HostInfo` rather than a
@@ -579,6 +587,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     tmuxSessionScopeSlice: e.POCKETAGENT_TMUX_SESSION_SCOPE_SLICE.trim() || null,
     pushContact: e.POCKETAGENT_PUSH_CONTACT.trim(),
     isNetworkExposed,
+    mdnsAdvertise: e.POCKETAGENT_MDNS_ADVERTISE,
     codeServerBaseUrl: e.POCKETAGENT_CODE_SERVER_URL?.trim() || null,
     liveSttUrl,
     liveSttModel: e.POCKETAGENT_LIVE_STT_MODEL?.trim() || null,

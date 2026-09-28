@@ -21,6 +21,11 @@ const ROUTES: { hash: string; route: Route }[] = [
   { hash: '#/planner', route: { name: 'planner' } },
   { hash: '#/planner/chat-1', route: { name: 'planner-chat', chatId: 'chat-1' } },
   { hash: '#/planner/agent/agent-1', route: { name: 'planner-agent', agentId: 'agent-1' } },
+  // PA-110: the Hub's own home. `#/hub` must never be read as a host segment
+  // (`HOST_SEGMENT` needs `#/h/`), which this row checks in both directions.
+  { hash: '#/hub', route: { name: 'hub' } },
+  { hash: '#/hub/templates', route: { name: 'hub-templates' } },
+  { hash: '#/hub/templates/tpl-1', route: { name: 'hub-template', templateId: 'tpl-1' } },
 ];
 
 // The acceptance criterion that matters most: PA-60 is a pure refactor, so a

@@ -41,3 +41,37 @@ export {
 } from './secret-box.js';
 export { bearerTokenFrom, generateToken, safeTokenEqual } from './tokens.js';
 export { isOriginAllowed } from './origin.js';
+// PA-110: DNS-SD over multicast DNS. Here rather than in either app because
+// the advertiser (`apps/server`) and the browser (`apps/hub`) are one
+// contract — the service type, the TXT keys and the TTLs — and a second copy
+// of any of them is how a Hub stops seeing backends with no error anywhere.
+export {
+  DnsDecodeError,
+  HOST_RECORD_TTL_S,
+  MDNS_ADDRESS,
+  MDNS_PORT,
+  MdnsAdvertiser,
+  MdnsBrowser,
+  POCKETAGENT_SERVICE_TYPE,
+  RR_TYPE,
+  SERVICE_RECORD_TTL_S,
+  decodePacket,
+  decodeTxt,
+  dnsKey,
+  encodePacket,
+  encodeTxt,
+  localIpv4Addresses,
+  openMdnsSocket,
+  type DiscoveredService,
+  type DnsPacket,
+  type DnsQuestion,
+  type DnsRecord,
+  type MdnsAdvertiserOptions,
+  type MdnsBrowserOptions,
+  type MdnsInterfaceAddress,
+  type MdnsLogger,
+  type MdnsPayload,
+  type MdnsRemote,
+  type MdnsTransport,
+  type SrvData,
+} from './mdns.js';

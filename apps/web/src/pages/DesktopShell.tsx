@@ -19,25 +19,34 @@ import { HostSheet } from '../components/HostSheet.js';
 import { AddHostDialog } from '../components/AddHostDialog.js';
 import { BindHostDialog } from '../components/BindHostDialog.js';
 import { EditHostDialog } from '../components/EditHostDialog.js';
-import { findHostByManageId, hostDriftMessage, serverVersionLine } from '../hosts/host-status.js';
+import {
+  findHostByManageId,
+  hostDotClass,
+  hostDriftMessage,
+  hostStatusSummary,
+  serverVersionLine,
+} from '../hosts/host-status.js';
+import { hubViewActive, overflowMenuItems } from '../hosts/hub-view.js';
 import { BuildVersions } from '../components/BuildVersions.js';
 import { HostProvider } from '../hosts/HostContext.js';
 import { useHostFleet } from '../hosts/useHostFleet.js';
 import { currentHostId, visibleHosts } from '../hosts/selected-host.js';
 import { loadCollapsedHosts, toggleCollapsedHost } from '../hosts/collapsed-pref.js';
 import type { HostDirectory } from '../hosts/directory.js';
+import type { HostRecord } from '../hosts/host-status.js';
 import type { HostNav } from '../hosts/HostNav.js';
 import { DEFAULT_HOST_ID } from '../api/host.js';
 import { PocketAgentsSection } from '../components/PocketAgentsSection.js';
 import { ShellSection } from '../components/ShellSection.js';
 import { TabBar, type Tab } from '../components/TabBar.js';
 import { UsageBar } from '../components/UsageBar.js';
-import { OverflowMenu } from './ProjectsPage.js';
+import { OverflowMenu, menuHandlers } from './ProjectsPage.js';
 import { ComposerPage } from './ComposerPage.js';
 import {
   AgentsFleetPage,
   CronJobEditorPage,
   CronJobsPage,
+  HubPage,
   HubTemplateEditorPage,
   HubTemplatesPage,
   PlannerAgentEditorPage,
@@ -241,6 +250,20 @@ export function DesktopShell({
   const here = currentHostId(nav.selection, hosts);
   const visible = useMemo(() => visibleHosts(nav.selection, hosts), [nav.selection, hosts]);
   const singleHost = hosts.length <= 1;
+  const hubMode = directory.source === 'hub';
+  /**
+   * PA-110: the Hub is selected (its tile, or a Hub route) — or there is no
+   * host at all, in which case every host surface would be a dead end and the
+   * Hub's page is the only honest thing to show. See `hubViewActive`.
+   */
+  const hubView = hubViewActive(directory.source, hosts.length, route);
+  /**
+   * Tabs belong to hosts. A Hub with none has nothing a restored tab could be
+   * talking to, so the strip is not rendered at all rather than showing tabs
+   * whose every request fails.
+   */
+  const tabsAvailable = !(hubMode && hosts.length === 0);
+  const openHub = (): void => onNavigate({ name: 'hub' }, { hostId: null });
 
   const [tabs, dispatch] = useReducer(tabListReducer, undefined, () =>
     // A tab persisted before PA-67 carries no host and is migrated onto the
@@ -645,6 +668,7 @@ export function DesktopShell({
           onSelect={(hostId) => nav.goToHost(hostId)}
           onAdd={() => setShowAddHost(true)}
           canManage={directory.canManage}
+          hub={hubMode ? { active: hubView, onSelect: openHub } : null}
         />
       )}
       <aside className="sidebar">
@@ -663,12 +687,19 @@ export function DesktopShell({
             {/* No `onClick`: the rail is the desktop switcher, and a second
                 affordance for the same action in the brand line is one too
                 many. */}
-            <HostChip
-              host={hereState.host}
-              record={hosts.find((candidate) => candidate.endpoint.id === here) ?? null}
-              compatibility={hereState.hostCompatibility}
-              allHosts={nav.selection.mode === 'all' && !singleHost}
-            />
+            {hubView ? (
+              <span className="host-chip">
+                <Icon name="hub" />
+                <span className="host-name">Hub</span>
+              </span>
+            ) : (
+              <HostChip
+                host={hereState.host}
+                record={hosts.find((candidate) => candidate.endpoint.id === here) ?? null}
+                compatibility={hereState.hostCompatibility}
+                allHosts={nav.selection.mode === 'all' && !singleHost}
+              />
+            )}
             {/* Which exact builds are running, at a glance and labelled by
                 component (PA-107) — see `BuildVersions`. Desktop-only: the
                 phone header's `.home-title` reuses the same `HostChip` but
@@ -683,6 +714,8 @@ export function DesktopShell({
               return (
                 <BuildVersions
                   className="sidebar-version"
+                  // The Hub view is about no one server (PA-110).
+                  showServer={!hubView}
                   server={line.text}
                   serverDetail={line.detail}
                   drift={selectedRecord ? hostDriftMessage(selectedRecord) : null}
@@ -704,59 +737,66 @@ export function DesktopShell({
           {menuOpen && (
             <OverflowMenu
               onClose={() => setMenuOpen(false)}
-              onAdvanced={() => {
-                setMenuOpen(false);
-                setShowAdvanced(here);
-              }}
-              onRefresh={() => {
-                setMenuOpen(false);
-                void fleet.refreshAll();
-                directory.refresh();
-              }}
-              onHidden={() => {
-                setMenuOpen(false);
-                setShowHidden(here);
-              }}
-              onRunning={() => {
-                setMenuOpen(false);
-                setShowRunning(here);
-              }}
-              onHosts={() => {
-                setMenuOpen(false);
-                setShowHostSheet(true);
-              }}
-              onShell={() => {
-                setMenuOpen(false);
-                setShowShell(here);
-              }}
-              runningCount={runningCount}
-              onSettings={() => {
-                setMenuOpen(false);
-                // PA-36: Settings is a singleton tab — `openPermanentTab`
-                // dedups by `tabIdFor`'s id, so opening it again from here
-                // just switches to the one already open rather than adding a
-                // second. Since PA-67 that id is per host, because a cron job
-                // or a webhook belongs to one machine and one global admin tab
-                // would show the wrong one's rows under the right title.
-                openPermanentTab(here, { name: 'settings' });
-              }}
-              onCron={() => {
-                setMenuOpen(false);
-                onNavigate({ name: 'cron' });
-              }}
-              onWebhooks={() => {
-                setMenuOpen(false);
-                onNavigate({ name: 'webhooks' });
-              }}
-              onPlanner={() => {
-                setMenuOpen(false);
-                onNavigate({ name: 'planner' });
-              }}
-              onLogout={onLogout}
+              // PA-110: disjoint sets — Hub items with the Hub selected,
+              // server items with a host selected. `overflowMenuItems` decides.
+              items={overflowMenuItems({
+                view: hubView ? 'hub' : 'host',
+                source: directory.source,
+                layout: 'desktop',
+                runningCount,
+              })}
+              handlers={menuHandlers(
+                (action) => {
+                  setMenuOpen(false);
+                  action();
+                },
+                hubView
+                  ? {
+                      refresh: () => directory.refresh(),
+                      'hub-overview': openHub,
+                      'hub-add-host': () => setShowAddHost(true),
+                      'hub-templates': () => onNavigate({ name: 'hub-templates' }, { hostId: null }),
+                      signout: onLogout,
+                    }
+                  : {
+                      refresh: () => {
+                        void fleet.refreshAll();
+                        directory.refresh();
+                      },
+                      shell: () => setShowShell(here),
+                      hidden: () => setShowHidden(here),
+                      running: () => setShowRunning(here),
+                      hosts: () => setShowHostSheet(true),
+                      // PA-36: Settings is a singleton tab — `openPermanentTab`
+                      // dedups by `tabIdFor`'s id, so opening it again from here
+                      // just switches to the one already open rather than adding a
+                      // second. Since PA-67 that id is per host, because a cron job
+                      // or a webhook belongs to one machine and one global admin tab
+                      // would show the wrong one's rows under the right title.
+                      settings: () => openPermanentTab(here, { name: 'settings' }),
+                      cron: () => onNavigate({ name: 'cron' }),
+                      webhooks: () => onNavigate({ name: 'webhooks' }),
+                      planner: () => onNavigate({ name: 'planner' }),
+                      advanced: () => setShowAdvanced(here),
+                      signout: onLogout,
+                    },
+              )}
             />
           )}
         </header>
 
+        {hubView ? (
+          <HubSidebar
+            route={route}
+            hosts={hosts}
+            onOverview={openHub}
+            onTemplates={() => onNavigate({ name: 'hub-templates' }, { hostId: null })}
+            onOpenHost={(hostId) => nav.goToHost(hostId)}
+            onAddHost={() => setShowAddHost(true)}
+            canManage={directory.canManage}
+          />
+        ) : (
+        <>
         <div className="sidebar-actions">
           <button
             type="button"
@@ -873,10 +913,12 @@ export function DesktopShell({
         </div>
 
         <UsageBar />
+        </>
+        )}
       </aside>
 
       <main className="workspace">
-        {openTabs.length > 0 && (
+        {tabsAvailable && openTabs.length > 0 && (
           <TabBar
             tabs={tabsForBar}
             activeId={activeTabId}
@@ -895,7 +937,7 @@ export function DesktopShell({
           />
         )}
 
-        {openTabs.length > 0 && (
+        {tabsAvailable && openTabs.length > 0 && (
           <div className={`tab-panels${activeTabId === null ? ' collapsed' : ''}`}>
             {openTabs.map((tab) => (
               /* Every panel stays mounted (only the active one is visible),
@@ -1038,7 +1080,19 @@ export function DesktopShell({
           </div>
         )}
 
-        {route.name === 'compose' ? (
+        {hubView && !isHubTemplateRoute(route) ? (
+          /* PA-110. Host-less, like the template pane below: nothing here is
+             any one machine's, and with no host there is no provider to give. */
+          <Suspense fallback={<PageFallback />}>
+            <HubPage
+              directory={directory}
+              onOpenHost={(hostId) => nav.goToHost(hostId)}
+              onOpenTemplates={() => onNavigate({ name: 'hub-templates' }, { hostId: null })}
+              onOpenTemplate={(templateId) => onNavigate({ name: 'hub-template', templateId }, { hostId: null })}
+              onApiError={onApiError}
+            />
+          </Suspense>
+        ) : route.name === 'compose' ? (
           <HostProvider endpoint={nav.endpointFor(here)}>
             <ComposerPage
               // Keyed on cwd *and host* so picking a different project's "new
@@ -1218,6 +1272,75 @@ function WelcomePane({ onCompose }: { onCompose: () => void }): JSX.Element {
       <button type="button" className="primary" onClick={onCompose}>
         New chat
       </button>
+    </div>
+  );
+}
+
+/**
+ * The sidebar while the Hub is selected (PA-110).
+ *
+ * Replaces "New chat", "Shell", "Agents", search and the host groups — every
+ * one of which acts on a host, and none of which has a host to act on here.
+ * What it offers instead is the Hub's own two pages and the host list as a
+ * way *out* of the Hub view: choosing a host goes to that host, exactly as its
+ * rail tile does.
+ */
+function HubSidebar({
+  route,
+  hosts,
+  onOverview,
+  onTemplates,
+  onOpenHost,
+  onAddHost,
+  canManage,
+}: {
+  route: Route;
+  hosts: readonly HostRecord[];
+  onOverview: () => void;
+  onTemplates: () => void;
+  onOpenHost: (hostId: string) => void;
+  onAddHost: () => void;
+  canManage: boolean;
+}): JSX.Element {
+  const templates = route.name === 'hub-templates' || route.name === 'hub-template';
+  // Anything else is the overview — including a host route on a Hub with no
+  // hosts, which renders the Hub page whatever the URL said.
+  const overview = !templates;
+  return (
+    <div className="sidebar-scroll hub-sidebar">
+      <nav className="hub-nav" aria-label="Hub">
+        <button type="button" className={`hub-nav-item${overview ? ' active' : ''}`} onClick={onOverview}>
+          <Icon name="hub" size={17} />
+          Overview
+        </button>
+        <button type="button" className={`hub-nav-item${templates ? ' active' : ''}`} onClick={onTemplates}>
+          <Icon name="template" size={17} />
+          Config templates
+        </button>
+      </nav>
+      <div className="hub-sidebar-hosts">
+        <div className="hub-sidebar-label">Hosts</div>
+        {hosts.length === 0 && <p className="hub-muted">None yet.</p>}
+        {hosts.map((host) => (
+          <button
+            key={host.endpoint.id}
+            type="button"
+            className="hub-sidebar-host"
+            onClick={() => onOpenHost(host.endpoint.id)}
+            title={host.message ?? `Open ${host.label}`}
+          >
+            <span className={hostDotClass(host.status)} aria-hidden="true" />
+            <span className="hub-sidebar-host-name">{host.label}</span>
+            <span className="hub-sidebar-host-status">{hostStatusSummary(host)}</span>
+          </button>
+        ))}
+        {canManage && (
+          <button type="button" className="hub-sidebar-host add" onClick={onAddHost}>
+            <Icon name="plus" size={15} />
+            <span className="hub-sidebar-host-name">Add host</span>
+          </button>
+        )}
+      </div>
     </div>
   );
 }

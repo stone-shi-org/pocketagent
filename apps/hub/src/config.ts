@@ -43,6 +43,7 @@ const RawEnv = z.object({
   POCKETAGENT_WEB_DIST: z.string().optional(),
   POCKETAGENT_HUB_LATEST_RELEASE: z.string().optional(),
   POCKETAGENT_HUB_PUSH_CONTACT: z.string().default('mailto:pocketagent@localhost'),
+  POCKETAGENT_HUB_MDNS: z.string().optional(),
 });
 
 export interface HubConfig {
@@ -65,6 +66,15 @@ export interface HubConfig {
   /** Advertised as `HubHostListResponse.latestRelease`; null when unconfigured. */
   readonly latestRelease: string | null;
   readonly pushContact: string;
+  /**
+   * PA-110: listen for backends advertising over mDNS. On by default, unlike
+   * the backend's own `POCKETAGENT_MDNS_ADVERTISE`: hearing an advertisement
+   * discloses nothing and grants nothing (a discovered backend is a
+   * suggestion until an operator adds and binds it), whereas advertising
+   * announces a terminal-access service to the whole LAN, which is the side
+   * that has to be a deliberate act.
+   */
+  readonly mdnsDiscovery: boolean;
 }
 
 const MIN_TOKEN_LENGTH = 24;
@@ -169,5 +179,6 @@ export function loadHubConfig(env: NodeJS.ProcessEnv = process.env): HubConfig {
       : path.join(REPO_ROOT, 'apps/web/dist'),
     latestRelease: e.POCKETAGENT_HUB_LATEST_RELEASE?.trim() || null,
     pushContact: e.POCKETAGENT_HUB_PUSH_CONTACT.trim(),
+    mdnsDiscovery: boolish(true)(e.POCKETAGENT_HUB_MDNS),
   };
 }

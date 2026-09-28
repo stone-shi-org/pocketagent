@@ -165,6 +165,7 @@ running keeps running.
 | `POCKETAGENT_PI_BIN` | `pi` | Pi CLI binary, resolved on `PATH`. |
 | `POCKETAGENT_SETTINGS_ENC_KEY` | — | Base64 of 32 random bytes, encrypting each custom Claude provider's API key (and the Gemini Live key, Telegram bot tokens) at rest. Unset disables that feature (it is not a boot error); set-but-invalid is. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
 | `POCKETAGENT_PUSH_CONTACT` | `mailto:pocketagent@localhost` | VAPID contact email/URI for Web Push notifications. |
+| `POCKETAGENT_MDNS_ADVERTISE` | `false` | Announce this backend on the LAN over mDNS so a Hub can offer it as a one-click add. Ignored while `HOST` is loopback. See [Finding backends on your network](#finding-backends-on-your-network). |
 | `POCKETAGENT_CODE_SERVER_URL` | unset | Base URL for code-server deep links. |
 | `POCKETAGENT_DEEPSEEK_*`, `POCKETAGENT_OMNIROUTE_*` | — | **Deprecated.** Read once on the first boot after upgrading, to import the old built-in variants as custom Claude providers, then never again. See [Continuing a chat on another provider](#continuing-a-chat-on-another-provider). |
 | `POCKETAGENT_WEB_DIST` | `<checkout>/apps/web/dist` | Directory the frontend is served from. The container image sets it explicitly; a normal install never needs it. If it does not exist the API still runs and page requests get a plain 404. |
@@ -462,11 +463,39 @@ POCKETAGENT_SETTINGS_ENC_KEY=<the second value>
 docker compose -f docker/compose.hub.yaml up -d
 ```
 
-Then open the Hub, sign in, and for each machine: **add a host** (an id, a label and the
-backend's base URL as the Hub can reach it), then **bind** it by pasting that backend's
-`POCKETAGENT_AUTH_TOKEN` once. The Hub exchanges it for a scoped credential and discards
-it — see [Hub credentials](#hub-credentials) for why that matters and what it does not
+Then open the Hub and sign in. A Hub with no hosts opens on its own **Hub page** — the
+**Hub** tile at the top of the host rail on a desktop, or the first entry in the host sheet on
+a phone. For each machine: **add a host** (a name and the backend's base URL as the Hub can
+reach it), then **bind** it by pasting that backend's `POCKETAGENT_AUTH_TOKEN` once — the Add
+dialog takes the token too and does both. The Hub exchanges it for a scoped credential and
+discards it — see [Hub credentials](#hub-credentials) for why that matters and what it does not
 buy you.
+
+The Hub page is where everything that belongs to the Hub rather than to one machine lives:
+every host as a card (status, version, whether the Hub holds a credential for it, whether its
+notification relay is connected, and Bind/Edit/Remove/Export), the backends heard on the
+network, config templates, and a test notification. Selecting a host switches everything to
+that host's own view, and the **⋯** menu follows the selection: with the Hub selected it offers
+Hub items only (hosts, templates), with a host selected it offers that server's settings only.
+
+### Finding backends on your network
+
+A backend started with `POCKETAGENT_MDNS_ADVERTISE=true` (and a non-loopback `HOST`)
+announces itself over multicast DNS as `_pocketagent._tcp`, and a Hub on the same LAN lists it
+under **On this network** with an **Add…** that fills in the name and address. It is a
+convenience, not a trust decision:
+
+- **Advertising is off by default**, because binding to a network address and announcing
+  that you did are two separate disclosures. The announcement carries only what `/health`
+  already tells anyone who can reach the port — the version and the protocol range.
+- **A discovered backend is a suggestion.** It is not registered, not bound and not reachable
+  through the Hub until you add it and paste its access token; anyone on the LAN can send an
+  mDNS packet, so the worst a forged one can do is put a wrong row in a list you read.
+- **mDNS does not cross routers or Tailscale**, and a container needs host networking
+  (`network_mode: host`) for either side. Across a tailnet, add hosts by address as before.
+- `POCKETAGENT_HUB_MDNS=false` stops the Hub listening at all. If UDP 5353 cannot be opened,
+  the Hub page says why and everything else works as before. `avahi-browse -rt
+  _pocketagent._tcp` shows the same advertisements from any Linux machine on the network.
 
 For development, run it from the checkout instead:
 
@@ -490,6 +519,7 @@ and a Hub with nothing registered has nothing to show.
 | `POCKETAGENT_HUB_SESSION_TTL_HOURS` | `720` | How long a Hub login lasts. |
 | `POCKETAGENT_HUB_LATEST_RELEASE` | unset | Newest release to compare hosts against, for the drift badge. Unset infers it from the hosts in the list. |
 | `POCKETAGENT_HUB_PUSH_CONTACT` | `mailto:pocketagent@localhost` | VAPID contact claim for Hub-managed Web Push relay (PA-73). |
+| `POCKETAGENT_HUB_MDNS` | `true` | Listen for backends advertising over mDNS and list them on the Hub page (PA-110). See [Finding backends on your network](#finding-backends-on-your-network). |
 | `POCKETAGENT_ALLOWED_ORIGINS`, `POCKETAGENT_COOKIE_SECURE`, `POCKETAGENT_TRUST_PROXY` | as for a backend | Set these on the **Hub**: it is the origin the browser talks to, and where TLS terminates. |
 
 ### TLS

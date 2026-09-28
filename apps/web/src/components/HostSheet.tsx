@@ -41,7 +41,14 @@ export function HostSheet({
   onClose,
   canManage,
   hubVersion = null,
+  hub = null,
 }: {
+  /**
+   * The Hub's own entry (PA-110), first in the list — the phone's
+   * counterpart of the rail's Hub tile, and the same third selection: while
+   * it is active neither "All hosts" nor any host row is.
+   */
+  hub?: { active: boolean; onSelect: () => void } | null;
   hosts: readonly HostRecord[];
   /**
    * The Hub's own version, or null standalone (PA-107). Shown as a footer
@@ -90,17 +97,34 @@ export function HostSheet({
       >
         <div className="sheet-title">Hosts</div>
         <div className="sheet-options">
-          <button
-            type="button"
-            className={`sheet-option${selectedHostId === null ? ' selected' : ''}`}
-            onClick={() => {
-              onSelectAll();
-              onClose();
-            }}
-          >
-            <Icon name="agents" size={18} />
-            <span>All hosts</span>
-          </button>
+          {hub && (
+            <button
+              type="button"
+              className={`sheet-option${hub.active ? ' selected' : ''}`}
+              onClick={() => {
+                hub.onSelect();
+                onClose();
+              }}
+            >
+              <Icon name="hub" size={18} />
+              <span>Hub</span>
+              <span className="sheet-option-detail">Hosts, discovery and templates</span>
+            </button>
+          )}
+
+          {hosts.length > 0 && (
+            <button
+              type="button"
+              className={`sheet-option${!hub?.active && selectedHostId === null ? ' selected' : ''}`}
+              onClick={() => {
+                onSelectAll();
+                onClose();
+              }}
+            >
+              <Icon name="agents" size={18} />
+              <span>All hosts</span>
+            </button>
+          )}
 
           {hosts.map((host) => {
             const drift = hostDriftMessage(host);
@@ -111,7 +135,7 @@ export function HostSheet({
             <div key={host.endpoint.id} className="host-sheet-row">
               <button
                 type="button"
-                className={`sheet-option${selectedHostId === host.endpoint.id ? ' selected' : ''}`}
+                className={`sheet-option${!hub?.active && selectedHostId === host.endpoint.id ? ' selected' : ''}`}
                 onClick={() => {
                   onSelect(host.endpoint.id);
                   onClose();

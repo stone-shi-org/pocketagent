@@ -27,6 +27,8 @@ import { useHostDirectory } from './hosts/directory.js';
 import { HostProvider } from './hosts/HostContext.js';
 import { currentHostId, resolveSelection } from './hosts/selected-host.js';
 import { endpointFor, hostSegmentFor, type HostNav } from './hosts/HostNav.js';
+import { hubViewActive, isHubRoute } from './hosts/hub-view.js';
+import { HubHomePage } from './pages/HubHomePage.js';
 
 /** Shared fallback while a lazily-loaded page's chunk is still fetching —
     same spinner the auth check above uses, so there's no visual seam
@@ -118,6 +120,18 @@ function AuthenticatedApp({ onAnonymous }: { onAnonymous: () => void }): JSX.Ele
     [selection, hosts, navigate],
   );
 
+  // PA-110: a Hub with no hosts *is* on its Hub page, in the URL too — not
+  // merely rendering it as a fallback. Otherwise adding the first host from
+  // that page flips `hubViewActive` off mid-task and drops the operator onto
+  // an "all hosts" view they never asked for, with the page they were using
+  // gone. An effect rather than a navigate during render, for the reason
+  // `UnknownHost` gives; the fallback in `hubViewActive` covers the one frame
+  // before it runs.
+  const hostless = directory.ready && directory.source === 'hub' && hosts.length === 0;
+  useEffect(() => {
+    if (hostless && !isHubRoute(route)) navigate({ name: 'hub' }, { hostId: null });
+  }, [hostless, route, navigate]);
+
   // Nothing host-scoped renders until the directory has published its list.
   // That gate is what makes `resolveHostEndpoint`'s default-host fallback
   // harmless: a `#/h/dev02/s/x` deep link never gets a frame in which `dev02`
@@ -169,7 +183,9 @@ function AuthenticatedApp({ onAnonymous }: { onAnonymous: () => void }): JSX.Ele
             onOpenTemplate={(templateId) =>
               navigate({ name: 'hub-template', templateId }, { hostId: null })
             }
-            onBack={() => navigate({ name: 'settings' })}
+            // PA-110: templates are reached from the Hub's own page now, not
+            // from a host's Settings, so that is where "back" goes.
+            onBack={() => navigate({ name: 'hub' }, { hostId: null })}
             onApiError={handleApiError}
           />
         ) : (
@@ -185,6 +201,28 @@ function AuthenticatedApp({ onAnonymous }: { onAnonymous: () => void }): JSX.Ele
           />
         )}
       </Suspense>
+    );
+  }
+
+  // PA-110: `#/hub` on an install with no Hub gets the same explanation as a
+  // template link does, rather than a page of failed requests.
+  if (route.name === 'hub' && directory.source !== 'hub') {
+    return <NoHub onHome={() => nav.goToHost(null)} />;
+  }
+
+  // PA-110: the Hub's own home — asked for, or the only thing a Hub with no
+  // hosts can honestly show (`hubViewActive`). Checked before `list`, since
+  // on a hostless Hub the list is exactly the dead end this replaces.
+  if (hubViewActive(directory.source, hosts.length, route)) {
+    return (
+      <HubHomePage
+        nav={nav}
+        directory={directory}
+        onOpenTemplates={() => navigate({ name: 'hub-templates' }, { hostId: null })}
+        onOpenTemplate={(templateId) => navigate({ name: 'hub-template', templateId }, { hostId: null })}
+        onApiError={handleApiError}
+        onLogout={logout}
+      />
     );
   }
 
@@ -214,6 +252,7 @@ function AuthenticatedApp({ onAnonymous }: { onAnonymous: () => void }): JSX.Ele
         onOpenPlannerChat={(hostId, chatId) => nav.openOn(hostId, { name: 'planner-chat', chatId })}
         onApiError={handleApiError}
         onLogout={logout}
+        onOpenHub={() => navigate({ name: 'hub' }, { hostId: null })}
       />
     );
   }
@@ -420,7 +459,8 @@ function PhoneRoute({
 }
 
 /**
- * `#/hub/templates` on an install with no Hub in front of it (PA-70).
+ * `#/hub` or `#/hub/templates` on an install with no Hub in front of it
+ * (PA-70, PA-110).
  *
  * The surface exists in this bundle because the Hub serves this same bundle
  * (PA-66), so the route is reachable on a backend too — where there is no
@@ -430,7 +470,7 @@ function NoHub({ onHome }: { onHome: () => void }): JSX.Element {
   return (
     <div className="app">
       <div className="empty">
-        Config templates live on a PocketAgent Hub, and this app is not being served by one.
+        That page belongs to a PocketAgent Hub, and this app is not being served by one.
         <br />
         <button type="button" onClick={onHome} style={{ marginTop: 16 }}>
           Home

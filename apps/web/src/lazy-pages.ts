@@ -59,3 +59,6 @@ export const HubTemplatesPage = lazy(() =>
 export const HubTemplateEditorPage = lazy(() =>
   import('./pages/HubTemplateEditorPage.js').then((m) => ({ default: m.HubTemplateEditorPage })),
 );
+
+/** PA-110. The Hub's own home; like the template pages, fetched only behind a Hub. */
+export const HubPage = lazy(() => import('./pages/HubPage.js').then((m) => ({ default: m.HubPage })));

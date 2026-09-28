@@ -3,6 +3,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { FastifyInstance } from 'fastify';
+import type { MdnsTransport } from '@pocketagent/node-kit';
 import { buildHubApp, type HubContext } from '../src/app.js';
 import type { HubConfig } from '../src/config.js';
 import { openHubDatabase } from '../src/db.js';
@@ -33,6 +34,8 @@ export function makeHubConfig(overrides: Partial<HubConfig> = {}): HubConfig {
     webDistPath: '/nonexistent-web-dist',
     latestRelease: null,
     pushContact: 'mailto:pocketagent@localhost',
+    // PA-110: never the real multicast socket in a test — see `startDiscovery`.
+    mdnsDiscovery: false,
     ...overrides,
   };
 }
@@ -56,7 +59,13 @@ export interface TestHub {
  * only resembles it.
  */
 export async function createTestHub(
-  options: { config?: Partial<HubConfig>; fetchImpl?: typeof fetch } = {},
+  options: {
+    config?: Partial<HubConfig>;
+    fetchImpl?: typeof fetch;
+    /** PA-110: an in-memory mDNS bus member; see `mdns-discovery.test.ts`. */
+    mdnsTransport?: () => Promise<MdnsTransport>;
+    discoveryRefreshWaitMs?: number;
+  } = {},
 ): Promise<TestHub> {
   const config = makeHubConfig(options.config ?? {});
   const db = openHubDatabase(':memory:');
@@ -64,6 +73,10 @@ export async function createTestHub(
     config,
     db,
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    ...(options.mdnsTransport ? { mdnsTransport: options.mdnsTransport } : {}),
+    ...(options.discoveryRefreshWaitMs === undefined
+      ? {}
+      : { discoveryRefreshWaitMs: options.discoveryRefreshWaitMs }),
     serveStatic: false,
     // Off by default: a suite that wants health behaviour starts it itself,
     // and the rest should not have background probes racing their assertions.

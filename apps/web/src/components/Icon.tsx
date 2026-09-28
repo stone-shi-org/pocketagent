@@ -59,7 +59,9 @@ export type IconName =
   | 'agent-generic'
   | 'template'
   | 'download'
-  | 'upload';
+  | 'upload'
+  | 'hub'
+  | 'broadcast';
 
 interface Props {
   name: IconName;
@@ -490,6 +492,28 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
       <polyline points="17 8 12 3 7 8" />
       <line x1="12" y1="3" x2="12" y2="15" />
+    </>
+  ),
+
+  // PA-110: the Hub itself — one node that the host glyphs hang off. A
+  // different silhouette from `host` and `agents` on purpose: the rail puts
+  // all three side by side, and "the Hub" must not read as a fourth machine.
+  hub: (
+    <>
+      <circle cx="12" cy="12" r="2.6" />
+      <circle cx="12" cy="4.2" r="1.9" />
+      <circle cx="5" cy="17.6" r="1.9" />
+      <circle cx="19" cy="17.6" r="1.9" />
+      <path d="M12 9.4V6.1M9.8 13.5l-3.3 2.8M14.2 13.5l3.3 2.8" />
+    </>
+  ),
+
+  // PA-110: "heard on the network" — discovery over mDNS.
+  broadcast: (
+    <>
+      <circle cx="12" cy="17" r="1.3" fill="currentColor" stroke="none" />
+      <path d="M8.6 13.6a4.8 4.8 0 0 1 6.8 0" />
+      <path d="M5.6 10.6a9 9 0 0 1 12.8 0" />
     </>
   ),
 };

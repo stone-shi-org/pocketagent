@@ -17,6 +17,7 @@ pnpm generate-token     # writes POCKETAGENT_AUTH_TOKEN into .env (mode 600)
 docker/build.sh         # images: thin | claude | all (PA-64) | hub (PA-66)
 pnpm demo:docker        # the backend image's whole contract, against a real container
 pnpm demo:hub           # PA-66's acceptance criteria: two real backends, a real Hub
+pnpm demo:hub-ui        # PA-110: the Hub's own UI and mDNS discovery, in real Chrome
 
 pnpm version:set 1.2.3  # the repo's semver, written to all six package.json files (PA-65, PA-66)
 ./test.sh               # CI: install --frozen-lockfile, vitest (JUnit XML), lint, typecheck
@@ -130,7 +131,7 @@ and `adopt.test.ts` skip themselves when `tmux` is not installed.
 ### Live demos
 
 The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
-decision. Nineteen demo scripts do; all but three run against a *running* server:
+decision. Twenty demo scripts do; all but four run against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -149,6 +150,7 @@ PA_DEEPSEEK_KEY=... pnpm demo:deepseek-variant   # cross-provider resume: one tr
 PA_DEEPSEEK_KEY=... pnpm demo:provider-ui        # provider CRUD, picker, disclosure banner, "Continue as…"
 pnpm demo:hub             # PA-66: two real backends + a real Hub, started by the script
 pnpm demo:provision       # PA-70: templates provisioned onto two real backends, checked on each
+pnpm demo:hub-ui          # PA-110: Hub view, server-only/Hub-only menus, real mDNS discovery
 PA_TOKEN=... pnpm demo:multi-host-ui     # multi-host: rail, sheet, aggregate home, deep links, both viewports
 PA_TOKEN=... pnpm demo:agent-install-ui  # agent setup dialog: four states, streamed install, phone viewport
 PA_TOKEN=... PA_GEMINI_KEY=... pnpm demo:gemini-live-ui  # PA-96: real speech → Gemini Live → tool → approval card, phone viewport
@@ -196,6 +198,16 @@ Pocket Agent, a provider and a skill template provisioned onto both — with eve
 against *each backend's own API* rather than through the Hub, since "the Hub believes it worked"
 is what a demo must not accept as evidence. It also reads each backend's stdout, because the
 backend's own audit line naming the Hub is a deliverable rather than a side effect.
+
+`pnpm demo:hub-ui` is the fourth, and where PA-110's acceptance criteria live: a real Hub, then
+a real backend started with `POCKETAGENT_MDNS_ADVERTISE=true`, driven in Chrome at desktop and
+phone viewports — a hostless Hub shows the Hub page with Hub-only menu items, the backend
+appears under "On this network" over *real* multicast, "Add…" registers and binds it with the
+address prefilled, selecting it shows server-only items, and stopping it removes it via its
+goodbye. The backend binds a container-bridge address when the machine has one, so the scratch
+server is never LAN-reachable; multicast loopback still carries the advertisement to a Hub on
+the same machine. The unit suites run mDNS over an in-memory bus instead, so this is the only
+place real multicast is exercised.
 
 `pnpm demo:docker` is the other odd one out: it needs no running server and no `PA_BASE`, because it
 builds the image and starts its own container with a throwaway data root, HOME and git
@@ -1871,6 +1883,67 @@ approvals or session updates.
 - **Backward compatibility:** In standalone deployments without a Hub, `apps/server` continues to handle
   VAPID keys and push subscriptions via its existing `/api/push/*` endpoints.
 
+### The Hub's own view, and network discovery (PA-110)
+
+A Hub used to have no UI of its own: it served the backend bundle unmodified, so a Hub with no
+hosts rendered "New chat", Settings, Cron and the rest, every one of them talking to a default
+host that did not exist. The fix is a **third selection** beside "all hosts" and "one host": the
+Hub itself — a **Hub** tile first in `HostRail`, the first entry in `HostSheet`, and a
+host-less `#/hub` route (`HubPage`) beside the existing `#/hub/templates`.
+
+**`hosts/hub-view.ts` is the one place both layouts ask.** `hubViewActive(source, hostCount,
+route)` is true only behind a Hub, and then either for a Hub route or for **a Hub with no hosts
+at all** — there every host surface is a dead end, so the Hub page is the home screen. That case
+is also *written to the URL* (`App`'s hostless effect navigates to `#/hub`), not merely rendered
+as a fallback: otherwise adding the first host from that very page flips the view to "all hosts"
+mid-task, which the browser demo caught. With the Hub selected the desktop sidebar is
+`HubSidebar` (Overview, Config templates, the host list as a way out) and the tab strip is not
+rendered on a hostless Hub, since a restored tab there has nothing to talk to.
+
+**The overflow menu follows the selection, and `overflowMenuItems` decides it.** Hub selected:
+Hub items only (hosts overview, add host, templates). A host selected: that server's items only
+— which in hub mode means *no* "Hosts…", because host management is the Hub's and a server menu
+offering it again is the mixing the ticket asked to end; a standalone install keeps "Hosts…",
+since it has no Hub tile and it is the only way a single-host desktop registers a second.
+`OverflowMenu` renders from that list with a handler map and skips any id without a handler, so
+the rule is one tested function rather than two components' JSX. The Hub's config-templates card
+moved off the *host's* Settings page onto `HubPage` for the same reason; the host Settings'
+"Hubs" section stays, because it is that backend's own list of Hubs bound to it.
+
+`HubPage` talks only to the Hub origin (`api/hub.ts`, `HostDirectory`) — never a host-scoped
+client, since there may be no host. It shows each registry row as a card with the verdicts the
+rail already computes plus the two only the Hub knows (credential held, push relay connected),
+the host-management actions that used to live only in the sheet, templates, and a test push.
+
+**Discovery is mDNS/DNS-SD, hand-rolled in `packages/node-kit/src/mdns.ts`.** Both halves live
+there because the service type (`_pocketagent._tcp`), the TXT keys (`MDNS_TXT_KEYS` in
+`packages/protocol/src/hub-discovery.ts`) and the TTLs are one contract between an advertiser in
+`apps/server` and a browser in `apps/hub`. Hand-rolled for the `cron-expr.ts` reason: the subset
+is small and fully specified, and no probing or conflict resolution is needed — instance names
+are unique by construction (hostname *and* port). Four things were found against a real avahi
+on stone-dev01 and are load-bearing:
+
+- **Sends are serialised.** `dgram.send` is asynchronous while `setMulticastInterface` is not, so
+  "set interface, send" in a loop sent every copy out of the *last* interface — a Docker bridge
+  — and nothing on the LAN heard it. `close()` also drains the queue, or the goodbye is dropped.
+- **Each multicast copy carries only its own interface's A record** (`MdnsPayload`'s builder
+  form). Listing every address told LAN peers to dial `172.22.0.1`.
+- **The SRV target is a name the advertiser owns** (`pocketagent-<host>-<port>.local`), never
+  `<hostname>.local`: avahi publishes that, and a second publisher with a different address set
+  is a conflict avahi resolves by renaming the machine.
+- **The Hub ranks addresses** (`usableAddresses`/`preferredAddress`): avahi-style responders
+  advertise `127.0.0.1`, `::1` and link-local IPv6 beside the LAN address. Link-local is never
+  offered (no URL can carry a zone id); loopback is a last resort; an advertised address a
+  packet actually arrived from wins, since that is evidence of a route.
+
+The backend's advertiser is started from `server.ts` after `listen` (never `buildApp`, so no
+test multicasts), is off by default, refuses a loopback bind with a warning, and advertises only
+the bound address for a specific `HOST`. The Hub's `DiscoveryService` is on by default, and a
+socket it cannot open is a `failed` *state* with a sentence, never a boot error. Discovered rows
+are computed on read and never stored; `registeredHostId` matches a row on port, scheme and any
+name the backend is known by. Known limitations: no IPv6 transport, no probing, and mDNS does
+not cross routers or Tailscale — across a tailnet, hosts are still added by address.
+
 ### Version drift and drain-then-exit restart (PA-69)
 
 The safe shape of "the frontend can upgrade the backend": **the frontend detects and reports,
@@ -2332,6 +2405,18 @@ These are load-bearing. Several were bugs first.
   unauthorized hosts are reported at `GET /api/push/status` and surfaced as warning badges in
   the UI rather than silently dropping notifications. Crucially, terminal I/O is never sent or
   stored over this mechanism — only high-level approval/message notification metadata.
+- **An mDNS advertisement carries nothing `/health` does not, and discovery never registers
+  anything** (PA-110). `advertisedTxt` is a version, a protocol range, a role, a scheme and a
+  TXT format number — `/health`'s budget — and `mdns-advertise.test.ts` asserts the exact key
+  set, because an advertisement reaches every machine on the LAN whether or not it can connect.
+  Advertising is off by default and refused on a loopback bind: binding to a network address
+  and announcing it are two separate disclosures, and each must be deliberate. On the Hub side a
+  discovered backend is only ever a suggestion — rows are computed per read and never stored,
+  "Add…" is the ordinary `POST /api/hub/hosts` with its URL validation, and binding still takes
+  that backend's master token — so a forged advertisement (mDNS is unauthenticated by nature)
+  can at worst put a wrong row in front of a human. `GET /api/hub/discovery` sits behind the
+  Hub session like every other `/api/hub/*` route, and its refresh is a POST so the Origin
+  check covers it.
 - **A live-listen utterance is never silently discarded, and barge-in commits
   only after the harness has judged it** (PA-85). The mic is open with no
   intent signal, so a filter is unavoidable — but the filter's own mistakes
@@ -2609,7 +2694,9 @@ a failure deferred to the operator's first bind. `POCKETAGENT_HUB_DATA_DIR` is l
 variable rather than `POCKETAGENT_DATA_DIR`: one name for two unrelated schemas is a trap in
 the one deployment where it matters, a compose file running both. The Hub has no workspace
 roots, so PA-62's "refuse a data root inside a workspace root" check has nothing to check here
-and is absent rather than quietly dropped.
+and is absent rather than quietly dropped. `POCKETAGENT_HUB_MDNS` (PA-110) defaults to *on*,
+unlike the backend's `POCKETAGENT_MDNS_ADVERTISE`, which defaults to off: hearing an
+advertisement discloses and grants nothing, announcing a terminal-access service to a LAN does.
 
 **Everything else the process reads outside the checkout is `$HOME`, and the rule is: if
 another binary owns the path, mount it rather than making it configurable.** The three

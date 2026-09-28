@@ -276,6 +276,8 @@ export function useHostDirectory(): HostDirectory {
   const [hubHosts, setHubHosts] = useState<HubHostEntry[]>([]);
   const [hubLatestRelease, setHubLatestRelease] = useState<string | null>(null);
   const [probes, setProbes] = useState<Record<string, HostProbe>>({});
+  /** Bumped to force an immediate re-probe of every host — see `bind`. */
+  const [probeNonce, setProbeNonce] = useState(0);
   const metaRef = useRef<Record<string, { lastAttemptAt: number; failures: number }>>({});
 
   /**
@@ -352,7 +354,8 @@ export function useHostDirectory(): HostDirectory {
     // deliberately left out of the deps for the same reason — it closes over
     // `entries` and so changes just as often, and the version captured here is
     // only ever stale about hosts that `entryKey` would have changed for.
-  }, [source, entryKey]);
+    // `probeNonce` restarts it on purpose, for an immediate forced round.
+  }, [source, entryKey, probeNonce]);
 
   // In hub mode the registry itself can change (another browser adds a host),
   // so re-read it on the same cadence as the status tier. In local mode there
@@ -532,6 +535,14 @@ export function useHostDirectory(): HostDirectory {
           return body?.error?.message ?? 'The Hub could not bind that host.';
         }
         applyRegistry(await probeHubRegistry());
+        // PA-110: re-probe now. A host added and then bound has usually
+        // already failed its first probe (it had no credential yet) and backed
+        // off, and binding does not change `entryKey`, so without this its card
+        // reads "unknown" for up to a minute after a bind that worked. A bump
+        // rather than calling `probeAll` here: the caller typically holds the
+        // `bind` from the render *before* its own `add`, whose `probeAll` does
+        // not know the new host exists (the demo caught exactly that).
+        setProbeNonce((n) => n + 1);
         return null;
       } catch {
         return 'Could not reach the Hub.';

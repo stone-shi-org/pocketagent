@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp, VERSION } from './app.js';
 import { RESTART_EXIT_CODE } from './admin/index.js';
 import { loadConfig, ConfigError } from './config/index.js';
+import { startMdnsAdvertiser } from './discovery/mdns.js';
 
 async function main(): Promise<void> {
   let config;
@@ -46,13 +47,26 @@ async function main(): Promise<void> {
     }
   }
 
+  // PA-110. After `listen`, so nothing is advertised that cannot yet be
+  // reached; here rather than in `buildApp` so no test ever multicasts.
+  const advertiser = await startMdnsAdvertiser(config, VERSION, app.log);
+
   let shuttingDown = false;
   const shutdown = async (signal: string, exitCode = 0): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     app.log.info({ signal, exitCode }, 'shutting down; terminating PTY sessions');
     try {
-      await Promise.race([app.close(), forcedExitAfter(app, SHUTDOWN_TIMEOUT_MS)]);
+      // First, and inside the race: a goodbye takes this row off every Hub's
+      // discovered list at once rather than after its 120 s TTL, and a socket
+      // that will not close must not hold the shutdown open.
+      await Promise.race([
+        (async () => {
+          await advertiser?.stop();
+          await app.close();
+        })(),
+        forcedExitAfter(app, SHUTDOWN_TIMEOUT_MS),
+      ]);
     } finally {
       process.exit(exitCode);
     }
