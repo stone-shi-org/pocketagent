@@ -34,7 +34,7 @@ const DISABLED_MESSAGE =
  * offer as one-click "Add". Two properties carry the design:
  *
  * - **A failure here is never the Hub's failure.** Port 5353 can be
- *   unavailable (a container without host networking, a locked-down box), and
+ *   unavailable (a locked-down box, a sandboxed container), and
  *   the Hub is fully usable without discovery — so `start()` records `failed`
  *   and a sentence rather than throwing, and the page says so instead of
  *   showing an empty list that reads as "no backends exist".
@@ -72,8 +72,7 @@ export class DiscoveryService {
       this.state = 'failed';
       const reason = error instanceof Error ? error.message : String(error);
       this.message =
-        `Could not listen for mDNS on UDP 5353 (${reason}). A Hub in a container needs host ` +
-        'networking for this; hosts can still be added by address.';
+        `Could not listen for mDNS on UDP 5353 (${reason}). Hosts can still be added by address.`;
       // `warn`, not `error`: the Hub is working, it just cannot hear
       // advertisements, and a deployment that never wanted discovery should
       // not page anyone for it.

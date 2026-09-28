@@ -491,8 +491,17 @@ convenience, not a trust decision:
 - **A discovered backend is a suggestion.** It is not registered, not bound and not reachable
   through the Hub until you add it and paste its access token; anyone on the LAN can send an
   mDNS packet, so the worst a forged one can do is put a wrong row in a list you read.
-- **mDNS does not cross routers or Tailscale**, and a container needs host networking
-  (`network_mode: host`) for either side. Across a tailnet, add hosts by address as before.
+- **mDNS does not cross routers or Tailscale.** Across a tailnet, add hosts by address as before.
+- **In Docker, containers on one network hear each other.** A Hub and backends attached to the
+  same user-defined network need nothing special (verified on a user-defined bridge); host
+  networking (`network_mode: host`) is only for reaching machines *outside* that network, on the
+  LAN. Two Compose details decide whether it works at all:
+  - **Put `POCKETAGENT_MDNS_ADVERTISE: 'true'` in the backend service's `environment:`.** A
+    Compose project's `.env` only fills `${…}` placeholders in the compose file; it is not passed
+    into the container. A variable set only there leaves the backend silent — no
+    "advertising on mDNS" line and no loopback warning in its log, which is the tell.
+  - **Give each backend a `hostname:`.** Inside a container the hostname is the container id,
+    and that is what the advertisement is named after (`f40abed7d172 (8787)`).
 - `POCKETAGENT_HUB_MDNS=false` stops the Hub listening at all. If UDP 5353 cannot be opened,
   the Hub page says why and everything else works as before. `avahi-browse -rt
   _pocketagent._tcp` shows the same advertisements from any Linux machine on the network.

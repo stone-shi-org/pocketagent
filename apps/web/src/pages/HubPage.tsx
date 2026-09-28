@@ -463,8 +463,10 @@ function DiscoverySection({
       ) : discovery.hosts.length === 0 ? (
         <p className="hub-muted">
           No backend is advertising here. A backend announces itself when started with{' '}
-          <code>POCKETAGENT_MDNS_ADVERTISE=true</code> and a non-loopback <code>HOST</code>; it has
-          to share a LAN (or Docker network) with this Hub, since mDNS does not cross routers.
+          <code>POCKETAGENT_MDNS_ADVERTISE=true</code> and a non-loopback <code>HOST</code>, and it
+          has to share a LAN or a Docker network with this Hub, since mDNS does not cross routers.
+          Under Docker Compose the variable belongs in the service’s <code>environment:</code> —
+          a project’s <code>.env</code> is not passed into the container.
         </p>
       ) : (
         <ul className="hub-discovered">
