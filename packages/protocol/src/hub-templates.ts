@@ -141,7 +141,7 @@ export type PocketAgentTemplatePayload = z.infer<typeof PocketAgentTemplatePaylo
  * of creation, so instantiating this makes the *receiving host* dial the third
  * party — which is the intent, but it is a side effect the confirmation names.
  */
-export const McpRegistryTemplatePayload = z
+export const SingleMcpRegistryTemplatePayload = z
   .object({
     name: z.string().min(1).max(128),
     transport: McpTransportKind,
@@ -161,7 +161,41 @@ export const McpRegistryTemplatePayload = z
     message: 'A header name is required when auth is set to header.',
     path: ['headerName'],
   });
+export type SingleMcpRegistryTemplatePayload = z.infer<typeof SingleMcpRegistryTemplatePayload>;
+
+/**
+ * A bundle of MCP registry entries within a single template (PA-111).
+ */
+export const McpRegistryBundleTemplatePayload = z.object({
+  registries: z.array(SingleMcpRegistryTemplatePayload).min(1).max(50),
+});
+export type McpRegistryBundleTemplatePayload = z.infer<typeof McpRegistryBundleTemplatePayload>;
+
+/**
+ * An MCP registry template payload — either a single registry or a bundle of registries.
+ */
+export const McpRegistryTemplatePayload = z.union([
+  SingleMcpRegistryTemplatePayload,
+  McpRegistryBundleTemplatePayload,
+]);
 export type McpRegistryTemplatePayload = z.infer<typeof McpRegistryTemplatePayload>;
+
+export function isMcpRegistryBundle(
+  payload: McpRegistryTemplatePayload,
+): payload is McpRegistryBundleTemplatePayload {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    'registries' in payload &&
+    Array.isArray((payload as McpRegistryBundleTemplatePayload).registries)
+  );
+}
+
+export function mcpRegistriesFromPayload(
+  payload: McpRegistryTemplatePayload,
+): SingleMcpRegistryTemplatePayload[] {
+  return isMcpRegistryBundle(payload) ? payload.registries : [payload];
+}
 
 /**
  * A custom Claude provider, minus its API key.
@@ -322,28 +356,31 @@ export function secretHolesFor(spec: HubTemplatePayload): SecretHole[] {
     case 'pocket-agent':
     case 'skill':
       return [];
-    case 'mcp-registry':
-      if (spec.payload.authKind === 'bearer') {
-        return [
-          {
-            key: 'bearerToken',
-            label: 'Bearer token',
+    case 'mcp-registry': {
+      const list = mcpRegistriesFromPayload(spec.payload);
+      const isBundle = isMcpRegistryBundle(spec.payload) && list.length > 1;
+      const holes: SecretHole[] = [];
+      list.forEach((reg, i) => {
+        if (reg.authKind === 'bearer') {
+          holes.push({
+            key: isBundle ? `bearerToken_${i}` : 'bearerToken',
+            label: isBundle ? `Bearer token for "${reg.name}"` : 'Bearer token',
             required: true,
-            description: `Sent as a bearer token to ${spec.payload.url}. Stored encrypted on the receiving host.`,
-          },
-        ];
-      }
-      if (spec.payload.authKind === 'header') {
-        return [
-          {
-            key: 'headerValue',
-            label: `Value for ${spec.payload.headerName ?? 'the auth header'}`,
+            description: `Sent as a bearer token to ${reg.url}. Stored encrypted on the receiving host.`,
+          });
+        } else if (reg.authKind === 'header') {
+          holes.push({
+            key: isBundle ? `headerValue_${i}` : 'headerValue',
+            label: isBundle
+              ? `Value for ${reg.headerName ?? 'the auth header'} (${reg.name})`
+              : `Value for ${reg.headerName ?? 'the auth header'}`,
             required: true,
-            description: `Sent as the ${spec.payload.headerName ?? 'auth'} header to ${spec.payload.url}. Stored encrypted on the receiving host.`,
-          },
-        ];
-      }
-      return [];
+            description: `Sent as the ${reg.headerName ?? 'auth'} header to ${reg.url}. Stored encrypted on the receiving host.`,
+          });
+        }
+      });
+      return holes;
+    }
     case 'claude-provider':
       return [
         {

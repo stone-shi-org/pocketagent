@@ -128,4 +128,96 @@ describe('instantiating a template on two hosts', () => {
     // run's own failure, not something to discover from someone else's 400.
     expect(dev01.requests).toHaveLength(0);
   });
+
+  it('provisions a multi-registry MCP bundle template and handles overwrites', async () => {
+    const id = await createTemplate(hub, {
+      kind: 'mcp-registry',
+      name: 'Dev Tools MCP Bundle',
+      payload: {
+        registries: [
+          {
+            name: 'Jira MCP',
+            transport: 'streamable_http',
+            url: 'https://jira.example.com/mcp',
+            authKind: 'bearer',
+            headerName: null,
+            description: 'Jira integration',
+            enabled: true,
+          },
+          {
+            name: 'Confluence MCP',
+            transport: 'sse',
+            url: 'https://confluence.example.com/mcp',
+            authKind: 'header',
+            headerName: 'X-Confluence-Key',
+            description: 'Confluence integration',
+            enabled: true,
+          },
+        ],
+      },
+    });
+
+    const { templates } = await listTemplates(hub);
+    const tpl = templates.find((t) => t.id === id)!;
+    expect(tpl.secretHoles).toEqual([
+      expect.objectContaining({
+        key: 'bearerToken_0',
+        label: 'Bearer token for "Jira MCP"',
+        required: true,
+      }),
+      expect.objectContaining({
+        key: 'headerValue_1',
+        label: 'Value for X-Confluence-Key (Confluence MCP)',
+        required: true,
+      }),
+    ]);
+
+    // Missing credential fails preflight
+    const failedRun = await instantiate(hub, id, {
+      hostIds: ['dev01'],
+      secrets: { bearerToken_0: 'jira-secret' },
+    });
+    expect(failedRun.results[0]!.outcome).toBe('failed');
+    expect(failedRun.results[0]!.message).toContain('Value for X-Confluence-Key (Confluence MCP) is required');
+
+    // Successful provisioning of bundle
+    const run1 = await instantiate(hub, id, {
+      hostIds: ['dev01'],
+      secrets: {
+        bearerToken_0: 'jira-secret',
+        headerValue_1: 'confluence-secret',
+      },
+    });
+    expect(run1.results[0]!.outcome).toBe('provisioned');
+    expect(dev01.registries).toHaveLength(2);
+    expect(dev01.registries[0]!.name).toBe('Jira MCP');
+    expect(dev01.registries[0]!.bearerToken).toBe('jira-secret');
+    expect(dev01.registries[1]!.name).toBe('Confluence MCP');
+    expect(dev01.registries[1]!.headerName).toBe('X-Confluence-Key');
+    expect(dev01.registries[1]!.headerValue).toBe('confluence-secret');
+
+    // Second instantiate without overwrite is skipped
+    const run2 = await instantiate(hub, id, {
+      hostIds: ['dev01'],
+      secrets: {
+        bearerToken_0: 'jira-secret',
+        headerValue_1: 'confluence-secret',
+      },
+    });
+    expect(run2.results[0]!.outcome).toBe('skipped');
+
+    // Overwrite updates existing registries
+    const run3 = await instantiate(hub, id, {
+      hostIds: ['dev01'],
+      secrets: {
+        bearerToken_0: 'jira-new-secret',
+        headerValue_1: 'confluence-new-secret',
+      },
+      overwrite: true,
+    });
+    expect(run3.results[0]!.outcome).toBe('overwritten');
+    expect(dev01.registries).toHaveLength(2);
+    expect(dev01.registries[0]!.bearerToken).toBe('jira-new-secret');
+    expect(dev01.registries[1]!.headerValue).toBe('confluence-new-secret');
+  });
 });

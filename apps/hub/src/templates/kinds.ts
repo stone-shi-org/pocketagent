@@ -1,4 +1,9 @@
-import type { HubTemplatePayload } from '@pocketagent/protocol';
+import {
+  isMcpRegistryBundle,
+  mcpRegistriesFromPayload,
+  type HubTemplatePayload,
+  type ProvisioningItem,
+} from '@pocketagent/protocol';
 
 /**
  * PA-70: how a template payload becomes calls against a backend's *existing*
@@ -23,6 +28,13 @@ export interface BackendCall {
   readonly method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   readonly path: string;
   readonly body?: unknown;
+}
+
+export interface BackendCallResult {
+  readonly ok: boolean;
+  readonly status: number;
+  readonly body: unknown;
+  readonly transportError: string | null;
 }
 
 /**
@@ -85,6 +97,17 @@ export interface ProvisionPlan {
   steps(remoteId: string): ProvisionStep[];
   /** A singleton has a fixed ledger id and skips create/collision entirely. */
   readonly singletonRemoteId: string | null;
+  /** Optional custom writer for bundled multi-resource templates. */
+  readonly executeWrite?: (
+    outcome: 'provisioned' | 'overwritten',
+    remoteId: string | null,
+    call: (c: BackendCall) => Promise<BackendCallResult>,
+    hostLabel: string,
+    existingIds: string[],
+  ) => Promise<
+    | { ok: true; remoteId: string | null; items: ProvisioningItem[] }
+    | { ok: false; error: string; remoteId: string | null; items: ProvisioningItem[] }
+  >;
 }
 
 /** Secrets for one run, keyed by `SecretHole.key`. */
@@ -149,42 +172,168 @@ export function planFor(spec: HubTemplatePayload, secrets: FilledSecrets): Provi
     }
 
     case 'mcp-registry': {
-      const p = spec.payload;
-      // The secret is spliced in here and nowhere else. `authKind: 'none'`
-      // sends neither field, which is what the backend's own `.refine` on
-      // that request expects.
-      const auth =
-        p.authKind === 'bearer'
-          ? { bearerToken: secrets.bearerToken }
-          : p.authKind === 'header'
-            ? { headerName: p.headerName, headerValue: secrets.headerValue }
-            : {};
-      const body = {
-        name: p.name,
-        transport: p.transport,
-        url: p.url,
-        authKind: p.authKind,
-        enabled: p.enabled,
-        ...(p.description === null ? {} : { description: p.description }),
-        ...auth,
-      };
+      const registries = mcpRegistriesFromPayload(spec.payload);
+      const isBundle = isMcpRegistryBundle(spec.payload) && registries.length > 1;
+
+      if (!isBundle) {
+        const p = registries[0]!;
+        // The secret is spliced in here and nowhere else. `authKind: 'none'`
+        // sends neither field, which is what the backend's own `.refine` on
+        // that request expects.
+        const auth =
+          p.authKind === 'bearer'
+            ? { bearerToken: secrets.bearerToken ?? secrets.bearerToken_0 }
+            : p.authKind === 'header'
+              ? { headerName: p.headerName, headerValue: secrets.headerValue ?? secrets.headerValue_0 }
+              : {};
+        const body = {
+          name: p.name,
+          transport: p.transport,
+          url: p.url,
+          authKind: p.authKind,
+          enabled: p.enabled,
+          ...(p.description === null ? {} : { description: p.description }),
+          ...auth,
+        };
+        return {
+          collectionPath: '/api/mcp-registries',
+          existingIds: (b) => idsFrom(b, 'registries'),
+          collision: () => null,
+          createCall: { method: 'POST', path: '/api/mcp-registries', body },
+          remoteIdFrom: (b) => {
+            const id = (b as { id?: unknown } | null)?.id;
+            return typeof id === 'string' ? id : null;
+          },
+          updateCall: (remoteId) => ({
+            method: 'PATCH',
+            path: `/api/mcp-registries/${encodeURIComponent(remoteId)}`,
+            body,
+          }),
+          updateAfterCreate: false,
+          steps: () => [],
+          singletonRemoteId: null,
+        };
+      }
+
+      // Bundled MCP registries (PA-111):
+      const bodies = registries.map((p, i) => {
+        const bearerToken = secrets[`bearerToken_${i}`] ?? (i === 0 ? secrets.bearerToken : undefined);
+        const headerValue = secrets[`headerValue_${i}`] ?? (i === 0 ? secrets.headerValue : undefined);
+        const auth =
+          p.authKind === 'bearer'
+            ? { bearerToken }
+            : p.authKind === 'header'
+              ? { headerName: p.headerName, headerValue }
+              : {};
+        return {
+          name: p.name,
+          transport: p.transport,
+          url: p.url,
+          authKind: p.authKind,
+          enabled: p.enabled,
+          ...(p.description === null ? {} : { description: p.description }),
+          ...auth,
+        };
+      });
+
       return {
         collectionPath: '/api/mcp-registries',
         existingIds: (b) => idsFrom(b, 'registries'),
         collision: () => null,
-        createCall: { method: 'POST', path: '/api/mcp-registries', body },
-        remoteIdFrom: (b) => {
-          const id = (b as { id?: unknown } | null)?.id;
-          return typeof id === 'string' ? id : null;
-        },
-        updateCall: (remoteId) => ({
-          method: 'PATCH',
-          path: `/api/mcp-registries/${encodeURIComponent(remoteId)}`,
-          body,
-        }),
+        createCall: null,
+        remoteIdFrom: () => null,
+        updateCall: () => null,
         updateAfterCreate: false,
         steps: () => [],
         singletonRemoteId: null,
+        executeWrite: async (outcome, remoteId, call, hostLabel, existingIds) => {
+          const items: ProvisioningItem[] = [];
+          const activeIds: string[] = [];
+
+          let prevIds: string[] = [];
+          if (remoteId !== null) {
+            try {
+              const parsed = JSON.parse(remoteId);
+              if (Array.isArray(parsed)) {
+                prevIds = parsed.filter((id): id is string => typeof id === 'string');
+              } else if (typeof parsed === 'string') {
+                prevIds = [parsed];
+              }
+            } catch {
+              prevIds = [remoteId];
+            }
+          }
+
+          for (let i = 0; i < registries.length; i++) {
+            const reg = registries[i]!;
+            const body = bodies[i]!;
+            const prevId = prevIds[i];
+
+            if (outcome === 'overwritten' && prevId && existingIds.includes(prevId)) {
+              const res = await call({
+                method: 'PATCH',
+                path: `/api/mcp-registries/${encodeURIComponent(prevId)}`,
+                body,
+              });
+              if (res.transportError !== null) {
+                return {
+                  ok: false,
+                  error: `Could not reach ${hostLabel}: ${res.transportError}`,
+                  remoteId: activeIds.length > 0 ? (activeIds.length === 1 ? activeIds[0]! : JSON.stringify(activeIds)) : remoteId,
+                  items,
+                };
+              }
+              if (!res.ok) {
+                const why = (res.body as { error?: { message?: unknown } } | null)?.error?.message;
+                return {
+                  ok: false,
+                  error: `${hostLabel} refused update for "${reg.name}": ${typeof why === 'string' ? why : `HTTP ${res.status}`}`,
+                  remoteId: activeIds.length > 0 ? (activeIds.length === 1 ? activeIds[0]! : JSON.stringify(activeIds)) : remoteId,
+                  items,
+                };
+              }
+              activeIds.push(prevId);
+              items.push({ label: `update MCP registry "${reg.name}"`, ok: true, message: 'updated' });
+            } else {
+              const res = await call({
+                method: 'POST',
+                path: '/api/mcp-registries',
+                body,
+              });
+              if (res.transportError !== null) {
+                return {
+                  ok: false,
+                  error: `Could not reach ${hostLabel}: ${res.transportError}`,
+                  remoteId: activeIds.length > 0 ? (activeIds.length === 1 ? activeIds[0]! : JSON.stringify(activeIds)) : remoteId,
+                  items,
+                };
+              }
+              if (!res.ok) {
+                const why = (res.body as { error?: { message?: unknown } } | null)?.error?.message;
+                return {
+                  ok: false,
+                  error: `${hostLabel} refused to create "${reg.name}": ${typeof why === 'string' ? why : `HTTP ${res.status}`}`,
+                  remoteId: activeIds.length > 0 ? (activeIds.length === 1 ? activeIds[0]! : JSON.stringify(activeIds)) : remoteId,
+                  items,
+                };
+              }
+              const createdId = (res.body as { id?: unknown } | null)?.id;
+              if (typeof createdId !== 'string') {
+                return {
+                  ok: false,
+                  error: `${hostLabel} created "${reg.name}" without an id.`,
+                  remoteId: activeIds.length > 0 ? (activeIds.length === 1 ? activeIds[0]! : JSON.stringify(activeIds)) : remoteId,
+                  items,
+                };
+              }
+              activeIds.push(createdId);
+              items.push({ label: `create MCP registry "${reg.name}"`, ok: true, message: 'created' });
+            }
+          }
+
+          const finalRemoteId = activeIds.length === 1 ? activeIds[0]! : JSON.stringify(activeIds);
+          return { ok: true, remoteId: finalRemoteId, items };
+        },
       };
     }
 
@@ -327,8 +476,13 @@ export function describeSpec(spec: HubTemplatePayload): string {
   switch (spec.kind) {
     case 'pocket-agent':
       return `Pocket Agent "${spec.payload.name}"`;
-    case 'mcp-registry':
-      return `MCP registry "${spec.payload.name}" (${spec.payload.url})`;
+    case 'mcp-registry': {
+      const regs = mcpRegistriesFromPayload(spec.payload);
+      if (regs.length === 1) {
+        return `MCP registry "${regs[0]!.name}" (${regs[0]!.url})`;
+      }
+      return `MCP registries (${regs.length} registries: ${regs.map((r) => r.name).join(', ')})`;
+    }
     case 'claude-provider':
       return `Claude provider "${spec.payload.name}" (${spec.payload.baseUrl})`;
     case 'skill':

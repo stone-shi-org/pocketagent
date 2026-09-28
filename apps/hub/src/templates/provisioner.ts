@@ -217,7 +217,7 @@ export class Provisioner {
         );
       }
       outcome = 'overwritten';
-    } else if (ledger?.remote_id != null && existing.includes(ledger.remote_id)) {
+    } else if (ledger?.remote_id != null && remoteIdPresent(existing, ledger.remote_id)) {
       if (!overwrite) {
         return finish(
           'skipped',
@@ -248,84 +248,100 @@ export class Provisioner {
     // ---- Write -------------------------------------------------------------
     const items: ProvisioningItem[] = [];
 
-    if (outcome === 'provisioned') {
-      if (plan.createCall === null) {
-        // Unreachable today — only a singleton kind has no create call, and a
-        // singleton never reaches `provisioned`. Stated rather than asserted
-        // with a `!`, so a sixth kind that forgets one fails with a sentence
-        // instead of a TypeError from inside the fetch helper.
-        return finish('failed', `${describeSpec(spec)} cannot be created, only replaced.`, null);
-      }
+    if (plan.executeWrite) {
       wrote = true;
-      const created = await call(plan.createCall);
-      if (created.transportError !== null) {
-        return finish('failed', `Could not reach ${hostLabel}: ${created.transportError}`, null);
+      const res = await plan.executeWrite(
+        outcome as 'provisioned' | 'overwritten',
+        remoteId,
+        call,
+        hostLabel,
+        existing,
+      );
+      if (!res.ok) {
+        return finish('failed', res.error, res.remoteId, res.items);
       }
-      if (!created.ok) {
-        return finish(
-          'failed',
-          `${hostLabel} refused to create it: ${errorMessage(created)}`,
-          null,
-        );
-      }
-      remoteId = plan.remoteIdFrom(created.body);
-      if (remoteId === null) {
-        // The write succeeded but the Hub cannot name what it made, so it
-        // could never overwrite it later. Reported rather than silently
-        // recorded as a success with a null id.
-        return finish(
-          'failed',
-          `${hostLabel} created it but answered without an id, so this Hub cannot track it.`,
-          null,
-        );
-      }
-    }
-
-    // `updateAfterCreate` is the pocket-agent case: its create route takes a
-    // name and nothing else.
-    const needsUpdate = outcome === 'overwritten' || plan.updateAfterCreate;
-    if (needsUpdate && remoteId !== null) {
-      const update = plan.updateCall(remoteId);
-      if (update !== null) {
+      remoteId = res.remoteId;
+      items.push(...res.items);
+    } else {
+      if (outcome === 'provisioned') {
+        if (plan.createCall === null) {
+          // Unreachable today — only a singleton kind has no create call, and a
+          // singleton never reaches `provisioned`. Stated rather than asserted
+          // with a `!`, so a sixth kind that forgets one fails with a sentence
+          // instead of a TypeError from inside the fetch helper.
+          return finish('failed', `${describeSpec(spec)} cannot be created, only replaced.`, null);
+        }
         wrote = true;
-        const applied = await call(update);
-        if (applied.transportError !== null) {
+        const created = await call(plan.createCall);
+        if (created.transportError !== null) {
+          return finish('failed', `Could not reach ${hostLabel}: ${created.transportError}`, null);
+        }
+        if (!created.ok) {
           return finish(
             'failed',
-            `Could not reach ${hostLabel}: ${applied.transportError}`,
-            remoteId,
-            items,
+            `${hostLabel} refused to create it: ${errorMessage(created)}`,
+            null,
           );
         }
-        if (!applied.ok) {
+        remoteId = plan.remoteIdFrom(created.body);
+        if (remoteId === null) {
+          // The write succeeded but the Hub cannot name what it made, so it
+          // could never overwrite it later. Reported rather than silently
+          // recorded as a success with a null id.
           return finish(
             'failed',
-            `${hostLabel} refused the settings: ${errorMessage(applied)}`,
-            remoteId,
-            items,
+            `${hostLabel} created it but answered without an id, so this Hub cannot track it.`,
+            null,
           );
         }
       }
-    }
 
-    if (remoteId !== null) {
-      for (const step of plan.steps(remoteId)) {
-        wrote = true;
-        const stepResult = await call(step.call);
-        const failed = stepResult.transportError !== null || !stepResult.ok;
-        if (!failed) {
-          items.push({ label: step.label, ok: true, message: 'applied' });
-          continue;
+      // `updateAfterCreate` is the pocket-agent case: its create route takes a
+      // name and nothing else.
+      const needsUpdate = outcome === 'overwritten' || plan.updateAfterCreate;
+      if (needsUpdate && remoteId !== null) {
+        const update = plan.updateCall(remoteId);
+        if (update !== null) {
+          wrote = true;
+          const applied = await call(update);
+          if (applied.transportError !== null) {
+            return finish(
+              'failed',
+              `Could not reach ${hostLabel}: ${applied.transportError}`,
+              remoteId,
+              items,
+            );
+          }
+          if (!applied.ok) {
+            return finish(
+              'failed',
+              `${hostLabel} refused the settings: ${errorMessage(applied)}`,
+              remoteId,
+              items,
+            );
+          }
         }
-        const why = stepResult.transportError ?? errorMessage(stepResult);
-        if (step.optional) {
-          // The documented case: a tool name this host's catalog does not
-          // have. The resource is created and usable, so the run continues and
-          // this is one reported item rather than a failed provisioning.
-          items.push({ label: step.label, ok: false, message: why });
-          continue;
+      }
+
+      if (remoteId !== null) {
+        for (const step of plan.steps(remoteId)) {
+          wrote = true;
+          const stepResult = await call(step.call);
+          const failed = stepResult.transportError !== null || !stepResult.ok;
+          if (!failed) {
+            items.push({ label: step.label, ok: true, message: 'applied' });
+            continue;
+          }
+          const why = stepResult.transportError ?? errorMessage(stepResult);
+          if (step.optional) {
+            // The documented case: a tool name this host's catalog does not
+            // have. The resource is created and usable, so the run continues and
+            // this is one reported item rather than a failed provisioning.
+            items.push({ label: step.label, ok: false, message: why });
+            continue;
+          }
+          return finish('failed', `${hostLabel} refused "${step.label}": ${why}`, remoteId, items);
         }
-        return finish('failed', `${hostLabel} refused "${step.label}": ${why}`, remoteId, items);
       }
     }
 
@@ -392,3 +408,18 @@ function errorMessage(result: CallResult): string {
   const message = (result.body as { error?: { message?: unknown } } | null)?.error?.message;
   return typeof message === 'string' && message.length > 0 ? message : `HTTP ${result.status}`;
 }
+
+/** Check if remoteId is present in existing IDs (handles single string or JSON-encoded array). */
+function remoteIdPresent(existing: string[], remoteId: string): boolean {
+  if (existing.includes(remoteId)) return true;
+  try {
+    const parsed = JSON.parse(remoteId);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed.some((id) => typeof id === 'string' && existing.includes(id));
+    }
+  } catch {
+    // bare non-JSON string
+  }
+  return false;
+}
+

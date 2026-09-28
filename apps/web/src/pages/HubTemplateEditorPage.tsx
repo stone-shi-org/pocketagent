@@ -757,6 +757,34 @@ function KindFields({
       );
 
     case 'mcp-registry':
+      if (draft.isBundle && draft.mcpRegistries && draft.mcpRegistries.length > 1) {
+        return (
+          <SectionCard
+            title={`MCP registries (${draft.mcpRegistries.length} bundled)`}
+            icon="link"
+            desc="This template bundles multiple MCP registries. Instantiating it configures all of them on the receiving host."
+          >
+            <div className="hub-discovered">
+              {draft.mcpRegistries.map((reg, idx) => (
+                <div key={idx} className="hub-row-card">
+                  <div className="hub-row-icon">
+                    <Icon name="link" size={18} />
+                  </div>
+                  <div className="hub-row-main">
+                    <strong>{reg.name}</strong>
+                    <span className="hub-mono">{reg.url}</span>
+                    <span className="hub-muted">
+                      Transport: {reg.transport} · Auth: {reg.authKind}
+                      {reg.headerName ? ` (${reg.headerName})` : ''} · {reg.enabled ? 'Enabled' : 'Disabled'}
+                      {reg.description ? ` — ${reg.description}` : ''}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </SectionCard>
+        );
+      }
       return (
         <SectionCard title="MCP registry" icon="link">
           <TextRow

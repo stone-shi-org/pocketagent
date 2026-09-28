@@ -1,4 +1,6 @@
 import {
+  isMcpRegistryBundle,
+  mcpRegistriesFromPayload,
   parseTemplatePayload,
   type CustomClaudeProviderKind,
   type HubTemplateKind,
@@ -6,6 +8,7 @@ import {
   type McpAuthKind,
   type McpTransportKind,
   type ProvisioningOutcome,
+  type SingleMcpRegistryTemplatePayload,
 } from '@pocketagent/protocol';
 
 /**
@@ -144,6 +147,8 @@ export interface TemplateDraft {
   embeddingModelId: string;
   webSearchBaseUrl: string;
   urlFetchBaseUrl: string;
+  isBundle?: boolean;
+  mcpRegistries?: SingleMcpRegistryTemplatePayload[];
 }
 
 const EMPTY_DRAFT: TemplateDraft = {
@@ -205,17 +210,31 @@ export function draftFrom(spec: HubTemplatePayload): TemplateDraft {
         mcpEnabled: spec.payload.mcpEnabled,
         disabledTools: spec.payload.disabledTools.join('\n'),
       };
-    case 'mcp-registry':
+    case 'mcp-registry': {
+      const isBundle = isMcpRegistryBundle(spec.payload) && spec.payload.registries.length > 1;
+      const list = mcpRegistriesFromPayload(spec.payload);
+      const first = list[0] ?? {
+        name: '',
+        transport: 'streamable_http' as const,
+        url: '',
+        authKind: 'none' as const,
+        headerName: null,
+        description: null,
+        enabled: true,
+      };
       return {
         ...draft,
-        name: spec.payload.name,
-        transport: spec.payload.transport,
-        url: spec.payload.url,
-        authKind: spec.payload.authKind,
-        headerName: spec.payload.headerName ?? '',
-        description: spec.payload.description ?? '',
-        enabled: spec.payload.enabled,
+        name: first.name,
+        transport: first.transport,
+        url: first.url,
+        authKind: first.authKind,
+        headerName: first.headerName ?? '',
+        description: first.description ?? '',
+        enabled: first.enabled,
+        isBundle,
+        mcpRegistries: list,
       };
+    }
     case 'claude-provider':
       return {
         ...draft,
@@ -263,6 +282,11 @@ export function payloadFrom(kind: HubTemplateKind, draft: TemplateDraft): unknow
         disabledTools: lines(draft.disabledTools),
       };
     case 'mcp-registry':
+      if (draft.isBundle && draft.mcpRegistries && draft.mcpRegistries.length > 1) {
+        return {
+          registries: draft.mcpRegistries,
+        };
+      }
       return {
         name: draft.name.trim(),
         transport: draft.transport,

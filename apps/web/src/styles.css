@@ -7632,6 +7632,55 @@ button.chat-rate-limit-badge {
   padding: 8px 0;
 }
 
+.export-mcp-selection-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  margin-bottom: 6px;
+}
+
+.export-mcp-selection-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.export-mcp-link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.export-mcp-link-btn:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.export-mcp-link-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.export-mcp-selection-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 8px 12px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: 100%;
+  box-sizing: border-box;
+}
+
 /* PA-98: Gemini Live header toggler and compact disclosure */
 .gemini-live-toggle {
   display: inline-flex;
