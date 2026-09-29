@@ -58,6 +58,7 @@ import type {
   PlannerModel,
   PlannerModelListResponse,
   CreatePlannerModelRequest,
+  UpdatePlannerModelRequest,
   DiscoverPlannerModelsResponse,
   TestPlannerModelResponse,
   PlannerEmbeddingApiKeyRevealResponse,
@@ -920,6 +921,12 @@ export function createApiClient(endpoint: HostEndpoint) {
 
     createPlannerModel: (body: CreatePlannerModelRequest) =>
       request<PlannerModel>('/api/planner/models', { method: 'POST', body: JSON.stringify(body) }),
+
+    updatePlannerModel: (id: string, body: UpdatePlannerModelRequest) =>
+      request<PlannerModel>(`/api/planner/models/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
 
     deletePlannerModel: (id: string) =>
       request<void>(`/api/planner/models/${encodeURIComponent(id)}`, { method: 'DELETE' }),

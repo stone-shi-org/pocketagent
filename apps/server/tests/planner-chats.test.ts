@@ -98,7 +98,7 @@ describe('PlannerLlmClient', () => {
 
     expect(events).toEqual([
       { type: 'text_delta', text: 'hello there' },
-      { type: 'done', content: 'hello there', toolCalls: [], usage: null },
+      { type: 'done', content: 'hello there', toolCalls: [], usage: null, reasoning: null },
     ]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0]!;
@@ -111,6 +111,74 @@ describe('PlannerLlmClient', () => {
       stream: true,
       stream_options: { include_usage: true },
     });
+  });
+
+  it('sends reasoning_effort when effort is specified', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() => fakeCompletionResponse('ok'));
+    const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
+    await collect(client.streamComplete('m', [], undefined, undefined, { effort: 'high' }));
+    const [, init] = fetchImpl.mock.calls[0]!;
+    const body = JSON.parse(init.body as string);
+    expect(body.reasoning_effort).toBe('high');
+  });
+
+  it('sends reasoning_effort none when thinking is false or effort is off', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() => fakeCompletionResponse('ok'));
+    const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
+    await collect(client.streamComplete('m', [], undefined, undefined, { thinking: false }));
+    const [, init] = fetchImpl.mock.calls[0]!;
+    const body = JSON.parse(init.body as string);
+    expect(body.reasoning_effort).toBe('none');
+
+    await collect(client.streamComplete('m', [], undefined, undefined, { effort: 'off' }));
+    const [, init2] = fetchImpl.mock.calls[1]!;
+    const body2 = JSON.parse(init2.body as string);
+    expect(body2.reasoning_effort).toBe('none');
+  });
+
+  it('streams delta.reasoning_content as thinking_delta and aggregates reasoning on done', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() =>
+      sseResponse([
+        JSON.stringify({ choices: [{ delta: { reasoning_content: 'Let me think...' } }] }),
+        JSON.stringify({ choices: [{ delta: { content: 'Here is the answer.' } }] }),
+      ]),
+    );
+    const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
+    const events = await collect(client.streamComplete('m', []));
+    expect(events).toEqual([
+      { type: 'thinking_delta', text: 'Let me think...' },
+      { type: 'text_delta', text: 'Here is the answer.' },
+      {
+        type: 'done',
+        content: 'Here is the answer.',
+        toolCalls: [],
+        usage: null,
+        reasoning: 'Let me think...',
+      },
+    ]);
+  });
+
+  it('parses <think> tags in content as thinking_delta', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() =>
+      sseResponse([
+        JSON.stringify({ choices: [{ delta: { content: '<think>Step 1' } }] }),
+        JSON.stringify({ choices: [{ delta: { content: ' and 2</think>Result' } }] }),
+      ]),
+    );
+    const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
+    const events = await collect(client.streamComplete('m', []));
+    expect(events).toEqual([
+      { type: 'thinking_delta', text: 'Step 1' },
+      { type: 'thinking_delta', text: ' and 2' },
+      { type: 'text_delta', text: 'Result' },
+      {
+        type: 'done',
+        content: 'Result',
+        toolCalls: [],
+        usage: null,
+        reasoning: 'Step 1 and 2',
+      },
+    ]);
   });
 
   it('omits the Authorization header when no API key is configured', async () => {

@@ -50,6 +50,7 @@ export interface ThinkingItem {
   type: 'thinking';
   key: string;
   text: string;
+  streaming?: boolean;
 }
 
 export interface NoticeItem {
@@ -229,11 +230,33 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
       };
     }
 
-    case 'thinking':
+    case 'thinking': {
+      const item: ThinkingItem = {
+        type: 'thinking',
+        key: `k_${event.id}`,
+        text: event.text,
+        streaming: false,
+      };
+      return { ...state, items: [...dropStreamingThinking(state.items), item] };
+    }
+
+    case 'thinking_delta': {
+      const key = `stream_thinking_${event.id}`;
+      const index = state.items.findIndex((i) => i.key === key);
+      if (index >= 0) {
+        const prev = state.items[index] as ThinkingItem;
+        const items = [...state.items];
+        items[index] = { ...prev, text: prev.text + event.text };
+        return { ...state, items };
+      }
       return {
         ...state,
-        items: [...state.items, { type: 'thinking', key: `k_${event.id}`, text: event.text }],
+        items: [
+          ...state.items,
+          { type: 'thinking', key, text: event.text, streaming: true },
+        ],
       };
+    }
 
     case 'tool_use': {
       const files = event.filePath && !state.files.includes(event.filePath)
@@ -491,5 +514,9 @@ export function groupIntoTurns(items: TranscriptItem[]): TurnNode[] {
 
 /** Remove any in-progress streaming preview. */
 function dropStreaming(items: TranscriptItem[]): TranscriptItem[] {
-  return items.filter((i) => !(i.type === 'text' && i.streaming));
+  return items.filter((i) => !('streaming' in i && i.streaming));
+}
+
+function dropStreamingThinking(items: TranscriptItem[]): TranscriptItem[] {
+  return items.filter((i) => !(i.type === 'thinking' && i.streaming));
 }

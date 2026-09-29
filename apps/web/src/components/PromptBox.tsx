@@ -50,6 +50,7 @@ const KNOWN_EFFORT_LABELS: Partial<Record<EffortLevel, string>> = {
   high: 'High',
   xhigh: 'Extra high',
   max: 'Max',
+  off: 'Off',
 };
 
 /** Exported for `ComposerPage`, which shows the same effort picker pre-session. */
@@ -200,6 +201,14 @@ interface Props {
   /** Switch effort level. Same next-prompt timing as `onSetModel`. */
   onSetEffort?: (effort: EffortLevel | null) => void;
   /**
+   * PA-113: Whether reasoning/thinking is enabled.
+   */
+  thinking?: boolean;
+  /**
+   * PA-113: Toggle reasoning/thinking on or off.
+   */
+  onToggleThinking?: () => void;
+  /**
    * True while the agent is generating a turn. Swaps the send button into a
    * stop button (see `onInterrupt`) instead of showing a separate control
    * elsewhere — undefined/false is indistinguishable from "not generating",
@@ -273,6 +282,8 @@ export function PromptBox({
   onSetModel,
   effort = null,
   onSetEffort,
+  thinking = true,
+  onToggleThinking,
   busy = false,
   onInterrupt,
 }: Props): JSX.Element {
@@ -557,6 +568,9 @@ export function PromptBox({
 
   function pickEffort(level: EffortLevel | null): void {
     onSetEffort?.(level);
+    if (level !== null && level !== 'off' && thinking === false) {
+      onToggleThinking?.();
+    }
     setModelPickerOpen(false);
   }
 
@@ -976,6 +990,20 @@ export function PromptBox({
             >
               <span>{currentModelLabel ?? '…'}</span>
               <Icon name="chevron-down" size={14} />
+            </button>
+          )}
+          {onToggleThinking && (
+            <button
+              type="button"
+              className={`thinking-chip${thinking === false ? ' off' : ' on'}`}
+              onClick={onToggleThinking}
+              disabled={disabled}
+              aria-pressed={thinking !== false}
+              aria-label={thinking === false ? 'Thinking is off. Click to turn thinking on.' : 'Thinking is on. Click to turn thinking off.'}
+              title={thinking === false ? 'Thinking: Off (click to turn on)' : `Thinking: On${effort ? ` (${effortLabel(effort)})` : ''} (click to turn off)`}
+            >
+              <Icon name="brain" size={14} />
+              <span>{thinking === false ? 'Think Off' : effort ? effortLabel(effort) : 'Think On'}</span>
             </button>
           )}
           {text.length > 500 && (

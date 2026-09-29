@@ -85,7 +85,12 @@ export function exportPlannerEndpointPayload(
   }
   return {
     baseUrl: settings.baseUrl,
-    models: models.map((m) => ({ modelId: m.modelId, label: m.label })),
+    models: models.map((m) => ({
+      modelId: m.modelId,
+      label: m.label,
+      ...(m.supportsEffort !== undefined ? { supportsEffort: m.supportsEffort } : {}),
+      ...(m.defaultEffort !== undefined ? { defaultEffort: m.defaultEffort } : {}),
+    })),
     embeddingBaseUrl: settings.embeddingBaseUrl ?? null,
     embeddingModelId: settings.embeddingModelId ?? null,
     webSearchBaseUrl: settings.webSearchBaseUrl ?? null,

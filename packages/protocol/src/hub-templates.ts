@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { EffortLevel } from './agent-events.js';
 import { HubHostId } from './hub-registry.js';
 import { McpAuthKind, McpTransportKind } from './mcp-registry.js';
 import { CustomClaudeProviderKind } from './custom-claude-providers.js';
@@ -268,7 +269,14 @@ export type SkillTemplatePayload = z.infer<typeof SkillTemplatePayload>;
 export const PlannerEndpointTemplatePayload = z.object({
   baseUrl: BASE_URL,
   models: z
-    .array(z.object({ modelId: MODEL_ID, label: z.string().min(1).max(128) }))
+    .array(
+      z.object({
+        modelId: MODEL_ID,
+        label: z.string().min(1).max(128),
+        supportsEffort: z.boolean().optional(),
+        defaultEffort: EffortLevel.nullable().optional(),
+      }),
+    )
     .max(50),
   embeddingBaseUrl: BASE_URL.nullable(),
   embeddingModelId: MODEL_ID.nullable(),

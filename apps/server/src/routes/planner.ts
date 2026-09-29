@@ -25,6 +25,7 @@ import {
   ResolvePlannerApprovalRequest,
   SetPlannerToolApprovalRequest,
   UpdatePlannerChatRequest,
+  UpdatePlannerModelRequest,
   UpdatePlannerSettingsRequest,
   type AgentEvent,
   type DeleteAllPlannerChatsResponse,
@@ -90,6 +91,7 @@ import {
   setSkillEnabledGlobally,
   setToolEnabledForWorkspace,
   setToolEnabledGlobally,
+  updatePlannerModel,
   writePlannerApiKey,
   writePlannerBaseUrl,
   writePlannerEmbeddingApiKey,
@@ -496,6 +498,8 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       id: crypto.randomUUID(),
       modelId: parsed.data.modelId,
       label: parsed.data.label,
+      supportsEffort: parsed.data.supportsEffort ?? true,
+      defaultEffort: parsed.data.defaultEffort ?? null,
       sortOrder: nextPlannerModelSortOrder(db),
       createdAt: Date.now(),
     };
@@ -505,6 +509,21 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       modelId: row.modelId,
     });
     return reply.code(201).send(row);
+  });
+
+  app.patch('/api/planner/models/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = UpdatePlannerModelRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    const updated = updatePlannerModel(app.pocket.db, id, parsed.data);
+    if (!updated) return notFound(reply, 'Model not found.');
+    auditConfigChange(request, 'planner model updated in the catalog', {
+      model: id,
+      fields: Object.keys(parsed.data),
+    });
+    return reply.send(updated);
   });
 
   /**
@@ -1246,6 +1265,8 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       if (!chat) return notFound(reply, 'Chat not found.');
       if (parsed.data.title !== undefined) chat = plannerChats.rename(id, parsed.data.title);
       if (parsed.data.modelId !== undefined) chat = plannerChats.setModel(id, parsed.data.modelId);
+      if (parsed.data.effort !== undefined) chat = plannerChats.setEffort(id, parsed.data.effort);
+      if (parsed.data.thinking !== undefined) chat = plannerChats.setThinking(id, parsed.data.thinking);
       return reply.send(chat);
     } catch (err) {
       return mapChatError(reply, err);
@@ -1388,6 +1409,8 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       parsed.data.content,
       {
         ...(parsed.data.modelId ? { modelId: parsed.data.modelId } : {}),
+        ...(parsed.data.effort !== undefined ? { effort: parsed.data.effort } : {}),
+        ...(parsed.data.thinking !== undefined ? { thinking: parsed.data.thinking } : {}),
         ...(parsed.data.image ? { image: parsed.data.image } : {}),
         ...(parsed.data.voiceMode !== undefined ? { voiceMode: parsed.data.voiceMode } : {}),
       },

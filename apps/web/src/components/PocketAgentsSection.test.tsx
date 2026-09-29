@@ -32,6 +32,7 @@ describe('PocketAgentsSection (PA-106)', () => {
         lastActivityAt: 1000,
         skipToolApprovalsEnabled: false,
         busy: false,
+        thinkingEnabled: true,
       },
     ];
 
@@ -63,6 +64,7 @@ describe('PocketAgentsSection (PA-106)', () => {
       lastActivityAt: 5000,
       skipToolApprovalsEnabled: false,
       busy: false,
+      thinkingEnabled: true,
     });
 
     // 15 scheduled chats with timestamps
@@ -78,6 +80,7 @@ describe('PocketAgentsSection (PA-106)', () => {
         skipToolApprovalsEnabled: false,
         cronJobId: 'job-1',
         busy: false,
+        thinkingEnabled: true,
       });
     }
 

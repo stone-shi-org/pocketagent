@@ -61,7 +61,8 @@ export type IconName =
   | 'download'
   | 'upload'
   | 'hub'
-  | 'broadcast';
+  | 'broadcast'
+  | 'brain';
 
 interface Props {
   name: IconName;
@@ -514,6 +515,15 @@ const PATHS: Record<IconName, JSX.Element> = {
       <circle cx="12" cy="17" r="1.3" fill="currentColor" stroke="none" />
       <path d="M8.6 13.6a4.8 4.8 0 0 1 6.8 0" />
       <path d="M5.6 10.6a9 9 0 0 1 12.8 0" />
+    </>
+  ),
+
+  // PA-113: Brain / thinking icon for reasoning effort and thinking toggle.
+  brain: (
+    <>
+      <path d="M12 5a3 3 0 0 0-5.5-1.5 3.5 3.5 0 0 0-4 4.5 3 3 0 0 0 .5 3.5 3.5 3.5 0 0 0 2 5.5 3 3 0 0 0 4 2V5" />
+      <path d="M12 5a3 3 0 0 1 5.5-1.5 3.5 3.5 0 0 1 4 4.5 3 3 0 0 1-.5 3.5 3.5 3.5 0 0 1-2 5.5 3 3 0 0 1-4 2V5" />
+      <path d="M7 13a2.5 2.5 0 0 1 5 0M12 13a2.5 2.5 0 0 1 5 0" />
     </>
   ),
 };

@@ -280,6 +280,8 @@ export interface PlannerModelRow {
   label: string;
   sortOrder: number;
   createdAt: number;
+  supportsEffort: boolean;
+  defaultEffort: string | null;
 }
 
 interface PlannerModelDbRow {
@@ -288,6 +290,8 @@ interface PlannerModelDbRow {
   label: string;
   sort_order: number;
   created_at: number;
+  supports_effort?: number | null;
+  default_effort?: string | null;
 }
 
 function modelFromDbRow(row: PlannerModelDbRow): PlannerModelRow {
@@ -297,6 +301,8 @@ function modelFromDbRow(row: PlannerModelDbRow): PlannerModelRow {
     label: row.label,
     sortOrder: row.sort_order,
     createdAt: row.created_at,
+    supportsEffort: row.supports_effort !== 0,
+    defaultEffort: row.default_effort ?? null,
   };
 }
 
@@ -308,9 +314,36 @@ export function readPlannerModels(db: Db): PlannerModelRow[] {
 
 export function insertPlannerModel(db: Db, row: PlannerModelRow): void {
   db.prepare(
-    `INSERT INTO planner_models (id, model_id, label, sort_order, created_at)
-     VALUES (@id, @modelId, @label, @sortOrder, @createdAt)`,
-  ).run(row);
+    `INSERT INTO planner_models (id, model_id, label, sort_order, created_at, supports_effort, default_effort)
+     VALUES (@id, @modelId, @label, @sortOrder, @createdAt, @supportsEffort, @defaultEffort)`,
+  ).run({
+    ...row,
+    supportsEffort: row.supportsEffort !== false ? 1 : 0,
+    defaultEffort: row.defaultEffort ?? null,
+  });
+}
+
+export function updatePlannerModel(
+  db: Db,
+  id: string,
+  patch: { label?: string; supportsEffort?: boolean; defaultEffort?: string | null },
+): boolean {
+  const assignments: string[] = [];
+  const params: Record<string, unknown> = { id };
+  if (patch.label !== undefined) {
+    assignments.push('label = @label');
+    params.label = patch.label;
+  }
+  if (patch.supportsEffort !== undefined) {
+    assignments.push('supports_effort = @supportsEffort');
+    params.supportsEffort = patch.supportsEffort ? 1 : 0;
+  }
+  if (patch.defaultEffort !== undefined) {
+    assignments.push('default_effort = @defaultEffort');
+    params.defaultEffort = patch.defaultEffort;
+  }
+  if (assignments.length === 0) return false;
+  return db.prepare(`UPDATE planner_models SET ${assignments.join(', ')} WHERE id = @id`).run(params).changes > 0;
 }
 
 export function deletePlannerModel(db: Db, id: string): boolean {
@@ -363,6 +396,8 @@ export const PLANNER_YOLO_ENABLED_KEY = 'planner_yolo_enabled';
 
 /** Seeds a new chat's model picker; each existing chat keeps its own choice. */
 export const PLANNER_LAST_MODEL_ID_KEY = 'planner_last_model_id';
+/** Seeds a new chat's effort picker; each existing chat keeps its own choice. */
+export const PLANNER_LAST_EFFORT_KEY = 'planner_last_effort';
 
 /**
  * PA-29: the embedding provider's own settings — a separate base URL, API
@@ -580,6 +615,15 @@ export function writePlannerLastModelId(db: Db, modelId: string | null): void {
   writeSetting(db, PLANNER_LAST_MODEL_ID_KEY, modelId ?? '');
 }
 
+export function readPlannerLastEffort(db: Db): string | null {
+  const value = readSetting(db, PLANNER_LAST_EFFORT_KEY);
+  return value && value.length > 0 ? value : null;
+}
+
+export function writePlannerLastEffort(db: Db, effort: string | null): void {
+  writeSetting(db, PLANNER_LAST_EFFORT_KEY, effort ?? '');
+}
+
 export function writePlannerEmbeddingBaseUrl(db: Db, baseUrl: string | null): void {
   writeSetting(db, PLANNER_EMBEDDING_BASE_URL_KEY, baseUrl ?? '');
 }
@@ -665,6 +709,8 @@ interface PlannerChatDbRow {
   skip_tool_approvals: number;
   parent_chat_id?: string | null;
   cron_job_id?: string | null;
+  last_effort?: string | null;
+  thinking_enabled?: number | null;
 }
 
 function chatFromDbRow(row: PlannerChatDbRow): PlannerChat {
@@ -680,6 +726,8 @@ function chatFromDbRow(row: PlannerChatDbRow): PlannerChat {
     parentChatId: row.parent_chat_id ?? null,
     cronJobId: row.cron_job_id ?? null,
     busy: false,
+    lastEffort: row.last_effort ?? null,
+    thinkingEnabled: row.thinking_enabled !== 0,
   };
 }
 
@@ -712,14 +760,16 @@ export function insertPlannerChat(db: Db, chat: PlannerChat): void {
   db.prepare(
     `INSERT INTO planner_chats
        (id, workspace_id, workspace_name, title, last_model_id, created_at, last_activity_at,
-        skip_tool_approvals, parent_chat_id, cron_job_id)
+        skip_tool_approvals, parent_chat_id, cron_job_id, last_effort, thinking_enabled)
      VALUES (@id, @workspaceId, @workspaceName, @title, @lastModelId, @createdAt, @lastActivityAt,
-        @skipToolApprovals, @parentChatId, @cronJobId)`,
+        @skipToolApprovals, @parentChatId, @cronJobId, @lastEffort, @thinkingEnabled)`,
   ).run({
     ...chat,
     skipToolApprovals: chat.skipToolApprovalsEnabled ? 1 : 0,
     parentChatId: chat.parentChatId ?? null,
     cronJobId: chat.cronJobId ?? null,
+    lastEffort: chat.lastEffort ?? null,
+    thinkingEnabled: chat.thinkingEnabled !== false ? 1 : 0,
   });
 }
 
@@ -727,7 +777,7 @@ export function insertPlannerChat(db: Db, chat: PlannerChat): void {
 export function updatePlannerChat(
   db: Db,
   id: string,
-  patch: Partial<Pick<PlannerChat, 'title' | 'lastModelId' | 'lastActivityAt'>>,
+  patch: Partial<Pick<PlannerChat, 'title' | 'lastModelId' | 'lastActivityAt' | 'lastEffort' | 'thinkingEnabled'>>,
 ): void {
   const assignments: string[] = [];
   const params: Record<string, unknown> = { id };
@@ -742,6 +792,14 @@ export function updatePlannerChat(
   if ('lastActivityAt' in patch) {
     assignments.push('last_activity_at = @lastActivityAt');
     params.lastActivityAt = patch.lastActivityAt;
+  }
+  if ('lastEffort' in patch) {
+    assignments.push('last_effort = @lastEffort');
+    params.lastEffort = patch.lastEffort;
+  }
+  if ('thinkingEnabled' in patch) {
+    assignments.push('thinking_enabled = @thinkingEnabled');
+    params.thinkingEnabled = patch.thinkingEnabled ? 1 : 0;
   }
   if (assignments.length === 0) return;
   db.prepare(`UPDATE planner_chats SET ${assignments.join(', ')} WHERE id = @id`).run(params);

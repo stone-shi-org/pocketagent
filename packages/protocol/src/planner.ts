@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { LIMITS } from './limits.js';
-import { AgentEvent } from './agent-events.js';
+import { AgentEvent, EffortLevel } from './agent-events.js';
 import { PromptImage } from './prompt-image.js';
 import { SessionInfo } from './session.js';
 import { PlannerLiveProvider } from './gemini-live.js';
@@ -184,6 +184,8 @@ export const PlannerModel = z.object({
   label: z.string(),
   sortOrder: z.number().int(),
   createdAt: z.number().int(),
+  supportsEffort: z.boolean().default(true),
+  defaultEffort: EffortLevel.nullable().optional(),
 });
 export type PlannerModel = z.infer<typeof PlannerModel>;
 
@@ -195,8 +197,17 @@ export type PlannerModelListResponse = z.infer<typeof PlannerModelListResponse>;
 export const CreatePlannerModelRequest = z.object({
   modelId: z.string().min(1).max(200),
   label: z.string().min(1).max(128),
+  supportsEffort: z.boolean().optional(),
+  defaultEffort: EffortLevel.nullable().optional(),
 });
 export type CreatePlannerModelRequest = z.infer<typeof CreatePlannerModelRequest>;
+
+export const UpdatePlannerModelRequest = z.object({
+  label: z.string().min(1).max(128).optional(),
+  supportsEffort: z.boolean().optional(),
+  defaultEffort: EffortLevel.nullable().optional(),
+});
+export type UpdatePlannerModelRequest = z.infer<typeof UpdatePlannerModelRequest>;
 
 /**
  * `GET /api/planner/models/discover` queries the configured endpoint's own
@@ -492,6 +503,10 @@ export const PlannerChat = z.object({
    * PA-76: true when a turn is currently executing or waiting for a decision on this chat.
    */
   busy: z.boolean().default(false),
+  /** PA-113: The effort level this chat last used or was explicitly configured with. */
+  lastEffort: EffortLevel.nullable().optional(),
+  /** PA-113: Whether reasoning/thinking is enabled for this chat. */
+  thinkingEnabled: z.boolean().optional().default(true),
 });
 export type PlannerChat = z.infer<typeof PlannerChat>;
 
@@ -516,12 +531,16 @@ export const CreatePlannerChatRequest = z.object({
   title: z.string().max(200).optional(),
   modelId: z.string().max(200).optional(),
   parentChatId: z.string().nullable().optional(),
+  effort: EffortLevel.nullable().optional(),
+  thinking: z.boolean().optional(),
 });
 export type CreatePlannerChatRequest = z.infer<typeof CreatePlannerChatRequest>;
 
 export const UpdatePlannerChatRequest = z.object({
   title: z.string().max(200).nullable().optional(),
   modelId: z.string().max(200).optional(),
+  effort: EffortLevel.nullable().optional(),
+  thinking: z.boolean().optional(),
 });
 export type UpdatePlannerChatRequest = z.infer<typeof UpdatePlannerChatRequest>;
 
@@ -561,6 +580,10 @@ export const PlannerSendMessageRequest = z
     modelId: z.string().max(200).optional(),
     /** PA-89: whether voice mode / live listen is active for this turn */
     voiceMode: z.boolean().optional(),
+    /** PA-113: Overrides the chat's remembered reasoning effort for this turn onward. */
+    effort: EffortLevel.nullable().optional(),
+    /** PA-113: Overrides whether thinking is enabled for this turn onward. */
+    thinking: z.boolean().optional(),
   })
   .refine((data) => data.content.trim().length > 0 || !!data.image, {
     message: 'Must provide content or an image.',

@@ -14,6 +14,7 @@ import {
   type PlannerSystemPromptSection,
   type PlannerToolApprovalChoice,
   type SessionInfo,
+  type ThinkingEvent,
 } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import type { Config } from '../config/index.js';
@@ -36,12 +37,14 @@ import {
   readPlannerChatMemoryFoldedTurns,
   readPlannerChats,
   readPlannerChatsByParentId,
+  readPlannerLastEffort,
   readPlannerSettings,
   resolvePlannerUrlFetchApiKey,
   resolvePlannerWebSearchApiKey,
   revealPlannerApiKey,
   updatePlannerChat,
   writePlannerChatMemoryFoldedTurns,
+  writePlannerLastEffort,
   writePlannerLastModelId,
   type PlannerSettingsSnapshot,
 } from './store.js';
@@ -883,6 +886,10 @@ export class PlannerChatService {
      * PA-106: provenance for scheduled-job chats.
      */
     cronJobId?: string | null;
+    /** PA-113: explicit effort level. */
+    effort?: string | null;
+    /** PA-113: explicit thinking on/off toggle. */
+    thinking?: boolean;
   }): PlannerChat {
     const workspace = input.workspaceId
       ? this.opts.plannerWorkspaces.get(input.workspaceId)
@@ -905,6 +912,8 @@ export class PlannerChatService {
       parentChatId: input.parentChatId ?? null,
       cronJobId: input.cronJobId ?? null,
       busy: false,
+      lastEffort: input.effort ?? readPlannerLastEffort(this.opts.db) ?? null,
+      thinkingEnabled: input.thinking !== undefined ? input.thinking : true,
     };
     insertPlannerChat(this.opts.db, chat);
     return chat;
@@ -919,6 +928,19 @@ export class PlannerChatService {
   setModel(id: string, modelId: string): PlannerChat {
     this.requireChat(id);
     updatePlannerChat(this.opts.db, id, { lastModelId: modelId });
+    return this.requireChat(id);
+  }
+
+  setEffort(id: string, effort: string | null): PlannerChat {
+    this.requireChat(id);
+    updatePlannerChat(this.opts.db, id, { lastEffort: effort });
+    writePlannerLastEffort(this.opts.db, effort);
+    return this.requireChat(id);
+  }
+
+  setThinking(id: string, thinkingEnabled: boolean): PlannerChat {
+    this.requireChat(id);
+    updatePlannerChat(this.opts.db, id, { thinkingEnabled });
     return this.requireChat(id);
   }
 
@@ -1343,11 +1365,29 @@ export class PlannerChatService {
   async *sendMessage(
     id: string,
     content: string,
-    opts: { modelId?: string; image?: PromptImage; signal?: AbortSignal; isWake?: boolean; voiceMode?: boolean } = {},
+    opts: {
+      modelId?: string;
+      image?: PromptImage;
+      signal?: AbortSignal;
+      isWake?: boolean;
+      voiceMode?: boolean;
+      effort?: string | null;
+      thinking?: boolean;
+    } = {},
   ): AsyncGenerator<AgentEvent> {
     const chat = this.requireChat(id);
     if (this.isBusy(id)) {
       throw new PlannerChatError('A turn is already in flight for this chat.', 'busy');
+    }
+
+    if (opts.effort !== undefined) {
+      chat.lastEffort = opts.effort;
+      updatePlannerChat(this.opts.db, chat.id, { lastEffort: opts.effort });
+      writePlannerLastEffort(this.opts.db, opts.effort);
+    }
+    if (opts.thinking !== undefined) {
+      chat.thinkingEnabled = opts.thinking;
+      updatePlannerChat(this.opts.db, chat.id, { thinkingEnabled: opts.thinking });
     }
 
     const settings = readPlannerSettings(this.opts.db);
@@ -1374,6 +1414,10 @@ export class PlannerChatService {
     try {
       const modelId = this.resolveModelId(chat, opts.modelId);
       const workspacePath = this.workspacePathFor(chat);
+
+      if (opts.effort !== undefined) {
+        yield* this.emit(workspacePath, chat.id, { kind: 'effort_changed', effort: chat.lastEffort ?? null });
+      }
 
       let promptContent = content;
       if (opts.voiceMode && this.opts.config?.voiceSpokenSummaryEnabled) {
@@ -1577,7 +1621,12 @@ export class PlannerChatService {
       outputTokens: stats.outputTokens,
       completedAt: Date.now(),
     });
-    updatePlannerChat(this.opts.db, chat.id, { lastModelId: modelId, lastActivityAt: Date.now() });
+    updatePlannerChat(this.opts.db, chat.id, {
+      lastModelId: modelId,
+      lastEffort: chat.lastEffort,
+      thinkingEnabled: chat.thinkingEnabled,
+      lastActivityAt: Date.now(),
+    });
     writePlannerLastModelId(this.opts.db, modelId);
     this.spawnsThisTurnByChat.delete(chat.id);
     this.turnPollChecksByChat.delete(chat.id);
@@ -1666,14 +1715,35 @@ export class PlannerChatService {
     });
 
     const textBlockId = crypto.randomUUID();
+    const thinkingBlockId = crypto.randomUUID();
     let completion: PlannerLlmCompletion | null = null;
+    let accumulatedThinking = '';
+    let emittedThinking = false;
     // `elapsedMs` only ever covers this — the LLM actually generating a
     // reply — never tool execution or an approval pause; see
     // `PlannerTurnStats`'s doc comment for why.
     const llmStartedAt = Date.now();
     try {
-      for await (const chunk of client.streamComplete(modelId, messages, toOpenAiToolSpecs(this.toolsFor(chat.workspaceId)), signal)) {
-        if (chunk.type === 'text_delta') {
+      for await (const chunk of client.streamComplete(
+        modelId,
+        messages,
+        toOpenAiToolSpecs(this.toolsFor(chat.workspaceId)),
+        signal,
+        {
+          effort: chat.lastEffort,
+          thinking: chat.thinkingEnabled !== false,
+        },
+      )) {
+        if (chunk.type === 'thinking_delta') {
+          accumulatedThinking += chunk.text;
+          yield { kind: 'thinking_delta', id: thinkingBlockId, text: chunk.text };
+        } else if (chunk.type === 'text_delta') {
+          if (accumulatedThinking.trim().length > 0 && !emittedThinking) {
+            emittedThinking = true;
+            const thinkEv: ThinkingEvent = { kind: 'thinking', id: thinkingBlockId, text: accumulatedThinking };
+            yield thinkEv;
+            await appendTranscriptEvent(workspacePath, chat.id, thinkEv);
+          }
           yield { kind: 'text_delta', id: textBlockId, text: chunk.text };
         } else {
           completion = chunk;
@@ -1689,6 +1759,14 @@ export class PlannerChatService {
       const failedStats = { ...stats, elapsedMs: stats.elapsedMs + (Date.now() - llmStartedAt) };
       yield* this.finishTurn(chat, workspacePath, modelId, `Could not reach the LLM endpoint: ${message}`, true, failedStats);
       return;
+    }
+
+    const finalReasoning = completion?.reasoning || accumulatedThinking;
+    if (finalReasoning.trim().length > 0 && !emittedThinking) {
+      emittedThinking = true;
+      const thinkEv: ThinkingEvent = { kind: 'thinking', id: thinkingBlockId, text: finalReasoning };
+      yield thinkEv;
+      await appendTranscriptEvent(workspacePath, chat.id, thinkEv);
     }
     const nextStats = addUsage(
       { ...stats, elapsedMs: stats.elapsedMs + (Date.now() - llmStartedAt) },

@@ -32,16 +32,26 @@ export interface PlannerLlmCompletion {
   content: string | null;
   toolCalls: PlannerLlmToolCall[];
   usage: PlannerLlmUsage | null;
+  reasoning: string | null;
 }
 
 /**
  * One piece of a streamed completion. `text_delta` arrives zero or more
- * times as the model's reply is generated; `done` arrives exactly once, at
- * the end, with the fully assembled result — the same shape `PlannerLlmCompletion`
+ * times as the model's reply is generated; `thinking_delta` arrives when
+ * the model outputs chain-of-thought tokens; `done` arrives exactly once,
+ * at the end, with the fully assembled result — the same shape `PlannerLlmCompletion`
  * always had, so a caller that only wants the final answer can ignore every
- * `text_delta` and just read the last event.
+ * delta and just read the last event.
  */
-export type PlannerLlmStreamEvent = { type: 'text_delta'; text: string } | ({ type: 'done' } & PlannerLlmCompletion);
+export type PlannerLlmStreamEvent =
+  | { type: 'text_delta'; text: string }
+  | { type: 'thinking_delta'; text: string }
+  | ({ type: 'done' } & PlannerLlmCompletion);
+
+export interface PlannerLlmStreamOptions {
+  effort?: string | null;
+  thinking?: boolean;
+}
 
 export class PlannerLlmError extends Error {
   override readonly name = 'PlannerLlmError';
@@ -226,9 +236,31 @@ export class PlannerLlmClient {
     messages: PlannerChatMessage[],
     tools?: unknown[],
     signal?: AbortSignal,
+    options?: PlannerLlmStreamOptions,
   ): AsyncGenerator<PlannerLlmStreamEvent> {
     const fetchImpl = this.opts.fetchImpl ?? fetch;
     const url = joinUrl(this.opts.baseUrl, '/chat/completions');
+
+    const requestPayload: Record<string, unknown> = {
+      model,
+      messages,
+      stream: true,
+      // Asks for a final usage-only chunk (`choices: []`, a `usage`
+      // object) before `[DONE]` — the standard OpenAI streaming opt-in,
+      // silently ignored by any compatible implementation that doesn't
+      // support it (an unknown JSON field, not an unknown parameter
+      // name). Without it there is no token count to compute tokens/sec
+      // from, so the turn footer just omits that bit — see `usage`
+      // below.
+      stream_options: { include_usage: true },
+      ...(tools && tools.length > 0 ? { tools } : {}),
+    };
+
+    if (options?.thinking === false || options?.effort === 'off') {
+      requestPayload.reasoning_effort = 'none';
+    } else if (options?.effort) {
+      requestPayload.reasoning_effort = options.effort;
+    }
 
     let res: Response;
     try {
@@ -239,20 +271,7 @@ export class PlannerLlmClient {
           accept: 'text/event-stream',
           ...(this.opts.apiKey ? { authorization: `Bearer ${this.opts.apiKey}` } : {}),
         },
-        body: JSON.stringify({
-          model,
-          messages,
-          stream: true,
-          // Asks for a final usage-only chunk (`choices: []`, a `usage`
-          // object) before `[DONE]` — the standard OpenAI streaming opt-in,
-          // silently ignored by any compatible implementation that doesn't
-          // support it (an unknown JSON field, not an unknown parameter
-          // name). Without it there is no token count to compute tokens/sec
-          // from, so the turn footer just omits that bit — see `usage`
-          // below.
-          stream_options: { include_usage: true },
-          ...(tools && tools.length > 0 ? { tools } : {}),
-        }),
+        body: JSON.stringify(requestPayload),
         ...(signal ? { signal } : {}),
       });
     } catch (err) {
@@ -280,21 +299,24 @@ export class PlannerLlmClient {
     // itself typically only appears on that call's very first chunk.
     const toolCallsByIndex = new Map<number, { id: string; name: string; args: string }>();
     let contentSoFar = '';
+    let reasoningSoFar = '';
+    let inThinkTag = false;
+    let sawAnyTextDelta = false;
     let sawAnyChunk = false;
     let usage: PlannerLlmUsage | null = null;
     let buffer = '';
 
-    const handleLine = (line: string): PlannerLlmStreamEvent | null => {
+    const handleLine = (line: string): PlannerLlmStreamEvent[] => {
       const trimmed = line.trim();
-      if (!trimmed.startsWith('data:')) return null;
+      if (!trimmed.startsWith('data:')) return [];
       const payload = trimmed.slice(5).trim();
-      if (payload.length === 0 || payload === '[DONE]') return null;
+      if (payload.length === 0 || payload === '[DONE]') return [];
 
       let parsed: unknown;
       try {
         parsed = JSON.parse(payload);
       } catch {
-        return null; // A malformed chunk is dropped rather than aborting the whole stream.
+        return []; // A malformed chunk is dropped rather than aborting the whole stream.
       }
       sawAnyChunk = true;
 
@@ -315,6 +337,8 @@ export class PlannerLlmClient {
           choices?: {
             delta?: {
               content?: string | null;
+              reasoning_content?: string | null;
+              reasoning?: string | null;
               tool_calls?: { index: number; id?: string; function?: { name?: string; arguments?: string } }[];
             };
           }[];
@@ -336,11 +360,65 @@ export class PlannerLlmClient {
         }
       }
 
-      if (delta?.content) {
-        contentSoFar += delta.content;
-        return { type: 'text_delta', text: delta.content };
+      const reasoningChunk = delta?.reasoning_content ?? delta?.reasoning;
+      if (typeof reasoningChunk === 'string' && reasoningChunk.length > 0) {
+        reasoningSoFar += reasoningChunk;
+        return [{ type: 'thinking_delta', text: reasoningChunk }];
       }
-      return null;
+
+      if (delta?.content) {
+        if (inThinkTag) {
+          const closeIdx = delta.content.indexOf('</think>');
+          if (closeIdx >= 0) {
+            inThinkTag = false;
+            const thinkPart = delta.content.slice(0, closeIdx);
+            const events: PlannerLlmStreamEvent[] = [];
+            if (thinkPart.length > 0) {
+              reasoningSoFar += thinkPart;
+              events.push({ type: 'thinking_delta', text: thinkPart });
+            }
+            const remainder = delta.content.slice(closeIdx + '</think>'.length).replace(/^\n+/, '');
+            if (remainder.length > 0) {
+              sawAnyTextDelta = true;
+              contentSoFar += remainder;
+              events.push({ type: 'text_delta', text: remainder });
+            }
+            return events;
+          }
+          reasoningSoFar += delta.content;
+          return [{ type: 'thinking_delta', text: delta.content }];
+        } else if (!sawAnyTextDelta && delta.content.startsWith('<think>')) {
+          inThinkTag = true;
+          const afterOpen = delta.content.slice('<think>'.length);
+          const closeIdx = afterOpen.indexOf('</think>');
+          if (closeIdx >= 0) {
+            inThinkTag = false;
+            const thinkPart = afterOpen.slice(0, closeIdx);
+            const events: PlannerLlmStreamEvent[] = [];
+            if (thinkPart.length > 0) {
+              reasoningSoFar += thinkPart;
+              events.push({ type: 'thinking_delta', text: thinkPart });
+            }
+            const remainder = afterOpen.slice(closeIdx + '</think>'.length).replace(/^\n+/, '');
+            if (remainder.length > 0) {
+              sawAnyTextDelta = true;
+              contentSoFar += remainder;
+              events.push({ type: 'text_delta', text: remainder });
+            }
+            return events;
+          }
+          if (afterOpen.length > 0) {
+            reasoningSoFar += afterOpen;
+            return [{ type: 'thinking_delta', text: afterOpen }];
+          }
+          return [];
+        }
+
+        sawAnyTextDelta = true;
+        contentSoFar += delta.content;
+        return [{ type: 'text_delta', text: delta.content }];
+      }
+      return [];
     };
 
     try {
@@ -352,14 +430,16 @@ export class PlannerLlmClient {
         while (boundary >= 0) {
           const line = buffer.slice(0, boundary);
           buffer = buffer.slice(boundary + 1);
-          const event = handleLine(line);
-          if (event) yield event;
+          for (const event of handleLine(line)) {
+            yield event;
+          }
           boundary = buffer.indexOf('\n');
         }
       }
       if (buffer.length > 0) {
-        const event = handleLine(buffer);
-        if (event) yield event;
+        for (const event of handleLine(buffer)) {
+          yield event;
+        }
       }
     } catch (err) {
       throw new PlannerLlmError(`Lost connection to the planner LLM endpoint: ${(err as Error).message}`);
@@ -373,12 +453,13 @@ export class PlannerLlmClient {
       .filter((call) => call.name.length > 0)
       .map((call) => ({ id: call.id, type: 'function' as const, function: { name: call.name, arguments: call.args } }));
     const content = contentSoFar.length > 0 ? contentSoFar : null;
+    const reasoning = reasoningSoFar.length > 0 ? reasoningSoFar : null;
 
-    if (content === null && toolCalls.length === 0) {
+    if (content === null && toolCalls.length === 0 && reasoning === null) {
       throw new PlannerLlmError('Planner LLM response had no message content or tool calls.');
     }
 
-    yield { type: 'done', content, toolCalls, usage };
+    yield { type: 'done', content, toolCalls, usage, reasoning };
   }
 }
 

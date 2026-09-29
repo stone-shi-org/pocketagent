@@ -123,6 +123,36 @@ describe('transcript: text', () => {
   });
 });
 
+describe('transcript: thinking', () => {
+  it('accumulates thinking deltas into one streaming thinking block', () => {
+    const state = applyEvents(emptyTranscript(), [
+      { kind: 'thinking_delta', id: 'th1', text: 'Hmm, let ' },
+      { kind: 'thinking_delta', id: 'th1', text: 'me think.' },
+    ]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({
+      type: 'thinking',
+      key: 'stream_thinking_th1',
+      text: 'Hmm, let me think.',
+      streaming: true,
+    });
+  });
+
+  it('replaces the streaming thinking placeholder when the complete thinking block lands', () => {
+    const state = applyEvents(emptyTranscript(), [
+      { kind: 'thinking_delta', id: 'th1', text: 'Partial thinking' },
+      { kind: 'thinking', id: 'k1', text: 'Full finished thought' },
+    ]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({
+      type: 'thinking',
+      key: 'k_k1',
+      text: 'Full finished thought',
+      streaming: false,
+    });
+  });
+});
+
 describe('transcript: tools', () => {
   it('joins a result onto its tool call', () => {
     const state = applyEvents(emptyTranscript(), [

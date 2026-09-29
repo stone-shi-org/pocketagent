@@ -413,7 +413,7 @@ function Item({
       // header, never through here.
       return <AssistantText item={item} />;
     case 'thinking':
-      return <Thinking text={item.text} />;
+      return <Thinking text={item.text} streaming={item.streaming} />;
     case 'tool':
       return <ToolCard item={item} />;
     case 'notice':
@@ -517,13 +517,13 @@ function Markdown({ text, streaming }: { text: string; streaming: boolean }): JS
   );
 }
 
-function Thinking({ text }: { text: string }): JSX.Element {
+function Thinking({ text, streaming }: { text: string; streaming?: boolean }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const words = text.trim().split(/\s+/).length;
+  const words = text.trim() ? text.trim().split(/\s+/).length : 0;
   return (
-    <div className="thinking">
+    <div className={`thinking${streaming ? ' streaming' : ''}`}>
       <button type="button" className="thinking-head" onClick={() => setOpen((v) => !v)}>
-        <span className="chev">{open ? '▾' : '▸'}</span> Thought for {words} words
+        <span className="chev">{open ? '▾' : '▸'}</span> {streaming ? 'Thinking…' : 'Thought for'} {words} {words === 1 ? 'word' : 'words'}
       </button>
       {open && <div className="thinking-body">{text}</div>}
     </div>

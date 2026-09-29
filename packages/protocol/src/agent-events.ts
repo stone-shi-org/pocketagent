@@ -46,6 +46,14 @@ export const ThinkingEvent = z.object({
   text: z.string(),
 });
 
+/** Incremental thinking for the block with the same id, when partials are on. */
+export const ThinkingDeltaEvent = z.object({
+  kind: z.literal('thinking_delta'),
+  id: z.string(),
+  text: z.string(),
+});
+export type ThinkingDeltaEvent = z.infer<typeof ThinkingDeltaEvent>;
+
 export const ToolUseEvent = z.object({
   kind: z.literal('tool_use'),
   id: z.string(),
@@ -385,6 +393,7 @@ export const AgentEvent = z.discriminatedUnion('kind', [
   TextEvent,
   TextDeltaEvent,
   ThinkingEvent,
+  ThinkingDeltaEvent,
   ToolUseEvent,
   ToolResultEvent,
   PermissionRequestEvent,

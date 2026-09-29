@@ -146,15 +146,15 @@ describe('hub-template-export payloads', () => {
       commandTimeoutSeconds: 30,
     };
     const models: PlannerModel[] = [
-      { id: 'm-1', modelId: 'gpt-4o', label: 'GPT-4o', createdAt: 1000, sortOrder: 0 },
-      { id: 'm-2', modelId: 'o1-mini', label: 'o1 Mini', createdAt: 1000, sortOrder: 1 },
+      { id: 'm-1', modelId: 'gpt-4o', label: 'GPT-4o', createdAt: 1000, sortOrder: 0, supportsEffort: true },
+      { id: 'm-2', modelId: 'o1-mini', label: 'o1 Mini', createdAt: 1000, sortOrder: 1, supportsEffort: true },
     ];
     const payload = exportPlannerEndpointPayload(settings, models);
     expect(payload).toEqual({
       baseUrl: 'https://api.openai.com/v1',
       models: [
-        { modelId: 'gpt-4o', label: 'GPT-4o' },
-        { modelId: 'o1-mini', label: 'o1 Mini' },
+        { modelId: 'gpt-4o', label: 'GPT-4o', supportsEffort: true },
+        { modelId: 'o1-mini', label: 'o1 Mini', supportsEffort: true },
       ],
       embeddingBaseUrl: 'https://embeddings.example.com',
       embeddingModelId: 'text-embed-3',

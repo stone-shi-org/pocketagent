@@ -1355,6 +1355,14 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE cron_jobs ADD COLUMN retention_days INTEGER NOT NULL DEFAULT 10;
   `,
+
+  // PA-113: reasoning effort and thinking support for planner chats and models.
+  `
+  ALTER TABLE planner_chats ADD COLUMN last_effort TEXT;
+  ALTER TABLE planner_chats ADD COLUMN thinking_enabled INTEGER NOT NULL DEFAULT 1;
+  ALTER TABLE planner_models ADD COLUMN supports_effort INTEGER NOT NULL DEFAULT 1;
+  ALTER TABLE planner_models ADD COLUMN default_effort TEXT;
+  `,
 ];
 
 /**
@@ -1640,6 +1648,24 @@ export function openDatabase(databasePath: string): Db {
               AND job_id IS NOT NULL
          )
     `);
+  }
+  // PA-113: probe planner_chats and planner_models reasoning effort / thinking columns
+  if (plannerChatColumns.size > 0 && !plannerChatColumns.has('last_effort')) {
+    db.exec('ALTER TABLE planner_chats ADD COLUMN last_effort TEXT');
+  }
+  if (plannerChatColumns.size > 0 && !plannerChatColumns.has('thinking_enabled')) {
+    db.exec('ALTER TABLE planner_chats ADD COLUMN thinking_enabled INTEGER NOT NULL DEFAULT 1');
+  }
+  const plannerModelColumns = new Set(
+    (db.prepare('PRAGMA table_info(planner_models)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (plannerModelColumns.size > 0 && !plannerModelColumns.has('supports_effort')) {
+    db.exec('ALTER TABLE planner_models ADD COLUMN supports_effort INTEGER NOT NULL DEFAULT 1');
+  }
+  if (plannerModelColumns.size > 0 && !plannerModelColumns.has('default_effort')) {
+    db.exec('ALTER TABLE planner_models ADD COLUMN default_effort TEXT');
   }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 

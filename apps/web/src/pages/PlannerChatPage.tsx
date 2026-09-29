@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   AgentEvent,
+  EffortLevel,
   ModelInfo,
   PlannerChat,
   PlannerContextPreviewResponse,
@@ -89,8 +90,8 @@ function toModelInfos(models: PlannerModel[]): ModelInfo[] {
     value: m.modelId,
     displayName: m.label,
     description: '',
-    supportsEffort: false,
-    supportedEffortLevels: [],
+    supportsEffort: m.supportsEffort !== false,
+    supportedEffortLevels: ['low', 'medium', 'high', 'xhigh'],
   }));
 }
 
@@ -135,6 +136,9 @@ function eventKey(event: AgentEvent): EventKeyInfo | null {
   }
   if (event.kind === 'effort_changed') {
     return { key: `effort_changed:${event.effort}`, ephemeral: true };
+  }
+  if (event.kind === 'thinking') {
+    return { key: `thinking:${event.id}`, ephemeral: false };
   }
   if (event.kind === 'commands_available') {
     return { key: `commands_available:${event.commands.map((c) => c.name).join(',')}`, ephemeral: true };
@@ -480,6 +484,31 @@ export function PlannerChatPage({
     })();
   };
 
+  const changeEffort = (effort: EffortLevel | null): void => {
+    void (async () => {
+      try {
+        const updated = await api.updatePlannerChat(chatId, { effort });
+        setChat(updated);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not change effort.');
+      }
+    })();
+  };
+
+  const toggleThinking = (): void => {
+    const nextThinking = chat?.thinkingEnabled === false ? true : false;
+    void (async () => {
+      try {
+        const updated = await api.updatePlannerChat(chatId, { thinking: nextThinking });
+        setChat(updated);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not toggle thinking.');
+      }
+    })();
+  };
+
   const startEditingTitle = (): void => {
     setTitleInput(chat?.title ?? '');
     setEditingTitle(true);
@@ -678,7 +707,13 @@ export function PlannerChatPage({
         ttsQueueRef.current?.arm();
         await api.sendPlannerMessage(
           chatId,
-          { content: trimmed, image, voiceMode: pipelineLiveActive },
+          {
+            content: trimmed,
+            image,
+            voiceMode: pipelineLiveActive,
+            effort: chat?.lastEffort ?? undefined,
+            thinking: chat?.thinkingEnabled !== false,
+          },
           onStreamEvent,
           controller.signal,
         );
@@ -1382,6 +1417,10 @@ export function PlannerChatPage({
         models={toModelInfos(models)}
         currentModel={chat?.lastModelId ?? null}
         onSetModel={changeModel}
+        effort={chat?.lastEffort ?? null}
+        onSetEffort={changeEffort}
+        thinking={chat?.thinkingEnabled !== false}
+        onToggleThinking={toggleThinking}
         busy={geminiLive ? false : isChatBusy}
         onInterrupt={handleInterrupt}
       />

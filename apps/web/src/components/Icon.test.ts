@@ -41,6 +41,9 @@ describe('Icon component', () => {
       'check',
       'close',
       'attach',
+      'mic',
+      'live-listen',
+      'speaker',
       'plus',
       'minimize',
       'shield',
@@ -63,6 +66,11 @@ describe('Icon component', () => {
       'agent-shell',
       'agent-generic',
       'template',
+      'download',
+      'upload',
+      'hub',
+      'broadcast',
+      'brain',
     ];
 
     for (const name of iconNames) {

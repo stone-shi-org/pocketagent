@@ -72,6 +72,7 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   const [urlFetchTestResult, setUrlFetchTestResult] = useState<TestPlannerUrlFetchResponse | null>(null);
   const [newModelId, setNewModelId] = useState('');
   const [newModelLabel, setNewModelLabel] = useState('');
+  const [newModelSupportsEffort, setNewModelSupportsEffort] = useState(true);
   const [newApprovalScope, setNewApprovalScope] = useState<'global' | 'workspace'>('global');
   const [newApprovalWorkspaceId, setNewApprovalWorkspaceId] = useState('');
   const [newApprovalTool, setNewApprovalTool] = useState('');
@@ -367,9 +368,21 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   const addModel = (): void => {
     if (!newModelId.trim() || !newModelLabel.trim()) return;
     void withBusy(async () => {
-      await api.createPlannerModel({ modelId: newModelId.trim(), label: newModelLabel.trim() });
+      await api.createPlannerModel({
+        modelId: newModelId.trim(),
+        label: newModelLabel.trim(),
+        supportsEffort: newModelSupportsEffort,
+      });
       setNewModelId('');
       setNewModelLabel('');
+      setNewModelSupportsEffort(true);
+    });
+  };
+
+  const toggleModelEffort = (id: string, current: boolean): void => {
+    void withBusy(async () => {
+      await api.updatePlannerModel(id, { supportsEffort: !current });
+      await load();
     });
   };
 
@@ -801,6 +814,15 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
             <div key={m.id} className="planner-model-row">
               <span>
                 {m.label} <span className="planner-row-meta">({m.modelId})</span>
+                <button
+                  type="button"
+                  className={`planner-badge-btn${m.supportsEffort !== false ? ' active' : ''}`}
+                  onClick={() => toggleModelEffort(m.id, m.supportsEffort !== false)}
+                  title={m.supportsEffort !== false ? 'Reasoning effort enabled (click to disable)' : 'Reasoning effort disabled (click to enable)'}
+                >
+                  <Icon name="brain" size={12} />
+                  <span>{m.supportsEffort !== false ? 'Effort on' : 'Effort off'}</span>
+                </button>
                 {result === 'testing' && <span className="planner-row-meta"> — testing…</span>}
                 {result && result !== 'testing' && (
                   <span className={result.ok ? 'planner-test-ok' : 'planner-test-fail'}>
@@ -844,6 +866,14 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
             value={newModelLabel}
             onChange={(e) => setNewModelLabel(e.target.value)}
           />
+          <label className="planner-inline-checkbox" title="Allow configuring reasoning effort for this model">
+            <input
+              type="checkbox"
+              checked={newModelSupportsEffort}
+              onChange={(e) => setNewModelSupportsEffort(e.target.checked)}
+            />
+            <span>Reasoning effort</span>
+          </label>
           <button type="button" className="planner-btn" disabled={busy} onClick={addModel}>
             <Icon name="plus" size={14} /> Add
           </button>
