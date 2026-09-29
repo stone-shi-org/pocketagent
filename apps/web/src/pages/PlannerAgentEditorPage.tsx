@@ -280,34 +280,9 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
     })();
   };
 
-  if (!loaded) {
-    return (
-      <div className="planner-page">
-        <div className="spinner">Loading…</div>
-      </div>
-    );
-  }
-
-  if (!agent) {
-    return (
-      <div className="planner-page">
-        <div className="planner-head">
-          <h2>Agent not found</h2>
-          {onBack && (
-            <button type="button" className="planner-btn" onClick={onBack}>
-              Close
-            </button>
-          )}
-        </div>
-        {error && (
-          <div className="error-box" role="alert">
-            {error}
-          </div>
-        )}
-      </div>
-    );
-  }
-
+  // Hooks must all run before the early returns below: the first render is the
+  // loading one, so a hook placed after `if (!loaded) return` changes the hook
+  // count between renders (React #310) and blanks the page.
   const [importSuccess, setImportSuccess] = useState<string | null>(null);
 
   const handleExport = (): void => {
@@ -364,6 +339,34 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
       setImportSuccess(null);
     },
   });
+
+  if (!loaded) {
+    return (
+      <div className="planner-page">
+        <div className="spinner">Loading…</div>
+      </div>
+    );
+  }
+
+  if (!agent) {
+    return (
+      <div className="planner-page">
+        <div className="planner-head">
+          <h2>Agent not found</h2>
+          {onBack && (
+            <button type="button" className="planner-btn" onClick={onBack}>
+              Close
+            </button>
+          )}
+        </div>
+        {error && (
+          <div className="error-box" role="alert">
+            {error}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="planner-page">
