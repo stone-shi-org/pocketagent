@@ -1957,7 +1957,12 @@ the bound address for a specific `HOST`. The Hub's `DiscoveryService` is on by d
 socket it cannot open is a `failed` *state* with a sentence, never a boot error. Discovered rows
 are computed on read and never stored; `registeredHostId` matches a row on port, scheme and any
 name the backend is known by. Known limitations: no IPv6 transport, no probing, and mDNS does
-not cross routers or Tailscale — across a tailnet, hosts are still added by address.
+not cross routers or Tailscale — across a tailnet, hosts are still added by address. In Docker,
+containers on one user-defined network hear each other with no host networking (verified on
+stone-test01's `home-net`); the trap found there was Compose, not multicast: a project `.env`
+only fills `${…}` in the compose file and is never passed into a container, so the variable
+must be in the service's `environment:` (`docker/compose.hub.yaml` wires it as
+`${PA_MDNS_ADVERTISE:-false}`), and a backend with no `hostname:` advertises its container id.
 
 ### Version drift and drain-then-exit restart (PA-69)
 

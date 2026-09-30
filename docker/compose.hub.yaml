@@ -94,6 +94,9 @@ services:
   # backend, or reverse-proxy only `/api/hooks/*` to it.
   dev01:
     image: registry.shifamily.com/homestack/pocketagent-server:latest
+    # PA-110: the name this backend advertises under on mDNS. Without it the
+    # container id is the hostname, and the Hub lists `f40abed7d172 (8787)`.
+    hostname: dev01
     environment:
       POCKETAGENT_AUTH_TOKEN: ${PA_DEV01_TOKEN:?set PA_DEV01_TOKEN in docker/.env}
       POCKETAGENT_WORKSPACE_ROOTS: ${PA_WORKSPACE_ROOT:?set PA_WORKSPACE_ROOT in docker/.env}
@@ -104,6 +107,12 @@ services:
       # at the edge. This flag is about the *browser's* cookie, and the
       # browser never talks to this service directly.
       POCKETAGENT_COOKIE_SECURE: 'false'
+      # PA-110: announce this backend so the Hub lists it under "On this
+      # network". Wired through a placeholder on purpose: a compose project's
+      # .env only fills ${...} here and is never passed into the container,
+      # so `POCKETAGENT_MDNS_ADVERTISE=true` in docker/.env alone does nothing.
+      # Containers on this one network hear each other with no host networking.
+      POCKETAGENT_MDNS_ADVERTISE: ${PA_MDNS_ADVERTISE:-false}
     volumes:
       - pocketagent-dev01-data:/data
       - pocketagent-dev01-home:/home/pocketagent
@@ -116,6 +125,7 @@ services:
 
   dev02:
     image: registry.shifamily.com/homestack/pocketagent-server:latest
+    hostname: dev02
     environment:
       POCKETAGENT_AUTH_TOKEN: ${PA_DEV02_TOKEN:?set PA_DEV02_TOKEN in docker/.env}
       POCKETAGENT_WORKSPACE_ROOTS: ${PA_WORKSPACE_ROOT:?set PA_WORKSPACE_ROOT in docker/.env}
@@ -123,6 +133,7 @@ services:
       PGID: ${PGID:-1000}
       POCKETAGENT_BACKEND: direct
       POCKETAGENT_COOKIE_SECURE: 'false'
+      POCKETAGENT_MDNS_ADVERTISE: ${PA_MDNS_ADVERTISE:-false}
     volumes:
       - pocketagent-dev02-data:/data
       - pocketagent-dev02-home:/home/pocketagent
