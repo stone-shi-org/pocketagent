@@ -1970,6 +1970,29 @@ input[type='number']::-webkit-outer-spin-button {
   font-size: 14px;
 }
 
+/* PA-114: "[KEY] Summary — Ada approved". The lead gives way first on a narrow
+   screen, because the chat title already names the issue and the change is
+   the only part that differs from one round of the ticket to the next. */
+.prompt-text.has-change {
+  display: flex;
+  align-items: baseline;
+}
+
+.prompt-text.has-change .prompt-lead {
+  flex: 0 1 auto;
+  min-width: 4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.prompt-text.has-change .prompt-change {
+  flex: 0 0 auto;
+  max-width: 70%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
 .prompt-text.expanded {
   white-space: pre-wrap;
   word-break: break-word;

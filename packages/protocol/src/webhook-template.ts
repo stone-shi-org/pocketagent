@@ -98,6 +98,7 @@ export const JIRA_TEMPLATE_VARS: readonly TemplateVarSpec[] = [
   { name: 'comment.body', kind: 'prose', description: "The full comment thread, oldest first. Every other author's comment is included in full; the webhook's own Agent identity's past comments are shown as a short preview so a long history does not crowd out what a human wrote.", example: 'Still broken in 2.1.' },
   { name: 'changelog.fields', kind: 'structured', description: 'Names of fields changed, comma-separated.', example: 'status, assignee' },
   { name: 'changelog.summary', kind: 'prose', description: 'One line per change, with old and new values.', example: 'status: "To Do" → "In Progress"' },
+  { name: 'change.headline', kind: 'prose', description: "One line saying what this event did — who approved, commented, moved or reassigned the issue. The chat's prompt bar shows it beside the issue key, so each round of a multi-turn ticket reads differently.", example: 'Ada Lovelace approved' },
   { name: 'webhook.name', kind: 'structured', description: 'The name you gave this webhook.', example: 'Triage new bugs' },
   { name: 'delivery.id', kind: 'structured', description: 'This delivery, for correlating with the history.', example: 'a3f9c1…' },
 ];
@@ -174,6 +175,9 @@ Updated By:   {{user.displayName}}
 Labels:       {{issue.labels}}
 Changed:      {{changelog.fields}}
 
+Latest activity:
+{{change.headline}}
+
 Changes:
 {{changelog.summary}}
 
@@ -228,6 +232,9 @@ Updated By:   {{user.displayName}}
 Labels:       {{issue.labels}}
 Changed:      {{changelog.fields}}
 
+Latest activity:
+{{change.headline}}
+
 Changes:
 {{changelog.summary}}
 
@@ -263,6 +270,9 @@ Reporter:     {{issue.reporter}}
 Updated By:   {{user.displayName}}
 Labels:       {{issue.labels}}
 Changed:      {{changelog.fields}}
+
+Latest activity:
+{{change.headline}}
 
 Changes:
 {{changelog.summary}}
@@ -302,6 +312,9 @@ Updated By:   {{user.displayName}}
 Labels:       {{issue.labels}}
 Changed:      {{changelog.fields}}
 
+Latest activity:
+{{change.headline}}
+
 Changes:
 {{changelog.summary}}
 
@@ -339,6 +352,9 @@ Reporter:     {{issue.reporter}}
 Updated By:   {{user.displayName}}
 Labels:       {{issue.labels}}
 Changed:      {{changelog.fields}}
+
+Latest activity:
+{{change.headline}}
 
 Changes:
 {{changelog.summary}}
@@ -494,6 +510,161 @@ function sanitizeText(value: string, max: number): { text: string; truncated: bo
 }
 
 /**
+ * Labels that the approval presets treat as "go ahead" (PA-102). Kept here
+ * beside the presets that name them, so the headline says "approved" for
+ * exactly the labels the workflow text accepts — and never for `agent-ready`.
+ */
+const APPROVAL_LABELS = new Set(['approve', 'approved', 'approval']);
+
+/** The comment snippet in a headline: long enough to recognise, short enough to leave room for the rest. */
+const HEADLINE_COMMENT_MAX = 80;
+const HEADLINE_MAX = 160;
+
+/**
+ * One line saying what a Jira event *did* (PA-114).
+ *
+ * A `per-issue` webhook feeds every round of a ticket — triage, approval,
+ * review comments — into one conversation, and every one of those prompts
+ * used to open with the same issue key and summary, so the chat read as the
+ * same turn repeated. The payload always said what changed; this is where
+ * that becomes a sentence: `Ada Lovelace approved`, `Ada Lovelace: still
+ * broken on 2.1`, `Ada Lovelace moved To Do → In Review`.
+ *
+ * Computed here from the structured payload rather than guessed in the
+ * browser from the rendered prompt, so the editor's preview, the prompt the
+ * agent reads and the prompt bar all agree. It is fenced as prose like any
+ * other Jira text, because it carries a display name and a comment excerpt.
+ *
+ * An approval is reported only for a *label* the presets accept. A comment
+ * saying "go ahead" stays a comment line: this is a description of the
+ * event, and it must not claim an approval the workflow itself would judge
+ * differently. Empty when nothing recognisable happened.
+ */
+export function describeJiraChange(payload: unknown): string {
+  const root = asRecord(payload);
+  const event = str(root['webhookEvent']);
+  const eventType = str(root['issue_event_type_name']);
+  const issue = asRecord(root['issue']);
+  const fields = asRecord(issue['fields']);
+  const items = (Array.isArray(asRecord(root['changelog'])['items'])
+    ? (asRecord(root['changelog'])['items'] as unknown[])
+    : []
+  ).map((i) => asRecord(i));
+
+  const commentEvent =
+    event.startsWith('comment_') || eventType === 'issue_commented' || eventType === 'issue_comment_edited';
+  const edited = event === 'comment_updated' || eventType === 'issue_comment_edited';
+  // A comment event carries the comment at the root; Jira DC's
+  // `issue_updated` + `issue_commented` may only have it in the issue's list.
+  const rootComment = asRecord(root['comment']);
+  const listComments = Array.isArray(asRecord(fields['comment'])['comments'])
+    ? (asRecord(fields['comment'])['comments'] as unknown[])
+    : [];
+  const comment = commentEvent
+    ? Object.keys(rootComment).length > 0
+      ? rootComment
+      : mostRecentComment(listComments)
+    : {};
+  const commentAuthor = str(asRecord(comment['author'])['displayName']);
+  const actor =
+    str(asRecord(root['user'])['displayName']) || commentAuthor || str(asRecord(root['user'])['name']);
+
+  const clauses: string[] = [];
+  const handled = new Set<string>();
+  const fieldOf = (i: Record<string, unknown>) => (str(i['field']) || str(i['fieldId'])).toLowerCase();
+
+  if (event === 'jira:issue_created') clauses.push('created the issue');
+  if (event === 'jira:issue_deleted') clauses.push('deleted the issue');
+
+  for (const item of items) {
+    if (fieldOf(item) !== 'labels') continue;
+    handled.add('labels');
+    const before = new Set(splitLabels(str(item['fromString'])));
+    const after = splitLabels(str(item['toString']));
+    const added = after.filter((l) => !before.has(l));
+    const afterSet = new Set(after);
+    const removed = [...before].filter((l) => !afterSet.has(l));
+    const approvals = added.filter((l) => APPROVAL_LABELS.has(l.toLowerCase()));
+    const others = added.filter((l) => !APPROVAL_LABELS.has(l.toLowerCase()));
+    // First, because it is the one change the approval presets act on.
+    if (approvals.length > 0) clauses.unshift('approved');
+    if (others.length > 0) clauses.push(`added label ${others.join(', ')}`);
+    if (removed.length > 0) clauses.push(`removed label ${removed.join(', ')}`);
+  }
+
+  for (const item of items) {
+    const field = fieldOf(item);
+    if (field === 'status') {
+      handled.add(field);
+      const from = str(item['fromString']);
+      const to = str(item['toString']);
+      clauses.push(from ? `moved ${from} → ${to}` : `moved to ${to}`);
+    } else if (field === 'assignee') {
+      handled.add(field);
+      const to = str(item['toString']);
+      clauses.push(to ? `assigned ${to}` : 'unassigned the issue');
+    } else if (field === 'resolution' && str(item['toString'])) {
+      handled.add(field);
+      clauses.push(`resolved as ${str(item['toString'])}`);
+    }
+  }
+
+  // Jira DC records a comment made during a transition as a `Comment` item.
+  const otherFields = Array.from(
+    new Set(
+      items
+        .map((i) => str(i['field']) || str(i['fieldId']))
+        .filter((f) => f !== '' && !handled.has(f.toLowerCase()) && !(commentEvent && f.toLowerCase() === 'comment')),
+    ),
+  );
+  if (otherFields.length > 0) clauses.push(`updated ${otherFields.join(', ')}`);
+
+  const excerpt = commentEvent ? commentExcerpt(str(comment['body'])) : '';
+  const who = actor || 'Someone';
+  let line: string;
+  if (commentEvent && clauses.length === 0) {
+    // The reporter's own shape: "<name>: <comment>".
+    const author = commentAuthor || who;
+    line = excerpt ? `${author}${edited ? ' (edited)' : ''}: ${excerpt}` : `${author} ${edited ? 'edited a' : 'added a'} comment`;
+  } else if (clauses.length > 0) {
+    line = `${who} ${clauses.join(', ')}`;
+    if (commentEvent) line += excerpt ? `: ${excerpt}` : ', with a comment';
+  } else {
+    return '';
+  }
+  return truncateLine(line, HEADLINE_MAX);
+}
+
+/** Jira's changelog writes labels as one space-separated string. */
+function splitLabels(value: string): string[] {
+  return value.split(/\s+/).filter((l) => l !== '');
+}
+
+/**
+ * The first line of a comment that has words in it, with Jira wiki markup's
+ * most common noise removed. Not a markup renderer — a headline only has to
+ * be recognisable, and the full thread is still in the prompt.
+ */
+function commentExcerpt(body: string): string {
+  for (const raw of body.split(/\r?\n/)) {
+    const line = raw
+      .replace(/\[~[^\]]*\]/g, '') // user mentions: [~accountid:…]
+      .replace(/\{(?:code|noformat|quote|panel)[^}]*\}/g, '')
+      .replace(/^\s*(?:h[1-6]\.|bq\.|[*#-]+\s)/, '')
+      // `*bold*` / `_italic_` only at word boundaries, so `snake_case_name` survives.
+      .replace(/(^|\s)[*_]([^*_\n]+)[*_](?=\s|$|[.,:;!?])/g, '$1$2')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (line !== '') return truncateLine(line, HEADLINE_COMMENT_MAX);
+  }
+  return '';
+}
+
+function truncateLine(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
+/**
  * Build the substitution map from a parsed Jira payload.
  *
  * Total, not partial: every name in `JIRA_TEMPLATE_VARS` gets a key, so an
@@ -570,6 +741,7 @@ export function jiraTemplateVariables(
         return `${field}: "${str(i['fromString'])}" → "${str(i['toString'])}"`;
       })
       .join('\n'),
+    'change.headline': describeJiraChange(payload),
     'webhook.name': extra.webhookName,
     'delivery.id': extra.deliveryId,
   };

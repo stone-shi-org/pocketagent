@@ -583,6 +583,21 @@ editor previews it, and duplicating the renderer in `apps/web` guarantees the pr
 lies about what the agent will be told. One exported array drives both the substitution and the
 editor's variable chips, so a variable existing in one but not the other is impossible.
 
+**Each delivery says what it did, not just which issue it is** (PA-114). A `per-issue`
+conversation receives every round of a ticket — triage, approval, review comments — and each
+prompt used to open with the same `[KEY] Summary`, so the chat read as one turn repeated.
+`describeJiraChange` (same file) turns the payload into one line (`Ada approved`, `Ada: still
+broken on 2.1`, `Ada moved To Do → In Review`) exposed as `{{change.headline}}`, and
+`promptHeadline` shows it after the key as `[KEY] Summary — Ada approved`, keeping the change
+and shortening the summary when space runs out (the chat title already names the issue). Two details are deliberate. It is
+**fenced prose**, found by its fence marker, because it carries a display name and comment text
+— a bare first line would put Jira text outside the fence. And "approved" is reported only for a
+label the approval presets accept: a "go ahead" *comment* stays a comment line, so the
+headline never claims an approval the workflow text would judge differently. Saved webhooks
+keep their own copy of the template, so an existing webhook shows it only once the preset is
+re-selected (or the two-line `Latest activity:` block is added); without it the bar is
+unchanged.
+
 **A webhook's agent may be a Pocket Agent, not only a coding agent** (PA-10, reporter: "Today,
 webhook can only select code agent, need add 'pocket agent' agents in there too. The Jira tag
 should support pocket agent too."). The two halves of that request forced one design decision:

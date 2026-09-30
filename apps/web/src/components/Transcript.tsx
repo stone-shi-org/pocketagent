@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { extractSpokenSummary, stripSpokenSummary } from '@pocketagent/protocol';
 import type { TranscriptItem, TranscriptState, TurnNode } from '../agent/transcript.js';
 import { groupIntoTurns } from '../agent/transcript.js';
-import { promptHeadline } from '../agent/prompt-headline.js';
+import { HEADLINE_SEPARATOR, promptHeadline, promptHeadlineParts } from '../agent/prompt-headline.js';
 import { renderMarkdown } from '../agent/markdown.js';
 import { enhanceCodeBlocks, handleCodeBlockClick } from '../agent/code-blocks.js';
 import { copyText } from '../agent/clipboard.js';
@@ -334,6 +334,7 @@ function TurnPanel({
   const [expanded, setExpanded] = useState(false);
   const promptText = turn.prompt?.text ?? '';
   const isMultiline = promptText.includes('\n') || promptText.length > 80;
+  const headline = useMemo(() => (promptText ? promptHeadlineParts(promptText) : null), [promptText]);
 
   const toggleExpand = (): void => {
     setExpanded((v) => !v);
@@ -356,11 +357,20 @@ function TurnPanel({
           className={`turn-header${sticky ? ' pinned' : ''}${expanded ? ' expanded' : ''}`}
           style={sticky ? { top: (top ?? 0) + TOP_INSET } : undefined}
         >
-          <div className={`prompt-text${expanded ? ' expanded' : ''}`}>
+          <div className={`prompt-text${expanded ? ' expanded' : ''}${!expanded && headline?.change ? ' has-change' : ''}`}>
             {turn.prompt.text
               ? expanded
                 ? promptText
-                : promptHeadline(turn.prompt.text)
+                : headline?.change
+                  ? (
+                    // Two spans so the summary is what ellipsizes on a narrow
+                    // screen and "— Ada approved" stays readable (PA-114).
+                    <>
+                      <span className="prompt-lead">{headline.lead}</span>
+                      <span className="prompt-change">{HEADLINE_SEPARATOR}{headline.change}</span>
+                    </>
+                  )
+                  : promptHeadline(turn.prompt.text)
               : (turn.prompt.image ? 'Sent an image' : '')}
           </div>
           {turn.prompt.text && <CopyButton text={turn.prompt.text} label="Copy prompt" />}
