@@ -34,6 +34,7 @@ export interface CustomClaudeProviderRegistration {
   defaultModel: string;
   smallModel: string | null;
   allowUnattended: boolean;
+  supportsEffort?: boolean;
 }
 
 export class AgentRegistry {
@@ -92,7 +93,7 @@ export class AgentRegistry {
         apiKey: provider.apiKey,
         model: provider.defaultModel,
         smallModel: provider.smallModel,
-        staticModels: modelListFrom(provider.models),
+        staticModels: modelListFrom(provider.models, provider.supportsEffort !== false),
         // The per-provider opt-in, straight through the field the route checks
         // already read (`structuredAgentProblem`). Off means the PA-19
         // behaviour exactly: refused for cron jobs and inbound webhooks.

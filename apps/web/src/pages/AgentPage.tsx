@@ -921,14 +921,16 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
     if (queued) sendPrompt(queued.text, queued.image);
   }, [inputDisabled, sessionId, sendPrompt]);
 
-  // Same fallback as the composer's model picker (see `resolveCurrentModel`'s
-  // doc comment) — without it the title bar showed nothing at all for an agy
-  // session until the user explicitly switched models, since agy's `init`
-  // line never reports one.
-  const modelLabel = useMemo(
-    () => resolveCurrentModel(transcript.models, transcript.model)?.displayName ?? null,
+  const currentModelInfo = useMemo(
+    () => resolveCurrentModel(transcript.models, transcript.model),
     [transcript.models, transcript.model],
   );
+  const modelLabel = currentModelInfo?.displayName ?? null;
+  const supportsEffort = Boolean(currentModelInfo?.supportsEffort);
+  const thinkingEnabled = transcript.effort !== 'off';
+  const toggleThinking = useCallback(() => {
+    setEffort(transcript.effort === 'off' ? null : 'off');
+  }, [transcript.effort, setEffort]);
 
   const costLabel = useMemo(
     () => (transcript.totalCostUsd > 0 ? `$${transcript.totalCostUsd.toFixed(3)}` : null),
@@ -1125,6 +1127,8 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         onSetModel={setModel}
         effort={transcript.effort}
         onSetEffort={setEffort}
+        thinking={supportsEffort ? thinkingEnabled : undefined}
+        onToggleThinking={supportsEffort ? toggleThinking : undefined}
         busy={transcript.busy}
         onInterrupt={() => connRef.current?.sendInterrupt()}
       />

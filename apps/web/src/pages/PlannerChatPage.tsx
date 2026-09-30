@@ -487,7 +487,10 @@ export function PlannerChatPage({
   const changeEffort = (effort: EffortLevel | null): void => {
     void (async () => {
       try {
-        const updated = await api.updatePlannerChat(chatId, { effort });
+        const updated = await api.updatePlannerChat(chatId, {
+          effort,
+          ...(effort !== null && effort !== 'off' ? { thinking: true } : {}),
+        });
         setChat(updated);
       } catch (err) {
         onApiError(err);

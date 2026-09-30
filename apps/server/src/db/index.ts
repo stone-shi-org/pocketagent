@@ -1356,12 +1356,13 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE cron_jobs ADD COLUMN retention_days INTEGER NOT NULL DEFAULT 10;
   `,
 
-  // PA-113: reasoning effort and thinking support for planner chats and models.
+  // PA-113: reasoning effort and thinking support for planner chats, models, and custom Claude providers.
   `
   ALTER TABLE planner_chats ADD COLUMN last_effort TEXT;
   ALTER TABLE planner_chats ADD COLUMN thinking_enabled INTEGER NOT NULL DEFAULT 1;
   ALTER TABLE planner_models ADD COLUMN supports_effort INTEGER NOT NULL DEFAULT 1;
   ALTER TABLE planner_models ADD COLUMN default_effort TEXT;
+  ALTER TABLE custom_claude_providers ADD COLUMN supports_effort INTEGER NOT NULL DEFAULT 1;
   `,
 ];
 
@@ -1666,6 +1667,14 @@ export function openDatabase(databasePath: string): Db {
   }
   if (plannerModelColumns.size > 0 && !plannerModelColumns.has('default_effort')) {
     db.exec('ALTER TABLE planner_models ADD COLUMN default_effort TEXT');
+  }
+  const customClaudeProviderColumns = new Set(
+    (db.prepare('PRAGMA table_info(custom_claude_providers)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (customClaudeProviderColumns.size > 0 && !customClaudeProviderColumns.has('supports_effort')) {
+    db.exec('ALTER TABLE custom_claude_providers ADD COLUMN supports_effort INTEGER NOT NULL DEFAULT 1');
   }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 

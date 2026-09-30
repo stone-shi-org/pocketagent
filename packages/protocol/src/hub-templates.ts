@@ -217,6 +217,7 @@ export const ClaudeProviderTemplatePayload = z.object({
   defaultModel: MODEL_ID,
   smallModel: MODEL_ID.nullable(),
   allowUnattended: z.boolean(),
+  supportsEffort: z.boolean().optional(),
 });
 export type ClaudeProviderTemplatePayload = z.infer<typeof ClaudeProviderTemplatePayload>;
 

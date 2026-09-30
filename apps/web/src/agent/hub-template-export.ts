@@ -62,6 +62,7 @@ export function exportClaudeProviderPayload(
     defaultModel: provider.defaultModel,
     smallModel: provider.smallModel ?? null,
     allowUnattended: provider.allowUnattended,
+    supportsEffort: provider.supportsEffort,
   };
 }
 
