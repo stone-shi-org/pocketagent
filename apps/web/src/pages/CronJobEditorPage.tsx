@@ -407,11 +407,16 @@ export function CronJobEditorPage({
     );
   };
 
-  const { trigger: triggerImport, fileInputProps } = useJsonImport<CronJobExportData>({
+  const { trigger: triggerImport, fileInputProps } = useJsonImport<CronJobExportData | CronJobExportData[]>({
     expectedKind: 'cron-job',
-    onSuccess: ({ data: imported }) => {
+    onSuccess: ({ data: importedRaw }) => {
       setError(null);
       setImportSuccess(null);
+      const imported = Array.isArray(importedRaw) ? importedRaw[0] : importedRaw;
+      if (!imported) {
+        setError('No cron job data found in export file.');
+        return;
+      }
       setName(imported.name);
       if (imported.enabled !== undefined) setEnabled(imported.enabled);
       if (imported.preset) {

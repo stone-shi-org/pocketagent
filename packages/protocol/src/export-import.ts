@@ -207,6 +207,13 @@ function validateExportPayload(
       return { ok: true, data: parsed.data };
     }
     case 'cron-job': {
+      if (Array.isArray(data)) {
+        const parsed = z.array(CronJobExportData).safeParse(data);
+        if (!parsed.success) {
+          return { ok: false, error: `Invalid cron job data in array: ${parsed.error.issues[0]?.message ?? 'validation error'}` };
+        }
+        return { ok: true, data: parsed.data };
+      }
       const parsed = CronJobExportData.safeParse(data);
       if (!parsed.success) {
         return { ok: false, error: `Invalid cron job data: ${parsed.error.issues[0]?.message ?? 'validation error'}` };

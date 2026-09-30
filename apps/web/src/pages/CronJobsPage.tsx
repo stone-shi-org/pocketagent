@@ -96,30 +96,39 @@ export function CronJobsPage({ onOpenJob, onApiError, onBack }: Props): JSX.Elem
 
   const [importSuccess, setImportSuccess] = useState<string | null>(null);
 
-  const { trigger: triggerImport, fileInputProps } = useJsonImport<CronJobExportData>({
+  const { trigger: triggerImport, fileInputProps } = useJsonImport<CronJobExportData | CronJobExportData[]>({
     expectedKind: 'cron-job',
     onSuccess: async ({ data: imported }) => {
       try {
         setError(null);
         setImportSuccess(null);
-        const created = await api.createCronJob({
-          name: imported.name,
-          enabled: imported.enabled ?? true,
-          preset: imported.preset,
-          cronExpr: imported.cronExpr,
-          timeZone: imported.timeZone,
-          cwd: imported.cwd ?? '',
-          agent: imported.agent,
-          worktreeMode: imported.worktreeMode ?? 'none',
-          model: imported.model,
-          effort: imported.effort,
-          skipPermissions: imported.skipPermissions ?? true,
-          prompt: imported.prompt,
-          overlapPolicy: imported.overlapPolicy ?? 'skip',
-          retentionDays: imported.retentionDays ?? 10,
-        });
+        const list = Array.isArray(imported) ? imported : [imported];
+        let importedCount = 0;
+        for (const item of list) {
+          await api.createCronJob({
+            name: item.name,
+            enabled: item.enabled ?? true,
+            preset: item.preset,
+            cronExpr: item.cronExpr,
+            timeZone: item.timeZone,
+            cwd: item.cwd ?? '',
+            agent: item.agent,
+            worktreeMode: item.worktreeMode ?? 'none',
+            model: item.model,
+            effort: item.effort,
+            skipPermissions: item.skipPermissions ?? true,
+            prompt: item.prompt,
+            overlapPolicy: item.overlapPolicy ?? 'skip',
+            retentionDays: item.retentionDays ?? 10,
+          });
+          importedCount++;
+        }
         await load();
-        setImportSuccess(`Job "${created.name}" imported successfully.`);
+        setImportSuccess(
+          importedCount === 1
+            ? `Job "${list[0]!.name}" imported successfully.`
+            : `Imported ${importedCount} scheduled jobs successfully.`,
+        );
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'Could not import scheduled job.');
       }
@@ -130,26 +139,30 @@ export function CronJobsPage({ onOpenJob, onApiError, onBack }: Props): JSX.Elem
     },
   });
 
+  const toExportData = (job: CronJob): CronJobExportData => ({
+    name: job.name,
+    enabled: job.enabled,
+    cronExpr: job.cronExpr,
+    timeZone: job.timeZone,
+    cwd: job.cwd,
+    agent: job.agent,
+    worktreeMode: job.worktreeMode,
+    model: job.model,
+    effort: job.effort,
+    skipPermissions: job.skipPermissionsEnabled,
+    prompt: job.prompt,
+    overlapPolicy: job.overlapPolicy,
+    retentionDays: job.retentionDays,
+  });
+
   const exportJob = (job: CronJob): void => {
-    exportToJsonFile(
-      'cron-job',
-      {
-        name: job.name,
-        enabled: job.enabled,
-        cronExpr: job.cronExpr,
-        timeZone: job.timeZone,
-        cwd: job.cwd,
-        agent: job.agent,
-        worktreeMode: job.worktreeMode,
-        model: job.model,
-        effort: job.effort,
-        skipPermissions: job.skipPermissionsEnabled,
-        prompt: job.prompt,
-        overlapPolicy: job.overlapPolicy,
-        retentionDays: job.retentionDays,
-      },
-      job.name,
-    );
+    exportToJsonFile('cron-job', toExportData(job), job.name);
+  };
+
+  const exportAllJobs = (): void => {
+    if (!jobs || jobs.length === 0) return;
+    const payloads = jobs.map(toExportData);
+    exportToJsonFile('cron-job', payloads, 'all');
   };
 
   const content = (
@@ -162,7 +175,17 @@ export function CronJobsPage({ onOpenJob, onApiError, onBack }: Props): JSX.Elem
             Each job starts an agent on its own schedule and sends it a prompt.
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+        <div className="cron-head-actions" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button
+            type="button"
+            className="cron-secondary"
+            disabled={!jobs || jobs.length === 0}
+            onClick={exportAllJobs}
+            title="Export all jobs to a JSON file"
+          >
+            <Icon name="download" size={16} />
+            Export all
+          </button>
           <button
             type="button"
             className="cron-secondary"

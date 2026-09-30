@@ -191,5 +191,33 @@ describe('json-transfer', () => {
     expect(templates[1]!.name).toBe('Bamboo MCP');
     expect(templates[1]!.description).toBeUndefined();
   });
+
+  it('validates batch cron-job export envelopes containing an array of jobs', () => {
+    const multiJobs = [
+      {
+        name: 'Nightly Cleanup',
+        agent: 'claude',
+        prompt: 'Clean up temp files',
+        cronExpr: '0 3 * * *',
+        enabled: true,
+      },
+      {
+        name: 'Morning Sync',
+        agent: 'claude',
+        prompt: 'Sync upstream repositories',
+        cronExpr: '0 8 * * 1-5',
+        enabled: false,
+      },
+    ];
+    const envelope = createExportEnvelope('cron-job', multiJobs, 'all');
+    const parseRes = parseExportEnvelope(envelope, 'cron-job');
+    expect(parseRes.ok).toBe(true);
+    if (parseRes.ok) {
+      expect(Array.isArray(parseRes.data)).toBe(true);
+      expect(parseRes.data).toHaveLength(2);
+      expect((parseRes.data as typeof multiJobs)[0]!.name).toBe('Nightly Cleanup');
+      expect((parseRes.data as typeof multiJobs)[1]!.name).toBe('Morning Sync');
+    }
+  });
 });
 
