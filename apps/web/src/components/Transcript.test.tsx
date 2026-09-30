@@ -50,6 +50,29 @@ describe('transcriptToMarkdown', () => {
   it('handles empty turns gracefully', () => {
     expect(transcriptToMarkdown([], [])).toBe('');
   });
+
+  it('cleans compaction error messages when exporting to markdown', () => {
+    const turns: TurnNode[] = [
+      {
+        key: 'turn-1',
+        prompt: { type: 'text', key: 'p1', role: 'user', text: 'Hello', streaming: false },
+        leaves: [
+          {
+            type: 'text',
+            key: 'a1',
+            role: 'assistant',
+            text: 'Prompt is too long · automatic compaction failed: API Error: 400 No target in combo agent-local-medium has confirmed vision support for this image request',
+            streaming: false,
+          },
+        ],
+      },
+    ];
+    const md = transcriptToMarkdown([], turns);
+    expect(md).toContain(
+      '### Assistant\n\nAutomatic compaction failed: API Error: 400 No target in combo agent-local-medium has confirmed vision support for this image request',
+    );
+    expect(md).not.toContain('Prompt is too long');
+  });
 });
 
 describe('Transcript component', () => {

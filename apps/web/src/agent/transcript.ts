@@ -1,4 +1,4 @@
-import { stripSpokenSummaryInstruction } from '@pocketagent/protocol';
+import { cleanCompactionErrorMessage, stripSpokenSummaryInstruction } from '@pocketagent/protocol';
 import type {
   AgentEvent,
   EffortLevel,
@@ -206,7 +206,7 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
         type: 'text',
         key: `t_${event.id}`,
         role: 'assistant',
-        text: event.text,
+        text: cleanCompactionErrorMessage(event.text),
         streaming: false,
       };
       return { ...state, items: [...dropStreaming(state.items), item] };

@@ -84,6 +84,21 @@ describe('transcript: text', () => {
     expect(state.items[0]).toMatchObject({ text: 'Partial then complete', streaming: false });
   });
 
+  it('cleans misleading prompt-too-long prefix on compaction error messages in assistant text', () => {
+    const state = applyEvents(emptyTranscript(), [
+      {
+        kind: 'text',
+        id: 'msg_err',
+        text: 'Prompt is too long · automatic compaction failed: API Error: 400 No target in combo agent-local-medium has confirmed vision support for this image request',
+      },
+    ]);
+    expect(state.items[0]).toMatchObject({
+      type: 'text',
+      role: 'assistant',
+      text: 'Automatic compaction failed: API Error: 400 No target in combo agent-local-medium has confirmed vision support for this image request',
+    });
+  });
+
   it('does not merge deltas from consecutive messages into one block', () => {
     // Regression: delta ids are content-block indices, which restart at 0 for
     // every assistant message. Keying on them alone concatenated one message's

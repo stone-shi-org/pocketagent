@@ -1,5 +1,6 @@
 import path from 'node:path';
-import type { AgentEvent, ModelInfo, SlashCommandInfo } from '@pocketagent/protocol';
+import { cleanCompactionErrorMessage, type AgentEvent, type ModelInfo, type SlashCommandInfo } from '@pocketagent/protocol';
+
 
 /** Tool results can be enormous; the UI only needs a readable preview. */
 const MAX_RESULT_CHARS = 8000;
@@ -250,7 +251,7 @@ function normalizeAssistant(message: Record<string, unknown>): AgentEvent[] {
     const blockType = str(raw.type);
 
     if (blockType === 'text') {
-      const text = str(raw.text) ?? '';
+      const text = cleanCompactionErrorMessage(str(raw.text) ?? '');
       if (text.trim().length === 0) continue;
       events.push({ kind: 'text', id: blockId(inner, events.length), text: clamp(text, MAX_TEXT_CHARS) });
       continue;

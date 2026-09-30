@@ -288,6 +288,63 @@ describe('normalizeSdkMessage: assistant', () => {
     });
     expect(events[0]).toMatchObject({ kind: 'thinking', text: 'Consider the edge case.' });
   });
+
+  it('cleans misleading prompt-too-long prefix on compaction error messages', () => {
+    const events = normalizeSdkMessage({
+      type: 'assistant',
+      message: {
+        id: 'm1',
+        content: [
+          {
+            type: 'text',
+            text: 'Prompt is too long · automatic compaction failed: API Error: 400 No target in combo agent-local-medium has confirmed vision support for this image request',
+          },
+        ],
+      },
+    });
+    expect(events[0]).toMatchObject({
+      kind: 'text',
+      text: 'Automatic compaction failed: API Error: 400 No target in combo agent-local-medium has confirmed vision support for this image request',
+    });
+  });
+
+  it('unwraps direct API Error when compaction prefix is omitted', () => {
+    const events = normalizeSdkMessage({
+      type: 'assistant',
+      message: {
+        id: 'm2',
+        content: [
+          {
+            type: 'text',
+            text: 'Prompt is too long · API Error: 500 Internal Server Error',
+          },
+        ],
+      },
+    });
+    expect(events[0]).toMatchObject({
+      kind: 'text',
+      text: 'API Error: 500 Internal Server Error',
+    });
+  });
+
+  it('preserves genuine prompt is too long messages that have no compaction prefix or API error', () => {
+    const events = normalizeSdkMessage({
+      type: 'assistant',
+      message: {
+        id: 'm3',
+        content: [
+          {
+            type: 'text',
+            text: 'Prompt is too long (exceeded maximum limit of 200,000 tokens)',
+          },
+        ],
+      },
+    });
+    expect(events[0]).toMatchObject({
+      kind: 'text',
+      text: 'Prompt is too long (exceeded maximum limit of 200,000 tokens)',
+    });
+  });
 });
 
 describe('normalizeSdkMessage: tool results', () => {

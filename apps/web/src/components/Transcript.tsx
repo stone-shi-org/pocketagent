@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { extractSpokenSummary, stripSpokenSummary } from '@pocketagent/protocol';
+import { cleanCompactionErrorMessage, extractSpokenSummary, stripSpokenSummary } from '@pocketagent/protocol';
 import type { TranscriptItem, TranscriptState, TurnNode } from '../agent/transcript.js';
 import { groupIntoTurns } from '../agent/transcript.js';
 import { HEADLINE_SEPARATOR, promptHeadline, promptHeadlineParts } from '../agent/prompt-headline.js';
@@ -456,11 +456,12 @@ function Item({
 function AssistantText({ item }: { item: TranscriptItem & { type: 'text' } }): JSX.Element {
   // `streaming` matters for a finished reply: a `<speak>` the model opened and
   // never closed is hidden only while it may still close, and shown after.
+  const cleanedText = useMemo(() => cleanCompactionErrorMessage(item.text), [item.text]);
   const shown = useMemo(
-    () => stripSpokenSummary(item.text, { streaming: item.streaming }),
-    [item.text, item.streaming],
+    () => stripSpokenSummary(cleanedText, { streaming: item.streaming }),
+    [cleanedText, item.streaming],
   );
-  const spoken = useMemo(() => extractSpokenSummary(item.text), [item.text]);
+  const spoken = useMemo(() => extractSpokenSummary(cleanedText), [cleanedText]);
   const [spokenOpen, setSpokenOpen] = useState(false);
 
   // Offered only when there is something the disclosure would actually add.
@@ -607,7 +608,7 @@ export function transcriptToMarkdown(historyTurns: TurnNode[], liveTurns: TurnNo
     const assistantParts: string[] = [];
     for (const leaf of t.leaves) {
       if (leaf.type === 'text') {
-        const text = stripSpokenSummary(leaf.text);
+        const text = stripSpokenSummary(cleanCompactionErrorMessage(leaf.text));
         if (text) assistantParts.push(text);
       } else if (leaf.type === 'tool') {
         assistantParts.push(`> **Tool:** \`${leaf.summary}\``);

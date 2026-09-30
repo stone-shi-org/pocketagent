@@ -431,3 +431,32 @@ export type AgentReplayPayload = z.infer<typeof AgentReplayPayload>;
 /** How a session is driven: a raw terminal, or a structured event stream. */
 export const SessionTransport = z.enum(['terminal', 'structured']);
 export type SessionTransport = z.infer<typeof SessionTransport>;
+
+/**
+ * Claude Code CLI hardcodes `var DM = "Prompt is too long"` and prepends
+ * `${DM} · automatic compaction failed: ` to any API or runtime error encountered
+ * during context compaction. When the error is an API rejection (such as an
+ * unsupported vision request on a text-only combo/model, rate limit, or server error),
+ * "Prompt is too long" is misleading and confuses users into thinking their prompt
+ * exceeded token limits.
+ *
+ * Strips the misleading prefix so the real compaction / API failure is clear:
+ * e.g. "Prompt is too long · automatic compaction failed: API Error: 400 ..." ->
+ *      "Automatic compaction failed: API Error: 400 ..."
+ * or if no compaction prefix followed:
+ * e.g. "Prompt is too long · API Error: 400 ..." ->
+ *      "API Error: 400 ..."
+ */
+export function cleanCompactionErrorMessage(text: string): string {
+  return text.replace(
+    /^Prompt is too long\s*[·\u00b7\u2022\u22c5\u2219\-*:]\s*(?:((?:(?:automatic|reactive|partial)\s+)?compaction failed):\s*)?/i,
+    (_match, compactionPrefix: string | undefined) => {
+      if (compactionPrefix) {
+        const normalized = compactionPrefix.trim();
+        return `${normalized.charAt(0).toUpperCase() + normalized.slice(1)}: `;
+      }
+      return '';
+    },
+  );
+}
+
