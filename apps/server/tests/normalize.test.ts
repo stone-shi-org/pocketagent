@@ -290,6 +290,55 @@ describe('normalizeSdkMessage: assistant', () => {
   });
 });
 
+describe('normalizeSdkMessage: stream_event', () => {
+  it('maps text_delta content block deltas', () => {
+    const events = normalizeSdkMessage({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'Hello, ' },
+      },
+    });
+    expect(events).toEqual([{ kind: 'text_delta', id: 'sd_0', text: 'Hello, ' }]);
+  });
+
+  it('maps thinking_delta content block deltas', () => {
+    const events = normalizeSdkMessage({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        index: 1,
+        delta: { type: 'thinking_delta', thinking: 'Let us consider the options...' },
+      },
+    });
+    expect(events).toEqual([{ kind: 'thinking_delta', id: 'sd_1', text: 'Let us consider the options...' }]);
+  });
+
+  it('drops empty text or thinking deltas', () => {
+    expect(
+      normalizeSdkMessage({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: '' },
+        },
+      }),
+    ).toEqual([]);
+    expect(
+      normalizeSdkMessage({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          index: 1,
+          delta: { type: 'thinking_delta', thinking: '' },
+        },
+      }),
+    ).toEqual([]);
+  });
+});
+
 describe('normalizeSdkMessage: tool results', () => {
   it('flattens content blocks into text', () => {
     const events = normalizeSdkMessage({

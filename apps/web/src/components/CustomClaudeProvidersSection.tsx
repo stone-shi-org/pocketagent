@@ -22,6 +22,7 @@ interface FormState {
   defaultModel: string;
   smallModel: string;
   allowUnattended: boolean;
+  supportsEffort: boolean;
 }
 
 function blankForm(): FormState {
@@ -34,6 +35,7 @@ function blankForm(): FormState {
     defaultModel: DEEPSEEK_DEFAULTS.defaultModel,
     smallModel: DEEPSEEK_DEFAULTS.smallModel,
     allowUnattended: false,
+    supportsEffort: true,
   };
 }
 
@@ -49,6 +51,7 @@ function formFor(provider: CustomClaudeProviderSummary): FormState {
     defaultModel: provider.defaultModel,
     smallModel: provider.smallModel ?? '',
     allowUnattended: provider.allowUnattended,
+    supportsEffort: provider.supportsEffort !== false,
   };
 }
 
@@ -162,6 +165,7 @@ export function CustomClaudeProvidersSection({ onApiError }: Props): JSX.Element
         defaultModel: form.defaultModel.trim(),
         smallModel: form.smallModel.trim() || null,
         allowUnattended: form.allowUnattended,
+        supportsEffort: form.supportsEffort,
       };
       if (editing === 'new') {
         await api.createCustomClaudeProvider({ ...common, apiKey: form.apiKey });
@@ -420,6 +424,19 @@ export function CustomClaudeProvidersSection({ onApiError }: Props): JSX.Element
               endpoint does not know the id, those fail mid-session rather than at start.
             </p>
           </div>
+
+          <label className="planner-checkbox-row" style={{ marginBottom: 10 }}>
+            <input
+              type="checkbox"
+              checked={form.supportsEffort}
+              disabled={busy}
+              onChange={(e) => patch({ supportsEffort: e.target.checked })}
+            />
+            <span>
+              <strong>Support reasoning effort &amp; thinking</strong> — enable thinking on/off and
+              reasoning effort controls (low, medium, high, extra high) for models on this provider.
+            </span>
+          </label>
 
           <label className="planner-checkbox-row" style={{ marginBottom: 10 }}>
             <input

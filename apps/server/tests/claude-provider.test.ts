@@ -132,11 +132,16 @@ describe('claude provider variants', () => {
       'deepseek-v4-pro',
       'deepseek-v4-flash',
     ]);
-    // Effort is a Claude-model concept the SDK maps onto Anthropic ids; showing
-    // the control for a third-party model would be a switch that does nothing.
-    expect(createClaudeProviderAdapter(OPTS).staticModels?.every((m) => !m.supportsEffort)).toBe(
+    // PA-113: Custom Claude provider models (DeepSeek, Omniroute) support reasoning effort & thinking
+    expect(createClaudeProviderAdapter(OPTS).staticModels?.every((m) => m.supportsEffort)).toBe(
       true,
     );
+    expect(createClaudeProviderAdapter(OPTS).staticModels?.[0]?.supportedEffortLevels).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+    ]);
   });
 
   it('discloses the provider persistently', () => {

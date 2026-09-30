@@ -447,7 +447,7 @@ describe('effort switching', () => {
 
     await session.setEffort('high');
 
-    expect(applyFlagSettingsCalls).toEqual([{ effortLevel: 'high' }]);
+    expect(applyFlagSettingsCalls).toEqual([{ effortLevel: 'high', alwaysThinkingEnabled: true }]);
     expect(events.find((e: any) => e.kind === 'effort_changed')).toEqual({
       kind: 'effort_changed',
       effort: 'high',
@@ -461,7 +461,23 @@ describe('effort switching', () => {
 
     await session.setEffort(null);
 
-    expect(applyFlagSettingsCalls).toEqual([{ effortLevel: null }]);
+    expect(applyFlagSettingsCalls).toEqual([{ effortLevel: null, alwaysThinkingEnabled: true }]);
+    await session.terminate();
+  });
+
+  it('disables thinking when effort is set to off', async () => {
+    const session = makeSession();
+    const events: unknown[] = [];
+    session.on('event', (_seq, event) => events.push(event));
+    await session.start();
+
+    await session.setEffort('off');
+
+    expect(applyFlagSettingsCalls).toEqual([{ effortLevel: null, alwaysThinkingEnabled: false }]);
+    expect(events.find((e: any) => e.kind === 'effort_changed')).toEqual({
+      kind: 'effort_changed',
+      effort: 'off',
+    });
     await session.terminate();
   });
 

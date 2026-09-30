@@ -430,7 +430,22 @@ export class StructuredSession extends EventEmitter<StructuredSessionEvents> {
   async setEffort(effort: EffortLevel | null): Promise<void> {
     if (!this.queryHandle || !this.isAlive()) return;
     try {
-      await this.queryHandle.applyFlagSettings({ effortLevel: effort as SdkEffortLevel | null });
+      if (effort === 'off' || effort === 'none') {
+        await this.queryHandle.applyFlagSettings({
+          effortLevel: null,
+          alwaysThinkingEnabled: false,
+        });
+      } else if (effort === null) {
+        await this.queryHandle.applyFlagSettings({
+          effortLevel: null,
+          alwaysThinkingEnabled: true,
+        });
+      } else {
+        await this.queryHandle.applyFlagSettings({
+          effortLevel: effort as SdkEffortLevel,
+          alwaysThinkingEnabled: true,
+        });
+      }
     } catch (err) {
       this.emitEvent({
         kind: 'notice',

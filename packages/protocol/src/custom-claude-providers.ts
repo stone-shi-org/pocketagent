@@ -55,6 +55,8 @@ export const CustomClaudeProviderSummary = z.object({
    * row rather than only at creation — see the invariant in CLAUDE.md.
    */
   allowUnattended: z.boolean(),
+  /** PA-113: Whether models for this custom provider support reasoning effort / thinking controls. */
+  supportsEffort: z.boolean().default(true),
   createdAt: z.number().int(),
   updatedAt: z.number().int(),
 });
@@ -94,6 +96,7 @@ export const CreateCustomClaudeProviderRequest = z.object({
   defaultModel: MODEL_ID,
   smallModel: MODEL_ID.nullable().optional(),
   allowUnattended: z.boolean().optional(),
+  supportsEffort: z.boolean().optional(),
 });
 export type CreateCustomClaudeProviderRequest = z.infer<typeof CreateCustomClaudeProviderRequest>;
 
@@ -115,6 +118,7 @@ export const UpdateCustomClaudeProviderRequest = z.object({
   defaultModel: MODEL_ID.optional(),
   smallModel: MODEL_ID.nullable().optional(),
   allowUnattended: z.boolean().optional(),
+  supportsEffort: z.boolean().optional(),
 });
 export type UpdateCustomClaudeProviderRequest = z.infer<typeof UpdateCustomClaudeProviderRequest>;
 

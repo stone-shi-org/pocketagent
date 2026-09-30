@@ -47,6 +47,7 @@ interface Row {
   default_model: string;
   small_model: string | null;
   allow_unattended: number;
+  supports_effort: number;
   created_at: number;
   updated_at: number;
 }
@@ -127,6 +128,7 @@ export class CustomClaudeProviderStore {
       default_model: defaultModel,
       small_model: smallModel,
       allow_unattended: req.allowUnattended ? 1 : 0,
+      supports_effort: req.supportsEffort !== false ? 1 : 0,
       created_at: now,
       updated_at: now,
     };
@@ -177,6 +179,8 @@ export class CustomClaudeProviderStore {
       small_model: smallModel,
       allow_unattended:
         req.allowUnattended === undefined ? existing.allow_unattended : req.allowUnattended ? 1 : 0,
+      supports_effort:
+        req.supportsEffort === undefined ? (existing.supports_effort ?? 1) : req.supportsEffort ? 1 : 0,
       updated_at: Date.now(),
     };
     this.db
@@ -184,7 +188,7 @@ export class CustomClaudeProviderStore {
         `UPDATE custom_claude_providers
             SET name = ?, provider_kind = ?, base_url = ?, api_key_ciphertext = ?,
                 models_json = ?, default_model = ?, small_model = ?, allow_unattended = ?,
-                updated_at = ?
+                supports_effort = ?, updated_at = ?
           WHERE id = ?`,
       )
       .run(
@@ -196,6 +200,7 @@ export class CustomClaudeProviderStore {
         row.default_model,
         row.small_model,
         row.allow_unattended,
+        row.supports_effort,
         row.updated_at,
         row.id,
       );
@@ -279,6 +284,7 @@ export class CustomClaudeProviderStore {
         // provider on a timer has to say so in Settings, which is the whole
         // point of making it a per-provider decision.
         allow_unattended: 0,
+        supports_effort: 1,
         created_at: now,
         updated_at: now,
       };
@@ -333,6 +339,7 @@ export class CustomClaudeProviderStore {
       defaultModel: row.default_model,
       smallModel: row.small_model,
       allowUnattended: row.allow_unattended === 1,
+      supportsEffort: row.supports_effort !== 0,
     });
   }
 
@@ -434,8 +441,8 @@ export class CustomClaudeProviderStore {
       .prepare(
         `INSERT INTO custom_claude_providers
            (id, name, provider_kind, base_url, api_key_ciphertext, models_json,
-            default_model, small_model, allow_unattended, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            default_model, small_model, allow_unattended, supports_effort, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
@@ -447,6 +454,7 @@ export class CustomClaudeProviderStore {
         row.default_model,
         row.small_model,
         row.allow_unattended,
+        row.supports_effort,
         row.created_at,
         row.updated_at,
       );
@@ -465,6 +473,7 @@ function toSummary(row: Row): CustomClaudeProviderSummary {
     defaultModel: row.default_model,
     smallModel: row.small_model,
     allowUnattended: row.allow_unattended === 1,
+    supportsEffort: (row.supports_effort ?? 1) !== 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

@@ -1,4 +1,4 @@
-import type { ModelInfo } from '@pocketagent/protocol';
+import type { EffortLevel, ModelInfo } from '@pocketagent/protocol';
 import type { AgentAdapter } from './types.js';
 import { resolveExecutable } from './registry.js';
 
@@ -129,6 +129,13 @@ export function createClaudeProviderAdapter(opts: ClaudeProviderOptions): AgentA
 }
 
 /**
+ * PA-113: The effort levels that custom Claude provider models (Omniroute,
+ * DeepSeek, etc.) accept. Claude Code CLI and Anthropic-compatible proxies
+ * support `'low' | 'medium' | 'high' | 'xhigh'`.
+ */
+export const CLAUDE_PROVIDER_EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh'];
+
+/**
  * Build a `ModelInfo` catalog from a comma-separated list of raw model ids.
  *
  * The ids are deliberately configuration rather than a hardcoded table. A
@@ -137,13 +144,9 @@ export function createClaudeProviderAdapter(opts: ClaudeProviderOptions): AgentA
  * wants its own ids (`deepseek-v4-flash`, `deepseek-v4-pro`) — so guessing
  * them here would produce a picker full of models the endpoint refuses. Take
  * them from the gateway's own `/models`.
- *
- * `supportsEffort` is false for every entry: effort is a Claude-model concept
- * the SDK maps onto Anthropic ids, and offering the control for a third-party
- * model would be a switch that silently does nothing.
  */
-export function parseModelList(raw: string | null): ModelInfo[] {
-  return modelListFrom(raw ? raw.split(',') : []);
+export function parseModelList(raw: string | null, supportsEffort = true): ModelInfo[] {
+  return modelListFrom(raw ? raw.split(',') : [], supportsEffort);
 }
 
 /**
@@ -155,7 +158,7 @@ export function parseModelList(raw: string | null): ModelInfo[] {
  * implementation and not two — trimming, de-duplication and first-seen ordering
  * are exactly the properties a picker depends on, and two copies would drift.
  */
-export function modelListFrom(ids: readonly string[]): ModelInfo[] {
+export function modelListFrom(ids: readonly string[], supportsEffort = true): ModelInfo[] {
   const seen = new Set<string>();
   const models: ModelInfo[] = [];
   for (const entry of ids) {
@@ -166,8 +169,8 @@ export function modelListFrom(ids: readonly string[]): ModelInfo[] {
       value,
       displayName: value,
       description: '',
-      supportsEffort: false,
-      supportedEffortLevels: [],
+      supportsEffort,
+      supportedEffortLevels: supportsEffort ? [...CLAUDE_PROVIDER_EFFORT_LEVELS] : [],
     });
   }
   return models;

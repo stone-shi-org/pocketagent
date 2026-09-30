@@ -92,6 +92,7 @@ describe('hub-template-export payloads', () => {
       defaultModel: 'claude-3-5-sonnet',
       smallModel: 'claude-3-5-haiku',
       allowUnattended: true,
+      supportsEffort: true,
       createdAt: 1000,
       updatedAt: 2000,
     };
@@ -104,6 +105,7 @@ describe('hub-template-export payloads', () => {
       defaultModel: 'claude-3-5-sonnet',
       smallModel: 'claude-3-5-haiku',
       allowUnattended: true,
+      supportsEffort: true,
     });
   });
 

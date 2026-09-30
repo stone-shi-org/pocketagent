@@ -187,6 +187,27 @@ describe('custom Claude provider routes', () => {
     expect(ids.indexOf(id)).toBe(1);
   });
 
+  it('defaults supportsEffort to true, and reflects it on staticModels in agent roster', async () => {
+    const id = await create();
+    const providers = (await get('/api/custom-claude-providers')).json().providers;
+    expect(providers[0].supportsEffort).toBe(true);
+
+    const agent = ctx.context.agents.get(id);
+    expect(agent?.staticModels?.every((m) => m.supportsEffort)).toBe(true);
+    expect(agent?.staticModels?.[0]?.supportedEffortLevels).toEqual(['low', 'medium', 'high', 'xhigh']);
+
+    // Can be disabled via PATCH
+    await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/custom-claude-providers/${encodeURIComponent(id)}`,
+      headers: authHeaders(ctx.cookie),
+      payload: { supportsEffort: false },
+    });
+    const updatedAgent = ctx.context.agents.get(id);
+    expect(updatedAgent?.staticModels?.every((m) => !m.supportsEffort)).toBe(true);
+    expect(updatedAgent?.staticModels?.[0]?.supportedEffortLevels).toEqual([]);
+  });
+
   it('drops out of the roster the moment it is deleted', async () => {
     const id = await create();
     const del = await ctx.app.inject({

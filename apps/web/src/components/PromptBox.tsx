@@ -568,9 +568,6 @@ export function PromptBox({
 
   function pickEffort(level: EffortLevel | null): void {
     onSetEffort?.(level);
-    if (level !== null && level !== 'off' && thinking === false) {
-      onToggleThinking?.();
-    }
     setModelPickerOpen(false);
   }
 

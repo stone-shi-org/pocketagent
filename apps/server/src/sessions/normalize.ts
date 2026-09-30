@@ -320,15 +320,23 @@ function normalizeResult(message: Record<string, unknown>): AgentEvent {
   };
 }
 
-/** Partial assistant text, when `includePartialMessages` is enabled. */
+/** Partial assistant text and thinking deltas, when `includePartialMessages` is enabled. */
 function normalizeStreamEvent(message: Record<string, unknown>): AgentEvent[] {
   const event = isRecord(message.event) ? message.event : null;
   if (!event || str(event.type) !== 'content_block_delta') return [];
   const delta = isRecord(event.delta) ? event.delta : null;
-  if (!delta || str(delta.type) !== 'text_delta') return [];
-  const text = str(delta.text) ?? '';
-  if (!text) return [];
-  return [{ kind: 'text_delta', id: `sd_${num(event.index) ?? 0}`, text }];
+  if (!delta) return [];
+  if (str(delta.type) === 'text_delta') {
+    const text = str(delta.text) ?? '';
+    if (!text) return [];
+    return [{ kind: 'text_delta', id: `sd_${num(event.index) ?? 0}`, text }];
+  }
+  if (str(delta.type) === 'thinking_delta') {
+    const text = str(delta.thinking) ?? '';
+    if (!text) return [];
+    return [{ kind: 'thinking_delta', id: `sd_${num(event.index) ?? 0}`, text }];
+  }
+  return [];
 }
 
 // ---------------------------------------------------------------------------
