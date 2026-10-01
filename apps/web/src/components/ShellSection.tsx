@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ShellSessionSummary } from '@pocketagent/protocol';
 import { Icon } from './Icon.js';
 import type { OpenChatOptions, ProjectsState } from './ProjectList.js';
@@ -7,6 +7,8 @@ import {
   isMissingAdoptTargetError,
   RecreateShellDialog,
 } from './RecreateShellDialog.js';
+import { useHostEndpoint } from '../hosts/HostContext.js';
+import { loadShellCollapsed, saveShellCollapsed } from '../hosts/tree-pref.js';
 
 interface Props {
   state: ProjectsState;
@@ -51,7 +53,13 @@ export function ShellSection({
   activeSessionId,
   search = '',
 }: Props): JSX.Element | null {
-  const [collapsed, setCollapsed] = useState(false);
+  const endpoint = useHostEndpoint();
+  const hostId = endpoint.id;
+  const [collapsed, setCollapsed] = useState(() => loadShellCollapsed(hostId));
+
+  useEffect(() => {
+    setCollapsed(loadShellCollapsed(hostId));
+  }, [hostId]);
   const [recreatePrompt, setRecreatePrompt] = useState<{
     shell: ShellSessionSummary;
     sessionName: string;
@@ -105,7 +113,13 @@ export function ShellSection({
           <button
             type="button"
             className="shell-head-toggle"
-            onClick={() => setCollapsed((v) => !v)}
+            onClick={() => {
+              setCollapsed((v) => {
+                const next = !v;
+                saveShellCollapsed(hostId, next);
+                return next;
+              });
+            }}
             aria-expanded={!isCollapsed}
           >
             Shell

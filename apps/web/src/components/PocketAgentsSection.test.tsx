@@ -1,9 +1,26 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { PlannerChat, PlannerWorkspace } from '@pocketagent/protocol';
 import { PocketAgentsSection } from './PocketAgentsSection.js';
 
+function fakeStorage(): Storage {
+  const store = new Map<string, string>();
+  return {
+    getItem: (key) => store.get(key) ?? null,
+    setItem: (key, value) => void store.set(key, value),
+    removeItem: (key) => void store.delete(key),
+    clear: () => store.clear(),
+    key: (index) => [...store.keys()][index] ?? null,
+    get length() {
+      return store.size;
+    },
+  };
+}
+
 describe('PocketAgentsSection (PA-106)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
   const workspaces: PlannerWorkspace[] = [
     {
       id: 'ws-1',
@@ -108,5 +125,61 @@ describe('PocketAgentsSection (PA-106)', () => {
     expect(html).not.toContain('Nightly Sync #15');
     // Hint displayed
     expect(html).toContain('Showing latest 10 runs');
+  });
+
+  it('renders collapsed workspace when saved in tree preferences for this host', async () => {
+    const { saveCollapsedPocketAgents } = await import('../hosts/tree-pref.js');
+    const { HostProvider } = await import('../hosts/HostContext.js');
+    const { hostEndpoint } = await import('../api/host.js');
+
+    const chats: PlannerChat[] = [
+      {
+        id: 'chat-1',
+        workspaceId: 'ws-1',
+        workspaceName: 'Agent Alpha',
+        title: 'Regular Chat 1',
+        lastModelId: null,
+        createdAt: 1000,
+        lastActivityAt: 1000,
+        skipToolApprovalsEnabled: false,
+        busy: false,
+        thinkingEnabled: true,
+      },
+    ];
+
+    vi.stubGlobal('localStorage', fakeStorage());
+    saveCollapsedPocketAgents('host-alpha', ['ws-1']);
+
+    const html = renderToStaticMarkup(
+      <HostProvider endpoint={hostEndpoint('host-alpha', '/h/host-alpha')}>
+        <PocketAgentsSection
+          workspaces={workspaces}
+          chats={chats}
+          refresh={async () => {}}
+          onOpenChat={() => {}}
+          onApiError={() => {}}
+        />
+      </HostProvider>,
+    );
+
+    // Collapsed: shows caret closed and doesn't render chat rows
+    expect(html).toContain('project-caret closed');
+    expect(html).not.toContain('Regular Chat 1');
+
+    // Another host is not collapsed
+    const htmlBeta = renderToStaticMarkup(
+      <HostProvider endpoint={hostEndpoint('host-beta', '/h/host-beta')}>
+        <PocketAgentsSection
+          workspaces={workspaces}
+          chats={chats}
+          refresh={async () => {}}
+          onOpenChat={() => {}}
+          onApiError={() => {}}
+        />
+      </HostProvider>,
+    );
+
+    expect(htmlBeta).not.toContain('project-caret closed');
+    expect(htmlBeta).toContain('Regular Chat 1');
   });
 });

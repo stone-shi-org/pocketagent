@@ -1,7 +1,12 @@
 import { useEffect, useState } from 'react';
 import type { PlannerChat, PlannerWorkspace } from '@pocketagent/protocol';
 import { Icon } from './Icon.js';
-import { useHostApi } from '../hosts/HostContext.js';
+import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
+import {
+  loadPocketAgentsTreeState,
+  saveCollapsedPocketAgents,
+  saveCollapsedPocketAgentCron,
+} from '../hosts/tree-pref.js';
 
 interface Props {
   /** `null` while the first load is still in flight — see `usePlannerChats`. */
@@ -45,12 +50,21 @@ export function PocketAgentsSection({
   activeChatId,
 }: Props): JSX.Element | null {
   const api = useHostApi();
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
-  const [cronCollapsed, setCronCollapsed] = useState<Set<string>>(() => new Set());
+  const endpoint = useHostEndpoint();
+  const hostId = endpoint.id;
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => loadPocketAgentsTreeState(hostId).collapsed);
+  const [cronCollapsed, setCronCollapsed] = useState<Set<string>>(() => loadPocketAgentsTreeState(hostId).cronCollapsed);
   const [busy, setBusy] = useState<Set<string>>(() => new Set());
   // Which workspace's "..." menu is open, keyed by workspace id — same
   // one-at-a-time, keyed-by-owner pattern `ProjectList`'s `menuFor` uses.
   const [menuFor, setMenuFor] = useState<string | null>(null);
+
+  // Sync collapsed state when switching host if this instance is reused
+  useEffect(() => {
+    const loaded = loadPocketAgentsTreeState(hostId);
+    setCollapsed(loaded.collapsed);
+    setCronCollapsed(loaded.cronCollapsed);
+  }, [hostId]);
 
   // Same dismiss-on-Escape as `ProjectMenu` — only wired while a menu is
   // actually open, so this section doesn't eat every Escape keypress on the
@@ -69,6 +83,7 @@ export function PocketAgentsSection({
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      saveCollapsedPocketAgents(hostId, next);
       return next;
     });
 
@@ -77,6 +92,7 @@ export function PocketAgentsSection({
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      saveCollapsedPocketAgentCron(hostId, next);
       return next;
     });
 
@@ -90,12 +106,13 @@ export function PocketAgentsSection({
             if (!prev.has(ws.id)) return prev;
             const next = new Set(prev);
             next.delete(ws.id);
+            saveCollapsedPocketAgentCron(hostId, next);
             return next;
           });
         }
       }
     }
-  }, [activeChatId, workspaces, chats]);
+  }, [activeChatId, workspaces, chats, hostId]);
 
   const newChat = (workspaceId: string): void => {
     setBusy((prev) => new Set(prev).add(workspaceId));

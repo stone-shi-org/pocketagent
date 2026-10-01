@@ -19,7 +19,15 @@ import { formatRelative } from './StatusBadge.js';
 import { DeleteWorktreeFlow } from './DeleteWorktreeFlow.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { isMissingAdoptTargetError } from './RecreateShellDialog.js';
-import { useHostApi } from '../hosts/HostContext.js';
+import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
+import {
+  loadProjectTreeState,
+  saveCollapsedProjects,
+  saveCollapsedQueued,
+  saveCollapsedSubagents,
+  saveExpandedChats,
+  saveExpandedDeleted,
+} from '../hosts/tree-pref.js';
 
 /** Chats shown per project before a "show more" row appears. */
 const CHAT_PAGE_SIZE = 5;
@@ -559,7 +567,7 @@ interface ListProps {
 /** The folders and their chats. Presentation only; state comes from above. */
 export function ProjectList({
   state,
-  search,
+  search = '',
   onCompose,
   activeSessionId,
   activeConversationId,
@@ -570,19 +578,41 @@ export function ProjectList({
   onOpenPlannerChat,
   onApiError,
 }: ListProps): JSX.Element {
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
-  const [collapsedSubagents, setCollapsedSubagents] = useState<Set<string>>(() => new Set());
-  const [expandedDeleted, setExpandedDeleted] = useState<Set<string>>(() => new Set());
+  const endpoint = useHostEndpoint();
+  const hostId = endpoint.id;
+
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => loadProjectTreeState(hostId).collapsed);
+  const [collapsedSubagents, setCollapsedSubagents] = useState<Set<string>>(
+    () => loadProjectTreeState(hostId).collapsedSubagents,
+  );
+  const [expandedDeleted, setExpandedDeleted] = useState<Set<string>>(
+    () => loadProjectTreeState(hostId).expandedDeleted,
+  );
   // Keyed by the *parent's* cwd, exactly as `expandedDeleted` is. Open by
   // default: a queue is a thing waiting to happen, and hiding it behind a
   // closed group is how "why hasn't my ticket run" becomes a support question.
-  const [collapsedQueued, setCollapsedQueued] = useState<Set<string>>(() => new Set());
-  const [expandedChats, setExpandedChats] = useState<Set<string>>(() => new Set());
+  const [collapsedQueued, setCollapsedQueued] = useState<Set<string>>(
+    () => loadProjectTreeState(hostId).collapsedQueued,
+  );
+  const [expandedChats, setExpandedChats] = useState<Set<string>>(
+    () => loadProjectTreeState(hostId).expandedChats,
+  );
   const [menuFor, setMenuFor] = useState<string | null>(null);
   // A delete flow can outlive its three-dot menu closing (it opens its own
   // dialogs), so it is not reusing `menuFor`'s state — but like `menuFor`,
   // only one can be open at a time, keyed by the worktree's own `cwd`.
   const [deleteFlowFor, setDeleteFlowFor] = useState<string | null>(null);
+
+  // Sync state if hostId changes while component instance is kept mounted
+  useEffect(() => {
+    const loaded = loadProjectTreeState(hostId);
+    setCollapsed(loaded.collapsed);
+    setCollapsedSubagents(loaded.collapsedSubagents);
+    setExpandedDeleted(loaded.expandedDeleted);
+    setCollapsedQueued(loaded.collapsedQueued);
+    setExpandedChats(loaded.expandedChats);
+  }, [hostId]);
+
   const { projects, open } = state;
 
   const visible = useMemo(() => filterProjects(projects ?? [], search), [projects, search]);
@@ -593,6 +623,7 @@ export function ProjectList({
       const next = new Set(prev);
       if (next.has(cwd)) next.delete(cwd);
       else next.add(cwd);
+      saveCollapsedProjects(hostId, next);
       return next;
     });
 
@@ -601,6 +632,7 @@ export function ProjectList({
       const next = new Set(prev);
       if (next.has(cwd)) next.delete(cwd);
       else next.add(cwd);
+      saveCollapsedSubagents(hostId, next);
       return next;
     });
 
@@ -609,6 +641,7 @@ export function ProjectList({
       const next = new Set(prev);
       if (next.has(cwd)) next.delete(cwd);
       else next.add(cwd);
+      saveExpandedDeleted(hostId, next);
       return next;
     });
 
@@ -617,11 +650,16 @@ export function ProjectList({
       const next = new Set(prev);
       if (next.has(cwd)) next.delete(cwd);
       else next.add(cwd);
+      saveCollapsedQueued(hostId, next);
       return next;
     });
 
   const showMoreChats = (cwd: string): void =>
-    setExpandedChats((prev) => new Set(prev).add(cwd));
+    setExpandedChats((prev) => {
+      const next = new Set(prev).add(cwd);
+      saveExpandedChats(hostId, next);
+      return next;
+    });
 
   // Collapse, "show more" and the open menu are all keyed by whichever
   // project's own `cwd` they belong to — a folded worktree has its own real
