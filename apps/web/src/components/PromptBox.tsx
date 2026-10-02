@@ -23,6 +23,7 @@ import { Icon } from './Icon.js';
 import { MicButton, type MicButtonHandle } from './MicButton.js';
 import { useAudioInputDevices } from '../audio/devices.js';
 import { MicPicker } from './MicPicker.js';
+import { appendPromptHistory, getPromptHistory } from '../agent/prompt-history.js';
 
 
 const WAVE_BAR_PROFILES = [
@@ -219,6 +220,13 @@ interface Props {
   busy?: boolean;
   /** Stops the in-flight turn. Only meaningful (and only rendered) while `busy`. */
   onInterrupt?: () => void;
+  /**
+   * Scoped prompt history storage key (PA-119).
+   * - Planner agent passes `plannerPromptHistoryKey()` (global).
+   * - Code agent passes `codePromptHistoryKey(session.cwd)` (per-workspace).
+   * When provided, previous commands are loaded from and saved to localStorage.
+   */
+  historyKey?: string;
 }
 
 /**
@@ -286,6 +294,7 @@ export function PromptBox({
   onToggleThinking,
   busy = false,
   onInterrupt,
+  historyKey,
 }: Props): JSX.Element {
   const key = DRAFT_KEY_PREFIX + sessionId;
   const [text, setText] = useState(() => {
@@ -297,9 +306,19 @@ export function PromptBox({
   });
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const sentHistoryRef = useRef<string[]>([]);
+  const sentHistoryRef = useRef<string[]>(
+    historyKey ? getPromptHistory(historyKey) : [],
+  );
   const historyIndexRef = useRef<number>(-1);
   const draftBeforeHistoryRef = useRef<string>('');
+
+  useEffect(() => {
+    if (historyKey) {
+      sentHistoryRef.current = getPromptHistory(historyKey);
+    }
+    historyIndexRef.current = -1;
+    draftBeforeHistoryRef.current = '';
+  }, [historyKey]);
   // Not persisted to sessionStorage like `text` — an attached image surviving
   // a reload but pointing at nothing the user can see again would be worse
   // than just losing the draft, since there would be no way to tell it was
@@ -469,10 +488,14 @@ export function PromptBox({
     if (onSend(value, attachedImage ?? undefined)) {
       if (value.trim()) {
         const trimmed = value.trim();
-        sentHistoryRef.current = [
-          ...sentHistoryRef.current.filter((h) => h !== trimmed),
-          trimmed,
-        ];
+        if (historyKey) {
+          sentHistoryRef.current = appendPromptHistory(historyKey, trimmed);
+        } else {
+          sentHistoryRef.current = [
+            ...sentHistoryRef.current.filter((h) => h !== trimmed),
+            trimmed,
+          ];
+        }
         historyIndexRef.current = -1;
         draftBeforeHistoryRef.current = '';
       }
@@ -522,6 +545,19 @@ export function PromptBox({
       void unlockAudioContext();
       const fullText = text.trim() ? `${text.trim()} ${trimmed}` : trimmed;
       if (onSend(fullText, attachedImage ?? undefined)) {
+        if (fullText.trim()) {
+          const finalTrimmed = fullText.trim();
+          if (historyKey) {
+            sentHistoryRef.current = appendPromptHistory(historyKey, finalTrimmed);
+          } else {
+            sentHistoryRef.current = [
+              ...sentHistoryRef.current.filter((h) => h !== finalTrimmed),
+              finalTrimmed,
+            ];
+          }
+          historyIndexRef.current = -1;
+          draftBeforeHistoryRef.current = '';
+        }
         setText('');
         setAttachedImage(null);
       }
@@ -619,7 +655,8 @@ export function PromptBox({
         const isAtStart =
           ref.current === null ||
           (ref.current.selectionStart === 0 && ref.current.selectionEnd === 0);
-        if (isAtStart && sentHistoryRef.current.length > 0) {
+        const inHistory = historyIndexRef.current !== -1;
+        if ((isAtStart || inHistory) && sentHistoryRef.current.length > 0) {
           event.preventDefault();
           if (historyIndexRef.current === -1) {
             draftBeforeHistoryRef.current = text;
@@ -630,6 +667,12 @@ export function PromptBox({
           const recalled = sentHistoryRef.current[historyIndexRef.current];
           if (recalled !== undefined) {
             setText(recalled);
+            setTimeout(() => {
+              if (ref.current) {
+                const len = ref.current.value.length;
+                ref.current.setSelectionRange(len, len);
+              }
+            }, 0);
           }
           return;
         }
@@ -642,13 +685,31 @@ export function PromptBox({
             const recalled = sentHistoryRef.current[historyIndexRef.current];
             if (recalled !== undefined) {
               setText(recalled);
+              setTimeout(() => {
+                if (ref.current) {
+                  const len = ref.current.value.length;
+                  ref.current.setSelectionRange(len, len);
+                }
+              }, 0);
             }
           } else {
             historyIndexRef.current = -1;
             setText(draftBeforeHistoryRef.current);
+            setTimeout(() => {
+              if (ref.current) {
+                const len = ref.current.value.length;
+                ref.current.setSelectionRange(len, len);
+              }
+            }, 0);
           }
           return;
         }
+      }
+      if (event.key === 'Escape' && historyIndexRef.current >= 0) {
+        event.preventDefault();
+        historyIndexRef.current = -1;
+        setText(draftBeforeHistoryRef.current);
+        return;
       }
     }
 
@@ -966,6 +1027,7 @@ export function PromptBox({
               setText(e.target.value);
               setDismissed(false);
               setModelPickerOpen(false);
+              historyIndexRef.current = -1;
             }}
             onKeyDown={onKeyDown}
             onPaste={supportsImageAttachment ? onPaste : undefined}

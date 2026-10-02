@@ -16,6 +16,7 @@ import { ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { Transcript } from '../components/Transcript.js';
 import { PromptBox } from '../components/PromptBox.js';
+import { plannerPromptHistoryKey } from '../agent/prompt-history.js';
 import { applyEvent, applyEvents, emptyTranscript, type TranscriptState } from '../agent/transcript.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { LiveListenController } from '../audio/live-listen.js';
@@ -1396,6 +1397,7 @@ export function PlannerChatPage({
 
       <PromptBox
         sessionId={`planner_${chatId}`}
+        historyKey={plannerPromptHistoryKey()}
         onSend={handleSend}
         disabled={disabled}
         supportsImageAttachment={true}
