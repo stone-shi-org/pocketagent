@@ -8,6 +8,11 @@
  *
  * `pnpm build` first. Run with: pnpm demo:mcp
  *
+ * Both protocol eras are driven: a legacy client (the v1 SDK, `initialize`
+ * handshake, a session — what Claude Code and most clients speak today) and a
+ * modern one (the v2 SDK negotiating revision 2026-07-28 via `server/discover`,
+ * stateless, version on every request).
+ *
  * Two optional steps use real agents, so they are opt-in:
  *   PA_MCP_REAL_AGENT=1   run_coding_task against a real `claude` CLI (uses your
  *                         real HOME for its sign-in, and files one transcript).
@@ -21,6 +26,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import {
+  Client as ModernClient,
+  StreamableHTTPClientTransport as ModernTransport,
+} from '@modelcontextprotocol/client';
 
 let step = 0;
 let failures = 0;
@@ -155,6 +164,46 @@ try {
   check(workspaces.data?.workspaces?.some((w) => w.path === workspace), 'list_workspaces shows the scratch folder');
   const resources = await client.listResourceTemplates();
   check(resources.resourceTemplates.length === 2, 'two transcript resource templates');
+
+  heading('Protocol negotiation: both eras, one endpoint');
+  check(client.transport?.protocolVersion === '2025-11-25', 'legacy client negotiated 2025-11-25 in initialize', client.transport?.protocolVersion);
+  const legacyInfo = await call(client, 'get_host_info');
+  check(legacyInfo.data?.protocol?.era === 'legacy', 'the legacy session is served as legacy', JSON.stringify(legacyInfo.data?.protocol));
+  const modern = new ModernClient({ name: 'mcp-demo-modern', version: '2.0.0' }, { versionNegotiation: { mode: 'auto' } });
+  await modern.connect(
+    new ModernTransport(new URL(`${BASE}/mcp`), { requestInit: { headers: { authorization: `Bearer ${minted.token}` } } }),
+  );
+  check(modern.getProtocolEra() === 'modern', 'a dual-era client negotiates the modern era', modern.getNegotiatedProtocolVersion());
+  const modernInfo = await call(modern, 'get_host_info');
+  check(
+    modernInfo.data?.protocol?.era === 'modern' && modernInfo.data?.protocol?.version === '2026-07-28',
+    'the modern request is served statelessly at 2026-07-28',
+    JSON.stringify(modernInfo.data?.protocol),
+  );
+  const modernTools = (await modern.listTools()).tools.map((t) => t.name);
+  check(JSON.stringify(modernTools) === JSON.stringify(tools), 'both eras see the identical tool catalog, in the same order');
+  const unknown = await fetch(`${BASE}/mcp`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${minted.token}`,
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+      'mcp-protocol-version': '2099-01-01',
+      'mcp-method': 'tools/list',
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2099-01-01', 'io.modelcontextprotocol/clientCapabilities': {} } },
+    }),
+  }).then((r) => r.json());
+  check(
+    unknown.error?.code === -32022 && unknown.error?.data?.supported?.includes('2026-07-28'),
+    'an unknown revision gets -32022 naming what to retry with',
+    JSON.stringify(unknown.error?.data),
+  );
+  await modern.close();
 
   heading('Work-starting refusals');
   const shell = await call(client, 'start_session', { cwd: project, agent: 'shell', prompt: 'ls' });

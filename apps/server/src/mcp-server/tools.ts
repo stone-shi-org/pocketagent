@@ -6,6 +6,7 @@ import {
   EffortLevel,
   MCP_SERVER_PATH,
   type AgentInfo,
+  type McpProtocolEra,
   type McpScope,
   type ProjectInfo,
   type SessionInfo,
@@ -46,6 +47,10 @@ export interface McpToolContext {
   principal: McpClientIdentity;
   /** PocketAgent hops already behind this request (`MCP_DEPTH_HEADER`). */
   depth: number;
+  /** Which MCP protocol era this call arrived on. */
+  era: McpProtocolEra;
+  /** The revision a modern request declared; `null` on a legacy session. */
+  protocolVersion: string | null;
   signal: AbortSignal;
   progress: (message: string, elapsedMs: number) => void;
 }
@@ -177,6 +182,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
       return {
         host: deps.pocket.projects.host(),
         mcpEndpoint: MCP_SERVER_PATH,
+        protocol: { era: ctx.era, version: ctx.protocolVersion },
         client: { label: ctx.principal.label, scopes: ctx.principal.scopes },
         liveSessionsStartedByYou: deps.work.liveSessionsFor(ctx.principal.id),
       };

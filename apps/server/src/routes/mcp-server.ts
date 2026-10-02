@@ -76,6 +76,9 @@ export const mcpServerRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(404).send({ error: { code: 'not_found', message: 'No such MCP client token.' } });
     }
     auditConfigChange(request, 'mcp client token revoked', { mcpClientId: request.params.id });
+    // Every request re-reads the token, but a listen stream or a legacy
+    // session's notification stream makes no further requests — close them now.
+    await mcpServer.revoke(request.params.id);
     return reply.code(204).send();
   });
 };

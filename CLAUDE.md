@@ -213,7 +213,8 @@ place real multicast is exercised.
 
 `pnpm demo:mcp` is the fifth that starts its own process, and where PA-118's acceptance
 criteria live: a scratch backend, a token minted through a real browser-session login, then the
-SDK's real client over real HTTP — the 401s (no token, the master token as a bearer, an MCP token
+SDK's real clients over real HTTP — both protocol eras (a legacy v1 client and a v2 client
+auto-negotiating 2026-07-28, seeing the identical catalog; an unknown revision's `-32022`), the 401s (no token, the master token as a bearer, an MCP token
 on the REST API), the scope-filtered catalog, the structured-only and containment refusals, and
 revocation ending an open MCP session. Two opt-in steps use real agents:
 `PA_MCP_REAL_AGENT=1` runs `run_coding_task` against a real `claude` (with your real `HOME`, so it
@@ -1914,14 +1915,35 @@ is never an MCP credential, and a cookie is not either (no MCP client holds one,
 credential on an endpoint that starts agents is CSRF surface for nothing). A hub credential is
 accepted on `/mcp` with full scopes, since it is already full-access.
 
-**Stateful sessions, bound to their principal.** The plan proposed stateless mode; resource
-subscriptions moving into v1 needed a session to notify on. A session id is never a credential
-on its own: every request still passes the gate with its own bearer, and one whose principal
-differs from the session's is answered as if the session did not exist. Every tool call re-reads
-the principal, so a revoked token or narrowed scope stops working on its next call and no
-notification is sent for a token that no longer exists. Sessions are capped per principal and
-expire idle, and they hold no work — closing one never touches a session or a chat, which is why
-`preClose` simply closes them all.
+**Dual-era: MCP 2026-07-28 and every 2025-era revision, on one endpoint.** Revision
+2026-07-28 ("modern") made MCP stateless — no `initialize`, no `Mcp-Session-Id`; every request
+carries its version and client capabilities in `_meta`, `server/discover` advertises the server,
+an unsupported version is a `-32022` error naming the supported ones (the client retries), and
+change notifications moved to a `subscriptions/listen` POST stream. Every earlier revision
+("legacy", 2025-11-25 back to 2024-10-07) negotiates once in `initialize` and holds a session.
+Claude Code and most clients in the field are still legacy, so the server serves both, on the
+**v2 SDK** (`@modelcontextprotocol/server`; v1 `@modelcontextprotocol/sdk` stays only for the
+Pocket Agent's outbound MCP *client*). The routing decision is the SDK's own classifier
+(`isLegacyRequest` — the exact code `createMcpHandler` runs), never a second copy here. Modern
+requests go to a `createMcpHandler(..., { legacy: 'reject' })` held **per principal**, which is
+what lets a revocation close that principal's listen streams and nobody else's. Legacy requests
+keep stateful sessions on v2's sessionful `WebStandardStreamableHTTPServerTransport` — deliberately
+*not* the SDK's stateless legacy fallback, which answers the session `GET` with 405 and would
+silently break `resources/subscribe` for every legacy client. Both eras build their `McpServer`
+from one `buildServer`, so a tool cannot exist in one era and not the other; the catalog's zod
+shapes are converted to JSON Schema once (`fromJsonSchema`) so both validate identically. Two
+SDK behaviours worth knowing: `initialize` echoes a requested legacy version it supports and
+counter-offers `2025-11-25` otherwise, and `server/discover`'s `supportedVersions` (and the
+`-32022` list) name only the modern revisions, even in the SDK's own dual-era mode — legacy ones
+are negotiated in `initialize`, not advertised. `mcp-server.test.ts` runs every behavioural block
+in both eras (v1 client for legacy, v2 pinned to 2026-07-28 for modern) plus wire-level
+negotiation tests. A legacy session id is never a credential on its own: every request still
+passes the gate with its own bearer, and one whose principal differs from the session's is
+answered as if the session did not exist. Every tool call (either era) re-reads the principal, so
+a revoked token or narrowed scope stops working on its next call, and revocation closes the
+principal's sessions and listen streams immediately (`McpServerService.revoke`). Legacy sessions
+are capped per principal and expire idle; none of it holds work, which is why `preClose` simply
+closes everything.
 
 **Tools that mirror a route call the route** (`InternalApiClient`). PA-70's rule — provisioning
 is the Hub being an API client, not a new contract — applied from inside the process:
@@ -1955,10 +1977,12 @@ decision field anywhere in the catalog (`mcp-server.test.ts` greps the input sch
 and the turn stays parked until a person answers in PocketAgent.
 
 Nothing about a tool call's arguments or results is logged — prompts and transcripts sit with
-terminal I/O. Each call logs its name, principal, duration and outcome. Known limitations: no
+terminal I/O. Each call logs its name, principal, era, duration and outcome. Known limitations: no
 OAuth (clients send a static bearer header, which Claude Code and Codex both accept); a Hub-level
-`/mcp` aggregating every host is a follow-up; and a coding agent started over MCP that is itself
-configured to call `/mcp` sends no depth, so only the caps bound that loop.
+`/mcp` aggregating every host is a follow-up; a coding agent started over MCP that is itself
+configured to call `/mcp` sends no depth, so only the caps bound that loop; and the Pocket Agent's
+outbound MCP client is still legacy-only (v1), since `auto` negotiation would add a
+`server/discover` probe to every call on a client that connects once per call.
 
 ### Hub Web Push fan-out (PA-73)
 
@@ -2531,7 +2555,8 @@ These are load-bearing. Several were bugs first.
   pause/resume, so they would be a remote shell with no gate. Agent installation and server
   restart stay unreachable from it, like from every other unattended trigger.
 - **`/mcp` is authenticated by exact match, and a `pam_` token is accepted nowhere else**
-  (PA-118). The gate's early return for non-`/api/` paths would otherwise make `/mcp` public, so
+  (PA-118). Both protocol eras pass this gate before the SDK sees anything — a modern request's
+  `_meta` envelope authenticates nothing. The gate's early return for non-`/api/` paths would otherwise make `/mcp` public, so
   `MCP_SERVER_PATH`/`MCP_SERVER_API_ALIAS` are named exactly — a prefix would gate the SPA, and
   forgetting the line would expose an endpoint that starts agents. On the MCP endpoint only a
   bearer credential counts (an MCP token, or a hub credential); the master token and a cookie are

@@ -460,6 +460,8 @@ export class PlannerChatService {
    * fate `pendingTurns` and a live session's listeners already share.
    */
   private readonly observers = new Map<string, Set<(event: AgentEvent) => void>>();
+  /** PA-118: listeners for every chat — see `observeAll`. */
+  private readonly globalObservers = new Set<(chatId: string, event: AgentEvent) => void>();
 
   /**
    * PA-44: how many Pocket-Agent-spawned-Pocket-Agent hops separate a chat
@@ -668,7 +670,28 @@ export class PlannerChatService {
     };
   }
 
+  /**
+   * PA-118: every chat's events, for a consumer that cannot know in advance
+   * which chats it cares about — the MCP server's `subscriptions/listen`
+   * streams (protocol revision 2026-07-28) carry their URI filters inside the
+   * SDK, so it publishes a change for any chat and the SDK delivers it only to
+   * the subscriptions that opted in. Same no-throw contract as `observe`.
+   */
+  observeAll(listener: (chatId: string, event: AgentEvent) => void): () => void {
+    this.globalObservers.add(listener);
+    return () => {
+      this.globalObservers.delete(listener);
+    };
+  }
+
   private notify(chatId: string, event: AgentEvent): void {
+    for (const listener of [...this.globalObservers]) {
+      try {
+        listener(chatId, event);
+      } catch (err) {
+        this.opts.logger?.warn({ err, chatId }, 'planner chat global observer threw');
+      }
+    }
     const set = this.observers.get(chatId);
     if (!set) return;
     for (const listener of [...set]) {

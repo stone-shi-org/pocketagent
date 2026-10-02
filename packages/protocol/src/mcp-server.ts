@@ -27,6 +27,29 @@ export const MCP_SERVER_PATH = '/mcp';
 export const MCP_SERVER_API_ALIAS = '/api/mcp';
 
 /**
+ * MCP protocol eras, as revision 2026-07-28 names them.
+ *
+ * - `modern` (2026-07-28 and later): stateless — every request carries its
+ *   protocol version and client capabilities in `_meta`, `server/discover`
+ *   advertises the server, and an unsupported version is answered with
+ *   `-32022` listing the supported ones so the client can retry.
+ * - `legacy` (2025-11-25 and earlier): the version is negotiated once, in the
+ *   `initialize` handshake, and the connection is a session.
+ *
+ * The endpoint serves both ("dual-era"), because almost every MCP client in
+ * the field today is legacy and a modern-only server would turn them away.
+ */
+export const McpProtocolEra = z.enum(['legacy', 'modern']);
+export type McpProtocolEra = z.infer<typeof McpProtocolEra>;
+
+/**
+ * The modern revisions this server speaks, newest first. The legacy ones are
+ * whatever the SDK's `initialize` can negotiate (2025-11-25 back to
+ * 2024-10-07) and are listed by the server itself, since the SDK owns them.
+ */
+export const MCP_MODERN_PROTOCOL_VERSIONS: readonly string[] = ['2026-07-28'];
+
+/**
  * Prefix on every MCP client token, so a token in a config file or a support
  * paste is distinguishable at a glance from a hub credential (`pah_`) or a
  * session id — and so the gate can reject anything else before it reaches the

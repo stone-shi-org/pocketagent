@@ -5,8 +5,13 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { ResourceUpdatedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import {
+  Client as ModernClient,
+  StreamableHTTPClientTransport as ModernTransport,
+} from '@modelcontextprotocol/client';
+import {
   MCP_DEPTH_HEADER,
   MCP_MAX_LIVE_SESSIONS_PER_CLIENT,
+  MCP_MODERN_PROTOCOL_VERSIONS,
   MCP_SESSION_RESOURCE_PREFIX,
   MCP_TOKEN_PREFIX_LENGTH,
   MCP_TOKEN_SCHEME_PREFIX,
@@ -28,10 +33,31 @@ import { authHeaders, createTestApp, TEST_TOKEN, waitFor, type TestApp } from '.
  * settled — an MCP caller can see an approval and can never answer one; a wait
  * times out but a turn never does; work is owned, capped and depth-limited.
  *
- * Everything goes through the SDK's real `Client` over a real socket, because
+ * Everything goes through the SDKs' real clients over a real socket, because
  * Streamable HTTP's session header and SSE responses cannot be exercised
- * through `app.inject()`.
+ * through `app.inject()`. The endpoint is dual-era, so every behavioural block
+ * runs twice: once as a **legacy** client (the v1 SDK, `initialize` handshake,
+ * a session) and once as a **modern** one (the v2 SDK pinned to 2026-07-28 —
+ * no handshake, per-request `_meta`). A tool that worked in one era and not
+ * the other is exactly the regression this shape exists to catch.
  */
+
+type Era = 'legacy' | 'modern';
+const ERAS: readonly Era[] = ['legacy', 'modern'];
+/** The era `connect()` uses unless told otherwise; set per describe block below. */
+let ERA: Era = 'legacy';
+
+/** The surface both SDKs' clients share, as far as these tests use it. */
+interface AnyClient {
+  callTool(params: { name: string; arguments?: Record<string, unknown> }): Promise<{ isError?: boolean; content: unknown }>;
+  listTools(): Promise<{ tools: { name: string }[] }>;
+  listResources(): Promise<{ resources: { uri: string }[] }>;
+  listResourceTemplates(): Promise<{ resourceTemplates: unknown[] }>;
+  readResource(params: { uri: string }): Promise<{ contents: unknown[] }>;
+  listPrompts(): Promise<{ prompts: { name: string }[] }>;
+  getPrompt(params: { name: string; arguments?: Record<string, string> }): Promise<{ messages: { content: unknown }[] }>;
+  close(): Promise<void>;
+}
 
 const prompts: unknown[] = [];
 
@@ -58,7 +84,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 let t: TestApp;
 let baseUrl: string;
 let logLines: string[];
-const clients: Client[] = [];
+const clients: AnyClient[] = [];
 
 function sseResponse(dataLines: string[]): Response {
   const body = dataLines.map((line) => `data: ${line}\n\n`).join('') + 'data: [DONE]\n\n';
@@ -92,7 +118,20 @@ beforeEach(async () => {
 afterEach(async () => {
   for (const client of clients.splice(0)) await client.close().catch(() => undefined);
   await t.cleanup();
+  ERA = 'legacy';
 });
+
+/** Run a block once per protocol era. */
+function describeEachEra(name: string, body: (era: Era) => void): void {
+  for (const era of ERAS) {
+    describe(`${name} [${era}]`, () => {
+      beforeEach(() => {
+        ERA = era;
+      });
+      body(era);
+    });
+  }
+}
 
 async function mint(scopes: McpScope[] = ['read', 'sessions', 'planner'], label = 'ci-agent') {
   const res = await t.app.inject({
@@ -105,17 +144,29 @@ async function mint(scopes: McpScope[] = ['read', 'sessions', 'planner'], label 
   return res.json() as { client: { id: string; tokenPrefix: string; scopes: McpScope[] }; token: string };
 }
 
-async function connect(token: string, opts: { path?: string; headers?: Record<string, string> } = {}): Promise<Client> {
+async function connect(
+  token: string,
+  opts: { path?: string; headers?: Record<string, string>; era?: Era } = {},
+): Promise<AnyClient> {
+  const url = new URL(`${baseUrl}${opts.path ?? '/mcp'}`);
+  const requestInit = { headers: { authorization: `Bearer ${token}`, ...(opts.headers ?? {}) } };
+  if ((opts.era ?? ERA) === 'modern') {
+    const client = new ModernClient(
+      { name: 'test-client', version: '2.0.0' },
+      { versionNegotiation: { mode: { pin: MCP_MODERN_PROTOCOL_VERSIONS[0]! } } },
+    );
+    await client.connect(new ModernTransport(url, { requestInit }));
+    expect(client.getProtocolEra()).toBe('modern');
+    clients.push(client as unknown as AnyClient);
+    return client as unknown as AnyClient;
+  }
   const client = new Client({ name: 'test-client', version: '1.0.0' });
-  const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}${opts.path ?? '/mcp'}`), {
-    requestInit: { headers: { authorization: `Bearer ${token}`, ...(opts.headers ?? {}) } },
-  });
-  await client.connect(transport);
+  await client.connect(new StreamableHTTPClientTransport(url, { requestInit }));
   clients.push(client);
-  return client;
+  return client as unknown as AnyClient;
 }
 
-async function call(client: Client, name: string, args: Record<string, unknown> = {}) {
+async function call(client: AnyClient, name: string, args: Record<string, unknown> = {}) {
   const result = await client.callTool({ name, arguments: args });
   const text = (result.content as { type: string; text: string }[])[0]?.text ?? '';
   return { isError: result.isError === true, text, data: result.isError ? null : JSON.parse(text) };
@@ -268,7 +319,7 @@ describe('MCP endpoint authentication', () => {
   });
 });
 
-describe('MCP scopes', () => {
+describeEachEra('MCP scopes', () => {
   it('lists only the tools a token’s scopes allow', async () => {
     const { token } = await mint(['read']);
     const names = (await (await connect(token)).listTools()).tools.map((tool) => tool.name);
@@ -300,7 +351,7 @@ describe('the tool catalog', () => {
   });
 });
 
-describe('driving coding agents', () => {
+describeEachEra('driving coding agents', () => {
   it('refuses an agent without a structured transport', async () => {
     const { token } = await mint();
     const client = await connect(token);
@@ -439,7 +490,7 @@ describe('driving coding agents', () => {
   });
 });
 
-describe('driving Pocket Agents', () => {
+describeEachEra('driving Pocket Agents', () => {
   it('runs a Pocket Agent task and returns its reply, without pre-approving its tools', async () => {
     await t.app.inject({
       method: 'PATCH',
@@ -463,7 +514,7 @@ describe('driving Pocket Agents', () => {
   });
 });
 
-describe('resources and prompts', () => {
+describeEachEra('resources and prompts', (era) => {
   it('exposes session transcripts as subscribable resources', async () => {
     const { token } = await mint();
     const client = await connect(token);
@@ -475,10 +526,22 @@ describe('resources and prompts', () => {
     expect(listed.resources.some((r) => r.uri === uri)).toBe(true);
 
     const updates: string[] = [];
-    client.setNotificationHandler(ResourceUpdatedNotificationSchema, (n) => {
-      updates.push(n.params.uri);
-    });
-    await client.subscribeResource({ uri });
+    if (era === 'legacy') {
+      // 2025-era: `resources/subscribe` on the session, notified on its GET stream.
+      const legacy = client as unknown as Client;
+      legacy.setNotificationHandler(ResourceUpdatedNotificationSchema, (n) => {
+        updates.push(n.params.uri);
+      });
+      await legacy.subscribeResource({ uri });
+    } else {
+      // 2026-07-28: no subscribe method — a `subscriptions/listen` stream that
+      // opted in to this URI.
+      const modern = client as unknown as ModernClient;
+      modern.setNotificationHandler('notifications/resources/updated', (n) => {
+        updates.push(n.params.uri);
+      });
+      await modern.listen({ resourceSubscriptions: [uri] });
+    }
     completeTurn(liveSession(id), 'Done here.');
     await waitFor(() => updates.includes(uri));
 
@@ -500,13 +563,138 @@ describe('resources and prompts', () => {
   });
 });
 
-describe('auditing', () => {
+describeEachEra('auditing', (era) => {
   it('logs each tool call by name and principal, never its arguments', async () => {
     const { token } = await mint();
     const client = await connect(token);
     await call(client, 'list_sessions', { agent: 'very-secret-argument-value' });
     const lines = logLines.filter((l) => l.includes('"mcp tool call"'));
-    expect(lines.some((l) => l.includes('"tool":"list_sessions"') && l.includes('"mcpClient":"ci-agent"'))).toBe(true);
+    expect(
+      lines.some(
+        (l) => l.includes('"tool":"list_sessions"') && l.includes('"mcpClient":"ci-agent"') && l.includes(`"era":"${era}"`),
+      ),
+    ).toBe(true);
     expect(logLines.join('')).not.toContain('very-secret-argument-value');
+  });
+});
+
+/**
+ * Protocol negotiation. The endpoint is dual-era: a modern client declares its
+ * revision on every request and is answered statelessly; a legacy client
+ * negotiates once, in `initialize`. These are pinned at the wire level rather
+ * than through a client, so a client SDK quietly papering over a server bug
+ * cannot make them pass.
+ */
+describe('protocol negotiation', () => {
+  const MODERN = MCP_MODERN_PROTOCOL_VERSIONS[0]!;
+
+  function modernRequest(token: string, method: string, version = MODERN, extraHeaders: Record<string, string> = {}) {
+    return fetch(`${baseUrl}/mcp`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        'mcp-protocol-version': version,
+        'mcp-method': method,
+        ...extraHeaders,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method,
+        params: {
+          _meta: {
+            'io.modelcontextprotocol/protocolVersion': version,
+            'io.modelcontextprotocol/clientCapabilities': {},
+            'io.modelcontextprotocol/clientInfo': { name: 'raw', version: '1' },
+          },
+        },
+      }),
+    });
+  }
+
+  async function initialize(token: string, protocolVersion: string): Promise<string | undefined> {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion, capabilities: {}, clientInfo: { name: 'raw', version: '1' } },
+      }),
+    });
+    expect(res.status).toBe(200);
+    return /"protocolVersion":"([^"]+)"/.exec(await res.text())?.[1];
+  }
+
+  it('answers server/discover with the modern revisions it speaks', async () => {
+    const { token } = await mint(['read']);
+    const res = await modernRequest(token, 'server/discover');
+    expect(res.status).toBe(200);
+    const body = JSON.parse((await res.text()).replace(/^[\s\S]*?data: /, '').split('\n')[0] ?? '{}');
+    const result = body.result ?? body;
+    expect(result.supportedVersions).toContain(MODERN);
+    expect(result.resultType).toBe('complete');
+    expect(result._meta?.['io.modelcontextprotocol/serverInfo']?.name).toBe('pocketagent');
+  });
+
+  it('rejects an unknown revision with -32022 naming the supported ones, so a client can retry', async () => {
+    const { token } = await mint(['read']);
+    const res = await modernRequest(token, 'tools/list', '2099-01-01');
+    const body = await res.json();
+    expect(body.error.code).toBe(-32022);
+    expect(body.error.data.requested).toBe('2099-01-01');
+    expect(body.error.data.supported).toContain(MODERN);
+  });
+
+  it('enforces the 2026-07-28 request headers (Mcp-Method must match the body)', async () => {
+    const { token } = await mint(['read']);
+    const res = await modernRequest(token, 'tools/list', MODERN, { 'mcp-method': 'prompts/list' });
+    expect(res.status).toBe(400);
+  });
+
+  it('negotiates every legacy revision in initialize, and counter-offers the newest for an unknown one', async () => {
+    const { token } = await mint(['read']);
+    for (const version of ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']) {
+      expect(await initialize(token, version)).toBe(version);
+    }
+    expect(await initialize(token, '1999-01-01')).toBe('2025-11-25');
+  });
+
+  it('lets a dual-era client pick: auto-negotiation lands on the modern era, a legacy-only client on 2025', async () => {
+    const { token } = await mint(['read']);
+    const auto = new ModernClient({ name: 'auto', version: '1' }, { versionNegotiation: { mode: 'auto' } });
+    await auto.connect(new ModernTransport(new URL(`${baseUrl}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    clients.push(auto as unknown as AnyClient);
+    expect(auto.getProtocolEra()).toBe('modern');
+    expect(auto.getNegotiatedProtocolVersion()).toBe(MODERN);
+    const hostInfo = await call(auto as unknown as AnyClient, 'get_host_info');
+    expect(hostInfo.data.protocol).toEqual({ era: 'modern', version: MODERN });
+
+    const legacy = await connect(token, { era: 'legacy' });
+    expect((await call(legacy, 'get_host_info')).data.protocol).toEqual({ era: 'legacy', version: null });
+  });
+
+  it('authenticates a modern request in the gate, before the SDK ever sees it', async () => {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'mcp-protocol-version': MODERN, 'mcp-method': 'server/discover' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'server/discover', params: {} }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('revokes a modern client immediately too — the next stateless request is refused', async () => {
+    const { token, client: summary } = await mint(['read']);
+    const client = await connect(token, { era: 'modern' });
+    expect((await call(client, 'list_workspaces')).isError).toBe(false);
+    await t.app.inject({ method: 'DELETE', url: `/api/mcp/tokens/${summary.id}`, headers: authHeaders(t.cookie) });
+    await expect(client.callTool({ name: 'list_workspaces', arguments: {} })).rejects.toThrow();
   });
 });

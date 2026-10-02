@@ -1196,6 +1196,12 @@ What to know before you do:
 - **Nothing else changes.** The access token is never an MCP credential, and an MCP token cannot
   reach the rest of the API. There is no shell tool, no agent installation and no restart.
 - **Connect to the machine itself**, not through a Hub — a Hub does not accept MCP tokens.
+- **Protocol versions.** Both MCP eras are served on the same URL: the stateless
+  **2026-07-28** revision (version on every request, `server/discover`, `subscriptions/listen`)
+  and every handshake-based revision from **2025-11-25** back to **2024-10-07**. A client picks
+  by how it opens — `initialize` gets a session at the version it asked for (or 2025-11-25 if it
+  asked for one this server does not know); a modern request is answered statelessly, and an
+  unknown modern revision is refused with the list to retry with.
 
 ### Continuing a chat on another provider
 
