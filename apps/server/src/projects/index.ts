@@ -36,6 +36,8 @@ import {
   setProjectVisibility,
   readPlannerChatConversationIds,
   readPlannerChatSessionIds,
+  readMcpConversationClients,
+  readMcpOwnedTargets,
   type Db,
 } from '../db/index.js';
 
@@ -305,6 +307,13 @@ export class ProjectService {
     // and session id.
     const plannerChatByConversation = readPlannerChatConversationIds(this.db);
     const plannerChatBySession = readPlannerChatSessionIds(this.db);
+    // PA-118: provenance for MCP-started chats — by conversation (the badge's
+    // key, for the `representativeSessions` reason above) and by session, for
+    // a session whose agent has not reported its conversation id yet.
+    const mcpByConversation = readMcpConversationClients(this.db);
+    const mcpBySession = new Map(
+      readMcpOwnedTargets(this.db, 'session').map((row) => [row.target_id, row.client_label]),
+    );
 
     // A non-forked resume keeps writing to the same transcript, but
     // `SessionManager.create` still mints a brand-new session row every time
@@ -345,10 +354,8 @@ export class ProjectService {
         session.plannerChatId ??
         plannerChatBySession.get(session.id) ??
         null;
-      push(
-        byCwd,
-        session.cwd,
-        chatFromSession(
+      push(byCwd, session.cwd, {
+        ...chatFromSession(
           session,
           liveConversation?.title,
           session.agentSessionId ? (cronByConversation.get(session.agentSessionId) ?? null) : null,
@@ -357,7 +364,11 @@ export class ProjectService {
             : null,
           plannerChatId,
         ),
-      );
+        mcpClient:
+          (session.agentSessionId ? mcpByConversation.get(session.agentSessionId) : undefined) ??
+          mcpBySession.get(session.id) ??
+          null,
+      });
     }
 
     // Every configured directory gets a place, even an empty one.
@@ -418,6 +429,7 @@ export class ProjectService {
         cronJobId: cronByConversation.get(conversation.id) ?? null,
         webhookId: webhookByConversation.get(conversation.id) ?? null,
         plannerChatId: plannerChatByConversation.get(conversation.id) ?? null,
+        mcpClient: mcpByConversation.get(conversation.id) ?? null,
         rateLimit: null,
       });
     }

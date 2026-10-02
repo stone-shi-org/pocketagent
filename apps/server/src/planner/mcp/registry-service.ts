@@ -558,7 +558,11 @@ export class McpRegistryService {
    * tool-result string the same way every other tool error there is
    * surfaced, never an uncaught exception.
    */
-  async callTool(qualifiedName: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }> {
+  async callTool(
+    qualifiedName: string,
+    args: Record<string, unknown>,
+    opts: { depth?: number } = {},
+  ): Promise<{ text: string; isError: boolean }> {
     const parsed = parseMcpQualifiedToolName(qualifiedName);
     if (!parsed) {
       throw new McpRegistryError(`"${qualifiedName}" is not an MCP tool.`, 'not_found', 404);
@@ -583,7 +587,7 @@ export class McpRegistryService {
     const client = this.createClient(live.row);
     try {
       await client.connect();
-      const result = await client.callTool(parsed.toolName, args);
+      const result = await client.callTool(parsed.toolName, args, opts);
       // Tool call connected and responded — clear any failure streak and cooldown
       this.recordSuccess(parsed.registryId, live.tools ?? [], live.row.reported_instructions);
       return result;

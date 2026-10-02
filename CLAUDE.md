@@ -18,6 +18,7 @@ docker/build.sh         # images: thin | claude | all (PA-64) | hub (PA-66)
 pnpm demo:docker        # the backend image's whole contract, against a real container
 pnpm demo:hub           # PA-66's acceptance criteria: two real backends, a real Hub
 pnpm demo:hub-ui        # PA-110: the Hub's own UI and mDNS discovery, in real Chrome
+pnpm demo:mcp           # PA-118: /mcp as an external agent sees it, against a scratch server
 
 pnpm version:set 1.2.3  # the repo's semver, written to all six package.json files (PA-65, PA-66)
 ./test.sh               # CI: install --frozen-lockfile, vitest (JUnit XML), lint, typecheck
@@ -131,7 +132,7 @@ and `adopt.test.ts` skip themselves when `tmux` is not installed.
 ### Live demos
 
 The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
-decision. Twenty demo scripts do; all but four run against a *running* server:
+decision. Twenty-one demo scripts do; all but five run against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -154,6 +155,7 @@ pnpm demo:hub-ui          # PA-110: Hub view, server-only/Hub-only menus, real m
 PA_TOKEN=... pnpm demo:multi-host-ui     # multi-host: rail, sheet, aggregate home, deep links, both viewports
 PA_TOKEN=... pnpm demo:agent-install-ui  # agent setup dialog: four states, streamed install, phone viewport
 PA_TOKEN=... PA_GEMINI_KEY=... pnpm demo:gemini-live-ui  # PA-96: real speech → Gemini Live → tool → approval card, phone viewport
+pnpm demo:mcp             # PA-118: scratch server + SDK client; PA_MCP_REAL_AGENT=1 / PA_MCP_CLAUDE_CLIENT=1 add real claude
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -208,6 +210,15 @@ goodbye. The backend binds a container-bridge address when the machine has one, 
 server is never LAN-reachable; multicast loopback still carries the advertisement to a Hub on
 the same machine. The unit suites run mDNS over an in-memory bus instead, so this is the only
 place real multicast is exercised.
+
+`pnpm demo:mcp` is the fifth that starts its own process, and where PA-118's acceptance
+criteria live: a scratch backend, a token minted through a real browser-session login, then the
+SDK's real client over real HTTP — the 401s (no token, the master token as a bearer, an MCP token
+on the REST API), the scope-filtered catalog, the structured-only and containment refusals, and
+revocation ending an open MCP session. Two opt-in steps use real agents:
+`PA_MCP_REAL_AGENT=1` runs `run_coding_task` against a real `claude` (with your real `HOME`, so it
+can sign in, which files one transcript under the scratch path), and `PA_MCP_CLAUDE_CLIENT=1` has
+a real Claude Code call `get_host_info` through `--mcp-config` — PocketAgent as the server end.
 
 `pnpm demo:docker` is the other odd one out: it needs no running server and no `PA_BASE`, because it
 builds the image and starts its own container with a throwaway data root, HOME and git
@@ -1865,6 +1876,90 @@ route and not even a reveal *decision*: past the bind response there is nothing 
 `token_prefix` — the leading characters kept in the clear — is what lets a list row be matched
 against the token in hand.
 
+### The MCP server (PA-118)
+
+PocketAgent is an MCP *client* (`planner/mcp/`, PA-37 — a Pocket Agent calling someone else's
+tools) and, since PA-118, an MCP *server*: another agent — Claude Code, Codex, a CI job, another
+PocketAgent — connects to `/mcp` over Streamable HTTP and uses this machine the way a person
+does. `apps/server/src/mcp-server/` holds all of it (`server.ts` the endpoint and its sessions,
+`tools.ts` the catalog, `work.ts` the work-starting half, `internal-api.ts` the in-process route
+client), beside `auth/mcp-tokens.ts`, `routes/mcp-server.ts` and
+`packages/protocol/src/mcp-server.ts`. The tools are listed in `MCP_TOOLS`: `read` (projects,
+sessions, transcripts, conversations, Pocket Agents, cron, webhooks, usage, worktrees, pending
+approvals, a session's git diff), `sessions` (`start_session`, `send_prompt`, `wait_for_turn`,
+`run_coding_task`, interrupt, stop), `planner` (create, message, wait on and interrupt a Pocket
+Agent chat; `run_pocket_task`) and `admin` (project folders, worktrees, hiding and clearing
+chats). Transcripts are also subscribable MCP resources, and the global skills are MCP prompts.
+
+**`/mcp` is outside `/api/`, which is exactly what made it dangerous.** The gate's first line
+returns early for every non-`/api/` path — that is how the SPA shell stays public — so a route
+added at `/mcp` would have been unauthenticated remote code execution, and the not-found handler
+would have answered its neighbours with a 200. The gate therefore names `/mcp` (and the
+`/api/mcp` alias) by **exact match**, never a prefix: `/mcp/x` and `/mcpx` are still the shell,
+and a test pins both directions. The alias exists only because a Hub proxies `/h/<id>/api/**`;
+through a Hub it carries the Hub's own credential, so a remote agent connects to the backend
+directly. `PUBLIC_API_PATHS` and `/api/hooks/` still enumerate the unauthenticated surface
+exactly — `/mcp` is authenticated, it just had to be told so.
+
+**A third credential class, scoped, and accepted on one endpoint only.** `pam_` tokens are
+`hub_credentials`' twin (`sha256(token)`, a clear prefix, no expiry, no reveal, read fresh on
+every request so revocation needs no restart, minted by a cookie session and never by an MCP
+principal so a leaked token cannot mint its successor). Two things differ. A token carries
+**scopes** (`read`/`sessions`/`planner`/`admin`, admin off by default) — a permissions model,
+which PA-63 declined for hub credentials, justified here by who holds the token: a Hub is the
+operator's own infrastructure, an MCP token is pasted into a third party's config file. And a
+`pam_` token is accepted **only on the MCP endpoint**: on `/api/projects` it is a 401, or every
+token would also be a full REST credential and its scopes would mean nothing. The master token
+is never an MCP credential, and a cookie is not either (no MCP client holds one, and an ambient
+credential on an endpoint that starts agents is CSRF surface for nothing). A hub credential is
+accepted on `/mcp` with full scopes, since it is already full-access.
+
+**Stateful sessions, bound to their principal.** The plan proposed stateless mode; resource
+subscriptions moving into v1 needed a session to notify on. A session id is never a credential
+on its own: every request still passes the gate with its own bearer, and one whose principal
+differs from the session's is answered as if the session did not exist. Every tool call re-reads
+the principal, so a revoked token or narrowed scope stops working on its next call and no
+notification is sent for a token that no longer exists. Sessions are capped per principal and
+expire idle, and they hold no work — closing one never touches a session or a chat, which is why
+`preClose` simply closes them all.
+
+**Tools that mirror a route call the route** (`InternalApiClient`). PA-70's rule — provisioning
+is the Hub being an API client, not a new contract — applied from inside the process:
+`delete_worktree` sits on forty lines of route logic, and a second copy is the thing that drifts.
+The call is `app.inject()` with a single-use 256-bit nonce, registered against the MCP principal
+and consumed by the gate, which honours it **only when `request.raw` is not an
+`http.IncomingMessage`** — only `light-my-request`'s synthetic request qualifies, so a network
+request carrying the header gets nothing. The principal is the MCP client's own, so a route's
+`auditConfigChange` writes `mcp:<label>` at `warn`, as it does for a Hub. Tools with no route
+(prompting, waiting, interrupting, Pocket Agent turns) compose services directly.
+
+**Work goes through the paths that already exist, with nothing relaxed.** `start_session`
+reuses `structuredAgentProblem` (structured only; an attended-only provider refused unless it
+allows unattended use), re-resolves the cwd for containment, mints any branch name, and sends the
+prompt through `PromptQueueService.submit` — so a prompt into a tree another session is mid-turn
+in queues visibly behind it, and there is no `force`. Prompting a session a human is using is
+allowed (decided on the ticket); stopping or interrupting one is not — only the client that
+started a session may (`mcp_owned_work`, which is also the home screen's `mcp` badge). Pocket
+Agent turns follow `startPocketAgent`'s observe-before-`next()` shape, never pass
+`skipToolApprovals`, and inherit the planner's gate unchanged. Caps: three live sessions per
+client, and all MCP sessions together stay below `maxSessions` minus the two slots webhooks
+already reserve for a human. A depth guard (`MAX_MCP_CALL_DEPTH`) stops PocketAgent calling
+itself through its own MCP registry in a loop — PocketAgent's client sends the depth in each
+`tools/call`'s `_meta` (it connects once per call but serves many chats, so depth belongs to the
+call). It is a loop guard, not a boundary; the caps are what bound a hostile caller.
+
+**`wait_for_turn` has a timeout; a turn never does.** States are `complete`,
+`awaiting_approval`, `queued`, `still_running` and `ended`. `still_running` ends the *wait*.
+`awaiting_approval` names the tool and says a human must answer — there is no approve tool, no
+decision field anywhere in the catalog (`mcp-server.test.ts` greps the input schemas for one),
+and the turn stays parked until a person answers in PocketAgent.
+
+Nothing about a tool call's arguments or results is logged — prompts and transcripts sit with
+terminal I/O. Each call logs its name, principal, duration and outcome. Known limitations: no
+OAuth (clients send a static bearer header, which Claude Code and Codex both accept); a Hub-level
+`/mcp` aggregating every host is a follow-up; and a coding agent started over MCP that is itself
+configured to call `/mcp` sends no depth, so only the caps bound that loop.
+
 ### Hub Web Push fan-out (PA-73)
 
 The browser's service worker registration is per-origin: a browser visiting the Hub connects
@@ -2425,6 +2520,28 @@ These are load-bearing. Several were bugs first.
   unauthorized hosts are reported at `GET /api/push/status` and surfaced as warning badges in
   the UI rather than silently dropping notifications. Crucially, terminal I/O is never sent or
   stored over this mechanism — only high-level approval/message notification metadata.
+- **An MCP client can see an approval and can never answer one** (PA-118). `/mcp` exposes no
+  tool that resolves a permission, and no tool input carries `skipPermissions`, `force`, a
+  decision, an executable or an argv — asserted by grepping `MCP_TOOLS` in
+  `apps/server/tests/mcp-server.test.ts`. A turn that needs approval reports
+  `awaiting_approval` and waits, with no timeout, for a human in PocketAgent; `wait_for_turn`'s
+  own timeout ends the wait, never the turn. An MCP-started session obeys exactly the approval
+  gate a human-started one does, and an MCP-created Pocket Agent chat is never pre-approved. The
+  planner's raw `exec_command`/`bash`/`write_file`/`rmdir` are not re-exported: MCP has no
+  pause/resume, so they would be a remote shell with no gate. Agent installation and server
+  restart stay unreachable from it, like from every other unattended trigger.
+- **`/mcp` is authenticated by exact match, and a `pam_` token is accepted nowhere else**
+  (PA-118). The gate's early return for non-`/api/` paths would otherwise make `/mcp` public, so
+  `MCP_SERVER_PATH`/`MCP_SERVER_API_ALIAS` are named exactly — a prefix would gate the SPA, and
+  forgetting the line would expose an endpoint that starts agents. On the MCP endpoint only a
+  bearer credential counts (an MCP token, or a hub credential); the master token and a cookie are
+  401. Off it, a `pam_` token is a 401, so scopes mean something. Tokens are `sha256` digests,
+  read fresh per request, minted only by a cookie session or a Hub — never by an MCP principal.
+- **An MCP tool's in-process route call cannot be forged from the network** (PA-118).
+  `InternalApiClient` authenticates `app.inject()` with a single-use nonce that the gate honours
+  only when `request.raw` is not an `http.IncomingMessage`; a real request carrying the header
+  falls through to ordinary authentication (asserted). The principal it resolves to is the MCP
+  client's, so audit lines say `mcp:<label>`.
 - **An mDNS advertisement carries nothing `/health` does not, and discovery never registers
   anything** (PA-110). `advertisedTxt` is a version, a protocol range, a role, a scheme and a
   TXT format number — `/health`'s budget — and `mdns-advertise.test.ts` asserts the exact key
@@ -2623,7 +2740,8 @@ These are load-bearing. Several were bugs first.
   endpoint from its options. The socket URL is deliberately *relative* (`<basePath>/api/ws`) so
   the browser derives origin and `ws:`/`wss:` itself, exactly as it already does for `fetch` —
   one rule for both transports instead of a hand-rolled scheme map that can disagree with the
-  page. The one remaining `window.location.origin` read is `SecretReveal.tsx`, which composes a
+  page. The remaining `window.location.origin` reads are `SecretReveal.tsx` and, by the same
+  reasoning, `McpClientsSection.tsx` (PA-118's `/mcp` URL for a client config). `SecretReveal.tsx` composes a
   webhook's *delivery* URL for a human to paste into Jira; the server deliberately has no notion
   of its own external origin, so that one stays — but it is only valid for the host that served
   the bundle. For any host reached through a path prefix, this origin is the *gateway's*, and a

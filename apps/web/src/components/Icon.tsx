@@ -44,6 +44,7 @@ export type IconName =
   | 'webhook'
   | 'webhook-jira'
   | 'webhook-bamboo'
+  | 'mcp'
   | 'link'
   | 'rotate'
   | 'key'
@@ -346,6 +347,17 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M8.1 9.6 10.6 15.9" />
       <path d="M15.9 9.6 13.4 15.9" />
       <path d="M8.7 8h6.6" />
+    </>
+  ),
+  // PA-118: a plug — "another agent plugged in over MCP". Distinct from
+  // `webhook`'s fan-out (an event from outside) and `agent-generic` (a Pocket
+  // Agent), because a chat an MCP client started is neither.
+  mcp: (
+    <>
+      <path d="M9 3v4" />
+      <path d="M15 3v4" />
+      <path d="M7 7h10v4a5 5 0 0 1-10 0V7Z" />
+      <path d="M12 16v5" />
     </>
   ),
   // A tag with a punched hole: a Jira issue, not a generic event — distinct

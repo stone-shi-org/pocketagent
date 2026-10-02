@@ -1103,6 +1103,7 @@ What it does enforce:
 | Health disclosure | `/health` is unauthenticated on purpose, so a front server can tell whether a backend is usable before it holds a credential for it. It returns only `status`, `version`, `protocol` and `uptimeSeconds` — the semver does tell an unauthenticated caller which build is running, which is accepted; a commit SHA, build host, path or config value must go behind the cookie instead, and a test pins the field list so adding one is deliberate. |
 | Token handling | The master token is exchanged once at login for a random 32-byte session id in an `HttpOnly; SameSite=Strict` cookie. The token never reaches JavaScript, localStorage, or the URL. Comparison is constant-time. |
 | Hub credentials | A Hub authenticates with a named, revocable credential instead of storing this backend's access token — see [Hub credentials](#hub-credentials). Only `sha256(token)` is stored, so a copied database yields nothing presentable, and the access token is never accepted as a bearer token. |
+| MCP clients | `/mcp` (and `/api/mcp`) accept only a scoped `pam_…` MCP client token or a hub credential — never the access token or a cookie — and an MCP token is refused on every other route. See [Letting other agents in over MCP](#letting-other-agents-in-over-mcp). |
 | Brute force | Login is rate-limited to 8 attempts/minute; other routes to 300/minute. |
 | CSRF | `SameSite=Strict` plus an explicit `Origin` check on every state-changing request and on the WebSocket handshake. |
 | Command execution | The browser picks an **agent id** from a server-side registry and a **cwd**. It cannot supply a command, arguments, or environment. Adapters return `argv[]` and are spawned without a shell. |
@@ -1161,6 +1162,40 @@ Four properties are worth stating plainly, because each one is a deliberate choi
 Binding requires no new configuration, and the credential is bound to no particular Hub
 implementation. This repository ships one — see [Running a Hub](#running-a-hub) — but the
 exchange above is just an HTTP call, so anything that can make it can hold a credential.
+
+### Letting other agents in over MCP
+
+Optional, and nothing is reachable until you mint a token. PocketAgent serves the
+[Model Context Protocol](https://modelcontextprotocol.io) at **`/mcp`** (Streamable HTTP), so
+another agent — Claude Code on your laptop, Codex, a CI job — can use this machine the way you
+do: browse projects and transcripts, start a coding agent on a task and get its answer
+(`run_coding_task`), talk to a Pocket Agent (`run_pocket_task`), and subscribe to a transcript.
+
+Create a token under **Settings → MCP clients**, pick its scopes, and paste the command it
+shows:
+
+```bash
+claude mcp add --transport http pocketagent http://<this-machine>:8787/mcp \
+  --header "Authorization: Bearer pam_…"
+```
+
+What to know before you do:
+
+- **Approvals still come to you.** An MCP client can see that a tool call is waiting for
+  approval, and can never answer it. You answer here (or from a push notification, or
+  Telegram), and the caller's `wait_for_turn` carries on. Sessions it starts obey the same
+  approval gate yours do.
+- **Scopes.** `read` (everything the home screen shows, never a secret), `sessions` (coding
+  agents), `planner` (Pocket Agents) are on by default; `admin` (add or remove project folders,
+  create or delete worktrees) is off — adding a folder lets every agent on this machine work in it.
+- **Limits.** Three live sessions per client; MCP-started sessions together always leave two
+  slots free for you. A client can stop or interrupt only sessions it started. Chats it starts
+  carry an MCP badge on the home screen.
+- **The token is shown once.** Only a digest is stored. Revoking it takes effect on the very
+  next request; sessions it started keep running for you to stop.
+- **Nothing else changes.** The access token is never an MCP credential, and an MCP token cannot
+  reach the rest of the API. There is no shell tool, no agent installation and no restart.
+- **Connect to the machine itself**, not through a Hub — a Hub does not accept MCP tokens.
 
 ### Continuing a chat on another provider
 

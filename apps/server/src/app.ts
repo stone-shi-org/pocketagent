@@ -8,10 +8,22 @@ import { adminRoutes } from './routes/admin.js';
 import { agentInstallRoutes } from './routes/agent-install.js';
 import websocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
-import { AUTH_COOKIE_NAME, LIMITS, SERVER_PROTOCOL_RANGE } from '@pocketagent/protocol';
+import {
+  AUTH_COOKIE_NAME,
+  LIMITS,
+  MCP_SCOPES,
+  MCP_SERVER_API_ALIAS,
+  MCP_SERVER_PATH,
+  SERVER_PROTOCOL_RANGE,
+} from '@pocketagent/protocol';
 import type { Config } from './config/index.js';
 import { AuthService, bearerTokenFrom, isOriginAllowed } from './auth/index.js';
 import { HubCredentialStore } from './auth/hub-credentials.js';
+import { McpTokenStore, type McpClientIdentity } from './auth/mcp-tokens.js';
+import { InternalApiClient } from './mcp-server/internal-api.js';
+import { McpWorkService } from './mcp-server/work.js';
+import { McpServerService } from './mcp-server/server.js';
+import { mcpServerRoutes } from './routes/mcp-server.js';
 import {
   deleteWorkspace,
   insertWorkspace,
@@ -300,6 +312,8 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const auth = new AuthService(db, config.authToken, config.sessionTtlMs);
   // PA-63: the second credential class. See `auth/hub-credentials.ts`.
   const hubCredentials = new HubCredentialStore(db);
+  // PA-118: the third credential class. See `auth/mcp-tokens.ts`.
+  const mcpTokens = new McpTokenStore(db);
   const workspaces = new WorkspaceRegistry(
     config.workspaceRoots,
     createWorkspaceStore({
@@ -689,6 +703,22 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // `server.ts` installs afterwards, so a test app can never exit the runner.
   const admin = new AdminService({ sessions, plannerChats, logger: app.log });
 
+  // PA-118: the MCP server. Constructed last because it composes nearly
+  // everything above; `internalApi` is attached to `app` once it is complete.
+  const internalApi = new InternalApiClient();
+  const mcpWork = new McpWorkService({
+    db,
+    sessions,
+    agents,
+    workspaces,
+    worktrees,
+    promptQueue,
+    plannerChats,
+    historyDeps: { sessions, conversations, agyTranscripts, piTranscripts },
+    maxSessions: config.maxSessions,
+    logger: app.log,
+  });
+
   const context: PocketContext = {
     config,
     auth,
@@ -725,8 +755,31 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     projects,
     usage,
     worktrees,
+    mcpTokens,
+    mcpWork,
+    // Replaced just below, once the context it reads from exists.
+    mcpServer: null as unknown as McpServerService,
   };
+  context.mcpServer = new McpServerService({
+    deps: { pocket: context, work: mcpWork, api: internalApi },
+    version: VERSION,
+    resolve: (id) => resolveMcpPrincipal(id),
+    logger: app.log,
+  });
   app.decorate('pocket', context);
+  internalApi.attach(app);
+
+  /**
+   * An MCP session's principal, re-read by id. A hub credential reaching the
+   * MCP endpoint is resolved through the hub store so revoking it there ends
+   * its MCP sessions too.
+   */
+  function resolveMcpPrincipal(id: string): McpClientIdentity | null {
+    const client = mcpTokens.get(id);
+    if (client) return client;
+    const hub = hubCredentials.list().find((h) => h.id === id);
+    return hub ? hubAsMcpPrincipal(hub) : null;
+  }
 
   const { interrupted, recovered } = await sessions.init();
   if (recovered > 0) app.log.info({ recovered }, 'reattached to sessions from a previous run');
@@ -792,9 +845,24 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   app.addHook('onRequest', async (request, reply) => {
     const url = request.url.split('?')[0] ?? '';
 
+    // PA-118: an MCP tool calling a route in-process. Only `app.inject()` can
+    // produce one — see `InternalApiClient.principalFor` for the two
+    // independent reasons a network request carrying the header gets nothing.
+    const internal = internalApi.principalFor(request);
+    if (internal !== null) {
+      request.mcpPrincipal = internal;
+      return;
+    }
+
+    // PA-118: the MCP endpoint is the one authenticated path outside `/api/`,
+    // named by **exact match** rather than a prefix — `/mcp/x` and `/mcpx` are
+    // still the SPA shell. Without this line `/mcp` would skip the gate
+    // entirely, because the early return below is what keeps the SPA public.
+    const isMcpEndpoint = url === MCP_SERVER_PATH || url === MCP_SERVER_API_ALIAS;
+
     // Static assets and the SPA shell are public; they contain no secrets and
     // the login screen has to be reachable.
-    if (!url.startsWith('/api/') && url !== '/health') return;
+    if (!url.startsWith('/api/') && url !== '/health' && !isMcpEndpoint) return;
 
     if (PUBLIC_API_PATHS.has(url)) return;
 
@@ -817,6 +885,32 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
           .code(403)
           .send({ error: { code: 'forbidden_origin', message: 'Origin not allowed.' } });
       }
+    }
+
+    // PA-118: the MCP endpoint takes a bearer credential and nothing else — an
+    // MCP client token (scoped), or a hub credential (full scopes, since it is
+    // already full-access). Not a cookie: no MCP client holds one, and an
+    // ambient credential on an endpoint that starts agents is a CSRF surface
+    // for nothing. Conversely a `pam_` token is accepted *only* here; on any
+    // other route it falls through to the 401 below, or every MCP token would
+    // also be a full REST credential and its scopes would mean nothing.
+    if (isMcpEndpoint) {
+      const bearer = bearerTokenFrom(request.headers.authorization);
+      const client = mcpTokens.validate(bearer, request.ip);
+      if (client !== null) {
+        request.mcpPrincipal = client;
+        return;
+      }
+      const viaHub = hubCredentials.validate(bearer, request.ip);
+      if (viaHub !== null) {
+        request.hubPrincipal = viaHub;
+        request.mcpPrincipal = hubAsMcpPrincipal(viaHub);
+        return;
+      }
+      return reply
+        .code(401)
+        .header('www-authenticate', 'Bearer realm="pocketagent-mcp"')
+        .send({ error: { code: 'unauthorized', message: 'An MCP client token is required (Authorization: Bearer pam_…).' } });
     }
 
     if (auth.validateSession(request.cookies[AUTH_COOKIE_NAME])) return;
@@ -880,6 +974,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   }));
 
   await app.register(authRoutes);
+  await app.register(mcpServerRoutes);
   await app.register(sessionRoutes);
   await app.register(agentInstallRoutes);
   await app.register(adminRoutes);
@@ -943,6 +1038,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // in `onClose` (its original spot) meant it never got a turn to run, since
   // `onClose` hooks only fire *after* `server.close()` has already resolved.
   app.addHook('preClose', async () => {
+    // PA-118: an open MCP notification stream is a non-idle connection, so it
+    // is closed here for the same reason the SSE and WebSocket kinds are.
+    await context.mcpServer.closeAll();
     app.server.closeAllConnections?.();
   });
 
@@ -959,4 +1057,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   });
 
   return { app, context };
+}
+
+/** PA-118: a hub credential on the MCP endpoint, as an MCP principal. */
+function hubAsMcpPrincipal(hub: { id: string; label: string }): McpClientIdentity {
+  return { id: hub.id, label: `hub:${hub.label}`, scopes: MCP_SCOPES };
 }

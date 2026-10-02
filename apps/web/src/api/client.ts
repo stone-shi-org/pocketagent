@@ -24,6 +24,9 @@ import type {
   HostInfo,
   UpdateCronJobRequest,
   HubCredentialListResponse,
+  CreateMcpClientTokenRequest,
+  CreateMcpClientTokenResponse,
+  McpClientTokenListResponse,
   MeResponse,
   ProjectInfo,
   PushStatusResponse,
@@ -301,6 +304,22 @@ export function createApiClient(endpoint: HostEndpoint) {
 
     revokeHub: (id: string) =>
       request<{ ok: true }>(`/api/auth/hubs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+    /**
+     * PA-118: MCP client tokens — what lets another agent call this server's
+     * `/mcp`. Minted here (a cookie session is required), shown once, revoked
+     * here; the server keeps only a digest, so there is no reveal.
+     */
+    listMcpTokens: () => request<McpClientTokenListResponse>('/api/mcp/tokens'),
+
+    createMcpToken: (body: CreateMcpClientTokenRequest) =>
+      request<CreateMcpClientTokenResponse>('/api/mcp/tokens', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+
+    revokeMcpToken: (id: string) =>
+      request<void>(`/api/mcp/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
     listSessions: () => request<{ sessions: SessionInfo[] }>('/api/sessions'),
 

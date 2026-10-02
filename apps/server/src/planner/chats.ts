@@ -17,6 +17,7 @@ import {
   type ThinkingEvent,
 } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
+import { readMcpOwnedWork } from '../db/index.js';
 import type { Config } from '../config/index.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 import type { SessionManager } from '../sessions/manager.js';
@@ -683,6 +684,8 @@ export class PlannerChatService {
     return {
       ...chat,
       busy: this.isBusy(chat.id),
+      // PA-118: provenance badge for a chat an MCP client created.
+      mcpClient: readMcpOwnedWork(this.opts.db, 'planner_chat', chat.id)?.client_label ?? null,
     };
   }
 

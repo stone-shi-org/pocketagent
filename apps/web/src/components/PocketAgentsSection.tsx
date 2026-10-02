@@ -213,7 +213,19 @@ export function PocketAgentsSection({
                   onClick={() => onOpenChat(chat.id)}
                   title={chat.title ?? 'Untitled chat'}
                 >
-                  <span className="chat-title">{chat.title ?? 'Untitled chat'}</span>
+                  <span className="chat-title">
+                    {chat.mcpClient && (
+                      <span title={`Created by MCP client ${chat.mcpClient}`}>
+                        <Icon
+                          name="mcp"
+                          size={13}
+                          className="chat-cron-badge"
+                          aria-label={`Created by MCP client ${chat.mcpClient}`}
+                        />
+                      </span>
+                    )}
+                    {chat.title ?? 'Untitled chat'}
+                  </span>
                 </button>
                 <button
                   type="button"

@@ -592,6 +592,14 @@ export const ChatSummary = z.object({
    * navigates to `#/planner/<chatId>`.
    */
   plannerChatId: z.string().nullable(),
+  /**
+   * PA-118: the label of the MCP client that started this chat over `/mcp`,
+   * so the row carries a badge instead of reading as something a human began.
+   * Keyed from the conversation id server-side for the same
+   * `representativeSessions` reason `cronJobId` is. Optional so every older
+   * construction site stays valid; absent and null both mean "not MCP".
+   */
+  mcpClient: z.string().nullable().optional(),
   /** Carried from the representative live session for an actionable row badge. */
   rateLimit: RateLimitEvent.nullable(),
 });

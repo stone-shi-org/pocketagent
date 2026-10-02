@@ -1264,6 +1264,16 @@ function ProjectSection({
                           aria-label="Started by a webhook"
                         />
                       )}
+                      {chat.mcpClient && (
+                        <span title={`Started by MCP client ${chat.mcpClient}`}>
+                          <Icon
+                            name="mcp"
+                            size={13}
+                            className="chat-cron-badge"
+                            aria-label={`Started by MCP client ${chat.mcpClient}`}
+                          />
+                        </span>
+                      )}
                       {chat.plannerChatId !== null && (
                         <span
                           className="chat-planner-badge"

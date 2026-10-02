@@ -500,6 +500,11 @@ export const PlannerChat = z.object({
    */
   cronJobId: z.string().nullable().optional(),
   /**
+   * PA-118: the label of the MCP client that created this chat over `/mcp`,
+   * for the same provenance badge a coding-agent chat gets.
+   */
+  mcpClient: z.string().nullable().optional(),
+  /**
    * PA-76: true when a turn is currently executing or waiting for a decision on this chat.
    */
   busy: z.boolean().default(false),

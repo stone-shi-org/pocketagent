@@ -18,6 +18,7 @@ export * from './planner.js';
 export * from './gemini-live.js';
 export * from './planner-memory.js';
 export * from './mcp-registry.js';
+export * from './mcp-server.js';
 export * from './telegram.js';
 export * from './hub.js';
 export * from './hub-registry.js';

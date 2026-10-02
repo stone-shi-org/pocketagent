@@ -7,6 +7,7 @@ import { CodingAgentsSection } from '../components/CodingAgentsSection.js';
 import { TelegramSection } from '../components/TelegramSection.js';
 import { HostAdminSection } from '../components/HostAdminSection.js';
 import { HubsSection } from '../components/HubsSection.js';
+import { McpClientsSection } from '../components/McpClientsSection.js';
 import { getTerminalFontOverride, setTerminalFontOverride } from '../agent/terminal-font-pref.js';
 import { getVoiceDirectSendPref, setVoiceDirectSendPref } from '../agent/voice-prefs.js';
 import { formatBuildInfo } from '../version.js';
@@ -648,6 +649,14 @@ export function SettingsPage({ onApiError, onBack, hubVersion = null }: Props): 
             desc="Hubs bound to this backend, and revoking one. A Hub stores a credential minted here, never this server's access token."
           >
             <HubsSection onApiError={onApiError} />
+          </SectionCard>
+
+          <SectionCard
+            title="MCP clients"
+            icon="code"
+            desc="Tokens that let another agent use this machine over MCP: browse projects, run coding agents and Pocket Agents, read their answers."
+          >
+            <McpClientsSection onApiError={onApiError} />
           </SectionCard>
 
           {/* PA-110: the Hub's config-templates card used to sit here, on a

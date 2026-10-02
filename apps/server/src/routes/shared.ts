@@ -44,7 +44,7 @@ export async function resolveWorkspaceCwdOrReply(
 export function structuredAgentProblem(
   agents: AgentRegistry,
   id: string,
-  noun: 'scheduled' | 'triggered by a webhook',
+  noun: 'scheduled' | 'triggered by a webhook' | 'started over MCP',
 ): string | null {
   const adapter = agents.get(id);
   if (adapter === undefined) return `No such agent "${id}".`;
@@ -122,11 +122,16 @@ export function auditConfigChange(
   details: Record<string, unknown> = {},
 ): void {
   const hub = request.hubPrincipal;
+  // PA-118: an MCP client is a remote principal exactly as a Hub is, so its
+  // changes are `warn` for the same reason — that line is the record that
+  // survives whatever happened on the caller's side.
+  const mcp = hub ? undefined : request.mcpPrincipal;
   const fields = {
     ...details,
-    by: hub ? `hub:${hub.label}` : 'session',
+    by: hub ? `hub:${hub.label}` : mcp ? `mcp:${mcp.label}` : 'session',
     ...(hub ? { hubId: hub.id } : {}),
+    ...(mcp ? { mcpClientId: mcp.id } : {}),
   };
-  if (hub) request.log.warn(fields, event);
+  if (hub || mcp) request.log.warn(fields, event);
   else request.log.info(fields, event);
 }

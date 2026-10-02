@@ -2,7 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type { McpAuthKind, McpTransportKind } from '@pocketagent/protocol';
+import { MCP_DEPTH_META_KEY, type McpAuthKind, type McpTransportKind } from '@pocketagent/protocol';
 
 /**
  * PA-37: a thin wrapper around the official `@modelcontextprotocol/sdk`
@@ -178,11 +178,19 @@ export class McpClient {
     }));
   }
 
-  async callTool(name: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }> {
+  async callTool(
+    name: string,
+    args: Record<string, unknown>,
+    opts: { depth?: number } = {},
+  ): Promise<{ text: string; isError: boolean }> {
     if (!this.client) throw new McpClientError('Not connected.');
     let result;
     try {
-      result = await this.client.callTool({ name, arguments: args }, undefined, {
+      // PA-118: how many PocketAgent hops deep this call already is, so a
+      // PocketAgent registered as its own MCP registry cannot loop forever.
+      // Harmless to any other server: `_meta` keys it does not know are ignored.
+      const meta = opts.depth !== undefined ? { _meta: { [MCP_DEPTH_META_KEY]: opts.depth } } : {};
+      result = await this.client.callTool({ name, arguments: args, ...meta }, undefined, {
         timeout: this.callTimeoutMs,
       });
     } catch (err) {

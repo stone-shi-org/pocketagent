@@ -177,6 +177,56 @@ export const MCP_REGISTRIES_DDL = `
  * reason `webhook_issue_sessions.planner_chat_id` isn't: a stale reference is
  * detected and rebuilt at read time, never a corruption to repair.
  */
+/**
+ * PA-118: MCP client tokens, and what each MCP client started.
+ *
+ * `mcp_client_tokens` is `hub_credentials`' shape plus `scopes_json`: a
+ * one-way `sha256(token)` digest (the backend only ever *verifies* one, so a
+ * copied database yields nothing presentable), a prefix kept in the clear for
+ * the list UI, no `expires_at` (revocation — a row delete — is the whole
+ * lifecycle). A separate table rather than a `kind` column on
+ * `hub_credentials`, because the two principals must stay distinguishable in
+ * every audit line and only this one carries scopes.
+ *
+ * `mcp_owned_work` records provenance and ownership: which session or Pocket
+ * Agent chat an MCP client started. Its own table rather than columns on
+ * `sessions`/`planner_chats` so the session manager's persistence path is
+ * untouched. `client_id` is deliberately **not** a foreign key — revoking a
+ * token must not erase the record of what it started, the same reason
+ * `cron_runs.job_id` is `SET NULL` — and `client_label` is copied onto the row
+ * so an orphan still describes itself. `target_id` is not a foreign key either:
+ * `pruneOldSessions` and `SessionManager.forget` delete session rows out from
+ * under it, and a CASCADE there would be harmless but a RESTRICT would make
+ * pruning fail.
+ *
+ * A named constant because it is run twice — as a migration, and as the
+ * idempotent positional-migration repair in `openDatabase`.
+ */
+export const MCP_SERVER_DDL = `
+  CREATE TABLE IF NOT EXISTS mcp_client_tokens (
+    id           TEXT PRIMARY KEY,
+    label        TEXT NOT NULL,
+    token_sha256 TEXT NOT NULL UNIQUE,
+    token_prefix TEXT NOT NULL,
+    scopes_json  TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    last_seen_at INTEGER,
+    last_seen_ip TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_mcp_client_tokens_created_at ON mcp_client_tokens (created_at);
+
+  CREATE TABLE IF NOT EXISTS mcp_owned_work (
+    kind         TEXT NOT NULL CHECK (kind IN ('session', 'planner_chat')),
+    target_id    TEXT NOT NULL,
+    client_id    TEXT NOT NULL,
+    client_label TEXT NOT NULL,
+    depth        INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL,
+    PRIMARY KEY (kind, target_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_mcp_owned_work_client ON mcp_owned_work (client_id);
+`;
+
 export const TELEGRAM_DDL = `
   CREATE TABLE IF NOT EXISTS telegram_bots (
     id                   TEXT PRIMARY KEY,
@@ -1364,6 +1414,9 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE planner_models ADD COLUMN default_effort TEXT;
   ALTER TABLE custom_claude_providers ADD COLUMN supports_effort INTEGER NOT NULL DEFAULT 1;
   `,
+
+  // PA-118: MCP client tokens and MCP provenance. See `MCP_SERVER_DDL`.
+  MCP_SERVER_DDL,
 ];
 
 /**
@@ -1676,6 +1729,9 @@ export function openDatabase(databasePath: string): Db {
   if (customClaudeProviderColumns.size > 0 && !customClaudeProviderColumns.has('supports_effort')) {
     db.exec('ALTER TABLE custom_claude_providers ADD COLUMN supports_effort INTEGER NOT NULL DEFAULT 1');
   }
+  // PA-118, same positional-migration hazard: re-running the migration's own
+  // DDL constant is idempotent (`IF NOT EXISTS`) and cannot drift from it.
+  db.exec(MCP_SERVER_DDL);
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
   return db;
@@ -2228,6 +2284,72 @@ export function deleteCronRunsForJob(db: Db, jobId: string): number {
 }
 
 /** Which conversations were produced by a scheduled run, for the home screen's badge. */
+export interface McpClientTokenRow {
+  id: string;
+  label: string;
+  token_sha256: string;
+  token_prefix: string;
+  scopes_json: string;
+  created_at: number;
+  last_seen_at: number | null;
+  last_seen_ip: string | null;
+}
+
+export interface McpOwnedWorkRow {
+  kind: 'session' | 'planner_chat';
+  target_id: string;
+  client_id: string;
+  client_label: string;
+  depth: number;
+  created_at: number;
+}
+
+/** PA-118: record that an MCP client started `targetId`. Idempotent. */
+export function recordMcpOwnedWork(
+  db: Db,
+  row: Omit<McpOwnedWorkRow, 'created_at'> & { created_at?: number },
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO mcp_owned_work (kind, target_id, client_id, client_label, depth, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(row.kind, row.target_id, row.client_id, row.client_label, row.depth, row.created_at ?? Date.now());
+}
+
+export function readMcpOwnedWork(
+  db: Db,
+  kind: McpOwnedWorkRow['kind'],
+  targetId: string,
+): McpOwnedWorkRow | null {
+  const row = db
+    .prepare('SELECT * FROM mcp_owned_work WHERE kind = ? AND target_id = ?')
+    .get(kind, targetId) as McpOwnedWorkRow | undefined;
+  return row ?? null;
+}
+
+export function readMcpOwnedTargets(db: Db, kind: McpOwnedWorkRow['kind'], clientId?: string): McpOwnedWorkRow[] {
+  return (
+    clientId === undefined
+      ? db.prepare('SELECT * FROM mcp_owned_work WHERE kind = ?').all(kind)
+      : db.prepare('SELECT * FROM mcp_owned_work WHERE kind = ? AND client_id = ?').all(kind, clientId)
+  ) as McpOwnedWorkRow[];
+}
+
+/**
+ * PA-118: which conversations an MCP client started, for the home screen's
+ * badge. Keyed on the conversation id (the session's `agent_session_id`) for
+ * the same `representativeSessions` reason `readCronRunConversationIds` is.
+ */
+export function readMcpConversationClients(db: Db): Map<string, string> {
+  const rows = db
+    .prepare(
+      `SELECT s.agent_session_id AS conversation_id, w.client_label AS label
+         FROM mcp_owned_work w JOIN sessions s ON s.id = w.target_id
+        WHERE w.kind = 'session' AND s.agent_session_id IS NOT NULL`,
+    )
+    .all() as { conversation_id: string; label: string }[];
+  return new Map(rows.map((r) => [r.conversation_id, r.label]));
+}
+
 export function readCronRunConversationIds(db: Db): Map<string, string> {
   const rows = db
     .prepare(

@@ -14,6 +14,9 @@ import type { AgyTranscriptStore } from './conversations/agy.js';
 import type { PiTranscriptStore } from './conversations/pi.js';
 import type { AdoptionService } from './adopt/index.js';
 import type { ProjectService } from './projects/index.js';
+import type { McpTokenStore, McpClientIdentity } from './auth/mcp-tokens.js';
+import type { McpWorkService } from './mcp-server/work.js';
+import type { McpServerService } from './mcp-server/server.js';
 import type { UsageService } from './usage/index.js';
 import type { WorktreeService } from './git/worktree.js';
 import type { CronService } from './cron/index.js';
@@ -94,6 +97,10 @@ export interface PocketContext {
   projects: ProjectService;
   usage: UsageService;
   worktrees: WorktreeService;
+  /** PA-118: the MCP server — its tokens, its work-starting half and its endpoint. */
+  mcpTokens: McpTokenStore;
+  mcpWork: McpWorkService;
+  mcpServer: McpServerService;
 }
 
 declare module 'fastify' {
@@ -114,5 +121,13 @@ declare module 'fastify' {
      * route legitimately has about its caller.
      */
     hubPrincipal?: HubCredentialIdentity;
+    /**
+     * PA-118: set by the same gate when this request is an MCP client's — a
+     * `pam_` token on the MCP endpoint, a hub credential on the MCP endpoint
+     * (full scopes, labelled `hub:<label>`), or an MCP tool's own in-process
+     * call to a route (`mcp-server/internal-api.ts`). Read by audit lines, and
+     * by exactly one decision: an MCP principal may not manage MCP tokens.
+     */
+    mcpPrincipal?: McpClientIdentity;
   }
 }

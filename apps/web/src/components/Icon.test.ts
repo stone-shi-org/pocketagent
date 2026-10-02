@@ -52,6 +52,7 @@ describe('Icon component', () => {
       'webhook',
       'webhook-jira',
       'webhook-bamboo',
+      'mcp',
       'link',
       'rotate',
       'key',

@@ -30,6 +30,7 @@ import type { McpRegistryService } from './mcp/registry-service.js';
 import { SkillRegistryError, type SkillRegistryService } from './skills.js';
 import { DEFAULT_COMMAND_TIMEOUT_SECONDS } from './store.js';
 import type { Db } from '../db/index.js';
+import { readMcpOwnedWork } from '../db/index.js';
 import type { Config } from '../config/index.js';
 import {
   SETTINGS_FIELDS,
@@ -2004,7 +2005,11 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         };
       }
       try {
-        const result = await deps.mcpRegistry.callTool(toolName, callArgs);
+        // PA-118: one hop deeper than this chat itself — see `MCP_DEPTH_META_KEY`.
+        const chatDepth = deps.plannerChatId
+          ? (readMcpOwnedWork(deps.db, 'planner_chat', deps.plannerChatId)?.depth ?? 0)
+          : 0;
+        const result = await deps.mcpRegistry.callTool(toolName, callArgs, { depth: chatDepth + 1 });
         const text = result.text.length > 0 ? result.text : '(empty result)';
         return {
           content: truncate(result.isError ? `Error from ${toolName}: ${text}` : text, MAX_TOOL_RESULT_CHARS),
