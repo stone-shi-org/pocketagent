@@ -24,6 +24,7 @@ import { Transcript } from '../components/Transcript.js';
 import { ApprovalSheet } from '../components/ApprovalSheet.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { PromptBox } from '../components/PromptBox.js';
+import { codePromptHistoryKey } from '../agent/prompt-history.js';
 import { PickerSheet, type SelectorOption } from '../components/SelectorRow.js';
 import { ConnectionBadge, StatusBadge } from '../components/StatusBadge.js';
 import { Icon } from '../components/Icon.js';
@@ -1105,6 +1106,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
 
       <PromptBox
         sessionId={sessionId}
+        historyKey={session?.cwd ? codePromptHistoryKey(session.cwd) : undefined}
         onSend={handleSend}
         disabled={inputDisabled}
         supportsImageAttachment={session?.transport === 'structured'}

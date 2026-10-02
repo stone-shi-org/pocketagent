@@ -5,6 +5,7 @@ import { ApiError } from '../api/client.js';
 import { applyEvents, emptyTranscript, type TranscriptItem } from '../agent/transcript.js';
 import { Transcript } from '../components/Transcript.js';
 import { PromptBox } from '../components/PromptBox.js';
+import { codePromptHistoryKey } from '../agent/prompt-history.js';
 import { PickerSheet, type SelectorOption } from '../components/SelectorRow.js';
 import { Icon } from '../components/Icon.js';
 import { setPendingPrompt } from '../agent/pending-prompt.js';
@@ -240,6 +241,7 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
       {!missing && (
         <PromptBox
           sessionId={`conversation:${conversationId}`}
+          historyKey={conversation ? codePromptHistoryKey(conversation.cwd) : undefined}
           onSend={start}
           disabled={!conversation || starting}
           // Every conversation here came from `ConversationStore`, which only

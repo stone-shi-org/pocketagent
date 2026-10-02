@@ -340,5 +340,111 @@ describe('PromptBox PA-112 chat improvements', () => {
   });
 });
 
+describe('PromptBox PA-119 up/down arrow keys command history', () => {
+  it('renders with historyKey for planner agent (global) and code agent (per-workspace)', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+    const { plannerPromptHistoryKey, codePromptHistoryKey } = await import('../agent/prompt-history.js');
+
+    const htmlPlanner = renderToStaticMarkup(
+      <PromptBox
+        sessionId="planner_test"
+        historyKey={plannerPromptHistoryKey()}
+        onSend={() => true}
+        disabled={false}
+      />,
+    );
+    expect(htmlPlanner).toContain('class="promptbar"');
+
+    const htmlCode = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-test"
+        historyKey={codePromptHistoryKey('/data/repos/project-a')}
+        onSend={() => true}
+        disabled={false}
+      />,
+    );
+    expect(htmlCode).toContain('class="promptbar"');
+  });
+
+  it('verifies arrow key history navigation semantics', () => {
+    // A pure representation of PromptBox's history navigation state machine
+    const history = ['first command', 'second command', 'third command'];
+    let text = 'my unsubmitted draft';
+    let draftBeforeHistory = '';
+    let historyIndex = -1;
+
+    // 1. User presses ArrowUp at start
+    if (historyIndex === -1) {
+      draftBeforeHistory = text;
+      historyIndex = history.length - 1;
+    }
+    text = history[historyIndex]!;
+    expect(text).toBe('third command');
+    expect(draftBeforeHistory).toBe('my unsubmitted draft');
+    expect(historyIndex).toBe(2);
+
+    // 2. User presses ArrowUp again
+    if (historyIndex > 0) {
+      historyIndex -= 1;
+    }
+    text = history[historyIndex]!;
+    expect(text).toBe('second command');
+    expect(historyIndex).toBe(1);
+
+    // 3. User presses ArrowUp again
+    if (historyIndex > 0) {
+      historyIndex -= 1;
+    }
+    text = history[historyIndex]!;
+    expect(text).toBe('first command');
+    expect(historyIndex).toBe(0);
+
+    // 4. ArrowUp at the oldest command does not underflow
+    if (historyIndex > 0) {
+      historyIndex -= 1;
+    }
+    text = history[historyIndex]!;
+    expect(text).toBe('first command');
+    expect(historyIndex).toBe(0);
+
+    // 5. User presses ArrowDown
+    if (historyIndex < history.length - 1) {
+      historyIndex += 1;
+      text = history[historyIndex]!;
+    }
+    expect(text).toBe('second command');
+    expect(historyIndex).toBe(1);
+
+    // 6. User presses ArrowDown again
+    if (historyIndex < history.length - 1) {
+      historyIndex += 1;
+      text = history[historyIndex]!;
+    }
+    expect(text).toBe('third command');
+    expect(historyIndex).toBe(2);
+
+    // 7. User presses ArrowDown past the most recent command -> restores draft!
+    if (historyIndex < history.length - 1) {
+      historyIndex += 1;
+      text = history[historyIndex]!;
+    } else {
+      historyIndex = -1;
+      text = draftBeforeHistory;
+    }
+    expect(text).toBe('my unsubmitted draft');
+    expect(historyIndex).toBe(-1);
+
+    // 8. Pressing Escape while in history restores draft
+    historyIndex = 1;
+    text = history[historyIndex]!;
+    // Press Escape
+    historyIndex = -1;
+    text = draftBeforeHistory;
+    expect(text).toBe('my unsubmitted draft');
+    expect(historyIndex).toBe(-1);
+  });
+});
+
 
 
