@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
+import { SKILL_PROJECT_DIRS, type SkillExportTarget } from '@pocketagent/protocol';
 import { readSetting, writeSetting, type Db } from '../db/index.js';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
 import { MAX_FILE_READ_BYTES } from './tools.js';
@@ -37,7 +39,7 @@ export class SkillRegistryError extends Error {
   override readonly name = 'SkillRegistryError';
   constructor(
     message: string,
-    readonly code: 'not_found' | 'invalid' | 'forbidden',
+    readonly code: 'not_found' | 'invalid' | 'forbidden' | 'skill_exists',
     readonly statusCode: number,
   ) {
     super(message);
@@ -614,10 +616,9 @@ export class SkillRegistryService {
    */
   discoverImportableSkills(): DiscoveredSkill[] {
     const out: DiscoveredSkill[] = [];
-    const sources: readonly ['claude' | 'agents', string][] = [
-      ['claude', '.claude/skills'],
-      ['agents', '.agents/skills'],
-    ];
+    // PA-55: the same table `exportToProject` writes into, so the two
+    // directions cannot drift on where a coding agent keeps its skills.
+    const sources = Object.entries(SKILL_PROJECT_DIRS) as [SkillExportTarget, string][];
     for (const root of this.workspaces.getRoots()) {
       const projectLabel = path.basename(root) || root;
       for (const [source, relDir] of sources) {
@@ -634,6 +635,181 @@ export class SkillRegistryService {
       }
     }
     return out.sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
+  }
+
+  /**
+   * PA-55: copy one catalog skill into a project tree's coding-agent skill
+   * directory (`SKILL_PROJECT_DIRS`), so a `claude`/`codex` session working
+   * there can load it. This is the reverse of `discoverImportableSkills`.
+   *
+   * Reached only from a human-driven route. No planner tool and no MCP tool
+   * calls it, which is why the approval gate needs no new rule. A model that
+   * wants a skill in a project still has to use `write_file`, gated as ever.
+   * What it *does* add is the first structured path from a Pocket Agent's
+   * scratch space into a directory a coding agent treats as source, so every
+   * rule below is about keeping that path from writing anything else:
+   *
+   * - The source is an id, re-resolved and re-checked against the trusted
+   *   roots, exactly as `loadSkillBody` does.
+   * - The destination is re-resolved through `WorkspaceRegistry`
+   *   (realpath, then containment), and must not be a planner workspace or
+   *   the skills root. A planner workspace is scratch space, not a project.
+   * - The skill directory (`.claude/skills`) is realpath'd after it exists
+   *   and must still be inside the project. Otherwise a `.claude` symlink
+   *   pointing out of the repository redirects the write, which the
+   *   containment check on `projectPath` alone cannot see.
+   * - Only regular files and directories are copied, each file opened with
+   *   `O_NOFOLLOW`. A symlink in a skill's folder is refused, never
+   *   followed: one pointing at `~/.ssh` would otherwise put a key into a
+   *   repository. Size and count are capped.
+   * - Every target is checked before anything is written. A collision is a
+   *   409 with nothing written unless `overwrite` is set. With it, the copy
+   *   is built in a sibling temp directory and swapped in by `rename`, so a
+   *   failure never leaves a half-written skill where an agent will load it.
+   *
+   * Nothing here touches git. The files are untracked changes, and
+   * committing them is the user's decision.
+   */
+  async exportToProject(opts: {
+    skillId: string;
+    projectPath: string;
+    targets: readonly SkillExportTarget[];
+    overwrite?: boolean;
+  }): Promise<{ projectRoot: string; results: { target: SkillExportTarget; path: string; overwrote: boolean }[] }> {
+    const live = this.find(opts.skillId);
+    if (!live) throw new SkillRegistryError(`No such skill: ${opts.skillId}`, 'not_found', 404);
+    const { slug, name } = live.summary;
+    let sourceReal: string;
+    try {
+      sourceReal = await fsp.realpath(live.dirPath);
+    } catch {
+      throw new SkillRegistryError(`"${name}"'s directory no longer exists.`, 'not_found', 404);
+    }
+    if (!this.isTrusted(sourceReal)) {
+      throw new SkillRegistryError(`"${name}"'s directory is no longer inside a trusted root.`, 'forbidden', 403);
+    }
+    const entries = await collectExportEntries(sourceReal, name);
+    if (!entries.some((e) => e.kind === 'file' && e.rel === 'SKILL.md')) {
+      throw new SkillRegistryError(`"${name}" has no SKILL.md.`, 'invalid', 400);
+    }
+    const skillMd = await readNoFollow(path.join(sourceReal, 'SKILL.md'));
+    if (!parseSkillFile(skillMd.toString('utf8'))) {
+      throw new SkillRegistryError(
+        `"${name}"'s SKILL.md is missing or malformed frontmatter, so a coding agent could not load it.`,
+        'invalid',
+        400,
+      );
+    }
+
+    // Throws `WorkspaceError` for anything outside every project folder. The
+    // route maps it the same way every other directory-taking route does.
+    const projectRoot = await this.workspaces.resolveWorkspacePath(opts.projectPath);
+    if (this.plannerWorkspaces.contains(projectRoot) || isContained(this.skillsRoot, projectRoot)) {
+      throw new SkillRegistryError(
+        "That directory is a Pocket Agent's own workspace, not a project. Export into a project folder.",
+        'forbidden',
+        403,
+      );
+    }
+
+    const targets = [...new Set(opts.targets)];
+    if (targets.length === 0) {
+      throw new SkillRegistryError('Pick at least one skill directory to export into.', 'invalid', 400);
+    }
+
+    // Phase 1: check every target, write nothing.
+    const plans: { target: SkillExportTarget; parent: string; dest: string; exists: boolean }[] = [];
+    for (const target of targets) {
+      const parent = path.join(projectRoot, ...SKILL_PROJECT_DIRS[target].split('/'));
+      await this.assertInsideProject(projectRoot, parent);
+      const dest = path.join(parent, slug);
+      const existing = await fsp.lstat(dest).catch(() => null);
+      if (existing?.isSymbolicLink()) {
+        throw new SkillRegistryError(
+          `${dest} is a symbolic link. Refusing to write through it; remove it first.`,
+          'forbidden',
+          403,
+        );
+      }
+      if (existing && opts.overwrite !== true) {
+        throw new SkillRegistryError(
+          `A skill named "${slug}" already exists at ${dest}. Confirm an overwrite to replace it.`,
+          'skill_exists',
+          409,
+        );
+      }
+      plans.push({ target, parent, dest, exists: existing !== null });
+    }
+
+    // Phase 2: write each target through a temp directory.
+    const results: { target: SkillExportTarget; path: string; overwrote: boolean }[] = [];
+    for (const plan of plans) {
+      await fsp.mkdir(plan.parent, { recursive: true });
+      // Re-checked now that the directory exists. A `.claude` that was absent
+      // in phase 1 cannot have been a symlink, but one created in between is
+      // exactly the race this second look closes.
+      const parentReal = await this.assertInsideProject(projectRoot, plan.parent);
+      const dest = path.join(parentReal, slug);
+      const tag = randomBytes(4).toString('hex');
+      const staging = path.join(parentReal, `.${slug}.pa-export-${tag}`);
+      const retired = path.join(parentReal, `.${slug}.pa-replaced-${tag}`);
+      try {
+        await fsp.mkdir(staging);
+        for (const entry of entries) {
+          const out = path.join(staging, entry.rel);
+          if (entry.kind === 'dir') {
+            await fsp.mkdir(out, { recursive: true });
+          } else {
+            const bytes = await readNoFollow(path.join(sourceReal, entry.rel));
+            await fsp.writeFile(out, bytes, { flag: 'wx' });
+          }
+        }
+        const existing = await fsp.lstat(dest).catch(() => null);
+        if (existing?.isSymbolicLink()) {
+          throw new SkillRegistryError(`${dest} became a symbolic link during the export.`, 'forbidden', 403);
+        }
+        if (existing) await fsp.rename(dest, retired);
+        await fsp.rename(staging, dest);
+        if (existing) await fsp.rm(retired, { recursive: true, force: true });
+        results.push({ target: plan.target, path: dest, overwrote: existing !== null });
+      } catch (err) {
+        await fsp.rm(staging, { recursive: true, force: true }).catch(() => undefined);
+        throw err;
+      }
+    }
+
+    this.logger.info(
+      { skill: live.summary.id, projectRoot, targets, overwrote: results.some((r) => r.overwrote) },
+      'Skill exported into a project tree',
+    );
+    return { projectRoot, results };
+  }
+
+  /** Realpath of `dir`'s deepest existing ancestor (or `dir` itself) must be
+      inside `projectRoot`. Returns `dir`'s realpath when it exists, else the
+      lexical path. A symlinked `.claude` that leaves the project fails here. */
+  private async assertInsideProject(projectRoot: string, dir: string): Promise<string> {
+    let probe = dir;
+    let suffix: string[] = [];
+    for (;;) {
+      try {
+        const real = await fsp.realpath(probe);
+        if (!isContained(projectRoot, real)) {
+          throw new SkillRegistryError(
+            `${dir} resolves outside the project (${real}). Refusing to export through a link that leaves it.`,
+            'forbidden',
+            403,
+          );
+        }
+        return suffix.length === 0 ? real : path.join(real, ...suffix);
+      } catch (err) {
+        if (err instanceof SkillRegistryError) throw err;
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT' || probe === projectRoot) throw err;
+        suffix = [path.basename(probe), ...suffix];
+        probe = path.dirname(probe);
+      }
+    }
   }
 
   /**
@@ -694,6 +870,93 @@ export class SkillRegistryService {
       throw new SkillRegistryError(`"${live.summary.name}"'s SKILL.md is no longer valid.`, 'invalid', 500);
     }
     return truncate(parsed.body, MAX_FILE_READ_BYTES);
+  }
+}
+
+/** PA-55: what one export may carry. A skill is instructions plus a few
+    reference files. Anything near these limits is not a skill, and copying it
+    into a repository on one click would be a surprise. */
+export const MAX_SKILL_EXPORT_BYTES = 1024 * 1024;
+export const MAX_SKILL_EXPORT_FILES = 200;
+
+interface ExportEntry {
+  rel: string;
+  kind: 'file' | 'dir';
+}
+
+/** Walks a skill directory with `lstat`, so nothing is followed. Returns
+    directories before their contents, so creating them in order works. */
+async function collectExportEntries(root: string, skillName: string): Promise<ExportEntry[]> {
+  const out: ExportEntry[] = [];
+  let files = 0;
+  let bytes = 0;
+  const walk = async (relDir: string): Promise<void> => {
+    const dirents = await fsp.readdir(path.join(root, relDir), { withFileTypes: true });
+    for (const d of dirents.sort((a, b) => a.name.localeCompare(b.name))) {
+      const rel = relDir ? path.join(relDir, d.name) : d.name;
+      const st = await fsp.lstat(path.join(root, rel));
+      if (st.isSymbolicLink()) {
+        throw new SkillRegistryError(
+          `"${skillName}" contains a symbolic link (${rel}). Links are never exported; replace it with the file itself.`,
+          'invalid',
+          400,
+        );
+      }
+      if (st.isDirectory()) {
+        out.push({ rel, kind: 'dir' });
+        await walk(rel);
+      } else if (st.isFile()) {
+        files += 1;
+        bytes += st.size;
+        if (files > MAX_SKILL_EXPORT_FILES) {
+          throw new SkillRegistryError(
+            `"${skillName}" has more than ${MAX_SKILL_EXPORT_FILES} files, which is more than a skill export carries.`,
+            'invalid',
+            400,
+          );
+        }
+        if (bytes > MAX_SKILL_EXPORT_BYTES) {
+          throw new SkillRegistryError(
+            `"${skillName}" is larger than ${MAX_SKILL_EXPORT_BYTES / 1024 / 1024} MiB, which is more than a skill export carries.`,
+            'invalid',
+            400,
+          );
+        }
+        out.push({ rel, kind: 'file' });
+      } else {
+        throw new SkillRegistryError(
+          `"${skillName}" contains ${rel}, which is not a regular file or directory.`,
+          'invalid',
+          400,
+        );
+      }
+    }
+  };
+  await walk('');
+  return out;
+}
+
+/** Reads a file without following a symlink at the last component, so a file
+    swapped for a link after `collectExportEntries` looked at it is refused
+    rather than read. The size is checked again against what was actually read. */
+async function readNoFollow(file: string): Promise<Buffer> {
+  let handle: fsp.FileHandle;
+  try {
+    handle = await fsp.open(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
+      throw new SkillRegistryError(`${path.basename(file)} became a symbolic link during the export.`, 'invalid', 400);
+    }
+    throw err;
+  }
+  try {
+    const bytes = await handle.readFile();
+    if (bytes.length > MAX_SKILL_EXPORT_BYTES) {
+      throw new SkillRegistryError(`${path.basename(file)} grew past the export size limit.`, 'invalid', 400);
+    }
+    return bytes;
+  } finally {
+    await handle.close();
   }
 }
 

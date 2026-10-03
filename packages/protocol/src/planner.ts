@@ -842,6 +842,22 @@ export const SetPlannerAgentSkillRequest = z.object({
 export type SetPlannerAgentSkillRequest = z.infer<typeof SetPlannerAgentSkillRequest>;
 
 /**
+ * PA-55: the coding-agent skill directory conventions, as one table both
+ * directions read. `discoverImportableSkills` scans these to *import* a
+ * project's skill into the Pocket Agent catalog, and `exportToProject` writes
+ * into them for the reverse direction. One table, so the two directions cannot
+ * disagree about where a coding agent looks: `claude` is Claude Code's own
+ * layout, and `agents` is the newer cross-tool layout Codex and others use.
+ */
+export const SkillExportTarget = z.enum(['claude', 'agents']);
+export type SkillExportTarget = z.infer<typeof SkillExportTarget>;
+
+export const SKILL_PROJECT_DIRS: Readonly<Record<SkillExportTarget, string>> = Object.freeze({
+  claude: '.claude/skills',
+  agents: '.agents/skills',
+});
+
+/**
  * PA-38 round 2: one skill found under a *project* workspace's own
  * `.claude/skills/` or `.agents/skills/` (the coding-agent conventions —
  * Claude Code's own, and the newer cross-tool layout Codex and others use)
@@ -856,13 +872,55 @@ export const DiscoveredSkill = z.object({
   path: z.string(),
   name: z.string(),
   description: z.string(),
-  source: z.enum(['claude', 'agents']),
+  source: SkillExportTarget,
   projectLabel: z.string(),
 });
 export type DiscoveredSkill = z.infer<typeof DiscoveredSkill>;
 
 export const DiscoverablePlannerSkillsResponse = z.object({ skills: z.array(DiscoveredSkill) });
 export type DiscoverablePlannerSkillsResponse = z.infer<typeof DiscoverablePlannerSkillsResponse>;
+
+/**
+ * PA-55: copy one catalog skill (global or one agent's own) into a project
+ * tree, so a `claude`/`codex` session working there can load it. The skill
+ * is named by id, as `promote` names it, and never by a path. `projectPath`
+ * is re-resolved through workspace containment on the server. `targets`
+ * lets the user pick per export. Both are on by default in the dialog,
+ * because the reviewer asked for the user to choose rather than for this
+ * server to pick one convention.
+ *
+ * Only a human-driven route reaches this. No planner tool and no MCP tool
+ * can export a skill, which is why the approval gate needs no new rule (see
+ * `CLAUDE.md`'s invariants).
+ */
+export const ExportPlannerSkillRequest = z.object({
+  projectPath: z.string().min(1).max(4096),
+  targets: z
+    .array(SkillExportTarget)
+    .min(1, { message: 'Pick at least one skill directory to export into.' })
+    .max(2),
+  /** Replace a skill already at the destination. Absent means a 409 with
+      nothing written, the same posture `ImportPlannerSkillRequest` takes. */
+  overwrite: z.boolean().optional(),
+});
+export type ExportPlannerSkillRequest = z.infer<typeof ExportPlannerSkillRequest>;
+
+export const ExportedSkillResult = z.object({
+  target: SkillExportTarget,
+  /** The absolute directory the skill now lives at. */
+  path: z.string(),
+  overwrote: z.boolean(),
+});
+export type ExportedSkillResult = z.infer<typeof ExportedSkillResult>;
+
+export const ExportPlannerSkillResponse = z.object({
+  results: z.array(ExportedSkillResult),
+  /** A session is mid-turn in this working tree right now. The export is
+      not refused for it (it is a few files a human chose to write), but it
+      is disclosed: that session sees the skill on its next scan, not mid-turn. */
+  busy: z.boolean(),
+});
+export type ExportPlannerSkillResponse = z.infer<typeof ExportPlannerSkillResponse>;
 
 // ---- Pocket Agents as a selectable "agent" ----------------------------------
 

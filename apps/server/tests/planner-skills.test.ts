@@ -746,3 +746,193 @@ describe('importing a global skill from content', () => {
     }
   });
 });
+
+/**
+ * PA-55: the reverse of discovery. A catalog skill is copied *into* a project
+ * tree's `.claude/skills/` and/or `.agents/skills/`. Every test below that
+ * refuses an export also asserts that nothing was written, because this is
+ * the first structured path from Pocket Agent scratch space into a project's
+ * source tree, and a refusal that half-wrote would defeat it.
+ */
+describe('exporting a skill into a project (PA-55)', () => {
+  let t: TestApp;
+  const extraDirs: string[] = [];
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (t) await t.cleanup();
+    for (const d of extraDirs.splice(0)) await fs.rm(d, { recursive: true, force: true });
+  });
+
+  const exportReq = (id: string, body: unknown) =>
+    t.app.inject({
+      method: 'POST',
+      url: `/api/planner/skills/${encodeURIComponent(id)}/export`,
+      headers: authHeaders(t.cookie),
+      payload: body as object,
+    });
+
+  async function agentSkill(slug = 'deploy-notes'): Promise<{ id: string; dir: string }> {
+    const ws = t.context.plannerWorkspaces.getDefault()!;
+    const dir = await writeSkill(path.join(ws.path, '.skills'), slug, {
+      name: 'Deploy Notes',
+      description: 'Use when writing deploy notes.',
+    });
+    t.context.skills.refresh();
+    return { id: `${ws.id}:${slug}`, dir };
+  }
+
+  const exists = (p: string) => fs.lstat(p).then(() => true, () => false);
+
+  it("exports an agent's own skill, auxiliary files included, into .claude/skills", async () => {
+    t = await createTestApp();
+    const { id, dir } = await agentSkill();
+    await fs.mkdir(path.join(dir, 'reference'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'reference', 'api.md'), '# API\nbytes é\n');
+
+    const res = await exportReq(id, { projectPath: t.projectDir, targets: ['claude'] });
+    expect(res.statusCode).toBe(200);
+    const projectReal = await fs.realpath(t.projectDir);
+    const dest = path.join(projectReal, '.claude', 'skills', 'deploy-notes');
+    expect(res.json()).toEqual({ results: [{ target: 'claude', path: dest, overwrote: false }], busy: false });
+    expect(await fs.readFile(path.join(dest, 'SKILL.md'), 'utf8')).toBe(
+      await fs.readFile(path.join(dir, 'SKILL.md'), 'utf8'),
+    );
+    expect(await fs.readFile(path.join(dest, 'reference', 'api.md'), 'utf8')).toBe('# API\nbytes é\n');
+    expect(await exists(path.join(projectReal, '.agents'))).toBe(false);
+    // No staging directory is left behind.
+    expect((await fs.readdir(path.join(projectReal, '.claude', 'skills'))).sort()).toEqual(['deploy-notes']);
+  });
+
+  it('exports a global skill into both directories at once, and the import scan then finds it', async () => {
+    t = await createTestApp();
+    // The import scan reads each project *folder's* own skill directories, so
+    // export into the folder itself rather than a directory below it.
+    const res = await exportReq('global:skill-creator', {
+      projectPath: t.workspaceRoot,
+      targets: ['claude', 'agents'],
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().results.map((r: { target: string }) => r.target)).toEqual(['claude', 'agents']);
+    const discovered = t.context.skills.discoverImportableSkills().filter((d) => d.name === 'skill-creator');
+    expect(discovered.map((d) => d.source).sort()).toEqual(['agents', 'claude']);
+  });
+
+  it('refuses a collision without overwrite and writes to no target', async () => {
+    t = await createTestApp();
+    const { id } = await agentSkill();
+    const projectReal = await fs.realpath(t.projectDir);
+    const existing = path.join(projectReal, '.agents', 'skills', 'deploy-notes');
+    await fs.mkdir(existing, { recursive: true });
+    await fs.writeFile(path.join(existing, 'SKILL.md'), 'hand-written');
+
+    const res = await exportReq(id, { projectPath: t.projectDir, targets: ['claude', 'agents'] });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('skill_exists');
+    // `.claude` comes first in the request, and was still not written.
+    expect(await exists(path.join(projectReal, '.claude'))).toBe(false);
+    expect(await fs.readFile(path.join(existing, 'SKILL.md'), 'utf8')).toBe('hand-written');
+  });
+
+  it('replaces the whole directory with overwrite, leaving no stale file', async () => {
+    t = await createTestApp();
+    const { id } = await agentSkill();
+    const projectReal = await fs.realpath(t.projectDir);
+    const existing = path.join(projectReal, '.claude', 'skills', 'deploy-notes');
+    await fs.mkdir(existing, { recursive: true });
+    await fs.writeFile(path.join(existing, 'stale.md'), 'old');
+
+    const res = await exportReq(id, { projectPath: t.projectDir, targets: ['claude'], overwrite: true });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().results[0].overwrote).toBe(true);
+    expect((await fs.readdir(existing)).sort()).toEqual(['SKILL.md']);
+    expect((await fs.readdir(path.dirname(existing))).sort()).toEqual(['deploy-notes']);
+  });
+
+  it('refuses a destination outside every project folder', async () => {
+    t = await createTestApp();
+    const { id } = await agentSkill();
+    const outside = await fs.mkdtemp('/tmp/pa-55-outside-');
+    extraDirs.push(outside);
+    const res = await exportReq(id, { projectPath: outside, targets: ['claude'] });
+    expect(res.statusCode).toBe(403);
+    expect(await fs.readdir(outside)).toEqual([]);
+  });
+
+  it("refuses a Pocket Agent's own workspace as the destination, even when it sits inside a project folder", async () => {
+    t = await createTestApp();
+    const { id } = await agentSkill();
+    const inside = path.join(t.projectDir, 'agent-scratch');
+    await fs.mkdir(inside);
+    await t.context.plannerWorkspaces.create(t.context.plannerWorkspacesRoot, 'Scratch In Project', { path: inside });
+    const res = await exportReq(id, { projectPath: inside, targets: ['claude'] });
+    expect(res.statusCode).toBe(403);
+    expect(await exists(path.join(inside, '.claude'))).toBe(false);
+  });
+
+  it('refuses to write through a .claude symlink that leaves the project', async () => {
+    t = await createTestApp();
+    const { id } = await agentSkill();
+    const elsewhere = await fs.mkdtemp('/tmp/pa-55-elsewhere-');
+    extraDirs.push(elsewhere);
+    await fs.symlink(elsewhere, path.join(t.projectDir, '.claude'));
+    const res = await exportReq(id, { projectPath: t.projectDir, targets: ['claude'] });
+    expect(res.statusCode).toBe(403);
+    expect(await fs.readdir(elsewhere)).toEqual([]);
+  });
+
+  it('refuses a skill containing a symlink, naming it, and never follows it', async () => {
+    t = await createTestApp();
+    const { id, dir } = await agentSkill();
+    const secret = await fs.mkdtemp('/tmp/pa-55-secret-');
+    extraDirs.push(secret);
+    await fs.writeFile(path.join(secret, 'id_rsa'), 'PRIVATE');
+    await fs.symlink(path.join(secret, 'id_rsa'), path.join(dir, 'key'));
+
+    const res = await exportReq(id, { projectPath: t.projectDir, targets: ['claude'] });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toContain('key');
+    expect(await exists(path.join(t.projectDir, '.claude'))).toBe(false);
+  });
+
+  it('refuses a skill over the size cap', async () => {
+    t = await createTestApp();
+    const { id, dir } = await agentSkill();
+    await fs.writeFile(path.join(dir, 'huge.bin'), Buffer.alloc(1024 * 1024 + 1));
+    const res = await exportReq(id, { projectPath: t.projectDir, targets: ['claude'] });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toContain('MiB');
+    expect(await exists(path.join(t.projectDir, '.claude'))).toBe(false);
+  });
+
+  it('refuses a SKILL.md a coding agent could not load', async () => {
+    t = await createTestApp();
+    const { id, dir } = await agentSkill();
+    await fs.writeFile(path.join(dir, 'SKILL.md'), 'no frontmatter any more\n');
+    const res = await exportReq(id, { projectPath: t.projectDir, targets: ['claude'] });
+    expect(res.statusCode).toBe(400);
+    expect(await exists(path.join(t.projectDir, '.claude'))).toBe(false);
+  });
+
+  it('answers 404 for an unknown skill and 400 for an empty target list', async () => {
+    t = await createTestApp();
+    expect((await exportReq('global:nope', { projectPath: t.projectDir, targets: ['claude'] })).statusCode).toBe(404);
+    expect((await exportReq('global:skill-creator', { projectPath: t.projectDir, targets: [] })).statusCode).toBe(400);
+  });
+
+  it('exports into a mid-turn tree but says so', async () => {
+    t = await createTestApp();
+    const { id } = await agentSkill();
+    const { treeRootOf } = await import('../src/git/worktree-paths.js');
+    vi.spyOn(t.context.sessions, 'busyTreeRoots').mockReturnValue([treeRootOf(await fs.realpath(t.projectDir))]);
+    const res = await exportReq(id, { projectPath: t.projectDir, targets: ['agents'] });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().busy).toBe(true);
+  });
+
+  it('is reachable only by a human: no planner tool and no MCP tool exports a skill', async () => {
+    const { PLANNER_TOOLS } = await import('../src/planner/tools.js');
+    const { MCP_TOOLS } = await import('../src/mcp-server/tools.js');
+    const names = [...PLANNER_TOOLS.map((tool) => tool.name), ...MCP_TOOLS.map((tool) => tool.name)];
+    expect(names.filter((n) => /export/i.test(n) && /skill/i.test(n))).toEqual([]);
+  });
+});

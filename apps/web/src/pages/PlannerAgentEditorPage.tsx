@@ -16,6 +16,7 @@ import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { Icon } from '../components/Icon.js';
 import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
+import { SkillExportDialog } from '../components/SkillExportDialog.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { getToolShortDescription, groupToolsByCategory } from '../agent/planner-tools-metadata.js';
@@ -52,6 +53,7 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
   const [models, setModels] = useState<PlannerModel[]>([]);
   const [tools, setTools] = useState<PlannerAgentToolInfo[] | null>(null);
   const [skills, setSkills] = useState<PlannerAgentSkillInfo[] | null>(null);
+  const [exportingSkill, setExportingSkill] = useState<PlannerAgentSkillInfo | null>(null);
   const [mcpRegistries, setMcpRegistries] = useState<PlannerAgentMcpRegistryInfo[] | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -582,8 +584,19 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
                 <br />
                 <span className="planner-row-meta">{s.description}</span>
               </span>
-              {s.source !== 'global' && (
-                <div className="planner-row-actions">
+              <div className="planner-row-actions">
+                {/* PA-55: the reverse of importing a project's skill, for any
+                    skill this agent can see. A human action only. */}
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={busy}
+                  onClick={() => setExportingSkill(s)}
+                  title="Copy this skill into a project, so a coding-agent session there can load it."
+                >
+                  Export to project…
+                </button>
+                {s.source !== 'global' && (
                   <button
                     type="button"
                     className="planner-btn"
@@ -593,8 +606,8 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
                   >
                     Promote to global
                   </button>
-                </div>
-              )}
+                )}
+              </div>
             </label>
           ))
         )}
@@ -764,6 +777,14 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
           onClose={() => setShowDirectoryPicker(false)}
           onPick={pickDirectory}
           onApiError={onApiError}
+        />
+      )}
+
+      {exportingSkill && (
+        <SkillExportDialog
+          skill={exportingSkill}
+          onApiError={onApiError}
+          onClose={() => setExportingSkill(null)}
         />
       )}
 

@@ -12,6 +12,7 @@ import {
   UpdateGeminiLiveSettingsRequest,
   LIST_MCP_TOOLS_NAME,
   PlannerMemoryTier,
+  ExportPlannerSkillRequest,
   ImportPlannerSkillRequest,
   RegisterPlannerSkillRequest,
   SetPlannerAgentMcpRegistryRequest,
@@ -41,6 +42,7 @@ import {
   type PlannerChatHistoryResponse,
   type PlannerChatListResponse,
   type DiscoverablePlannerSkillsResponse,
+  type ExportPlannerSkillResponse,
   type PlannerContextPreviewResponse,
   type PlannerEmbeddingApiKeyRevealResponse,
   type PlannerMemoryListResponse,
@@ -65,6 +67,8 @@ import { PlannerLlmClient, PlannerLlmError } from '../planner/llm-client.js';
 import { PLANNER_TOOLS, postJsonToIntegration } from '../planner/tools.js';
 import { SkillRegistryError, type SkillSummary } from '../planner/skills.js';
 import { auditConfigChange } from './shared.js';
+import { WorkspaceError } from '../workspaces/index.js';
+import { treeRootOf } from '../git/worktree-paths.js';
 import { createLiveSttClient } from '../voice/live-stt-client.js';
 import { SpokenTextPipeline } from '../voice/spoken-text-pipeline.js';
 import { TurnTtsPump } from '../voice/turn-tts-pump.js';
@@ -1034,6 +1038,52 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       const globalDisabled = readGlobalDisabledSkillNames(app.pocket.db);
       return reply.code(200).send(toGlobalSkillInfo(summary, globalDisabled));
     } catch (err) {
+      return mapSkillError(reply, err);
+    }
+  });
+
+  /**
+   * PA-55: copy one catalog skill into a project's `.claude/skills/` and/or
+   * `.agents/skills/`, the reverse of the discover-and-import pair below.
+   * Every containment, symlink and overwrite rule lives in
+   * `SkillRegistryService.exportToProject`. This route only maps errors,
+   * reports whether a session is mid-turn in that tree, and writes the
+   * audit line. It never logs the skill's body.
+   *
+   * Deliberately absent from the planner tool catalog and from `/mcp`: an
+   * export is a human's decision, which is why the approval gate needs no
+   * new rule for it.
+   */
+  app.post('/api/planner/skills/:id/export', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = ExportPlannerSkillRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    try {
+      const { projectRoot, results } = await app.pocket.skills.exportToProject({
+        skillId: id,
+        projectPath: parsed.data.projectPath,
+        targets: parsed.data.targets,
+        overwrite: parsed.data.overwrite,
+      });
+      auditConfigChange(request, 'skill exported into a project tree', {
+        skill: id,
+        projectPath: projectRoot,
+        targets: results.map((r) => r.target),
+        overwrote: results.some((r) => r.overwrote),
+      });
+      const tree = treeRootOf(projectRoot);
+      const response: ExportPlannerSkillResponse = {
+        results,
+        busy: app.pocket.sessions.busyTreeRoots().includes(tree),
+      };
+      return reply.code(200).send(response);
+    } catch (err) {
+      if (err instanceof WorkspaceError) {
+        const status = err.code === 'forbidden' ? 403 : err.code === 'not_found' ? 404 : 400;
+        return reply.code(status).send({ error: { code: err.code, message: err.message } });
+      }
       return mapSkillError(reply, err);
     }
   });

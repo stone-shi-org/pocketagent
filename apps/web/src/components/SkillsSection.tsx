@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { DiscoveredSkill, PlannerSkillInfo } from '@pocketagent/protocol';
+import { SKILL_PROJECT_DIRS, type DiscoveredSkill, type PlannerSkillInfo } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { Icon } from './Icon.js';
 import { PlannerDirectoryPicker } from './PlannerDirectoryPicker.js';
+import { SkillExportDialog } from './SkillExportDialog.js';
 import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
@@ -38,6 +39,7 @@ export function SkillsSection({ onApiError, onChanged }: Props): JSX.Element {
   const [showPicker, setShowPicker] = useState(false);
   const [pendingPath, setPendingPath] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState<PlannerSkillInfo | null>(null);
+  const [exporting, setExporting] = useState<PlannerSkillInfo | null>(null);
   // PA-38 round 2: "You can have a UI, globally scan and user can choose to
   // import" — a separate list, loaded independently of the global catalog
   // above, since it is opt-in visibility rather than part of it (see
@@ -187,6 +189,15 @@ export function SkillsSection({ onApiError, onChanged }: Props): JSX.Element {
             <div className="planner-row-actions">
               <button
                 type="button"
+                className="planner-btn"
+                disabled={busy}
+                onClick={() => setExporting(s)}
+                title="Copy this skill into a project, so a coding-agent session there can load it."
+              >
+                Export to project…
+              </button>
+              <button
+                type="button"
                 className="planner-btn danger"
                 disabled={busy}
                 onClick={() => setConfirmingDelete(s)}
@@ -230,6 +241,18 @@ export function SkillsSection({ onApiError, onChanged }: Props): JSX.Element {
         />
       )}
 
+      {exporting && (
+        <SkillExportDialog
+          skill={exporting}
+          onApiError={onApiError}
+          onClose={() => {
+            setExporting(null);
+            // An export into a project folder shows up in the discovery scan below.
+            void loadDiscovered();
+          }}
+        />
+      )}
+
       {confirmingDelete && (
         <ConfirmDialog
           title={`Delete ${confirmingDelete.name}?`}
@@ -266,7 +289,7 @@ export function SkillsSection({ onApiError, onChanged }: Props): JSX.Element {
               <span>
                 <strong>{s.name}</strong>{' '}
                 <span className="planner-row-meta">
-                  ({s.projectLabel} · {s.source === 'claude' ? '.claude/skills' : '.agents/skills'})
+                  ({s.projectLabel} · {SKILL_PROJECT_DIRS[s.source]})
                 </span>
                 <br />
                 <span className="planner-row-meta">{s.description}</span>

@@ -105,6 +105,8 @@ import type {
   PlannerSkillDetailResponse,
   PlannerSkillInfo,
   RegisterPlannerSkillRequest,
+  ExportPlannerSkillRequest,
+  ExportPlannerSkillResponse,
   SetPlannerSkillEnabledRequest,
   PlannerAgentSkillsResponse,
   SetPlannerAgentSkillRequest,
@@ -1214,6 +1216,14 @@ export function createApiClient(endpoint: HostEndpoint) {
 
     promotePlannerSkill: (id: string) =>
       request<PlannerSkillInfo>(`/api/planner/skills/${encodeURIComponent(id)}/promote`, { method: 'POST' }),
+
+    /** PA-55: copy a catalog skill into a project's coding-agent skill
+        directories. A 409 (`skill_exists`) means nothing was written. */
+    exportPlannerSkill: (id: string, body: ExportPlannerSkillRequest) =>
+      request<ExportPlannerSkillResponse>(`/api/planner/skills/${encodeURIComponent(id)}/export`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
 
     listDiscoverablePlannerSkills: () =>
       request<DiscoverablePlannerSkillsResponse>('/api/planner/skills/discoverable'),

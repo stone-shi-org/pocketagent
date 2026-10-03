@@ -933,6 +933,34 @@ called once from `app.ts`) rather than through the constructor, because `app.ts`
 `webhooks` after `plannerChats` (each of them needs `plannerChats` itself, to drive a Pocket
 Agent run) — passing them the other way at construction time would be a genuine cycle.
 
+**A skill crosses into a project only when a human exports it** (PA-55). PA-38 gave Pocket
+Agent its own skills (`planner/skills.ts`), and round 2 added a one-way *import* from a project's
+`.claude/skills/` or `.agents/skills/`. `POST /api/planner/skills/:id/export`
+(`SkillRegistryService.exportToProject`) is the reverse direction. It copies one catalog skill,
+global or one agent's own, into a project so a `claude`/`codex` session there can load it. Both
+directions read one table, `SKILL_PROJECT_DIRS` (`packages/protocol/src/planner.ts`), so they
+cannot disagree about where a coding agent looks. The user picks the target directories for each
+export, and both are on by default. This is the first structured path from Pocket Agent scratch
+space into a tree a coding agent treats as *source*, so its rules are about writing nothing else:
+- The skill is named by id and re-checked against the trusted roots, as `loadSkillBody` does.
+- The destination goes through `resolveWorkspacePath`, and a planner workspace is refused even
+  when it sits inside a project folder.
+- `.claude/skills` is realpath'd after it exists and must still be inside the project, because a
+  `.claude` symlink out of the repository passes the containment check on the project path.
+- Only regular files and directories are copied (each file opened `O_NOFOLLOW`). A symlink in
+  the skill's folder is refused, never followed, and the copy is capped at 1 MiB / 200 files.
+- Every target is checked before anything is written. A collision is a 409 with nothing written,
+  and a confirmed overwrite is built in a sibling temp directory and swapped in by `rename`.
+- Nothing touches git: the files are untracked changes, and the dialog says so.
+
+**The approval gate needed no new rule, and that is the design rather than an omission.**
+There is no `export_skill` planner tool and no `/mcp` tool. The click is the decision, and a
+model that wants a skill in a project still has to use `write_file`, gated as ever. A test pins
+that neither catalog grows one. The export is not routed through `RunQueue` (a few files a
+person chose to write), but a mid-turn session in that tree is reported (`busy`) rather than
+hidden. Known limitation: an export is a copy that then diverges, like a PA-70 template, so later
+edits to the Pocket Agent's copy are not synced.
+
 **A turn is streamed at both levels, not request/response.** `PlannerChatService.sendMessage`/
 `resolveApproval` (`planner/chats.ts`) are async generators that `yield` one `AgentEvent` at a
 time as each step of the turn happens; `routes/planner.ts`'s `streamPlannerEvents` drains one
@@ -2590,6 +2618,12 @@ These are load-bearing. Several were bugs first.
   only when `request.raw` is not an `http.IncomingMessage`; a real request carrying the header
   falls through to ordinary authentication (asserted). The principal it resolves to is the MCP
   client's, so audit lines say `mcp:<label>`.
+- **A Pocket Agent's skill reaches a project tree only by a human's explicit export** (PA-55).
+  No planner tool and no MCP tool exports a skill (asserted in `planner-skills.test.ts`), so the
+  model's only way into a project is still `write_file` behind the approval gate. The export
+  route copies regular files only, never through a symlink at either end. It writes nothing on a
+  collision without a confirmed overwrite, and its audit line carries ids and paths, never the
+  skill's body.
 - **An mDNS advertisement carries nothing `/health` does not, and discovery never registers
   anything** (PA-110). `advertisedTxt` is a version, a protocol range, a role, a scheme and a
   TXT format number — `/health`'s budget — and `mdns-advertise.test.ts` asserts the exact key
