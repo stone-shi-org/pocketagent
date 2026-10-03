@@ -73,6 +73,9 @@ const server = spawn(process.execPath, ['apps/server/dist/server.js'], {
     POCKETAGENT_BACKEND: 'direct',
     POCKETAGENT_COOKIE_SECURE: 'false',
     POCKETAGENT_ADOPT_TMUX_SOCKET: '',
+    // An MCP registry's bearer token is encrypted at rest; the client step
+    // below registers this server as its own registry.
+    POCKETAGENT_SETTINGS_ENC_KEY: crypto.randomBytes(32).toString('base64'),
   },
   stdio: ['ignore', 'ignore', 'pipe'],
 });
@@ -254,6 +257,44 @@ try {
       bad('claude -p with --mcp-config failed', String(err.message).split('\n')[0]);
     }
   }
+
+  heading("PocketAgent's own MCP client negotiates too");
+  // A Pocket Agent MCP registry pointing at this very server: its client must
+  // land on 2026-07-28 (the server is dual-era) and remember it on the row.
+  const selfToken = await (
+    await fetch(`${BASE}/api/mcp/tokens`, {
+      method: 'POST',
+      headers: { cookie, origin: BASE, 'content-type': 'application/json' },
+      body: JSON.stringify({ label: 'self-registry', scopes: ['read'] }),
+    })
+  ).json();
+  const registry = await (
+    await fetch(`${BASE}/api/mcp-registries`, {
+      method: 'POST',
+      headers: { cookie, origin: BASE, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'This PocketAgent',
+        transport: 'streamable_http',
+        url: `${BASE}/mcp`,
+        authKind: 'bearer',
+        bearerToken: selfToken.token,
+      }),
+    })
+  ).json();
+  const tested = await (
+    await fetch(`${BASE}/api/mcp-registries/${registry.id ?? registry.registry?.id}/test`, {
+      method: 'POST',
+      headers: { cookie, origin: BASE },
+    })
+  ).json();
+  check(tested.ok === true, 'the registry connects', tested.message);
+  const listed = await (await fetch(`${BASE}/api/mcp-registries`, { headers: { cookie } })).json();
+  const row = (listed.registries ?? []).find((r) => r.name === 'This PocketAgent');
+  check(
+    row?.protocolEra === 'modern' && row?.protocolVersion === '2026-07-28',
+    'the client negotiated 2026-07-28 and recorded it on the registry',
+    `${row?.protocolEra} ${row?.protocolVersion}`,
+  );
 
   heading('Revocation takes effect on the next call');
   const del = await fetch(`${BASE}/api/mcp/tokens/${minted.client.id}`, {

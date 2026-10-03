@@ -1922,8 +1922,9 @@ an unsupported version is a `-32022` error naming the supported ones (the client
 change notifications moved to a `subscriptions/listen` POST stream. Every earlier revision
 ("legacy", 2025-11-25 back to 2024-10-07) negotiates once in `initialize` and holds a session.
 Claude Code and most clients in the field are still legacy, so the server serves both, on the
-**v2 SDK** (`@modelcontextprotocol/server`; v1 `@modelcontextprotocol/sdk` stays only for the
-Pocket Agent's outbound MCP *client*). The routing decision is the SDK's own classifier
+**v2 SDK** (`@modelcontextprotocol/server`, and `@modelcontextprotocol/client` for the outbound
+side below; v1 `@modelcontextprotocol/sdk` remains a dependency only for test fixtures, the legacy client in `pnpm demo:mcp` and the
+zod→JSON-Schema helper). The routing decision is the SDK's own classifier
 (`isLegacyRequest` — the exact code `createMcpHandler` runs), never a second copy here. Modern
 requests go to a `createMcpHandler(..., { legacy: 'reject' })` held **per principal**, which is
 what lets a revocation close that principal's listen streams and nobody else's. Legacy requests
@@ -1980,9 +1981,31 @@ Nothing about a tool call's arguments or results is logged — prompts and trans
 terminal I/O. Each call logs its name, principal, era, duration and outcome. Known limitations: no
 OAuth (clients send a static bearer header, which Claude Code and Codex both accept); a Hub-level
 `/mcp` aggregating every host is a follow-up; a coding agent started over MCP that is itself
-configured to call `/mcp` sends no depth, so only the caps bound that loop; and the Pocket Agent's
-outbound MCP client is still legacy-only (v1), since `auto` negotiation would add a
-`server/discover` probe to every call on a client that connects once per call.
+configured to call `/mcp` sends no depth, so only the caps bound that loop.
+
+**The outbound client negotiates too, and caches the answer** (`planner/mcp/client.ts`,
+`McpRegistryService`). A Pocket Agent's MCP registries use the v2 client with
+`versionNegotiation: 'auto'` on `streamable_http`: a definitive modern `server/discover` answer
+selects 2026-07-28, anything else falls back to `initialize`, byte-equivalent to the old v1
+client, so no server that worked before stops working. `sse` is the deprecated HTTP+SSE
+transport, legacy by definition, and never probes. Because `McpClient` is one connection per tool
+call, probing every time would put a round trip in front of every call; the spec says a client
+SHOULD cache the era per server, so the verdict is stored on the registry row
+(`protocol_era`/`protocol_version`/`protocol_discover_json`/`protocol_checked_at`) and handed back
+as the SDK's `prior` — a cached modern verdict adopts the stored `DiscoverResult` with zero round
+trips, a cached legacy one skips the probe. The cache is a cache: Test/Refresh always re-probe; a
+URL, transport or auth change clears it; a modern verdict that fails to connect is dropped and the
+connection retried on a fresh probe (connecting runs no tool, so that is always safe); and a
+legacy verdict expires after `LEGACY_ERA_VERDICT_TTL_MS` (a day), because — the SDK's own warning —
+a stale modern verdict fails loudly but a stale legacy one succeeds silently forever, so an
+upgraded server would otherwise never be noticed. A `tools/call` that fails under a cached modern
+verdict clears it, and is retried **only** when the error proves the server refused the protocol
+(`ERA_REJECTION`: `-32022`, method not found, or the 400 `Bad Request: Server not initialized` a
+real 2025-era SDK server answers a handshake-less request with) — any other failure may have
+happened after the tool ran, and a mutating tool must never run twice because a retry guessed.
+The negotiated revision is shown on the registry row in Settings. `mcp-client-negotiation.test.ts`
+drives both directions against real servers: this app's own dual-era `/mcp`, and the v1 test
+server in `helpers-mcp-server.ts`, a genuine 2025-era server.
 
 ### Hub Web Push fan-out (PA-73)
 

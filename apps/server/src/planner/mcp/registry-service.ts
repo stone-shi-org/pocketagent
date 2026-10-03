@@ -13,7 +13,13 @@ import {
 import type { Db } from '../../db/index.js';
 import { SETTINGS_ENC_KEY_VAR, decryptSecret, encryptSecret } from '../../crypto/secret-box.js';
 import { readAgentDisabledMcpRegistries, readPlannerSettings } from '../store.js';
-import { McpClient, McpClientError, type McpConnectionConfig, type McpToolDescriptor } from './client.js';
+import {
+  McpClient,
+  McpClientError,
+  type McpConnectionConfig,
+  type McpEraVerdict,
+  type McpToolDescriptor,
+} from './client.js';
 
 export class McpRegistryError extends Error {
   override readonly name = 'McpRegistryError';
@@ -44,7 +50,38 @@ interface Row {
   updated_at: number;
   description: string | null;
   reported_instructions: string | null;
+  /** PA-118: the cached era verdict — see `recordEraVerdict`. */
+  protocol_era?: string | null;
+  protocol_version?: string | null;
+  protocol_discover_json?: string | null;
+  protocol_checked_at?: number | null;
 }
+
+/**
+ * PA-118: how long a cached *legacy* verdict is trusted before the next
+ * connection probes again. Asymmetric on purpose, following the SDK's own
+ * guidance: a stale modern verdict fails loudly at its first request (and is
+ * then cleared and re-probed), but a stale legacy one succeeds silently
+ * forever — an upgraded server still answers `initialize` — so without an
+ * expiry a registry would never notice its server learned 2026-07-28.
+ */
+export const LEGACY_ERA_VERDICT_TTL_MS = 24 * 60 * 60_000;
+
+/**
+ * Errors that mean the server *rejected the protocol* rather than ran the
+ * call: an unsupported-version answer, an unknown method, or an HTTP status a
+ * pre-2026 server gives a request shape it does not understand. Only these
+ * justify retrying a `tools/call` after dropping a cached modern verdict — any
+ * other failure might have happened after the tool ran, and a mutating tool
+ * must never be executed twice because a retry guessed.
+ */
+//
+// "Bad Request: Server not initialized" is what a real 2025-era SDK server
+// answers a modern (handshake-less) request with — HTTP 400 with no modern
+// error body, which is precisely the spec's own signal for "this is a legacy
+// server", and a request it refused before doing anything.
+const ERA_REJECTION =
+  /-32022|unsupported protocol version|-32601|method not found|bad request|not initialized|\b(400|404|405|406|415)\b/i;
 
 /** One registry's live, in-memory state: the row (kept in step with the
     database on every mutation, `PlannerWorkspaceRegistry`-style, rather than
@@ -103,7 +140,7 @@ export interface McpRegistryServiceOptions {
   /** Injected in tests so clock can be advanced deterministically. Defaults to Date.now. */
   now?: () => number;
   /** Injected in tests to mock or supply fake transports. Defaults to new McpClient(config). */
-  clientFactory?: (config: McpConnectionConfig) => McpClient;
+  clientFactory?: (config: McpConnectionConfig, opts: { prior: McpEraVerdict | null }) => McpClient;
 }
 
 /**
@@ -125,7 +162,7 @@ export class McpRegistryService {
   private readonly encKey: Buffer | undefined;
   private readonly logger: FastifyBaseLogger;
   private readonly now: () => number;
-  private readonly clientFactory?: (config: McpConnectionConfig) => McpClient;
+  private readonly clientFactory?: (config: McpConnectionConfig, opts: { prior: McpEraVerdict | null }) => McpClient;
   private readonly live = new Map<string, LiveRegistry>();
 
   /**
@@ -196,10 +233,98 @@ export class McpRegistryService {
           });
   }
 
-  private createClient(row: Row): McpClient {
+  private createClient(row: Row, prior: McpEraVerdict | null = null): McpClient {
     const config = this.connectionConfig(row);
-    if (this.clientFactory) return this.clientFactory(config);
-    return new McpClient(config);
+    if (this.clientFactory) return this.clientFactory(config, { prior });
+    return new McpClient(config, { prior });
+  }
+
+  /**
+   * Connect, reusing the cached era verdict unless `probe` is set. A cached
+   * verdict that fails to connect is dropped and the connection retried once
+   * with a fresh probe — that is the "re-probe if the cached assumption later
+   * fails" the spec asks for, and connecting runs no tool, so retrying it is
+   * always safe. Whatever era the connection ends up in is recorded.
+   */
+  private async connectClient(live: LiveRegistry, probe: boolean): Promise<McpClient> {
+    const prior = probe ? null : this.cachedVerdict(live.row);
+    let client = this.createClient(live.row, prior);
+    try {
+      await client.connect();
+    } catch (err) {
+      await client.close();
+      if (!client.usedPriorVerdict) throw err;
+      this.clearEraVerdict(live);
+      client = this.createClient(live.row, null);
+      await client.connect();
+    }
+    this.recordEraVerdict(live, client.getEraVerdict());
+    return client;
+  }
+
+  /** The stored verdict, or `null` when there is none or it has expired. */
+  private cachedVerdict(row: Row): McpEraVerdict | null {
+    if (row.protocol_era !== 'legacy' && row.protocol_era !== 'modern') return null;
+    if (row.protocol_era === 'legacy') {
+      const checked = row.protocol_checked_at ?? 0;
+      if (this.now() - checked > LEGACY_ERA_VERDICT_TTL_MS) return null;
+      return { era: 'legacy', version: row.protocol_version ?? null, discover: null };
+    }
+    if (!row.protocol_discover_json) return null;
+    try {
+      return {
+        era: 'modern',
+        version: row.protocol_version ?? null,
+        discover: JSON.parse(row.protocol_discover_json) as McpEraVerdict['discover'],
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private recordEraVerdict(live: LiveRegistry, verdict: McpEraVerdict | null): void {
+    if (!verdict) return;
+    const now = this.now();
+    const discoverJson = verdict.discover ? JSON.stringify(verdict.discover) : null;
+    // Unchanged verdict: refresh only a legacy one's timestamp when it is half
+    // way to expiry, so a busy registry does not write the row on every call.
+    if (
+      live.row.protocol_era === verdict.era &&
+      live.row.protocol_version === verdict.version &&
+      (live.row.protocol_discover_json ?? null) === discoverJson &&
+      now - (live.row.protocol_checked_at ?? 0) < LEGACY_ERA_VERDICT_TTL_MS / 2
+    ) {
+      return;
+    }
+    this.db
+      .prepare(
+        `UPDATE mcp_registries SET protocol_era = ?, protocol_version = ?, protocol_discover_json = ?,
+                protocol_checked_at = ? WHERE id = ?`,
+      )
+      .run(verdict.era, verdict.version, discoverJson, now, live.row.id);
+    live.row = {
+      ...live.row,
+      protocol_era: verdict.era,
+      protocol_version: verdict.version,
+      protocol_discover_json: discoverJson,
+      protocol_checked_at: now,
+    };
+  }
+
+  private clearEraVerdict(live: LiveRegistry): void {
+    this.db
+      .prepare(
+        `UPDATE mcp_registries SET protocol_era = NULL, protocol_version = NULL,
+                protocol_discover_json = NULL, protocol_checked_at = NULL WHERE id = ?`,
+      )
+      .run(live.row.id);
+    live.row = {
+      ...live.row,
+      protocol_era: null,
+      protocol_version: null,
+      protocol_discover_json: null,
+      protocol_checked_at: null,
+    };
   }
 
   get encryptionAvailable(): boolean {
@@ -304,6 +429,11 @@ export class McpRegistryService {
       cooldownUntil: prevLive?.cooldownUntil ?? null,
     };
     this.live.set(row.id, live);
+    // PA-118: a different URL, transport or credential may well be a
+    // different server, so its cached protocol era is no longer evidence.
+    if (row.url !== existing.url || row.transport !== existing.transport || row.auth_kind !== existing.auth_kind) {
+      this.clearEraVerdict(live);
+    }
     this.logger.info(
       { registry: row.id, rekeyed: rekeyingBearer || rekeyingHeader, enabled: row.enabled === 1 },
       'MCP registry updated',
@@ -349,9 +479,11 @@ export class McpRegistryService {
   async checkConnection(id: string): Promise<TestMcpRegistryResponse> {
     const live = this.liveOrThrow(id);
     const startedAt = this.now();
-    const client = this.createClient(live.row);
+    // Test / Refresh always probe afresh: an operator pressing either is
+    // exactly the moment to re-learn what the server speaks.
+    let client: McpClient | null = null;
     try {
-      await client.connect();
+      client = await this.connectClient(live, true);
       const tools = await client.listTools();
       this.recordSuccess(id, tools, client.getInstructions());
       return {
@@ -367,7 +499,7 @@ export class McpRegistryService {
       this.recordFailure(id, formattedMessage);
       return { ok: false, message: formattedMessage, latencyMs: this.now() - startedAt, toolCount: null };
     } finally {
-      await client.close();
+      await client?.close();
     }
   }
 
@@ -584,10 +716,24 @@ export class McpRegistryService {
       );
     }
 
-    const client = this.createClient(live.row);
+    let client: McpClient | null = null;
     try {
-      await client.connect();
-      const result = await client.callTool(parsed.toolName, args, opts);
+      client = await this.connectClient(live, false);
+      let result: { text: string; isError: boolean };
+      try {
+        result = await client.callTool(parsed.toolName, args, opts);
+      } catch (err) {
+        // A cached modern verdict can be stale (the server was downgraded or
+        // replaced): drop it either way, and retry once on a fresh probe only
+        // when the error proves the server rejected the protocol — see
+        // `ERA_REJECTION` for why nothing else may be retried.
+        if (!client.usedPriorVerdict || live.row.protocol_era !== 'modern') throw err;
+        this.clearEraVerdict(live);
+        if (!ERA_REJECTION.test((err as Error).message)) throw err;
+        await client.close();
+        client = await this.connectClient(live, true);
+        result = await client.callTool(parsed.toolName, args, opts);
+      }
       // Tool call connected and responded — clear any failure streak and cooldown
       this.recordSuccess(parsed.registryId, live.tools ?? [], live.row.reported_instructions);
       return result;
@@ -598,7 +744,7 @@ export class McpRegistryService {
       this.recordFailure(parsed.registryId, formattedMessage);
       throw new McpRegistryError(formattedMessage, 'not_found', 502);
     } finally {
-      await client.close();
+      await client?.close();
     }
   }
 
@@ -747,6 +893,8 @@ function toSummary(row: Row, live?: LiveRegistry, now: number = Date.now()): Mcp
     lastConnectedAt: row.last_connected_at,
     lastError: row.last_error,
     cooldownUntil: cooldown,
+    protocolEra: row.protocol_era === 'legacy' || row.protocol_era === 'modern' ? row.protocol_era : null,
+    protocolVersion: row.protocol_version ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

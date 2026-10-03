@@ -1,11 +1,19 @@
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { MCP_DEPTH_META_KEY, type McpAuthKind, type McpTransportKind } from '@pocketagent/protocol';
+import {
+  Client,
+  SSEClientTransport,
+  StreamableHTTPClientTransport,
+  type DiscoverResult,
+  type Transport,
+} from '@modelcontextprotocol/client';
+import {
+  MCP_DEPTH_META_KEY,
+  type McpAuthKind,
+  type McpProtocolEra,
+  type McpTransportKind,
+} from '@pocketagent/protocol';
 
 /**
- * PA-37: a thin wrapper around the official `@modelcontextprotocol/sdk`
+ * PA-37: a thin wrapper around the official MCP SDK's
  * client, covering exactly the two remote transports the reporter asked for
  * (`streamable_http`, the current single-endpoint transport, and `sse`, the
  * legacy two-endpoint one) and exactly the three MCP calls this app needs
@@ -16,6 +24,24 @@ import { MCP_DEPTH_META_KEY, type McpAuthKind, type McpTransportKind } from '@po
  * reconnection and batching rules are more than a single-shot
  * `postJsonToIntegration`-style POST, and reimplementing them by hand would
  * only reproduce a spec the SDK already gets right.
+ *
+ * **Dual-era since PA-118.** Built on the v2 SDK client
+ * (`@modelcontextprotocol/client`), so a registry can be a server speaking the
+ * stateless 2026-07-28 revision as well as any 2025-era one. On
+ * `streamable_http` the client negotiates (`versionNegotiation: 'auto'`): it
+ * probes `server/discover`, adopts the modern era on definitive modern
+ * evidence and otherwise falls back to the plain `initialize` handshake,
+ * byte-equivalent to a 2025 client — so every server that worked before still
+ * does. `sse` is the deprecated HTTP+SSE transport, which exists only in the
+ * legacy era, so it never probes.
+ *
+ * Because this class is one connection per call, probing every time would put
+ * a `server/discover` round trip in front of every tool call. The spec's answer
+ * is that a client SHOULD cache the era per server, so `connect` accepts the
+ * verdict a previous connection produced (`McpEraVerdict`, persisted on the
+ * registry row by `McpRegistryService`) and passes it as the SDK's `prior`:
+ * a cached modern verdict adopts the stored `DiscoverResult` with zero round
+ * trips, a cached legacy one skips the probe.
  *
  * One `McpClient` is one short-lived connection — connect, do one or more
  * calls, close — matching the fact that nothing else in the planner's own
@@ -100,6 +126,18 @@ function contentToText(content: readonly unknown[]): string {
     .join('\n');
 }
 
+/**
+ * What a connection learned about the server's protocol era, for the next
+ * connection to reuse. `discover` is the server's own `server/discover`
+ * result and is present exactly when `era` is `modern` — it is what lets a
+ * modern verdict be adopted with zero round trips.
+ */
+export interface McpEraVerdict {
+  era: McpProtocolEra;
+  version: string | null;
+  discover: DiscoverResult | null;
+}
+
 export class McpClientError extends Error {
   override readonly name = 'McpClientError';
 }
@@ -108,6 +146,8 @@ export interface McpClientOptions {
   connectTimeoutMs?: number;
   callTimeoutMs?: number;
   customTransport?: Transport;
+  /** A verdict a previous connection produced; `null`/absent probes afresh. */
+  prior?: McpEraVerdict | null;
 }
 
 export class McpClient {
@@ -115,6 +155,7 @@ export class McpClient {
   private readonly connectTimeoutMs: number;
   private readonly callTimeoutMs: number;
   private readonly customTransport?: Transport;
+  private readonly prior: McpEraVerdict | null;
 
   constructor(
     private readonly config: McpConnectionConfig,
@@ -132,17 +173,49 @@ export class McpClient {
       this.connectTimeoutMs = MCP_CONNECT_TIMEOUT_MS;
       this.callTimeoutMs = MCP_CALL_TIMEOUT_MS;
     }
+    this.prior =
+      optionsOrTransport && !('start' in optionsOrTransport) ? (optionsOrTransport.prior ?? null) : null;
+  }
+
+  /** Whether this connection was handed a cached verdict rather than probing. */
+  get usedPriorVerdict(): boolean {
+    return this.prior !== null && this.config.transport !== 'sse';
+  }
+
+  /**
+   * The era this connection actually ended up in, for the caller to persist.
+   * `null` before `connect()` succeeds.
+   */
+  getEraVerdict(): McpEraVerdict | null {
+    const client = this.client;
+    if (!client) return null;
+    const era = client.getProtocolEra();
+    if (!era) return null;
+    const discover = era === 'modern' ? (client.getDiscoverResult() ?? null) : null;
+    return { era, version: client.getNegotiatedProtocolVersion() ?? null, discover };
   }
 
   async connect(): Promise<void> {
     const transport = this.customTransport ?? buildTransport(this.config);
-    const client = new Client({ name: 'pocketagent', version: '1.0.0' }, { capabilities: {} });
+    const negotiate = this.config.transport !== 'sse';
+    const client = new Client(
+      { name: 'pocketagent', version: '1.0.0' },
+      {
+        capabilities: {},
+        // `sse` is legacy-only by definition; everything else negotiates.
+        ...(negotiate ? { versionNegotiation: { mode: 'auto' as const } } : {}),
+      },
+    );
+    const prior = negotiate ? priorFor(this.prior) : undefined;
     let timer: NodeJS.Timeout | undefined;
     try {
       const timeoutPromise = new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error('MCP error -32001: Request timed out')), this.connectTimeoutMs);
       });
-      await Promise.race([client.connect(transport, { timeout: this.connectTimeoutMs }), timeoutPromise]);
+      await Promise.race([
+        client.connect(transport, { timeout: this.connectTimeoutMs, ...(prior ? { prior } : {}) }),
+        timeoutPromise,
+      ]);
     } catch (err) {
       throw new McpClientError(`Could not connect: ${(err as Error).message}`);
     } finally {
@@ -190,9 +263,7 @@ export class McpClient {
       // PocketAgent registered as its own MCP registry cannot loop forever.
       // Harmless to any other server: `_meta` keys it does not know are ignored.
       const meta = opts.depth !== undefined ? { _meta: { [MCP_DEPTH_META_KEY]: opts.depth } } : {};
-      result = await this.client.callTool({ name, arguments: args, ...meta }, undefined, {
-        timeout: this.callTimeoutMs,
-      });
+      result = await this.client.callTool({ name, arguments: args, ...meta }, { timeout: this.callTimeoutMs });
     } catch (err) {
       throw new McpClientError(`tools/call failed: ${(err as Error).message}`);
     }
@@ -205,4 +276,17 @@ export class McpClient {
     this.client = null;
     await client?.close().catch(() => undefined);
   }
+}
+
+/**
+ * A stored verdict as the SDK's `prior`. A modern verdict without its
+ * `DiscoverResult` cannot be adopted, so it probes afresh instead of guessing.
+ */
+function priorFor(verdict: McpEraVerdict | null):
+  | { kind: 'modern'; discover: DiscoverResult }
+  | { kind: 'legacy' }
+  | undefined {
+  if (!verdict) return undefined;
+  if (verdict.era === 'legacy') return { kind: 'legacy' };
+  return verdict.discover ? { kind: 'modern', discover: verdict.discover } : undefined;
 }

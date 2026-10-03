@@ -1417,6 +1417,19 @@ export const MIGRATIONS: readonly string[] = [
 
   // PA-118: MCP client tokens and MCP provenance. See `MCP_SERVER_DDL`.
   MCP_SERVER_DDL,
+
+  // PA-118: the protocol era each MCP registry's server speaks, cached so the
+  // Pocket Agent's client (one connection per tool call) does not probe
+  // `server/discover` before every call — the spec's own "clients SHOULD cache
+  // the era per server". `protocol_discover_json` is the server's
+  // `DiscoverResult`, which is what lets a cached modern verdict be adopted
+  // with zero round trips. All four are a cache: NULL means "probe next time".
+  `
+  ALTER TABLE mcp_registries ADD COLUMN protocol_era TEXT;
+  ALTER TABLE mcp_registries ADD COLUMN protocol_version TEXT;
+  ALTER TABLE mcp_registries ADD COLUMN protocol_discover_json TEXT;
+  ALTER TABLE mcp_registries ADD COLUMN protocol_checked_at INTEGER;
+  `,
 ];
 
 /**
@@ -1648,6 +1661,18 @@ export function openDatabase(databasePath: string): Db {
   }
   if (mcpRegistryColumns.size > 0 && !mcpRegistryColumns.has('reported_instructions')) {
     db.exec('ALTER TABLE mcp_registries ADD COLUMN reported_instructions TEXT');
+  }
+  // PA-118, same hazard: the era cache columns. `recordEraVerdict` names them
+  // unconditionally, so a miss would fail every MCP tool call.
+  for (const [name, type] of [
+    ['protocol_era', 'TEXT'],
+    ['protocol_version', 'TEXT'],
+    ['protocol_discover_json', 'TEXT'],
+    ['protocol_checked_at', 'INTEGER'],
+  ] as const) {
+    if (mcpRegistryColumns.size > 0 && !mcpRegistryColumns.has(name)) {
+      db.exec(`ALTER TABLE mcp_registries ADD COLUMN ${name} ${type}`);
+    }
   }
   // PA-75, same positional-migration hazard: probe sessions.planner_chat_id
   // so any checkpoint that passed this count before the migration landed

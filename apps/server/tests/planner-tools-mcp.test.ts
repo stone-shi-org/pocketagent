@@ -463,6 +463,15 @@ describe('list_mcp_tools / call_mcp_tool', () => {
                 content: [{ type: 'text', text: 'email processed' }],
               },
             });
+          } else if ('id' in message) {
+            // A 2025-era server answers anything it does not know — including
+            // the 2026-07-28 client's `server/discover` probe — with "method
+            // not found", which is what sends a dual-era client to `initialize`.
+            this.onmessage?.({
+              jsonrpc: '2.0',
+              id: message.id,
+              error: { code: -32601, message: 'Method not found' },
+            } as JSONRPCMessage);
           }
         }
       }

@@ -218,6 +218,9 @@ importers:
       '@fastify/websocket':
         specifier: ^11.0.2
         version: 11.3.0
+      '@modelcontextprotocol/client':
+        specifier: 2.2.0
+        version: 2.2.0
       '@modelcontextprotocol/sdk':
         specifier: ^1.30.0
         version: 1.30.0(supports-color@8.1.1)(zod@3.25.76)
@@ -252,9 +255,6 @@ importers:
         specifier: ^3.24.1
         version: 3.25.76
     devDependencies:
-      '@modelcontextprotocol/client':
-        specifier: 2.2.0
-        version: 2.2.0
       '@types/better-sqlite3':
         specifier: ^7.6.12
         version: 7.6.13

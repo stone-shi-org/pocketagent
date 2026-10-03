@@ -457,6 +457,9 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
                   {r.lastConnectedAt
                     ? `${r.toolCount} tool(s), last connected ${new Date(r.lastConnectedAt).toLocaleString()}`
                     : 'Never connected'}
+                  {/* PA-118: the protocol revision the last connection agreed
+                      on — 2026-07-28 (stateless) or a 2025-era handshake. */}
+                  {r.protocolVersion && ` · MCP ${r.protocolVersion}`}
                   {r.lastError && ` — last error: ${r.lastError}`}
                   {r.cooldownUntil && r.cooldownUntil > Date.now() && (
                     <span className="settings-badge" style={{ marginLeft: 6 }}>

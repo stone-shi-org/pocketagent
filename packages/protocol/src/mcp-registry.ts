@@ -100,6 +100,15 @@ export const McpRegistrySummary = z.object({
   /** PA-101: Milliseconds epoch timestamp until which calls to this registry
       are short-circuited due to connection timeout/failure, or null if healthy. */
   cooldownUntil: z.number().int().nullable().default(null),
+  /**
+   * PA-118: the MCP protocol era and revision the last connection negotiated
+   * with this server — `modern` for 2026-07-28 (stateless, per-request
+   * version), `legacy` for the `initialize` handshake (2025-11-25 and
+   * earlier). `null` until a connection has succeeded. Optional so an older
+   * server's response still parses.
+   */
+  protocolEra: z.enum(['legacy', 'modern']).nullable().optional(),
+  protocolVersion: z.string().nullable().optional(),
   createdAt: z.number().int(),
   updatedAt: z.number().int(),
 });
