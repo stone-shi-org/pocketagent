@@ -35,6 +35,7 @@
 # so a musl base would break them even when the server itself started fine.
 ARG NODE_IMAGE=node:22-bookworm-slim
 ARG SERVER_BASE_IMAGE=ubuntu:26.04
+ARG DOCKER_CLI_IMAGE=docker:cli
 
 # ---------------------------------------------------------------------------
 # deps — the full dependency tree, with the toolchain the native modules need
@@ -289,7 +290,43 @@ CMD ["node", "apps/server/dist/server.js"]
 # ---------------------------------------------------------------------------
 # claude — the thin image plus one pinned CLI
 # ---------------------------------------------------------------------------
+# Docker's own CLI image is the source of the static `docker` client and the
+# buildx plugin, rather than Docker's apt repo: that repo is keyed by Ubuntu
+# codename and 26.04 may not be published there, and a static copy needs no
+# gpg key fetch at build time.
+FROM ${DOCKER_CLI_IMAGE} AS docker-cli
+
 FROM runtime AS claude
+
+# Operator/agent tooling for the `claude` and `all` images only — the thin
+# runtime stays lean (and the Hub image never sees any of it). `all` inherits
+# this layer because it is built FROM claude. Kept before the agent installs
+# so a package change does not invalidate the (slow) installer layers' inputs
+# any more than adding a layer here must.
+#   build-essential, python3   agents compiling native deps (npm/pip installs)
+#   sqlite3                    exploring pocketagent.db from `docker exec`
+#   iproute2                   `ip`, `ss`
+#   net-tools                  `netstat`, `ifconfig`
+#   iputils-ping, traceroute   reachability from inside the container
+#   dnsutils                   `dig`, `nslookup`
+#   netcat-openbsd             `nc` port checks
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        dnsutils \
+        iproute2 \
+        iputils-ping \
+        net-tools \
+        netcat-openbsd \
+        python3 \
+        sqlite3 \
+        traceroute \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker *client* only (`docker build`, `docker buildx`). It has no daemon: it
+# works only when DOCKER_HOST or a mounted /var/run/docker.sock points at one.
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/local/libexec/docker/cli-plugins/docker-buildx
 
 # PA-104: agent CLIs are installed with each vendor's *official* installer —
 # the same one Settings uses (`apps/server/src/agents/catalog.ts`) and the one
