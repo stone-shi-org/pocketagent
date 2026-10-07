@@ -7991,7 +7991,7 @@ button.chat-rate-limit-badge {
   border: 1px solid var(--border);
 }
 
-/* PA-98: compact MCP description in registry cards */
+/* PA-98: compact MCP description in registry cards (retained for compatibility) */
 .planner-mcp-desc {
   display: inline-block;
   max-width: 520px;
@@ -7999,6 +7999,147 @@ button.chat-rate-limit-badge {
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: bottom;
+}
+
+/* PA-120: MCP registry cards with aligned actions and responsive layout */
+.mcp-registry-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mcp-registry-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.mcp-registry-card:hover {
+  border-color: var(--border-strong);
+}
+
+.mcp-registry-card.disabled {
+  opacity: 0.75;
+}
+
+.mcp-registry-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mcp-registry-card-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  font-size: 14px;
+  min-width: 0;
+  line-height: 1.4;
+}
+
+.mcp-registry-card-title strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.mcp-registry-card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.mcp-registry-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.mcp-registry-description {
+  color: var(--text);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.mcp-registry-suggestion {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--bg-elev);
+  padding: 6px 10px;
+  border-radius: 6px;
+  line-height: 1.4;
+}
+
+.mcp-registry-url {
+  font-size: 12px;
+  min-width: 0;
+}
+
+.mcp-registry-url code {
+  display: inline-block;
+  max-width: 100%;
+  color: var(--text-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+  background: var(--bg-elev);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.mcp-registry-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.mcp-registry-error {
+  color: var(--danger);
+}
+
+.mcp-registry-test-result {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.mcp-registry-test-result.ok {
+  background: rgba(31, 168, 85, 0.1);
+  color: var(--ok);
+  border: 1px solid rgba(31, 168, 85, 0.25);
+}
+
+.mcp-registry-test-result.fail {
+  background: rgba(224, 45, 35, 0.1);
+  color: var(--danger);
+  border: 1px solid rgba(224, 45, 35, 0.25);
+}
+
+.mcp-registry-card-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
 }
 
 .planner-gemini-strip {

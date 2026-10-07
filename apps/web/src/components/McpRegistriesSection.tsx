@@ -404,120 +404,133 @@ export function McpRegistriesSection({ onApiError, onChanged }: Props): JSX.Elem
       ) : registries.length === 0 ? (
         <p className="planner-row-meta">No MCP registries yet.</p>
       ) : (
-        registries.map((r) => {
-          const result = testResults[r.id];
-          return (
-            <div key={r.id} className="planner-model-row">
-              <span>
-                <label className="planner-checkbox-row" style={{ display: 'inline-flex', marginRight: 8 }}>
-                  <input
-                    type="checkbox"
-                    checked={r.enabled}
-                    disabled={busy}
-                    aria-label={`Enable ${r.name} globally`}
-                    onChange={(e) => void toggleRegistryEnabled(r, e.target.checked)}
-                  />
-                </label>
-                <strong>{r.name}</strong>{' '}
-                <span className="planner-row-meta">
-                  ({r.transport === 'streamable_http' ? 'Streamable HTTP' : 'HTTP+SSE'})
-                </span>
-                {!r.enabled && <span className="settings-badge">Disabled</span>}
-                <br />
-                {r.description && (
-                  <>
-                    <span className="planner-row-meta planner-mcp-desc" title={r.description}>
-                      {r.description.length > 70 ? `${r.description.slice(0, 67)}…` : r.description}
+        <div className="mcp-registry-list">
+          {registries.map((r) => {
+            const result = testResults[r.id];
+            return (
+              <div key={r.id} className={`mcp-registry-card${r.enabled ? '' : ' disabled'}`}>
+                <div className="mcp-registry-card-header">
+                  <div className="mcp-registry-card-title">
+                    <label className="planner-checkbox-row" style={{ display: 'inline-flex', marginRight: 4 }}>
+                      <input
+                        type="checkbox"
+                        checked={r.enabled}
+                        disabled={busy}
+                        aria-label={`Enable ${r.name} globally`}
+                        onChange={(e) => void toggleRegistryEnabled(r, e.target.checked)}
+                      />
+                    </label>
+                    <strong>{r.name}</strong>
+                    <span className="planner-row-meta">
+                      ({r.transport === 'streamable_http' ? 'Streamable HTTP' : 'HTTP+SSE'})
                     </span>
-                    <br />
-                  </>
-                )}
-                {!r.description && r.reportedInstructions && (
-                  <>
-                    <span className="planner-row-meta planner-mcp-desc" title={r.reportedInstructions}>
-                      Server suggestion available.{' '}
+                    {!r.enabled && <span className="settings-badge">Disabled</span>}
+                    {r.cooldownUntil && r.cooldownUntil > Date.now() && (
+                      <span className="settings-badge" style={{ color: 'var(--warn)' }}>
+                        Cooling down until {new Date(r.cooldownUntil).toLocaleTimeString()}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mcp-registry-card-header-actions">
+                    <button
+                      type="button"
+                      className="planner-btn"
+                      disabled={busy}
+                      onClick={() => openEdit(r)}
+                      title={`Edit ${r.name}`}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      className="planner-btn danger"
+                      disabled={busy}
+                      onClick={() => setConfirmingDelete(r)}
+                      aria-label={`Delete ${r.name}`}
+                      title={`Delete ${r.name}`}
+                    >
+                      <Icon name="trash" size={14} />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mcp-registry-card-body">
+                  {r.description && (
+                    <div className="mcp-registry-description" title={r.description}>
+                      {r.description}
+                    </div>
+                  )}
+                  {!r.description && r.reportedInstructions && (
+                    <div className="mcp-registry-suggestion">
+                      <span>Server suggestion: &ldquo;{r.reportedInstructions}&rdquo;</span>
                       <button
                         type="button"
                         className="planner-btn"
-                        style={{ padding: '1px 6px', fontSize: '11px', marginLeft: 4 }}
+                        style={{ padding: '1px 6px', fontSize: '11px', flexShrink: 0 }}
                         disabled={busy}
                         onClick={() => void useReportedInstructions(r)}
                       >
                         Use as description
                       </button>
-                    </span>
-                    <br />
-                  </>
-                )}
-                <span className="planner-row-meta" style={{ wordBreak: 'break-all' }}>
-                  {r.url}
-                </span>
-                <br />
-                <span className="planner-row-meta">
-                  {r.lastConnectedAt
-                    ? `${r.toolCount} tool(s), last connected ${new Date(r.lastConnectedAt).toLocaleString()}`
-                    : 'Never connected'}
-                  {/* PA-118: the protocol revision the last connection agreed
-                      on — 2026-07-28 (stateless) or a 2025-era handshake. */}
-                  {r.protocolVersion && ` · MCP ${r.protocolVersion}`}
-                  {r.lastError && ` — last error: ${r.lastError}`}
-                  {r.cooldownUntil && r.cooldownUntil > Date.now() && (
-                    <span className="settings-badge" style={{ marginLeft: 6 }}>
-                      Cooling down until {new Date(r.cooldownUntil).toLocaleTimeString()}
-                    </span>
+                    </div>
                   )}
-                </span>
-                {result && result !== 'testing' && (
-                  <>
-                    <br />
-                    <span className="planner-row-meta">
-                      {result.ok ? '✓' : '✗'} {result.message} ({result.latencyMs}ms)
+
+                  <div className="mcp-registry-url">
+                    <code>{r.url}</code>
+                  </div>
+
+                  <div className="mcp-registry-status">
+                    <span>
+                      {r.lastConnectedAt
+                        ? `${r.toolCount} tool(s), last connected ${new Date(r.lastConnectedAt).toLocaleString()}`
+                        : 'Never connected'}
+                      {/* PA-118: the protocol revision the last connection agreed
+                          on — 2026-07-28 (stateless) or a 2025-era handshake. */}
+                      {r.protocolVersion && ` · MCP ${r.protocolVersion}`}
+                      {r.lastError && <span className="mcp-registry-error"> — last error: {r.lastError}</span>}
                     </span>
-                  </>
-                )}
-              </span>
-              <div className="planner-row-actions">
-                <button
-                  type="button"
-                  className="planner-btn"
-                  disabled={busy || result === 'testing'}
-                  onClick={() => void test(r, false)}
-                >
-                  {result === 'testing' ? 'Testing…' : 'Test connection'}
-                </button>
-                <button
-                  type="button"
-                  className="planner-btn"
-                  disabled={busy || result === 'testing'}
-                  onClick={() => void test(r, true)}
-                >
-                  Refresh tools
-                </button>
-                <button
-                  type="button"
-                  className="planner-btn"
-                  disabled={busy}
-                  title="Export to JSON"
-                  onClick={() => exportRegistry(r)}
-                >
-                  <Icon name="download" size={14} /> Export
-                </button>
-                <button type="button" className="planner-btn" disabled={busy} onClick={() => openEdit(r)}>
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  className="planner-btn danger"
-                  disabled={busy}
-                  onClick={() => setConfirmingDelete(r)}
-                  aria-label={`Delete ${r.name}`}
-                >
-                  <Icon name="trash" size={14} />
-                </button>
+                  </div>
+
+                  {result && result !== 'testing' && (
+                    <div className={`mcp-registry-test-result ${result.ok ? 'ok' : 'fail'}`}>
+                      <span>
+                        {result.ok ? '✓' : '✗'} {result.message} ({result.latencyMs}ms)
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="mcp-registry-card-footer">
+                  <button
+                    type="button"
+                    className="planner-btn"
+                    disabled={busy || result === 'testing'}
+                    onClick={() => void test(r, false)}
+                  >
+                    {result === 'testing' ? 'Testing…' : 'Test connection'}
+                  </button>
+                  <button
+                    type="button"
+                    className="planner-btn"
+                    disabled={busy || result === 'testing'}
+                    onClick={() => void test(r, true)}
+                  >
+                    Refresh tools
+                  </button>
+                  <button
+                    type="button"
+                    className="planner-btn"
+                    disabled={busy}
+                    title="Export to JSON"
+                    onClick={() => exportRegistry(r)}
+                  >
+                    <Icon name="download" size={14} /> Export
+                  </button>
+                </div>
               </div>
-            </div>
-          );
-        })
+            );
+          })}
+        </div>
       )}
 
       {editing === null ? (
