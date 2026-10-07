@@ -310,6 +310,7 @@ FROM runtime AS claude
 #   iputils-ping, traceroute   reachability from inside the container
 #   dnsutils                   `dig`, `nslookup`
 #   netcat-openbsd             `nc` port checks
+#   vim                        editing files from `docker exec`
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
@@ -321,6 +322,7 @@ RUN apt-get update \
         python3 \
         sqlite3 \
         traceroute \
+        vim \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker *client* only (`docker build`, `docker buildx`). It has no daemon: it
