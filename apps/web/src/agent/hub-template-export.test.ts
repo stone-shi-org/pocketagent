@@ -146,6 +146,10 @@ describe('hub-template-export payloads', () => {
       meInstruction: '',
       toolsInstruction: '',
       commandTimeoutSeconds: 30,
+      llmIdleTimeoutSeconds: 300,
+      compactionEnabled: true,
+      compactionReserveTokens: 16384,
+      compactionKeepRecentTokens: 20000,
     };
     const models: PlannerModel[] = [
       { id: 'm-1', modelId: 'gpt-4o', label: 'GPT-4o', createdAt: 1000, sortOrder: 0, supportsEffort: true },

@@ -200,7 +200,13 @@ describe('PlannerLlmClient', () => {
 
   it('throws PlannerLlmError on a non-2xx response, including the status', async () => {
     const fetchImpl = vi.fn().mockImplementation(() => new Response('server exploded', { status: 500 }));
-    const client = new PlannerLlmClient({ baseUrl: 'https://api.example.com', apiKey: null, fetchImpl });
+    // PA-121: retries off, so the first failure is the one thrown.
+    const client = new PlannerLlmClient({
+      baseUrl: 'https://api.example.com',
+      apiKey: null,
+      fetchImpl,
+      retry: { maxRetries: 0 },
+    });
     await expect(collect(client.streamComplete('m', []))).rejects.toThrow(PlannerLlmError);
     await expect(collect(client.streamComplete('m', []))).rejects.toMatchObject({ statusCode: 500 });
   });
@@ -1070,15 +1076,20 @@ describe('planner chat routes over HTTP', () => {
     // for why an upstream failure has to become a `text`/`turn_complete`
     // event instead of a different HTTP status the way a pre-phase-6 502
     // once did.
-    const fetchImpl = vi.fn().mockResolvedValue(new Response('boom', { status: 500 }));
+    // A 400 rather than a 5xx: since PA-121 a 5xx is retried first.
+    const fetchImpl = vi.fn().mockImplementation(() => new Response('boom', { status: 400 }));
     t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
     await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
     const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
     const { res, events } = await sendMessage(t, chat.id, 'hi');
     expect(res.statusCode).toBe(200);
-    expect(events.map((e) => e.kind)).toEqual(['user_prompt', 'text', 'turn_complete']);
-    expect(findEvent(events, 'text')?.text).toMatch(/Could not reach the LLM endpoint/);
+    // PA-121: an error notice, not assistant text — so it is not replayed to
+    // the model as something it said.
+    expect(events.map((e) => e.kind)).toEqual(['user_prompt', 'notice', 'turn_complete']);
+    expect(findEvent(events, 'notice')).toMatchObject({ level: 'error' });
+    expect(findEvent(events, 'notice')?.text).toMatch(/Could not reach the LLM endpoint/);
     expect(findEvent(events, 'turn_complete')).toMatchObject({ isError: true });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it('a chat surviving its workspace deletion still has a readable, appendable transcript', async () => {

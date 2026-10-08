@@ -227,6 +227,40 @@ describe('Pocket Agent turn loop (PA-121)', () => {
     expect(capToolOutput('small')).toEqual({ content: 'small', truncated: false });
   });
 
+  // ---- LLM resilience (phase 2) ---------------------------------------------
+
+  it('retries a transient LLM failure inside the turn and says so with an info notice', async () => {
+    const { fetchImpl, bodies } = scripted([
+      () => new Response('overloaded', { status: 503, headers: { 'retry-after-ms': '1' } }),
+      () => reply('recovered'),
+    ]);
+    const chat = await setup(fetchImpl);
+    const events = await send(chat.id, 'hello');
+    const notice = events.find((e) => e.kind === 'notice')!;
+    expect(notice).toMatchObject({ level: 'info' });
+    expect(String(notice.text)).toMatch(/retrying in 1s \(attempt 1 of 3\)/);
+    expect(events.filter((e) => e.kind === 'text').map((e) => e.text)).toEqual(['recovered']);
+    expect(events.at(-1)).toMatchObject({ kind: 'turn_complete', isError: false });
+    expect(bodies).toHaveLength(2);
+    // The notice is history, not context: the next turn does not send it.
+    await send(chat.id, 'again');
+    expect(JSON.stringify(bodies.at(-1)!.messages)).not.toContain('retrying');
+  });
+
+  it('keeps an LLM failure out of what the model is sent on the next turn', async () => {
+    const { fetchImpl, bodies } = scripted([
+      () => new Response('bad request', { status: 400 }),
+      () => reply('fine now'),
+    ]);
+    const chat = await setup(fetchImpl);
+    const first = await send(chat.id, 'one');
+    expect(first.find((e) => e.kind === 'notice')).toMatchObject({ level: 'error' });
+    await send(chat.id, 'two');
+    const sent = bodies.at(-1)!.messages;
+    expect(sent.filter((m) => m.role === 'assistant')).toHaveLength(0);
+    expect(JSON.stringify(sent)).not.toContain('Could not reach');
+  });
+
   // ---- transcript robustness ------------------------------------------------
 
   it('skips an unreadable transcript line instead of making the chat unusable', async () => {

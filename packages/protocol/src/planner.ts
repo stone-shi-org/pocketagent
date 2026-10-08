@@ -351,6 +351,23 @@ export const PlannerSettingsDto = z.object({
    * may run before being killed. Configurable (default 300s, previously hardcoded 60s).
    */
   commandTimeoutSeconds: z.number().int().min(1).max(3600),
+  /**
+   * PA-121: how long the chat-completion stream may go without receiving a
+   * byte before the request is abandoned — and retried, if nothing had been
+   * streamed yet. `0` turns it off. Default 300s.
+   */
+  llmIdleTimeoutSeconds: z.number().int().min(0).max(3600),
+  /**
+   * PA-121: context compaction. When a chat's context would leave less than
+   * `compactionReserveTokens` free in the model's context window, the older
+   * part of the conversation is summarized by the model and replaced by that
+   * summary in what later turns send; the most recent
+   * `compactionKeepRecentTokens` stay verbatim. The transcript itself is
+   * never rewritten. On by default.
+   */
+  compactionEnabled: z.boolean(),
+  compactionReserveTokens: z.number().int().min(1024).max(1_000_000),
+  compactionKeepRecentTokens: z.number().int().min(1024).max(1_000_000),
 });
 export type PlannerSettingsDto = z.infer<typeof PlannerSettingsDto>;
 
@@ -395,6 +412,12 @@ export const UpdatePlannerSettingsRequest = z.object({
   maxSubagentSpawnsPerTurn: z.number().int().min(1).max(50).optional(),
   /** See `PlannerSettingsDto.commandTimeoutSeconds`'s doc comment. */
   commandTimeoutSeconds: z.number().int().min(1).max(3600).optional(),
+  /** PA-121: see `PlannerSettingsDto.llmIdleTimeoutSeconds`. */
+  llmIdleTimeoutSeconds: z.number().int().min(0).max(3600).optional(),
+  /** PA-121: see `PlannerSettingsDto.compactionEnabled`. */
+  compactionEnabled: z.boolean().optional(),
+  compactionReserveTokens: z.number().int().min(1024).max(1_000_000).optional(),
+  compactionKeepRecentTokens: z.number().int().min(1024).max(1_000_000).optional(),
 });
 export type UpdatePlannerSettingsRequest = z.infer<typeof UpdatePlannerSettingsRequest>;
 

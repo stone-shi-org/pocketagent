@@ -65,6 +65,7 @@ import {
   PlannerLlmError,
   type PlannerChatMessage,
   type PlannerLlmCompletion,
+  type PlannerLlmRetryPolicy,
   type PlannerLlmToolCall,
   type PlannerLlmUsage,
   type PlannerUserContentPart,
@@ -240,6 +241,8 @@ export interface PlannerChatServiceOptions {
   };
   /** Injected in tests so no real network call is ever made. */
   llmFetch?: typeof fetch;
+  /** PA-121: injected in tests to shrink the LLM retry delays. */
+  llmRetry?: Partial<PlannerLlmRetryPolicy>;
   /** PA-31: injected in tests so `web_search`/`url_fetch` never make a real
       network call either — distinct from `llmFetch` above, which is only
       ever handed to `PlannerLlmClient`, not to `PlannerToolDeps`. */
@@ -1244,7 +1247,7 @@ export class PlannerChatService {
       shares this so `llmFetch` injection and the base-url/api-key lookup
       never drift between them. Throws `not_configured` if no endpoint is
       set, same as `resolveModelId`. */
-  private llmClient(): PlannerLlmClient {
+  private llmClient(opts: { retry?: boolean } = {}): PlannerLlmClient {
     const settings = readPlannerSettings(this.opts.db);
     if (!settings.baseUrl) {
       throw new PlannerChatError('Planner LLM endpoint is not configured.', 'not_configured');
@@ -1253,6 +1256,9 @@ export class PlannerChatService {
       baseUrl: settings.baseUrl,
       apiKey: revealPlannerApiKey(this.opts.db),
       ...(this.opts.llmFetch ? { fetchImpl: this.opts.llmFetch } : {}),
+      // PA-121: a turn retries a transient failure; a "Test" button must
+      // report the first one, or a 503 reads as a 14-second hang.
+      ...(opts.retry === false ? { retry: { maxRetries: 0 } } : this.opts.llmRetry ? { retry: this.opts.llmRetry } : {}),
     });
   }
 
@@ -1407,7 +1413,7 @@ export class PlannerChatService {
    * error, so the route can always answer 200 with a verdict.
    */
   async testModel(modelId: string): Promise<{ ok: boolean; message: string; latencyMs: number }> {
-    const client = this.llmClient();
+    const client = this.llmClient({ retry: false });
     const startedAt = Date.now();
     try {
       let content: string | null = null;
@@ -1813,11 +1819,19 @@ export class PlannerChatService {
     if (personaMessage) {
       messages.unshift({ role: 'system', content: personaMessage });
     }
-    const client = new PlannerLlmClient({
-      baseUrl: settings.baseUrl!,
-      apiKey: revealPlannerApiKey(this.opts.db),
-      ...(this.opts.llmFetch ? { fetchImpl: this.opts.llmFetch } : {}),
-    });
+    if (!settings.baseUrl) {
+      // Checked before the first yield by `resolveModelId`, so only an
+      // endpoint cleared in Settings mid-turn lands here — reported in-band,
+      // since `llmClient()` would throw past a stream already started.
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'notice',
+        level: 'error',
+        text: 'The Pocket Agent LLM endpoint is no longer configured.',
+      });
+      yield* this.finishTurn(chat, workspacePath, modelId, '', true, stats);
+      return;
+    }
+    const client = this.llmClient();
 
     const textBlockId = crypto.randomUUID();
     const thinkingBlockId = crypto.randomUUID();
@@ -1837,9 +1851,21 @@ export class PlannerChatService {
         {
           effort: chat.lastEffort,
           thinking: chat.thinkingEnabled !== false,
+          idleTimeoutMs: settings.llmIdleTimeoutSeconds * 1000,
         },
       )) {
-        if (chunk.type === 'thinking_delta') {
+        if (chunk.type === 'retry') {
+          // PA-121: persisted as an `info` notice — visible in the chat so a
+          // long wait does not read as a hang, ignored by Telegram (which
+          // relays only warnings and errors), and never part of what the
+          // model is sent (`eventsToLlmMessages` drops notices).
+          const seconds = Math.max(1, Math.round(chunk.delayMs / 1000));
+          yield* this.emit(workspacePath, chat.id, {
+            kind: 'notice',
+            level: 'info',
+            text: `The LLM endpoint failed (${firstLine(chunk.reason)}); retrying in ${seconds}s (attempt ${chunk.attempt} of ${chunk.maxRetries}).`,
+          });
+        } else if (chunk.type === 'thinking_delta') {
           accumulatedThinking += chunk.text;
           yield { kind: 'thinking_delta', id: thinkingBlockId, text: chunk.text };
         } else if (chunk.type === 'text_delta') {
@@ -1862,7 +1888,17 @@ export class PlannerChatService {
       this.opts.logger?.warn({ err, chat: chat.id, model: modelId }, 'planner LLM call failed');
       const message = err instanceof PlannerLlmError ? err.message : (err as Error).message;
       const failedStats = { ...stats, elapsedMs: stats.elapsedMs + (Date.now() - llmStartedAt) };
-      yield* this.finishTurn(chat, workspacePath, modelId, `Could not reach the LLM endpoint: ${message}`, true, failedStats);
+      // PA-121: an error notice, not an assistant `text`. As `text` it was
+      // replayed to the model on every later turn as something it had said
+      // ("Could not reach the LLM endpoint: …"), which models then
+      // apologised for or tried to act on. A notice still shows in the chat
+      // and still reaches Telegram, and is dropped from the context.
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'notice',
+        level: 'error',
+        text: `Could not reach the LLM endpoint: ${message}`,
+      });
+      yield* this.finishTurn(chat, workspacePath, modelId, '', true, failedStats);
       return;
     }
 
@@ -3158,6 +3194,11 @@ export function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatM
   flushPendingCalls();
   flushNarration();
   return messages;
+}
+
+function firstLine(text: string): string {
+  const line = text.split('\n')[0] ?? '';
+  return line.length > 200 ? `${line.slice(0, 200)}…` : line;
 }
 
 /** `Error: …` for a failed tool result, unless it already says so. */

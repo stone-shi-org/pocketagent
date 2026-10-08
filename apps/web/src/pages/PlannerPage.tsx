@@ -101,6 +101,10 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   const [maxSubagentSpawnsPerTurnInput, setMaxSubagentSpawnsPerTurnInput] = useState('3');
   // PA-95: see `PlannerSettingsDto.commandTimeoutSeconds`'s doc comment.
   const [commandTimeoutSecondsInput, setCommandTimeoutSecondsInput] = useState('300');
+  // PA-121: see `PlannerSettingsDto.llmIdleTimeoutSeconds` / `.compactionEnabled`.
+  const [llmIdleTimeoutSecondsInput, setLlmIdleTimeoutSecondsInput] = useState('300');
+  const [compactionReserveTokensInput, setCompactionReserveTokensInput] = useState('16384');
+  const [compactionKeepRecentTokensInput, setCompactionKeepRecentTokensInput] = useState('20000');
 
   const load = useCallback(async () => {
     try {
@@ -124,6 +128,9 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       setMaxToolIterationsInput(String(se.maxToolIterations));
       setMaxSubagentSpawnsPerTurnInput(String(se.maxSubagentSpawnsPerTurn ?? 3));
       setCommandTimeoutSecondsInput(String(se.commandTimeoutSeconds ?? 300));
+      setLlmIdleTimeoutSecondsInput(String(se.llmIdleTimeoutSeconds ?? 300));
+      setCompactionReserveTokensInput(String(se.compactionReserveTokens ?? 16384));
+      setCompactionKeepRecentTokensInput(String(se.compactionKeepRecentTokens ?? 20000));
       setTools(to.tools);
       setApprovals(ap.approvals);
       setError(null);
@@ -210,6 +217,51 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       return;
     }
     void withBusy(() => api.updatePlannerSettings({ commandTimeoutSeconds: parsed }));
+  };
+
+  // PA-121: the LLM stream idle timeout and the two compaction budgets — the
+  // same clamp-client-side-or-revert shape as the three fields above, with
+  // each field's range taken from the server schema.
+  const saveBoundedInt = (
+    raw: string,
+    min: number,
+    max: number,
+    revert: () => void,
+    patch: (n: number) => Parameters<typeof api.updatePlannerSettings>[0],
+  ): void => {
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+      revert();
+      return;
+    }
+    void withBusy(() => api.updatePlannerSettings(patch(parsed)));
+  };
+  const saveLlmIdleTimeoutSeconds = (): void =>
+    saveBoundedInt(
+      llmIdleTimeoutSecondsInput,
+      0,
+      3600,
+      () => setLlmIdleTimeoutSecondsInput(String(settings?.llmIdleTimeoutSeconds ?? 300)),
+      (n) => ({ llmIdleTimeoutSeconds: n }),
+    );
+  const saveCompactionReserveTokens = (): void =>
+    saveBoundedInt(
+      compactionReserveTokensInput,
+      1024,
+      1_000_000,
+      () => setCompactionReserveTokensInput(String(settings?.compactionReserveTokens ?? 16384)),
+      (n) => ({ compactionReserveTokens: n }),
+    );
+  const saveCompactionKeepRecentTokens = (): void =>
+    saveBoundedInt(
+      compactionKeepRecentTokensInput,
+      1024,
+      1_000_000,
+      () => setCompactionKeepRecentTokensInput(String(settings?.compactionKeepRecentTokens ?? 20000)),
+      (n) => ({ compactionKeepRecentTokens: n }),
+    );
+  const setCompactionEnabled = (enabled: boolean): void => {
+    void withBusy(() => api.updatePlannerSettings({ compactionEnabled: enabled }));
   };
 
   const saveApiKey = (): void => {
@@ -1383,6 +1435,76 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
         <p className="planner-row-meta" style={{ marginTop: 4 }}>
           Maximum duration (in seconds) a planner shell command (bash/exec_command) may run before
           being killed. Default is 300s (5 minutes).
+        </p>
+
+        <div className="planner-field" style={{ marginTop: 14, maxWidth: 160 }}>
+          <label htmlFor="planner-llm-idle-timeout-seconds">LLM idle timeout (seconds)</label>
+          <input
+            id="planner-llm-idle-timeout-seconds"
+            type="number"
+            min={0}
+            max={3600}
+            step={1}
+            value={llmIdleTimeoutSecondsInput}
+            disabled={busy}
+            onChange={(e) => setLlmIdleTimeoutSecondsInput(e.target.value)}
+            onBlur={saveLlmIdleTimeoutSeconds}
+          />
+        </div>
+        <p className="planner-row-meta" style={{ marginTop: 4 }}>
+          A reply from the LLM endpoint that sends nothing for this long is abandoned, and retried if
+          nothing had arrived yet. Rate limits, 5xx errors and dropped connections are retried
+          automatically up to 3 times. 0 turns the idle timeout off.
+        </p>
+
+        <h3 style={{ marginTop: 14 }}>Context</h3>
+        <label className="planner-checkbox-row" style={{ marginBottom: 10 }}>
+          <input
+            type="checkbox"
+            checked={settings?.compactionEnabled ?? true}
+            disabled={busy}
+            onChange={(e) => setCompactionEnabled(e.target.checked)}
+          />
+          <span>
+            <strong>Compact long chats</strong> — when a chat nears its model's context window, the
+            older part is summarized by the model and later turns send that summary instead. The chat
+            history itself is kept in full. Type <code>/compact</code> in a chat to do it now.
+          </span>
+        </label>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <div className="planner-field" style={{ maxWidth: 180 }}>
+            <label htmlFor="planner-compaction-reserve-tokens">Reserve (tokens)</label>
+            <input
+              id="planner-compaction-reserve-tokens"
+              type="number"
+              min={1024}
+              max={1000000}
+              step={1024}
+              value={compactionReserveTokensInput}
+              disabled={busy || settings?.compactionEnabled === false}
+              onChange={(e) => setCompactionReserveTokensInput(e.target.value)}
+              onBlur={saveCompactionReserveTokens}
+            />
+          </div>
+          <div className="planner-field" style={{ maxWidth: 180 }}>
+            <label htmlFor="planner-compaction-keep-recent-tokens">Keep recent (tokens)</label>
+            <input
+              id="planner-compaction-keep-recent-tokens"
+              type="number"
+              min={1024}
+              max={1000000}
+              step={1024}
+              value={compactionKeepRecentTokensInput}
+              disabled={busy || settings?.compactionEnabled === false}
+              onChange={(e) => setCompactionKeepRecentTokensInput(e.target.value)}
+              onBlur={saveCompactionKeepRecentTokens}
+            />
+          </div>
+        </div>
+        <p className="planner-row-meta" style={{ marginTop: 4 }}>
+          Compaction runs once fewer than <em>Reserve</em> tokens of the model&apos;s context window
+          would be left free; the most recent <em>Keep recent</em> tokens of the chat are kept word for
+          word. Each model&apos;s context window is set on its row under Models.
         </p>
 
         <h3 style={{ marginTop: 14 }}>Remembered decisions</h3>

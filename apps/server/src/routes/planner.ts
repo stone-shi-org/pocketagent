@@ -104,6 +104,8 @@ import {
   writePlannerMaxToolIterations,
   writePlannerMaxSubagentSpawnsPerTurn,
   writePlannerCommandTimeoutSeconds,
+  writePlannerLlmIdleTimeoutSeconds,
+  writePlannerCompactionSettings,
   writePlannerMcpEnabled,
   writePlannerMeInstruction,
   writePlannerToolsInstruction,
@@ -608,6 +610,10 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       maxToolIterations,
       maxSubagentSpawnsPerTurn,
       commandTimeoutSeconds,
+      llmIdleTimeoutSeconds,
+      compactionEnabled,
+      compactionReserveTokens,
+      compactionKeepRecentTokens,
     } = parsed.data;
     if (baseUrl !== undefined) writePlannerBaseUrl(db, baseUrl);
     if (apiKey !== undefined) writePlannerApiKey(db, apiKey.length > 0 ? apiKey : null);
@@ -643,6 +649,13 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     if (commandTimeoutSeconds !== undefined) {
       writePlannerCommandTimeoutSeconds(db, commandTimeoutSeconds);
     }
+    // PA-121: the LLM stream's idle timeout and context compaction.
+    if (llmIdleTimeoutSeconds !== undefined) writePlannerLlmIdleTimeoutSeconds(db, llmIdleTimeoutSeconds);
+    writePlannerCompactionSettings(db, {
+      ...(compactionEnabled !== undefined ? { enabled: compactionEnabled } : {}),
+      ...(compactionReserveTokens !== undefined ? { reserveTokens: compactionReserveTokens } : {}),
+      ...(compactionKeepRecentTokens !== undefined ? { keepRecentTokens: compactionKeepRecentTokens } : {}),
+    });
     // PA-70: the planner endpoint is the one *singleton* a Hub can provision,
     // so this line matters more than the others — it records a change that
     // repoints the LLM endpoint every Pocket Agent chat on this host uses.

@@ -496,6 +496,33 @@ export const DEFAULT_MAX_SUBAGENT_SPAWNS_PER_TURN = 3;
 export const PLANNER_COMMAND_TIMEOUT_SECONDS_KEY = 'planner_command_timeout_seconds';
 export const DEFAULT_COMMAND_TIMEOUT_SECONDS = 300;
 
+/**
+ * PA-121: how long the chat-completion stream may go without a single byte
+ * before the request is abandoned (and, if nothing had been streamed yet,
+ * retried). `0` turns it off. 300s matches pi's
+ * `DEFAULT_HTTP_IDLE_TIMEOUT_MS`: long enough for a slow reasoning model to
+ * think before its first token, short enough that a dead connection does not
+ * hold a turn — and the chat's `busy` flag — forever. It bounds a wedged
+ * network call, which is nobody's decision; it is not a timeout on anything a
+ * human is being asked.
+ */
+export const PLANNER_LLM_IDLE_TIMEOUT_SECONDS_KEY = 'planner_llm_idle_timeout_seconds';
+export const DEFAULT_LLM_IDLE_TIMEOUT_SECONDS = 300;
+
+/**
+ * PA-121: context compaction — see `planner/compaction.ts`. On by default:
+ * without it a long chat eventually exceeds the model's context window and
+ * every later turn fails. `reserveTokens` is the headroom kept free below the
+ * window (for the reply, and as slack for the estimate); `keepRecentTokens`
+ * is how much of the most recent conversation survives verbatim. Defaults are
+ * pi's (`DEFAULT_COMPACTION_SETTINGS`).
+ */
+export const PLANNER_COMPACTION_ENABLED_KEY = 'planner_compaction_enabled';
+export const PLANNER_COMPACTION_RESERVE_TOKENS_KEY = 'planner_compaction_reserve_tokens';
+export const PLANNER_COMPACTION_KEEP_RECENT_TOKENS_KEY = 'planner_compaction_keep_recent_tokens';
+export const DEFAULT_COMPACTION_RESERVE_TOKENS = 16_384;
+export const DEFAULT_COMPACTION_KEEP_RECENT_TOKENS = 20_000;
+
 export interface PlannerSettingsSnapshot {
   baseUrl: string | null;
   hasApiKey: boolean;
@@ -516,6 +543,10 @@ export interface PlannerSettingsSnapshot {
   maxToolIterations: number;
   maxSubagentSpawnsPerTurn: number;
   commandTimeoutSeconds: number;
+  llmIdleTimeoutSeconds: number;
+  compactionEnabled: boolean;
+  compactionReserveTokens: number;
+  compactionKeepRecentTokens: number;
 }
 
 export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
@@ -540,7 +571,53 @@ export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
     maxToolIterations: readMaxToolIterations(db),
     maxSubagentSpawnsPerTurn: readMaxSubagentSpawnsPerTurn(db),
     commandTimeoutSeconds: readCommandTimeoutSeconds(db),
+    llmIdleTimeoutSeconds: readBoundedInt(db, PLANNER_LLM_IDLE_TIMEOUT_SECONDS_KEY, DEFAULT_LLM_IDLE_TIMEOUT_SECONDS, 0, 3600),
+    // Absence means on, the same convention `mcpEnabled` uses.
+    compactionEnabled: readSetting(db, PLANNER_COMPACTION_ENABLED_KEY) !== '0',
+    compactionReserveTokens: readBoundedInt(
+      db,
+      PLANNER_COMPACTION_RESERVE_TOKENS_KEY,
+      DEFAULT_COMPACTION_RESERVE_TOKENS,
+      1024,
+      1_000_000,
+    ),
+    compactionKeepRecentTokens: readBoundedInt(
+      db,
+      PLANNER_COMPACTION_KEEP_RECENT_TOKENS_KEY,
+      DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
+      1024,
+      1_000_000,
+    ),
   };
+}
+
+/** An integer setting, clamped defensively on the way out like the three
+    above it: an out-of-range or unparsable row reads as the default. */
+function readBoundedInt(db: Db, key: string, fallback: number, min: number, max: number): number {
+  const raw = readSetting(db, key);
+  if (raw === null || raw === '') return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) return fallback;
+  return parsed;
+}
+
+/** PA-121: see `PLANNER_LLM_IDLE_TIMEOUT_SECONDS_KEY`. */
+export function writePlannerLlmIdleTimeoutSeconds(db: Db, n: number): void {
+  writeSetting(db, PLANNER_LLM_IDLE_TIMEOUT_SECONDS_KEY, String(n));
+}
+
+/** PA-121: see `PLANNER_COMPACTION_ENABLED_KEY`. */
+export function writePlannerCompactionSettings(
+  db: Db,
+  patch: { enabled?: boolean; reserveTokens?: number; keepRecentTokens?: number },
+): void {
+  if (patch.enabled !== undefined) writeSetting(db, PLANNER_COMPACTION_ENABLED_KEY, patch.enabled ? '1' : '0');
+  if (patch.reserveTokens !== undefined) {
+    writeSetting(db, PLANNER_COMPACTION_RESERVE_TOKENS_KEY, String(patch.reserveTokens));
+  }
+  if (patch.keepRecentTokens !== undefined) {
+    writeSetting(db, PLANNER_COMPACTION_KEEP_RECENT_TOKENS_KEY, String(patch.keepRecentTokens));
+  }
 }
 
 function readMaxToolIterations(db: Db): number {

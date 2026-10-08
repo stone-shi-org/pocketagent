@@ -1,3 +1,5 @@
+import { isContextOverflowMessage, isQuotaMessage, isRetryableStatus, retryAfterMs } from './llm-errors.js';
+
 /** OpenAI wire format is snake_case; kept verbatim rather than translated,
     since these objects are serialized straight into the request body and
     parsed straight out of the response — a translation layer here would be
@@ -53,21 +55,97 @@ export interface PlannerLlmCompletion {
 export type PlannerLlmStreamEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'thinking_delta'; text: string }
+  /** PA-121: an attempt failed before streaming anything and will be
+      retried after `delayMs`. Surfaced so the chat is not silent while it
+      waits; nothing about the failed attempt reaches the transcript. */
+  | { type: 'retry'; attempt: number; maxRetries: number; delayMs: number; reason: string }
   | ({ type: 'done' } & PlannerLlmCompletion);
 
 export interface PlannerLlmStreamOptions {
   effort?: string | null;
   thinking?: boolean;
+  /**
+   * PA-121: abandon the request when no byte has arrived for this long —
+   * waiting for the response headers included. `0`/absent means no idle
+   * timeout, which is how every caller behaved before.
+   */
+  idleTimeoutMs?: number;
+  /** PA-121: sent as `max_tokens` when set. Omitted otherwise, because some
+      OpenAI-compatible servers reject the field outright. */
+  maxTokens?: number;
 }
 
 export class PlannerLlmError extends Error {
   override readonly name = 'PlannerLlmError';
+  /** PA-121: worth trying again — see `llm-errors.ts`. */
+  readonly retryable: boolean;
+  /** PA-121: the prompt did not fit the model's context window. Never
+      retried as-is; `driveLoop` compacts the conversation and tries once. */
+  readonly contextOverflow: boolean;
+  /** PA-121: the delay the server asked for, when it named one. */
+  readonly retryAfterMs: number | null;
   constructor(
     message: string,
     readonly statusCode?: number,
+    details: { retryable?: boolean; contextOverflow?: boolean; retryAfterMs?: number | null } = {},
   ) {
     super(message);
+    this.contextOverflow = details.contextOverflow ?? false;
+    this.retryable = !this.contextOverflow && (details.retryable ?? false);
+    this.retryAfterMs = details.retryAfterMs ?? null;
   }
+}
+
+/**
+ * PA-121: the error for a non-2xx response, classified. Quota and overflow
+ * are decided from the body text first, because a provider will happily
+ * report either with a 429 or a 400.
+ */
+function httpError(prefix: string, status: number, body: string, headers: Headers): PlannerLlmError {
+  const message = `${prefix} returned ${status}: ${body.slice(0, 500)}`;
+  if (isQuotaMessage(body)) return new PlannerLlmError(message, status, { retryable: false });
+  if (isContextOverflowMessage(body)) return new PlannerLlmError(message, status, { contextOverflow: true });
+  return new PlannerLlmError(message, status, {
+    retryable: isRetryableStatus(status),
+    retryAfterMs: retryAfterMs(headers),
+  });
+}
+
+/**
+ * PA-121: retry policy for `streamComplete` — pi's agent-level defaults
+ * (3 retries, 2s doubling, at most 60s). A server asking for a longer wait
+ * than `maxDelayMs` is not waited for: a minute-plus `retry-after` means the
+ * provider is not coming back on the timescale of a chat turn.
+ */
+export interface PlannerLlmRetryPolicy {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+}
+
+export const DEFAULT_LLM_RETRY_POLICY: PlannerLlmRetryPolicy = {
+  maxRetries: 3,
+  baseDelayMs: 2_000,
+  maxDelayMs: 60_000,
+};
+
+/** Resolves after `ms`, or rejects as soon as `signal` aborts. */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new PlannerLlmError('Aborted.'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new PlannerLlmError('Aborted.'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 export interface PlannerLlmClientOptions {
@@ -75,6 +153,9 @@ export interface PlannerLlmClientOptions {
   apiKey: string | null;
   /** Injected in tests so no real network call is ever made. */
   fetchImpl?: typeof fetch;
+  /** PA-121: overrides `DEFAULT_LLM_RETRY_POLICY` — tests shrink the delays,
+      and `maxRetries: 0` turns retrying off. */
+  retry?: Partial<PlannerLlmRetryPolicy>;
 }
 
 /** PA-29: bounds `embed()`'s round trip. Unlike `streamComplete` (which may
@@ -238,6 +319,18 @@ export class PlannerLlmClient {
     return { embeddings };
   }
 
+  /**
+   * One chat completion, streamed, retried on transient failure (PA-121).
+   *
+   * An attempt is retried only when it failed *before streaming anything*: a
+   * connection error, a retryable status, an idle timeout or an empty stream.
+   * Once a delta has been yielded the caller has shown it to someone, so a
+   * retry would repeat it — that failure is thrown, as every failure was
+   * before. A context overflow and a quota error are never retried here; the
+   * first is the caller's to handle by shrinking the context, the second
+   * cannot get better by waiting. Each retry is announced with a `retry`
+   * event, and the wait itself ends early if `signal` aborts.
+   */
   async *streamComplete(
     model: string,
     messages: PlannerChatMessage[],
@@ -245,8 +338,89 @@ export class PlannerLlmClient {
     signal?: AbortSignal,
     options?: PlannerLlmStreamOptions,
   ): AsyncGenerator<PlannerLlmStreamEvent> {
+    const policy = { ...DEFAULT_LLM_RETRY_POLICY, ...this.opts.retry };
+    for (let attempt = 0; ; attempt++) {
+      let streamedAnything = false;
+      try {
+        for await (const event of this.streamOnce(model, messages, tools, signal, options)) {
+          if (event.type !== 'done') streamedAnything = true;
+          yield event;
+        }
+        return;
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        const error = err instanceof PlannerLlmError ? err : new PlannerLlmError((err as Error).message);
+        if (streamedAnything || !error.retryable || attempt >= policy.maxRetries) throw error;
+        let delayMs: number;
+        if (error.retryAfterMs !== null) {
+          if (error.retryAfterMs > policy.maxDelayMs) throw error;
+          delayMs = error.retryAfterMs;
+        } else {
+          // Exponential, with up to 25% jitter downward so several chats
+          // failing together do not retry in lockstep.
+          delayMs = Math.min(policy.baseDelayMs * 2 ** attempt, policy.maxDelayMs) * (1 - Math.random() * 0.25);
+        }
+        delayMs = Math.round(delayMs);
+        yield { type: 'retry', attempt: attempt + 1, maxRetries: policy.maxRetries, delayMs, reason: error.message };
+        await abortableSleep(delayMs, signal);
+      }
+    }
+  }
+
+  private async *streamOnce(
+    model: string,
+    messages: PlannerChatMessage[],
+    tools: unknown[] | undefined,
+    externalSignal: AbortSignal | undefined,
+    options: PlannerLlmStreamOptions | undefined,
+  ): AsyncGenerator<PlannerLlmStreamEvent> {
     const fetchImpl = this.opts.fetchImpl ?? fetch;
     const url = joinUrl(this.opts.baseUrl, '/chat/completions');
+
+    // PA-121: one controller for this attempt, aborted by the caller's signal
+    // or by the idle timer — `fetch` and every `read()` both see it.
+    const controller = new AbortController();
+    const onExternalAbort = (): void => controller.abort();
+    if (externalSignal?.aborted) controller.abort();
+    else externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
+    const idleMs = options?.idleTimeoutMs ?? 0;
+    let idledOut = false;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const armIdle = (): void => {
+      if (idleMs <= 0) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        idledOut = true;
+        controller.abort();
+      }, idleMs);
+    };
+    const idleError = (): PlannerLlmError =>
+      new PlannerLlmError(`The planner LLM endpoint sent nothing for ${Math.round(idleMs / 1000)}s.`, undefined, {
+        retryable: true,
+      });
+    const signal = controller.signal;
+    try {
+      armIdle();
+      yield* this.streamBody(fetchImpl, url, model, messages, tools, signal, options, armIdle, () =>
+        idledOut ? idleError() : null,
+      );
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      externalSignal?.removeEventListener('abort', onExternalAbort);
+    }
+  }
+
+  private async *streamBody(
+    fetchImpl: typeof fetch,
+    url: string,
+    model: string,
+    messages: PlannerChatMessage[],
+    tools: unknown[] | undefined,
+    signal: AbortSignal,
+    options: PlannerLlmStreamOptions | undefined,
+    onActivity: () => void,
+    idleFailure: () => PlannerLlmError | null,
+  ): AsyncGenerator<PlannerLlmStreamEvent> {
 
     const requestPayload: Record<string, unknown> = {
       model,
@@ -268,6 +442,9 @@ export class PlannerLlmClient {
     } else if (options?.effort) {
       requestPayload.reasoning_effort = options.effort;
     }
+    if (options?.maxTokens !== undefined && options.maxTokens > 0) {
+      requestPayload.max_tokens = options.maxTokens;
+    }
 
     let res: Response;
     try {
@@ -279,20 +456,21 @@ export class PlannerLlmClient {
           ...(this.opts.apiKey ? { authorization: `Bearer ${this.opts.apiKey}` } : {}),
         },
         body: JSON.stringify(requestPayload),
-        ...(signal ? { signal } : {}),
+        signal,
       });
     } catch (err) {
-      throw new PlannerLlmError(
-        `Could not reach the planner LLM endpoint: ${(err as Error).message}`,
-      );
+      const idle = idleFailure();
+      if (idle) throw idle;
+      // A network-level failure (refused, reset, DNS) is transient by nature.
+      throw new PlannerLlmError(`Could not reach the planner LLM endpoint: ${(err as Error).message}`, undefined, {
+        retryable: !signal.aborted,
+      });
     }
+    onActivity();
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      throw new PlannerLlmError(
-        `Planner LLM endpoint returned ${res.status}: ${body.slice(0, 500)}`,
-        res.status,
-      );
+      throw httpError('Planner LLM endpoint', res.status, body, res.headers);
     }
 
     const reader = res.body?.getReader();
@@ -437,6 +615,7 @@ export class PlannerLlmClient {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        onActivity();
         buffer += decoder.decode(value, { stream: true });
         let boundary = buffer.indexOf('\n');
         while (boundary >= 0) {
@@ -454,11 +633,15 @@ export class PlannerLlmClient {
         }
       }
     } catch (err) {
-      throw new PlannerLlmError(`Lost connection to the planner LLM endpoint: ${(err as Error).message}`);
+      const idle = idleFailure();
+      if (idle) throw idle;
+      throw new PlannerLlmError(`Lost connection to the planner LLM endpoint: ${(err as Error).message}`, undefined, {
+        retryable: !signal.aborted,
+      });
     }
 
     if (!sawAnyChunk) {
-      throw new PlannerLlmError('Planner LLM endpoint returned an empty stream.');
+      throw new PlannerLlmError('Planner LLM endpoint returned an empty stream.', undefined, { retryable: true });
     }
 
     const toolCalls: PlannerLlmToolCall[] = Array.from(toolCallsByIndex.values())

@@ -747,7 +747,29 @@ describe('planner routes over HTTP', () => {
       maxSubagentSpawnsPerTurn: 3,
       // PA-95: configurable command timeout in seconds (default 300).
       commandTimeoutSeconds: 300,
+      // PA-121: LLM stream idle timeout, and context compaction (on).
+      llmIdleTimeoutSeconds: 300,
+      compactionEnabled: true,
+      compactionReserveTokens: 16384,
+      compactionKeepRecentTokens: 20000,
     });
+  });
+
+  it('PATCH updates the PA-121 loop settings and persists them', async () => {
+    const res = await patch('/api/planner/settings', {
+      llmIdleTimeoutSeconds: 0,
+      compactionEnabled: false,
+      compactionReserveTokens: 8192,
+      compactionKeepRecentTokens: 4096,
+    });
+    expect(res.statusCode).toBe(200);
+    expect((await get('/api/planner/settings')).json()).toMatchObject({
+      llmIdleTimeoutSeconds: 0,
+      compactionEnabled: false,
+      compactionReserveTokens: 8192,
+      compactionKeepRecentTokens: 4096,
+    });
+    expect((await patch('/api/planner/settings', { compactionReserveTokens: 10 })).statusCode).toBe(400);
   });
 
   it('PATCH updates commandTimeoutSeconds and persists it', async () => {
