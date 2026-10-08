@@ -159,6 +159,10 @@ export const PlannerContextPreviewResponse = z.object({
           reason: z.enum(['threshold', 'overflow', 'manual']),
         })
         .nullable(),
+      /** PA-122: the sum of every turn's `costUsd` in this transcript, or
+          `null` when no turn has one (no prices set). Optional so an older
+          server still parses. */
+      spentUsd: z.number().nullable().optional(),
     })
     .optional(),
 });

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { EffortLevel } from './agent-events.js';
+import { PlannerModelOptionalFields } from './planner.js';
 import { HubHostId } from './hub-registry.js';
 import { McpAuthKind, McpTransportKind } from './mcp-registry.js';
 import { CustomClaudeProviderKind } from './custom-claude-providers.js';
@@ -276,6 +277,9 @@ export const PlannerEndpointTemplatePayload = z.object({
         label: z.string().min(1).max(128),
         supportsEffort: z.boolean().optional(),
         defaultEffort: EffortLevel.nullable().optional(),
+        // PA-122: context limits, caching and prices are portable — their
+        // values mean the same thing on every host, and none is a secret.
+        ...PlannerModelOptionalFields,
       }),
     )
     .max(50),

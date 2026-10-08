@@ -1417,6 +1417,8 @@ export function PlannerChatPage({
                     {contextPreview.budget.compactionEnabled
                       ? `Compacts automatically at about ${contextPreview.budget.thresholdTokens.toLocaleString()}; /compact does it now.`
                       : 'Automatic compaction is off.'}
+                    {contextPreview.budget.spentUsd != null &&
+                      ` Turns in this chat have cost about $${contextPreview.budget.spentUsd.toFixed(4)} (from the model prices in Settings, or the provider's own figure).`}
                   </p>
                 )}
               </div>

@@ -287,11 +287,25 @@ export interface PlannerModelRow {
   maxOutputTokens: number | null;
   /** PA-122: `null` = auto, see `planner/prompt-cache.ts`. */
   promptCaching: boolean | null;
+  /** PA-122: USD per million tokens; `null` = not set, see `planner/cost.ts`. */
+  inputPricePerMTok: number | null;
+  outputPricePerMTok: number | null;
+  cacheReadPricePerMTok: number | null;
+  cacheWritePricePerMTok: number | null;
 }
+
+/** PA-122: the price columns, camelCase → column name. */
+const PRICE_COLUMNS = {
+  inputPricePerMTok: 'price_input',
+  outputPricePerMTok: 'price_output',
+  cacheReadPricePerMTok: 'price_cache_read',
+  cacheWritePricePerMTok: 'price_cache_write',
+} as const;
+type PriceField = keyof typeof PRICE_COLUMNS;
 
 /** The columns a caller may leave out when adding a row — each defaults to
     "not set". */
-type OptionalModelColumns = 'contextWindow' | 'maxOutputTokens' | 'promptCaching';
+type OptionalModelColumns = 'contextWindow' | 'maxOutputTokens' | 'promptCaching' | PriceField;
 
 function nullableBool(value: number | null | undefined): boolean | null {
   return value === null || value === undefined ? null : value !== 0;
@@ -312,6 +326,10 @@ interface PlannerModelDbRow {
   context_window?: number | null;
   max_output_tokens?: number | null;
   prompt_caching?: number | null;
+  price_input?: number | null;
+  price_output?: number | null;
+  price_cache_read?: number | null;
+  price_cache_write?: number | null;
 }
 
 function modelFromDbRow(row: PlannerModelDbRow): PlannerModelRow {
@@ -326,6 +344,10 @@ function modelFromDbRow(row: PlannerModelDbRow): PlannerModelRow {
     contextWindow: row.context_window ?? null,
     maxOutputTokens: row.max_output_tokens ?? null,
     promptCaching: nullableBool(row.prompt_caching),
+    inputPricePerMTok: row.price_input ?? null,
+    outputPricePerMTok: row.price_output ?? null,
+    cacheReadPricePerMTok: row.price_cache_read ?? null,
+    cacheWritePricePerMTok: row.price_cache_write ?? null,
   };
 }
 
@@ -342,9 +364,9 @@ export function insertPlannerModel(
   db.prepare(
     `INSERT INTO planner_models
        (id, model_id, label, sort_order, created_at, supports_effort, default_effort, context_window, max_output_tokens,
-        prompt_caching)
+        prompt_caching, price_input, price_output, price_cache_read, price_cache_write)
      VALUES (@id, @modelId, @label, @sortOrder, @createdAt, @supportsEffort, @defaultEffort, @contextWindow, @maxOutputTokens,
-        @promptCaching)`,
+        @promptCaching, @inputPricePerMTok, @outputPricePerMTok, @cacheReadPricePerMTok, @cacheWritePricePerMTok)`,
   ).run({
     id: row.id,
     modelId: row.modelId,
@@ -356,6 +378,10 @@ export function insertPlannerModel(
     contextWindow: row.contextWindow ?? null,
     maxOutputTokens: row.maxOutputTokens ?? null,
     promptCaching: boolParam(row.promptCaching),
+    inputPricePerMTok: row.inputPricePerMTok ?? null,
+    outputPricePerMTok: row.outputPricePerMTok ?? null,
+    cacheReadPricePerMTok: row.cacheReadPricePerMTok ?? null,
+    cacheWritePricePerMTok: row.cacheWritePricePerMTok ?? null,
   });
 }
 
@@ -379,7 +405,7 @@ export function updatePlannerModel(
     contextWindow?: number | null;
     maxOutputTokens?: number | null;
     promptCaching?: boolean | null;
-  },
+  } & Partial<Record<PriceField, number | null>>,
 ): boolean {
   const assignments: string[] = [];
   const params: Record<string, unknown> = { id };
@@ -406,6 +432,11 @@ export function updatePlannerModel(
   if (patch.promptCaching !== undefined) {
     assignments.push('prompt_caching = @promptCaching');
     params.promptCaching = boolParam(patch.promptCaching);
+  }
+  for (const field of Object.keys(PRICE_COLUMNS) as PriceField[]) {
+    if (patch[field] === undefined) continue;
+    assignments.push(`${PRICE_COLUMNS[field]} = @${field}`);
+    params[field] = patch[field];
   }
   if (assignments.length === 0) return false;
   return db.prepare(`UPDATE planner_models SET ${assignments.join(', ')} WHERE id = @id`).run(params).changes > 0;

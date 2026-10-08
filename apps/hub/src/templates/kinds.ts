@@ -461,7 +461,10 @@ export function planFor(spec: HubTemplatePayload, secrets: FilledSecrets): Provi
                   call: {
                     method: 'POST' as const,
                     path: '/api/planner/models',
-                    body: { modelId: model.modelId, label: model.label },
+                    // PA-122: every optional setting the template carries,
+                    // not just the id and label — an older backend's schema
+                    // strips a field it does not know rather than failing.
+                    body: model,
                   },
                 })),
               ],

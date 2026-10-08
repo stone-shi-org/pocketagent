@@ -8520,3 +8520,7 @@ button.chat-rate-limit-badge {
 .compaction-summary { white-space: pre-wrap; margin-top: 6px; padding: 8px 10px; background: var(--bg-elev); border-radius: 8px; color: var(--text); font-size: 13px; }
 .planner-model-limit { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; font-size: 12px; color: var(--text-dim); }
 .planner-model-limit input { width: 92px; padding: 2px 6px; font-size: 12px; }
+/* PA-122: per-model prices sit on their own line under the limits. */
+.planner-model-prices { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-top: 4px; }
+.planner-model-prices .planner-model-limit input { width: 72px; }
+.planner-model-limit select { padding: 2px 4px; font-size: 12px; }

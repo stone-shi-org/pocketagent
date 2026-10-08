@@ -617,7 +617,8 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       'planner-endpoint',
       {
         baseUrl: baseUrlInput,
-        models: (models ?? []).map((m) => ({ modelId: m.modelId, label: m.label })),
+        // PA-122: each model's settings travel with it, not just its name.
+        models: (models ?? []).map(({ id: _id, sortOrder: _sortOrder, createdAt: _createdAt, ...model }) => model),
         embeddingBaseUrl: embeddingBaseUrlInput || null,
         embeddingModelId: embeddingModelIdInput || null,
         webSearchBaseUrl: webSearchBaseUrlInput || null,
@@ -645,7 +646,7 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
           const existingModelIds = new Set((models ?? []).map((m) => m.modelId));
           for (const m of imported.models) {
             if (!existingModelIds.has(m.modelId)) {
-              await api.createPlannerModel({ modelId: m.modelId, label: m.label });
+              await api.createPlannerModel(m);
             }
           }
           await load();
@@ -906,6 +907,36 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
                   disabled={busy}
                   onSave={(v) => setModelLimit(m.id, { promptCaching: v })}
                 />
+                <span
+                  className="planner-model-prices"
+                  title="USD per million tokens, used to show each turn's cost. Optional — with no input and output price a turn shows no cost. An empty cache price is charged at the input price. A cost the provider reports itself is used instead."
+                >
+                  <PriceInput
+                    label="$ in"
+                    value={m.inputPricePerMTok ?? null}
+                    disabled={busy}
+                    onSave={(v) => setModelLimit(m.id, { inputPricePerMTok: v })}
+                  />
+                  <PriceInput
+                    label="out"
+                    value={m.outputPricePerMTok ?? null}
+                    disabled={busy}
+                    onSave={(v) => setModelLimit(m.id, { outputPricePerMTok: v })}
+                  />
+                  <PriceInput
+                    label="cache read"
+                    value={m.cacheReadPricePerMTok ?? null}
+                    disabled={busy}
+                    onSave={(v) => setModelLimit(m.id, { cacheReadPricePerMTok: v })}
+                  />
+                  <PriceInput
+                    label="cache write"
+                    value={m.cacheWritePricePerMTok ?? null}
+                    disabled={busy}
+                    onSave={(v) => setModelLimit(m.id, { cacheWritePricePerMTok: v })}
+                  />
+                  <span className="planner-row-meta">per 1M tokens</span>
+                </span>
                 {result === 'testing' && <span className="planner-row-meta"> — testing…</span>}
                 {result && result !== 'testing' && (
                   <span className={result.ok ? 'planner-test-ok' : 'planner-test-fail'}>
@@ -1645,6 +1676,52 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
  * server's `[1024, 10 000 000]` range reverts rather than round-tripping as a
  * 400.
  */
+/** PA-122: one per-million-token price; empty = not set. */
+function PriceInput({
+  label,
+  value,
+  disabled,
+  onSave,
+}: {
+  label: string;
+  value: number | null;
+  disabled: boolean;
+  onSave: (value: number | null) => void;
+}): JSX.Element {
+  const [text, setText] = useState(value === null ? '' : String(value));
+  useEffect(() => {
+    setText(value === null ? '' : String(value));
+  }, [value]);
+  const commit = (): void => {
+    const trimmed = text.trim();
+    if (trimmed === '') {
+      if (value !== null) onSave(null);
+      return;
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 10_000) {
+      setText(value === null ? '' : String(value));
+      return;
+    }
+    if (parsed !== value) onSave(parsed);
+  };
+  return (
+    <label className="planner-model-limit">
+      <span>{label}</span>
+      <input
+        type="number"
+        min={0}
+        step="any"
+        placeholder="—"
+        value={text}
+        disabled={disabled}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+      />
+    </label>
+  );
+}
+
 /** PA-122: Auto / On / Off for a nullable per-model boolean. */
 function TriStateSelect({
   label,

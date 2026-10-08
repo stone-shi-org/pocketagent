@@ -95,6 +95,7 @@ import { estimateTokens } from './token-estimate.js';
 import type { GeminiFunctionDeclaration } from './gemini-live.js';
 import { prepareToolArguments, toolUseInput } from './tool-args.js';
 import { applyCacheControl, isCacheControlRejection, resolvePromptCaching } from './prompt-cache.js';
+import { roundTripCostUsd, type PlannerModelPrices } from './cost.js';
 import {
   SUMMARIZATION_SYSTEM_PROMPT,
   buildSummaryRequest,
@@ -450,6 +451,11 @@ interface PlannerTurnStats {
   /** PA-122: subsets of `inputTokens`; `null` until a provider reports one. */
   cacheReadTokens: number | null;
   cacheWriteTokens: number | null;
+  /** PA-122: the sum of every costed round trip, `null` before the first. */
+  costUsd: number | null;
+  /** PA-122: a round trip could not be costed (no prices, no usage), so the
+      sum above is a lower bound and the turn reports no cost at all. */
+  costIncomplete: boolean;
 }
 
 const EMPTY_TURN_STATS: PlannerTurnStats = {
@@ -458,6 +464,8 @@ const EMPTY_TURN_STATS: PlannerTurnStats = {
   outputTokens: null,
   cacheReadTokens: null,
   cacheWriteTokens: null,
+  costUsd: null,
+  costIncomplete: false,
 };
 
 /** A figure that may never have been reported, added to a running total
@@ -472,9 +480,10 @@ function addNullable(total: number | null, value: number | null | undefined): nu
     reports the same fields. */
 function turnStatsFields(stats: PlannerTurnStats | null): Pick<
   TurnCompleteEvent,
-  'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens'
+  'costUsd' | 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens'
 > {
   return {
+    costUsd: stats && !stats.costIncomplete ? stats.costUsd : null,
     inputTokens: stats?.inputTokens ?? null,
     outputTokens: stats?.outputTokens ?? null,
     cacheReadTokens: stats?.cacheReadTokens ?? null,
@@ -489,10 +498,19 @@ const EMPTY_DISABLED_SET: ReadonlySet<string> = new Set();
 /** Folds one LLM call's usage (if the provider sent one) into the running
     total — accumulates rather than replaces, since a turn's tokens are the
     sum across every round trip it took. */
-function addUsage(stats: PlannerTurnStats, usage: PlannerLlmUsage | null): PlannerTurnStats {
-  if (!usage) return stats;
+function addUsage(
+  stats: PlannerTurnStats,
+  usage: PlannerLlmUsage | null,
+  prices: PlannerModelPrices | null,
+): PlannerTurnStats {
+  // PA-122: a completed round trip with no usage block cannot be costed, so
+  // the turn's cost becomes unknown rather than quietly too low.
+  if (!usage) return { ...stats, costIncomplete: true };
+  const cost = roundTripCostUsd(usage, prices);
   return {
     ...stats,
+    costUsd: cost === null ? stats.costUsd : (stats.costUsd ?? 0) + cost,
+    costIncomplete: stats.costIncomplete || cost === null,
     inputTokens: (stats.inputTokens ?? 0) + usage.promptTokens,
     outputTokens: (stats.outputTokens ?? 0) + usage.completionTokens,
     cacheReadTokens: addNullable(stats.cacheReadTokens, usage.cacheReadTokens),
@@ -929,7 +947,6 @@ export class PlannerChatService {
             isError: false,
             numTurns: null,
             durationMs: pending.kind === 'loop' ? pending.stats.elapsedMs : null,
-            costUsd: null,
             ...turnStatsFields(pending.kind === 'loop' ? pending.stats : null),
             completedAt: Date.now(),
           });
@@ -1382,6 +1399,7 @@ export class PlannerChatService {
               reason: lastCompaction.reason,
             }
           : null,
+        spentUsd: spentUsd(events),
       },
       systemPrompt,
       tools: {
@@ -1882,7 +1900,6 @@ export class PlannerChatService {
       isError,
       numTurns: null,
       durationMs: stats.elapsedMs,
-      costUsd: null,
       ...turnStatsFields(stats),
       completedAt: Date.now(),
     });
@@ -1956,6 +1973,7 @@ export class PlannerChatService {
 
     const toolSpecs = toOpenAiToolSpecs(this.toolsFor(chat.workspaceId));
     const limits = this.modelLimits(modelId);
+    const modelRow = readPlannerModelByModelId(this.opts.db, modelId);
     let events = await this.readEvents(workspacePath, chat.id);
     let messages = await this.buildTurnContext(chat, workspacePath, settings, events);
     let rawEstimate = estimateRequestTokens(messages, toolSpecs);
@@ -1971,7 +1989,7 @@ export class PlannerChatService {
       this.calibration.apply(chat.id, rawEstimate) > compactionThreshold(limits.contextWindow, settings.compactionReserveTokens)
     ) {
       const outcome = yield* this.compactChat(chat, workspacePath, modelId, 'threshold', null, signal);
-      stats = addCompactionStats(stats, outcome);
+      stats = addCompactionStats(stats, outcome, modelRow);
       if (signal?.aborted) {
         yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'interrupted');
         return;
@@ -1986,7 +2004,6 @@ export class PlannerChatService {
     // PA-121: `max_tokens` only for a model whose row sets an output limit,
     // sized so prompt plus reply fit the window. Never sent otherwise —
     // several OpenAI-compatible servers reject the field.
-    const modelRow = readPlannerModelByModelId(this.opts.db, modelId);
     const maxTokens =
       modelRow?.maxOutputTokens != null
         ? Math.max(1024, Math.min(modelRow.maxOutputTokens, limits.contextWindow - estimatedTokens - CONTEXT_SAFETY_TOKENS))
@@ -2090,7 +2107,7 @@ export class PlannerChatService {
         // simply too small for what is being kept.
         if (settings.compactionEnabled && !loopOpts.overflowRecovery) {
           const outcome = yield* this.compactChat(chat, workspacePath, modelId, 'overflow', null, signal);
-          const recoveredStats = addCompactionStats(failedStats, outcome);
+          const recoveredStats = addCompactionStats(failedStats, outcome, modelRow);
           if (outcome.compacted && !signal?.aborted) {
             yield* this.driveLoop(chat, workspacePath, modelId, iteration, recoveredStats, signal, {
               overflowRecovery: true,
@@ -2133,10 +2150,10 @@ export class PlannerChatService {
       yield thinkEv;
       await appendTranscriptEvent(workspacePath, chat.id, thinkEv);
     }
-    const nextStats = addUsage(
-      { ...stats, elapsedMs: stats.elapsedMs + (Date.now() - llmStartedAt) },
-      completion?.usage ?? null,
-    );
+    const timedStats = { ...stats, elapsedMs: stats.elapsedMs + (Date.now() - llmStartedAt) };
+    // A request that produced no completion at all is not a billed round
+    // trip, so only a completion without usage makes the cost unknown.
+    const nextStats = completion ? addUsage(timedStats, completion.usage, modelRow) : timedStats;
     // PA-121: what the provider actually counted for this request calibrates
     // the next estimate — see `TokenCalibration`.
     if (completion?.usage && completion.usage.promptTokens > 0) {
@@ -3856,10 +3873,28 @@ function contextMessages(projection: ContextProjection): PlannerChatMessage[] {
   return [{ role: 'user', content: summary }, ...messages];
 }
 
+/** PA-122: what this transcript's turns cost, from their own
+    `turn_complete.costUsd` — `null` when none of them has one. */
+function spentUsd(events: readonly AgentEvent[]): number | null {
+  let total: number | null = null;
+  for (const event of events) {
+    if (event.kind === 'turn_complete' && event.costUsd !== null) total = (total ?? 0) + event.costUsd;
+  }
+  return total;
+}
+
 /** PA-121: a compaction's LLM time and tokens count toward the turn's
     footer like any other round trip. */
-function addCompactionStats(stats: PlannerTurnStats, outcome: CompactionOutcome): PlannerTurnStats {
-  return addUsage({ ...stats, elapsedMs: stats.elapsedMs + outcome.elapsedMs }, outcome.usage);
+function addCompactionStats(
+  stats: PlannerTurnStats,
+  outcome: CompactionOutcome,
+  prices: PlannerModelPrices | null,
+): PlannerTurnStats {
+  const withTime = { ...stats, elapsedMs: stats.elapsedMs + outcome.elapsedMs };
+  // A compaction that never reached the model (nothing to compact) costs
+  // nothing; one that did and reported no usage makes the cost unknown.
+  if (!outcome.usage && outcome.elapsedMs === 0) return withTime;
+  return addUsage(withTime, outcome.usage, prices);
 }
 
 /** The system message a real turn prepends when memory injection has any

@@ -204,11 +204,41 @@ export const PlannerModel = z.object({
    * token counts a provider reports does not depend on it.
    */
   promptCaching: z.boolean().nullable().optional(),
+  /**
+   * PA-122: what this model costs, in USD per million tokens, as the
+   * operator entered it — used to fill `turn_complete.costUsd`. A cache
+   * price left `null` is charged at the input price. With no input or
+   * output price, a turn's cost is `null` rather than a fabricated `0`.
+   * There is no billing source of truth behind these numbers: a provider
+   * that reports its own cost (`usage.cost`) is believed over them.
+   */
+  inputPricePerMTok: z.number().nonnegative().nullable().optional(),
+  outputPricePerMTok: z.number().nonnegative().nullable().optional(),
+  cacheReadPricePerMTok: z.number().nonnegative().nullable().optional(),
+  cacheWritePricePerMTok: z.number().nonnegative().nullable().optional(),
 });
 export type PlannerModel = z.infer<typeof PlannerModel>;
 
-/** PA-121: bounds for `PlannerModel.contextWindow`/`maxOutputTokens` on the way in. */
+/** PA-122: bounds for a per-million-token price on the way in. */
+const PRICE_PER_MTOK = z.number().min(0).max(10_000).nullable();
+
+/** PA-122: bounds for `PlannerModel.contextWindow`/`maxOutputTokens` (PA-121) on the way in. */
 const TOKEN_LIMIT = z.number().int().min(1024).max(10_000_000).nullable();
+
+/**
+ * PA-122: a model row's optional settings, shared by create, update and the
+ * Hub's `planner-endpoint` template, so a field cannot be settable in one and
+ * silently dropped by another. Every one is "not set" when absent.
+ */
+export const PlannerModelOptionalFields = {
+  contextWindow: TOKEN_LIMIT.optional(),
+  maxOutputTokens: TOKEN_LIMIT.optional(),
+  promptCaching: z.boolean().nullable().optional(),
+  inputPricePerMTok: PRICE_PER_MTOK.optional(),
+  outputPricePerMTok: PRICE_PER_MTOK.optional(),
+  cacheReadPricePerMTok: PRICE_PER_MTOK.optional(),
+  cacheWritePricePerMTok: PRICE_PER_MTOK.optional(),
+};
 
 export const PlannerModelListResponse = z.object({
   models: z.array(PlannerModel),
@@ -220,9 +250,7 @@ export const CreatePlannerModelRequest = z.object({
   label: z.string().min(1).max(128),
   supportsEffort: z.boolean().optional(),
   defaultEffort: EffortLevel.nullable().optional(),
-  contextWindow: TOKEN_LIMIT.optional(),
-  maxOutputTokens: TOKEN_LIMIT.optional(),
-  promptCaching: z.boolean().nullable().optional(),
+  ...PlannerModelOptionalFields,
 });
 export type CreatePlannerModelRequest = z.infer<typeof CreatePlannerModelRequest>;
 
@@ -230,11 +258,8 @@ export const UpdatePlannerModelRequest = z.object({
   label: z.string().min(1).max(128).optional(),
   supportsEffort: z.boolean().optional(),
   defaultEffort: EffortLevel.nullable().optional(),
-  /** PA-121: `null` clears it back to "not set". */
-  contextWindow: TOKEN_LIMIT.optional(),
-  maxOutputTokens: TOKEN_LIMIT.optional(),
-  /** PA-122: `null` puts it back to auto. */
-  promptCaching: z.boolean().nullable().optional(),
+  /** `null` clears a field back to "not set" (auto, for `promptCaching`). */
+  ...PlannerModelOptionalFields,
 });
 export type UpdatePlannerModelRequest = z.infer<typeof UpdatePlannerModelRequest>;
 

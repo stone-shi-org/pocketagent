@@ -1445,6 +1445,15 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE planner_models ADD COLUMN prompt_caching INTEGER;
   `,
+
+  // PA-122: a planner model's price, USD per million tokens, for
+  // `turn_complete.costUsd`. NULL = not set (see `planner/cost.ts`).
+  `
+  ALTER TABLE planner_models ADD COLUMN price_input REAL;
+  ALTER TABLE planner_models ADD COLUMN price_output REAL;
+  ALTER TABLE planner_models ADD COLUMN price_cache_read REAL;
+  ALTER TABLE planner_models ADD COLUMN price_cache_write REAL;
+  `,
 ];
 
 /**
@@ -1771,6 +1780,11 @@ export function openDatabase(databasePath: string): Db {
   // PA-122, likewise.
   if (plannerModelColumns.size > 0 && !plannerModelColumns.has('prompt_caching')) {
     db.exec('ALTER TABLE planner_models ADD COLUMN prompt_caching INTEGER');
+  }
+  for (const column of ['price_input', 'price_output', 'price_cache_read', 'price_cache_write']) {
+    if (plannerModelColumns.size > 0 && !plannerModelColumns.has(column)) {
+      db.exec(`ALTER TABLE planner_models ADD COLUMN ${column} REAL`);
+    }
   }
   const customClaudeProviderColumns = new Set(
     (db.prepare('PRAGMA table_info(custom_claude_providers)').all() as { name: string }[]).map(

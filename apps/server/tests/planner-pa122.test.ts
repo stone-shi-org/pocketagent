@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { authHeaders, createTestApp, type TestApp } from './helpers.js';
 import { parseUsage } from '../src/planner/llm-client.js';
 import { applyCacheControl, resolvePromptCaching } from '../src/planner/prompt-cache.js';
+import { roundTripCostUsd } from '../src/planner/cost.js';
 
 /**
  * PA-122: the Pocket Agent loop follow-ups — prompt caching, cost, image
@@ -148,6 +149,44 @@ describe('PA-122 usage parsing and cache markers (pure)', () => {
   });
 });
 
+describe('PA-122 cost (pure)', () => {
+  const prices = {
+    inputPricePerMTok: 3,
+    outputPricePerMTok: 15,
+    cacheReadPricePerMTok: 0.3,
+    cacheWritePricePerMTok: 3.75,
+  };
+
+  it('prices uncached input, cache reads, cache writes and output separately', () => {
+    const cost = roundTripCostUsd(
+      { promptTokens: 1_000_000, completionTokens: 100_000, cacheReadTokens: 500_000, cacheWriteTokens: 200_000 },
+      prices,
+    );
+    // 300k uncached × $3 + 500k × $0.30 + 200k × $3.75 + 100k × $15
+    expect(cost).toBeCloseTo(0.9 + 0.15 + 0.75 + 1.5, 10);
+  });
+
+  it('charges an unset cache price at the input price', () => {
+    const cost = roundTripCostUsd(
+      { promptTokens: 1_000_000, completionTokens: 0, cacheReadTokens: 1_000_000, cacheWriteTokens: null },
+      { ...prices, cacheReadPricePerMTok: null },
+    );
+    expect(cost).toBeCloseTo(3, 10);
+  });
+
+  it('is null, never 0, without an input and output price or without usage', () => {
+    const usage = { promptTokens: 10, completionTokens: 10 };
+    expect(roundTripCostUsd(usage, null)).toBeNull();
+    expect(roundTripCostUsd(usage, { ...prices, outputPricePerMTok: null })).toBeNull();
+    expect(roundTripCostUsd(null, prices)).toBeNull();
+  });
+
+  it('believes a cost the provider reports over the configured prices', () => {
+    expect(roundTripCostUsd({ promptTokens: 10, completionTokens: 10, costUsd: 0.5 }, prices)).toBe(0.5);
+    expect(roundTripCostUsd({ promptTokens: 10, completionTokens: 10, costUsd: 0.5 }, null)).toBe(0.5);
+  });
+});
+
 describe('PA-122 Pocket Agent loop', () => {
   let t: TestApp;
   afterEach(async () => {
@@ -286,5 +325,83 @@ describe('PA-122 Pocket Agent loop', () => {
     const chat = await setup(fetchImpl);
     const events = await send(chat.id, 'hello');
     expect(events.at(-1)).toMatchObject({ kind: 'turn_complete', cacheReadTokens: null, cacheWriteTokens: null });
+  });
+
+  // ---- Part 2: cost ---------------------------------------------------------
+
+  const priced = { inputPricePerMTok: 2, outputPricePerMTok: 10 };
+
+  it('fills turn_complete.costUsd from the model prices across every round trip', async () => {
+    const { fetchImpl } = scripted([
+      () => toolCall([{ name: 'list_workspaces', args: '{}' }], { prompt_tokens: 100_000, completion_tokens: 1_000 }),
+      () => reply('done', { prompt_tokens: 200_000, completion_tokens: 2_000 }),
+    ]);
+    const chat = await setup(fetchImpl, { modelId: 'gpt-4o', ...priced });
+    const events = await send(chat.id, 'go');
+    const done = events.at(-1)!;
+    expect(done.kind).toBe('turn_complete');
+    // 300k in × $2 + 3k out × $10, per million
+    expect(done.costUsd as number).toBeCloseTo(0.6 + 0.03, 10);
+
+    const preview = (
+      await t.app.inject({ method: 'GET', url: `/api/planner/chats/${chat.id}/context-preview`, headers: authHeaders(t.cookie) })
+    ).json();
+    expect(preview.budget.spentUsd).toBeCloseTo(0.63, 10);
+  });
+
+  it('reports no cost for an unpriced model, or when a round trip reported no usage', async () => {
+    const unpriced = scripted([() => reply('hi', { prompt_tokens: 10, completion_tokens: 2 })]);
+    const chat = await setup(unpriced.fetchImpl, { modelId: 'gpt-4o' });
+    expect((await send(chat.id, 'hello')).at(-1)).toMatchObject({ kind: 'turn_complete', costUsd: null });
+    await t.cleanup();
+
+    const partial = scripted([
+      () => toolCall([{ name: 'list_workspaces', args: '{}' }], { prompt_tokens: 100, completion_tokens: 10 }),
+      () => reply('done'),
+    ]);
+    const chat2 = await setup(partial.fetchImpl, { modelId: 'gpt-4o', ...priced });
+    const done = (await send(chat2.id, 'go')).at(-1)!;
+    expect(done.costUsd).toBeNull();
+    // The tokens that were reported still are.
+    expect(done.inputTokens).toBe(100);
+  });
+
+  it('keeps the cost of the turn so far when a parked approval is interrupted', async () => {
+    const { fetchImpl } = scripted([
+      () =>
+        toolCall([{ name: 'write_file', args: JSON.stringify({ path: 'a.txt', content: 'x' }) }], {
+          prompt_tokens: 1_000_000,
+          completion_tokens: 0,
+        }),
+    ]);
+    const chat = await setup(fetchImpl, { modelId: 'gpt-4o', ...priced });
+    const events = await send(chat.id, 'write it');
+    expect(events.some((e) => e.kind === 'permission_request')).toBe(true);
+    await post(`/api/planner/chats/${chat.id}/interrupt`);
+    const history = (
+      await t.app.inject({ method: 'GET', url: `/api/planner/chats/${chat.id}/history`, headers: authHeaders(t.cookie) })
+    ).json().events as Array<{ kind: string; costUsd?: number | null; stopReason?: string }>;
+    const done = history.filter((e) => e.kind === 'turn_complete').at(-1)!;
+    expect(done.stopReason).toBe('interrupted');
+    expect(done.costUsd).toBeCloseTo(2, 10);
+  });
+
+  it('accepts, returns and clears the price fields', async () => {
+    const { fetchImpl } = scripted([() => reply('hi')]);
+    await setup(fetchImpl, { modelId: 'gpt-4o', ...priced, cacheReadPricePerMTok: 0.5 });
+    const list = () =>
+      t.app
+        .inject({ method: 'GET', url: '/api/planner/models', headers: authHeaders(t.cookie) })
+        .then((r) => r.json().models as Array<Record<string, unknown>>);
+    const [model] = await list();
+    expect(model).toMatchObject({
+      inputPricePerMTok: 2,
+      outputPricePerMTok: 10,
+      cacheReadPricePerMTok: 0.5,
+      cacheWritePricePerMTok: null,
+    });
+    expect((await patch(`/api/planner/models/${model!.id}`, { inputPricePerMTok: -1 })).statusCode).toBe(400);
+    await patch(`/api/planner/models/${model!.id}`, { inputPricePerMTok: null });
+    expect((await list())[0]!.inputPricePerMTok).toBeNull();
   });
 });
