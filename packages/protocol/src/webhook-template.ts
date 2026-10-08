@@ -154,7 +154,7 @@ const BAMBOO_LONG_PROSE_VARS = new Set(['trigger.sentence']);
 
 /**
  * How to upload an attachment through the mcp-atlassian MCP server, appended to
- * the default Jira template. That server runs in a container on another
+ * every Jira preset template. That server runs in a container on another
  * machine, so a local `file_path` is "file not found" there; agents kept
  * retrying with paths until told to send the bytes inline as base64. It is
  * operator-authored text with no template variables, so it goes after the
@@ -361,7 +361,9 @@ Workflow Instructions:
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Fix: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review").
-3. If not yet approved or ready, analyze the root cause, post the findings and proposed solution plan as a comment on the Jira ticket {{issue.key}} without modifying code.`;
+3. If not yet approved or ready, analyze the root cause, post the findings and proposed solution plan as a comment on the Jira ticket {{issue.key}} without modifying code.
+
+${MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS}`;
 
 export const JIRA_PROMPT_TEMPLATE_NEW_FEATURE = `A Jira feature request event arrived: {{event}}.
 
@@ -402,7 +404,9 @@ Workflow Instructions:
       - Before committing, rebase your branch onto the latest main/master branch.
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Feature: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
-      - Transition/mark the Jira ticket status as "In Review" (or "in-review").`;
+      - Transition/mark the Jira ticket status as "In Review" (or "in-review").
+
+${MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS}`;
 
 export const JIRA_PROMPT_TEMPLATE_TASK = `A Jira task event arrived: {{event}}.
 
@@ -443,7 +447,9 @@ Workflow Instructions:
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Task: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review").
-   - If not yet approved (no "go ahead"/"approve" comment and none of the labels "approve", "approved" or "approval"), post a brief assessment or plan on {{issue.key}} without modifying code.`;
+   - If not yet approved (no "go ahead"/"approve" comment and none of the labels "approve", "approved" or "approval"), post a brief assessment or plan on {{issue.key}} without modifying code.
+
+${MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS}`;
 
 export const JIRA_PROMPT_TEMPLATE_IMPROVEMENT = `A Jira improvement event arrived: {{event}}.
 
@@ -484,7 +490,9 @@ Workflow Instructions:
       - Commit the changes with a commit message that includes the Jira ticket key {{issue.key}} (e.g. "[{{issue.key}}] Improvement: ...").
       - Post a comment on Jira ticket {{issue.key}} with a "Summary of Changes" including the commit revision hash / ID, files modified, and verification results.
       - Transition/mark the Jira ticket status as "In Review" (or "in-review").
-   - If not yet approved (no "go ahead"/"approve" comment and none of the labels "approve", "approved" or "approval"), post a brief assessment or plan on {{issue.key}} without modifying code.`;
+   - If not yet approved (no "go ahead"/"approve" comment and none of the labels "approve", "approved" or "approval"), post a brief assessment or plan on {{issue.key}} without modifying code.
+
+${MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS}`;
 
 export interface JiraPromptTemplatePreset {
   id: string;

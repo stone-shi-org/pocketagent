@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_JIRA_PROMPT_TEMPLATE,
+  JIRA_PROMPT_TEMPLATES,
   MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS,
   JIRA_SAMPLE_PAYLOAD,
   JIRA_TEMPLATE_VARS,
@@ -209,15 +210,18 @@ describe('renderJiraTemplate', () => {
     expect(r.text).toContain('PA-123');
   });
 
-  it('ends the default template with the mcp-atlassian upload instructions, verbatim', () => {
-    // The instructions mention `{"filename": ...}` and a python one-liner; none
-    // of it may be mistaken for a variable or lost to escaping.
-    const r = render(DEFAULT_JIRA_PROMPT_TEMPLATE, JIRA_SAMPLE_PAYLOAD);
-    expect(r.missing).toEqual([]);
-    expect(r.text.endsWith(MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS)).toBe(true);
-    expect(r.text).toContain('`confluence_upload_attachment`');
-    expect(r.text).toContain('`[{"filename": "log.txt", "content_base64": "<base64>"}]`');
-  });
+  it.each(JIRA_PROMPT_TEMPLATES.map((t) => [t.id, t.template] as const))(
+    'ends the %s template with the mcp-atlassian upload instructions, verbatim',
+    (_id, template) => {
+      // The instructions mention `{"filename": ...}` and a python one-liner; none
+      // of it may be mistaken for a variable or lost to escaping.
+      const r = render(template, JIRA_SAMPLE_PAYLOAD);
+      expect(r.missing).toEqual([]);
+      expect(r.text.endsWith(MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS)).toBe(true);
+      expect(r.text).toContain('`confluence_upload_attachment`');
+      expect(r.text).toContain('`[{"filename": "log.txt", "content_base64": "<base64>"}]`');
+    },
+  );
 
   it('substitutes an unknown name as empty and reports it', () => {
     const r = render('a{{nope.here}}b', JIRA_SAMPLE_PAYLOAD);
