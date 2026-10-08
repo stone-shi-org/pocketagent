@@ -30,6 +30,15 @@ export const TextEvent = z.object({
   kind: z.literal('text'),
   id: z.string(),
   text: z.string(),
+  /**
+   * PA-121: text a Pocket Agent turn wrote on its way to calling tools ("Let
+   * me check the config first…"), as opposed to its answer. Persisted so the
+   * model and a human reopening the chat can both see it, and marked so the
+   * surfaces that relay only a turn's *answer* — Telegram, an MCP client's
+   * `wait_for_turn` — can leave it out. Absent means an ordinary reply, which
+   * is every structured-session text event and every older transcript.
+   */
+  interim: z.boolean().optional(),
 });
 
 /** Incremental text for the block with the same id, when partials are on. */

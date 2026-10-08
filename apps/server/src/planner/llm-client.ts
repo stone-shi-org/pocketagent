@@ -33,6 +33,13 @@ export interface PlannerLlmCompletion {
   toolCalls: PlannerLlmToolCall[];
   usage: PlannerLlmUsage | null;
   reasoning: string | null;
+  /**
+   * PA-121: the provider's `choices[0].finish_reason` (`stop`, `tool_calls`,
+   * `length`, …), or `null` when it never sent one. `length` is the one that
+   * matters: a reply cut off at the output-token limit may carry tool calls
+   * whose argument JSON is incomplete, and `driveLoop` refuses to run those.
+   */
+  finishReason: string | null;
 }
 
 /**
@@ -304,6 +311,7 @@ export class PlannerLlmClient {
     let sawAnyTextDelta = false;
     let sawAnyChunk = false;
     let usage: PlannerLlmUsage | null = null;
+    let finishReason: string | null = null;
     let buffer = '';
 
     const handleLine = (line: string): PlannerLlmStreamEvent[] => {
@@ -335,6 +343,7 @@ export class PlannerLlmClient {
       const choice = (
         parsed as {
           choices?: {
+            finish_reason?: string | null;
             delta?: {
               content?: string | null;
               reasoning_content?: string | null;
@@ -345,6 +354,9 @@ export class PlannerLlmClient {
         }
       ).choices?.[0];
       const delta = choice?.delta;
+      if (typeof choice?.finish_reason === 'string' && choice.finish_reason.length > 0) {
+        finishReason = choice.finish_reason;
+      }
 
       for (const call of delta?.tool_calls ?? []) {
         const existing = toolCallsByIndex.get(call.index);
@@ -459,7 +471,7 @@ export class PlannerLlmClient {
       throw new PlannerLlmError('Planner LLM response had no message content or tool calls.');
     }
 
-    yield { type: 'done', content, toolCalls, usage, reasoning };
+    yield { type: 'done', content, toolCalls, usage, reasoning, finishReason };
   }
 }
 

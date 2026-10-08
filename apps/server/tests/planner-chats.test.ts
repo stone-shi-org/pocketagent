@@ -98,7 +98,7 @@ describe('PlannerLlmClient', () => {
 
     expect(events).toEqual([
       { type: 'text_delta', text: 'hello there' },
-      { type: 'done', content: 'hello there', toolCalls: [], usage: null, reasoning: null },
+      { type: 'done', content: 'hello there', toolCalls: [], usage: null, reasoning: null, finishReason: null },
     ]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0]!;
@@ -154,6 +154,7 @@ describe('PlannerLlmClient', () => {
         toolCalls: [],
         usage: null,
         reasoning: 'Let me think...',
+        finishReason: null,
       },
     ]);
   });
@@ -177,6 +178,7 @@ describe('PlannerLlmClient', () => {
         toolCalls: [],
         usage: null,
         reasoning: 'Step 1 and 2',
+        finishReason: null,
       },
     ]);
   });
@@ -1981,7 +1983,11 @@ describe('planner chat routes over HTTP', () => {
 
     const { events } = await sendMessage(t, chat.id, 'stop pocket');
     const toolResult = events.find((e) => e.kind === 'tool_result')!;
-    expect(String(toolResult.content)).toContain('Stopping pocket_agent subagents is not supported');
+    // PA-121: refused by schema validation before the tool runs — the
+    // schema's own enum says only coding_agent can be stopped — and marked
+    // as an error so the model knows the call did nothing.
+    expect(String(toolResult.content)).toContain('kind: must be one of "coding_agent"');
+    expect(toolResult.isError).toBe(true);
   });
 
   it('poll check short-circuit resets repeat count when null baseline receives activity', async () => {

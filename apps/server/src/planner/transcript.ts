@@ -29,10 +29,20 @@ export async function appendTranscriptEvent(
   await fs.appendFile(file, `${JSON.stringify(event)}\n`, 'utf8');
 }
 
-/** Empty (not an error) for a chat that has never had a message sent yet. */
+/**
+ * Empty (not an error) for a chat that has never had a message sent yet.
+ *
+ * A line that is not valid JSON is skipped, not thrown (PA-121). Before, one
+ * bad line — most plausibly a write cut short by a crash or a full disk,
+ * after which the next append lands on the same line — made every later read
+ * throw, so the chat could neither be opened nor sent another message, and
+ * nothing short of deleting the file by hand recovered it. Losing one event
+ * is the better failure. `onSkippedLine` lets a caller log it.
+ */
 export async function readTranscriptEvents(
   workspacePath: string,
   chatId: string,
+  onSkippedLine?: (lineNumber: number) => void,
 ): Promise<AgentEvent[]> {
   const file = transcriptPath(workspacePath, chatId);
   let raw: string;
@@ -42,10 +52,23 @@ export async function readTranscriptEvents(
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw err;
   }
-  return raw
-    .split('\n')
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line) as AgentEvent);
+  const events: AgentEvent[] = [];
+  const lines = raw.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.trim().length === 0) continue;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (parsed && typeof parsed === 'object' && typeof (parsed as { kind?: unknown }).kind === 'string') {
+        events.push(parsed as AgentEvent);
+        continue;
+      }
+    } catch {
+      /* reported below */
+    }
+    onSkippedLine?.(i + 1);
+  }
+  return events;
 }
 
 /** Removes the transcript file for a cleared or deleted chat. */

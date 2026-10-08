@@ -601,7 +601,8 @@ export function lastTurnText(events: readonly AgentEvent[]): string | null {
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i]!;
     if (event.kind === 'user_prompt') break;
-    if (event.kind === 'text' && event.text.trim().length > 0) texts.unshift(event.text);
+    // PA-121: a Pocket Agent turn's `interim` narration is not its answer.
+    if (event.kind === 'text' && !event.interim && event.text.trim().length > 0) texts.unshift(event.text);
   }
   if (texts.length > 0) return truncateTail(texts.join('\n\n'), MAX_RESULT_CHARS);
   if (events.length === 0) return null;

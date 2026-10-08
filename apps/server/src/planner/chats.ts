@@ -88,6 +88,7 @@ import { TelegramClient } from '../telegram/client.js';
 import { sendMarkdown } from '../telegram/send.js';
 import { estimateTokens } from './token-estimate.js';
 import type { GeminiFunctionDeclaration } from './gemini-live.js';
+import { prepareToolArguments, toolUseInput } from './tool-args.js';
 
 export class PlannerChatError extends Error {
   override readonly name = 'PlannerChatError';
@@ -112,6 +113,54 @@ export class PlannerChatError extends Error {
 const GIVE_UP_MESSAGE =
   'I made too many tool calls without reaching an answer — try narrowing your request, ' +
   'or ask me to summarize what I found so far.';
+
+/**
+ * PA-121: the backstop on what any one tool result contributes to the next
+ * request. Each tool still truncates its own output more intelligently (a
+ * shell command keeps its tail, a file read says which lines it showed); this
+ * exists for the ones that do not — `use_skill` could hand back a 200 KB
+ * body, `list_workspaces`/`read_settings` are unbounded — so that no single
+ * result can crowd the conversation out of the context window. 50 000
+ * characters matches pi's per-result default (`DEFAULT_MAX_BYTES`).
+ */
+export const MAX_TOOL_OUTPUT_CHARS = 50_000;
+
+/**
+ * PA-121: what the model is told when a reply hit the output-token limit
+ * with tool calls in it. Streamed argument JSON that was cut off can still
+ * parse — `{"path": "a"}` is a valid prefix of `{"path": "a/b/c.txt"}` — so
+ * executing it would run a call the model never finished writing. Mirrors
+ * pi's `failToolCallsFromTruncatedMessage`.
+ */
+const TRUNCATED_TOOL_CALL_MESSAGE =
+  'Not run: your response hit the output token limit, so the arguments of this tool call may be ' +
+  'incomplete. Re-issue the tool call with complete arguments (split large content across several ' +
+  'smaller calls if needed).';
+
+/**
+ * PA-121: the result the model sees for a `tool_use` that has no
+ * `tool_result` in the transcript. The one way to get there is an approval
+ * that was pending when the server restarted (`pendingTurns` is in-memory
+ * only, by design), and it used to be replayed as an empty string — which a
+ * model reads as "the tool ran and printed nothing".
+ */
+const MISSING_TOOL_RESULT_MESSAGE =
+  'No result was recorded for this tool call — most likely the server restarted while it was ' +
+  'waiting for approval. Assume it did not run.';
+
+/** Keeps both ends of an oversized result: the head usually says what it is,
+    the tail is where a failure is reported. */
+export function capToolOutput(content: string): { content: string; truncated: boolean } {
+  if (content.length <= MAX_TOOL_OUTPUT_CHARS) return { content, truncated: false };
+  const half = Math.floor(MAX_TOOL_OUTPUT_CHARS / 2);
+  const omitted = content.length - half * 2;
+  return {
+    content:
+      `${content.slice(0, half)}\n\n[… ${omitted} characters omitted: this tool result was over the ` +
+      `${MAX_TOOL_OUTPUT_CHARS}-character limit. Ask for a narrower slice of it …]\n\n${content.slice(-half)}`,
+    truncated: true,
+  };
+}
 
 /**
  * PA-29: how many of a chat's most recent turns (one `user_prompt` and
@@ -1057,7 +1106,7 @@ export class PlannerChatService {
 
   async history(id: string): Promise<AgentEvent[]> {
     const chat = this.requireChat(id);
-    return readTranscriptEvents(this.workspacePathFor(chat), chat.id);
+    return this.readEvents(this.workspacePathFor(chat), chat.id);
   }
 
   /**
@@ -1069,9 +1118,22 @@ export class PlannerChatService {
     for (const [pendingId, pending] of this.pendingTurns) {
       if (pending.chatId === id) this.pendingTurns.delete(pendingId);
     }
+    // PA-121: a turn still running would otherwise go on appending to the
+    // file this is about to delete, recreating a transcript that starts
+    // mid-turn. Aborting is what `interrupt` does first, too; nothing is
+    // persisted for it here because the history it would land in is going.
+    const controller = this.turnAbortControllers.get(id);
+    if (controller) {
+      controller.abort();
+      this.turnAbortControllers.delete(id);
+    }
     this.mailboxByChat.delete(id);
     const workspacePath = this.workspacePathFor(chat);
     await clearTranscriptEvents(workspacePath, chat.id);
+    // PA-121: the fold marker counts turns of the transcript just deleted.
+    // Left in place, a cleared chat folded nothing into memory until it had
+    // re-grown past the old count.
+    writePlannerChatMemoryFoldedTurns(this.opts.db, chat.id, 0);
     updatePlannerChat(this.opts.db, chat.id, { lastActivityAt: Date.now() });
   }
 
@@ -1096,7 +1158,7 @@ export class PlannerChatService {
   async previewContext(id: string): Promise<PlannerContextPreviewResponse> {
     const chat = this.requireChat(id);
     const workspacePath = this.workspacePathFor(chat);
-    const events = await readTranscriptEvents(workspacePath, chat.id);
+    const events = await this.readEvents(workspacePath, chat.id);
     const turns = splitIntoTurns(events);
     const keepFrom = Math.max(0, turns.length - ROLLING_WINDOW_TURNS);
     const inWindowEvents = turns.slice(keepFrom).flat();
@@ -1507,7 +1569,15 @@ export class PlannerChatService {
       const chat = this.requireChat(chatId);
       const workspacePath = this.workspacePathFor(chat);
       const call = pending.kind === 'live' ? pending.call : pending.toolCalls[pending.index]!;
-      yield* this.applyApprovalDecision(chat, workspacePath, approvalId, pending.workspaceId, call, choice);
+      yield* this.applyApprovalDecision(
+        chat,
+        workspacePath,
+        approvalId,
+        pending.workspaceId,
+        call,
+        choice,
+        abortController.signal,
+      );
 
       // PA-96: a live call has no continuation to resume — Gemini drives its
       // own conversation, and the browser relays the `tool_result` just
@@ -1548,6 +1618,7 @@ export class PlannerChatService {
     workspaceId: string | null,
     call: PlannerLlmToolCall,
     choice: PlannerToolApprovalChoice,
+    signal?: AbortSignal,
   ): AsyncGenerator<AgentEvent> {
     // Re-resolved rather than remembered: a tool disabled while the approval
     // sat waiting is refused now, whatever the human says.
@@ -1593,14 +1664,22 @@ export class PlannerChatService {
       decision: 'allow',
       message: scopeMessage(choice),
     });
-    const result = await this.executeTool(tool, call.function.arguments, chat);
+    const result = await this.executeTool(tool, call.function.arguments, chat, signal);
     yield* this.emit(workspacePath, chat.id, {
       kind: 'tool_result',
       id: crypto.randomUUID(),
       toolUseId: call.id,
       content: result.content,
-      truncated: false,
+      truncated: result.truncated,
       isError: result.isError,
+    });
+  }
+
+  /** Every transcript read in this service, so a skipped corrupt line is
+      logged once per read rather than throwing (PA-121, `transcript.ts`). */
+  private readEvents(workspacePath: string, chatId: string): Promise<AgentEvent[]> {
+    return readTranscriptEvents(workspacePath, chatId, (line) => {
+      this.opts.logger?.warn({ chatId, line }, 'skipped an unreadable line in a Pocket Agent transcript');
     });
   }
 
@@ -1711,7 +1790,7 @@ export class PlannerChatService {
       return;
     }
 
-    const events = await readTranscriptEvents(workspacePath, chat.id);
+    const events = await this.readEvents(workspacePath, chat.id);
     const memoryEnabled = this.memoryEnabledFor(chat.workspaceId);
     const windowedEvents = await this.applyRollingWindow(chat, events, memoryEnabled);
     const messages = eventsToLlmMessages(windowedEvents);
@@ -1824,8 +1903,20 @@ export class PlannerChatService {
       return;
     }
 
+    // PA-121: what the model wrote before calling tools ("Let me check the
+    // config first…") used to be streamed as deltas and then dropped, so on
+    // the next round trip the model could not see its own reasoning and the
+    // reopened chat showed tool cards with no explanation. Persisted now,
+    // marked `interim` so the surfaces that relay a turn's *answer* (Telegram,
+    // an MCP client's `wait_for_turn`) can leave it out, and replayed in the
+    // same assistant message as the tool calls (`eventsToLlmMessages`).
+    const narration = completion.content?.trim() ? completion.content : null;
+    if (narration) {
+      yield* this.emit(workspacePath, chat.id, { kind: 'text', id: textBlockId, text: narration, interim: true });
+    }
+
     for (const call of completion.toolCalls) {
-      const args = safeParseArgs(call.function.arguments);
+      const args = toolUseInput(call.function.arguments);
       yield* this.emit(workspacePath, chat.id, {
         kind: 'tool_use',
         id: call.id,
@@ -1834,6 +1925,24 @@ export class PlannerChatService {
         summary: summarizeToolCall(call.function.name, args),
         filePath: extractFilePath(args),
       });
+    }
+
+    if (completion.finishReason === 'length') {
+      // Never executed — see `TRUNCATED_TOOL_CALL_MESSAGE`. Each call still
+      // gets a result, so the history stays a valid call/result sequence, and
+      // the model is asked again with the iteration budget charged as usual.
+      for (const call of completion.toolCalls) {
+        yield* this.emit(workspacePath, chat.id, {
+          kind: 'tool_result',
+          id: crypto.randomUUID(),
+          toolUseId: call.id,
+          content: TRUNCATED_TOOL_CALL_MESSAGE,
+          truncated: false,
+          isError: true,
+        });
+      }
+      yield* this.driveLoop(chat, workspacePath, modelId, iteration + 1, nextStats, signal);
+      return;
     }
 
     yield* this.processToolCalls(chat, workspacePath, modelId, completion.toolCalls, 0, iteration + 1, nextStats, signal);
@@ -1916,13 +2025,13 @@ export class PlannerChatService {
         continue;
       }
 
-      const result = await this.executeTool(gate.tool, call.function.arguments, chat);
+      const result = await this.executeTool(gate.tool, call.function.arguments, chat, signal);
       yield* this.emit(workspacePath, chat.id, {
         kind: 'tool_result',
         id: crypto.randomUUID(),
         toolUseId: call.id,
         content: result.content,
-        truncated: false,
+        truncated: result.truncated,
         isError: result.isError,
       });
       if (signal?.aborted) {
@@ -1959,6 +2068,13 @@ export class PlannerChatService {
     if (!tool) {
       return { kind: 'unavailable', message: this.toolUnavailableMessage(chat.workspaceId, call.function.name) };
     }
+    // PA-121: a call whose arguments are not valid JSON, or do not fit the
+    // tool's schema, is answered with the exact problem before anything else
+    // — in particular before a human is asked to approve it. Approving a call
+    // that cannot run would only waste their answer, and the model can fix
+    // its own mistake on the next round trip.
+    const prepared = prepareToolArguments(tool.name, tool.parameters, call.function.arguments);
+    if (!prepared.ok) return { kind: 'unavailable', message: prepared.message };
     // PA-37: a `call_mcp_tool` invocation's real risk lives in *which*
     // underlying MCP tool it names, never in the wrapper's own static
     // `readOnly` — see `effectiveMcpToolIdentity`'s own doc comment.
@@ -2073,7 +2189,7 @@ export class PlannerChatService {
       );
     }
     const workspacePath = this.workspacePathFor(chat);
-    const events = await readTranscriptEvents(workspacePath, chat.id);
+    const events = await this.readEvents(workspacePath, chat.id);
     // The same window `previewContext` shows and a real turn sends, taken
     // without folding: minting a token must not write memories as a side
     // effect of a human merely switching the mic on.
@@ -2136,7 +2252,7 @@ export class PlannerChatService {
           function: { name: c.name, arguments: JSON.stringify(c.args ?? {}) },
         }));
         for (const call of llmCalls) {
-          const args = safeParseArgs(call.function.arguments);
+          const args = toolUseInput(call.function.arguments);
           await this.persist(workspacePath, chat.id, {
             kind: 'tool_use',
             id: call.id,
@@ -2160,6 +2276,7 @@ export class PlannerChatService {
           }
           let output: string;
           let isError: boolean;
+          let truncated = false;
           if (gate.kind === 'unavailable') {
             output = gate.message;
             isError = true;
@@ -2170,13 +2287,14 @@ export class PlannerChatService {
             const result = await this.executeTool(gate.tool, call.function.arguments, chat);
             output = result.content;
             isError = result.isError;
+            truncated = result.truncated;
           }
           await this.persist(workspacePath, chat.id, {
             kind: 'tool_result',
             id: crypto.randomUUID(),
             toolUseId: call.id,
             content: output,
-            truncated: false,
+            truncated,
             isError,
           });
           results.push({ ...base, status: isError ? 'refused' : 'completed', output, approvalId: null });
@@ -2236,12 +2354,33 @@ export class PlannerChatService {
     });
   }
 
+  /**
+   * Runs one tool call whose gate has already said yes. Arguments are parsed
+   * and validated against the tool's schema first (PA-121, `tool-args.ts`) —
+   * `gateToolCall` has normally refused a malformed call before it got here,
+   * but a parked approval re-enters through `applyApprovalDecision`, and this
+   * is the one place every execution passes, so it checks again rather than
+   * trusting that. The result is capped by `capToolOutput` on the way out.
+   */
   private async executeTool(
     tool: PlannerToolDefinition,
     rawArguments: string,
     chat: PlannerChat,
+    signal?: AbortSignal,
+  ): Promise<{ content: string; isError: boolean; truncated: boolean }> {
+    const prepared = prepareToolArguments(tool.name, tool.parameters, rawArguments);
+    if (!prepared.ok) return { content: prepared.message, isError: true, truncated: false };
+    const outcome = await this.runTool(tool, prepared.args, chat, signal);
+    const capped = capToolOutput(outcome.content);
+    return { content: capped.content, isError: outcome.isError, truncated: capped.truncated };
+  }
+
+  private async runTool(
+    tool: PlannerToolDefinition,
+    args: Record<string, unknown>,
+    chat: PlannerChat,
+    signal?: AbortSignal,
   ): Promise<{ content: string; isError: boolean }> {
-    const args = safeParseArgs(rawArguments);
     // PA-31: read fresh on every call, like `resolveModelId`'s own
     // `readPlannerSettings` above — a provider toggled or rekeyed in
     // Settings must take effect on the very next tool call.
@@ -2337,6 +2476,7 @@ export class PlannerChatService {
           spawnDepth: this.spawnDepthOf(chat.id),
           maxSubagentSpawnsPerTurn: settings.maxSubagentSpawnsPerTurn,
           plannerChatId: chat.id,
+          ...(signal ? { signal } : {}),
           telegram: {
             links:
               this.opts.telegramLinks
@@ -2815,7 +2955,7 @@ function permissionRequestEvent(
   tool: PlannerToolDefinition,
   mcpIdentity: { name: string; displayName: string } | null,
 ): AgentEvent {
-  const args = safeParseArgs(call.function.arguments);
+  const args = toolUseInput(call.function.arguments);
   return {
     kind: 'permission_request',
     id: approvalId,
@@ -2942,25 +3082,41 @@ function extractFilePath(args: Record<string, unknown>): string | null {
  * matching however many calls one real completion actually returned in a
  * single response — followed by one `tool`-role message per call.
  */
-function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatMessage[] {
+export function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatMessage[] {
   const messages: PlannerChatMessage[] = [];
   let pendingCalls: PlannerLlmToolCall[] | null = null;
+  // PA-121: the `interim` text a round trip wrote before its tool calls goes
+  // back into the *same* assistant message as `content`, which is exactly
+  // what the provider originally returned — OpenAI-compatible APIs accept
+  // `content` alongside `tool_calls`.
+  let pendingNarration: string | null = null;
   const resultsById = new Map<string, string>();
 
   const flushPendingCalls = (): void => {
     if (!pendingCalls) return;
     const calls = pendingCalls;
     pendingCalls = null;
-    messages.push({ role: 'assistant', content: null, tool_calls: calls });
+    messages.push({ role: 'assistant', content: pendingNarration, tool_calls: calls });
+    pendingNarration = null;
     for (const call of calls) {
-      messages.push({ role: 'tool', tool_call_id: call.id, content: resultsById.get(call.id) ?? '' });
+      messages.push({
+        role: 'tool',
+        tool_call_id: call.id,
+        content: resultsById.get(call.id) ?? MISSING_TOOL_RESULT_MESSAGE,
+      });
     }
+  };
+  const flushNarration = (): void => {
+    if (pendingNarration === null) return;
+    messages.push({ role: 'assistant', content: pendingNarration });
+    pendingNarration = null;
   };
 
   for (const event of events) {
     switch (event.kind) {
       case 'user_prompt':
         flushPendingCalls();
+        flushNarration();
         if (event.image) {
           const parts: PlannerUserContentPart[] = [
             {
@@ -2976,7 +3132,9 @@ function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatMessage[
         break;
       case 'text':
         flushPendingCalls();
-        messages.push({ role: 'assistant', content: event.text });
+        flushNarration();
+        if (event.interim) pendingNarration = event.text;
+        else messages.push({ role: 'assistant', content: event.text });
         break;
       case 'tool_use':
         (pendingCalls ??= []).push({
@@ -2986,7 +3144,9 @@ function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatMessage[
         });
         break;
       case 'tool_result':
-        resultsById.set(event.toolUseId, event.content);
+        // PA-121: the `tool` message has no error field, so an error has to
+        // say so in its text or the model reads a refusal as output.
+        resultsById.set(event.toolUseId, event.isError ? markToolError(event.content) : event.content);
         break;
       default:
         // `notice`, `turn_complete`, `permission_request`, `permission_resolved`,
@@ -2996,7 +3156,13 @@ function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatMessage[
     }
   }
   flushPendingCalls();
+  flushNarration();
   return messages;
+}
+
+/** `Error: …` for a failed tool result, unless it already says so. */
+function markToolError(content: string): string {
+  return /^error\b/i.test(content.trimStart()) ? content : `Error: ${content}`;
 }
 
 /**

@@ -205,7 +205,9 @@ export class TelegramBridge {
     client: TelegramClient,
   ): Promise<void> {
     try {
-      if (event.kind === 'text' && event.text.trim().length > 0) {
+      // PA-121: `interim` text is the model narrating its way to a tool
+      // call; the chat bubble is for the answer, as it always was.
+      if (event.kind === 'text' && !event.interim && event.text.trim().length > 0) {
         // PA-105: the model writes Markdown; Telegram renders its HTML subset.
         await sendMarkdown(client, telegramChatId, event.text, { logger: this.deps.logger });
       } else if (event.kind === 'permission_request') {

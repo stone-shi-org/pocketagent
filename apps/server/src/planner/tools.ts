@@ -107,6 +107,13 @@ import { TelegramBotError } from '../telegram/bots-store.js';
  */
 
 export interface PlannerToolDeps {
+  /**
+   * PA-121: the turn's abort signal, so interrupting a turn can stop the tool
+   * it is running rather than only the round trip after it. Optional: the
+   * Gemini Live bridge and every existing test build deps without one, and a
+   * tool that ignores it behaves exactly as before.
+   */
+  signal?: AbortSignal;
   workspaces: WorkspaceRegistry;
   plannerWorkspaces: PlannerWorkspaceRegistry;
   sessions: SessionManager;
@@ -496,7 +503,8 @@ export function extractResultSummary(text: string): string | null {
 export function lastMessageSummary(events: readonly AgentEvent[]): string {
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i]!;
-    if (ev.kind === 'text') {
+    // PA-121: `interim` narration is not the subagent's answer.
+    if (ev.kind === 'text' && !ev.interim) {
       const result = extractResultSummary(ev.text);
       return truncateTail(result ?? ev.text, MAX_TOOL_RESULT_CHARS);
     }
