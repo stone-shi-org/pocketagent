@@ -16,6 +16,7 @@ import type {
   WorkspaceEntry,
 } from '@pocketagent/protocol';
 import {
+  BAMBOO_PROMPT_TEMPLATES,
   BAMBOO_TEMPLATE_VARS,
   DEFAULT_BAMBOO_PROMPT_TEMPLATE,
   DEFAULT_JIRA_PROMPT_TEMPLATE,
@@ -1503,14 +1504,33 @@ export function WebhookEditorPage({
 
           {promptTemplateMode === 'single' ? (
             type === 'bamboo' ? (
-              <TextRow
-                label="Prompt template"
-                value={promptTemplate}
-                busy={busy}
-                multiline
-                rows={10}
-                onChange={setPromptTemplate}
-              />
+              <>
+                <SelectRowNative
+                  busy={busy}
+                  label="Template preset"
+                  value={BAMBOO_PROMPT_TEMPLATES.find((p) => p.template === promptTemplate)?.id ?? 'custom'}
+                  options={[
+                    ...BAMBOO_PROMPT_TEMPLATES.map((p) => ({ value: p.id, label: p.name })),
+                    { value: 'custom', label: 'Custom prompt template' },
+                  ]}
+                  help={
+                    BAMBOO_PROMPT_TEMPLATES.find((p) => p.template === promptTemplate)?.description ??
+                    'Custom prompt instructions for the agent.'
+                  }
+                  onChange={(val) => {
+                    const found = BAMBOO_PROMPT_TEMPLATES.find((p) => p.id === val);
+                    if (found) setPromptTemplate(found.template);
+                  }}
+                />
+                <TextRow
+                  label="Prompt template"
+                  value={promptTemplate}
+                  busy={busy}
+                  multiline
+                  rows={10}
+                  onChange={setPromptTemplate}
+                />
+              </>
             ) : (
             <>
               <SelectRowNative
@@ -1575,6 +1595,23 @@ export function WebhookEditorPage({
                       <option value="Successful">Successful</option>
                       <option value="Failed">Failed</option>
                       <option value="Unknown">Unknown</option>
+                    </select>
+                    <select
+                      className="settings-select prompt-map-preset-select"
+                      value={BAMBOO_PROMPT_TEMPLATES.find((p) => p.template === row.promptTemplate)?.id ?? 'custom'}
+                      disabled={busy}
+                      aria-label="Prompt template preset"
+                      onChange={(e) => {
+                        const preset = BAMBOO_PROMPT_TEMPLATES.find((p) => p.id === e.target.value);
+                        if (preset) updateBambooPromptTemplateRoute(row.id, { promptTemplate: preset.template });
+                      }}
+                    >
+                      {BAMBOO_PROMPT_TEMPLATES.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                      <option value="custom">Custom template</option>
                     </select>
                     <button
                       type="button"

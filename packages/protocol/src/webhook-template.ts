@@ -229,6 +229,50 @@ After the fix:
 
 Do not change anything outside this working tree.`;
 
+/**
+ * The pre-"commit and push" Bamboo prompt, kept verbatim as a preset: webhooks
+ * saved before that change hold exactly this text, so the editor names it
+ * instead of calling it "Custom".
+ */
+export const BAMBOO_PROMPT_TEMPLATE_INVESTIGATE = `A Bamboo build event arrived: {{notification}}.
+
+Plan:     {{plan.key}} ({{plan.name}})
+Build:    {{build.resultKey}}   State: {{build.state}}
+Started:  {{build.startedAt}}   Finished: {{build.finishedAt}}
+Details:  {{build.resultUrl}}
+
+Trigger:
+{{trigger.sentence}}
+
+The Bamboo plan {{plan.key}} build {{build.number}} finished with state
+{{build.state}}. Investigate {{build.resultKey}} in this repository: find what
+went wrong (or confirm what fixed it), and fix the underlying issue if the
+build failed. Do not push a branch or change anything outside this working
+tree unless told to above.`;
+
+export interface BambooPromptTemplatePreset {
+  id: string;
+  name: string;
+  description: string;
+  template: string;
+}
+
+export const BAMBOO_PROMPT_TEMPLATES: readonly BambooPromptTemplatePreset[] = [
+  {
+    id: 'fix-and-push',
+    name: 'Fix, Commit & Push (Default)',
+    description:
+      'Investigate and fix the failure, commit and push, then wait for the triggered Bamboo build to finish and keep going until it passes.',
+    template: DEFAULT_BAMBOO_PROMPT_TEMPLATE,
+  },
+  {
+    id: 'investigate-only',
+    name: 'Investigate & Fix Locally (No Push)',
+    description: 'Investigate and fix in the working tree only; nothing is pushed.',
+    template: BAMBOO_PROMPT_TEMPLATE_INVESTIGATE,
+  },
+];
+
 export const JIRA_PROMPT_TEMPLATE_FIX_ISSUE = `A Jira issue update event arrived: {{event}}.
 
 Issue:        {{issue.key}}
