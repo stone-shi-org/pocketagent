@@ -368,12 +368,21 @@ COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/
 # target inside the official layout, and the pinned version where there is
 # one. `claude --version` alone passes whatever directory the binary landed
 # in, which is how the npm stage shipped broken the first time.
+#
+# Every download uses `curl --compressed`. Google's front end for
+# antigravity.google sometimes answers with `Content-Encoding: gzip` although
+# no Accept-Encoding was sent (about one request in three, observed
+# 2026-10-08), and plain curl then writes the gzip bytes to disk: `bash` fails
+# with "cannot execute binary file" and the `all` target breaks at random
+# (PA-PD-75). `--compressed` asks for compression and decodes whatever comes
+# back, so the file is the script either way. The server's own installer
+# (`agents/install.ts`) fetches with Node's `fetch`, which already decodes.
 ENV AGENT_IMAGE_HOME=/opt/pocketagent-agents
 ARG CLAUDE_CODE_VERSION
 RUN test -n "${CLAUDE_CODE_VERSION}" \
     || { echo "CLAUDE_CODE_VERSION is unset. Build via docker/build.sh, which reads docker/agent-versions.env." >&2; exit 1; } \
     && install -d -m 0755 "$AGENT_IMAGE_HOME" \
-    && curl -fsSL https://claude.ai/install.sh -o /tmp/claude-install.sh \
+    && curl -fsSL --compressed https://claude.ai/install.sh -o /tmp/claude-install.sh \
     && env -u NPM_CONFIG_PREFIX HOME="$AGENT_IMAGE_HOME" \
         bash /tmp/claude-install.sh "${CLAUDE_CODE_VERSION}" \
     && rm -f /tmp/claude-install.sh \
@@ -402,13 +411,13 @@ ARG OPENCODE_VERSION
 RUN test -n "${CODEX_VERSION}" && test -n "${OPENCODE_VERSION}" \
     || { echo "Agent versions are unset. Build via docker/build.sh, which reads docker/agent-versions.env." >&2; exit 1; } \
     && A="$AGENT_IMAGE_HOME" \
-    && curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/codex-install.sh \
+    && curl -fsSL --compressed https://chatgpt.com/codex/install.sh -o /tmp/codex-install.sh \
     && env -u NPM_CONFIG_PREFIX HOME="$A" CODEX_NON_INTERACTIVE=1 sh /tmp/codex-install.sh --release "${CODEX_VERSION}" \
-    && curl -fsSL https://opencode.ai/install -o /tmp/opencode-install.sh \
+    && curl -fsSL --compressed https://opencode.ai/install -o /tmp/opencode-install.sh \
     && env -u NPM_CONFIG_PREFIX HOME="$A" bash /tmp/opencode-install.sh --version "${OPENCODE_VERSION}" --no-modify-path \
-    && curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh \
+    && curl -fsSL --compressed https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh \
     && env -u NPM_CONFIG_PREFIX HOME="$A" bash /tmp/agy-install.sh \
-    && curl -fsSL https://pi.dev/install.sh -o /tmp/pi-install.sh \
+    && curl -fsSL --compressed https://pi.dev/install.sh -o /tmp/pi-install.sh \
     && env -u NPM_CONFIG_PREFIX HOME="$A" sh /tmp/pi-install.sh \
     && rm -f /tmp/codex-install.sh /tmp/opencode-install.sh /tmp/agy-install.sh /tmp/pi-install.sh \
     && ln -sf "$A/.local/bin/codex" /usr/local/bin/codex \
