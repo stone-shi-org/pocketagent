@@ -153,6 +153,55 @@ const BAMBOO_LONG_PROSE_VARS = new Set(['trigger.sentence']);
  */
 
 /**
+ * How to upload an attachment through the mcp-atlassian MCP server, appended to
+ * the default Jira template. That server runs in a container on another
+ * machine, so a local `file_path` is "file not found" there; agents kept
+ * retrying with paths until told to send the bytes inline as base64. It is
+ * operator-authored text with no template variables, so it goes after the
+ * closing instruction rather than near the untrusted blocks.
+ */
+export const MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS = `## Uploading attachments via the mcp-atlassian MCP server
+
+The mcp-atlassian server runs in a Docker container on a different machine. It
+CANNOT read files on your machine, so passing a local path in \`file_path\`,
+\`file_paths\` or \`attachments\` will fail with "file not found". Instead, send the
+file contents inline as base64.
+
+### Confluence: \`confluence_upload_attachment\`
+- Do NOT pass \`file_path\`.
+- Pass \`content_id\` (page/blog post ID), \`filename\` (with extension, e.g.
+  \`report.pdf\`; it sets the attachment title and type), and \`content_base64\`
+  (the file's bytes, base64-encoded).
+- Optional: \`comment\`, \`minor_edit\`.
+- \`confluence_upload_attachments\` (plural) only accepts file paths, so it will
+  NOT work. To upload several files, call \`confluence_upload_attachment\` once per file.
+
+### Jira: \`jira_update_issue\`
+- Do NOT use the \`attachments\` parameter (it takes file paths).
+- If the tool schema has an \`attachments_base64\` parameter, use it with a JSON
+  array string:
+  \`[{"filename": "log.txt", "content_base64": "<base64>"}]\`
+- If the schema has no \`attachments_base64\`, this server version can't upload
+  Jira attachments. Tell the user instead of retrying with paths.
+
+### Producing the base64
+- Encode the real file bytes with a tool, e.g. \`base64 -w0 <file>\` (Linux),
+  \`base64 -i <file>\` (macOS), or
+  \`python3 -c "import base64,sys;print(base64.b64encode(open(sys.argv[1],'rb').read()).decode())" <file>\`.
+- Never hand-write or "re-type" base64, and never encode a summary or
+  description of the file. The string must be the exact output of the command.
+- Send the base64 string with no line breaks and no \`data:...;base64,\` prefix.
+
+### Size limits
+- Only use this for small files (roughly under 200 KB, e.g. logs, configs,
+  small screenshots). Base64 makes the file about 33% bigger, and the whole
+  string has to go into your tool call.
+- For anything larger, don't attempt the upload. Tell the user the file is too
+  big for inline upload and ask how to proceed.
+- After uploading, verify with \`confluence_get_attachments\` (Confluence) or by
+  re-reading the issue (Jira) that the attachment exists and has a non-zero size.`;
+
+/**
  * The starting template.
  *
  * Structured values sit in the aligned header; every *prose* value gets its own
@@ -195,7 +244,9 @@ what is going on, and post your findings and analysis as a comment on the Jira
 issue {{issue.key}}. If this event is an assignee change or ticket assignment to
 you by a user, treat this and the attached latest comment as active instructions.
 Do not push a branch or change anything outside this working tree unless told to
-above.`;
+above.
+
+${MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS}`;
 
 /**
  * The starting template for a Bamboo build webhook.

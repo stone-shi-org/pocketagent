@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { JIRA_SAMPLE_PAYLOAD } from '@pocketagent/protocol';
+import { JIRA_SAMPLE_PAYLOAD, MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS } from '@pocketagent/protocol';
 import { REDACT_PATHS } from '../src/app.js';
 import {
   openDatabase,
@@ -941,7 +941,11 @@ describe('webhook delivery: agent identity in the assembled comment thread', () 
     ]);
     const preview = (await post(`/api/webhooks/${hook.id}/preview`, { payload })).json();
     expect(preview.prompt).toContain('a\nb\nc\nd\ne');
-    expect(preview.prompt).not.toContain('...');
+    // The default template's upload instructions mention `data:...;base64,`,
+    // so look for a trim marker only in the rendered issue content above them.
+    const rendered = preview.prompt.slice(0, preview.prompt.indexOf(MCP_ATLASSIAN_UPLOAD_INSTRUCTIONS));
+    expect(rendered).toContain('a\nb\nc\nd\ne');
+    expect(rendered).not.toContain('...');
   });
 
   it("keeps every other author's comment in full, trims the configured identity's own", async () => {
