@@ -218,8 +218,16 @@ Trigger:
 The Bamboo plan {{plan.key}} build {{build.number}} finished with state
 {{build.state}}. Investigate {{build.resultKey}} in this repository: find what
 went wrong (or confirm what fixed it), and fix the underlying issue if the
-build failed. Do not push a branch or change anything outside this working
-tree unless told to above.`;
+build failed.
+
+After the fix:
+1. Commit the change and push it.
+2. Wait for the Bamboo build that the push triggers to finish, and check its
+   result. If it fails, keep fixing, committing and pushing until it passes.
+3. The first successful build also triggers this webhook, so a green result
+   on {{plan.key}} is the signal that the work is done.
+
+Do not change anything outside this working tree.`;
 
 export const JIRA_PROMPT_TEMPLATE_FIX_ISSUE = `A Jira issue update event arrived: {{event}}.
 
