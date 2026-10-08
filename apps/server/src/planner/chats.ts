@@ -16,6 +16,7 @@ import {
   type PlannerToolApprovalChoice,
   type SessionInfo,
   type ThinkingEvent,
+  type TurnCompleteEvent,
 } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import { readMcpOwnedWork } from '../db/index.js';
@@ -93,6 +94,7 @@ import { sendMarkdown } from '../telegram/send.js';
 import { estimateTokens } from './token-estimate.js';
 import type { GeminiFunctionDeclaration } from './gemini-live.js';
 import { prepareToolArguments, toolUseInput } from './tool-args.js';
+import { applyCacheControl, isCacheControlRejection, resolvePromptCaching } from './prompt-cache.js';
 import {
   SUMMARIZATION_SYSTEM_PROMPT,
   buildSummaryRequest,
@@ -445,9 +447,40 @@ interface PlannerTurnStats {
   elapsedMs: number;
   inputTokens: number | null;
   outputTokens: number | null;
+  /** PA-122: subsets of `inputTokens`; `null` until a provider reports one. */
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
 }
 
-const EMPTY_TURN_STATS: PlannerTurnStats = { elapsedMs: 0, inputTokens: null, outputTokens: null };
+const EMPTY_TURN_STATS: PlannerTurnStats = {
+  elapsedMs: 0,
+  inputTokens: null,
+  outputTokens: null,
+  cacheReadTokens: null,
+  cacheWriteTokens: null,
+};
+
+/** A figure that may never have been reported, added to a running total
+    that may never have been started. */
+function addNullable(total: number | null, value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return total;
+  return (total ?? 0) + value;
+}
+
+/** The token half of a turn's `turn_complete` — one place, so every path
+    that ends a turn (finishing, interrupting, a parked turn being dismissed)
+    reports the same fields. */
+function turnStatsFields(stats: PlannerTurnStats | null): Pick<
+  TurnCompleteEvent,
+  'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens'
+> {
+  return {
+    inputTokens: stats?.inputTokens ?? null,
+    outputTokens: stats?.outputTokens ?? null,
+    cacheReadTokens: stats?.cacheReadTokens ?? null,
+    cacheWriteTokens: stats?.cacheWriteTokens ?? null,
+  };
+}
 
 /** Reused rather than allocating a fresh empty `Set` per call for an
     orphaned chat's `toolsFor` — see that method's doc comment. */
@@ -462,6 +495,8 @@ function addUsage(stats: PlannerTurnStats, usage: PlannerLlmUsage | null): Plann
     ...stats,
     inputTokens: (stats.inputTokens ?? 0) + usage.promptTokens,
     outputTokens: (stats.outputTokens ?? 0) + usage.completionTokens,
+    cacheReadTokens: addNullable(stats.cacheReadTokens, usage.cacheReadTokens),
+    cacheWriteTokens: addNullable(stats.cacheWriteTokens, usage.cacheWriteTokens),
   };
 }
 
@@ -663,6 +698,23 @@ export class PlannerChatService {
    * the drain check cannot disagree about what "a turn is running" means.
    */
   private readonly activeTurns = new Map<string, number>();
+
+  /**
+   * PA-122: chats whose endpoint refused `cache_control` markers during the
+   * current turn — sent without them until the turn ends, so the refusal is
+   * reported once rather than once per round trip.
+   */
+  private readonly cacheControlRefused = new Set<string>();
+
+  /**
+   * PA-122: the memories a turn ranked, kept for that turn's later round
+   * trips. They are ranked against the latest user prompt, which does not
+   * change within a turn until someone steers it, so re-ranking could only
+   * ever reshuffle the system message — and a system message that changes
+   * mid-turn defeats the prompt cache for everything after it. Keyed by the
+   * query, so a steer (a new prompt) ranks afresh.
+   */
+  private readonly turnMemories = new Map<string, { query: string; memories: PlannerMemory[] }>();
   private readonly turnAbortControllers = new Map<string, AbortController>();
   /** PA-121: per-chat correction of the token estimate — see `TokenCalibration`. */
   private readonly calibration = new TokenCalibration();
@@ -878,8 +930,7 @@ export class PlannerChatService {
             numTurns: null,
             durationMs: pending.kind === 'loop' ? pending.stats.elapsedMs : null,
             costUsd: null,
-            inputTokens: pending.kind === 'loop' ? pending.stats.inputTokens : null,
-            outputTokens: pending.kind === 'loop' ? pending.stats.outputTokens : null,
+            ...turnStatsFields(pending.kind === 'loop' ? pending.stats : null),
             completedAt: Date.now(),
           });
           this.turnStartedAtByChat.delete(chatId);
@@ -1125,6 +1176,7 @@ export class PlannerChatService {
     this.activeTurns.delete(id);
     this.activeWakeTurns.delete(id);
     this.mailboxByChat.delete(id);
+    this.turnMemories.delete(id);
     this.wakeActionBudgetByChat.delete(id);
     const timers = this.scheduledWakeTimersByChat.get(id);
     if (timers) {
@@ -1191,6 +1243,7 @@ export class PlannerChatService {
       this.turnAbortControllers.delete(id);
     }
     this.mailboxByChat.delete(id);
+    this.turnMemories.delete(id);
     const workspacePath = this.workspacePathFor(chat);
     await clearTranscriptEvents(workspacePath, chat.id);
     // PA-121: the fold marker counts turns of the transcript just deleted.
@@ -1830,8 +1883,7 @@ export class PlannerChatService {
       numTurns: null,
       durationMs: stats.elapsedMs,
       costUsd: null,
-      inputTokens: stats.inputTokens,
-      outputTokens: stats.outputTokens,
+      ...turnStatsFields(stats),
       completedAt: Date.now(),
     });
     updatePlannerChat(this.opts.db, chat.id, {
@@ -1841,6 +1893,8 @@ export class PlannerChatService {
       lastActivityAt: Date.now(),
     });
     writePlannerLastModelId(this.opts.db, modelId);
+    this.cacheControlRefused.delete(chat.id);
+    this.turnMemories.delete(chat.id);
     this.spawnsThisTurnByChat.delete(chat.id);
     this.turnPollChecksByChat.delete(chat.id);
     this.turnStartedAtByChat.delete(chat.id);
@@ -1952,6 +2006,16 @@ export class PlannerChatService {
     }
     const client = this.llmClient();
 
+    // PA-122: Anthropic-style cache breakpoints, for a model whose caching is
+    // on and whose endpoint has not refused them earlier in this turn. The
+    // unmarked `messages` are kept for the estimate and the calibration, so
+    // the markers never change what we think the prompt weighs.
+    const cacheControl =
+      resolvePromptCaching(modelId, modelRow?.promptCaching) && !this.cacheControlRefused.has(chat.id);
+    const request = cacheControl
+      ? applyCacheControl(messages, toolSpecs, this.stableSystemPrefix(chat, workspacePath, settings))
+      : { messages, tools: toolSpecs };
+
     const textBlockId = crypto.randomUUID();
     const thinkingBlockId = crypto.randomUUID();
     let completion: PlannerLlmCompletion | null = null;
@@ -1962,7 +2026,7 @@ export class PlannerChatService {
     // `PlannerTurnStats`'s doc comment for why.
     const llmStartedAt = Date.now();
     try {
-      for await (const chunk of client.streamComplete(modelId, messages, toolSpecs, signal, {
+      for await (const chunk of client.streamComplete(modelId, request.messages, request.tools, signal, {
         effort: chat.lastEffort,
         thinking: chat.thinkingEnabled !== false,
         idleTimeoutMs: settings.llmIdleTimeoutSeconds * 1000,
@@ -2002,6 +2066,22 @@ export class PlannerChatService {
       this.opts.logger?.warn({ err, chat: chat.id, model: modelId }, 'planner LLM call failed');
       const message = err instanceof PlannerLlmError ? err.message : (err as Error).message;
       const failedStats = { ...stats, elapsedMs: stats.elapsedMs + (Date.now() - llmStartedAt) };
+      if (cacheControl && err instanceof PlannerLlmError && isCacheControlRejection(err)) {
+        // PA-122: the endpoint refused the markers themselves. Said once, and
+        // the round trip is sent again without them for the rest of this
+        // turn. The model row is deliberately not changed: whether to cache
+        // is an operator's setting, and a gateway may refuse only today.
+        this.cacheControlRefused.add(chat.id);
+        yield* this.emit(workspacePath, chat.id, {
+          kind: 'notice',
+          level: 'warn',
+          text:
+            `The LLM endpoint refused prompt-caching markers for ${modelId}, so this turn is sent without them. ` +
+            'Set "Prompt caching" to Off for this model in Settings if this keeps happening.',
+        });
+        yield* this.driveLoop(chat, workspacePath, modelId, iteration, failedStats, signal, loopOpts);
+        return;
+      }
       if (err instanceof PlannerLlmError && err.contextOverflow) {
         // PA-121: the provider says the prompt does not fit, whatever our
         // estimate said. Compact and try this round trip once more — pi's
@@ -3158,6 +3238,14 @@ export class PlannerChatService {
    * `dryRun` is for the preview and for sizing a compaction: no folding into
    * memory and no `last_accessed_at` bump, so looking changes nothing.
    */
+  /** PA-122: the part of `buildTurnContext`'s system message that does not
+      change between turns — the same builder with no memories, so the two
+      cannot disagree about where the stable part ends. */
+  private stableSystemPrefix(chat: PlannerChat, workspacePath: string, settings: PlannerSettingsSnapshot): string {
+    const workspace = chat.workspaceId ? this.opts.plannerWorkspaces.get(chat.workspaceId) : undefined;
+    return buildSystemMessage(workspace ?? null, settings, [], workspacePath);
+  }
+
   private async buildTurnContext(
     chat: PlannerChat,
     workspacePath: string,
@@ -3177,11 +3265,18 @@ export class PlannerChatService {
     }
     let memories: PlannerMemory[] = [];
     if (memoryEnabled && chat.workspaceId) {
-      const results = await this.opts.memory.search(chat.workspaceId, lastUserPromptText(events), {
-        limit: MEMORY_INJECT_TOP_K,
-        ...(opts.dryRun ? { dryRun: true } : {}),
-      });
-      memories = results.map((r) => r.memory);
+      const query = lastUserPromptText(events);
+      const frozen = opts.dryRun ? undefined : this.turnMemories.get(chat.id);
+      if (frozen && frozen.query === query) {
+        memories = frozen.memories;
+      } else {
+        const results = await this.opts.memory.search(chat.workspaceId, query, {
+          limit: MEMORY_INJECT_TOP_K,
+          ...(opts.dryRun ? { dryRun: true } : {}),
+        });
+        memories = results.map((r) => r.memory);
+        if (!opts.dryRun) this.turnMemories.set(chat.id, { query, memories });
+      }
     }
     const workspace = chat.workspaceId ? this.opts.plannerWorkspaces.get(chat.workspaceId) : undefined;
     return [{ role: 'system', content: buildSystemMessage(workspace ?? null, settings, memories, workspacePath) }, ...history];

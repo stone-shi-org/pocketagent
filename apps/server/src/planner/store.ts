@@ -285,6 +285,20 @@ export interface PlannerModelRow {
   /** PA-121: tokens; `null` = not set, see `planner/context-budget.ts`. */
   contextWindow: number | null;
   maxOutputTokens: number | null;
+  /** PA-122: `null` = auto, see `planner/prompt-cache.ts`. */
+  promptCaching: boolean | null;
+}
+
+/** The columns a caller may leave out when adding a row — each defaults to
+    "not set". */
+type OptionalModelColumns = 'contextWindow' | 'maxOutputTokens' | 'promptCaching';
+
+function nullableBool(value: number | null | undefined): boolean | null {
+  return value === null || value === undefined ? null : value !== 0;
+}
+
+function boolParam(value: boolean | null | undefined): number | null {
+  return value === null || value === undefined ? null : value ? 1 : 0;
 }
 
 interface PlannerModelDbRow {
@@ -297,6 +311,7 @@ interface PlannerModelDbRow {
   default_effort?: string | null;
   context_window?: number | null;
   max_output_tokens?: number | null;
+  prompt_caching?: number | null;
 }
 
 function modelFromDbRow(row: PlannerModelDbRow): PlannerModelRow {
@@ -310,6 +325,7 @@ function modelFromDbRow(row: PlannerModelDbRow): PlannerModelRow {
     defaultEffort: row.default_effort ?? null,
     contextWindow: row.context_window ?? null,
     maxOutputTokens: row.max_output_tokens ?? null,
+    promptCaching: nullableBool(row.prompt_caching),
   };
 }
 
@@ -321,19 +337,25 @@ export function readPlannerModels(db: Db): PlannerModelRow[] {
 
 export function insertPlannerModel(
   db: Db,
-  row: Omit<PlannerModelRow, 'contextWindow' | 'maxOutputTokens'> &
-    Partial<Pick<PlannerModelRow, 'contextWindow' | 'maxOutputTokens'>>,
+  row: Omit<PlannerModelRow, OptionalModelColumns> & Partial<Pick<PlannerModelRow, OptionalModelColumns>>,
 ): void {
   db.prepare(
     `INSERT INTO planner_models
-       (id, model_id, label, sort_order, created_at, supports_effort, default_effort, context_window, max_output_tokens)
-     VALUES (@id, @modelId, @label, @sortOrder, @createdAt, @supportsEffort, @defaultEffort, @contextWindow, @maxOutputTokens)`,
+       (id, model_id, label, sort_order, created_at, supports_effort, default_effort, context_window, max_output_tokens,
+        prompt_caching)
+     VALUES (@id, @modelId, @label, @sortOrder, @createdAt, @supportsEffort, @defaultEffort, @contextWindow, @maxOutputTokens,
+        @promptCaching)`,
   ).run({
-    ...row,
+    id: row.id,
+    modelId: row.modelId,
+    label: row.label,
+    sortOrder: row.sortOrder,
+    createdAt: row.createdAt,
     supportsEffort: row.supportsEffort !== false ? 1 : 0,
     defaultEffort: row.defaultEffort ?? null,
     contextWindow: row.contextWindow ?? null,
     maxOutputTokens: row.maxOutputTokens ?? null,
+    promptCaching: boolParam(row.promptCaching),
   });
 }
 
@@ -356,6 +378,7 @@ export function updatePlannerModel(
     defaultEffort?: string | null;
     contextWindow?: number | null;
     maxOutputTokens?: number | null;
+    promptCaching?: boolean | null;
   },
 ): boolean {
   const assignments: string[] = [];
@@ -379,6 +402,10 @@ export function updatePlannerModel(
   if (patch.maxOutputTokens !== undefined) {
     assignments.push('max_output_tokens = @maxOutputTokens');
     params.maxOutputTokens = patch.maxOutputTokens;
+  }
+  if (patch.promptCaching !== undefined) {
+    assignments.push('prompt_caching = @promptCaching');
+    params.promptCaching = boolParam(patch.promptCaching);
   }
   if (assignments.length === 0) return false;
   return db.prepare(`UPDATE planner_models SET ${assignments.join(', ')} WHERE id = @id`).run(params).changes > 0;

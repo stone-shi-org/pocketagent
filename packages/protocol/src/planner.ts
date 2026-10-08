@@ -197,6 +197,13 @@ export const PlannerModel = z.object({
    */
   contextWindow: z.number().int().positive().nullable().optional(),
   maxOutputTokens: z.number().int().positive().nullable().optional(),
+  /**
+   * PA-122: whether requests to this model carry Anthropic `cache_control`
+   * breakpoints. `null` = auto: on for a Claude model, off otherwise, since a
+   * strict OpenAI-compatible server rejects the field. Reading the cached
+   * token counts a provider reports does not depend on it.
+   */
+  promptCaching: z.boolean().nullable().optional(),
 });
 export type PlannerModel = z.infer<typeof PlannerModel>;
 
@@ -215,6 +222,7 @@ export const CreatePlannerModelRequest = z.object({
   defaultEffort: EffortLevel.nullable().optional(),
   contextWindow: TOKEN_LIMIT.optional(),
   maxOutputTokens: TOKEN_LIMIT.optional(),
+  promptCaching: z.boolean().nullable().optional(),
 });
 export type CreatePlannerModelRequest = z.infer<typeof CreatePlannerModelRequest>;
 
@@ -225,6 +233,8 @@ export const UpdatePlannerModelRequest = z.object({
   /** PA-121: `null` clears it back to "not set". */
   contextWindow: TOKEN_LIMIT.optional(),
   maxOutputTokens: TOKEN_LIMIT.optional(),
+  /** PA-122: `null` puts it back to auto. */
+  promptCaching: z.boolean().nullable().optional(),
 });
 export type UpdatePlannerModelRequest = z.infer<typeof UpdatePlannerModelRequest>;
 

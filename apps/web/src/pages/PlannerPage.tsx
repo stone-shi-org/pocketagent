@@ -11,6 +11,7 @@ import type {
   TestPlannerWebSearchResponse,
   PlannerEndpointTemplatePayload,
   PocketAgentExportData,
+  UpdatePlannerModelRequest,
 } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
@@ -439,10 +440,8 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   };
 
   // PA-121: a model's context window / output limit; `null` = not set.
-  const setModelLimit = (
-    id: string,
-    patch: { contextWindow?: number | null; maxOutputTokens?: number | null },
-  ): void => {
+  // PA-122: the same path carries prompt caching, prices and image support.
+  const setModelLimit = (id: string, patch: UpdatePlannerModelRequest): void => {
     void withBusy(async () => {
       await api.updatePlannerModel(id, patch);
       await load();
@@ -899,6 +898,13 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
                   value={m.maxOutputTokens ?? null}
                   disabled={busy}
                   onSave={(v) => setModelLimit(m.id, { maxOutputTokens: v })}
+                />
+                <TriStateSelect
+                  label="Cache"
+                  title="Prompt caching: send Anthropic cache_control markers. Auto = on for Claude models only, since strict OpenAI-compatible servers reject the field. Cached token counts are shown whenever the provider reports them, whatever this says."
+                  value={m.promptCaching ?? null}
+                  disabled={busy}
+                  onSave={(v) => setModelLimit(m.id, { promptCaching: v })}
                 />
                 {result === 'testing' && <span className="planner-row-meta"> — testing…</span>}
                 {result && result !== 'testing' && (
@@ -1639,6 +1645,40 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
  * server's `[1024, 10 000 000]` range reverts rather than round-tripping as a
  * 400.
  */
+/** PA-122: Auto / On / Off for a nullable per-model boolean. */
+function TriStateSelect({
+  label,
+  title,
+  value,
+  disabled,
+  onSave,
+}: {
+  label: string;
+  title: string;
+  value: boolean | null;
+  disabled: boolean;
+  onSave: (value: boolean | null) => void;
+}): JSX.Element {
+  const current = value === null ? 'auto' : value ? 'on' : 'off';
+  return (
+    <label className="planner-model-limit" title={title}>
+      <span>{label}</span>
+      <select
+        value={current}
+        disabled={disabled}
+        onChange={(e) => {
+          const next = e.target.value === 'auto' ? null : e.target.value === 'on';
+          if (next !== value) onSave(next);
+        }}
+      >
+        <option value="auto">Auto</option>
+        <option value="on">On</option>
+        <option value="off">Off</option>
+      </select>
+    </label>
+  );
+}
+
 function ModelLimitInput({
   label,
   title,

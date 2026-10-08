@@ -69,6 +69,9 @@ export interface TurnItem {
   durationMs: number | null;
   inputTokens: number | null;
   outputTokens: number | null;
+  /** PA-122: how much of `inputTokens` came from the provider's prompt
+      cache; `null` when it never said (Pocket Agent turns only). */
+  cacheReadTokens: number | null;
   /** Epoch ms the turn finished, for a footer to render a local-timezone
       timestamp. `null` for a backend that doesn't set it (see
       `TurnCompleteEvent.completedAt`'s own doc comment). */
@@ -356,6 +359,7 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
             durationMs: event.durationMs,
             inputTokens: event.inputTokens,
             outputTokens: event.outputTokens,
+            cacheReadTokens: event.cacheReadTokens ?? null,
             completedAt: event.completedAt ?? null,
             suggestions: event.suggestions,
           },

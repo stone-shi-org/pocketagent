@@ -1438,6 +1438,13 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE planner_models ADD COLUMN context_window INTEGER;
   ALTER TABLE planner_models ADD COLUMN max_output_tokens INTEGER;
   `,
+
+  // PA-122: whether a planner model's requests carry Anthropic
+  // `cache_control` breakpoints. NULL = auto (on for Claude models), see
+  // `planner/prompt-cache.ts`.
+  `
+  ALTER TABLE planner_models ADD COLUMN prompt_caching INTEGER;
+  `,
 ];
 
 /**
@@ -1760,6 +1767,10 @@ export function openDatabase(databasePath: string): Db {
   }
   if (plannerModelColumns.size > 0 && !plannerModelColumns.has('max_output_tokens')) {
     db.exec('ALTER TABLE planner_models ADD COLUMN max_output_tokens INTEGER');
+  }
+  // PA-122, likewise.
+  if (plannerModelColumns.size > 0 && !plannerModelColumns.has('prompt_caching')) {
+    db.exec('ALTER TABLE planner_models ADD COLUMN prompt_caching INTEGER');
   }
   const customClaudeProviderColumns = new Set(
     (db.prepare('PRAGMA table_info(custom_claude_providers)').all() as { name: string }[]).map(

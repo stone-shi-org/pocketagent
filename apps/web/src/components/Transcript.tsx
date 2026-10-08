@@ -585,7 +585,11 @@ function TurnFooter({
   const bits: string[] = [];
   if (item.durationMs !== null) bits.push(`${(item.durationMs / 1000).toFixed(1)}s`);
   if (item.inputTokens !== null || item.outputTokens !== null) {
-    bits.push(`${item.inputTokens ?? 0}↑ ${item.outputTokens ?? 0}↓`);
+    // PA-122: the cached share, only when the provider reported a non-zero
+    // one — "0 cached" would read as caching being broken on a provider that
+    // simply does not say.
+    const cached = item.cacheReadTokens ? ` (${item.cacheReadTokens} cached)` : '';
+    bits.push(`${item.inputTokens ?? 0}↑${cached} ${item.outputTokens ?? 0}↓`);
   }
   // Tokens/sec only means something for actual generation time, so it needs
   // both a duration and an output-token count — either missing (a backend

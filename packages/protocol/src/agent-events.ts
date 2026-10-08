@@ -168,6 +168,14 @@ export const TurnCompleteEvent = z.object({
   inputTokens: z.number().int().nullable(),
   outputTokens: z.number().int().nullable(),
   /**
+   * PA-122: how many of `inputTokens` the provider read from, and wrote to,
+   * its prompt cache over the turn. Optional, and only Pocket Agent turns
+   * set them; absent or `null` means the provider reported nothing about
+   * caching, which a footer must not render as "0 cached".
+   */
+  cacheReadTokens: z.number().int().nullable().optional(),
+  cacheWriteTokens: z.number().int().nullable().optional(),
+  /**
    * Wall-clock epoch ms at which the turn finished, for a footer to render a
    * timestamp in the viewer's own timezone (`new Date(x).toLocaleTimeString()`
    * already does that with no timezone math needed). Optional rather than

@@ -10,15 +10,25 @@ export interface PlannerLlmToolCall {
   function: { name: string; arguments: string };
 }
 
+/** PA-122: Anthropic's prompt-caching breakpoint, as Anthropic-compatible
+    gateways (OpenRouter, LiteLLM) accept it on an OpenAI-shaped content
+    part. Only ever added by `prompt-cache.ts`, and only for a model whose
+    caching is on — a strict OpenAI-compatible server rejects the key. */
+export interface PlannerCacheControl {
+  type: 'ephemeral';
+}
+
+export type PlannerTextContentPart = { type: 'text'; text: string; cache_control?: PlannerCacheControl };
+
 export type PlannerUserContentPart =
-  | { type: 'text'; text: string }
-  | { type: 'image_url'; image_url: { url: string } };
+  | PlannerTextContentPart
+  | { type: 'image_url'; image_url: { url: string }; cache_control?: PlannerCacheControl };
 
 export type PlannerChatMessage =
-  | { role: 'system'; content: string }
+  | { role: 'system'; content: string | PlannerTextContentPart[] }
   | { role: 'user'; content: string | PlannerUserContentPart[] }
   | { role: 'assistant'; content: string | null; tool_calls?: PlannerLlmToolCall[] }
-  | { role: 'tool'; tool_call_id: string; content: string };
+  | { role: 'tool'; tool_call_id: string; content: string | PlannerTextContentPart[] };
 
 /** OpenAI's own `usage` shape, snake_case for the same reason as the wire
     types above. `null` when the provider never sent one — not every
@@ -26,8 +36,55 @@ export type PlannerChatMessage =
     so the settings-page turn footer simply omits the tokens/tps bits rather
     than showing a fabricated zero. */
 export interface PlannerLlmUsage {
+  /** Every prompt token, cached ones included (OpenAI's convention). */
   promptTokens: number;
   completionTokens: number;
+  /**
+   * PA-122: how many of `promptTokens` were read from the provider's prompt
+   * cache, and how many were written to it. `null` when the provider said
+   * nothing either way, which is not the same as `0`. Both are subsets of
+   * `promptTokens` — see `parseUsage` for the gateways that report them the
+   * other way round.
+   */
+  cacheReadTokens?: number | null;
+  cacheWriteTokens?: number | null;
+  /** PA-122: what the provider itself says the request cost, in USD, when it
+      reports one (OpenRouter, LiteLLM). Preferred over a computed figure. */
+  costUsd?: number | null;
+}
+
+function finiteNonNegative(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/**
+ * PA-122: one `usage` object, in any of the shapes OpenAI-compatible servers
+ * send. OpenAI, DeepSeek and OpenRouter report the cache inside
+ * `prompt_tokens_details` and count it as part of `prompt_tokens`; an
+ * Anthropic-style passthrough (LiteLLM, some proxies) reports
+ * `cache_read_input_tokens` / `cache_creation_input_tokens` beside it, and a
+ * proxy that copies Anthropic's own `input_tokens` leaves the cache *out* of
+ * `prompt_tokens`. That last case is detectable — the cache cannot be bigger
+ * than the whole prompt — and is normalised to the inclusive convention, so
+ * token calibration and cost both read one meaning.
+ */
+export function parseUsage(raw: unknown): PlannerLlmUsage | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const u = raw as Record<string, unknown>;
+  const details = (u.prompt_tokens_details && typeof u.prompt_tokens_details === 'object'
+    ? u.prompt_tokens_details
+    : {}) as Record<string, unknown>;
+  const read = finiteNonNegative(details.cached_tokens) ?? finiteNonNegative(u.cache_read_input_tokens);
+  const write = finiteNonNegative(details.cache_write_tokens) ?? finiteNonNegative(u.cache_creation_input_tokens);
+  let promptTokens = finiteNonNegative(u.prompt_tokens) ?? 0;
+  if ((read ?? 0) + (write ?? 0) > promptTokens) promptTokens += (read ?? 0) + (write ?? 0);
+  return {
+    promptTokens,
+    completionTokens: finiteNonNegative(u.completion_tokens) ?? 0,
+    cacheReadTokens: read,
+    cacheWriteTokens: write,
+    costUsd: finiteNonNegative(u.cost),
+  };
 }
 
 export interface PlannerLlmCompletion {
@@ -510,13 +567,8 @@ export class PlannerLlmClient {
       // alongside an empty `choices: []` — captured here rather than
       // returned as its own stream event, the same "assemble internally,
       // surface only in `done`" treatment tool-call chunks already get.
-      const rawUsage = (parsed as { usage?: { prompt_tokens?: number; completion_tokens?: number } | null }).usage;
-      if (rawUsage) {
-        usage = {
-          promptTokens: rawUsage.prompt_tokens ?? 0,
-          completionTokens: rawUsage.completion_tokens ?? 0,
-        };
-      }
+      const rawUsage = parseUsage((parsed as { usage?: unknown }).usage);
+      if (rawUsage) usage = rawUsage;
 
       const choice = (
         parsed as {
