@@ -965,7 +965,9 @@ describe('webhook delivery: agent identity in the assembled comment thread', () 
     const preview = (await post(`/api/webhooks/${hook.id}/preview`, { payload })).json();
     // The agent's own comment: first 3 lines, then a truncation marker.
     expect(preview.prompt).toContain('Triage: root-cause analysis\nline 2\nline 3\n...');
-    expect(preview.prompt).not.toContain('line 4');
+    // Anchored on the newline: the fence label `change.headline <nonce>` reads
+    // `headline 4…` whenever the random nonce starts with a 4.
+    expect(preview.prompt).not.toContain('\nline 4');
     // The human's comment: untouched, in full.
     expect(preview.prompt).toContain('Fix does not work.\nStill broken on retry.');
     // Oldest first.
