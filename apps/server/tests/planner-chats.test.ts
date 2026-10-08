@@ -307,6 +307,21 @@ function findEvent(
   return events.find((e) => e.kind === kind);
 }
 
+/**
+ * PA-121: every turn's single system message now opens with the base
+ * preamble (`basePlannerSystemPrompt`). Tests about what *else* is sent strip
+ * it: the whole system message when it is only the preamble, otherwise just
+ * the preamble's paragraph.
+ */
+function withoutBaseSystem(messages: Array<{ role: string; content: unknown }>): Array<{ role: string; content: unknown }> {
+  const [first, ...rest] = messages;
+  if (!first || first.role !== 'system' || !String(first.content).startsWith('You are a Pocket Agent')) {
+    return messages;
+  }
+  const remainder = String(first.content).split('\n\n').slice(1).join('\n\n');
+  return remainder ? [{ role: 'system', content: remainder }, ...rest] : rest;
+}
+
 /** `text_delta` events stream live but are never persisted (see `driveLoop`'s
     doc comment) — so a comparison against the on-disk history has to ignore
     them, the same way the persistence layer itself does. */
@@ -587,7 +602,7 @@ describe('planner chat routes over HTTP', () => {
     // The LLM was called with the running history including the just-sent
     // user message — not an empty or stale list.
     const sentMessages = JSON.parse(fetchImpl.mock.calls[0]![1].body as string).messages;
-    expect(sentMessages).toEqual([{ role: 'user', content: 'plan my week' }]);
+    expect(withoutBaseSystem(sentMessages)).toEqual([{ role: 'user', content: 'plan my week' }]);
   });
 
   it('clears chat history via DELETE /api/planner/chats/:id/history', async () => {
@@ -620,7 +635,7 @@ describe('planner chat routes over HTTP', () => {
     expect(events[0]).toMatchObject({ kind: 'user_prompt', text: 'Describe this', image });
 
     const sentBody = JSON.parse(fetchImpl.mock.calls[0]![1].body as string);
-    expect(sentBody.messages).toEqual([
+    expect(withoutBaseSystem(sentBody.messages)).toEqual([
       {
         role: 'user',
         content: [
@@ -734,7 +749,7 @@ describe('planner chat routes over HTTP', () => {
 
   // ---- PA-45: identity/"me"/"tools" context, prepended as a system message -
 
-  it('sends no persona system message when identity/me/tools are all unset', async () => {
+  it('sends only the base system message when identity/me/tools are all unset', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(fakeCompletionResponse('ok'));
     t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
     await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
@@ -742,7 +757,15 @@ describe('planner chat routes over HTTP', () => {
 
     await sendMessage(t, chat.id, 'hi');
     const messages = JSON.parse(fetchImpl.mock.calls[0]![1].body as string).messages;
-    expect(messages).toEqual([{ role: 'user', content: 'hi' }]);
+    // PA-121: a fresh agent is no longer sent nothing — the base preamble
+    // tells it where it runs, its own workspace directory, and that tool
+    // output is data. Nothing persona-shaped is added to it.
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe('system');
+    expect(messages[0].content).toMatch(/^You are a Pocket Agent/);
+    expect(messages[0].content).toContain('Your own workspace directory is ');
+    expect(messages[0].content).not.toContain('Who you are');
+    expect(withoutBaseSystem(messages)).toEqual([{ role: 'user', content: 'hi' }]);
   });
 
   it("prepends this agent's identity, the global me instruction, and the global tools instruction as one system message, in that order", async () => {
@@ -760,7 +783,7 @@ describe('planner chat routes over HTTP', () => {
     const chat = (await post(t, '/api/planner/chats', { workspaceId: ws.id, modelId: 'gpt-4o' })).json();
 
     await sendMessage(t, chat.id, 'hi');
-    const messages = JSON.parse(fetchImpl.mock.calls[0]![1].body as string).messages;
+    const messages = withoutBaseSystem(JSON.parse(fetchImpl.mock.calls[0]![1].body as string).messages);
     expect(messages).toHaveLength(2);
     expect(messages[0].role).toBe('system');
     expect(messages[0].content).toBe(
@@ -781,7 +804,7 @@ describe('planner chat routes over HTTP', () => {
     const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
 
     await sendMessage(t, chat.id, 'hi');
-    const messages = JSON.parse(fetchImpl.mock.calls[0]![1].body as string).messages;
+    const messages = withoutBaseSystem(JSON.parse(fetchImpl.mock.calls[0]![1].body as string).messages);
     expect(messages[0]).toEqual({
       role: 'system',
       content: 'About the person you are helping:\nMy name is Stone.',
@@ -833,7 +856,8 @@ describe('planner chat routes over HTTP', () => {
     const res = await get(t, `/api/planner/chats/${chat.id}/context-preview`);
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(body.systemPrompt).toEqual([]);
+    // PA-121: only the base preamble, which every turn sends.
+    expect(body.systemPrompt.map((s: { id: string }) => s.id)).toEqual(['base']);
     // `enabledTools` is `[]`; `JSON.stringify([])` is the 2-char string
     // `"[]"`, which `estimateTokens` rounds up to 1 — not literally zero,
     // since the estimator works on serialized text, not tool count.
@@ -843,7 +867,7 @@ describe('planner chat routes over HTTP', () => {
     expect(body.window.tokens).toBe(1);
     // Nothing configured, nothing in the window, no memory candidates: the
     // headline total is just the two one-token floors above.
-    expect(body.totalTokens).toBe(body.window.tokens + body.tools.tokens);
+    expect(body.totalTokens).toBe(body.systemPrompt[0].tokens + body.window.tokens + body.tools.tokens);
   });
 
   it("context-preview reports the identity/about/toolsEnvironment sections with non-negative token counts, mirroring buildPersonaSystemMessage's own sections", async () => {
@@ -973,7 +997,10 @@ describe('planner chat routes over HTTP', () => {
 
     // The second call carries the assistant's tool-call message and the
     // executed tool's result, in addition to the original user turn.
-    const secondCallMessages = JSON.parse(fetchImpl.mock.calls[1]![1].body as string).messages;
+    const secondCallMessages = withoutBaseSystem(JSON.parse(fetchImpl.mock.calls[1]![1].body as string).messages) as Array<{
+      role: string;
+      content: string;
+    }>;
     expect(secondCallMessages).toHaveLength(3);
     expect(secondCallMessages[0]).toEqual({ role: 'user', content: 'what workspaces do I have?' });
     expect(secondCallMessages[1]).toMatchObject({
@@ -1063,7 +1090,7 @@ describe('planner chat routes over HTTP', () => {
     await post(t, `/api/planner/chats/${chat.id}/messages`, { content: 'second message' });
 
     const secondCallBody = JSON.parse(fetchImpl.mock.calls[1]![1].body as string);
-    expect(secondCallBody.messages).toEqual([
+    expect(withoutBaseSystem(secondCallBody.messages)).toEqual([
       { role: 'user', content: 'first message' },
       { role: 'assistant', content: 'first reply' },
       { role: 'user', content: 'second message' },

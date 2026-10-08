@@ -2,7 +2,7 @@ import type { AgentEvent, PermissionRequestEvent, PlannerToolApprovalChoice } fr
 import { PlannerChatError, type PlannerChatService } from '../planner/chats.js';
 import type { McpRegistryService } from '../planner/mcp/registry-service.js';
 import type { TelegramLinksStore } from './links-store.js';
-import { interceptSlashCommand } from './slash-commands.js';
+import { interceptSlashCommand, type TelegramSlashCommand } from './slash-commands.js';
 import type { TelegramCallbackQuery, TelegramClient, TelegramMessage, TelegramUpdate } from './client.js';
 import { escapeHtml } from './format.js';
 import { sendHtmlWithPlainFallback, sendMarkdown, sendPlainText } from './send.js';
@@ -76,7 +76,7 @@ export class TelegramBridge {
     const text = message.text!.trim();
     const command = interceptSlashCommand(text);
     if (command) {
-      const reply = await this.runSlashCommand(command, link.plannerChatId, link.workspaceId);
+      const reply = await this.runSlashCommand(command, link.plannerChatId, link.workspaceId, text);
       // Plain text: these replies are ours, not the model's, and carry no
       // Markdown worth rendering (PA-105).
       await sendPlainText(client, telegramChatId, reply);
@@ -262,9 +262,10 @@ export class TelegramBridge {
    * comment for why this cannot instead reuse the web UI's implementation.
    */
   private async runSlashCommand(
-    command: 'clear' | 'context' | 'mcp',
+    command: TelegramSlashCommand,
     plannerChatId: string | null,
     workspaceId: string | null,
+    text = '',
   ): Promise<string> {
     if (command === 'mcp') {
       const registries = this.deps.mcpRegistry.list().filter((r) => r.enabled);
@@ -283,12 +284,37 @@ export class TelegramBridge {
       return 'History cleared.';
     }
 
+    if (command === 'compact') {
+      // Anything after the command is what the summary should focus on.
+      const focus = text.trim().replace(/^\/\S+\s*/, '');
+      try {
+        const result = await this.deps.plannerChats.compact(plannerChatId, focus || null);
+        return result.compacted
+          ? `Compacted: about ${result.tokensBefore.toLocaleString('en-US')} → ${result.tokensAfter.toLocaleString('en-US')} tokens of context.`
+          : result.message;
+      } catch (err) {
+        return `Could not compact: ${(err as Error).message}`;
+      }
+    }
+
     // command === 'context'
     const preview = await this.deps.plannerChats.previewContext(plannerChatId);
-    const lines = [
-      `Context window: ${preview.window.inWindowMessages} message(s) in window, ` +
-        `${preview.window.foldedMessages} folded into memory (limit ${preview.window.windowLimit}).`,
-    ];
+    const budget = preview.budget;
+    const lines =
+      budget?.compactionEnabled
+        ? [
+            // PA-121: a token budget, not a turn count, once compaction is on.
+            `Context: about ${preview.totalTokens.toLocaleString('en-US')} of ${budget.contextWindow.toLocaleString('en-US')} ` +
+              `tokens (${budget.modelId ?? 'no model'}${budget.contextWindowSource === 'model' ? '' : ', window assumed'}); ` +
+              `compacts at ${budget.thresholdTokens.toLocaleString('en-US')}.`,
+            budget.compactions > 0
+              ? `Compacted ${budget.compactions} time(s); ${preview.window.inWindowMessages} message(s) kept after the latest summary.`
+              : `${preview.window.inWindowMessages} message(s) in context, not compacted yet.`,
+          ]
+        : [
+            `Context window: ${preview.window.inWindowMessages} message(s) in window, ` +
+              `${preview.window.foldedMessages} folded into memory (limit ${preview.window.windowLimit}).`,
+          ];
     if (!preview.memoryEnabled) {
       lines.push('Memory is disabled for this agent.');
     } else if (preview.candidates.length === 0) {

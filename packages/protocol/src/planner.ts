@@ -186,8 +186,22 @@ export const PlannerModel = z.object({
   createdAt: z.number().int(),
   supportsEffort: z.boolean().default(true),
   defaultEffort: EffortLevel.nullable().optional(),
+  /**
+   * PA-121: the model's context window and output limit, in tokens. `null`
+   * means "not set", in which case the loop uses a built-in table of known
+   * model families and then 128k / 16k — so most rows never need these, and
+   * an operator only fills them in for a model the table gets wrong. The
+   * context window decides when a chat is compacted; the output limit, when
+   * set, is sent as `max_tokens` (never otherwise, since some servers reject
+   * the field).
+   */
+  contextWindow: z.number().int().positive().nullable().optional(),
+  maxOutputTokens: z.number().int().positive().nullable().optional(),
 });
 export type PlannerModel = z.infer<typeof PlannerModel>;
+
+/** PA-121: bounds for `PlannerModel.contextWindow`/`maxOutputTokens` on the way in. */
+const TOKEN_LIMIT = z.number().int().min(1024).max(10_000_000).nullable();
 
 export const PlannerModelListResponse = z.object({
   models: z.array(PlannerModel),
@@ -199,6 +213,8 @@ export const CreatePlannerModelRequest = z.object({
   label: z.string().min(1).max(128),
   supportsEffort: z.boolean().optional(),
   defaultEffort: EffortLevel.nullable().optional(),
+  contextWindow: TOKEN_LIMIT.optional(),
+  maxOutputTokens: TOKEN_LIMIT.optional(),
 });
 export type CreatePlannerModelRequest = z.infer<typeof CreatePlannerModelRequest>;
 
@@ -206,6 +222,9 @@ export const UpdatePlannerModelRequest = z.object({
   label: z.string().min(1).max(128).optional(),
   supportsEffort: z.boolean().optional(),
   defaultEffort: EffortLevel.nullable().optional(),
+  /** PA-121: `null` clears it back to "not set". */
+  contextWindow: TOKEN_LIMIT.optional(),
+  maxOutputTokens: TOKEN_LIMIT.optional(),
 });
 export type UpdatePlannerModelRequest = z.infer<typeof UpdatePlannerModelRequest>;
 
@@ -1034,4 +1053,23 @@ export const InterruptPlannerChatResponse = z.object({
   interrupted: z.boolean(),
 });
 export type InterruptPlannerChatResponse = z.infer<typeof InterruptPlannerChatResponse>;
+
+/**
+ * PA-121: `POST /api/planner/chats/:id/compact` — summarize the chat's
+ * history now (`/compact` in a chat), optionally steering what the summary
+ * should keep. Refused with 409 while a turn is running.
+ */
+export const CompactPlannerChatRequest = z.object({
+  focus: z.string().max(2000).nullable().optional(),
+});
+export type CompactPlannerChatRequest = z.infer<typeof CompactPlannerChatRequest>;
+
+export const CompactPlannerChatResponse = z.object({
+  compacted: z.boolean(),
+  /** Why not, when `compacted` is false. */
+  message: z.string(),
+  tokensBefore: z.number().int(),
+  tokensAfter: z.number().int(),
+});
+export type CompactPlannerChatResponse = z.infer<typeof CompactPlannerChatResponse>;
 

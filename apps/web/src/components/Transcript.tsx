@@ -430,11 +430,33 @@ function Item({
       return <div className={`notice inline ${item.level}`}>{item.text}</div>;
     case 'command_output':
       return <div className="command-output">{item.text}</div>;
+    case 'compaction':
+      return <CompactionDivider item={item} />;
     case 'turn':
       return <TurnFooter item={item} onSelectPrompt={onSelectPrompt} busy={busy} />;
     default:
       return null;
   }
+}
+
+/**
+ * PA-121: where a Pocket Agent chat was compacted. Collapsed by default — the
+ * summary is for the model, and a human who wants it can open it — and
+ * plain text rather than markdown, because it is exactly the string the
+ * model is sent.
+ */
+function CompactionDivider({ item }: { item: TranscriptItem & { type: 'compaction' } }): JSX.Element {
+  const why =
+    item.reason === 'manual' ? 'on request' : item.reason === 'overflow' ? 'after the model ran out of room' : 'to fit the context window';
+  return (
+    <details className="compaction-divider">
+      <summary>
+        Earlier conversation summarized {why} (about {item.tokensBefore.toLocaleString()} →{' '}
+        {item.tokensAfter.toLocaleString()} tokens)
+      </summary>
+      <div className="compaction-summary">{item.summary}</div>
+    </details>
+  );
 }
 
 /**

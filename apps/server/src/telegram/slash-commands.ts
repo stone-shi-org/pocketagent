@@ -1,5 +1,6 @@
 /**
- * PA-53: Pocket Agent's `/clear`, `/context` and `/mcp` slash commands,
+ * PA-53: Pocket Agent's `/clear`, `/context` and `/mcp` slash commands (and
+ * PA-121's `/compact`),
  * reimplemented for Telegram.
  *
  * There is no server-side slash-command mechanism for Pocket Agent chats
@@ -17,7 +18,7 @@
  * business holding.
  */
 
-export type TelegramSlashCommand = 'clear' | 'context' | 'mcp';
+export type TelegramSlashCommand = 'clear' | 'context' | 'mcp' | 'compact';
 
 /** Aliases mirror `PLANNER_SLASH_COMMANDS` in `PlannerChatPage.tsx` exactly —
     `/reset` is a synonym for `/clear` there, and stays one here so the two
@@ -27,6 +28,8 @@ const COMMAND_ALIASES: Record<string, TelegramSlashCommand> = {
   reset: 'clear',
   context: 'context',
   mcp: 'mcp',
+  // PA-121: summarize the chat's history now, as in the web chat.
+  compact: 'compact',
 };
 
 /**

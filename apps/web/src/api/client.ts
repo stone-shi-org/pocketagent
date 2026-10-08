@@ -84,6 +84,7 @@ import type {
   UpdatePlannerChatRequest,
   DeleteAllPlannerChatsResponse,
   InterruptPlannerChatResponse,
+  CompactPlannerChatResponse,
   PlannerChatHistoryResponse,
   PlannerChatSubagentsResponse,
   PlannerContextPreviewResponse,
@@ -1078,6 +1079,13 @@ export function createApiClient(endpoint: HostEndpoint) {
     /**
      * PA-99: Interrupts an in-flight planner turn or dismisses a pending approval.
      */
+    /** PA-121: `/compact` — summarize the chat's history now. */
+    compactPlannerChat: (id: string, focus: string | null) =>
+      request<CompactPlannerChatResponse>(`/api/planner/chats/${encodeURIComponent(id)}/compact`, {
+        method: 'POST',
+        body: JSON.stringify({ focus }),
+      }),
+
     interruptPlannerChat: (id: string) =>
       request<InterruptPlannerChatResponse>(`/api/planner/chats/${encodeURIComponent(id)}/interrupt`, {
         method: 'POST',

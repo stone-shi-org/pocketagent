@@ -438,6 +438,17 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
     });
   };
 
+  // PA-121: a model's context window / output limit; `null` = not set.
+  const setModelLimit = (
+    id: string,
+    patch: { contextWindow?: number | null; maxOutputTokens?: number | null },
+  ): void => {
+    void withBusy(async () => {
+      await api.updatePlannerModel(id, patch);
+      await load();
+    });
+  };
+
   const removeModel = (id: string): void => {
     void withBusy(() => api.deletePlannerModel(id));
   };
@@ -875,6 +886,20 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
                   <Icon name="brain" size={12} />
                   <span>{m.supportsEffort !== false ? 'Effort on' : 'Effort off'}</span>
                 </button>
+                <ModelLimitInput
+                  label="Context"
+                  title="Context window in tokens. Empty = worked out from the model name (128k if unknown)."
+                  value={m.contextWindow ?? null}
+                  disabled={busy}
+                  onSave={(v) => setModelLimit(m.id, { contextWindow: v })}
+                />
+                <ModelLimitInput
+                  label="Max out"
+                  title="Output limit in tokens, sent as max_tokens. Empty = not sent."
+                  value={m.maxOutputTokens ?? null}
+                  disabled={busy}
+                  onSave={(v) => setModelLimit(m.id, { maxOutputTokens: v })}
+                />
                 {result === 'testing' && <span className="planner-row-meta"> — testing…</span>}
                 {result && result !== 'testing' && (
                   <span className={result.ok ? 'planner-test-ok' : 'planner-test-fail'}>
@@ -1605,5 +1630,58 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
         />
       )}
     </div>
+  );
+}
+
+/**
+ * PA-121: one of a model row's token limits, edited inline and saved on blur.
+ * Empty means "not set" (the server then works it out); anything outside the
+ * server's `[1024, 10 000 000]` range reverts rather than round-tripping as a
+ * 400.
+ */
+function ModelLimitInput({
+  label,
+  title,
+  value,
+  disabled,
+  onSave,
+}: {
+  label: string;
+  title: string;
+  value: number | null;
+  disabled: boolean;
+  onSave: (value: number | null) => void;
+}): JSX.Element {
+  const [text, setText] = useState(value === null ? '' : String(value));
+  useEffect(() => {
+    setText(value === null ? '' : String(value));
+  }, [value]);
+  const commit = (): void => {
+    const trimmed = text.trim();
+    if (trimmed === '') {
+      if (value !== null) onSave(null);
+      return;
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isInteger(parsed) || parsed < 1024 || parsed > 10_000_000) {
+      setText(value === null ? '' : String(value));
+      return;
+    }
+    if (parsed !== value) onSave(parsed);
+  };
+  return (
+    <label className="planner-model-limit" title={title}>
+      <span>{label}</span>
+      <input
+        type="number"
+        min={1024}
+        step={1024}
+        placeholder="auto"
+        value={text}
+        disabled={disabled}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+      />
+    </label>
   );
 }

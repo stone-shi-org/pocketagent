@@ -77,6 +77,21 @@ export interface TurnItem {
   suggestions?: string[];
 }
 
+/**
+ * PA-121: a Pocket Agent chat's older history was summarized to fit the
+ * model's context window. Rendered as a divider that expands to the summary:
+ * everything above it is still shown, but from here on the model sees the
+ * summary in its place.
+ */
+export interface CompactionItem {
+  type: 'compaction';
+  key: string;
+  summary: string;
+  tokensBefore: number;
+  tokensAfter: number;
+  reason: 'threshold' | 'overflow' | 'manual';
+}
+
 /** Output from a slash command that resolved locally, without a model turn. */
 export interface CommandOutputItem {
   type: 'command_output';
@@ -90,7 +105,8 @@ export type TranscriptItem =
   | ToolItem
   | NoticeItem
   | TurnItem
-  | CommandOutputItem;
+  | CommandOutputItem
+  | CompactionItem;
 
 export interface TranscriptState {
   items: TranscriptItem[];
@@ -357,6 +373,22 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
 
     case 'rate_limit':
       return { ...state, rateLimit: event };
+
+    case 'context_compaction':
+      return {
+        ...state,
+        items: [
+          ...state.items,
+          {
+            type: 'compaction',
+            key: `cc_${event.id}`,
+            summary: event.summary,
+            tokensBefore: event.tokensBefore,
+            tokensAfter: event.tokensAfter,
+            reason: event.reason,
+          },
+        ],
+      };
 
     // REPLACE semantics, per the SDK's own `commands_changed` doc comment —
     // this is the full current list, not a delta, whether it arrived from

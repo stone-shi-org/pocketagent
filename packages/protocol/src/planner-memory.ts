@@ -135,5 +135,31 @@ export const PlannerContextPreviewResponse = z.object({
       server-side rather than summed again in the client, so the headline and
       the per-section numbers it adds up can never drift apart. */
   totalTokens: z.number().int(),
+  /**
+   * PA-121: the token budget the next turn is planned against. `window` above
+   * still describes what is sent; with compaction on, "in window" means the
+   * events kept after the latest summary and "folded" the ones it replaced.
+   * Optional so a response from an older server still parses.
+   */
+  budget: z
+    .object({
+      modelId: z.string().nullable(),
+      contextWindow: z.number().int(),
+      /** Set on the model row, guessed from the model's name, or the default. */
+      contextWindowSource: z.enum(['model', 'known', 'default']),
+      compactionEnabled: z.boolean(),
+      /** The context size at which the chat is compacted. */
+      thresholdTokens: z.number().int(),
+      /** How many times this chat has been compacted so far. */
+      compactions: z.number().int(),
+      lastCompaction: z
+        .object({
+          tokensBefore: z.number().int(),
+          tokensAfter: z.number().int(),
+          reason: z.enum(['threshold', 'overflow', 'manual']),
+        })
+        .nullable(),
+    })
+    .optional(),
 });
 export type PlannerContextPreviewResponse = z.infer<typeof PlannerContextPreviewResponse>;

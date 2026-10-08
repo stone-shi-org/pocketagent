@@ -282,6 +282,9 @@ export interface PlannerModelRow {
   createdAt: number;
   supportsEffort: boolean;
   defaultEffort: string | null;
+  /** PA-121: tokens; `null` = not set, see `planner/context-budget.ts`. */
+  contextWindow: number | null;
+  maxOutputTokens: number | null;
 }
 
 interface PlannerModelDbRow {
@@ -292,6 +295,8 @@ interface PlannerModelDbRow {
   created_at: number;
   supports_effort?: number | null;
   default_effort?: string | null;
+  context_window?: number | null;
+  max_output_tokens?: number | null;
 }
 
 function modelFromDbRow(row: PlannerModelDbRow): PlannerModelRow {
@@ -303,6 +308,8 @@ function modelFromDbRow(row: PlannerModelDbRow): PlannerModelRow {
     createdAt: row.created_at,
     supportsEffort: row.supports_effort !== 0,
     defaultEffort: row.default_effort ?? null,
+    contextWindow: row.context_window ?? null,
+    maxOutputTokens: row.max_output_tokens ?? null,
   };
 }
 
@@ -312,21 +319,44 @@ export function readPlannerModels(db: Db): PlannerModelRow[] {
   ).map(modelFromDbRow);
 }
 
-export function insertPlannerModel(db: Db, row: PlannerModelRow): void {
+export function insertPlannerModel(
+  db: Db,
+  row: Omit<PlannerModelRow, 'contextWindow' | 'maxOutputTokens'> &
+    Partial<Pick<PlannerModelRow, 'contextWindow' | 'maxOutputTokens'>>,
+): void {
   db.prepare(
-    `INSERT INTO planner_models (id, model_id, label, sort_order, created_at, supports_effort, default_effort)
-     VALUES (@id, @modelId, @label, @sortOrder, @createdAt, @supportsEffort, @defaultEffort)`,
+    `INSERT INTO planner_models
+       (id, model_id, label, sort_order, created_at, supports_effort, default_effort, context_window, max_output_tokens)
+     VALUES (@id, @modelId, @label, @sortOrder, @createdAt, @supportsEffort, @defaultEffort, @contextWindow, @maxOutputTokens)`,
   ).run({
     ...row,
     supportsEffort: row.supportsEffort !== false ? 1 : 0,
     defaultEffort: row.defaultEffort ?? null,
+    contextWindow: row.contextWindow ?? null,
+    maxOutputTokens: row.maxOutputTokens ?? null,
   });
+}
+
+/** PA-121: the catalog row for a model id, if one exists — what the loop
+    reads a context window from. First by sort order when an id is listed
+    twice. */
+export function readPlannerModelByModelId(db: Db, modelId: string): PlannerModelRow | null {
+  const row = db
+    .prepare('SELECT * FROM planner_models WHERE model_id = ? ORDER BY sort_order, created_at LIMIT 1')
+    .get(modelId) as PlannerModelDbRow | undefined;
+  return row ? modelFromDbRow(row) : null;
 }
 
 export function updatePlannerModel(
   db: Db,
   id: string,
-  patch: { label?: string; supportsEffort?: boolean; defaultEffort?: string | null },
+  patch: {
+    label?: string;
+    supportsEffort?: boolean;
+    defaultEffort?: string | null;
+    contextWindow?: number | null;
+    maxOutputTokens?: number | null;
+  },
 ): boolean {
   const assignments: string[] = [];
   const params: Record<string, unknown> = { id };
@@ -341,6 +371,14 @@ export function updatePlannerModel(
   if (patch.defaultEffort !== undefined) {
     assignments.push('default_effort = @defaultEffort');
     params.defaultEffort = patch.defaultEffort;
+  }
+  if (patch.contextWindow !== undefined) {
+    assignments.push('context_window = @contextWindow');
+    params.contextWindow = patch.contextWindow;
+  }
+  if (patch.maxOutputTokens !== undefined) {
+    assignments.push('max_output_tokens = @maxOutputTokens');
+    params.maxOutputTokens = patch.maxOutputTokens;
   }
   if (assignments.length === 0) return false;
   return db.prepare(`UPDATE planner_models SET ${assignments.join(', ')} WHERE id = @id`).run(params).changes > 0;

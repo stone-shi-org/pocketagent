@@ -397,6 +397,33 @@ export const TtsAudioEvent = z.object({
 });
 export type TtsAudioEvent = z.infer<typeof TtsAudioEvent>;
 
+/**
+ * PA-121: a Pocket Agent chat's older history was summarized to fit the
+ * model's context window. Appended to the chat's transcript, which is never
+ * rewritten: every earlier event is still there and still renders. What
+ * changes is what later turns *send* — this `summary`, then the events from
+ * `firstKeptEventId` on (`planner/compaction.ts`, `projectContext`).
+ *
+ * Planner-only. A structured session never emits it, so it never reaches a
+ * WebSocket frame and needs no `PROTOCOL_VERSION` bump; it travels in a
+ * Pocket Agent chat's history response and SSE stream, which an older bundle
+ * reads with the transcript reducer, whose `default` ignores a kind it does
+ * not know.
+ */
+export const ContextCompactionEvent = z.object({
+  kind: z.literal('context_compaction'),
+  id: z.string(),
+  summary: z.string(),
+  /** The first event kept verbatim after the summary; `null` when the
+      summary covers everything that existed. */
+  firstKeptEventId: z.string().nullable(),
+  /** Estimated context size before and after, in tokens. */
+  tokensBefore: z.number().int(),
+  tokensAfter: z.number().int(),
+  reason: z.enum(['threshold', 'overflow', 'manual']),
+});
+export type ContextCompactionEvent = z.infer<typeof ContextCompactionEvent>;
+
 export const AgentEvent = z.discriminatedUnion('kind', [
   SessionStartedEvent,
   TextEvent,
@@ -418,6 +445,7 @@ export const AgentEvent = z.discriminatedUnion('kind', [
   EffortChangedEvent,
   ConversationResetEvent,
   TtsAudioEvent,
+  ContextCompactionEvent,
 ]);
 export type AgentEvent = z.infer<typeof AgentEvent>;
 

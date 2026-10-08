@@ -46,6 +46,13 @@ const PLANNER_SLASH_COMMANDS: SlashCommandInfo[] = [
     aliases: [],
   },
   {
+    // PA-121: summarize the history now rather than when the context fills.
+    name: 'compact',
+    description: 'Summarize the conversation so far to free up context',
+    argumentHint: '[what to focus on]',
+    aliases: [],
+  },
+  {
     name: 'mcp',
     description: 'List available MCP servers and tools',
     argumentHint: '',
@@ -657,6 +664,30 @@ export function PlannerChatPage({
 
     if (!image && trimmed === '/context') {
       togglePreview();
+      return true;
+    }
+
+    // PA-121: `/compact [focus]`. One LLM call; the divider it produces comes
+    // back with the reloaded history.
+    if (!image && (trimmed === '/compact' || trimmed.startsWith('/compact '))) {
+      const focus = trimmed.slice('/compact'.length).trim();
+      const note = (text: string, level: 'info' | 'warn'): void =>
+        setTranscript((prev) => ({
+          ...(prev ?? emptyTranscript()),
+          items: [...(prev ?? emptyTranscript()).items, { type: 'notice', key: `compact_${Date.now()}`, level, text }],
+        }));
+      note('Summarizing the conversation…', 'info');
+      void (async () => {
+        try {
+          const result = await api.compactPlannerChat(chatId, focus || null);
+          await load();
+          if (!result.compacted) note(result.message, 'warn');
+          setContextPreview(null);
+        } catch (err) {
+          onApiError(err);
+          setError(err instanceof ApiError ? err.message : 'Could not compact the conversation.');
+        }
+      })();
       return true;
     }
 
@@ -1348,15 +1379,46 @@ export function PlannerChatPage({
 
               <div className="planner-context-preview-group">
                 <p className="planner-context-preview-group-title">Conversation history</p>
-                <p className="planner-context-preview-window">
-                  {contextPreview.window.inWindowMessages} of{' '}
-                  {contextPreview.window.inWindowMessages + contextPreview.window.foldedMessages} transcript
-                  messages are in context (window: last {contextPreview.window.windowLimit} turns, ~
-                  {contextPreview.window.tokens} tokens)
-                  {contextPreview.window.foldedMessages > 0 &&
-                    ` — ${contextPreview.window.foldedMessages} older ones were folded into memory`}
-                  .
-                </p>
+                {contextPreview.budget?.compactionEnabled ? (
+                  // PA-121: a token budget rather than a turn count.
+                  <p className="planner-context-preview-window">
+                    {contextPreview.window.inWindowMessages} of{' '}
+                    {contextPreview.window.inWindowMessages + contextPreview.window.foldedMessages} transcript
+                    messages are in context (~{contextPreview.window.tokens.toLocaleString()} tokens)
+                    {contextPreview.budget.compactions > 0
+                      ? ` — the rest is covered by a summary (compacted ${contextPreview.budget.compactions} time${
+                          contextPreview.budget.compactions === 1 ? '' : 's'
+                        })`
+                      : ''}
+                    .
+                  </p>
+                ) : (
+                  <p className="planner-context-preview-window">
+                    {contextPreview.window.inWindowMessages} of{' '}
+                    {contextPreview.window.inWindowMessages + contextPreview.window.foldedMessages} transcript
+                    messages are in context (window: last {contextPreview.window.windowLimit} turns, ~
+                    {contextPreview.window.tokens} tokens)
+                    {contextPreview.window.foldedMessages > 0 &&
+                      ` — ${contextPreview.window.foldedMessages} older ones were folded into memory`}
+                    .
+                  </p>
+                )}
+                {contextPreview.budget && (
+                  <p className="planner-context-preview-window">
+                    About {contextPreview.totalTokens.toLocaleString()} of{' '}
+                    {contextPreview.budget.contextWindow.toLocaleString()} tokens used
+                    {contextPreview.budget.modelId ? ` (${contextPreview.budget.modelId}` : ' ('}
+                    {contextPreview.budget.contextWindowSource === 'model'
+                      ? ')'
+                      : contextPreview.budget.contextWindowSource === 'known'
+                        ? '; window assumed from the model name — set it under Settings → Models)'
+                        : '; window unknown, assumed — set it under Settings → Models)'}
+                    .{' '}
+                    {contextPreview.budget.compactionEnabled
+                      ? `Compacts automatically at about ${contextPreview.budget.thresholdTokens.toLocaleString()}; /compact does it now.`
+                      : 'Automatic compaction is off.'}
+                  </p>
+                )}
               </div>
 
               <div className="planner-context-preview-group">

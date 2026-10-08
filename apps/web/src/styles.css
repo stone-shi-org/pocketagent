@@ -8513,3 +8513,10 @@ button.chat-rate-limit-badge {
   .hub-row-card .hub-row-actions { width: 100%; justify-content: flex-end; }
   .hub-page-add { padding: 8px 10px; }
 }
+
+/* PA-121: a Pocket Agent chat's compaction point — quiet, expandable. */
+.compaction-divider { margin: 12px 0; border-top: 1px dashed var(--border-strong); padding-top: 6px; color: var(--text-dim); font-size: 13px; }
+.compaction-divider > summary { cursor: pointer; }
+.compaction-summary { white-space: pre-wrap; margin-top: 6px; padding: 8px 10px; background: var(--bg-elev); border-radius: 8px; color: var(--text); font-size: 13px; }
+.planner-model-limit { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; font-size: 12px; color: var(--text-dim); }
+.planner-model-limit input { width: 92px; padding: 2px 6px; font-size: 12px; }

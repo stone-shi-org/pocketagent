@@ -1430,6 +1430,14 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE mcp_registries ADD COLUMN protocol_discover_json TEXT;
   ALTER TABLE mcp_registries ADD COLUMN protocol_checked_at INTEGER;
   `,
+
+  // PA-121: each planner model's context window and output limit, in tokens.
+  // NULL means "not set": the loop falls back to a table of known model
+  // families, then to 128k / 16k (see `planner/context-budget.ts`).
+  `
+  ALTER TABLE planner_models ADD COLUMN context_window INTEGER;
+  ALTER TABLE planner_models ADD COLUMN max_output_tokens INTEGER;
+  `,
 ];
 
 /**
@@ -1745,6 +1753,13 @@ export function openDatabase(databasePath: string): Db {
   }
   if (plannerModelColumns.size > 0 && !plannerModelColumns.has('default_effort')) {
     db.exec('ALTER TABLE planner_models ADD COLUMN default_effort TEXT');
+  }
+  // PA-121, same positional-migration hazard as the two above.
+  if (plannerModelColumns.size > 0 && !plannerModelColumns.has('context_window')) {
+    db.exec('ALTER TABLE planner_models ADD COLUMN context_window INTEGER');
+  }
+  if (plannerModelColumns.size > 0 && !plannerModelColumns.has('max_output_tokens')) {
+    db.exec('ALTER TABLE planner_models ADD COLUMN max_output_tokens INTEGER');
   }
   const customClaudeProviderColumns = new Set(
     (db.prepare('PRAGMA table_info(custom_claude_providers)').all() as { name: string }[]).map(

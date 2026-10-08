@@ -35,6 +35,8 @@ import {
   type GeminiLiveTokenResponse,
   type GeminiLiveToolCallsResponse,
   type InterruptPlannerChatResponse,
+  CompactPlannerChatRequest,
+  type CompactPlannerChatResponse,
   type PlannerAgentMcpRegistriesResponse,
   type PlannerAgentSkillsResponse,
   type PlannerAgentToolsResponse,
@@ -506,6 +508,8 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       label: parsed.data.label,
       supportsEffort: parsed.data.supportsEffort ?? true,
       defaultEffort: parsed.data.defaultEffort ?? null,
+      contextWindow: parsed.data.contextWindow ?? null,
+      maxOutputTokens: parsed.data.maxOutputTokens ?? null,
       sortOrder: nextPlannerModelSortOrder(db),
       createdAt: Date.now(),
     };
@@ -1494,6 +1498,24 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const interrupted = await app.pocket.plannerChats.interrupt(id);
     const response: InterruptPlannerChatResponse = { ok: true, interrupted };
     return noStore(reply).send(response);
+  });
+
+  // PA-121: `/compact` — summarize the history now. The work is one LLM call,
+  // so this answers when it is done rather than streaming; the
+  // `context_compaction` event reaches an open chat through `/events`.
+  app.post('/api/planner/chats/:id/compact', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = CompactPlannerChatRequest.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    try {
+      const result = await app.pocket.plannerChats.compact(id, parsed.data.focus ?? null);
+      const response: CompactPlannerChatResponse = result;
+      return noStore(reply).send(response);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
   });
 
   // ---- Gemini Live (PA-96) --------------------------------------------------
