@@ -17,6 +17,17 @@ import {
 import { SECRET_KEY_BYTES } from '../src/crypto/secret-box.js';
 import { authHeaders, createTestApp, type TestApp } from './helpers.js';
 
+/** PA-121: several tools now return `{ content, isError }`; these tests
+    are about the text. */
+async function runText(
+  tool: { execute: (deps: never, args: Record<string, unknown>) => Promise<string | { content: string }> },
+  deps: unknown,
+  args: Record<string, unknown>,
+): Promise<string> {
+  const result = await tool.execute(deps as never, args);
+  return typeof result === 'string' ? result : result.content;
+}
+
 /**
  * PA-6: the planner's tool catalog (read-only from phase 3, mutating from
  * phase 4), tested directly against a real `createTestApp()` context rather
@@ -133,6 +144,7 @@ describe('PLANNER_TOOLS catalog', () => {
         'get_current_time',
         'get_subagent_status',
         'grep_files',
+        'list_dir',
         'list_mcp_tools',
         'list_sessions',
         'list_skills',
@@ -153,6 +165,7 @@ describe('PLANNER_TOOLS catalog', () => {
         'bash',
         'call_mcp_tool',
         'delete_worktree',
+        'edit_file',
         'exec_command',
         'memory_save',
         'mkdir',
@@ -528,7 +541,7 @@ describe('planner tools against a real app context', () => {
     await fs.writeFile(filePath, 'hello from the project');
 
     const tool = findPlannerTool('read_file')!;
-    const result = await tool.execute(depsFor(t), { path: filePath });
+    const result = await runText(tool, depsFor(t), { path: filePath });
     expect(result).toBe('hello from the project');
   });
 
@@ -539,22 +552,22 @@ describe('planner tools against a real app context', () => {
     await fs.writeFile(filePath, '# a planner skill');
 
     const tool = findPlannerTool('read_file')!;
-    const result = await tool.execute(depsFor(t), { path: filePath });
+    const result = await runText(tool, depsFor(t), { path: filePath });
     expect(result).toBe('# a planner skill');
   });
 
   it('read_file refuses a path outside every project and planner workspace', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('read_file')!;
-    await expect(tool.execute(depsFor(t), { path: '/etc/hosts' })).rejects.toThrow(
-      /outside every project workspace/,
-    );
+    // PA-121: a refusal is an error result the model sees, not a throw.
+    const result = await tool.execute(depsFor(t), { path: '/etc/hosts' });
+    expect(result).toMatchObject({ isError: true, content: expect.stringMatching(/outside every project workspace/) });
   });
 
   it('read_file reports (without throwing) a directory is not a file', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('read_file')!;
-    const result = await tool.execute(depsFor(t), { path: t.projectDir });
+    const result = await runText(tool, depsFor(t), { path: t.projectDir });
     expect(result).toMatch(/is not a file/);
   });
 });
@@ -571,7 +584,7 @@ describe('write_file', () => {
     t = await createTestApp();
     const tool = findPlannerTool('write_file')!;
     const target = path.join(t.projectDir, 'plan.md');
-    const result = await tool.execute(depsFor(t), { path: target, content: '# Plan' });
+    const result = await runText(tool, depsFor(t), { path: target, content: '# Plan' });
     expect(result).toMatch(/Wrote 6 characters/);
     expect(await fs.readFile(target, 'utf8')).toBe('# Plan');
   });
@@ -581,7 +594,7 @@ describe('write_file', () => {
     const defaultWorkspace = t.context.plannerWorkspaces.getDefault()!;
     const target = path.join(defaultWorkspace.path, 'skill.md');
     const tool = findPlannerTool('write_file')!;
-    await tool.execute(depsFor(t), { path: target, content: 'notes' });
+    await runText(tool, depsFor(t), { path: target, content: 'notes' });
     expect(await fs.readFile(target, 'utf8')).toBe('notes');
   });
 
@@ -590,7 +603,7 @@ describe('write_file', () => {
     const target = path.join(t.projectDir, 'existing.txt');
     await fs.writeFile(target, 'old');
     const tool = findPlannerTool('write_file')!;
-    await tool.execute(depsFor(t), { path: target, content: 'new' });
+    await runText(tool, depsFor(t), { path: target, content: 'new' });
     expect(await fs.readFile(target, 'utf8')).toBe('new');
   });
 
@@ -598,7 +611,7 @@ describe('write_file', () => {
     t = await createTestApp();
     const tool = findPlannerTool('write_file')!;
     const target = path.join(t.projectDir, 'missing-parent', 'file.txt');
-    const result = await tool.execute(depsFor(t), { path: target, content: 'x' });
+    const result = await runText(tool, depsFor(t), { path: target, content: 'x' });
     expect(result).toMatch(/parent directory does not exist/);
     await expect(fs.stat(target)).rejects.toThrow();
   });
@@ -606,14 +619,14 @@ describe('write_file', () => {
   it('refuses a path outside every workspace', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('write_file')!;
-    const result = await tool.execute(depsFor(t), { path: '/tmp/pa-outside-write.txt', content: 'x' });
+    const result = await runText(tool, depsFor(t), { path: '/tmp/pa-outside-write.txt', content: 'x' });
     expect(result).toMatch(/outside every project workspace/);
   });
 
   it('refuses to overwrite a directory', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('write_file')!;
-    const result = await tool.execute(depsFor(t), { path: t.projectDir, content: 'x' });
+    const result = await runText(tool, depsFor(t), { path: t.projectDir, content: 'x' });
     expect(result).toMatch(/is a directory/);
   });
 });
@@ -628,7 +641,7 @@ describe('mkdir', () => {
     t = await createTestApp();
     const target = path.join(t.projectDir, 'sub');
     const tool = findPlannerTool('mkdir')!;
-    const result = await tool.execute(depsFor(t), { path: target });
+    const result = await runText(tool, depsFor(t), { path: target });
     expect(result).toMatch(/Created/);
     expect((await fs.stat(target)).isDirectory()).toBe(true);
   });
@@ -637,14 +650,14 @@ describe('mkdir', () => {
     t = await createTestApp();
     const target = path.join(t.projectDir, 'a', 'b', 'c');
     const tool = findPlannerTool('mkdir')!;
-    await tool.execute(depsFor(t), { path: target });
+    await runText(tool, depsFor(t), { path: target });
     expect((await fs.stat(target)).isDirectory()).toBe(true);
   });
 
   it('refuses a target outside every workspace, without creating anything', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('mkdir')!;
-    const result = await tool.execute(depsFor(t), { path: '/tmp/pa-outside-mkdir/nested' });
+    const result = await runText(tool, depsFor(t), { path: '/tmp/pa-outside-mkdir/nested' });
     expect(result).toMatch(/outside every project workspace/);
   });
 });
@@ -660,7 +673,7 @@ describe('rmdir', () => {
     const target = path.join(t.projectDir, 'empty');
     await fs.mkdir(target);
     const tool = findPlannerTool('rmdir')!;
-    const result = await tool.execute(depsFor(t), { path: target });
+    const result = await runText(tool, depsFor(t), { path: target });
     expect(result).toMatch(/Removed/);
     await expect(fs.stat(target)).rejects.toThrow();
   });
@@ -671,7 +684,7 @@ describe('rmdir', () => {
     await fs.mkdir(target);
     await fs.writeFile(path.join(target, 'file.txt'), 'x');
     const tool = findPlannerTool('rmdir')!;
-    const result = await tool.execute(depsFor(t), { path: target });
+    const result = await runText(tool, depsFor(t), { path: target });
     expect(result).toMatch(/not empty/);
     expect((await fs.stat(target)).isDirectory()).toBe(true);
   });
@@ -682,7 +695,7 @@ describe('rmdir', () => {
     await fs.mkdir(target);
     await fs.writeFile(path.join(target, 'file.txt'), 'x');
     const tool = findPlannerTool('rmdir')!;
-    const result = await tool.execute(depsFor(t), { path: target, recursive: true });
+    const result = await runText(tool, depsFor(t), { path: target, recursive: true });
     expect(result).toMatch(/Removed/);
     await expect(fs.stat(target)).rejects.toThrow();
   });
@@ -692,14 +705,14 @@ describe('rmdir', () => {
     const target = path.join(t.projectDir, 'file.txt');
     await fs.writeFile(target, 'x');
     const tool = findPlannerTool('rmdir')!;
-    const result = await tool.execute(depsFor(t), { path: target });
+    const result = await runText(tool, depsFor(t), { path: target });
     expect(result).toMatch(/is not a directory/);
   });
 
   it('refuses a path outside every workspace', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('rmdir')!;
-    const result = await tool.execute(depsFor(t), { path: '/tmp' });
+    const result = await runText(tool, depsFor(t), { path: '/tmp' });
     expect(result).toMatch(/outside every project workspace/);
   });
 });
@@ -713,7 +726,7 @@ describe('send_instruction', () => {
   it('reports an unknown session id plainly', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('send_instruction')!;
-    const result = await tool.execute(depsFor(t), { sessionId: 'does-not-exist', prompt: 'hi' });
+    const result = await runText(tool, depsFor(t), { sessionId: 'does-not-exist', prompt: 'hi' });
     expect(result).toMatch(/No session found/);
   });
 
@@ -727,7 +740,7 @@ describe('send_instruction', () => {
     });
     const sessionId = created.json().id as string;
     const tool = findPlannerTool('send_instruction')!;
-    const result = await tool.execute(depsFor(t), { sessionId, prompt: 'do something' });
+    const result = await runText(tool, depsFor(t), { sessionId, prompt: 'do something' });
     expect(result).toMatch(/terminal session/);
   });
 
@@ -741,7 +754,7 @@ describe('send_instruction', () => {
     });
     const sessionId = created.json().id as string;
     const tool = findPlannerTool('send_instruction')!;
-    const result = await tool.execute(depsFor(t), { sessionId, prompt: '   ' });
+    const result = await runText(tool, depsFor(t), { sessionId, prompt: '   ' });
     expect(result).toMatch(/No instruction text/);
   });
 });
@@ -774,7 +787,7 @@ describe('delete_worktree', () => {
     });
 
     const tool = findPlannerTool('delete_worktree')!;
-    const result = await tool.execute(depsFor(t), { path: created.cwd });
+    const result = await runText(tool, depsFor(t), { path: created.cwd });
     expect(result).toMatch(/Removed worktree/);
     await expect(fs.stat(created.cwd)).rejects.toThrow();
   });
@@ -795,7 +808,7 @@ describe('delete_worktree', () => {
     });
 
     const tool = findPlannerTool('delete_worktree')!;
-    const result = await tool.execute(depsFor(t), { path: created.cwd });
+    const result = await runText(tool, depsFor(t), { path: created.cwd });
     expect(result).toMatch(/session is still running/);
     expect((await fs.stat(created.cwd)).isDirectory()).toBe(true);
   });
@@ -803,7 +816,7 @@ describe('delete_worktree', () => {
   it('reports a path that is not a worktree, rather than throwing', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('delete_worktree')!;
-    const result = await tool.execute(depsFor(t), { path: t.projectDir });
+    const result = await runText(tool, depsFor(t), { path: t.projectDir });
     expect(result).toMatch(/Could not remove worktree/);
   });
 });
@@ -817,7 +830,7 @@ describe('exec_command', () => {
   it('captures stdout and reports the exit code', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('exec_command')!;
-    const result = await tool.execute(depsFor(t), { cwd: t.projectDir, command: 'echo hello' });
+    const result = await runText(tool, depsFor(t), { cwd: t.projectDir, command: 'echo hello' });
     expect(result).toContain('exit code 0');
     expect(result).toContain('hello');
   });
@@ -825,7 +838,7 @@ describe('exec_command', () => {
   it('captures stderr and a non-zero exit code', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('exec_command')!;
-    const result = await tool.execute(depsFor(t), {
+    const result = await runText(tool, depsFor(t), {
       cwd: t.projectDir,
       command: 'echo oops >&2; exit 3',
     });
@@ -837,14 +850,14 @@ describe('exec_command', () => {
     t = await createTestApp();
     await fs.writeFile(path.join(t.projectDir, 'marker.txt'), 'x');
     const tool = findPlannerTool('exec_command')!;
-    const result = await tool.execute(depsFor(t), { cwd: t.projectDir, command: 'ls' });
+    const result = await runText(tool, depsFor(t), { cwd: t.projectDir, command: 'ls' });
     expect(result).toContain('marker.txt');
   });
 
   it('strips POCKETAGENT_ environment variables from the child', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('exec_command')!;
-    const result = await tool.execute(depsFor(t), {
+    const result = await runText(tool, depsFor(t), {
       cwd: t.projectDir,
       command: 'env | grep -c POCKETAGENT_ || true',
     });
@@ -855,14 +868,14 @@ describe('exec_command', () => {
   it('reports empty command without running anything', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('exec_command')!;
-    const result = await tool.execute(depsFor(t), { cwd: t.projectDir, command: '   ' });
+    const result = await runText(tool, depsFor(t), { cwd: t.projectDir, command: '   ' });
     expect(result).toMatch(/No command provided/);
   });
 
   it('refuses a cwd outside every workspace', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('exec_command')!;
-    const result = await tool.execute(depsFor(t), { cwd: '/etc', command: 'echo hi' });
+    const result = await runText(tool, depsFor(t), { cwd: '/etc', command: 'echo hi' });
     expect(result).toMatch(/outside every project workspace/);
   });
 
@@ -871,7 +884,7 @@ describe('exec_command', () => {
     const target = path.join(t.projectDir, 'file.txt');
     await fs.writeFile(target, 'x');
     const tool = findPlannerTool('exec_command')!;
-    const result = await tool.execute(depsFor(t), { cwd: target, command: 'echo hi' });
+    const result = await runText(tool, depsFor(t), { cwd: target, command: 'echo hi' });
     expect(result).toMatch(/is not a directory/);
   });
 });
@@ -885,7 +898,7 @@ describe('bash', () => {
   it('runs command with explicit cwd', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('bash')!;
-    const result = await tool.execute(depsFor(t), { cwd: t.projectDir, command: 'echo hello from bash' });
+    const result = await runText(tool, depsFor(t), { cwd: t.projectDir, command: 'echo hello from bash' });
     expect(result).toContain('exit code 0');
     expect(result).toContain('hello from bash');
   });
@@ -895,7 +908,7 @@ describe('bash', () => {
     await fs.writeFile(path.join(t.projectDir, 'bash-marker.txt'), 'content');
     const tool = findPlannerTool('bash')!;
     const deps = depsFor(t, undefined, { workspacePath: t.projectDir });
-    const result = await tool.execute(deps, { command: 'ls' });
+    const result = await runText(tool, deps, { command: 'ls' });
     expect(result).toContain('exit code 0');
     expect(result).toContain('bash-marker.txt');
   });
@@ -905,7 +918,7 @@ describe('bash', () => {
     const defaultWs = t.context.plannerWorkspaces.getDefault()!;
     await fs.writeFile(path.join(defaultWs.path, 'default-ws-marker.txt'), 'content');
     const tool = findPlannerTool('bash')!;
-    const result = await tool.execute(depsFor(t), { command: 'ls' });
+    const result = await runText(tool, depsFor(t), { command: 'ls' });
     expect(result).toContain('exit code 0');
     expect(result).toContain('default-ws-marker.txt');
   });
@@ -914,7 +927,7 @@ describe('bash', () => {
     t = await createTestApp();
     const tool = findPlannerTool('bash')!;
     const deps = depsFor(t, undefined, { commandTimeoutSeconds: 1, workspacePath: t.projectDir });
-    const result = await tool.execute(deps, { command: 'sleep 3' });
+    const result = await runText(tool, deps, { command: 'sleep 3' });
     expect(result).toContain('timed out after 1s and was killed');
   });
 
@@ -922,14 +935,14 @@ describe('bash', () => {
     t = await createTestApp();
     const tool = findPlannerTool('bash')!;
     const deps = depsFor(t, undefined, { commandTimeoutSeconds: 10, workspacePath: t.projectDir });
-    const result = await tool.execute(deps, { command: 'sleep 3', timeout: 1 });
+    const result = await runText(tool, deps, { command: 'sleep 3', timeout: 1 });
     expect(result).toContain('timed out after 1s and was killed');
   });
 
   it('refuses a cwd outside every workspace', async () => {
     t = await createTestApp();
     const tool = findPlannerTool('bash')!;
-    const result = await tool.execute(depsFor(t), { cwd: '/etc', command: 'echo hi' });
+    const result = await runText(tool, depsFor(t), { cwd: '/etc', command: 'echo hi' });
     expect(result).toMatch(/outside every project workspace/);
   });
 });

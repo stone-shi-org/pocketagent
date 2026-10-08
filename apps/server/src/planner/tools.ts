@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import {
   CALL_MCP_TOOL_NAME,
@@ -29,6 +30,7 @@ import type { PlannerMemoryService } from './memory.js';
 import type { McpRegistryService } from './mcp/registry-service.js';
 import { SkillRegistryError, type SkillRegistryService } from './skills.js';
 import { DEFAULT_COMMAND_TIMEOUT_SECONDS } from './store.js';
+import { applyEdits, normalizeEditsArgument } from './edit-file.js';
 import type { Db } from '../db/index.js';
 import { readMcpOwnedWork } from '../db/index.js';
 import type { Config } from '../config/index.js';
@@ -431,6 +433,13 @@ export interface PlannerToolDefinition {
   /** JSON Schema, sent to the LLM verbatim as the function's `parameters`. */
   parameters: Record<string, unknown>;
   readOnly: boolean;
+  /**
+   * PA-121: rewrites the arguments a model sent into the shape `parameters`
+   * describes, before they are validated — for argument shapes models are
+   * known to send that are unambiguous but wrong (pi's `prepareArguments`).
+   * Must be pure and must not throw.
+   */
+  prepareArguments?: (args: Record<string, unknown>) => Record<string, unknown>;
   execute: (deps: PlannerToolDeps, args: Record<string, unknown>) => Promise<string | PlannerToolResult>;
 }
 
@@ -459,6 +468,79 @@ const SEARCH_TIMEOUT_MS = 20_000;
     before `MAX_TOOL_RESULT_CHARS` even gets a chance to bite — a result list
     this long is a sign the search needs narrowing, not more room. */
 const MAX_SEARCH_RESULTS = 300;
+
+/** PA-121: what the model is shown of a command's output (its *last* 2000 lines /
+    50 KB) and of a file (its first, from `offset`) — pi's limits. The end of a log is where the error, the test
+    summary and the final result are; the old head-first cut threw exactly
+    that away. */
+export const MAX_COMMAND_OUTPUT_LINES = 2_000;
+export const MAX_COMMAND_OUTPUT_BYTES = 50 * 1024;
+
+/** PA-121: `list_dir`'s defaults (pi's `ls` uses 500). */
+const DEFAULT_LIST_DIR_ENTRIES = 500;
+const MAX_LIST_DIR_ENTRIES = 2_000;
+/** PA-121: `grep_files` cuts each matching line to this (pi's
+    `GREP_MAX_LINE_LENGTH`): one minified bundle line can otherwise be most
+    of the result. */
+const MAX_GREP_LINE_CHARS = 500;
+
+/** PA-121: how big a file `read_file` will open at all — it reads a slice at
+    a time now, so this only has to bound memory, not the reply. */
+const MAX_READ_FILE_TOTAL_BYTES = 10 * 1024 * 1024;
+
+/** A NUL in the first 8 KB is the same "binary" heuristic `grep -I` uses. */
+function looksBinary(buffer: Buffer): boolean {
+  return buffer.subarray(0, 8192).includes(0);
+}
+
+/**
+ * PA-121: the part of a file `read_file` returns — lines `offset`..`offset +
+ * limit - 1`, then cut to `MAX_COMMAND_OUTPUT_LINES` / `MAX_COMMAND_OUTPUT_BYTES`
+ * whole lines, with a note saying exactly what was shown and how to continue
+ * (pi's `read` tool). The old tool returned the first 20 000 characters of a
+ * file with "…(truncated)" and no way to ask for the rest.
+ */
+export function readFileSlice(
+  text: string,
+  opts: { offset?: number | undefined; limit?: number | undefined },
+): PlannerToolResult {
+  const lines = text.split('\n');
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  const total = lines.length;
+  const offset = Math.max(1, Math.floor(opts.offset ?? 1));
+  if (offset > total) {
+    return { content: `Offset ${offset} is beyond the end of the file (${total} lines).`, isError: true };
+  }
+  const requestedEnd = opts.limit !== undefined && opts.limit > 0 ? Math.min(total, offset + Math.floor(opts.limit) - 1) : total;
+
+  const shown: string[] = [];
+  let bytes = 0;
+  for (let i = offset - 1; i < requestedEnd && shown.length < MAX_COMMAND_OUTPUT_LINES; i++) {
+    const lineBytes = Buffer.byteLength(lines[i]!, 'utf8') + 1;
+    if (bytes + lineBytes > MAX_COMMAND_OUTPUT_BYTES) {
+      if (shown.length === 0) {
+        return {
+          content:
+            `[Line ${offset} is ${lineBytes} bytes, over the ${MAX_COMMAND_OUTPUT_BYTES / 1024} KB limit. ` +
+            `Use bash: sed -n '${offset}p' <file> | head -c ${MAX_COMMAND_OUTPUT_BYTES}]`,
+          isError: false,
+        };
+      }
+      break;
+    }
+    shown.push(lines[i]!);
+    bytes += lineBytes;
+  }
+  const last = offset + shown.length - 1;
+  const body = shown.join('\n');
+  if (last < requestedEnd) {
+    return { content: `${body}\n\n[Showing lines ${offset}-${last} of ${total}. Use offset=${last + 1} to continue.]` };
+  }
+  if (last < total) {
+    return { content: `${body}\n\n[${total - last} more lines in the file. Use offset=${last + 1} to continue.]` };
+  }
+  return { content: body };
+}
 
 /** Keeps the head — used for file reading, grep, and search results. */
 export function truncate(text: string, max: number): string {
@@ -821,24 +903,46 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
   {
     name: 'read_file',
     description:
-      'Read a text file. The path must be inside an added project workspace or a planner workspace.',
+      'Read a text file. The path must be inside an added project workspace or a planner workspace. ' +
+      `Shows at most ${MAX_COMMAND_OUTPUT_LINES} lines / ${MAX_COMMAND_OUTPUT_BYTES / 1024} KB at a time; for a longer ` +
+      'file, the result says which lines it showed and the offset to continue from.',
     parameters: {
       type: 'object',
-      properties: { path: { type: 'string' } },
+      properties: {
+        path: { type: 'string' },
+        offset: { type: 'integer', description: 'Line number to start reading from, 1-based. Default 1.' },
+        limit: { type: 'integer', description: 'Maximum number of lines to read.' },
+      },
       required: ['path'],
       additionalProperties: false,
     },
     readOnly: true,
     async execute(deps, args) {
       const requested = String(args.path ?? '');
-      const real = await resolveExistingPathWithin(deps, requested);
-      const stat = await fs.stat(real);
-      if (!stat.isFile()) return `${requested} is not a file.`;
-      if (stat.size > MAX_FILE_READ_BYTES) {
-        return `${requested} is ${stat.size} bytes, over this tool's ${MAX_FILE_READ_BYTES}-byte limit.`;
+      let real: string;
+      try {
+        real = await resolveExistingPathWithin(deps, requested);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
       }
-      const content = await fs.readFile(real, 'utf8');
-      return truncate(content, MAX_TOOL_RESULT_CHARS);
+      const stat = await fs.stat(real);
+      if (!stat.isFile()) return { content: `${requested} is not a file.`, isError: true };
+      if (stat.size > MAX_READ_FILE_TOTAL_BYTES) {
+        return {
+          content:
+            `${requested} is ${stat.size} bytes, over this tool's ${MAX_READ_FILE_TOTAL_BYTES}-byte limit. ` +
+            'Use bash (head, tail, sed -n, grep) to look at part of it.',
+          isError: true,
+        };
+      }
+      const buffer = await fs.readFile(real);
+      if (looksBinary(buffer)) {
+        return { content: `${requested} looks like a binary file, which this tool does not read.`, isError: true };
+      }
+      return readFileSlice(buffer.toString('utf8'), {
+        offset: typeof args.offset === 'number' ? args.offset : undefined,
+        limit: typeof args.limit === 'number' ? args.limit : undefined,
+      });
     },
   },
   {
@@ -874,18 +978,21 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
   {
     name: 'grep_files',
     description:
-      'Search file contents for a pattern under a directory, like `grep -r`. The directory must be ' +
-      'inside an added project workspace or a planner workspace.',
+      'Search file contents for a pattern under a directory. Uses ripgrep when it is installed (regex syntax, ' +
+      'skips files listed in .gitignore and binary files), otherwise grep -r. The directory must be inside an ' +
+      'added project workspace or a planner workspace.',
     parameters: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Directory to search under.' },
-        pattern: { type: 'string', description: 'A basic regular expression to search for.' },
+        pattern: { type: 'string', description: 'A regular expression to search for.' },
+        literal: { type: 'boolean', description: 'Treat the pattern as plain text, not a regex. Default false.' },
         caseInsensitive: { type: 'boolean', description: 'Match case-insensitively. Default false.' },
         filePattern: {
           type: 'string',
           description: 'Only search files matching this glob, e.g. "*.ts". Default: every file.',
         },
+        context: { type: 'integer', description: 'Lines of context to show around each match. Default 0.' },
         maxResults: {
           type: 'number',
           description: `Maximum number of matching lines to return (default 100, capped at ${MAX_SEARCH_RESULTS}).`,
@@ -908,40 +1015,68 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       const stat = await fs.stat(real);
       if (!stat.isDirectory()) return `${requested} is not a directory.`;
 
-      // `-I` skips binary files (grep's own heuristic) — a binary match is
-      // never something an LLM can usefully act on, and it risks smuggling
-      // non-UTF8 bytes into the tool result. Argv array, not a shell string:
-      // unlike `exec_command`, the pattern and glob here are never
+      const context =
+        typeof args.context === 'number' && args.context > 0 ? Math.min(10, Math.floor(args.context)) : 0;
+      const glob = typeof args.filePattern === 'string' && args.filePattern.trim() ? args.filePattern.trim() : null;
+      // Argv arrays, never a shell string: the pattern and glob are never
       // shell-interpreted, so there is nothing for either to inject into.
-      const grepArgs = ['-r', '-n', '-I'];
-      if (args.caseInsensitive === true) grepArgs.push('-i');
-      if (typeof args.filePattern === 'string' && args.filePattern.trim()) {
-        grepArgs.push(`--include=${args.filePattern.trim()}`);
+      const rg = await findExecutableOnPath(['rg']);
+      let bin: string;
+      let argv: string[];
+      if (rg) {
+        // PA-121: ripgrep, as pi uses — .gitignore-aware (so node_modules and
+        // build output stop drowning real matches), skips binary files, and
+        // much faster on a large tree.
+        bin = rg;
+        argv = ['--line-number', '--no-heading', '--color=never', '--hidden', '--glob', '!.git'];
+        if (args.caseInsensitive === true) argv.push('--ignore-case');
+        if (args.literal === true) argv.push('--fixed-strings');
+        if (glob) argv.push('--glob', glob);
+        if (context > 0) argv.push('--context', String(context));
+        argv.push('-e', pattern, '.');
+      } else {
+        // `-I` skips binary files (grep's own heuristic) — a binary match is
+        // never something an LLM can usefully act on, and it risks smuggling
+        // non-UTF8 bytes into the tool result.
+        bin = 'grep';
+        argv = ['-r', '-n', '-I'];
+        if (args.caseInsensitive === true) argv.push('-i');
+        if (args.literal === true) argv.push('-F');
+        if (glob) argv.push(`--include=${glob}`);
+        if (context > 0) argv.push(`-C${context}`);
+        argv.push('--', pattern, '.');
       }
-      grepArgs.push('--', pattern, '.');
 
-      const result = await runArgvCommand('grep', grepArgs, real, SEARCH_TIMEOUT_MS);
-      if (result.timedOut) return `grep timed out after ${SEARCH_TIMEOUT_MS / 1000}s. Narrow path or pattern.`;
-      // grep's own exit codes: 0 = matches found, 1 = none found (not an
+      const result = await runArgvCommand(bin, argv, real, SEARCH_TIMEOUT_MS);
+      const name = rg ? 'ripgrep' : 'grep';
+      if (result.timedOut) return `${name} timed out after ${SEARCH_TIMEOUT_MS / 1000}s. Narrow path or pattern.`;
+      // Both tools' exit codes: 0 = matches found, 1 = none found (not an
       // error), 2+ = a real usage/read error.
       if (result.code !== null && result.code > 1) {
-        return `grep failed: ${truncate(result.stderr || result.stdout, 500)}`;
+        return `${name} failed: ${truncate(result.stderr || result.stdout, 500)}`;
       }
       const lines = result.stdout.split('\n').filter((l) => l.length > 0);
       if (lines.length === 0) return 'No matches found.';
       const rawLimit = typeof args.maxResults === 'number' ? Math.round(args.maxResults) : 100;
       const limit = Math.min(MAX_SEARCH_RESULTS, Math.max(1, rawLimit));
-      const shown = lines.slice(0, limit);
-      const suffix =
-        lines.length > shown.length ? `\n…(${lines.length - shown.length} more matches — narrow your search)` : '';
+      let cutLines = false;
+      const shown = lines.slice(0, limit).map((l) => {
+        if (l.length <= MAX_GREP_LINE_CHARS) return l;
+        cutLines = true;
+        return `${l.slice(0, MAX_GREP_LINE_CHARS)}… [line truncated]`;
+      });
+      const notes: string[] = [];
+      if (lines.length > shown.length) notes.push(`${lines.length - shown.length} more lines — narrow your search, or raise maxResults`);
+      if (cutLines) notes.push(`long lines were cut to ${MAX_GREP_LINE_CHARS} characters; use read_file to see them whole`);
+      const suffix = notes.length > 0 ? `\n[${notes.join('; ')}]` : '';
       return truncate(shown.join('\n'), MAX_TOOL_RESULT_CHARS) + suffix;
     },
   },
   {
     name: 'find_files',
     description:
-      'Find files by name under a directory, like `find -iname`. The directory must be inside an ' +
-      'added project workspace or a planner workspace.',
+      'Find files by name under a directory, like `find -iname` (using fd when it is installed, which skips ' +
+      'files listed in .gitignore). The directory must be inside an added project workspace or a planner workspace.',
     parameters: {
       type: 'object',
       properties: {
@@ -969,9 +1104,21 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       const stat = await fs.stat(real);
       if (!stat.isDirectory()) return `${requested} is not a directory.`;
 
-      const result = await runArgvCommand('find', ['.', '-iname', namePattern], real, SEARCH_TIMEOUT_MS);
-      if (result.timedOut) return `find timed out after ${SEARCH_TIMEOUT_MS / 1000}s. Narrow path or pattern.`;
-      if (result.code !== 0) return `find failed: ${truncate(result.stderr || result.stdout, 500)}`;
+      // PA-121: fd when installed (as pi uses) — .gitignore-aware, so a
+      // search is not buried under node_modules — else find, as before.
+      // Both match the glob against the file name, case-insensitively.
+      const fd = await findExecutableOnPath(['fd', 'fdfind']);
+      const result = fd
+        ? await runArgvCommand(
+            fd,
+            ['--glob', '--ignore-case', '--hidden', '--exclude', '.git', '--color=never', '--', namePattern, '.'],
+            real,
+            SEARCH_TIMEOUT_MS,
+          )
+        : await runArgvCommand('find', ['.', '-iname', namePattern], real, SEARCH_TIMEOUT_MS);
+      const name = fd ? 'fd' : 'find';
+      if (result.timedOut) return `${name} timed out after ${SEARCH_TIMEOUT_MS / 1000}s. Narrow path or pattern.`;
+      if (result.code !== 0) return `${name} failed: ${truncate(result.stderr || result.stdout, 500)}`;
       const lines = result.stdout
         .split('\n')
         .filter((l) => l.length > 0)
@@ -983,6 +1130,43 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       const suffix =
         lines.length > shown.length ? `\n…(${lines.length - shown.length} more — narrow your search)` : '';
       return truncate(shown.join('\n'), MAX_TOOL_RESULT_CHARS) + suffix;
+    },
+  },
+  {
+    name: 'list_dir',
+    description:
+      'List the entries of a directory, sorted, with a trailing / on subdirectories. The directory must be ' +
+      'inside an added project workspace or a planner workspace.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        limit: { type: 'integer', description: `Maximum entries to return (default ${DEFAULT_LIST_DIR_ENTRIES}).` },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    async execute(deps, args) {
+      const requested = String(args.path ?? '');
+      let real: string;
+      try {
+        real = await resolveExistingPathWithin(deps, requested);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+      const stat = await fs.stat(real);
+      if (!stat.isDirectory()) return { content: `${requested} is not a directory.`, isError: true };
+      const entries = await fs.readdir(real, { withFileTypes: true });
+      if (entries.length === 0) return '(empty directory)';
+      const names = entries
+        .map((e) => (e.isDirectory() ? `${e.name}/` : e.isSymbolicLink() ? `${e.name}@` : e.name))
+        .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+      const rawLimit = typeof args.limit === 'number' ? Math.round(args.limit) : DEFAULT_LIST_DIR_ENTRIES;
+      const limit = Math.min(MAX_LIST_DIR_ENTRIES, Math.max(1, rawLimit));
+      const shown = names.slice(0, limit);
+      const more = names.length > shown.length ? `\n[${names.length - shown.length} more entries. Use limit to see more.]` : '';
+      return shown.join('\n') + more;
     },
   },
   {
@@ -1560,7 +1744,10 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       const requested = String(args.path ?? '');
       const content = String(args.content ?? '');
       if (content.length > MAX_FILE_WRITE_CHARS) {
-        return `Refusing: ${content.length} characters is over this tool's ${MAX_FILE_WRITE_CHARS}-character limit.`;
+        return {
+          content: `Refusing: ${content.length} characters is over this tool's ${MAX_FILE_WRITE_CHARS}-character limit. Use edit_file to change part of a file.`,
+          isError: true,
+        };
       }
       const absolute = path.resolve(requested);
       const parent = path.dirname(absolute);
@@ -1568,20 +1755,83 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       try {
         realParent = await fs.realpath(parent);
       } catch {
-        return `${requested}'s parent directory does not exist. Create it first with mkdir.`;
+        return { content: `${requested}'s parent directory does not exist. Create it first with mkdir.`, isError: true };
       }
       if (!isWithinTrustedRoot(deps, realParent)) {
-        return `${requested} is outside every project workspace and every planner workspace.`;
+        return { content: `${requested} is outside every project workspace and every planner workspace.`, isError: true };
       }
       const target = path.join(realParent, path.basename(absolute));
       try {
         const existing = await fs.stat(target).catch(() => null);
-        if (existing?.isDirectory()) return `${requested} is a directory, not a file.`;
+        if (existing?.isDirectory()) return { content: `${requested} is a directory, not a file.`, isError: true };
         await fs.writeFile(target, content, 'utf8');
         return `Wrote ${content.length} characters to ${requested}.`;
       } catch (err) {
-        return `Could not write ${requested}: ${(err as Error).message}`;
+        return { content: `Could not write ${requested}: ${(err as Error).message}`, isError: true };
       }
+    },
+  },
+  {
+    name: 'edit_file',
+    description:
+      'Edit a text file by replacing exact text — prefer this to write_file for changing part of an existing ' +
+      'file. Each edit replaces one oldText with its newText. Every oldText must appear exactly once in the ' +
+      'file as it is now (include enough surrounding lines to make it unique), edits must not overlap, and ' +
+      'all of them are matched against the file before any is applied. Read the file first and copy oldText ' +
+      'from it. The path must be inside an added project workspace or a planner workspace.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        edits: {
+          type: 'array',
+          description: 'One or more replacements to make in the file.',
+          items: {
+            type: 'object',
+            properties: {
+              oldText: { type: 'string', description: 'Text to find; must occur exactly once.' },
+              newText: { type: 'string', description: 'Text to put in its place.' },
+            },
+            required: ['oldText', 'newText'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['path', 'edits'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    prepareArguments(args) {
+      // `edits` as a JSON string, as one object, or `oldText`/`newText` at
+      // the top level — all seen from real models (pi's edit-tool shims).
+      const edits = normalizeEditsArgument(args);
+      return edits ? { path: args.path, edits } : args;
+    },
+    async execute(deps, args) {
+      const requested = String(args.path ?? '');
+      const edits = normalizeEditsArgument(args);
+      if (!edits) return { content: 'No edits provided: pass edits as a list of {oldText, newText}.', isError: true };
+      let real: string;
+      try {
+        real = await resolveExistingPathWithin(deps, requested);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+      const stat = await fs.stat(real);
+      if (!stat.isFile()) return { content: `${requested} is not a file.`, isError: true };
+      if (stat.size > MAX_READ_FILE_TOTAL_BYTES) {
+        return { content: `${requested} is too large to edit with this tool (${stat.size} bytes).`, isError: true };
+      }
+      const buffer = await fs.readFile(real);
+      if (looksBinary(buffer)) return { content: `${requested} looks like a binary file.`, isError: true };
+      const outcome = applyEdits(buffer.toString('utf8'), edits, requested);
+      if (!outcome.ok) return { content: outcome.message, isError: true };
+      try {
+        await fs.writeFile(real, outcome.content, 'utf8');
+      } catch (err) {
+        return { content: `Could not write ${requested}: ${(err as Error).message}`, isError: true };
+      }
+      return `Replaced ${outcome.replaced} block${outcome.replaced === 1 ? '' : 's'} in ${requested} (first change at line ${outcome.firstChangedLine}).`;
     },
   },
   {
@@ -2452,29 +2702,70 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
 
 /**
  * PA-95: Common execution handler for `bash` and `exec_command`.
+ *
+ * PA-121: returns a `PlannerToolResult` so a failed command is an error the
+ * model is told about (`isError`), not just text that happens to contain an
+ * exit code; and passes the turn's abort signal down so interrupting a turn
+ * stops the command it is running.
  */
 async function executeShellCommand(
   deps: PlannerToolDeps,
   args: Record<string, unknown>,
-): Promise<string> {
+): Promise<PlannerToolResult> {
   const command = String(args.command ?? '').trim();
-  if (!command) return 'No command provided.';
+  if (!command) return { content: 'No command provided.', isError: true };
 
   let cwd: string;
   try {
     cwd = await resolveExecutionCwd(deps, args.cwd !== undefined ? String(args.cwd) : undefined);
   } catch (err) {
-    return (err as Error).message;
+    return { content: (err as Error).message, isError: true };
   }
-  const stat = await fs.stat(cwd);
-  if (!stat.isDirectory()) return `${cwd} is not a directory.`;
+  const stat = await fs.stat(cwd).catch(() => null);
+  if (!stat?.isDirectory()) return { content: `${cwd} is not a directory.`, isError: true };
 
   const configuredTimeoutSec = deps.commandTimeoutSeconds ?? DEFAULT_COMMAND_TIMEOUT_SECONDS;
   let timeoutSec = configuredTimeoutSec;
   if (typeof args.timeout === 'number' && Number.isFinite(args.timeout) && args.timeout > 0) {
     timeoutSec = Math.min(Math.floor(args.timeout), configuredTimeoutSec);
   }
-  return runShellCommand(deps.shell, command, cwd, timeoutSec * 1000);
+  const run = await runShellCommand(deps.shell, command, cwd, timeoutSec * 1000, deps.signal);
+  const output = await formatCommandOutput(run.output, deps.workspacePath ?? null, run.droppedBytes);
+  const status = run.aborted
+    ? 'interrupted, and the command was killed'
+    : run.timedOut
+      ? `timed out after ${timeoutSec}s and was killed`
+      : run.spawnError
+        ? `could not run: ${run.spawnError}`
+        : run.signal
+          ? `killed by ${run.signal}`
+          : `exit code ${run.code}`;
+  const failed = run.aborted || run.timedOut || run.spawnError !== null || run.signal !== null || run.code !== 0;
+  return {
+    content: `$ ${command}\n(${status})\n${output}`,
+    isError: failed,
+  };
+}
+
+/** How much output is held in memory at all. Past the shown tail, the full
+    output goes to a file — but a command printing gigabytes must not hold
+    them in this process, so even the file is capped. */
+const MAX_CAPTURED_COMMAND_BYTES = 20 * 1024 * 1024;
+/** How long to keep reading after the shell exits, waiting for its pipes to
+    go quiet — pi's `EXIT_STDIO_GRACE_MS`. */
+const EXIT_STDIO_GRACE_MS = 100;
+/** Full-output files older than this are removed the next time one is written. */
+const COMMAND_OUTPUT_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+interface ShellRun {
+  output: Buffer;
+  /** Output dropped from the front once `MAX_CAPTURED_COMMAND_BYTES` was passed. */
+  droppedBytes: number;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
+  aborted: boolean;
+  spawnError: string | null;
 }
 
 /**
@@ -2482,56 +2773,207 @@ async function executeShellCommand(
  * every other child process this server spawns already gets
  * (`sessions/env.ts` — `POCKETAGENT_*` must never reach a spawned process,
  * including one started by the planner). No PTY: this is one-shot output
- * capture, not an interactive terminal.
+ * capture, not an interactive terminal. `-l` (a login shell) is deliberate:
+ * it is what gives the command the same `PATH` a human's shell has — see
+ * CLAUDE.md on `/etc/profile.d/10-pocketagent-path.sh`.
+ *
+ * PA-121 fixed four things here, each a hang or a lie:
+ * - **stdin is `/dev/null`.** It used to be a pipe nobody wrote to or
+ *   closed, so anything that read stdin (`cat` with no file, a `read`, a
+ *   tool prompting y/n) sat there until the timeout.
+ * - **The command gets its own process group, and the whole group is
+ *   killed** on timeout or interrupt. Killing only the shell left every
+ *   grandchild running — `npm test`'s workers, a server started for a test.
+ * - **It settles on `exit`, plus a short quiet period on stdio**, not on
+ *   `close`. `close` waits for every holder of the pipes to exit, so a
+ *   command that backgrounded something (`server &`) hung the tool call —
+ *   and the turn — until the timeout, *after* the command itself had
+ *   finished.
+ * - **Output is kept whole up to a cap** and cut by `formatCommandOutput`,
+ *   which keeps the tail.
  */
 function runShellCommand(
   shell: string,
   command: string,
   cwd: string,
   timeoutMs: number = DEFAULT_EXEC_TIMEOUT_MS,
-): Promise<string> {
+  signal?: AbortSignal,
+): Promise<ShellRun> {
   return new Promise((resolve) => {
-    let child;
+    const chunks: Buffer[] = [];
+    let captured = 0;
+    let droppedBytes = 0;
+    let settled = false;
+    let timedOut = false;
+    let aborted = false;
+    let exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(shell, ['-lc', command], { cwd, env: buildChildEnv({ cwd }) });
+      child = spawn(shell, ['-lc', command], {
+        cwd,
+        env: buildChildEnv({ cwd }),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
+      });
     } catch (err) {
-      resolve(`Could not start the shell: ${(err as Error).message}`);
+      resolve({
+        output: Buffer.alloc(0),
+        droppedBytes: 0,
+        code: null,
+        signal: null,
+        timedOut: false,
+        aborted: false,
+        spawnError: (err as Error).message,
+      });
       return;
     }
 
-    let output = '';
-    let truncated = false;
-    const onChunk = (chunk: Buffer): void => {
-      if (output.length >= MAX_TOOL_RESULT_CHARS) {
-        truncated = true;
-        return;
+    const killGroup = (): void => {
+      if (child.pid === undefined) return;
+      try {
+        // Negative pid: the whole process group `detached` gave the shell.
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* already gone */
+        }
       }
-      output += chunk.toString('utf8');
+    };
+
+    const finish = (spawnError: string | null = null): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
+      signal?.removeEventListener('abort', onAbort);
+      child.stdout?.removeAllListeners('data');
+      child.stderr?.removeAllListeners('data');
+      // Anything still holding our pipes is a background process the command
+      // left behind; stop listening rather than wait for it.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      resolve({
+        output: Buffer.concat(chunks),
+        droppedBytes,
+        code: exitInfo?.code ?? null,
+        signal: exitInfo?.signal ?? null,
+        timedOut,
+        aborted,
+        spawnError,
+      });
+    };
+
+    const armGrace = (): void => {
+      if (!exitInfo) return;
+      if (graceTimer) clearTimeout(graceTimer);
+      graceTimer = setTimeout(() => finish(), EXIT_STDIO_GRACE_MS);
+    };
+
+    const onChunk = (chunk: Buffer): void => {
+      // A rolling tail: past the cap the oldest output goes, never the end.
+      chunks.push(chunk);
+      captured += chunk.length;
+      while (chunks.length > 1 && captured - chunks[0]!.length >= MAX_CAPTURED_COMMAND_BYTES) {
+        const dropped = chunks.shift()!;
+        captured -= dropped.length;
+        droppedBytes += dropped.length;
+      }
+      armGrace();
     };
     child.stdout?.on('data', onChunk);
     child.stderr?.on('data', onChunk);
 
-    let timedOut = false;
-    const timer = setTimeout(() => {
+    const onAbort = (): void => {
+      aborted = true;
+      killGroup();
+    };
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener('abort', onAbort, { once: true });
+
+    timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
+      killGroup();
     }, timeoutMs);
 
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      resolve(`Could not run command: ${err.message}`);
+    child.on('error', (err) => finish(err.message));
+    child.on('exit', (code, sig) => {
+      exitInfo = { code, signal: sig };
+      if (timer) clearTimeout(timer);
+      armGrace();
     });
-    child.on('close', (code, signal) => {
-      clearTimeout(timer);
-      const status = timedOut
-        ? `timed out after ${timeoutMs / 1000}s and was killed`
-        : signal
-          ? `killed by ${signal}`
-          : `exit code ${code}`;
-      const body = truncate(output, MAX_TOOL_RESULT_CHARS) + (truncated ? '\n…(output truncated)' : '');
-      resolve(`$ ${command}\n(${status})\n${body}`);
-    });
+    child.on('close', () => finish());
   });
+}
+
+/**
+ * PA-121: a command's captured output as the model sees it — the tail, with
+ * a note of what was left out and, when anything was, where the full output
+ * was saved. The file is written under the chat's own planner workspace
+ * (`.tool-output/`, mode 0600), which `read_file` and `grep_files` can
+ * already reach — so "look at line 5 000 of that build log" is one ordinary
+ * tool call away instead of re-running the command.
+ */
+export async function formatCommandOutput(
+  output: Buffer,
+  workspacePath: string | null,
+  droppedBytes = 0,
+): Promise<string> {
+  const text = output.toString('utf8');
+  if (text.length === 0) return droppedBytes > 0 ? '(no output kept)' : '(no output)';
+  const lines = text.split('\n');
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  const totalLines = lines.length;
+  if (droppedBytes === 0 && totalLines <= MAX_COMMAND_OUTPUT_LINES && output.length <= MAX_COMMAND_OUTPUT_BYTES) {
+    return text;
+  }
+
+  // Walk back from the end until either limit is reached.
+  const kept: string[] = [];
+  let bytes = 0;
+  for (let i = lines.length - 1; i >= 0 && kept.length < MAX_COMMAND_OUTPUT_LINES; i--) {
+    const lineBytes = Buffer.byteLength(lines[i]!, 'utf8') + 1;
+    if (bytes + lineBytes > MAX_COMMAND_OUTPUT_BYTES) {
+      if (kept.length === 0) {
+        // One enormous last line: keep its end.
+        const tail = Buffer.from(lines[i]!, 'utf8').subarray(-MAX_COMMAND_OUTPUT_BYTES).toString('utf8');
+        kept.unshift(tail);
+      }
+      break;
+    }
+    kept.unshift(lines[i]!);
+    bytes += lineBytes;
+  }
+  const firstShown = totalLines - kept.length + 1;
+  const savedTo = await saveFullOutput(output, workspacePath);
+  const where = savedTo ? ` Full output: ${savedTo}` : '';
+  const lost =
+    droppedBytes > 0 ? ` The first ${droppedBytes} bytes of output were over the capture limit and were not kept.` : '';
+  return `[Showing lines ${firstShown}-${totalLines} of ${totalLines}.${where}${lost}]\n${kept.join('\n')}`;
+}
+
+async function saveFullOutput(output: Buffer, workspacePath: string | null): Promise<string | null> {
+  if (!workspacePath) return null;
+  const dir = path.join(workspacePath, '.tool-output');
+  try {
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    // Best-effort cleanup of old logs, so the directory does not grow forever.
+    const now = Date.now();
+    for (const name of await fs.readdir(dir)) {
+      const file = path.join(dir, name);
+      const st = await fs.stat(file).catch(() => null);
+      if (st && now - st.mtimeMs > COMMAND_OUTPUT_RETENTION_MS) await fs.rm(file, { force: true }).catch(() => undefined);
+    }
+    const file = path.join(dir, `bash-${new Date().toISOString().replace(/[:.]/g, '-')}-${Math.random().toString(16).slice(2, 10)}.log`);
+    await fs.writeFile(file, output, { mode: 0o600, flag: 'wx' });
+    return file;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -2585,6 +3027,62 @@ function runArgvCommand(
     });
   });
 }
+
+/**
+ * PA-121: the first of `names` found on this process's `PATH`, cached — so
+ * `grep_files`/`find_files` can use ripgrep/fd where installed and fall back
+ * to grep/find where not, without spawning a probe per call. A tool
+ * installed after boot is picked up after a restart.
+ */
+const executableCache = new Map<string, string | null>();
+async function findExecutableOnPath(names: readonly string[]): Promise<string | null> {
+  const key = names.join('|');
+  if (executableCache.has(key)) return executableCache.get(key)!;
+  let found: string | null = null;
+  outer: for (const dir of (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)) {
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      try {
+        await fs.access(candidate, fsConstants.X_OK);
+        found = candidate;
+        break outer;
+      } catch {
+        /* not here */
+      }
+    }
+  }
+  executableCache.set(key, found);
+  return found;
+}
+
+/**
+ * PA-121: tools whose calls may run concurrently within one batch — pure
+ * reads with no per-turn state. pi runs every tool call in a batch in
+ * parallel by default; this is the conservative subset of that. Left out on
+ * purpose, although they are `readOnly`: `check_back_in` (it ends the turn
+ * and refuses every call after it, so order is its whole meaning),
+ * `get_subagent_status` and `read_session_output` (their repeat-poll
+ * short-circuit keeps per-turn state), and `call_mcp_tool` (whether a call
+ * mutates depends on the MCP tool it names).
+ */
+export const PARALLEL_SAFE_TOOLS: ReadonlySet<string> = new Set([
+  'read_file',
+  'list_dir',
+  'grep_files',
+  'find_files',
+  'get_current_time',
+  'list_workspaces',
+  'list_sessions',
+  'list_subagents',
+  'list_skills',
+  'use_skill',
+  'list_mcp_tools',
+  'list_telegram_links',
+  'memory_search',
+  'read_settings',
+  'web_search',
+  'url_fetch',
+]);
 
 export function findPlannerTool(name: string): PlannerToolDefinition | undefined {
   return PLANNER_TOOLS.find((t) => t.name === name);

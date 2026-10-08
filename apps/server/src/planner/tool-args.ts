@@ -53,8 +53,12 @@ export function prepareToolArguments(
   toolName: string,
   schema: JsonSchema | undefined,
   rawArguments: string,
+  /** The tool's own `prepareArguments` shim, run after parsing and before
+      validation. */
+  prepare?: (args: Record<string, unknown>) => Record<string, unknown>,
 ): PreparedToolArguments {
-  const parsed = parseToolArgumentJson(rawArguments);
+  const parsedJson = parseToolArgumentJson(rawArguments);
+  const parsed = parsedJson.ok && prepare ? { ok: true as const, value: prepare(parsedJson.value) } : parsedJson;
   if (!parsed.ok) {
     return {
       ok: false,

@@ -896,8 +896,8 @@ message and final reply and discarded the tool trace; the fix (still tracked und
 followed a review round asking for exactly that visibility.
 
 **The tool catalog** (`planner/tools.ts`) splits into read-only (`list_workspaces`,
-`list_sessions`, `read_session_output`, `read_file` — exempt from approval entirely) and
-mutating (`send_instruction`, `write_file`, `mkdir`, `rmdir`, `delete_worktree`,
+`list_sessions`, `read_session_output`, `read_file`, `list_dir` — exempt from approval entirely) and
+mutating (`send_instruction`, `write_file`, `edit_file`, `mkdir`, `rmdir`, `delete_worktree`,
 `exec_command` — gated, see the invariants list). Every tool that touches a path resolves it
 through the same realpath-then-containment check `workspaces/index.ts` already established,
 extended to accept either a project workspace root or a planner workspace root.
@@ -1005,6 +1005,94 @@ the real `ApprovalSheet` — driven by the same `TranscriptState.pending` the re
 just with its own four choices (once / remember for this workspace / remember globally / deny)
 instead of `ApprovalSheet`'s two, since the shared `PermissionDecision` type has no
 workspace/global concept of its own.
+
+### The Pocket Agent loop: context budget, compaction, tool hygiene (PA-121)
+
+The loop was compared against pi's (`earendil-works/pi`), and the gaps closed here were all
+silent failures: a long chat overflowed the model's window and then failed every turn, a
+malformed tool call ran with `{}`, a dead stream held the turn forever, a backgrounded process
+hung `bash` past its timeout. Steering while busy, prompt caching, cost tracking and image
+budgeting were deliberately left for PA-122.
+
+**Context is a token budget, not 20 turns.** Each `planner_models` row may set
+`context_window`/`max_output_tokens`; unset falls back to `KNOWN_MODEL_WINDOWS`
+(`planner/context-budget.ts`, matched on the id without its `provider/` prefix) and then to
+128k / 16k. A request is estimated at chars÷4 plus a flat 1 200 tokens per image (a base64
+data URL is not billed by its length), and `TokenCalibration` scales that per chat by the
+provider's own `prompt_tokens` for the previous request — a ratio, clamped to [0.5, 4], so it
+survives compaction and restarts degrade it to 1 rather than to a wrong figure. `max_tokens` is
+sent **only** for a row that sets an output limit, because several OpenAI-compatible servers
+reject the field.
+
+**Compaction appends; it never rewrites.** Past `contextWindow − compactionReserveTokens`
+(default 16 384), `compactChat` summarizes the older part with the chat's own model (the
+reporter's choice: no separate compaction model) into pi's structured format, and appends a
+`context_compaction` event. `projectContext` (`planner/compaction.ts`) is the single rule for
+what a turn sends: the latest summary, then the events from its `firstKeptEventId` on. So the UI
+still replays everything, and a bad summary costs a worse next turn, never lost history. Three
+rules carry it. A cut never separates a `tool_use` from its result (providers reject an orphan
+`tool` message), so it lands only on a prompt, a text, or the first call of a batch. A later
+compaction is handed the previous summary to *update*, so what was learned before the first one
+survives the second. And a summary that stopped at `length`, called a tool or came back empty is
+rejected, with nothing recorded — a partial summary would silently replace history with less
+than it claims. `keepRecentTokens` is capped at half the threshold so a small model is actually
+shrunk. An overflow error from the provider compacts keeping as little as `/compact` does — the
+estimate was wrong by definition — and retries that round trip **once**. `/compact [focus]` is
+a web slash command, a Telegram one, and `POST /api/planner/chats/:id/compact`. With compaction
+switched off the PA-29 20-turn window and its memory fold still apply; with it on, the summary
+(capped) is what is saved to memory instead. `context_compaction` is in the `AgentEvent` union
+but is planner-only — no structured session emits it, so it never reaches a WebSocket frame and
+needed no `PROTOCOL_VERSION` bump.
+
+**One system message, and it now always exists.** `buildSystemMessage` is
+`basePlannerSystemPrompt` (where the agent runs, its workspace directory, that tool output is
+data, a denied call is not retried unchanged) then the persona sections then the ranked
+memories. It used to be up to two system messages, and none at all for an unconfigured agent.
+
+**A tool call is validated before the gate, and refused before a human is asked.**
+`prepareToolArguments` (`planner/tool-args.ts`) parses the arguments and checks them against
+the tool's own `parameters`, coercing the usual model mistakes (`"5"`, `"true"`, an array sent
+as a JSON string) and dropping unknown keys, and otherwise answers with the field and what was
+received. Invalid JSON is kept in `tool_use.input` under `_invalidArguments` so the next round
+trip shows the model what it sent. A tool may declare `prepareArguments` for shapes known to be
+unambiguous but wrong (`edit_file`'s). A reply that ended `finish_reason: length` with tool calls
+in it runs none of them — streamed JSON cut short can still parse. Narration written before a
+tool call is persisted as `text` with `interim: true` and replayed in the same assistant message;
+Telegram, MCP's `lastTurnText` and subagent summaries skip interim text, so they still relay only
+the answer. An error result reaches the model as `Error: …`, a `tool_use` with no recorded result
+(an approval lost to a restart) says so instead of replaying `''`, and `capToolOutput` keeps both
+ends of anything over 50 000 characters.
+
+**The LLM client retries, and gives up on a silent stream.** `PlannerLlmClient.streamComplete`
+retries 408/409/429/5xx, network errors and an empty or idle stream up to 3 times (2 s doubling,
+jittered, `retry-after(-ms)` honoured up to 60 s), but **only an attempt that streamed nothing**
+— a retry after a delta would show the user the same text twice. Quota errors and overflows are
+never retried (`planner/llm-errors.ts` classifies them from the body, since providers report
+either with a 429 or a 400). Each retry is an `info` notice, which Telegram ignores and
+`eventsToLlmMessages` drops. `llmIdleTimeoutSeconds` (default 300, 0 = off) bounds a wedged
+connection — nobody's decision, not a timeout on an approval. An LLM failure is now an `error`
+notice rather than assistant text, so it is no longer replayed to the model as something it said.
+The Settings "Test" button does not retry.
+
+**`bash` settles on exit and kills its process group.** stdin is `/dev/null` (a command
+reading it used to wait out the timeout); the shell is `detached` so a timeout or an interrupt —
+the turn's `AbortSignal` now reaches tools as `PlannerToolDeps.signal` — kills the whole group,
+not just the shell; and the call settles on `exit` plus 100 ms of quiet rather than on `close`,
+which waited for any background process still holding the pipes. A deliberately backgrounded
+process is left running. Output keeps the *tail* (2 000 lines / 50 KB) with the full output saved
+mode 0600 under the chat's workspace `.tool-output/` (pruned after a day), which `read_file` can
+open; a non-zero exit is `isError`. `-l` stays, for the PATH reasons above.
+
+**File tools.** `read_file` pages (`offset`/`limit`, 2 000 lines / 50 KB a page, with the offset
+to continue from) and refuses binary files. `edit_file` (mutating, gated) replaces `oldText`s that
+must each occur exactly once, all matched against the original, overlaps refused; a tolerant
+match (trailing whitespace, typographic quotes and dashes) rewrites only the lines it touches and
+only trusts a mid-line position where normalization kept the line's length. CRLF and a BOM
+survive. The web renders `edit_file`/`write_file` input as a diff, on the card and in the approval
+sheet. `list_dir` is new and read-only. `grep_files`/`find_files` use ripgrep/fd when they are on
+`PATH` (`.gitignore`-aware) and grep/find otherwise. A batch of two or more calls that are all in
+`PARALLEL_SAFE_TOOLS` runs concurrently with results persisted in the model's order; any batch with
+anything else in it is sequential exactly as before, so the approval pause is untouched.
 
 ### Telegram channel (PA-53)
 

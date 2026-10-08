@@ -118,6 +118,25 @@ export function diffFromToolInput(
     // A Write has no "before" available client-side; render it as all-additions.
     if (after !== null) return { before: '', after };
   }
+  // PA-121: the Pocket Agent's own file tools. `edit_file` carries a list of
+  // replacements; they are shown as one diff, separated by a marker line,
+  // which is what a human approving the call needs to see.
+  if (name === 'edit_file' && Array.isArray(input.edits)) {
+    const edits = (input.edits as unknown[]).filter(
+      (e): e is { oldText: string; newText: string } =>
+        !!e && typeof (e as { oldText?: unknown }).oldText === 'string' && typeof (e as { newText?: unknown }).newText === 'string',
+    );
+    if (edits.length > 0) {
+      return {
+        before: edits.map((e) => e.oldText).join('\n⋯\n'),
+        after: edits.map((e) => e.newText).join('\n⋯\n'),
+      };
+    }
+  }
+  if (name === 'write_file') {
+    const after = str(input.content);
+    if (after !== null) return { before: '', after };
+  }
   if (name === 'NotebookEdit') {
     const after = str(input.new_source);
     if (after !== null) return { before: str(input.old_source) ?? '', after };

@@ -75,6 +75,7 @@ import {
 import {
   MAX_SUBAGENT_SPAWN_DEPTH,
   MAX_SUBAGENT_SPAWNS_PER_TURN,
+  PARALLEL_SAFE_TOOLS,
   PLANNER_TOOLS,
   findPlannerTool,
   lastMessageSummary,
@@ -2149,6 +2150,41 @@ export class PlannerChatService {
     stats: PlannerTurnStats,
     signal?: AbortSignal,
   ): AsyncGenerator<AgentEvent> {
+    // PA-121: a batch of two or more calls that are all parallel-safe reads
+    // the gate lets straight through runs concurrently — a model that asks
+    // for five files at once should not wait for them one after another.
+    // Results are still persisted in the order the model asked for them.
+    // Anything else (a mutating call, one needing approval, one refused)
+    // keeps the sequential path below unchanged, so the approval pause is
+    // exactly what it was.
+    const remaining = toolCalls.slice(startIndex);
+    if (remaining.length > 1 && !this.checkBackInScheduledThisTurn.has(chat.id) && !signal?.aborted) {
+      const gates = remaining.map((call) => this.gateToolCall(chat, call));
+      if (gates.every((g) => g.kind === 'run' && g.tool.readOnly && PARALLEL_SAFE_TOOLS.has(g.tool.name))) {
+        const results = await Promise.all(
+          remaining.map((call, i) =>
+            this.executeTool((gates[i] as { tool: PlannerToolDefinition }).tool, call.function.arguments, chat, signal),
+          ),
+        );
+        for (let i = 0; i < remaining.length; i++) {
+          yield* this.emit(workspacePath, chat.id, {
+            kind: 'tool_result',
+            id: crypto.randomUUID(),
+            toolUseId: remaining[i]!.id,
+            content: results[i]!.content,
+            truncated: results[i]!.truncated,
+            isError: results[i]!.isError,
+          });
+        }
+        if (signal?.aborted) {
+          yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'interrupted');
+          return;
+        }
+        yield* this.driveLoop(chat, workspacePath, modelId, iteration, stats, signal);
+        return;
+      }
+    }
+
     for (let index = startIndex; index < toolCalls.length; index++) {
       if (signal?.aborted) {
         yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'interrupted');
@@ -2257,7 +2293,7 @@ export class PlannerChatService {
     // — in particular before a human is asked to approve it. Approving a call
     // that cannot run would only waste their answer, and the model can fix
     // its own mistake on the next round trip.
-    const prepared = prepareToolArguments(tool.name, tool.parameters, call.function.arguments);
+    const prepared = prepareToolArguments(tool.name, tool.parameters, call.function.arguments, tool.prepareArguments);
     if (!prepared.ok) return { kind: 'unavailable', message: prepared.message };
     // PA-37: a `call_mcp_tool` invocation's real risk lives in *which*
     // underlying MCP tool it names, never in the wrapper's own static
@@ -2567,7 +2603,7 @@ export class PlannerChatService {
     chat: PlannerChat,
     signal?: AbortSignal,
   ): Promise<{ content: string; isError: boolean; truncated: boolean }> {
-    const prepared = prepareToolArguments(tool.name, tool.parameters, rawArguments);
+    const prepared = prepareToolArguments(tool.name, tool.parameters, rawArguments, tool.prepareArguments);
     if (!prepared.ok) return { content: prepared.message, isError: true, truncated: false };
     const outcome = await this.runTool(tool, prepared.args, chat, signal);
     const capped = capToolOutput(outcome.content);
