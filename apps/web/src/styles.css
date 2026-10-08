@@ -8524,3 +8524,5 @@ button.chat-rate-limit-badge {
 .planner-model-prices { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-top: 4px; }
 .planner-model-prices .planner-model-limit input { width: 72px; }
 .planner-model-limit select { padding: 2px 4px; font-size: 12px; }
+/* PA-122: the attached-image caveat beside its thumbnail. */
+.attach-note { max-width: 240px; font-size: 12px; line-height: 1.35; color: var(--text-dim); }

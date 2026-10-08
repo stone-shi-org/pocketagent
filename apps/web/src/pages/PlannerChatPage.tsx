@@ -12,6 +12,7 @@ import type {
   SessionInfo,
   SlashCommandInfo,
 } from '@pocketagent/protocol';
+import { plannerModelSupportsImages } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { Transcript } from '../components/Transcript.js';
@@ -605,6 +606,12 @@ export function PlannerChatPage({
   }, [shouldStream, load]);
 
   const pending = transcript?.pending[0] ?? null;
+  // PA-122: warn before sending an image to a model that cannot read it.
+  const selectedModel = models.find((m) => m.modelId === chat?.lastModelId) ?? null;
+  const imageNote =
+    selectedModel && !plannerModelSupportsImages(selectedModel.modelId, selectedModel.supportsImages)
+      ? `${selectedModel.label} cannot read images — it will see a note instead. Pick a vision model to have it look.`
+      : null;
   const isChatBusy = sending || (chat?.busy ?? false) || (transcript?.busy ?? false);
   // PA-99: PromptBox manages its own busy state (swapping send into stop) — disabled
   // only blocks interaction while an approval decision is pending from the human.
@@ -1465,6 +1472,7 @@ export function PlannerChatPage({
         onSend={handleSend}
         disabled={disabled}
         supportsImageAttachment={true}
+        attachmentNote={imageNote}
         supportsVoiceInput={voiceEnabled}
         onTranscribeVoice={
           voiceEnabled

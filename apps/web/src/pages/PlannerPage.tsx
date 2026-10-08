@@ -907,6 +907,13 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
                   disabled={busy}
                   onSave={(v) => setModelLimit(m.id, { promptCaching: v })}
                 />
+                <TriStateSelect
+                  label="Images"
+                  title="Whether this model can read attached images. Auto = yes, unless it is a known text-only model. When off, each image is replaced by a short note in what the model is sent; the chat keeps the image."
+                  value={m.supportsImages ?? null}
+                  disabled={busy}
+                  onSave={(v) => setModelLimit(m.id, { supportsImages: v })}
+                />
                 <span
                   className="planner-model-prices"
                   title="USD per million tokens, used to show each turn's cost. Optional — with no input and output price a turn shows no cost. An empty cache price is charged at the input price. A cost the provider reports itself is used instead."

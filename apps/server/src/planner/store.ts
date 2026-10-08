@@ -292,6 +292,8 @@ export interface PlannerModelRow {
   outputPricePerMTok: number | null;
   cacheReadPricePerMTok: number | null;
   cacheWritePricePerMTok: number | null;
+  /** PA-122: `null` = auto, see `plannerModelSupportsImages`. */
+  supportsImages: boolean | null;
 }
 
 /** PA-122: the price columns, camelCase → column name. */
@@ -305,7 +307,7 @@ type PriceField = keyof typeof PRICE_COLUMNS;
 
 /** The columns a caller may leave out when adding a row — each defaults to
     "not set". */
-type OptionalModelColumns = 'contextWindow' | 'maxOutputTokens' | 'promptCaching' | PriceField;
+type OptionalModelColumns = 'contextWindow' | 'maxOutputTokens' | 'promptCaching' | 'supportsImages' | PriceField;
 
 function nullableBool(value: number | null | undefined): boolean | null {
   return value === null || value === undefined ? null : value !== 0;
@@ -330,6 +332,7 @@ interface PlannerModelDbRow {
   price_output?: number | null;
   price_cache_read?: number | null;
   price_cache_write?: number | null;
+  supports_images?: number | null;
 }
 
 function modelFromDbRow(row: PlannerModelDbRow): PlannerModelRow {
@@ -348,6 +351,7 @@ function modelFromDbRow(row: PlannerModelDbRow): PlannerModelRow {
     outputPricePerMTok: row.price_output ?? null,
     cacheReadPricePerMTok: row.price_cache_read ?? null,
     cacheWritePricePerMTok: row.price_cache_write ?? null,
+    supportsImages: nullableBool(row.supports_images),
   };
 }
 
@@ -364,9 +368,10 @@ export function insertPlannerModel(
   db.prepare(
     `INSERT INTO planner_models
        (id, model_id, label, sort_order, created_at, supports_effort, default_effort, context_window, max_output_tokens,
-        prompt_caching, price_input, price_output, price_cache_read, price_cache_write)
+        prompt_caching, price_input, price_output, price_cache_read, price_cache_write, supports_images)
      VALUES (@id, @modelId, @label, @sortOrder, @createdAt, @supportsEffort, @defaultEffort, @contextWindow, @maxOutputTokens,
-        @promptCaching, @inputPricePerMTok, @outputPricePerMTok, @cacheReadPricePerMTok, @cacheWritePricePerMTok)`,
+        @promptCaching, @inputPricePerMTok, @outputPricePerMTok, @cacheReadPricePerMTok, @cacheWritePricePerMTok,
+        @supportsImages)`,
   ).run({
     id: row.id,
     modelId: row.modelId,
@@ -382,6 +387,7 @@ export function insertPlannerModel(
     outputPricePerMTok: row.outputPricePerMTok ?? null,
     cacheReadPricePerMTok: row.cacheReadPricePerMTok ?? null,
     cacheWritePricePerMTok: row.cacheWritePricePerMTok ?? null,
+    supportsImages: boolParam(row.supportsImages),
   });
 }
 
@@ -405,6 +411,7 @@ export function updatePlannerModel(
     contextWindow?: number | null;
     maxOutputTokens?: number | null;
     promptCaching?: boolean | null;
+    supportsImages?: boolean | null;
   } & Partial<Record<PriceField, number | null>>,
 ): boolean {
   const assignments: string[] = [];
@@ -432,6 +439,10 @@ export function updatePlannerModel(
   if (patch.promptCaching !== undefined) {
     assignments.push('prompt_caching = @promptCaching');
     params.promptCaching = boolParam(patch.promptCaching);
+  }
+  if (patch.supportsImages !== undefined) {
+    assignments.push('supports_images = @supportsImages');
+    params.supportsImages = boolParam(patch.supportsImages);
   }
   for (const field of Object.keys(PRICE_COLUMNS) as PriceField[]) {
     if (patch[field] === undefined) continue;

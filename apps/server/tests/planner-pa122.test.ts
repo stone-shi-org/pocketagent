@@ -3,6 +3,31 @@ import { authHeaders, createTestApp, type TestApp } from './helpers.js';
 import { parseUsage } from '../src/planner/llm-client.js';
 import { applyCacheControl, resolvePromptCaching } from '../src/planner/prompt-cache.js';
 import { roundTripCostUsd } from '../src/planner/cost.js';
+import { budgetContextImages, imageDimensions } from '../src/planner/image-budget.js';
+import { plannerModelSupportsImages } from '@pocketagent/protocol';
+
+function png(width: number, height: number): string {
+  const b = Buffer.alloc(33);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
+  b.writeUInt32BE(13, 8);
+  b.write('IHDR', 12, 'latin1');
+  b.writeUInt32BE(width, 16);
+  b.writeUInt32BE(height, 20);
+  return b.toString('base64');
+}
+
+function jpeg(width: number, height: number): string {
+  const app0 = Buffer.alloc(18);
+  app0.writeUInt16BE(0xffe0, 0);
+  app0.writeUInt16BE(16, 2);
+  const sof = Buffer.alloc(19);
+  sof.writeUInt16BE(0xffc2, 0);
+  sof.writeUInt16BE(17, 2);
+  sof[4] = 8;
+  sof.writeUInt16BE(height, 5);
+  sof.writeUInt16BE(width, 7);
+  return Buffer.concat([Buffer.from([0xff, 0xd8]), app0, Buffer.from([0xff, 0xff]), sof]).toString('base64');
+}
 
 /**
  * PA-122: the Pocket Agent loop follow-ups — prompt caching, cost, image
@@ -184,6 +209,67 @@ describe('PA-122 cost (pure)', () => {
   it('believes a cost the provider reports over the configured prices', () => {
     expect(roundTripCostUsd({ promptTokens: 10, completionTokens: 10, costUsd: 0.5 }, prices)).toBe(0.5);
     expect(roundTripCostUsd({ promptTokens: 10, completionTokens: 10, costUsd: 0.5 }, null)).toBe(0.5);
+  });
+});
+
+describe('PA-122 image budget (pure)', () => {
+  it('reads dimensions from PNG, JPEG, GIF and WebP headers', () => {
+    expect(imageDimensions('image/png', png(1920, 1080))).toEqual({ width: 1920, height: 1080 });
+    expect(imageDimensions('image/jpeg', jpeg(4032, 3024))).toEqual({ width: 4032, height: 3024 });
+    const gif = Buffer.from('GIF89a\x40\x01\xf0\x00', 'latin1');
+    expect(imageDimensions('image/gif', gif.toString('base64'))).toEqual({ width: 320, height: 240 });
+    const webp = Buffer.alloc(30);
+    webp.write('RIFF', 0, 'latin1');
+    webp.write('WEBPVP8X', 8, 'latin1');
+    webp.writeUIntLE(799, 24, 3);
+    webp.writeUIntLE(599, 27, 3);
+    expect(imageDimensions('image/webp', webp.toString('base64'))).toEqual({ width: 800, height: 600 });
+  });
+
+  it('answers null for bytes that are not the image they claim to be', () => {
+    expect(imageDimensions('image/png', jpeg(10, 10))).toBeNull();
+    expect(imageDimensions('image/jpeg', png(10, 10))).toBeNull();
+    expect(imageDimensions('image/jpeg', Buffer.from('not an image').toString('base64'))).toBeNull();
+  });
+
+  const image = (data: string, type = 'image/png') => ({
+    type: 'image_url' as const,
+    image_url: { url: `data:${type};base64,${data}` },
+  });
+
+  it('replaces every image with a note for a model that cannot read them, as plain text', () => {
+    const out = budgetContextImages(
+      [{ role: 'user', content: [image(png(10, 10)), { type: 'text', text: 'what is this?' }] }],
+      { supportsImages: false, modelId: 'deepseek-chat' },
+    );
+    expect(out[0]).toEqual({
+      role: 'user',
+      content: '[An image was attached here, but deepseek-chat cannot read images, so it was left out.]\n\nwhat is this?',
+    });
+  });
+
+  it('sends only the newest images, and leaves out unreadable or oversized ones', () => {
+    const messages = [1, 2, 3, 4, 5, 6].map((n) => ({
+      role: 'user' as const,
+      content: [image(png(100 * n, 100)), { type: 'text' as const, text: `image ${n}` }],
+    }));
+    messages[5]!.content[0] = image(png(9000, 100));
+    messages[4]!.content[0] = image(Buffer.from('garbage').toString('base64'));
+    const out = budgetContextImages(messages, { supportsImages: true, modelId: 'gpt-4o', maxImages: 2 });
+    expect(String(out[5]!.content)).toMatch(/9000×100 it is too large/);
+    expect(String(out[4]!.content)).toMatch(/could not be read/);
+    expect(Array.isArray(out[3]!.content)).toBe(true);
+    expect(Array.isArray(out[2]!.content)).toBe(true);
+    for (const old of [out[0]!, out[1]!]) expect(String(old.content)).toMatch(/left out to save context/);
+  });
+
+  it('decides image support from the row, then a short text-only list, else yes', () => {
+    expect(plannerModelSupportsImages('deepseek-chat', null)).toBe(false);
+    expect(plannerModelSupportsImages('deepseek/deepseek-reasoner', undefined)).toBe(false);
+    expect(plannerModelSupportsImages('deepseek-vl2', null)).toBe(true);
+    expect(plannerModelSupportsImages('some-new-model', null)).toBe(true);
+    expect(plannerModelSupportsImages('deepseek-chat', true)).toBe(true);
+    expect(plannerModelSupportsImages('gpt-4o', false)).toBe(false);
   });
 });
 
@@ -403,5 +489,49 @@ describe('PA-122 Pocket Agent loop', () => {
     expect((await patch(`/api/planner/models/${model!.id}`, { inputPricePerMTok: -1 })).statusCode).toBe(400);
     await patch(`/api/planner/models/${model!.id}`, { inputPricePerMTok: null });
     expect((await list())[0]!.inputPricePerMTok).toBeNull();
+  });
+
+  // ---- Part 3: images --------------------------------------------------------
+
+  const attached = (data: string) => ({ image: { mediaType: 'image/png', data } });
+
+  it('sends a text-only model a note instead of the image, and keeps the image in the chat', async () => {
+    const { fetchImpl, bodies } = scripted([() => reply('I cannot see it')]);
+    const chat = await setup(fetchImpl, { modelId: 'deepseek-chat' });
+    await send(chat.id, 'what is in this?', attached(png(800, 600)));
+
+    const user = bodies[0]!.messages.find((m) => m.role === 'user')!;
+    expect(user.content).toBe(
+      '[An image was attached here, but deepseek-chat cannot read images, so it was left out.]\n\nwhat is in this?',
+    );
+    const history = (
+      await t.app.inject({ method: 'GET', url: `/api/planner/chats/${chat.id}/history`, headers: authHeaders(t.cookie) })
+    ).json().events as Array<{ kind: string; image?: unknown }>;
+    expect(history.find((e) => e.kind === 'user_prompt')!.image).toMatchObject({ mediaType: 'image/png' });
+  });
+
+  it('re-sends only the newest four images of a long chat', async () => {
+    const { fetchImpl, bodies } = scripted([() => reply('ok')]);
+    const chat = await setup(fetchImpl, { modelId: 'gpt-4o' });
+    for (let n = 1; n <= 6; n++) await send(chat.id, `look at ${n}`, attached(png(100 * n, 100)));
+    const last = bodies.at(-1)!;
+    const imageParts = last.messages.flatMap((m) =>
+      Array.isArray(m.content) ? (m.content as Array<{ type: string }>).filter((p) => p.type === 'image_url') : [],
+    );
+    expect(imageParts).toHaveLength(4);
+    const firstUser = last.messages.find((m) => m.role === 'user')!;
+    expect(String(firstUser.content)).toMatch(/left out to save context/);
+  });
+
+  it('accepts, returns and clears supportsImages', async () => {
+    const { fetchImpl } = scripted([() => reply('hi')]);
+    await setup(fetchImpl, { modelId: 'gpt-4o', supportsImages: false });
+    const list = async () =>
+      (await t.app.inject({ method: 'GET', url: '/api/planner/models', headers: authHeaders(t.cookie) })).json()
+        .models as Array<{ id: string; supportsImages: boolean | null }>;
+    const [model] = await list();
+    expect(model!.supportsImages).toBe(false);
+    await patch(`/api/planner/models/${model!.id}`, { supportsImages: null });
+    expect((await list())[0]!.supportsImages).toBeNull();
   });
 });

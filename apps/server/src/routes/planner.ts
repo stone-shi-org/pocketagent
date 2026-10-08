@@ -515,6 +515,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       outputPricePerMTok: parsed.data.outputPricePerMTok ?? null,
       cacheReadPricePerMTok: parsed.data.cacheReadPricePerMTok ?? null,
       cacheWritePricePerMTok: parsed.data.cacheWritePricePerMTok ?? null,
+      supportsImages: parsed.data.supportsImages ?? null,
       sortOrder: nextPlannerModelSortOrder(db),
       createdAt: Date.now(),
     };

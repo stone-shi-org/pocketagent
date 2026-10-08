@@ -58,6 +58,7 @@ import {
   LIST_SKILLS_NAME,
   USE_SKILL_NAME,
   isTerminalStatus,
+  plannerModelSupportsImages,
   type PromptImage,
 } from '@pocketagent/protocol';
 import { treeRootOf } from '../git/worktree-paths.js';
@@ -96,6 +97,7 @@ import type { GeminiFunctionDeclaration } from './gemini-live.js';
 import { prepareToolArguments, toolUseInput } from './tool-args.js';
 import { applyCacheControl, isCacheControlRejection, resolvePromptCaching } from './prompt-cache.js';
 import { roundTripCostUsd, type PlannerModelPrices } from './cost.js';
+import { budgetContextImages } from './image-budget.js';
 import {
   SUMMARIZATION_SYSTEM_PROMPT,
   buildSummaryRequest,
@@ -1975,7 +1977,10 @@ export class PlannerChatService {
     const limits = this.modelLimits(modelId);
     const modelRow = readPlannerModelByModelId(this.opts.db, modelId);
     let events = await this.readEvents(workspacePath, chat.id);
-    let messages = await this.buildTurnContext(chat, workspacePath, settings, events);
+    // PA-122: images are budgeted before anything is estimated, so the
+    // estimate counts only the images that will actually be sent.
+    const imageBudget = { supportsImages: plannerModelSupportsImages(modelId, modelRow?.supportsImages), modelId };
+    let messages = budgetContextImages(await this.buildTurnContext(chat, workspacePath, settings, events), imageBudget);
     let rawEstimate = estimateRequestTokens(messages, toolSpecs);
 
     // PA-121: compact before the request when the context would leave less
@@ -1996,7 +2001,7 @@ export class PlannerChatService {
       }
       if (outcome.compacted) {
         events = await this.readEvents(workspacePath, chat.id);
-        messages = await this.buildTurnContext(chat, workspacePath, settings, events);
+        messages = budgetContextImages(await this.buildTurnContext(chat, workspacePath, settings, events), imageBudget);
         rawEstimate = estimateRequestTokens(messages, toolSpecs);
       }
     }

@@ -1454,6 +1454,12 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE planner_models ADD COLUMN price_cache_read REAL;
   ALTER TABLE planner_models ADD COLUMN price_cache_write REAL;
   `,
+
+  // PA-122: whether a planner model reads images. NULL = auto (yes, unless
+  // the id is a known text-only model — `plannerModelSupportsImages`).
+  `
+  ALTER TABLE planner_models ADD COLUMN supports_images INTEGER;
+  `,
 ];
 
 /**
@@ -1780,6 +1786,9 @@ export function openDatabase(databasePath: string): Db {
   // PA-122, likewise.
   if (plannerModelColumns.size > 0 && !plannerModelColumns.has('prompt_caching')) {
     db.exec('ALTER TABLE planner_models ADD COLUMN prompt_caching INTEGER');
+  }
+  if (plannerModelColumns.size > 0 && !plannerModelColumns.has('supports_images')) {
+    db.exec('ALTER TABLE planner_models ADD COLUMN supports_images INTEGER');
   }
   for (const column of ['price_input', 'price_output', 'price_cache_read', 'price_cache_write']) {
     if (plannerModelColumns.size > 0 && !plannerModelColumns.has(column)) {

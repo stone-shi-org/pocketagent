@@ -83,6 +83,13 @@ interface Props {
    */
   supportsImageAttachment?: boolean;
   /**
+   * PA-122: a line shown under an attached image's preview — the Pocket Agent
+   * page uses it to say the selected model cannot read images, before the
+   * message is sent rather than after. Sending still goes through: the image
+   * is kept in the chat and reaches the model once a vision model is chosen.
+   */
+  attachmentNote?: string | null;
+  /**
    * Shows the push-to-talk mic button (PA-20 Phase 1). Gated on the server
    * having a `liveSttUrl` configured (`RuntimeSettings.liveSttUrl !== ''` —
    * editable from Settings, not an env var) — unlike `supportsImageAttachment`,
@@ -273,6 +280,7 @@ export function PromptBox({
   onSend,
   disabled,
   supportsImageAttachment = false,
+  attachmentNote = null,
   supportsVoiceInput = false,
   onTranscribeVoice,
   supportsLiveListen = false,
@@ -849,6 +857,7 @@ export function PromptBox({
               >
                 <Icon name="close" size={13} />
               </button>
+              {attachmentNote && <span className="attach-note">{attachmentNote}</span>}
             </>
           ) : (
             <span className="attach-error">{attachError ?? voiceError ?? liveListenError}</span>

@@ -216,8 +216,38 @@ export const PlannerModel = z.object({
   outputPricePerMTok: z.number().nonnegative().nullable().optional(),
   cacheReadPricePerMTok: z.number().nonnegative().nullable().optional(),
   cacheWritePricePerMTok: z.number().nonnegative().nullable().optional(),
+  /**
+   * PA-122: whether this model can read an attached image. `null` = auto:
+   * yes, unless the model id is a known text-only one
+   * (`plannerModelSupportsImages`). For a model that cannot, each image is
+   * replaced by a one-line note in what is sent; the transcript keeps it.
+   */
+  supportsImages: z.boolean().nullable().optional(),
 });
 export type PlannerModel = z.infer<typeof PlannerModel>;
+
+/**
+ * PA-122: model families known to reject image input, matched against the id
+ * with any `provider/` prefix removed. Deliberately short: an unknown model is
+ * assumed to see images, because that is what every model was assumed to do
+ * before, and leaving images out by default would silently drop them for
+ * people using them today. In the protocol package because both sides ask —
+ * the server when it builds a request, the composer when it warns before one
+ * is sent.
+ */
+const TEXT_ONLY_MODEL_PATTERNS: readonly RegExp[] = [
+  /^deepseek-(?!vl)/,
+  /^gpt-3\.5/,
+  /^o[13]-mini/,
+  /^qwen[\d.]*-coder/,
+  /^codestral/,
+];
+
+export function plannerModelSupportsImages(modelId: string, setting: boolean | null | undefined): boolean {
+  if (setting === true || setting === false) return setting;
+  const bare = modelId.toLowerCase().replace(/^.*\//, '');
+  return !TEXT_ONLY_MODEL_PATTERNS.some((pattern) => pattern.test(bare));
+}
 
 /** PA-122: bounds for a per-million-token price on the way in. */
 const PRICE_PER_MTOK = z.number().min(0).max(10_000).nullable();
@@ -238,6 +268,7 @@ export const PlannerModelOptionalFields = {
   outputPricePerMTok: PRICE_PER_MTOK.optional(),
   cacheReadPricePerMTok: PRICE_PER_MTOK.optional(),
   cacheWritePricePerMTok: PRICE_PER_MTOK.optional(),
+  supportsImages: z.boolean().nullable().optional(),
 };
 
 export const PlannerModelListResponse = z.object({
