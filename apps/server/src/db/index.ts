@@ -1460,6 +1460,24 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE planner_models ADD COLUMN supports_images INTEGER;
   `,
+
+  // PA-122: messages a person sent to a Pocket Agent chat while it was busy,
+  // waiting to be delivered (after the current tool batch, or as the next
+  // turn). Persisted rather than held in memory because a queued human
+  // prompt must never be lost, a forced restart included — the same rule
+  // `session_prompt_queue` follows. `content` is the final prompt text;
+  // `image_json` a `PromptImage`. Rows are deleted as each is written into
+  // the transcript, and go with their chat.
+  `
+  CREATE TABLE IF NOT EXISTS planner_prompt_queue (
+    id          TEXT PRIMARY KEY,
+    chat_id     TEXT NOT NULL REFERENCES planner_chats (id) ON DELETE CASCADE,
+    content     TEXT NOT NULL,
+    image_json  TEXT,
+    created_at  INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_planner_prompt_queue_chat ON planner_prompt_queue (chat_id, created_at);
+  `,
 ];
 
 /**

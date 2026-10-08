@@ -44,7 +44,59 @@ export interface TelegramBridgeDeps {
  * rather than inventing a second one.
  */
 export class TelegramBridge {
+  /**
+   * PA-122: one relay per paired chat, held until the chat has nothing left
+   * for the person (`PlannerChatService.whenIdle`) rather than until the turn
+   * this bridge started ends. A message sent while the chat is busy is
+   * queued and may be answered by a follow-up turn nobody here is draining;
+   * a relay tied to one turn would never forward that reply. One per chat,
+   * so a turn and a steer landing in it are not forwarded twice.
+   */
+  private readonly relays = new Map<string, () => void>();
+
   constructor(private readonly deps: TelegramBridgeDeps) {}
+
+  private ensureRelay(botId: string, telegramChatId: string, chatId: string, client: TelegramClient): void {
+    const key = `${botId}\u0000${telegramChatId}\u0000${chatId}`;
+    if (this.relays.has(key)) return;
+    const unsubscribe = this.deps.plannerChats.observe(chatId, (event) => {
+      void this.forwardEvent(botId, telegramChatId, event, client);
+    });
+    const stopWaiting = this.deps.plannerChats.whenIdle(chatId, () => this.endRelay(key));
+    this.relays.set(key, () => {
+      unsubscribe();
+      stopWaiting();
+    });
+  }
+
+  private endRelay(key: string): void {
+    const stop = this.relays.get(key);
+    if (!stop) return;
+    this.relays.delete(key);
+    stop();
+  }
+
+  private endRelayIfIdle(botId: string, telegramChatId: string, chatId: string): void {
+    if (!this.deps.plannerChats.isBusy(chatId)) this.endRelay(`${botId}\u0000${telegramChatId}\u0000${chatId}`);
+  }
+
+  /** PA-122: a message for a chat that is mid-turn is queued, not refused. */
+  private async queueForBusyChat(
+    botId: string,
+    telegramChatId: string,
+    chatId: string,
+    text: string,
+    client: TelegramClient,
+  ): Promise<void> {
+    try {
+      this.deps.plannerChats.queuePrompt(chatId, text);
+    } catch (err) {
+      await client.sendMessage(telegramChatId, `Error: ${(err as Error).message}`);
+      return;
+    }
+    this.ensureRelay(botId, telegramChatId, chatId, client);
+    await client.sendMessage(telegramChatId, "Queued — I'll read this after the current step.");
+  }
 
   async handleUpdate(botId: string, update: TelegramUpdate, client: TelegramClient): Promise<void> {
     if (update.callback_query) {
@@ -107,28 +159,36 @@ export class TelegramBridge {
     }
     const chatId = chat.id;
 
+    if (this.deps.plannerChats.isBusy(chatId)) {
+      await this.queueForBusyChat(botId, telegramChatId, chatId, text, client);
+      return;
+    }
+
     // Watch before prompting — see `PlannerChatService.observe`'s own doc
     // comment. A turn that pauses for approval ends its generator while
     // genuinely still running; without this, the reply and the approval
     // prompt below would never be seen.
-    const unsubscribe = this.deps.plannerChats.observe(chatId, (event) => {
-      void this.forwardEvent(botId, telegramChatId, event, client);
-    });
+    this.ensureRelay(botId, telegramChatId, chatId, client);
 
     const turn = this.deps.plannerChats.sendMessage(chatId, text);
     try {
       const first = await turn.next();
       if (first.done === true) {
-        unsubscribe();
+        this.endRelayIfIdle(botId, telegramChatId, chatId);
         return;
       }
     } catch (err) {
-      unsubscribe();
+      // Another turn started between the check above and this one.
+      if (err instanceof PlannerChatError && err.code === 'busy') {
+        await this.queueForBusyChat(botId, telegramChatId, chatId, text, client);
+        return;
+      }
+      this.endRelayIfIdle(botId, telegramChatId, chatId);
       await client.sendMessage(telegramChatId, `Error: ${(err as Error).message}`);
       return;
     }
 
-    void this.drain(turn, unsubscribe, telegramChatId, client);
+    void this.drain(turn, telegramChatId, client);
   }
 
   private async handleCallbackQuery(
@@ -150,33 +210,26 @@ export class TelegramBridge {
 
     await client.answerCallbackQuery(query.id);
     const chatId = link.plannerChatId;
-    const unsubscribe = this.deps.plannerChats.observe(chatId, (event) => {
-      void this.forwardEvent(botId, telegramChatId, event, client);
-    });
+    this.ensureRelay(botId, telegramChatId, chatId, client);
     const turn = this.deps.plannerChats.resolveApproval(chatId, parsed.approvalId, parsed.choice);
     try {
       const first = await turn.next();
       if (first.done === true) {
-        unsubscribe();
+        this.endRelayIfIdle(botId, telegramChatId, chatId);
         return;
       }
     } catch (err) {
-      unsubscribe();
+      this.endRelayIfIdle(botId, telegramChatId, chatId);
       await client.sendMessage(telegramChatId, `Error: ${(err as Error).message}`);
       return;
     }
-    void this.drain(turn, unsubscribe, telegramChatId, client);
+    void this.drain(turn, telegramChatId, client);
   }
 
   /** Pump a turn's generator to completion in the background — somebody has
       to, or it never advances past whatever it just yielded — mirroring
       `RunExecutor.startPocketAgent`'s own background drain exactly. */
-  private async drain(
-    turn: AsyncGenerator<AgentEvent>,
-    unsubscribe: () => void,
-    telegramChatId: string,
-    client: TelegramClient,
-  ): Promise<void> {
+  private async drain(turn: AsyncGenerator<AgentEvent>, telegramChatId: string, client: TelegramClient): Promise<void> {
     try {
       while (true) {
         const next = await turn.next();
@@ -185,9 +238,9 @@ export class TelegramBridge {
     } catch (err) {
       this.deps.logger?.warn({ err }, 'Telegram bridge turn failed while streaming');
       await client.sendMessage(telegramChatId, `Error: ${(err as Error).message}`).catch(() => {});
-    } finally {
-      unsubscribe();
     }
+    // The relay is not ended here: it lasts until the chat is idle, which a
+    // queued follow-up may postpone past this turn (`ensureRelay`).
   }
 
   /**

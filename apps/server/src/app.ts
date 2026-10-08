@@ -808,6 +808,11 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // first reconcile tick.
   await telegramPoller.init();
 
+  // PA-122: a forced restart can leave Pocket Agent messages queued behind a
+  // turn it destroyed. Each was a person pressing send, so they are delivered
+  // now rather than waiting for that chat's next turn to end.
+  plannerChats.resumeQueuedPrompts();
+
   await app.register(cookie);
   await app.register(rateLimit, {
     global: false,

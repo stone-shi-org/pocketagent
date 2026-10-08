@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { LIMITS } from './limits.js';
-import { AgentEvent, EffortLevel } from './agent-events.js';
+import { AgentEvent, EffortLevel, QueuedPromptSummary } from './agent-events.js';
 import { PromptImage } from './prompt-image.js';
 import { SessionInfo } from './session.js';
 import { PlannerLiveProvider } from './gemini-live.js';
@@ -620,6 +620,9 @@ export const PlannerChat = z.object({
   lastEffort: EffortLevel.nullable().optional(),
   /** PA-113: Whether reasoning/thinking is enabled for this chat. */
   thinkingEnabled: z.boolean().optional().default(true),
+  /** PA-122: messages sent while the chat was busy, not yet delivered,
+      oldest first. */
+  queuedPrompts: z.array(QueuedPromptSummary).optional(),
 });
 export type PlannerChat = z.infer<typeof PlannerChat>;
 
@@ -702,6 +705,33 @@ export const PlannerSendMessageRequest = z
     message: 'Must provide content or an image.',
   });
 export type PlannerSendMessageRequest = z.infer<typeof PlannerSendMessageRequest>;
+
+/** PA-122: how many undelivered messages one chat may hold. A person typing
+    while a turn runs never comes near it; it bounds a client stuck in a loop. */
+export const MAX_QUEUED_PROMPTS_PER_CHAT = 20;
+
+/**
+ * PA-122: a message sent while the chat is busy. It is delivered after the
+ * current tool batch (steering the running turn), or as the next turn if the
+ * model finishes first — and if the chat turned out to be idle by the time it
+ * arrived, straight away. It never answers a pending approval.
+ */
+export const QueuePlannerPromptRequest = z
+  .object({
+    content: z.string().max(LIMITS.maxInputChars).default(''),
+    image: PromptImage.optional(),
+    voiceMode: z.boolean().optional(),
+  })
+  .refine((data) => data.content.trim().length > 0 || !!data.image, {
+    message: 'Must provide content or an image.',
+  });
+export type QueuePlannerPromptRequest = z.infer<typeof QueuePlannerPromptRequest>;
+
+export const QueuePlannerPromptResponse = z.object({
+  prompt: QueuedPromptSummary,
+  queuedPrompts: z.array(QueuedPromptSummary),
+});
+export type QueuePlannerPromptResponse = z.infer<typeof QueuePlannerPromptResponse>;
 
 /**
  * `allow_once` runs the tool without remembering anything. `allow_workspace`

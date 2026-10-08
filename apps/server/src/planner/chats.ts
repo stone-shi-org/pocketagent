@@ -16,6 +16,7 @@ import {
   type PlannerToolApprovalChoice,
   type SessionInfo,
   type ThinkingEvent,
+  type QueuedPromptSummary,
   type TurnCompleteEvent,
 } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
@@ -42,6 +43,13 @@ import {
   readPlannerChatsByParentId,
   readPlannerLastEffort,
   readPlannerModelByModelId,
+  countPlannerQueuedPrompts,
+  deletePlannerQueuedPrompt,
+  deletePlannerQueuedPromptsForChat,
+  insertPlannerQueuedPrompt,
+  readChatIdsWithQueuedPrompts,
+  readPlannerQueuedPrompts,
+  type PlannerQueuedPromptRow,
   readPlannerSettings,
   resolvePlannerUrlFetchApiKey,
   resolvePlannerWebSearchApiKey,
@@ -57,6 +65,7 @@ import {
   LIST_MCP_TOOLS_NAME,
   LIST_SKILLS_NAME,
   USE_SKILL_NAME,
+  MAX_QUEUED_PROMPTS_PER_CHAT,
   isTerminalStatus,
   plannerModelSupportsImages,
   type PromptImage,
@@ -520,6 +529,16 @@ function addUsage(
   };
 }
 
+/** PA-122: a queue row as observers and the chat row show it. */
+function queuedPromptSummary(row: PlannerQueuedPromptRow): QueuedPromptSummary {
+  return {
+    id: row.id,
+    text: stripSpokenSummaryInstruction(row.content),
+    hasImage: row.image !== null,
+    createdAt: row.createdAt,
+  };
+}
+
 /**
  * PA-76: Formats one or more queued mailbox messages into a single prompt that wakes
  * the parent chat. Coalesces multiple subagent completions into one turn.
@@ -735,6 +754,25 @@ export class PlannerChatService {
    * query, so a steer (a new prompt) ranks afresh.
    */
   private readonly turnMemories = new Map<string, { query: string; memories: PlannerMemory[] }>();
+
+  /**
+   * PA-122: a chat whose prompt queue is being delivered as a follow-up turn
+   * right now. That turn's own end must not start another drain — the drain
+   * that started it carries on itself once it returns — or a turn that
+   * fails its preconditions would restart itself synchronously, forever.
+   */
+  private readonly queueDrainInProgress = new Set<string>();
+
+  /**
+   * PA-122: a chat whose queued follow-up could not start (no LLM endpoint,
+   * say). Its messages stay queued and visible, and are not retried on
+   * every idle moment; a new message, a cancel, or the next turn the user
+   * starts clears it.
+   */
+  private readonly stalledQueues = new Set<string>();
+
+  /** PA-122: `whenIdle` callbacks — see there. */
+  private readonly idleWaiters = new Map<string, Set<() => void>>();
   private readonly turnAbortControllers = new Map<string, AbortController>();
   /** PA-121: per-chat correction of the token estimate — see `TokenCalibration`. */
   private readonly calibration = new TokenCalibration();
@@ -891,6 +929,7 @@ export class PlannerChatService {
     return {
       ...chat,
       busy: this.isBusy(chat.id),
+      queuedPrompts: this.queuedPrompts(chat.id),
       // PA-118: provenance badge for a chat an MCP client created.
       mcpClient: readMcpOwnedWork(this.opts.db, 'planner_chat', chat.id)?.client_label ?? null,
     };
@@ -954,7 +993,7 @@ export class PlannerChatService {
           });
           this.turnStartedAtByChat.delete(chatId);
           this.turnPollChecksByChat.delete(chatId);
-          void this.drainMailbox(chatId);
+          this.drainNext(chatId);
         }
         stopped = true;
       }
@@ -1003,8 +1042,193 @@ export class PlannerChatService {
     }
     list.push(message);
     if (!this.isBusy(chatId) && !this.isLiveActive(chatId)) {
-      void this.drainMailbox(chatId);
+      this.drainNext(chatId);
     }
+  }
+
+  // ---- Steering: the prompt queue (PA-122) -----------------------------------
+  //
+  // A message sent while a chat is busy is queued, not refused, and delivered
+  // at the next safe point: after the running turn's current tool batch
+  // (steering it), or — if the model finishes first — as the next turn,
+  // ahead of any subagent wake. Never silent (every change reaches observers
+  // as a `prompt_queue` snapshot), never lost (it is a row, so it survives a
+  // forced restart and is delivered at boot), always cancellable. A message
+  // queued while a turn is parked on an approval waits for a human to answer
+  // it; queueing never answers, denies or dismisses anything.
+
+  /** PA-122: queue a message for a busy chat — or, if the chat turned out to
+      be idle by the time it arrived, deliver it at once as a turn. */
+  queuePrompt(chatId: string, content: string, opts: { image?: PromptImage; voiceMode?: boolean } = {}): QueuedPromptSummary {
+    this.requireChat(chatId);
+    if (this.isLiveActive(chatId)) {
+      throw new PlannerChatError('Gemini Live is on in this chat; a typed message goes to Gemini while it is.', 'busy');
+    }
+    const text =
+      opts.voiceMode && this.opts.config?.voiceSpokenSummaryEnabled ? appendSpokenSummaryInstruction(content) : content;
+    if (!text.trim() && !opts.image) throw new PlannerChatError('Must provide content or an image.', 'invalid');
+    if (countPlannerQueuedPrompts(this.opts.db, chatId) >= MAX_QUEUED_PROMPTS_PER_CHAT) {
+      throw new PlannerChatError(
+        `This chat already has ${MAX_QUEUED_PROMPTS_PER_CHAT} messages waiting. Cancel one, or wait for the turn to finish.`,
+        'invalid',
+      );
+    }
+    const row: PlannerQueuedPromptRow = {
+      id: crypto.randomUUID(),
+      chatId,
+      content: text,
+      image: opts.image ?? null,
+      createdAt: Date.now(),
+    };
+    insertPlannerQueuedPrompt(this.opts.db, row);
+    this.stalledQueues.delete(chatId);
+    this.notifyQueue(chatId);
+    this.drainNext(chatId);
+    return queuedPromptSummary(row);
+  }
+
+  /** PA-122: withdraw a message that has not been delivered yet. */
+  cancelQueuedPrompt(chatId: string, promptId: string): boolean {
+    this.requireChat(chatId);
+    const removed = deletePlannerQueuedPrompt(this.opts.db, chatId, promptId);
+    if (removed) {
+      this.notifyQueue(chatId);
+      if (this.queuedPromptCount(chatId) === 0) this.stalledQueues.delete(chatId);
+      this.drainNext(chatId);
+    }
+    return removed;
+  }
+
+  queuedPrompts(chatId: string): QueuedPromptSummary[] {
+    return readPlannerQueuedPrompts(this.opts.db, chatId).map(queuedPromptSummary);
+  }
+
+  /**
+   * PA-122: call `listener` once, the next time this chat has nothing left
+   * for a person: no turn running, none parked on an approval, and no queued
+   * message about to become one. For a front end that must keep relaying a
+   * chat past the end of the turn it started — Telegram's bridge, whose
+   * user's queued message may be answered by a follow-up turn it never ran.
+   * Returns the unsubscribe.
+   */
+  whenIdle(chatId: string, listener: () => void): () => void {
+    let set = this.idleWaiters.get(chatId);
+    if (!set) {
+      set = new Set();
+      this.idleWaiters.set(chatId, set);
+    }
+    set.add(listener);
+    return () => {
+      const current = this.idleWaiters.get(chatId);
+      current?.delete(listener);
+      if (current && current.size === 0) this.idleWaiters.delete(chatId);
+    };
+  }
+
+  /** PA-122: at boot, deliver whatever a forced restart left queued — a
+      person pressed send on every one of them. */
+  resumeQueuedPrompts(): void {
+    for (const chatId of readChatIdsWithQueuedPrompts(this.opts.db)) this.drainNext(chatId);
+  }
+
+  private queuedPromptCount(chatId: string): number {
+    return countPlannerQueuedPrompts(this.opts.db, chatId);
+  }
+
+  private hasDeliverableQueue(chatId: string): boolean {
+    return !this.stalledQueues.has(chatId) && this.queuedPromptCount(chatId) > 0;
+  }
+
+  private notifyQueue(chatId: string): void {
+    this.notify(chatId, { kind: 'prompt_queue', prompts: this.queuedPrompts(chatId) });
+  }
+
+  private settleIdle(chatId: string): void {
+    const waiters = this.idleWaiters.get(chatId);
+    if (!waiters) return;
+    this.idleWaiters.delete(chatId);
+    for (const listener of waiters) {
+      try {
+        listener();
+      } catch (err) {
+        this.opts.logger?.warn({ err, chatId }, 'planner idle listener threw');
+      }
+    }
+  }
+
+  /**
+   * PA-122: what a chat does when a turn ends and nothing else holds it: a
+   * person's queued message first, then (only if there is none) the
+   * subagent mailbox. The single entry point every "the chat just went
+   * idle" path calls, so the order cannot differ between them.
+   */
+  private drainNext(chatId: string): void {
+    if (this.isBusy(chatId) || this.queueDrainInProgress.has(chatId)) return;
+    if (this.hasDeliverableQueue(chatId) && !this.isLiveActive(chatId)) {
+      void this.drainPromptQueue(chatId);
+      return;
+    }
+    this.settleIdle(chatId);
+    void this.drainMailbox(chatId);
+  }
+
+  /** PA-122: deliver the queue as one follow-up turn — each message its own
+      `user_prompt`, in the order sent — and drain the generator, since no
+      request is attached to it; its events reach the page and Telegram
+      through `observe`. */
+  private async drainPromptQueue(chatId: string): Promise<void> {
+    if (this.isBusy(chatId) || this.queueDrainInProgress.has(chatId) || this.isLiveActive(chatId)) return;
+    if (!readPlannerChat(this.opts.db, chatId) || this.queuedPromptCount(chatId) === 0) return;
+    this.queueDrainInProgress.add(chatId);
+    let stalled = false;
+    try {
+      for await (const _event of this.sendMessage(chatId, '', { fromQueue: true })) {
+        // drained — observers already saw each event via `emit`
+      }
+    } catch (err) {
+      // A turn that slipped in first will deliver the queue itself. Anything
+      // else (no endpoint configured, the chat deleted) leaves the messages
+      // queued and visible rather than retrying on every idle moment.
+      if (!(err instanceof PlannerChatError && err.code === 'busy')) {
+        stalled = this.queuedPromptCount(chatId) > 0;
+        this.opts.logger?.warn({ err, chatId }, 'could not deliver queued Pocket Agent messages');
+      }
+    } finally {
+      this.queueDrainInProgress.delete(chatId);
+    }
+    if (stalled) this.stalledQueues.add(chatId);
+    this.drainNext(chatId);
+  }
+
+  /**
+   * PA-122: write each queued message into the transcript as a
+   * `user_prompt`, oldest first, removing its row once it is written. A row
+   * cancelled meanwhile is skipped. A person steering a wake turn makes it
+   * theirs: it stops counting as unattended, and gets a person's spawn
+   * budget rather than the wake's.
+   */
+  private async *deliverQueuedPrompts(chat: PlannerChat, workspacePath: string): AsyncGenerator<AgentEvent, number> {
+    const rows = readPlannerQueuedPrompts(this.opts.db, chat.id);
+    if (rows.length === 0) return 0;
+    if (this.activeWakeTurns.delete(chat.id)) {
+      const settings = readPlannerSettings(this.opts.db);
+      this.wakeActionBudgetByChat.set(chat.id, settings.maxSubagentSpawnsPerTurn ?? MAX_SUBAGENT_SPAWNS_PER_TURN);
+    }
+    let delivered = 0;
+    for (const row of rows) {
+      const stillQueued = readPlannerQueuedPrompts(this.opts.db, chat.id).some((r) => r.id === row.id);
+      if (!stillQueued) continue;
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'user_prompt',
+        id: crypto.randomUUID(),
+        text: row.content,
+        ...(row.image ? { image: row.image } : {}),
+      });
+      deletePlannerQueuedPrompt(this.opts.db, chat.id, row.id);
+      delivered++;
+    }
+    if (delivered > 0) this.notifyQueue(chat.id);
+    return delivered;
   }
 
   /**
@@ -1018,6 +1242,9 @@ export class PlannerChatService {
     }
 
     if (this.isBusy(chatId)) return;
+    // PA-122: a person's queued message goes first; the mailbox is drained
+    // again when the turn delivering it ends.
+    if (this.hasDeliverableQueue(chatId) || this.queueDrainInProgress.has(chatId)) return;
     // PA-96: a wake turn runs the planner LLM, and while Gemini Live is this
     // chat's model that would put two models in one conversation. Deferred,
     // not dropped: `endLive` (or the activity TTL lapsing) drains it.
@@ -1217,6 +1444,11 @@ export class PlannerChatService {
       clearTimeout(liveTimer);
       this.liveExpiryTimers.delete(id);
     }
+    // PA-122: the rows CASCADE with the chat; the in-memory state does not.
+    deletePlannerQueuedPromptsForChat(this.opts.db, id);
+    this.stalledQueues.delete(id);
+    this.queueDrainInProgress.delete(id);
+    this.settleIdle(id);
     return deletePlannerChat(this.opts.db, id);
   }
 
@@ -1249,6 +1481,10 @@ export class PlannerChatService {
    */
   async clearHistory(id: string): Promise<void> {
     const chat = this.requireChat(id);
+    // PA-122: queued messages go with the history they were meant to extend
+    // — and before the abort below, whose turn would otherwise deliver them.
+    if (deletePlannerQueuedPromptsForChat(this.opts.db, id) > 0) this.notifyQueue(id);
+    this.stalledQueues.delete(id);
     for (const [pendingId, pending] of this.pendingTurns) {
       if (pending.chatId === id) this.pendingTurns.delete(pendingId);
     }
@@ -1642,12 +1878,17 @@ export class PlannerChatService {
       voiceMode?: boolean;
       effort?: string | null;
       thinking?: boolean;
+      /** PA-122: this turn's prompts are the chat's queued messages, not
+          `content` — see `drainPromptQueue`. */
+      fromQueue?: boolean;
     } = {},
   ): AsyncGenerator<AgentEvent> {
     const chat = this.requireChat(id);
     if (this.isBusy(id)) {
       throw new PlannerChatError('A turn is already in flight for this chat.', 'busy');
     }
+    // PA-122: a turn the user starts is a fresh chance for a stalled queue.
+    if (!opts.fromQueue) this.stalledQueues.delete(id);
 
     if (opts.effort !== undefined) {
       chat.lastEffort = opts.effort;
@@ -1693,18 +1934,29 @@ export class PlannerChatService {
         promptContent = appendSpokenSummaryInstruction(promptContent);
       }
 
-      if (chat.title === null) {
-        const title = deriveChatTitle(stripSpokenSummaryInstruction(promptContent) || (opts.image ? 'Image prompt' : ''));
-        if (title) updatePlannerChat(this.opts.db, chat.id, { title });
-      }
+      if (opts.fromQueue) {
+        const first = readPlannerQueuedPrompts(this.opts.db, chat.id)[0];
+        if (chat.title === null && first) {
+          const title = deriveChatTitle(stripSpokenSummaryInstruction(first.content) || (first.image ? 'Image prompt' : ''));
+          if (title) updatePlannerChat(this.opts.db, chat.id, { title });
+        }
+        // Everything was cancelled between the drain deciding to run and
+        // now: there is no new prompt, so there is nothing to ask the model.
+        if ((yield* this.deliverQueuedPrompts(chat, workspacePath)) === 0) return;
+      } else {
+        if (chat.title === null) {
+          const title = deriveChatTitle(stripSpokenSummaryInstruction(promptContent) || (opts.image ? 'Image prompt' : ''));
+          if (title) updatePlannerChat(this.opts.db, chat.id, { title });
+        }
 
-      const userEvent: AgentEvent = {
-        kind: 'user_prompt',
-        id: crypto.randomUUID(),
-        text: promptContent,
-        ...(opts.image ? { image: opts.image } : {}),
-      };
-      yield* this.emit(workspacePath, chat.id, userEvent);
+        const userEvent: AgentEvent = {
+          kind: 'user_prompt',
+          id: crypto.randomUUID(),
+          text: promptContent,
+          ...(opts.image ? { image: opts.image } : {}),
+        };
+        yield* this.emit(workspacePath, chat.id, userEvent);
+      }
 
       yield* this.driveLoop(chat, workspacePath, modelId, 0, EMPTY_TURN_STATS, abortController.signal);
     } finally {
@@ -1715,7 +1967,7 @@ export class PlannerChatService {
       if (!this.isBusy(chat.id)) {
         this.turnStartedAtByChat.delete(chat.id);
         this.turnPollChecksByChat.delete(chat.id);
-        void this.drainMailbox(chat.id);
+        this.drainNext(chat.id);
       }
     }
   }
@@ -1782,7 +2034,7 @@ export class PlannerChatService {
       if (!this.isBusy(chatId)) {
         this.turnStartedAtByChat.delete(chatId);
         this.turnPollChecksByChat.delete(chatId);
-        void this.drainMailbox(chatId);
+        this.drainNext(chatId);
       }
     }
   }
@@ -2228,6 +2480,7 @@ export class PlannerChatService {
           isError: true,
         });
       }
+      yield* this.deliverQueuedPrompts(chat, workspacePath);
       yield* this.driveLoop(chat, workspacePath, modelId, iteration + 1, nextStats, signal);
       return;
     }
@@ -2282,6 +2535,7 @@ export class PlannerChatService {
           yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'interrupted');
           return;
         }
+        yield* this.deliverQueuedPrompts(chat, workspacePath);
         yield* this.driveLoop(chat, workspacePath, modelId, iteration, stats, signal);
         return;
       }
@@ -2374,7 +2628,11 @@ export class PlannerChatService {
       return;
     }
 
-    // Every call in this batch resolved — ask the model what's next.
+    // Every call in this batch resolved — ask the model what's next. PA-122:
+    // anything the user sent meanwhile goes in first, here and only here (and
+    // in the parallel path above): after a batch's last result, so it can
+    // never sit between a call and its result, which providers reject.
+    yield* this.deliverQueuedPrompts(chat, workspacePath);
     yield* this.driveLoop(chat, workspacePath, modelId, iteration, stats, signal);
   }
 
@@ -2434,6 +2692,10 @@ export class PlannerChatService {
   private busyWithPlannerLoop(chatId: string): boolean {
     const active = (this.activeTurns.get(chatId) ?? 0) - (this.liveWork.get(chatId) ?? 0);
     if (active > 0) return true;
+    // PA-122: a queued message is a planner turn that has not started yet —
+    // letting Gemini take the chat now would put two models in it the moment
+    // it does.
+    if (this.queuedPromptCount(chatId) > 0) return true;
     for (const pending of this.pendingTurns.values()) {
       if (pending.chatId === chatId && pending.kind === 'loop') return true;
     }
@@ -2457,7 +2719,7 @@ export class PlannerChatService {
     if (previous) clearTimeout(previous);
     const timer = setTimeout(() => {
       this.liveExpiryTimers.delete(chatId);
-      if (!this.isLiveActive(chatId) && !this.isBusy(chatId)) void this.drainMailbox(chatId);
+      if (!this.isLiveActive(chatId) && !this.isBusy(chatId)) this.drainNext(chatId);
     }, LIVE_ACTIVITY_TTL_MS + 1000);
     timer.unref?.();
     this.liveExpiryTimers.set(chatId, timer);
@@ -2474,7 +2736,7 @@ export class PlannerChatService {
       this.liveExpiryTimers.delete(chatId);
     }
     this.spawnsThisTurnByChat.delete(chatId);
-    if (!this.isBusy(chatId)) void this.drainMailbox(chatId);
+    if (!this.isBusy(chatId)) this.drainNext(chatId);
   }
 
   private serializeLive<T>(chatId: string, work: () => Promise<T>): Promise<T> {
@@ -3508,7 +3770,7 @@ export class PlannerChatService {
     } finally {
       this.turnAbortControllers.delete(chatId);
       endTurn();
-      if (!this.isBusy(chatId)) void this.drainMailbox(chatId);
+      if (!this.isBusy(chatId)) this.drainNext(chatId);
     }
   }
 

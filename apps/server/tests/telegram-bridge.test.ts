@@ -237,6 +237,30 @@ describe('TelegramBridge', () => {
     expect(chatA).not.toBe(chatB);
   });
 
+  it('queues a message sent mid-turn and relays the follow-up turn that answers it, once (PA-122)', async () => {
+    let release!: (r: Response) => void;
+    const held = new Promise<Response>((resolve) => (release = resolve));
+    const llmFetch = vi
+      .fn()
+      .mockImplementationOnce(() => held)
+      .mockResolvedValueOnce(fakeCompletionResponse('Answer to the follow-up'));
+    const { t, bridge, botId, workspaceId, client, calls } = await setup(llmFetch);
+    current = t;
+    t.context.telegramLinks.create(botId, { telegramChatId: '333', workspaceId });
+
+    await bridge.handleUpdate(botId, messageUpdate('333', 'first'), client);
+    await waitFor(() => llmFetch.mock.calls.length === 1);
+    await bridge.handleUpdate(botId, messageUpdate('333', 'one more thing', 2), client);
+    const texts = () => calls.filter((c) => c.method === 'sendMessage').map((c) => String(c.body.text));
+    await waitFor(() => texts().some((text) => /^Queued/.test(text)));
+    expect(texts().some((text) => /^Error/.test(text))).toBe(false);
+
+    release(fakeCompletionResponse('Answer to the first'));
+    await waitFor(() => texts().some((text) => text.includes('Answer to the follow-up')));
+    expect(texts().filter((text) => text.includes('Answer to the first'))).toHaveLength(1);
+    expect(texts().filter((text) => text.includes('Answer to the follow-up'))).toHaveLength(1);
+  });
+
   it('slash commands never reach the LLM, and /clear + /mcp answer sensibly with no chat yet', async () => {
     const llmFetch = vi.fn();
     const { t, bridge, botId, workspaceId, client, calls } = await setup(llmFetch);

@@ -84,6 +84,8 @@ import type {
   UpdatePlannerChatRequest,
   DeleteAllPlannerChatsResponse,
   InterruptPlannerChatResponse,
+  QueuePlannerPromptRequest,
+  QueuePlannerPromptResponse,
   CompactPlannerChatResponse,
   PlannerChatHistoryResponse,
   PlannerChatSubagentsResponse,
@@ -1085,6 +1087,19 @@ export function createApiClient(endpoint: HostEndpoint) {
         method: 'POST',
         body: JSON.stringify({ focus }),
       }),
+
+    /** PA-122: a message for a busy chat, delivered after its current step. */
+    queuePlannerPrompt: (id: string, body: QueuePlannerPromptRequest) =>
+      request<QueuePlannerPromptResponse>(`/api/planner/chats/${encodeURIComponent(id)}/queue`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+
+    cancelQueuedPlannerPrompt: (id: string, promptId: string) =>
+      request<void>(
+        `/api/planner/chats/${encodeURIComponent(id)}/queue/${encodeURIComponent(promptId)}`,
+        { method: 'DELETE' },
+      ),
 
     interruptPlannerChat: (id: string) =>
       request<InterruptPlannerChatResponse>(`/api/planner/chats/${encodeURIComponent(id)}/interrupt`, {

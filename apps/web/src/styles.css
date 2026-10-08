@@ -8525,4 +8525,13 @@ button.chat-rate-limit-badge {
 .planner-model-prices .planner-model-limit input { width: 72px; }
 .planner-model-limit select { padding: 2px 4px; font-size: 12px; }
 /* PA-122: the attached-image caveat beside its thumbnail. */
+/* PA-122: messages queued while a Pocket Agent turn runs — above the
+   composer, each cancellable. */
+.planner-queue { margin: 0 12px 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); display: flex; flex-direction: column; gap: 4px; }
+.planner-queue-title { margin: 0; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
+.planner-queue-item { display: flex; align-items: flex-start; gap: 8px; font-size: 14px; }
+.planner-queue-text { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 4.5em; overflow: hidden; }
+.planner-queue-image { margin-right: 6px; padding: 0 5px; border-radius: 6px; font-size: 11px; background: var(--bg-elev-2); color: var(--text-dim); }
+.planner-queue-cancel { flex: none; display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: none; border-radius: 50%; background: transparent; color: var(--text-dim); }
+.promptbar button.primary.queue { margin-right: 6px; }
 .attach-note { max-width: 240px; font-size: 12px; line-height: 1.35; color: var(--text-dim); }

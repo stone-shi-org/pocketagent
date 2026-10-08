@@ -432,6 +432,34 @@ export const ContextCompactionEvent = z.object({
 });
 export type ContextCompactionEvent = z.infer<typeof ContextCompactionEvent>;
 
+/**
+ * PA-122: one message a person sent to a Pocket Agent chat while it was busy,
+ * waiting to be delivered — after the current tool batch, or as the next turn.
+ * The text only; an attached image is carried by the queue row, not here.
+ */
+export const QueuedPromptSummary = z.object({
+  id: z.string(),
+  text: z.string(),
+  hasImage: z.boolean(),
+  createdAt: z.number().int(),
+});
+export type QueuedPromptSummary = z.infer<typeof QueuedPromptSummary>;
+
+/**
+ * PA-122: the chat's whole prompt queue, sent to its observers whenever the
+ * queue changes. A snapshot rather than added/removed deltas, so a client
+ * that missed one frame is corrected by the next. Planner-only and never
+ * persisted: a delivered message is in the transcript as its own
+ * `user_prompt`, and the queue itself lives in `planner_prompt_queue`. Like
+ * `context_compaction`, no structured session emits it, so it never reaches a
+ * WebSocket frame.
+ */
+export const PromptQueueEvent = z.object({
+  kind: z.literal('prompt_queue'),
+  prompts: z.array(QueuedPromptSummary),
+});
+export type PromptQueueEvent = z.infer<typeof PromptQueueEvent>;
+
 export const AgentEvent = z.discriminatedUnion('kind', [
   SessionStartedEvent,
   TextEvent,
@@ -454,6 +482,7 @@ export const AgentEvent = z.discriminatedUnion('kind', [
   ConversationResetEvent,
   TtsAudioEvent,
   ContextCompactionEvent,
+  PromptQueueEvent,
 ]);
 export type AgentEvent = z.infer<typeof AgentEvent>;
 

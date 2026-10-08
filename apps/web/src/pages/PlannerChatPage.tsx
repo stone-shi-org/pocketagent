@@ -9,6 +9,7 @@ import type {
   PlannerModel,
   PlannerToolApprovalChoice,
   PromptImage,
+  QueuedPromptSummary,
   SessionInfo,
   SlashCommandInfo,
 } from '@pocketagent/protocol';
@@ -193,6 +194,8 @@ export function PlannerChatPage({
   const api = useHostApi();
   const [chat, setChat] = useState<PlannerChat | null>(null);
   const [models, setModels] = useState<PlannerModel[]>([]);
+  // PA-122: messages sent while the chat was busy, not yet delivered.
+  const [queued, setQueued] = useState<QueuedPromptSummary[]>([]);
   const [transcript, setTranscript] = useState<TranscriptState | null>(null);
   const [subagents, setSubagents] = useState<SessionInfo[]>([]);
   const [plannerSubagents, setPlannerSubagents] = useState<PlannerChat[]>([]);
@@ -426,6 +429,7 @@ export function PlannerChatPage({
       setChat(found);
       setMissing(found === null);
       setModels(modelList);
+      setQueued(found?.queuedPrompts ?? []);
       seenPermanentKeys.current.clear();
       seenEphemeralKeys.current.clear();
       for (const ev of events) {
@@ -553,6 +557,11 @@ export function PlannerChatPage({
         ttsQueueRef.current?.enqueue(event.chunk.data, event.chunk.sampleRateHz);
         return;
       }
+      // PA-122: a snapshot of the queue, not part of the transcript.
+      if (event.kind === 'prompt_queue') {
+        setQueued(event.prompts);
+        return;
+      }
       // PA-96: a call Gemini made was parked on approval and a human just
       // decided it. The resolution stream and the observer stream both carry
       // this event; the controller relays it once and ignores the repeat.
@@ -613,9 +622,41 @@ export function PlannerChatPage({
       ? `${selectedModel.label} cannot read images — it will see a note instead. Pick a vision model to have it look.`
       : null;
   const isChatBusy = sending || (chat?.busy ?? false) || (transcript?.busy ?? false);
-  // PA-99: PromptBox manages its own busy state (swapping send into stop) — disabled
-  // only blocks interaction while an approval decision is pending from the human.
-  const disabled = pending !== null;
+  // PA-99: PromptBox manages its own busy state (swapping send into stop).
+  // PA-122: no longer disabled while an approval is pending — a message typed
+  // then is queued behind the approval, which still waits for its own answer.
+  const disabled = false;
+
+  /** PA-122: a message for a busy chat goes into its queue, and is read by
+      the agent after its current step (or as the next turn). */
+  const queueMessage = (content: string, image?: PromptImage): boolean => {
+    setError(null);
+    void (async () => {
+      try {
+        const res = await api.queuePlannerPrompt(chatId, { content, image, voiceMode: pipelineLiveActive });
+        setQueued(res.queuedPrompts);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not queue your message. It was not sent.');
+      }
+    })();
+    return true;
+  };
+
+  const cancelQueued = (promptId: string): void => {
+    setQueued((prev) => prev.filter((q) => q.id !== promptId));
+    void (async () => {
+      try {
+        await api.cancelQueuedPlannerPrompt(chatId, promptId);
+      } catch (err) {
+        onApiError(err);
+        // Most likely delivered a moment ago; the next snapshot is the truth.
+        if (!(err instanceof ApiError && err.status === 404)) {
+          setError(err instanceof ApiError ? err.message : 'Could not cancel that message.');
+        }
+      }
+    })();
+  };
 
   /** `PromptBox.onSend` is synchronous by contract (see its own props doc):
       a `true` return clears the composer immediately, matching how a real
@@ -639,7 +680,12 @@ export function PlannerChatPage({
         return true;
       }
     }
-    if ((!trimmed && !image) || isChatBusy || pending !== null) return false;
+    if (!trimmed && !image) return false;
+    if (isChatBusy || pending !== null) {
+      // Slash commands act on the chat now; they are not messages to queue.
+      if (!image && trimmed.startsWith('/')) return false;
+      return queueMessage(trimmed, image);
+    }
 
     // Handle slash commands without sending to LLM:
     if (!image && (trimmed === '/clear' || trimmed === '/reset')) {
@@ -770,6 +816,12 @@ export function PlannerChatPage({
         }
       } catch (err) {
         if (controller.signal.aborted || (err as Error)?.name === 'AbortError') return;
+        // PA-122: a turn began on the server first (a subagent waking the
+        // chat, say) — queue the message behind it instead of losing it.
+        if (err instanceof ApiError && err.code === 'busy') {
+          queueMessage(trimmed, image);
+          return;
+        }
         onApiError(err);
         setError(
           err instanceof ApiError
@@ -1466,6 +1518,36 @@ export function PlannerChatPage({
         </div>
       )}
 
+      {queued.length > 0 && !geminiLive && (
+        <div className="planner-queue" aria-live="polite">
+          <p className="planner-queue-title">
+            <Icon name="queue" size={14} />
+            {pending !== null
+              ? 'Waiting for your answer to the approval above, then sent:'
+              : isChatBusy
+                ? 'Sent after the current step:'
+                : 'Sending…'}
+          </p>
+          {queued.map((q) => (
+            <div key={q.id} className="planner-queue-item">
+              <span className="planner-queue-text">
+                {q.hasImage && <span className="planner-queue-image">image</span>}
+                {q.text}
+              </span>
+              <button
+                type="button"
+                className="planner-queue-cancel"
+                onClick={() => cancelQueued(q.id)}
+                aria-label="Cancel this queued message"
+                title="Cancel — it will not be sent"
+              >
+                <Icon name="close" size={13} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <PromptBox
         sessionId={`planner_${chatId}`}
         historyKey={plannerPromptHistoryKey()}
@@ -1499,6 +1581,7 @@ export function PlannerChatPage({
         thinking={chat?.thinkingEnabled !== false}
         onToggleThinking={toggleThinking}
         busy={geminiLive ? false : isChatBusy}
+        queueWhileBusy={!geminiLive}
         onInterrupt={handleInterrupt}
       />
     </div>

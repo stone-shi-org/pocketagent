@@ -23,6 +23,8 @@ import {
   UpdatePlannerMemoryRequest,
   UpdatePlannerWorkspaceRequest,
   PlannerSendMessageRequest,
+  QueuePlannerPromptRequest,
+  type QueuePlannerPromptResponse,
   ResolvePlannerApprovalRequest,
   SetPlannerToolApprovalRequest,
   UpdatePlannerChatRequest,
@@ -1492,6 +1494,46 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       voiceMode: parsed.data.voiceMode,
       config: app.pocket.config,
     });
+  });
+
+  /**
+   * PA-122: a message sent while the chat is busy — queued, and delivered
+   * after the running turn's current tool batch or as the next turn (or at
+   * once, if the turn ended before it arrived). `POST .../messages` still
+   * answers 409 `busy` for a busy chat: cron, webhooks and MCP rely on that,
+   * and only a person at the chat should be able to steer a turn.
+   */
+  app.post('/api/planner/chats/:id/queue', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = QueuePlannerPromptRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    try {
+      const prompt = app.pocket.plannerChats.queuePrompt(id, parsed.data.content, {
+        ...(parsed.data.image ? { image: parsed.data.image } : {}),
+        ...(parsed.data.voiceMode !== undefined ? { voiceMode: parsed.data.voiceMode } : {}),
+      });
+      const response: QueuePlannerPromptResponse = {
+        prompt,
+        queuedPrompts: app.pocket.plannerChats.queuedPrompts(id),
+      };
+      return noStore(reply).code(201).send(response);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  app.delete('/api/planner/chats/:id/queue/:promptId', async (request, reply) => {
+    const { id, promptId } = request.params as { id: string; promptId: string };
+    try {
+      if (!app.pocket.plannerChats.cancelQueuedPrompt(id, promptId)) {
+        return notFound(reply, 'That message is no longer queued — it may already have been delivered.');
+      }
+      return reply.code(204).send();
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
   });
 
   /**

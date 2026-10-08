@@ -534,4 +534,228 @@ describe('PA-122 Pocket Agent loop', () => {
     await patch(`/api/planner/models/${model!.id}`, { supportsImages: null });
     expect((await list())[0]!.supportsImages).toBeNull();
   });
+
+  // ---- Part 4: steering -----------------------------------------------------
+
+  /** A response the test releases when it is ready, so a turn can be held
+      mid-flight while a message is queued. */
+  function deferred() {
+    let release!: (r: Response) => void;
+    const promise = new Promise<Response>((resolve) => (release = resolve));
+    return { promise, release };
+  }
+
+  async function waitFor(check: () => boolean | Promise<boolean>, what: string): Promise<void> {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      if (await check()) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  }
+
+  const get = (url: string) => t.app.inject({ method: 'GET', url, headers: authHeaders(t.cookie) });
+  const history = async (chatId: string) =>
+    (await get(`/api/planner/chats/${chatId}/history`)).json().events as Array<{ kind: string; [k: string]: unknown }>;
+  const queue = (chatId: string, content: string) => post(`/api/planner/chats/${chatId}/queue`, { content });
+  const userTexts = (body: Body) => body.messages.filter((m) => m.role === 'user').map((m) => m.content);
+
+  it('delivers a message sent mid-turn after the current tool batch, never between a call and its result', async () => {
+    const first = deferred();
+    const { fetchImpl, bodies } = scripted([
+      () => first.promise,
+      () => reply('done, and checked the config too'),
+    ]);
+    const chat = await setup(fetchImpl);
+    const turn = send(chat.id, 'look around');
+    await waitFor(() => bodies.length === 1, 'the first request');
+
+    const queued = await queue(chat.id, 'also check the config');
+    expect(queued.statusCode).toBe(201);
+    expect(queued.json().queuedPrompts).toHaveLength(1);
+    expect((await get(`/api/planner/chats/${chat.id}`)).json().queuedPrompts).toHaveLength(1);
+
+    first.release(toolCall([{ name: 'list_workspaces', args: '{}' }]));
+    const events = await turn;
+
+    const second = bodies[1]!.messages;
+    const roles = second.map((m) => m.role);
+    expect(roles.slice(-4)).toEqual(['user', 'assistant', 'tool', 'user']);
+    expect(second.at(-1)!.content).toBe('also check the config');
+    // It reached the stream of the turn it steered, after the tool result.
+    const kinds = events.map((e) => e.kind);
+    expect(kinds.lastIndexOf('user_prompt')).toBeGreaterThan(kinds.indexOf('tool_result'));
+    expect(events.at(-1)).toMatchObject({ kind: 'turn_complete', isError: false });
+    expect((await get(`/api/planner/chats/${chat.id}`)).json().queuedPrompts).toEqual([]);
+  });
+
+  it('starts the next turn with a message queued while the model was writing its final answer', async () => {
+    const first = deferred();
+    const { fetchImpl, bodies } = scripted([() => first.promise, () => reply('second answer')]);
+    const chat = await setup(fetchImpl);
+    const turn = send(chat.id, 'first question');
+    await waitFor(() => bodies.length === 1, 'the first request');
+    await queue(chat.id, 'and a follow-up');
+    first.release(reply('first answer'));
+    await turn;
+
+    await waitFor(async () => (await history(chat.id)).filter((e) => e.kind === 'turn_complete').length === 2, 'the follow-up turn');
+    expect(userTexts(bodies[1]!)).toEqual(['first question', 'and a follow-up']);
+    const events = await history(chat.id);
+    expect(events.map((e) => e.kind)).toEqual([
+      'user_prompt',
+      'text',
+      'turn_complete',
+      'user_prompt',
+      'text',
+      'turn_complete',
+    ]);
+  });
+
+  it('delivers at once when the chat is idle by the time the message arrives', async () => {
+    const { fetchImpl, bodies } = scripted([() => reply('hi')]);
+    const chat = await setup(fetchImpl);
+    expect((await queue(chat.id, 'hello')).statusCode).toBe(201);
+    await waitFor(async () => (await history(chat.id)).some((e) => e.kind === 'turn_complete'), 'the turn');
+    expect(userTexts(bodies[0]!)).toEqual(['hello']);
+  });
+
+  it('never answers a pending approval, and is delivered after a human answers it', async () => {
+    const { fetchImpl, bodies } = scripted([
+      () => toolCall([{ name: 'write_file', args: JSON.stringify({ path: 'a.txt', content: 'x' }) }]),
+      () => reply('written'),
+    ]);
+    const chat = await setup(fetchImpl);
+    const events = await send(chat.id, 'write it');
+    const request = events.find((e) => e.kind === 'permission_request')!;
+
+    await queue(chat.id, 'use a.md instead if you can');
+    // Still parked: nothing resolved it, nothing ran, the model was not asked again.
+    expect(bodies).toHaveLength(1);
+    expect((await history(chat.id)).some((e) => e.kind === 'permission_resolved')).toBe(false);
+    expect((await get(`/api/planner/chats/${chat.id}`)).json()).toMatchObject({ busy: true });
+
+    const resumed = await post(`/api/planner/chats/${chat.id}/approvals/${request.id as string}`, { decision: 'deny' });
+    const after = parseEvents(resumed.payload);
+    expect(after.find((e) => e.kind === 'permission_resolved')).toMatchObject({ decision: 'deny' });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]!.messages.at(-1)).toMatchObject({ role: 'user', content: 'use a.md instead if you can' });
+  });
+
+  it('keeps the queue through an interrupt and runs it as the next turn', async () => {
+    const first = deferred();
+    const { fetchImpl, bodies } = scripted([() => first.promise, () => reply('ok, doing that instead')]);
+    const chat = await setup(fetchImpl);
+    const turn = send(chat.id, 'start the long thing');
+    await waitFor(() => bodies.length === 1, 'the first request');
+    await queue(chat.id, 'actually, do this instead');
+    await post(`/api/planner/chats/${chat.id}/interrupt`);
+    first.release(reply('too late'));
+    await turn;
+
+    await waitFor(() => bodies.length === 2, 'the follow-up request');
+    expect(bodies[1]!.messages.at(-1)).toMatchObject({ role: 'user', content: 'actually, do this instead' });
+  });
+
+  it('lets a queued message be cancelled, and /clear discards the queue', async () => {
+    const first = deferred();
+    const { fetchImpl, bodies } = scripted([() => first.promise, () => reply('second')]);
+    const chat = await setup(fetchImpl);
+    const turn = send(chat.id, 'go');
+    await waitFor(() => bodies.length === 1, 'the first request');
+
+    const a = (await queue(chat.id, 'cancel me')).json().prompt.id as string;
+    await queue(chat.id, 'clear me');
+    expect((await t.app.inject({ method: 'DELETE', url: `/api/planner/chats/${chat.id}/queue/${a}`, headers: authHeaders(t.cookie) })).statusCode).toBe(204);
+    expect((await t.app.inject({ method: 'DELETE', url: `/api/planner/chats/${chat.id}/queue/${a}`, headers: authHeaders(t.cookie) })).statusCode).toBe(404);
+    expect((await get(`/api/planner/chats/${chat.id}`)).json().queuedPrompts.map((q: { text: string }) => q.text)).toEqual(['clear me']);
+
+    await t.app.inject({ method: 'DELETE', url: `/api/planner/chats/${chat.id}/history`, headers: authHeaders(t.cookie) });
+    expect((await get(`/api/planner/chats/${chat.id}`)).json().queuedPrompts).toEqual([]);
+    first.release(reply('first'));
+    await turn;
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bodies).toHaveLength(1);
+  });
+
+  it('runs a queued message before a subagent wake, and only then the wake', async () => {
+    const first = deferred();
+    const { fetchImpl, bodies } = scripted([() => first.promise, () => reply('answered you'), () => reply('noted the subagent')]);
+    const chat = await setup(fetchImpl);
+    const turn = send(chat.id, 'start');
+    await waitFor(() => bodies.length === 1, 'the first request');
+    t.app.pocket.plannerChats.enqueueMailbox(chat.id, {
+      kind: 'coding_agent',
+      subagentId: 'sub-1',
+      status: 'completed',
+      summary: 'all green',
+    });
+    await queue(chat.id, 'my follow-up');
+    first.release(reply('first'));
+    await turn;
+
+    await waitFor(() => bodies.length === 3, 'the follow-up and the wake');
+    expect(bodies[1]!.messages.at(-1)).toMatchObject({ role: 'user', content: 'my follow-up' });
+    expect(String(bodies[2]!.messages.at(-1)!.content)).toMatch(/^\[Subagent Notification\]/);
+  });
+
+  it('still answers 409 on POST /messages for a busy chat — only the queue steers', async () => {
+    const first = deferred();
+    const { fetchImpl, bodies } = scripted([() => first.promise]);
+    const chat = await setup(fetchImpl);
+    const turn = send(chat.id, 'go');
+    await waitFor(() => bodies.length === 1, 'the first request');
+    const busy = await post(`/api/planner/chats/${chat.id}/messages`, { content: 'again' });
+    expect(busy.statusCode).toBe(409);
+    expect((await get(`/api/planner/chats/${chat.id}`)).json().queuedPrompts).toEqual([]);
+    first.release(reply('first'));
+    await turn;
+  });
+
+  it('counts a queued message as planner work for Gemini Live', async () => {
+    const first = deferred();
+    const { fetchImpl, bodies } = scripted([() => first.promise]);
+    const chat = await setup(fetchImpl);
+    const turn = send(chat.id, 'go');
+    await waitFor(() => bodies.length === 1, 'the first request');
+    await queue(chat.id, 'queued');
+    const service = t.app.pocket.plannerChats as unknown as {
+      busyWithPlannerLoop(id: string): boolean;
+      activeTurns: Map<string, number>;
+    };
+    // Simulate the instant between turns: no turn counted, a message queued.
+    const saved = service.activeTurns.get(chat.id);
+    service.activeTurns.delete(chat.id);
+    expect(service.busyWithPlannerLoop(chat.id)).toBe(true);
+    service.activeTurns.set(chat.id, saved!);
+    await t.app.inject({ method: 'DELETE', url: `/api/planner/chats/${chat.id}/history`, headers: authHeaders(t.cookie) });
+    first.release(reply('first'));
+    await turn.catch(() => {});
+  });
+
+  it('delivers at boot what a forced restart left queued', async () => {
+    const { fetchImpl, bodies } = scripted([() => reply('picked it up')]);
+    const chat = await setup(fetchImpl);
+    const { insertPlannerQueuedPrompt } = await import('../src/planner/store.js');
+    insertPlannerQueuedPrompt(t.app.pocket.db, {
+      id: 'left-over',
+      chatId: chat.id,
+      content: 'sent just before the restart',
+      image: null,
+      createdAt: Date.now(),
+    });
+    t.app.pocket.plannerChats.resumeQueuedPrompts();
+    await waitFor(() => bodies.length === 1, 'the delivered turn');
+    expect(userTexts(bodies[0]!)).toEqual(['sent just before the restart']);
+  });
+
+  it('leaves a queue it cannot deliver visible instead of retrying forever', async () => {
+    const { fetchImpl, bodies } = scripted([() => reply('never')]);
+    const chat = await setup(fetchImpl);
+    await patch('/api/planner/settings', { baseUrl: '' });
+    expect((await queue(chat.id, 'nowhere to go')).statusCode).toBe(201);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bodies).toHaveLength(0);
+    expect((await get(`/api/planner/chats/${chat.id}`)).json().queuedPrompts).toHaveLength(1);
+  });
 });

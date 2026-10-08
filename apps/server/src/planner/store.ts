@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type { PlannerChat, PlannerLiveProvider, PlannerMemory, PlannerMemoryTier } from '@pocketagent/protocol';
+import { PromptImage } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import { readSetting, writeSetting } from '../db/index.js';
 import type { PlannerWorkspaceRow, PlannerWorkspaceStore } from './workspaces.js';
@@ -1367,4 +1368,76 @@ function buildFtsMatchQuery(text: string): string | null {
     .slice(0, 32);
   if (tokens.length === 0) return null;
   return tokens.map((token) => `"${token}"`).join(' OR ');
+}
+
+// ---- planner_prompt_queue (PA-122) ------------------------------------------
+
+export interface PlannerQueuedPromptRow {
+  id: string;
+  chatId: string;
+  content: string;
+  image: PromptImage | null;
+  createdAt: number;
+}
+
+interface PlannerQueuedPromptDbRow {
+  id: string;
+  chat_id: string;
+  content: string;
+  image_json: string | null;
+  created_at: number;
+}
+
+function queuedPromptFromDbRow(row: PlannerQueuedPromptDbRow): PlannerQueuedPromptRow {
+  let image: PromptImage | null = null;
+  if (row.image_json) {
+    try {
+      const parsed = PromptImage.safeParse(JSON.parse(row.image_json));
+      image = parsed.success ? parsed.data : null;
+    } catch {
+      image = null;
+    }
+  }
+  return { id: row.id, chatId: row.chat_id, content: row.content, image, createdAt: row.created_at };
+}
+
+export function insertPlannerQueuedPrompt(db: Db, row: PlannerQueuedPromptRow): void {
+  db.prepare(
+    `INSERT INTO planner_prompt_queue (id, chat_id, content, image_json, created_at)
+     VALUES (@id, @chatId, @content, @imageJson, @createdAt)`,
+  ).run({
+    id: row.id,
+    chatId: row.chatId,
+    content: row.content,
+    imageJson: row.image ? JSON.stringify(row.image) : null,
+    createdAt: row.createdAt,
+  });
+}
+
+/** Oldest first — the order they were sent, and the order they are delivered. */
+export function readPlannerQueuedPrompts(db: Db, chatId: string): PlannerQueuedPromptRow[] {
+  return (
+    db
+      .prepare('SELECT * FROM planner_prompt_queue WHERE chat_id = ? ORDER BY created_at, rowid')
+      .all(chatId) as PlannerQueuedPromptDbRow[]
+  ).map(queuedPromptFromDbRow);
+}
+
+export function countPlannerQueuedPrompts(db: Db, chatId: string): number {
+  return (db.prepare('SELECT COUNT(*) AS n FROM planner_prompt_queue WHERE chat_id = ?').get(chatId) as { n: number }).n;
+}
+
+export function deletePlannerQueuedPrompt(db: Db, chatId: string, id: string): boolean {
+  return db.prepare('DELETE FROM planner_prompt_queue WHERE id = ? AND chat_id = ?').run(id, chatId).changes > 0;
+}
+
+export function deletePlannerQueuedPromptsForChat(db: Db, chatId: string): number {
+  return db.prepare('DELETE FROM planner_prompt_queue WHERE chat_id = ?').run(chatId).changes;
+}
+
+/** Chats with something still queued — what a boot delivers. */
+export function readChatIdsWithQueuedPrompts(db: Db): string[] {
+  return (
+    db.prepare('SELECT DISTINCT chat_id FROM planner_prompt_queue ORDER BY chat_id').all() as { chat_id: string }[]
+  ).map((r) => r.chat_id);
 }

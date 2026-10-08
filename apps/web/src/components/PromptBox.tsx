@@ -228,6 +228,13 @@ interface Props {
   /** Stops the in-flight turn. Only meaningful (and only rendered) while `busy`. */
   onInterrupt?: () => void;
   /**
+   * PA-122: while `busy`, also offer Send — beside Stop, not instead of it —
+   * because this surface queues a message sent mid-turn (the Pocket Agent
+   * chat delivers it after the current step). Callers whose agent cannot
+   * take a message mid-turn leave it off and keep the plain Stop button.
+   */
+  queueWhileBusy?: boolean;
+  /**
    * Scoped prompt history storage key (PA-119).
    * - Planner agent passes `plannerPromptHistoryKey()` (global).
    * - Code agent passes `codePromptHistoryKey(session.cwd)` (per-workspace).
@@ -301,6 +308,7 @@ export function PromptBox({
   thinking = true,
   onToggleThinking,
   busy = false,
+  queueWhileBusy = false,
   onInterrupt,
   historyKey,
 }: Props): JSX.Element {
@@ -1090,6 +1098,18 @@ export function PromptBox({
               actually looking at while typing the next thing). `text.length`
               never gates this in the busy state: stopping shouldn't require
               having typed anything. */}
+          {busy && queueWhileBusy && (text.trim().length > 0 || attachedImage) && (
+            <button
+              type="button"
+              className="primary queue"
+              onClick={send}
+              disabled={disabled || text.length > LIMITS.maxInputChars}
+              aria-label="Send after the current step"
+              title="Send after the current step — the agent reads it before its next move"
+            >
+              <Icon name="arrow-up" size={18} />
+            </button>
+          )}
           <button
             type="button"
             className={busy ? 'primary stop' : 'primary'}

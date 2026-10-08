@@ -1012,7 +1012,7 @@ The loop was compared against pi's (`earendil-works/pi`), and the gaps closed he
 silent failures: a long chat overflowed the model's window and then failed every turn, a
 malformed tool call ran with `{}`, a dead stream held the turn forever, a backgrounded process
 hung `bash` past its timeout. Steering while busy, prompt caching, cost tracking and image
-budgeting were deliberately left for PA-122.
+budgeting were deliberately left for PA-122 (below).
 
 **Context is a token budget, not 20 turns.** Each `planner_models` row may set
 `context_window`/`max_output_tokens`; unset falls back to `KNOWN_MODEL_WINDOWS`
@@ -1093,6 +1093,60 @@ sheet. `list_dir` is new and read-only. `grep_files`/`find_files` use ripgrep/fd
 `PATH` (`.gitignore`-aware) and grep/find otherwise. A batch of two or more calls that are all in
 `PARALLEL_SAFE_TOOLS` runs concurrently with results persisted in the model's order; any batch with
 anything else in it is sequential exactly as before, so the approval pause is untouched.
+
+### The Pocket Agent loop, continued: steering, caching, cost, images (PA-122)
+
+**A message sent mid-turn is queued, not refused.** `POST /api/planner/chats/:id/queue` writes a
+`planner_prompt_queue` row, and the message is delivered at the next safe point: after the
+running turn's current tool batch (`deliverQueuedPrompts`, called only where `processToolCalls`
+hands back to `driveLoop`, so it can never land between a `tool_use` and its result), or — if
+the model finishes first — as the next turn. It is the human-prompt queue's rules again: never
+silent (every change is a `prompt_queue` snapshot to observers, never persisted), never lost (a
+row, so a forced restart delivers it at boot via `resumeQueuedPrompts`), always cancellable
+(`DELETE …/queue/:promptId`). `POST …/messages` **still answers 409** for a busy chat: cron,
+webhooks and MCP rely on that, and steering is for the person at the chat — the web page and
+Telegram queue, nothing unattended does. Queueing while a turn is parked on an approval is
+allowed and answers nothing; the message waits behind the approval. Interrupt keeps the queue
+(it becomes the next turn); `/clear` and deleting the chat discard it.
+
+`drainNext` is the one "the chat just went idle" step every path calls, and its order is the
+design: the person's queue first, then the subagent mailbox, which is still delivered only at
+idle (a wake turn is never steered into). A steer that lands in a *wake* turn makes it the
+person's — `activeWakeTurns` cleared, a human's spawn budget restored. `busyWithPlannerLoop`
+counts a queued message as planner work, so Gemini Live cannot take the chat in the instant
+before the follow-up starts; while live, typed text goes to Gemini and the queue route refuses.
+`queueDrainInProgress` is load-bearing: a follow-up that fails its preconditions would otherwise
+restart itself synchronously from its own `finally`. Such a queue is marked stalled and left
+visible rather than retried; a new message, a cancel or the next turn clears it. Telegram keeps
+one relay per chat until `whenIdle` fires, rather than one per turn, or the follow-up's reply
+would reach nobody — and one, so a steer and its turn are not forwarded twice.
+
+**Prompt caching** (`prompt-cache.ts`). `parseUsage` reads the cache from every usage shape —
+`prompt_tokens_details.cached_tokens`, Anthropic-style `cache_read_input_tokens` /
+`cache_creation_input_tokens` (normalised when a proxy left them out of `prompt_tokens`), and a
+reported `usage.cost` — so the footer's "(N cached)" works for OpenAI and DeepSeek with no
+markers at all. Markers are per model (`planner_models.prompt_caching`, null = on for Claude
+ids), because a strict OpenAI-compatible server 400s on `cache_control`; a refusal is one
+notice and the turn continues unmarked. Three breakpoints: the *stable* part of the system
+message, the last tool, the last user/tool message. The ranked memories sit after the first
+breakpoint because they change per turn, and are ranked once per turn (`turnMemories`) so the
+system message is stable across a tool loop.
+
+**Cost** (`cost.ts`). Optional per-model prices, USD per million tokens; a provider-reported
+cost wins. `costUsd` is **null, never 0**, when the model has no input/output price or any
+round trip of the turn reported no usage — an understated figure would read as a fact. The
+prices are an operator's numbers, not a bill, the same caveat a custom Claude provider carries
+the other way. They travel with exports and the Hub's `planner-endpoint` template, which now
+carries every optional model field (`PlannerModelOptionalFields`) instead of id and label only.
+
+**Images** (`image-budget.ts`, both sides). The browser downscales an attachment to at most
+2000×2000 and ~4.5 MB of base64 (`apps/web/src/agent/image-budget.ts`) rather than refusing
+photos over 5 MB — on the client because the server has no image library and `sharp` would be
+a third native dependency. The server applies, to the *built messages* so the transcript keeps
+every image: a text-only model (`plannerModelSupportsImages`, in the protocol package so the
+composer can warn first) gets a one-line note per image; only the newest four images are
+re-sent; one whose header will not parse or is over 8000 px is left out with a note rather
+than failing the request. Unknown models are assumed to see images, as before.
 
 ### Telegram channel (PA-53)
 
@@ -2706,6 +2760,12 @@ These are load-bearing. Several were bugs first.
   only when `request.raw` is not an `http.IncomingMessage`; a real request carrying the header
   falls through to ordinary authentication (asserted). The principal it resolves to is the MCP
   client's, so audit lines say `mcp:<label>`.
+- **A queued Pocket Agent message never answers an approval, and only a person can queue one**
+  (PA-122). A message sent while a turn is parked waits behind the approval and is delivered
+  only after a human answers it; nothing about queueing resolves, denies or dismisses one, and
+  there is still no timeout. `POST …/messages` keeps answering 409 for a busy chat, so no
+  unattended trigger (cron, webhook, MCP) can steer a turn — only the web chat and a paired
+  Telegram chat use the queue. Asserted in `apps/server/tests/planner-pa122.test.ts`.
 - **A Pocket Agent's skill reaches a project tree only by a human's explicit export** (PA-55).
   No planner tool and no MCP tool exports a skill (asserted in `planner-skills.test.ts`), so the
   model's only way into a project is still `write_file` behind the approval gate. The export
