@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import path from 'node:path';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { openSseStream } from './sse.js';
 import {
@@ -58,6 +61,9 @@ import {
   type PlannerToolApprovalRow,
   type PlannerToolListResponse,
   type PlannerWorkspaceListResponse,
+  type PlannerArtifact,
+  type PlannerArtifactsResponse,
+  type DeletePlannerArtifactResponse,
   type TestPlannerEmbeddingResponse,
   type TestPlannerModelResponse,
   type TestPlannerUrlFetchResponse,
@@ -71,7 +77,7 @@ import { PlannerLlmClient, PlannerLlmError } from '../planner/llm-client.js';
 import { PLANNER_TOOLS, postJsonToIntegration } from '../planner/tools.js';
 import { SkillRegistryError, type SkillSummary } from '../planner/skills.js';
 import { auditConfigChange } from './shared.js';
-import { WorkspaceError } from '../workspaces/index.js';
+import { isContained, WorkspaceError } from '../workspaces/index.js';
 import { treeRootOf } from '../git/worktree-paths.js';
 import { createLiveSttClient } from '../voice/live-stt-client.js';
 import { SpokenTextPipeline } from '../voice/spoken-text-pipeline.js';
@@ -129,6 +135,10 @@ function badRequest(reply: FastifyReply, message: string): FastifyReply {
 
 function notFound(reply: FastifyReply, message: string): FastifyReply {
   return reply.code(404).send({ error: { code: 'not_found', message } });
+}
+
+function forbidden(reply: FastifyReply, message: string): FastifyReply {
+  return reply.code(403).send({ error: { code: 'forbidden', message } });
 }
 
 function noStore(reply: FastifyReply): FastifyReply {
@@ -1718,5 +1728,218 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     }
     const generator = app.pocket.plannerChats.resolveApproval(id, approvalId, parsed.data.decision);
     await streamPlannerEvents(request, reply, generator);
+  });
+
+  // ---- Artifacts (PA-128) ---------------------------------------------------
+
+  function mimeTypeForArtifact(filename: string): string {
+    const ext = path.extname(filename).toLowerCase();
+    switch (ext) {
+      case '.html':
+      case '.htm':
+        return 'text/html; charset=utf-8';
+      case '.md':
+      case '.markdown':
+        return 'text/markdown; charset=utf-8';
+      case '.txt':
+      case '.log':
+        return 'text/plain; charset=utf-8';
+      case '.json':
+        return 'application/json; charset=utf-8';
+      case '.csv':
+        return 'text/csv; charset=utf-8';
+      case '.pdf':
+        return 'application/pdf';
+      case '.png':
+        return 'image/png';
+      case '.jpg':
+      case '.jpeg':
+        return 'image/jpeg';
+      case '.gif':
+        return 'image/gif';
+      case '.svg':
+        return 'image/svg+xml';
+      case '.webp':
+        return 'image/webp';
+      case '.xml':
+        return 'application/xml; charset=utf-8';
+      case '.yaml':
+      case '.yml':
+        return 'text/yaml; charset=utf-8';
+      case '.css':
+        return 'text/css; charset=utf-8';
+      case '.js':
+        return 'text/javascript; charset=utf-8';
+      case '.ts':
+        return 'text/plain; charset=utf-8';
+      default:
+        return 'application/octet-stream';
+    }
+  }
+
+  async function listArtifactFiles(artifactsDir: string): Promise<PlannerArtifact[]> {
+    const results: PlannerArtifact[] = [];
+    async function walk(currentDir: string, relativeDir: string) {
+      let entries: fs.Dirent[];
+      try {
+        entries = await fsPromises.readdir(currentDir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue; // ignore hidden files
+        const fullPath = path.join(currentDir, entry.name);
+        const relPath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          await walk(fullPath, relPath);
+        } else if (entry.isFile()) {
+          try {
+            const stat = await fsPromises.stat(fullPath);
+            results.push({
+              name: relPath,
+              size: stat.size,
+              modifiedAt: Math.round(stat.mtimeMs),
+            });
+          } catch {
+            // ignore unreadable
+          }
+        }
+      }
+    }
+    await walk(artifactsDir, '');
+    results.sort((a, b) => b.modifiedAt - a.modifiedAt);
+    return results;
+  }
+
+  function resolveArtifactPath(artifactsDir: string, requestedName: string): string | null {
+    const trimmed = requestedName.trim();
+    if (!trimmed || trimmed.includes('\0')) return null;
+    const target = path.resolve(artifactsDir, trimmed);
+    if (!isContained(artifactsDir, target) || target === artifactsDir) {
+      return null;
+    }
+    return target;
+  }
+
+  function artifactsDirForWorkspace(workspaceId: string): string | null {
+    const ws = workspaceId === 'default'
+      ? app.pocket.plannerWorkspaces.getDefault()
+      : app.pocket.plannerWorkspaces.get(workspaceId);
+    if (!ws) return null;
+    return path.join(ws.path, 'artifacts');
+  }
+
+  function artifactsDirForChat(chatId: string): string | null {
+    const chat = app.pocket.plannerChats.get(chatId);
+    if (!chat) return null;
+    const ws = chat.workspaceId ? app.pocket.plannerWorkspaces.get(chat.workspaceId) : undefined;
+    const workspace = ws ?? app.pocket.plannerWorkspaces.getDefault();
+    if (!workspace) return null;
+    return path.join(workspace.path, 'artifacts');
+  }
+
+  async function handleServeArtifactFile(
+    artifactsDir: string,
+    query: { name?: string; download?: string },
+    reply: FastifyReply,
+  ) {
+    const name = query.name;
+    if (!name) return badRequest(reply, 'Missing required name query parameter.');
+    const filePath = resolveArtifactPath(artifactsDir, name);
+    if (!filePath) return forbidden(reply, 'Invalid or forbidden artifact path.');
+    let stat: fs.Stats;
+    try {
+      stat = await fsPromises.stat(filePath);
+    } catch {
+      return notFound(reply, 'Artifact not found.');
+    }
+    if (!stat.isFile()) return badRequest(reply, 'Requested path is not a file.');
+
+    const mimeType = mimeTypeForArtifact(name);
+    const isDownload = query.download === '1' || query.download === 'true' || mimeType === 'application/octet-stream';
+    const dispositionType = isDownload ? 'attachment' : 'inline';
+    const filename = path.basename(filePath);
+
+    reply.header('Content-Type', mimeType);
+    reply.header('Content-Length', stat.size);
+    reply.header('Content-Disposition', `${dispositionType}; filename="${encodeURIComponent(filename)}"`);
+
+    const stream = fs.createReadStream(filePath);
+    return reply.send(stream);
+  }
+
+  async function handleDeleteArtifactFile(
+    artifactsDir: string,
+    query: { name?: string },
+    reply: FastifyReply,
+  ) {
+    const name = query.name;
+    if (!name) return badRequest(reply, 'Missing required name query parameter.');
+    const filePath = resolveArtifactPath(artifactsDir, name);
+    if (!filePath) return forbidden(reply, 'Invalid or forbidden artifact path.');
+    try {
+      const stat = await fsPromises.stat(filePath);
+      if (!stat.isFile()) return badRequest(reply, 'Requested path is not a file.');
+      await fsPromises.unlink(filePath);
+      const response: DeletePlannerArtifactResponse = { ok: true };
+      return response;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return notFound(reply, 'Artifact not found.');
+      }
+      return badRequest(reply, `Could not delete artifact: ${(err as Error).message}`);
+    }
+  }
+
+  app.get('/api/planner/workspaces/:id/artifacts', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const artifactsDir = artifactsDirForWorkspace(id);
+    if (!artifactsDir) return notFound(reply, 'Workspace not found.');
+    await fsPromises.mkdir(artifactsDir, { recursive: true });
+    const artifacts = await listArtifactFiles(artifactsDir);
+    const response: PlannerArtifactsResponse = { artifacts };
+    return response;
+  });
+
+  app.get('/api/planner/chats/:id/artifacts', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const artifactsDir = artifactsDirForChat(id);
+    if (!artifactsDir) return notFound(reply, 'Chat not found.');
+    await fsPromises.mkdir(artifactsDir, { recursive: true });
+    const artifacts = await listArtifactFiles(artifactsDir);
+    const response: PlannerArtifactsResponse = { artifacts };
+    return response;
+  });
+
+  app.get('/api/planner/workspaces/:id/artifacts/file', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const query = request.query as { name?: string; download?: string };
+    const artifactsDir = artifactsDirForWorkspace(id);
+    if (!artifactsDir) return notFound(reply, 'Workspace not found.');
+    return handleServeArtifactFile(artifactsDir, query, reply);
+  });
+
+  app.get('/api/planner/chats/:id/artifacts/file', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const query = request.query as { name?: string; download?: string };
+    const artifactsDir = artifactsDirForChat(id);
+    if (!artifactsDir) return notFound(reply, 'Chat not found.');
+    return handleServeArtifactFile(artifactsDir, query, reply);
+  });
+
+  app.delete('/api/planner/workspaces/:id/artifacts/file', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const query = request.query as { name?: string };
+    const artifactsDir = artifactsDirForWorkspace(id);
+    if (!artifactsDir) return notFound(reply, 'Workspace not found.');
+    return handleDeleteArtifactFile(artifactsDir, query, reply);
+  });
+
+  app.delete('/api/planner/chats/:id/artifacts/file', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const query = request.query as { name?: string };
+    const artifactsDir = artifactsDirForChat(id);
+    if (!artifactsDir) return notFound(reply, 'Chat not found.');
+    return handleDeleteArtifactFile(artifactsDir, query, reply);
   });
 };

@@ -1169,3 +1169,23 @@ export const CompactPlannerChatResponse = z.object({
 });
 export type CompactPlannerChatResponse = z.infer<typeof CompactPlannerChatResponse>;
 
+/**
+ * PA-128: An artifact file stored inside the workspace `artifacts/` subfolder.
+ */
+export const PlannerArtifact = z.object({
+  name: z.string(),
+  size: z.number().int().nonnegative(),
+  modifiedAt: z.number().int(),
+});
+export type PlannerArtifact = z.infer<typeof PlannerArtifact>;
+
+export const PlannerArtifactsResponse = z.object({
+  artifacts: z.array(PlannerArtifact),
+});
+export type PlannerArtifactsResponse = z.infer<typeof PlannerArtifactsResponse>;
+
+export const DeletePlannerArtifactResponse = z.object({
+  ok: z.literal(true),
+});
+export type DeletePlannerArtifactResponse = z.infer<typeof DeletePlannerArtifactResponse>;
+

@@ -12,10 +12,12 @@ import type {
   QueuedPromptSummary,
   SessionInfo,
   SlashCommandInfo,
+  PlannerArtifact,
 } from '@pocketagent/protocol';
 import { plannerModelSupportsImages } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
+import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { Transcript } from '../components/Transcript.js';
 import { PromptBox } from '../components/PromptBox.js';
 import { plannerPromptHistoryKey } from '../agent/prompt-history.js';
@@ -156,6 +158,50 @@ function eventKey(event: AgentEvent): EventKeyInfo | null {
   return null;
 }
 
+const INLINE_EXTENSIONS = new Set([
+  '.html',
+  '.htm',
+  '.txt',
+  '.text',
+  '.md',
+  '.markdown',
+  '.json',
+  '.csv',
+  '.pdf',
+  '.svg',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+]);
+
+function isViewableInline(filename: string): boolean {
+  const dot = filename.lastIndexOf('.');
+  if (dot === -1) return false;
+  return INLINE_EXTENSIONS.has(filename.slice(dot).toLowerCase());
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatArtifactDate(timestamp: number | string): string {
+  try {
+    const d = new Date(timestamp);
+    return d.toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return String(timestamp);
+  }
+}
+
 /**
  * PA-6: one Pocket Agent chat, rendered as an exact mirror of a structured
  * session's own chat UI — literally the same `Transcript`/`PromptBox`
@@ -201,6 +247,13 @@ export function PlannerChatPage({
   const [plannerSubagents, setPlannerSubagents] = useState<PlannerChat[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // PA-128: Workspace artifacts side panel state
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
+  const [artifacts, setArtifacts] = useState<PlannerArtifact[]>([]);
+  const [artifactsLoading, setArtifactsLoading] = useState(false);
+  const [artifactsError, setArtifactsError] = useState<string | null>(null);
+  const [pendingDeleteArtifact, setPendingDeleteArtifact] = useState<PlannerArtifact | null>(null);
+  const [deletingArtifact, setDeletingArtifact] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [geminiLiveActive, setGeminiLiveActive] = useState(false);
   const [pipelineLiveActive, setPipelineLiveActive] = useState(false);
@@ -378,6 +431,79 @@ export function PlannerChatPage({
       // ignore
     }
   }, [chatId]);
+
+  const refreshArtifacts = useCallback(async () => {
+    setArtifactsLoading(true);
+    setArtifactsError(null);
+    try {
+      const res = await api.listPlannerChatArtifacts(chatId);
+      setArtifacts(res.artifacts);
+    } catch (err) {
+      setArtifactsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setArtifactsLoading(false);
+    }
+  }, [api, chatId]);
+
+  useEffect(() => {
+    if (artifactsOpen) {
+      void refreshArtifacts();
+    }
+  }, [artifactsOpen, refreshArtifacts]);
+
+  // Pre-fetch artifacts count for badge even when panel is closed
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .listPlannerChatArtifacts(chatId)
+      .then((res) => {
+        if (!cancelled) setArtifacts(res.artifacts);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [api, chatId]);
+
+  const toggleArtifacts = useCallback(() => {
+    setArtifactsOpen((prev) => !prev);
+  }, []);
+
+  const handleOpenArtifact = useCallback(
+    (artifact: PlannerArtifact) => {
+      const inline = isViewableInline(artifact.name);
+      const url = api.plannerChatArtifactFileUrl(chatId, artifact.name, !inline);
+      window.open(url, '_blank', 'noopener,noreferrer');
+    },
+    [api, chatId],
+  );
+
+  const handleDownloadArtifact = useCallback(
+    (artifact: PlannerArtifact) => {
+      const url = api.plannerChatArtifactFileUrl(chatId, artifact.name, true);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = artifact.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    },
+    [api, chatId],
+  );
+
+  const handleDeleteArtifact = useCallback(async () => {
+    if (!pendingDeleteArtifact) return;
+    setDeletingArtifact(true);
+    try {
+      await api.deletePlannerChatArtifact(chatId, pendingDeleteArtifact.name);
+      setPendingDeleteArtifact(null);
+      await refreshArtifacts();
+    } catch (err) {
+      setArtifactsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeletingArtifact(false);
+    }
+  }, [api, chatId, pendingDeleteArtifact, refreshArtifacts]);
 
   const removeCodingSubagent = async (subagent: SessionInfo, e: React.MouseEvent): Promise<void> => {
     e.preventDefault();
@@ -583,6 +709,7 @@ export function PlannerChatPage({
         setSending(false);
         setChat((prev) => (prev ? { ...prev, busy: false } : null));
         void refreshSubagents();
+        void refreshArtifacts();
         void (async () => {
           try {
             const { chats } = await api.listPlannerChats();
@@ -594,7 +721,7 @@ export function PlannerChatPage({
         })();
       }
     },
-    [chatId, refreshSubagents, isEventSeen, markEventSeen],
+    [chatId, refreshSubagents, refreshArtifacts, isEventSeen, markEventSeen],
   );
 
   useEffect(() => {
@@ -834,6 +961,7 @@ export function PlannerChatPage({
         }
         setSending(false);
         void refreshSubagents();
+        void refreshArtifacts();
       }
     })();
     return true;
@@ -1093,6 +1221,7 @@ export function PlannerChatPage({
       } finally {
         setSending(false);
         void refreshSubagents();
+        void refreshArtifacts();
       }
     })();
   };
@@ -1153,6 +1282,19 @@ export function PlannerChatPage({
             </button>
             <button
               type="button"
+              className={`planner-btn planner-artifacts-toggle${artifactsOpen ? ' active' : ''}`}
+              onClick={toggleArtifacts}
+              aria-label={artifactsOpen ? 'Close artifacts side panel' : 'Open artifacts side panel'}
+              title="Artifacts generated in this workspace"
+            >
+              <Icon name="file" size={14} />
+              <span>Artifacts</span>
+              {artifacts.length > 0 && (
+                <span className="planner-artifacts-count">{artifacts.length}</span>
+              )}
+            </button>
+            <button
+              type="button"
               className={`planner-btn gemini-live-toggle${geminiLive ? ' active' : ''}${!isGeminiConfigured ? ' disabled' : ''}`}
               disabled={!isGeminiConfigured}
               onClick={() => handleToggleGeminiLive(!geminiLiveActive)}
@@ -1183,7 +1325,9 @@ export function PlannerChatPage({
         )}
       </div>
 
-      {chat?.parentChatId && (
+      <div className="planner-chat-body">
+        <div className="planner-chat-main">
+          {chat?.parentChatId && (
         <div className="planner-parent-chat-banner" role="status">
           <Icon name="agent-generic" size={13} />
           <span>Spawned as a subagent by</span>
@@ -1584,6 +1728,117 @@ export function PlannerChatPage({
         queueWhileBusy={!geminiLive}
         onInterrupt={handleInterrupt}
       />
+        </div>
+
+        {artifactsOpen && (
+          <aside className="planner-artifacts-panel" aria-label="Workspace artifacts side panel">
+            <div className="planner-artifacts-header">
+              <div className="planner-artifacts-title">
+                <Icon name="file" size={15} />
+                <span>Artifacts</span>
+                <span className="planner-artifacts-badge">{artifacts.length}</span>
+              </div>
+              <div className="planner-artifacts-actions">
+                <button
+                  type="button"
+                  className="planner-artifact-btn"
+                  onClick={() => void refreshArtifacts()}
+                  disabled={artifactsLoading}
+                  aria-label="Refresh artifacts list"
+                  title="Refresh artifacts"
+                >
+                  <Icon name="rotate" size={14} />
+                </button>
+                <button
+                  type="button"
+                  className="planner-artifact-btn"
+                  onClick={() => setArtifactsOpen(false)}
+                  aria-label="Close artifacts panel"
+                  title="Close panel"
+                >
+                  <Icon name="close" size={14} />
+                </button>
+              </div>
+            </div>
+
+            {artifactsError && (
+              <div className="planner-artifacts-error" role="alert">
+                {artifactsError}
+              </div>
+            )}
+
+            {artifactsLoading && artifacts.length === 0 ? (
+              <div className="planner-artifacts-loading">Loading artifacts…</div>
+            ) : artifacts.length === 0 ? (
+              <div className="planner-artifacts-empty">
+                <Icon name="folder" size={32} />
+                <p className="planner-artifacts-empty-title">No artifacts yet</p>
+                <p className="planner-artifacts-empty-desc">
+                  Files and plans created by the agent in <code>artifacts/</code> will appear here.
+                </p>
+              </div>
+            ) : (
+              <ul className="planner-artifacts-list">
+                {artifacts.map((artifact) => {
+                  const inline = isViewableInline(artifact.name);
+                  return (
+                    <li key={artifact.name} className="planner-artifact-item">
+                      <button
+                        type="button"
+                        className="planner-artifact-main"
+                        onClick={() => handleOpenArtifact(artifact)}
+                        title={inline ? `Open ${artifact.name} in new tab` : `Download ${artifact.name}`}
+                      >
+                        <span className="planner-artifact-icon">
+                          <Icon name={inline ? 'file' : 'download'} size={15} />
+                        </span>
+                        <span className="planner-artifact-info">
+                          <span className="planner-artifact-name">{artifact.name}</span>
+                          <span className="planner-artifact-meta">
+                            {formatFileSize(artifact.size)} · {formatArtifactDate(artifact.modifiedAt)}
+                          </span>
+                        </span>
+                      </button>
+                      <div className="planner-artifact-item-actions">
+                        <button
+                          type="button"
+                          className="planner-artifact-btn"
+                          onClick={() => handleDownloadArtifact(artifact)}
+                          aria-label={`Download ${artifact.name}`}
+                          title="Download file"
+                        >
+                          <Icon name="download" size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          className="planner-artifact-btn danger"
+                          onClick={() => setPendingDeleteArtifact(artifact)}
+                          aria-label={`Delete ${artifact.name}`}
+                          title="Delete file"
+                        >
+                          <Icon name="trash" size={14} />
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </aside>
+        )}
+      </div>
+
+      {pendingDeleteArtifact && (
+        <ConfirmDialog
+          title="Delete artifact?"
+          body={`Are you sure you want to delete "${pendingDeleteArtifact.name}"? This cannot be undone.`}
+          confirmLabel={deletingArtifact ? 'Deleting…' : 'Delete'}
+          danger={true}
+          busy={deletingArtifact}
+          onConfirm={() => void handleDeleteArtifact()}
+          onCancel={() => setPendingDeleteArtifact(null)}
+        />
+      )}
     </div>
   );
 }

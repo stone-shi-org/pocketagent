@@ -701,7 +701,8 @@ function isWithinTrustedRoot(deps: PlannerToolDeps, real: string): boolean {
  * reject.
  */
 async function resolveExistingPathWithin(deps: PlannerToolDeps, requested: string): Promise<string> {
-  const absolute = path.resolve(requested);
+  const base = deps.workspacePath ?? process.cwd();
+  const absolute = path.isAbsolute(requested) ? path.resolve(requested) : path.resolve(base, requested);
   let real: string;
   try {
     real = await fs.realpath(absolute);
@@ -748,7 +749,8 @@ async function resolveExecutionCwd(deps: PlannerToolDeps, requestedCwd?: string)
  * worktree path.
  */
 async function resolveCreatablePath(deps: PlannerToolDeps, requested: string): Promise<string> {
-  const absolute = path.resolve(requested);
+  const base = deps.workspacePath ?? process.cwd();
+  const absolute = path.isAbsolute(requested) ? path.resolve(requested) : path.resolve(base, requested);
   let probe = absolute;
   let real: string | null = null;
   while (real === null) {
@@ -1749,7 +1751,8 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
           isError: true,
         };
       }
-      const absolute = path.resolve(requested);
+      const base = deps.workspacePath ?? process.cwd();
+      const absolute = path.isAbsolute(requested) ? path.resolve(requested) : path.resolve(base, requested);
       const parent = path.dirname(absolute);
       let realParent: string;
       try {

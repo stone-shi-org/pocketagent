@@ -125,6 +125,7 @@ export class PlannerWorkspaceRegistry {
     if (this.store.isSeeded()) return;
     const defaultPath = path.join(root, 'default');
     await fs.mkdir(defaultPath, { recursive: true });
+    await fs.mkdir(path.join(defaultPath, 'artifacts'), { recursive: true });
     const real = await fs.realpath(defaultPath);
     const row: PlannerWorkspaceRow = {
       id: crypto.randomUUID(),
@@ -191,6 +192,7 @@ export class PlannerWorkspaceRegistry {
       await fs.mkdir(dirPath, { recursive: true });
       real = await fs.realpath(dirPath);
     }
+    await fs.mkdir(path.join(real, 'artifacts'), { recursive: true });
 
     const row: PlannerWorkspaceRow = {
       id: crypto.randomUUID(),
