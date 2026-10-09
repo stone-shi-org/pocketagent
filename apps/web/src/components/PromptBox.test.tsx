@@ -446,5 +446,89 @@ describe('PromptBox PA-119 up/down arrow keys command history', () => {
   });
 });
 
+describe('PromptBox mobile two-line layout and mode handling (PA-123)', () => {
+  it('renders top input row with textarea and bottom tools row with left and right clusters', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+
+    const html = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-test-pa123-layout"
+        onSend={() => true}
+        disabled={false}
+        supportsImageAttachment={true}
+        supportsVoiceInput={true}
+        onTranscribeVoice={async () => 'transcribed'}
+        models={[{ value: 'test-model', displayName: 'Test Model', description: '', supportsEffort: false, supportedEffortLevels: [] }]}
+        currentModel="test-model"
+        thinking={true}
+        onToggleThinking={() => {}}
+      />,
+    );
+
+    // Promptbar input row exists and contains textarea
+    expect(html).toContain('class="promptbar-input-row"');
+    const inputRowIdx = html.indexOf('class="promptbar-input-row"');
+    const textareaIdx = html.indexOf('<textarea');
+    expect(textareaIdx).toBeGreaterThan(inputRowIdx);
+
+    // Promptbar tools row exists and contains left and right clusters
+    expect(html).toContain('class="promptbar-tools-row"');
+    expect(html).toContain('class="promptbar-tools-left"');
+    expect(html).toContain('class="promptbar-tools-right"');
+
+    const toolsRowIdx = html.indexOf('class="promptbar-tools-row"');
+    const toolsLeftIdx = html.indexOf('class="promptbar-tools-left"');
+    const toolsRightIdx = html.indexOf('class="promptbar-tools-right"');
+
+    // Input row precedes tools row in DOM
+    expect(inputRowIdx).toBeLessThan(toolsRowIdx);
+    expect(toolsRowIdx).toBeLessThan(toolsLeftIdx);
+    expect(toolsLeftIdx).toBeLessThan(toolsRightIdx);
+
+    // Left cluster contains AttachButton and MicButton
+    const attachIdx = html.indexOf('class="attach-btn"');
+    const micIdx = html.indexOf('class="mic-btn"');
+    expect(attachIdx).toBeGreaterThan(toolsLeftIdx);
+    expect(attachIdx).toBeLessThan(toolsRightIdx);
+    expect(micIdx).toBeGreaterThan(toolsLeftIdx);
+    expect(micIdx).toBeLessThan(toolsRightIdx);
+
+    // Right cluster contains model chip, thinking chip, and send button
+    const modelIdx = html.indexOf('class="model-chip"');
+    const thinkIdx = html.indexOf('class="thinking-chip on"');
+    const sendIdx = html.indexOf('class="primary"');
+    expect(modelIdx).toBeGreaterThan(toolsRightIdx);
+    expect(thinkIdx).toBeGreaterThan(toolsRightIdx);
+    expect(sendIdx).toBeGreaterThan(toolsRightIdx);
+  });
+
+  it('renders live-listen indicator in tools-left cluster during active live stream mode', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+
+    const html = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-test-pa123-livestream"
+        onSend={() => true}
+        disabled={false}
+        supportsImageAttachment={true}
+        supportsLiveListen={true}
+        liveListenActive={true}
+        onSetLiveListen={() => {}}
+      />,
+    );
+
+    // Top input row contains textarea while live streaming is active
+    expect(html).toContain('class="promptbar-input-row"');
+    expect(html).toContain('<textarea');
+
+    // Bottom tools-left contains live-listen-indicator
+    const toolsLeftIdx = html.indexOf('class="promptbar-tools-left"');
+    const indicatorIdx = html.indexOf('class="live-listen-indicator"');
+    expect(indicatorIdx).toBeGreaterThan(toolsLeftIdx);
+  });
+});
+
 
 

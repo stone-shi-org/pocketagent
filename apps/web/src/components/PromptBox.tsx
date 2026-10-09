@@ -742,7 +742,7 @@ export function PromptBox({
   }
 
   return (
-    <div className={isVoiceRecording ? 'promptbar recording' : 'promptbar'}>
+    <div className={isVoiceRecording ? 'promptbar recording' : isTranscribing ? 'promptbar transcribing' : 'promptbar'}>
       {micPickerOpen && (
         <MicPicker
           devices={audioDevices}
@@ -872,259 +872,260 @@ export function PromptBox({
           )}
         </div>
       )}
-      {/* PA-91: keep the attach trigger mounted (disabled) while recording
-          or transcribing so the mic button immediately beside it does not jump
-          under the user's held finger or pointer. */}
-      {supportsImageAttachment && (
-        <AttachButton
-          inputRef={fileInputRef}
-          onFile={(file) => void attach(file)}
-          disabled={disabled || isVoiceRecording || isTranscribing}
-        />
-      )}
-      {/*
-        PA-20 & PA-97: live stream component consolidated as a unified capsule
-        taking the left part of the prompt box, perfectly aligned with the buttons
-        and textarea baseline (no fragmented controls or sandwiched attach button).
-        The broadcast icon button at the front acts as the active toggle to turn off.
-      */}
-      {!isVoiceRecording && !isTranscribing && supportsLiveListen && onSetLiveListen && liveListenActive && (
-        <div className="live-listen-indicator" role="status" aria-live="polite">
-          <button
-            type="button"
-            className="live-listen-btn active"
-            onClick={() => onSetLiveListen(false)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setMicPickerOpen((v) => !v);
-            }}
-            disabled={disabled}
-            aria-pressed={true}
-            aria-label="Turn off live listening"
-            title="Turn off live listening"
-          >
-            <Icon name="live-listen" size={17} />
-          </button>
-          {isSpeaking ? (
-            // PA-83 #4: while the reply is actually being read aloud, this
-            // replaces the meter with a dedicated stop control — "otherwise
-            // it talks very long" was the ticket's own complaint, and
-            // waiting to detect the user's own speech (barge-in) is not the
-            // only way to want it to stop.
-            <>
-              <span className="live-listen-status">Speaking…</span>
-              {onStopSpeaking && (
-                <button
-                  type="button"
-                  className="live-listen-stop-btn"
-                  onClick={onStopSpeaking}
-                  aria-label="Stop speaking"
-                  title="Stop speaking"
-                >
-                  <Icon name="stop" size={13} />
-                  <span>Stop</span>
-                </button>
-              )}
-            </>
-          ) : (
-            <>
-              <span className="live-listen-status">Listening…</span>
-              <span className="live-listen-meter" aria-hidden="true">
-                <span
-                  className="live-listen-meter-fill"
-                  style={{ transform: `scaleX(${Math.min(1, micLevel * 8)})` }}
-                />
-              </span>
-              <button
-                type="button"
-                className="live-listen-mic-btn"
-                onClick={() => setMicPickerOpen((v) => !v)}
-                title={`Microphone: ${currentMicLabel}. Click to switch.`}
-                aria-label={`Microphone: ${currentMicLabel}. Click to switch.`}
-              >
-                <Icon name="mic" size={12} />
-                <span className="live-listen-mic-name">{currentMicLabel}</span>
-                <Icon name="chevron-down" size={10} />
-              </button>
-            </>
-          )}
-          {/* PA-85: why the harness just ignored or parked something. Inside
-              the indicator rather than in the error row above, because it is
-              a normal outcome of listening, not a fault — and the indicator
-              is the one element guaranteed to be on screen whenever
-              live-listen is on. */}
-          {liveListenNotice && <span className="live-listen-notice">{liveListenNotice}</span>}
-        </div>
-      )}
-      {supportsVoiceInput && onTranscribeVoice && !liveListenActive && (
-        <div className="mic-control-group">
-          <MicButton
-            key="mic-btn"
-            ref={micButtonRef}
-            onRecorded={(utterance) => void handleVoiceRecorded(utterance)}
-            onError={setVoiceError}
-            onRecordingChange={setIsVoiceRecording}
-            onLevel={setVoiceLevel}
-            onOverDiscardChange={setIsOverDiscard}
-            disabled={disabled || isTranscribing}
-            deviceId={selectedMicDeviceId}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setMicPickerOpen((v) => !v);
-            }}
-          />
-          <button
-            type="button"
-            className="mic-select-btn"
-            onClick={() => setMicPickerOpen((v) => !v)}
-            disabled={disabled || isVoiceRecording || isTranscribing}
-            aria-label={`Microphone: ${currentMicLabel}. Choose microphone.`}
-            title={`Microphone: ${currentMicLabel}. Choose microphone.`}
-          >
-            <Icon name="chevron-down" size={10} />
-          </button>
-        </div>
-      )}
       {isVoiceRecording ? (
-        <div className="promptbar-recording" role="status" aria-label="Recording audio">
-          <span className="promptbar-recording-time">{formatElapsed(elapsedSeconds)}</span>
-          <div
-            className="promptbar-wave"
-            aria-hidden="true"
-            title="Click to finish recording"
-            onClick={() => void micButtonRef.current?.stop()}
-          >
-            {WAVE_BAR_PROFILES.map((profile, index) => (
-              <span
-                key={index}
-                className="promptbar-wave-bar"
-                style={{
-                  transform: `scaleY(${Math.min(1, Math.max(0.14, (voiceLevel * 7 + 0.12) * profile))})`,
-                }}
-              />
-            ))}
+        <>
+          {supportsImageAttachment && (
+            <AttachButton
+              inputRef={fileInputRef}
+              onFile={(file) => void attach(file)}
+              disabled={true}
+            />
+          )}
+          <div className="promptbar-recording" role="status" aria-label="Recording audio">
+            <span className="promptbar-recording-time">{formatElapsed(elapsedSeconds)}</span>
+            <div
+              className="promptbar-wave"
+              aria-hidden="true"
+              title="Click to finish recording"
+              onClick={() => void micButtonRef.current?.stop()}
+            >
+              {WAVE_BAR_PROFILES.map((profile, index) => (
+                <span
+                  key={index}
+                  className="promptbar-wave-bar"
+                  style={{
+                    transform: `scaleY(${Math.min(1, Math.max(0.14, (voiceLevel * 7 + 0.12) * profile))})`,
+                  }}
+                />
+              ))}
+            </div>
+            <button
+              type="button"
+              className={isOverDiscard ? 'voice-discard-btn hovered' : 'voice-discard-btn'}
+              onClick={() => void micButtonRef.current?.cancel()}
+              aria-label="Cancel recording (discard)"
+              title="Cancel recording (discard)"
+            >
+              <Icon name="stop" size={15} />
+            </button>
           </div>
-          <button
-            type="button"
-            className={isOverDiscard ? 'voice-discard-btn hovered' : 'voice-discard-btn'}
-            onClick={() => void micButtonRef.current?.cancel()}
-            aria-label="Cancel recording (discard)"
-            title="Cancel recording (discard)"
-          >
-            <Icon name="stop" size={15} />
-          </button>
-        </div>
+        </>
       ) : isTranscribing ? (
-        <div className="promptbar-transcribing" role="status" aria-live="polite">
-          <span className="live-listen-dot" aria-hidden="true" />
-          <span>Transcribing voice…</span>
-        </div>
+        <>
+          {supportsImageAttachment && (
+            <AttachButton
+              inputRef={fileInputRef}
+              onFile={(file) => void attach(file)}
+              disabled={true}
+            />
+          )}
+          <div className="promptbar-transcribing" role="status" aria-live="polite">
+            <span className="live-listen-dot" aria-hidden="true" />
+            <span>Transcribing voice…</span>
+          </div>
+        </>
       ) : (
         <>
-          {supportsLiveListen && onSetLiveListen && !liveListenActive && (
-            <button
-              type="button"
-              className="live-listen-btn"
-              onClick={() => onSetLiveListen(true)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setMicPickerOpen((v) => !v);
+          <div className="promptbar-input-row">
+            <textarea
+              ref={ref}
+              value={text}
+              onChange={(e) => {
+                setText(e.target.value);
+                setDismissed(false);
+                setModelPickerOpen(false);
+                historyIndexRef.current = -1;
               }}
-              disabled={disabled}
-              aria-pressed={false}
-              aria-label="Turn on live listening (hands-free)"
-            >
-              <Icon name="live-listen" size={19} />
-            </button>
-          )}
-          <textarea
-            ref={ref}
-            value={text}
-            onChange={(e) => {
-              setText(e.target.value);
-              setDismissed(false);
-              setModelPickerOpen(false);
-              historyIndexRef.current = -1;
-            }}
-            onKeyDown={onKeyDown}
-            onPaste={supportsImageAttachment ? onPaste : undefined}
-            placeholder="Type a prompt…"
-            rows={1}
-            aria-label="Prompt"
-            enterKeyHint="enter"
-          />
-          {models.length > 0 && (
-            <button
-              type="button"
-              className="model-chip"
-              onClick={() => setModelPickerOpen((v) => !v)}
-              disabled={disabled}
-              aria-haspopup="listbox"
-              aria-expanded={modelPickerOpen}
-              aria-label={`Model: ${currentModelLabel ?? 'unknown'}. Choose a different model.`}
-              ref={modelChipRef}
-            >
-              <span>{currentModelLabel ?? '…'}</span>
-              <Icon name="chevron-down" size={14} />
-            </button>
-          )}
-          {onToggleThinking && (
-            <button
-              type="button"
-              className={`thinking-chip${thinking === false ? ' off' : ' on'}`}
-              onClick={onToggleThinking}
-              disabled={disabled}
-              aria-pressed={thinking !== false}
-              aria-label={thinking === false ? 'Thinking is off. Click to turn thinking on.' : 'Thinking is on. Click to turn thinking off.'}
-              title={thinking === false ? 'Thinking: Off (click to turn on)' : `Thinking: On${effort ? ` (${effortLabel(effort)})` : ''} (click to turn off)`}
-            >
-              <Icon name="brain" size={14} />
-              <span>{thinking === false ? 'Think Off' : effort ? effortLabel(effort) : 'Think On'}</span>
-            </button>
-          )}
-          {text.length > 500 && (
-            <span
-              className={`char-counter${text.length > LIMITS.maxInputChars ? ' limit-exceeded' : text.length > LIMITS.maxInputChars * 0.9 ? ' limit-warning' : ''}`}
-              aria-label={`${text.length} of ${LIMITS.maxInputChars} characters`}
-            >
-              {text.length > LIMITS.maxInputChars
-                ? `${(text.length - LIMITS.maxInputChars).toLocaleString()} over limit`
-                : `${text.length.toLocaleString()} / ${LIMITS.maxInputChars.toLocaleString()}`}
-            </span>
-          )}
-          {/* Stop, not send, while a turn is in flight — one control instead of a
-              separate "Stop generating" chip elsewhere on the page (it used to
-              live in `.agent-strip`, disconnected from the box the user is
-              actually looking at while typing the next thing). `text.length`
-              never gates this in the busy state: stopping shouldn't require
-              having typed anything. */}
-          {busy && queueWhileBusy && (text.trim().length > 0 || attachedImage) && (
-            <button
-              type="button"
-              className="primary queue"
-              onClick={send}
-              disabled={disabled || text.length > LIMITS.maxInputChars}
-              aria-label="Send after the current step"
-              title="Send after the current step — the agent reads it before its next move"
-            >
-              <Icon name="arrow-up" size={18} />
-            </button>
-          )}
-          <button
-            type="button"
-            className={busy ? 'primary stop' : 'primary'}
-            onClick={busy ? onInterrupt : send}
-            disabled={
-              busy
-                ? disabled
-                : disabled ||
-                  (text.length === 0 && !attachedImage) ||
-                  text.length > LIMITS.maxInputChars
-            }
-            aria-label={busy ? 'Stop generating' : 'Send prompt'}
-          >
-            <Icon name={busy ? 'stop' : 'arrow-up'} size={busy ? 16 : 18} />
-          </button>
+              onKeyDown={onKeyDown}
+              onPaste={supportsImageAttachment ? onPaste : undefined}
+              placeholder="Type a prompt…"
+              rows={1}
+              aria-label="Prompt"
+              enterKeyHint="enter"
+            />
+          </div>
+          <div className="promptbar-tools-row">
+            <div className="promptbar-tools-left">
+              {supportsImageAttachment && (
+                <AttachButton
+                  inputRef={fileInputRef}
+                  onFile={(file) => void attach(file)}
+                  disabled={disabled}
+                />
+              )}
+              {supportsLiveListen && onSetLiveListen && liveListenActive && (
+                <div className="live-listen-indicator" role="status" aria-live="polite">
+                  <button
+                    type="button"
+                    className="live-listen-btn active"
+                    onClick={() => onSetLiveListen(false)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setMicPickerOpen((v) => !v);
+                    }}
+                    disabled={disabled}
+                    aria-pressed={true}
+                    aria-label="Turn off live listening"
+                    title="Turn off live listening"
+                  >
+                    <Icon name="live-listen" size={17} />
+                  </button>
+                  {isSpeaking ? (
+                    <>
+                      <span className="live-listen-status">Speaking…</span>
+                      {onStopSpeaking && (
+                        <button
+                          type="button"
+                          className="live-listen-stop-btn"
+                          onClick={onStopSpeaking}
+                          aria-label="Stop speaking"
+                          title="Stop speaking"
+                        >
+                          <Icon name="stop" size={13} />
+                          <span>Stop</span>
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <span className="live-listen-status">Listening…</span>
+                      <span className="live-listen-meter" aria-hidden="true">
+                        <span
+                          className="live-listen-meter-fill"
+                          style={{ transform: `scaleX(${Math.min(1, micLevel * 8)})` }}
+                        />
+                      </span>
+                      <button
+                        type="button"
+                        className="live-listen-mic-btn"
+                        onClick={() => setMicPickerOpen((v) => !v)}
+                        title={`Microphone: ${currentMicLabel}. Click to switch.`}
+                        aria-label={`Microphone: ${currentMicLabel}. Click to switch.`}
+                      >
+                        <Icon name="mic" size={12} />
+                        <span className="live-listen-mic-name">{currentMicLabel}</span>
+                        <Icon name="chevron-down" size={10} />
+                      </button>
+                    </>
+                  )}
+                  {liveListenNotice && <span className="live-listen-notice">{liveListenNotice}</span>}
+                </div>
+              )}
+              {supportsVoiceInput && onTranscribeVoice && !liveListenActive && (
+                <div className="mic-control-group">
+                  <MicButton
+                    key="mic-btn"
+                    ref={micButtonRef}
+                    onRecorded={(utterance) => void handleVoiceRecorded(utterance)}
+                    onError={setVoiceError}
+                    onRecordingChange={setIsVoiceRecording}
+                    onLevel={setVoiceLevel}
+                    onOverDiscardChange={setIsOverDiscard}
+                    disabled={disabled || isTranscribing}
+                    deviceId={selectedMicDeviceId}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setMicPickerOpen((v) => !v);
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="mic-select-btn"
+                    onClick={() => setMicPickerOpen((v) => !v)}
+                    disabled={disabled || isVoiceRecording || isTranscribing}
+                    aria-label={`Microphone: ${currentMicLabel}. Choose microphone.`}
+                    title={`Microphone: ${currentMicLabel}. Choose microphone.`}
+                  >
+                    <Icon name="chevron-down" size={10} />
+                  </button>
+                </div>
+              )}
+              {supportsLiveListen && onSetLiveListen && !liveListenActive && (
+                <button
+                  type="button"
+                  className="live-listen-btn"
+                  onClick={() => onSetLiveListen(true)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setMicPickerOpen((v) => !v);
+                  }}
+                  disabled={disabled}
+                  aria-pressed={false}
+                  aria-label="Turn on live listening (hands-free)"
+                >
+                  <Icon name="live-listen" size={19} />
+                </button>
+              )}
+            </div>
+            <div className="promptbar-tools-right">
+              {models.length > 0 && (
+                <button
+                  type="button"
+                  className="model-chip"
+                  onClick={() => setModelPickerOpen((v) => !v)}
+                  disabled={disabled}
+                  aria-haspopup="listbox"
+                  aria-expanded={modelPickerOpen}
+                  aria-label={`Model: ${currentModelLabel ?? 'unknown'}. Choose a different model.`}
+                  ref={modelChipRef}
+                >
+                  <span>{currentModelLabel ?? '…'}</span>
+                  <Icon name="chevron-down" size={14} />
+                </button>
+              )}
+              {onToggleThinking && (
+                <button
+                  type="button"
+                  className={`thinking-chip${thinking === false ? ' off' : ' on'}`}
+                  onClick={onToggleThinking}
+                  disabled={disabled}
+                  aria-pressed={thinking !== false}
+                  aria-label={thinking === false ? 'Thinking is off. Click to turn thinking on.' : 'Thinking is on. Click to turn thinking off.'}
+                  title={thinking === false ? 'Thinking: Off (click to turn on)' : `Thinking: On${effort ? ` (${effortLabel(effort)})` : ''} (click to turn off)`}
+                >
+                  <Icon name="brain" size={14} />
+                  <span>{thinking === false ? 'Think Off' : effort ? effortLabel(effort) : 'Think On'}</span>
+                </button>
+              )}
+              {text.length > 500 && (
+                <span
+                  className={`char-counter${text.length > LIMITS.maxInputChars ? ' limit-exceeded' : text.length > LIMITS.maxInputChars * 0.9 ? ' limit-warning' : ''}`}
+                  aria-label={`${text.length} of ${LIMITS.maxInputChars} characters`}
+                >
+                  {text.length > LIMITS.maxInputChars
+                    ? `${(text.length - LIMITS.maxInputChars).toLocaleString()} over limit`
+                    : `${text.length.toLocaleString()} / ${LIMITS.maxInputChars.toLocaleString()}`}
+                </span>
+              )}
+              {busy && queueWhileBusy && (text.trim().length > 0 || attachedImage) && (
+                <button
+                  type="button"
+                  className="primary queue"
+                  onClick={send}
+                  disabled={disabled || text.length > LIMITS.maxInputChars}
+                  aria-label="Send after the current step"
+                  title="Send after the current step — the agent reads it before its next move"
+                >
+                  <Icon name="arrow-up" size={18} />
+                </button>
+              )}
+              <button
+                type="button"
+                className={busy ? 'primary stop' : 'primary'}
+                onClick={busy ? onInterrupt : send}
+                disabled={
+                  busy
+                    ? disabled
+                    : disabled ||
+                      (text.length === 0 && !attachedImage) ||
+                      text.length > LIMITS.maxInputChars
+                }
+                aria-label={busy ? 'Stop generating' : 'Send prompt'}
+              >
+                <Icon name={busy ? 'stop' : 'arrow-up'} size={busy ? 16 : 18} />
+              </button>
+            </div>
+          </div>
         </>
       )}
     </div>

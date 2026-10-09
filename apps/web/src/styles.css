@@ -1604,6 +1604,146 @@ input[type='number']::-webkit-outer-spin-button {
   opacity: 1;
 }
 
+/* PA-123: Desktop row arrangement (single-line floating pill).
+   .promptbar-tools-row has display: contents so its left and right tool clusters
+   participate directly in .promptbar's flex container, flanking the central textarea. */
+.promptbar-input-row {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  order: 2;
+}
+
+.promptbar-input-row textarea {
+  width: 100%;
+}
+
+.promptbar-tools-row {
+  display: contents;
+}
+
+.promptbar-tools-left {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  order: 1;
+  flex: none;
+}
+
+.promptbar-tools-right {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  order: 3;
+  flex: none;
+}
+
+/* PA-123: Mobile two-line layout (<= 600px).
+   On small screens (especially iPhones), a single row compresses the prompt textarea
+   into a tiny unusable sliver when auxiliary controls (attach, live-listen, mic,
+   model, thinking chips) are present.
+   We transform the promptbar into a two-line layout:
+   - Line 1 (top): dedicated full-width textarea for comfortable typing & viewing.
+   - Line 2 (bottom): dedicated action toolbar containing input/voice tools on the left
+     and model/thinking/submit buttons on the right. */
+@media (max-width: 600px) {
+  .promptbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    padding: 10px 12px 8px 14px;
+    border-radius: 20px;
+    margin: 0 calc(8px + var(--safe-right)) calc(12px + var(--safe-bottom))
+      calc(8px + var(--safe-left));
+  }
+
+  .promptbar-input-row {
+    width: 100%;
+    order: 1;
+    display: flex;
+  }
+
+  .promptbar-input-row textarea {
+    width: 100%;
+    flex: 1;
+    min-height: 38px;
+    max-height: 160px;
+    padding: 2px 0 4px;
+    font-size: 16px; /* 16px prevents iOS Safari auto-zoom on input focus */
+    line-height: 1.45;
+  }
+
+  .promptbar-tools-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    order: 2;
+    gap: 6px;
+    min-height: 36px;
+  }
+
+  .promptbar-tools-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 1 auto;
+    min-width: 0;
+    order: 1;
+  }
+
+  .promptbar-tools-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    margin-left: auto;
+    order: 2;
+  }
+
+  .promptbar .model-chip {
+    max-width: 85px;
+    padding: 4px 6px;
+    font-size: 11.5px;
+    margin-bottom: 0;
+    align-self: center;
+  }
+
+  .promptbar .thinking-chip {
+    max-width: 80px;
+    padding: 4px 6px;
+    font-size: 11.5px;
+    margin-bottom: 0;
+    align-self: center;
+  }
+
+  .promptbar .attach-btn {
+    align-self: center;
+    margin-bottom: 0;
+  }
+
+  .promptbar .mic-control-group {
+    align-self: center;
+  }
+
+  .promptbar .live-listen-btn,
+  .promptbar .live-listen-indicator {
+    align-self: center;
+  }
+
+  .promptbar button.primary {
+    align-self: center;
+  }
+
+  .promptbar.recording,
+  .promptbar.transcribing {
+    flex-direction: row;
+    align-items: center;
+    min-height: 48px;
+    padding: 6px 12px;
+  }
+}
+
 .spinner {
   color: var(--text-dim);
   padding: 32px;
