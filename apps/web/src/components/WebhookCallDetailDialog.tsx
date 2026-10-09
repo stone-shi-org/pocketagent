@@ -3,6 +3,8 @@ import type { WebhookDeliveryDetail, WebhookHistoryEntry } from '@pocketagent/pr
 import { ApiError } from '../api/client.js';
 import { formatRelative } from './StatusBadge.js';
 import { useHostApi } from '../hosts/HostContext.js';
+import { RetryDeliveryButton } from './RetryDeliveryButton.js';
+import type { RetryOutcome } from './RetryDeliveryButton.js';
 
 /** One `label: value` line — skipped entirely when `value` is null, so the dialog never shows "—". */
 function Fact({ label, value }: { label: string; value: string | number | null }): JSX.Element | null {
@@ -29,10 +31,13 @@ export function WebhookCallDetailDialog({
   entry,
   onClose,
   onApiError,
+  onRetried,
 }: {
   entry: WebhookHistoryEntry;
   onClose: () => void;
   onApiError: (error: unknown) => void;
+  /** PA-125: after a successful retry; the parent reloads and closes this. */
+  onRetried: (outcome: RetryOutcome) => void;
 }): JSX.Element {
   const api = useHostApi();
   const [detail, setDetail] = useState<WebhookDeliveryDetail | null>(null);
@@ -112,6 +117,7 @@ export function WebhookCallDetailDialog({
             />
             <Fact label="Received" value={formatRelative(entry.receivedAt)} />
             <Fact label="Error" value={entry.error} />
+            <Fact label="Retry of" value={entry.retryOf} />
 
             {entry.webhookId === null && (
               <p className="transport-hint">
@@ -146,6 +152,15 @@ export function WebhookCallDetailDialog({
         )}
 
         <div className="dialog-actions">
+          {entry.kind === 'delivery' && (
+            <RetryDeliveryButton
+              delivery={entry}
+              variant="text"
+              onRetried={onRetried}
+              onError={setError}
+              onApiError={onApiError}
+            />
+          )}
           <button type="button" onClick={onClose}>
             Close
           </button>

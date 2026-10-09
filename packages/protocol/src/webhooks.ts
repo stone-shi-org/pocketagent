@@ -94,7 +94,12 @@ export const WebhookDeliveryStatus = z.enum([
 ]);
 export type WebhookDeliveryStatus = z.infer<typeof WebhookDeliveryStatus>;
 
-export const WebhookDeliveryTrigger = z.enum(['delivery', 'test']);
+/**
+ * `retry` (PA-125) is a human re-running a stored payload from the history
+ * panel. Deliveries travel over HTTP only and the browser does not schema-parse
+ * them, so the new value needed no `PROTOCOL_VERSION` bump.
+ */
+export const WebhookDeliveryTrigger = z.enum(['delivery', 'test', 'retry']);
 export type WebhookDeliveryTrigger = z.infer<typeof WebhookDeliveryTrigger>;
 
 /** `skipped` is what a `test` delivery records: authentic by construction. */
@@ -602,8 +607,30 @@ export const WebhookDelivery = z.object({
   queuePosition: z.number().int().nullable(),
   /** The working tree this delivery is waiting on. Null if it never queued. */
   queueKey: z.string().nullable(),
+  /** PA-125: the delivery this one re-ran, when `trigger` is `retry`. */
+  retryOf: z.string().nullable(),
+  /**
+   * PA-125: why this delivery cannot be retried, or null if it can. Computed by
+   * the server's one rule (`retryProblem`) so the button's disabled state and
+   * the route's 409 cannot disagree — the browser has no other way to know
+   * whether a payload was stored, since the list never carries it.
+   */
+  retryProblem: z.string().nullable(),
 });
 export type WebhookDelivery = z.infer<typeof WebhookDelivery>;
+
+/**
+ * PA-125: delivery statuses a human may re-run. A delivery that never reached
+ * the run (`throttled` by a cap, `skipped` by the overlap policy) or one that
+ * ran and `failed`. Not `rejected`/`invalid` (never authenticated or parsed),
+ * not `filtered`/`duplicate` (they did what they should), and never anything
+ * still in flight. One list, read by the route and the button alike.
+ */
+export const RETRYABLE_DELIVERY_STATUSES: readonly WebhookDeliveryStatus[] = [
+  'failed',
+  'throttled',
+  'skipped',
+];
 
 /** One delivery in full, for the detail view. Payload only when it was stored. */
 export const WebhookDeliveryDetail = WebhookDelivery.extend({

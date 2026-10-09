@@ -40,6 +40,7 @@ import { useHostApi } from '../hosts/HostContext.js';
 import type { WebhookExportData } from '@pocketagent/protocol';
 import { exportToJsonFile } from '../agent/json-transfer.js';
 import { useJsonImport } from '../hooks/useJsonImport.js';
+import { RetryDeliveryButton, retryOutcomeMessage } from '../components/RetryDeliveryButton.js';
 
 interface Props {
   /** `'new'` for an unsaved webhook. */
@@ -2364,8 +2365,8 @@ export function WebhookEditorPage({
                             <span className="history-row-actor">by {d.actor}</span>
                           )}
 
-                          {d.trigger === 'test' && (
-                            <span className="history-test-tag">test</span>
+                          {(d.trigger === 'test' || d.trigger === 'retry') && (
+                            <span className="history-test-tag">{d.trigger}</span>
                           )}
 
                           {d.skipPermissionsEnabled && (
@@ -2384,6 +2385,16 @@ export function WebhookEditorPage({
                           {d.error !== null && <span className="history-row-error">{d.error}</span>}
                         </div>
                       </button>
+                      <div className="history-row-actions">
+                        <RetryDeliveryButton
+                          delivery={d}
+                          onRetried={(outcome) => {
+                            void loadDeliveries().then(() => setError(retryOutcomeMessage(outcome)));
+                          }}
+                          onError={setError}
+                          onApiError={onApiError}
+                        />
+                      </div>
                     </div>
                   );
                 })}

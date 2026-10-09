@@ -31,6 +31,7 @@ import {
   JiraWebhookFilter as JiraWebhookFilterSchema,
   bambooTemplateVariables,
   jiraTemplateVariables,
+  RETRYABLE_DELIVERY_STATUSES,
   parsePocketAgentId,
   renderBambooTemplate,
   renderJiraTemplate,
@@ -214,7 +215,7 @@ export class WebhookServiceError extends Error {
     // Only the codes actually thrown from here. Slug-format, reserved-name and
     // agent-transport checks live in the route, where they can produce a better
     // message and answer 400 directly.
-    readonly code: 'not_found' | 'slug_taken' | 'invalid_filter',
+    readonly code: 'not_found' | 'slug_taken' | 'invalid_filter' | 'conflict',
     readonly statusCode = 400,
   ) {
     super(message);
@@ -2300,6 +2301,59 @@ export class WebhookService {
     } catch {
       throw new WebhookServiceError('That is not valid JSON.', 'invalid_filter');
     }
+    return this.runUnsigned(hook, text, payload, 'test', null);
+  }
+
+  /**
+   * Re-run a delivery's stored payload as a new delivery (PA-125).
+   *
+   * A sibling of `test`, not a resurrection of the old row: the failed row
+   * stays exactly as it was, as history, and the retry is a fresh row with
+   * `trigger: 'retry'` and `retry_of` pointing back. Its `body_hash` is null
+   * like a test's, so a retry never touches the idempotency claim — the replay
+   * invariant is about *network* deliveries, and this one is a signed-in human
+   * pressing a button. It then goes through the same `dispatch` as everything
+   * else, judged against the webhook's *current* configuration (filter, caps,
+   * overlap, directory queue, prompt, agent, skip-permissions), which is both
+   * the smaller change and the honest one: the button reads "run this again",
+   * not "replay last Tuesday's decisions".
+   *
+   * Only a stored, complete payload can be retried. `storePayloads: false`
+   * kept nothing, and a truncated one would not parse — or worse, would parse
+   * into less than the sender said.
+   */
+  async retry(id: string, deliveryId: string): Promise<DeliveryOutcome> {
+    const hook = this.get(id);
+    const original = this.delivery(deliveryId);
+    if (original.webhook_id !== hook.id) {
+      throw new WebhookServiceError('No such delivery.', 'not_found', 404);
+    }
+    const problem = retryProblem(original);
+    if (problem !== null) throw new WebhookServiceError(problem, 'conflict', 409);
+    let payload: unknown;
+    try {
+      payload = JSON.parse(original.payload_json ?? '');
+    } catch {
+      // `storablePayload` caps the *pretty-printed* JSON, which can be longer
+      // than the raw body that `payload_truncated` was judged against.
+      throw new WebhookServiceError(
+        'The stored payload is incomplete, so this delivery cannot be retried.',
+        'conflict',
+        409,
+      );
+    }
+    return this.runUnsigned(hook, original.payload_json ?? '', payload, 'retry', original.id);
+  }
+
+  /** `test` and `retry`'s shared tail: record a row with auth skipped, then dispatch. */
+  private async runUnsigned(
+    hook: WebhookRow,
+    text: string,
+    payload: unknown,
+    trigger: 'test' | 'retry',
+    retryOf: string | null,
+  ): Promise<DeliveryOutcome> {
+    const type = hook.type as WebhookType;
     const parsed = type === 'bamboo' ? parseBambooEvent(payload) : parseJiraEvent(payload);
     if (!parsed.ok) throw new WebhookServiceError(parsed.reason, 'invalid_filter');
     const row = deliveryRowFieldsOf(type, parsed.facts);
@@ -2308,9 +2362,10 @@ export class WebhookService {
     insertWebhookDelivery(this.db, {
       ...this.blankRow(hook, deliveryId),
       status: 'starting',
-      trigger: 'test',
-      // Null body hash, so a test never collides with a real delivery and two
-      // tests of the same payload both run.
+      trigger,
+      retry_of: retryOf,
+      // Null body hash, so a test or retry never collides with a real
+      // delivery and two runs of the same payload both run.
       body_hash: null,
       signature_state: 'skipped',
       event: row.event,
@@ -2504,6 +2559,8 @@ export class WebhookService {
       queuedAt: row.queued_at,
       queueKey: row.queue_key,
       queuePosition: row.status === 'queued' ? this.queue.positionOf(row.id) : null,
+      retryOf: row.retry_of ?? null,
+      retryProblem: row.webhook_id === null ? 'This webhook has been deleted.' : retryProblem(row),
     };
   }
 
@@ -2680,6 +2737,26 @@ function isUniqueViolation(err: unknown): boolean {
  * in one — including a token that then sits in our database because we stored
  * the body verbatim for debugging.
  */
+/**
+ * Why this delivery cannot be retried, or null if it can (PA-125). Exported so
+ * the route and its tests read one rule; the browser mirrors the status half
+ * through `RETRYABLE_DELIVERY_STATUSES`.
+ */
+export function retryProblem(
+  row: Pick<WebhookDeliveryRow, 'status' | 'payload_json' | 'payload_truncated'>,
+): string | null {
+  if (!RETRYABLE_DELIVERY_STATUSES.includes(row.status as WebhookDeliveryStatus)) {
+    return `A ${row.status} delivery cannot be retried.`;
+  }
+  if (row.payload_json === null) {
+    return 'This delivery\'s payload was not stored (Store payloads is off), so it cannot be retried.';
+  }
+  if (row.payload_truncated === 1) {
+    return 'This delivery\'s payload was too large to store in full, so it cannot be retried.';
+  }
+  return null;
+}
+
 function scrubSecrets(value: unknown, depth = 0): unknown {
   if (depth > 12) return '[too deep]';
   if (Array.isArray(value)) return value.map((v) => scrubSecrets(v, depth + 1));

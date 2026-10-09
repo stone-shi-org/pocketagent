@@ -854,6 +854,22 @@ export function createApiClient(endpoint: HostEndpoint) {
         { method: 'POST', body: JSON.stringify({ action }) },
       ),
 
+    /**
+     * PA-125: re-run a failed/throttled/skipped delivery's stored payload as a
+     * new delivery. The answer describes the new one; the original is untouched.
+     */
+    retryWebhookDelivery: (id: string, deliveryId: string) =>
+      request<{
+        deliveryId: string | null;
+        status: string;
+        sessionId: string | null;
+        plannerChatId?: string | null;
+        reason: string | null;
+      }>(
+        `/api/webhooks/${encodeURIComponent(id)}/deliveries/${encodeURIComponent(deliveryId)}/retry`,
+        { method: 'POST' },
+      ),
+
     clearWebhookDeliveries: (id: string) =>
       request<{ ok: true; removed: number }>(
         `/api/webhooks/${encodeURIComponent(id)}/deliveries`,

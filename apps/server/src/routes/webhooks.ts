@@ -22,7 +22,7 @@ import type { WebhookSpec, WebhookSpecCommon } from '../webhooks/index.js';
 import { WebhookServiceError } from '../webhooks/index.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type { PlannerWorkspaceRegistry } from '../planner/workspaces.js';
-import { resolveWorkspaceCwdOrReply, webhookAgentProblem } from './shared.js';
+import { auditConfigChange, resolveWorkspaceCwdOrReply, webhookAgentProblem } from './shared.js';
 import { webhookDeliveryRoutes } from './webhook-delivery.js';
 
 /** Default page size for a delivery list. */
@@ -374,6 +374,34 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
           });
         }
         return reply.send({ ok: true });
+      } catch (err) {
+        return mapError(reply, err);
+      }
+    },
+  );
+
+  /**
+   * Re-run a failed, throttled or skipped delivery's stored payload (PA-125).
+   *
+   * Answers 202 with the *new* delivery's outcome, like `/test`: the retry is
+   * its own row, and the original stays as it was. 409 when the delivery is
+   * not retryable (status, or no complete stored payload). Rate-limited like
+   * `/test`, since each one can start an agent, and a POST so the Origin check
+   * covers it.
+   */
+  app.post<{ Params: { id: string; deliveryId: string } }>(
+    '/api/webhooks/:id/deliveries/:deliveryId/retry',
+    { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } },
+    async (request, reply) => {
+      try {
+        const outcome = await webhooks.retry(request.params.id, request.params.deliveryId);
+        auditConfigChange(request, 'webhook delivery retried', {
+          webhookId: request.params.id,
+          retryOf: request.params.deliveryId,
+          deliveryId: outcome.deliveryId,
+          status: outcome.status,
+        });
+        return reply.code(202).send(outcome);
       } catch (err) {
         return mapError(reply, err);
       }

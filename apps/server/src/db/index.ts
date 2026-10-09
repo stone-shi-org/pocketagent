@@ -1478,6 +1478,14 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX IF NOT EXISTS idx_planner_prompt_queue_chat ON planner_prompt_queue (chat_id, created_at);
   `,
+
+  // PA-125: a delivery a human re-ran from the history panel points back at
+  // the one it retried. A plain id rather than a foreign key, for the same
+  // reason `session_id` is not one: pruning deletes delivery rows, and a
+  // retry's history must outlive the row it retried.
+  `
+  ALTER TABLE webhook_deliveries ADD COLUMN retry_of TEXT;
+  `,
 ];
 
 /**
@@ -1824,6 +1832,16 @@ export function openDatabase(databasePath: string): Db {
   // PA-118, same positional-migration hazard: re-running the migration's own
   // DDL constant is idempotent (`IF NOT EXISTS`) and cannot drift from it.
   db.exec(MCP_SERVER_DDL);
+  // PA-125, same positional-migration hazard: `insertWebhookDelivery` writes
+  // `retry_of` unconditionally, so a miss would fail every delivery insert.
+  const deliveryColumnsForRetry = new Set(
+    (db.prepare('PRAGMA table_info(webhook_deliveries)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (deliveryColumnsForRetry.size > 0 && !deliveryColumnsForRetry.has('retry_of')) {
+    db.exec('ALTER TABLE webhook_deliveries ADD COLUMN retry_of TEXT');
+  }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
   return db;
@@ -2569,7 +2587,7 @@ export interface WebhookDeliveryRow {
   webhook_name: string;
   agent: string;
   status: string;
-  /** `'delivery' | 'test'`. */
+  /** `'delivery' | 'test' | 'retry'`. */
   trigger: string;
   /** sha256 of the raw body. The idempotency key — see the migration comment. */
   body_hash: string | null;
@@ -2619,6 +2637,11 @@ export interface WebhookDeliveryRow {
    * See the migration comment for why it is frozen rather than re-derived.
    */
   queued_spec_json: string | null;
+  /**
+   * PA-125: the delivery this one re-ran, when a human pressed Retry. Optional
+   * on insert so the many row builders that predate it need not name it.
+   */
+  retry_of?: string | null;
 }
 
 export interface WebhookIssueSessionRow {
@@ -2783,16 +2806,16 @@ export function insertWebhookDelivery(db: Db, row: WebhookDeliveryRow): void {
        signature_state, skip_permissions_enabled, queue_skipped_by_label, payload_json, payload_bytes,
        payload_truncated, rendered_prompt, reason, received_at, started_at,
        finished_at, session_id, agent_session_id, planner_chat_id, cwd, error,
-       queue_key, queued_at, queued_spec_json
+       queue_key, queued_at, queued_spec_json, retry_of
      ) VALUES (
        @id, @webhook_id, @webhook_name, @agent, @status, @trigger, @body_hash,
        @delivery_header, @event, @event_type, @issue_key, @project_key, @actor,
        @signature_state, @skip_permissions_enabled, @queue_skipped_by_label, @payload_json, @payload_bytes,
        @payload_truncated, @rendered_prompt, @reason, @received_at, @started_at,
        @finished_at, @session_id, @agent_session_id, @planner_chat_id, @cwd, @error,
-       @queue_key, @queued_at, @queued_spec_json
+       @queue_key, @queued_at, @queued_spec_json, @retry_of
      )`,
-  ).run(row);
+  ).run({ ...row, retry_of: row.retry_of ?? null });
 }
 
 export function updateWebhookDelivery(

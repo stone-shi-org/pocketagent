@@ -14,6 +14,7 @@ import {
   readWebhookDeliveryConversationIds,
   readWebhookHits,
   readWebhookIssueSession,
+  updateWebhookDelivery,
   upsertWebhookIssueSession,
   writeAgentDefaults,
   type Db,
@@ -427,6 +428,7 @@ describe('webhook delivery: the unauthenticated surface', () => {
       ['POST', '/api/webhooks/x/secret/reveal'],
       ['POST', '/api/webhooks/x/secret/rotate'],
       ['POST', '/api/webhooks/x/test'],
+      ['POST', '/api/webhooks/x/deliveries/y/retry'],
       ['POST', '/api/webhooks/x/preview'],
       ['GET', '/api/cron/jobs'],
       ['POST', '/api/cron/jobs'],
@@ -1046,6 +1048,107 @@ describe('webhook test and preview', () => {
       })
     ).json();
     expect(body.prompt).toBe('Just PA-123 please');
+  });
+});
+
+describe('webhook delivery retry (PA-125)', () => {
+  /** A delivered row, forced into `status` — a real failure needs a crashing agent. */
+  async function deliveredRow(
+    hook: { id: string; secret: string },
+    status: string,
+    over: Record<string, unknown> = {},
+  ): Promise<string> {
+    const res = await deliver(SLUG, payloadFor({ timestamp: Date.now() + Math.random() }), {
+      secret: hook.secret,
+    });
+    const id = res.json().deliveryId as string;
+    updateWebhookDelivery(ctx.db, id, { status, finished_at: Date.now(), ...over });
+    return id;
+  }
+
+  it('re-runs a failed delivery as a new row and leaves the original alone', async () => {
+    const hook = await createWebhook({ directoryPolicy: 'allow', overlapPolicy: 'allow', maxConcurrent: 5 });
+    const original = await deliveredRow(hook, 'failed', { error: 'boom' });
+    const before = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 }).find((r) => r.id === original);
+
+    const res = await post(`/api/webhooks/${hook.id}/deliveries/${original}/retry`);
+    expect(res.statusCode, res.body).toBe(202);
+    const retryId = res.json().deliveryId as string;
+    expect(retryId).not.toBe(original);
+    expect(res.json().status).toBe('running');
+
+    const rows = readWebhookDeliveries(ctx.db, { webhookId: hook.id, limit: 10 });
+    const retry = rows.find((r) => r.id === retryId);
+    expect(retry?.trigger).toBe('retry');
+    expect(retry?.retry_of).toBe(original);
+    expect(retry?.signature_state).toBe('skipped');
+    // Never the original's hash: the idempotency claim stays the network's.
+    expect(retry?.body_hash).toBeNull();
+    expect(retry?.issue_key).toBe(before?.issue_key);
+    expect(rows.find((r) => r.id === original)).toEqual(before);
+
+    const listed = (await get(`/api/webhooks/${hook.id}/deliveries`)).json().deliveries as {
+      id: string;
+      retryOf: string | null;
+      retryProblem: string | null;
+    }[];
+    expect(listed.find((d) => d.id === retryId)?.retryOf).toBe(original);
+    expect(listed.find((d) => d.id === original)?.retryProblem).toBeNull();
+  });
+
+  it('runs a retry through the current gates rather than around them', async () => {
+    // A throttled delivery retried while the cap is still full is throttled
+    // again — a retry is a delivery, not an override.
+    const hook = await createWebhook({ overlapPolicy: 'allow', directoryPolicy: 'allow', maxConcurrent: 1 });
+    await deliver(SLUG, payloadFor({ timestamp: 1 + Date.now() }), { secret: hook.secret });
+    const second = await deliver(SLUG, payloadFor({ timestamp: 2 + Date.now() }), { secret: hook.secret });
+    expect(second.json().status).toBe('throttled');
+
+    const res = await post(`/api/webhooks/${hook.id}/deliveries/${second.json().deliveryId}/retry`);
+    expect(res.statusCode).toBe(202);
+    expect(res.json().status).toBe('throttled');
+    expect(res.json().reason).toMatch(/limit 1/);
+  });
+
+  it('refuses statuses that are not retryable', async () => {
+    const hook = await createWebhook();
+    for (const status of ['succeeded', 'running', 'queued', 'filtered', 'duplicate', 'rejected']) {
+      const id = await deliveredRow(hook, status);
+      const res = await post(`/api/webhooks/${hook.id}/deliveries/${id}/retry`);
+      expect(res.statusCode, status).toBe(409);
+      expect(res.json().error.code).toBe('conflict');
+    }
+  });
+
+  it('refuses a delivery whose payload was not kept, and says so in the list', async () => {
+    const hook = await createWebhook({ storePayloads: false });
+    const id = await deliveredRow(hook, 'failed');
+    const res = await post(`/api/webhooks/${hook.id}/deliveries/${id}/retry`);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.message).toMatch(/not stored/);
+    const listed = (await get(`/api/webhooks/${hook.id}/deliveries`)).json().deliveries as {
+      id: string;
+      retryProblem: string | null;
+    }[];
+    expect(listed.find((d) => d.id === id)?.retryProblem).toMatch(/not stored/);
+  });
+
+  it('refuses a truncated or unparseable stored payload', async () => {
+    const hook = await createWebhook();
+    const truncated = await deliveredRow(hook, 'failed', { payload_truncated: 1 });
+    expect((await post(`/api/webhooks/${hook.id}/deliveries/${truncated}/retry`)).statusCode).toBe(409);
+    const cut = await deliveredRow(hook, 'failed', { payload_json: '{"issue": {"ke' });
+    const res = await post(`/api/webhooks/${hook.id}/deliveries/${cut}/retry`);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.message).toMatch(/incomplete/);
+  });
+
+  it('answers 404 for a delivery that belongs to another webhook', async () => {
+    const hook = await createWebhook();
+    const other = await createWebhook({ slug: 'other' });
+    const id = await deliveredRow(hook, 'failed');
+    expect((await post(`/api/webhooks/${other.id}/deliveries/${id}/retry`)).statusCode).toBe(404);
+    expect((await post(`/api/webhooks/${hook.id}/deliveries/nope/retry`)).statusCode).toBe(404);
   });
 });
 

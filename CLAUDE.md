@@ -610,6 +610,19 @@ keep their own copy of the template, so an existing webhook shows it only once t
 re-selected (or the two-line `Latest activity:` block is added); without it the bar is
 unchanged.
 
+**A failed delivery can be retried by a human, as a new delivery** (PA-125). `POST
+/api/webhooks/:id/deliveries/:deliveryId/retry` is `test`'s sibling: it re-runs the row's stored
+payload through `dispatch` with auth skipped, as a fresh row with `trigger: 'retry'`,
+`retry_of` pointing back, and a null `body_hash`. The original row is left alone, and a retry
+never touches the idempotency claim, because the replay rule is about network deliveries.
+It is judged against the webhook's *current* config, filter, caps, overlap, directory queue,
+prompt, agent and skip-permissions included. So a retry is a delivery, not an override, and a
+throttled one retried under a full cap is throttled again. `RETRYABLE_DELIVERY_STATUSES`
+(`failed`, `throttled`, `skipped`) is the one list. `retryProblem` is the one rule (status,
+payload not stored, payload truncated), surfaced on each `WebhookDelivery` so the button's
+disabled reason and the route's 409 cannot disagree. With `storePayloads` off, nothing was
+kept, so nothing can be retried.
+
 **A webhook's agent may be a Pocket Agent, not only a coding agent** (PA-10, reporter: "Today,
 webhook can only select code agent, need add 'pocket agent' agents in there too. The Jira tag
 should support pocket agent too."). The two halves of that request forced one design decision:

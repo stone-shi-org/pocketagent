@@ -4,6 +4,8 @@ import { ApiError } from '../api/client.js';
 import { Icon } from './Icon.js';
 import { formatRelative, WebhookStatusIcon } from './StatusBadge.js';
 import { WebhookCallDetailDialog } from './WebhookCallDetailDialog.js';
+import { RetryDeliveryButton, retryOutcomeMessage } from './RetryDeliveryButton.js';
+import type { RetryOutcome } from './RetryDeliveryButton.js';
 import { useHostApi } from '../hosts/HostContext.js';
 
 interface Props {
@@ -78,6 +80,12 @@ export function WebhookHistoryPanel({
 
   const visible = (entries ?? []).filter((e) => showNoise || !isNoise(e));
 
+  // PA-125: the retry is a new row; reloading is what shows it.
+  const onRetried = (outcome: RetryOutcome): void => {
+    setDetailEntry(null);
+    void load().then(() => setError(retryOutcomeMessage(outcome)));
+  };
+
   const openEntry = (e: WebhookHistoryEntry): void => {
     if (e.kind === 'hit') {
       if (e.reason === 'disabled' && e.webhookId !== null) onOpenWebhook(e.webhookId);
@@ -151,8 +159,8 @@ export function WebhookHistoryPanel({
                       <span className="history-row-actor">by {e.actor}</span>
                     )}
 
-                    {e.kind === 'delivery' && e.trigger === 'test' && (
-                      <span className="history-test-tag">test</span>
+                    {e.kind === 'delivery' && (e.trigger === 'test' || e.trigger === 'retry') && (
+                      <span className="history-test-tag">{e.trigger}</span>
                     )}
 
                     {e.kind === 'delivery' && e.queueSkippedByLabel && (
@@ -177,6 +185,14 @@ export function WebhookHistoryPanel({
                 </button>
 
                 <div className="history-row-actions">
+                  {e.kind === 'delivery' && (
+                    <RetryDeliveryButton
+                      delivery={e}
+                      onRetried={onRetried}
+                      onError={setError}
+                      onApiError={onApiError}
+                    />
+                  )}
                   <button
                     type="button"
                     className="round-btn plain history-detail-btn"
@@ -198,6 +214,7 @@ export function WebhookHistoryPanel({
           entry={detailEntry}
           onClose={() => setDetailEntry(null)}
           onApiError={onApiError}
+          onRetried={onRetried}
         />
       )}
     </div>
