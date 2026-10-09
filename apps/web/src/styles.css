@@ -7137,10 +7137,33 @@ button.chat-rate-limit-badge {
   height: 100%;
 }
 
-.planner-artifacts-toggle.active {
+.planner-artifacts-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  margin-left: 6px;
+  font-size: 12px;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+  flex: none;
+}
+
+.planner-artifacts-toggle:hover {
+  color: var(--text);
+  border-color: var(--border);
   background: var(--bg-elev-2);
-  color: var(--accent);
+}
+
+.planner-artifacts-toggle.active {
+  background: rgba(59, 130, 246, 0.15);
   border-color: var(--accent);
+  color: var(--accent);
 }
 
 .planner-artifacts-count {
@@ -7152,8 +7175,8 @@ button.chat-rate-limit-badge {
   font-size: 10px;
   font-weight: 700;
   border-radius: 999px;
-  min-width: 16px;
-  height: 16px;
+  min-width: 15px;
+  height: 15px;
   padding: 0 4px;
   line-height: 1;
   margin-left: 2px;
