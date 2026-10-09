@@ -34,7 +34,15 @@ export interface CreateWorktreeInput {
   branchMode: 'new' | 'current';
   /** Required when `branchMode` is `'new'`. */
   branchName?: string;
-  /** If true and the branch already has an existing worktree, reuse and return it instead of throwing. */
+  /**
+   * If true and the branch already exists:
+   * - returns its `.worktrees/<slug>` checkout when that directory already exists;
+   * - otherwise creates `.worktrees/<slug>` on the existing branch (fast-forwarding
+   *   to `baseRef` via `-B` when the branch is already merged into `baseRef`, or
+   *   checking out its existing tip when it carries unmerged commits);
+   * - falls back to a suffixed branch name when the branch is already checked out
+   *   in the main repo or another non-standard worktree path.
+   */
   reuseExisting?: boolean;
 }
 
@@ -98,21 +106,50 @@ export class WorktreeService {
     const baseRef = currentBranch ?? 'HEAD';
 
     let branch: string;
+    let attachExistingBranch: 'as-is' | 'reset-to-base' | null = null;
     if (input.branchMode === 'new') {
       const requested = input.branchName?.trim() ?? '';
       await assertValidBranchName(requested);
       const exists = await branchExists(projectCwd, requested);
       if (exists) {
-        if (input.reuseExisting) {
-          const existingPath = worktreePathFor(projectCwd, requested);
-          if (await pathExists(existingPath)) {
+        if (!input.reuseExisting) {
+          throw new WorktreeError(`Branch "${requested}" already exists.`, 'branch_exists');
+        }
+        const existingPath = worktreePathFor(projectCwd, requested);
+        if (await pathExists(existingPath)) {
+          if (await pathExists(path.join(existingPath, '.git'))) {
             const resolved = await this.workspaces.resolveWorkspacePath(existingPath);
             return { cwd: resolved, branch: requested };
           }
+          // Broken worktree directory without a `.git` pointer — clean it up so
+          // the worktree can be recreated cleanly below.
+          await fs.rm(existingPath, { recursive: true, force: true });
         }
-        throw new WorktreeError(`Branch "${requested}" already exists.`, 'branch_exists');
+        // The local branch exists, but its `.worktrees/<slug>` directory does not
+        // (e.g. a previous worktree was removed via `git worktree remove` or
+        // `rm -rf` without deleting the branch ref, or the branch was created in
+        // the main repo). Prune any stale worktree registration first so
+        // `git worktree add` does not refuse a missing-but-registered checkout.
+        await pruneWorktrees(projectCwd);
+        if (await isBranchCheckedOut(projectCwd, requested)) {
+          // Git refuses to check one branch out in two worktrees at once (e.g.
+          // `requested` is currently checked out in the main repo or another
+          // non-standard worktree path). Mint a suffixed branch off `baseRef`
+          // rather than failing an unattended run.
+          branch = `${requested}-${crypto.randomBytes(3).toString('hex')}`;
+        } else {
+          branch = requested;
+          // If every commit on `requested` is already reachable from `baseRef`
+          // (an older merged worktree branch left behind as `master` moved on),
+          // fast-forward/reset it to `baseRef` (`-B`) so the new worktree starts
+          // on current code rather than a stale ancestor. If it has unmerged
+          // commits, attach to its existing tip so no work is lost.
+          const merged = await isMergedInto(projectCwd, requested, baseRef).catch(() => false);
+          attachExistingBranch = merged ? 'reset-to-base' : 'as-is';
+        }
+      } else {
+        branch = requested;
       }
-      branch = requested;
     } else {
       // Git refuses to check a branch out in two worktrees at once, so
       // reusing `currentBranch` here is not an option — mint a new branch
@@ -126,18 +163,28 @@ export class WorktreeService {
     const worktreePath = worktreePathFor(projectCwd, branch);
     if (await pathExists(worktreePath)) {
       if (input.reuseExisting) {
-        const resolved = await this.workspaces.resolveWorkspacePath(worktreePath);
-        return { cwd: resolved, branch };
+        if (await pathExists(path.join(worktreePath, '.git'))) {
+          const resolved = await this.workspaces.resolveWorkspacePath(worktreePath);
+          return { cwd: resolved, branch };
+        }
+        await fs.rm(worktreePath, { recursive: true, force: true });
+      } else {
+        throw new WorktreeError(
+          `${worktreePath} already exists. Remove it or pick a different branch name.`,
+          'already_exists',
+        );
       }
-      throw new WorktreeError(
-        `${worktreePath} already exists. Remove it or pick a different branch name.`,
-        'already_exists',
-      );
     }
 
     await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+    const addArgs =
+      attachExistingBranch === 'as-is'
+        ? ['worktree', 'add', worktreePath, branch]
+        : attachExistingBranch === 'reset-to-base'
+          ? ['worktree', 'add', '-B', branch, worktreePath, baseRef]
+          : ['worktree', 'add', '-b', branch, worktreePath, baseRef];
     try {
-      await execFileAsync('git', ['worktree', 'add', '-b', branch, worktreePath, baseRef], {
+      await execFileAsync('git', addArgs, {
         cwd: projectCwd,
       });
     } catch (err) {
@@ -313,6 +360,37 @@ async function branchExists(projectCwd: string, branch: string): Promise<boolean
       cwd: projectCwd,
     });
     return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Best-effort `git worktree prune`, so a worktree directory that was deleted
+ * out-of-band (`rm -rf`) does not leave a stale `.git/worktrees/<slug>` entry
+ * that makes `git worktree add` or `git worktree list` think the branch is
+ * still checked out.
+ */
+async function pruneWorktrees(projectCwd: string): Promise<void> {
+  try {
+    await execFileAsync('git', ['worktree', 'prune'], { cwd: projectCwd });
+  } catch {
+    // Best-effort — see comment above.
+  }
+}
+
+/**
+ * Whether `branch` is currently checked out in any live worktree (including
+ * the main checkout). Must be called after `pruneWorktrees` so missing
+ * directories do not count as checked out.
+ */
+async function isBranchCheckedOut(projectCwd: string, branch: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('git', ['worktree', 'list', '--porcelain'], {
+      cwd: projectCwd,
+    });
+    const targetLine = `branch refs/heads/${branch}`;
+    return stdout.split('\n').some((line) => line.trim() === targetLine);
   } catch {
     return false;
   }

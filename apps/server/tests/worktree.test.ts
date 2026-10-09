@@ -94,6 +94,70 @@ describe('WorktreeService', () => {
     ).rejects.toMatchObject({ code: 'branch_exists' });
   });
 
+  it('recreates worktree and fast-forwards to baseRef when reuseExisting is true and local branch is already merged', async () => {
+    // Create branch at initial commit, then advance main repo HEAD
+    execFileSync('git', ['branch', 'feature/planner-agent'], { cwd: repo });
+    fs.writeFileSync(path.join(repo, 'file.txt'), 'two\n');
+    execFileSync('git', ['add', 'file.txt'], { cwd: repo });
+    execFileSync('git', ['commit', '-q', '-m', 'second on main'], { cwd: repo });
+    const mainHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo }).toString().trim();
+
+    const result = await service.create({
+      projectCwd: repo,
+      branchMode: 'new',
+      branchName: 'feature/planner-agent',
+      reuseExisting: true,
+    });
+
+    expect(result.branch).toBe('feature/planner-agent');
+    expect(result.cwd).toBe(fs.realpathSync(path.join(repo, '.worktrees', 'feature-planner-agent')));
+    expect(currentBranch(result.cwd)).toBe('feature/planner-agent');
+    const wtHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: result.cwd }).toString().trim();
+    expect(wtHead).toBe(mainHead);
+  });
+
+  it('attaches worktree at existing tip when reuseExisting is true and local branch has unmerged commits (including after rm -rf)', async () => {
+    const first = await service.create({
+      projectCwd: repo,
+      branchMode: 'new',
+      branchName: 'feature/unmerged-leftover',
+    });
+    fs.writeFileSync(path.join(first.cwd, 'work.txt'), 'in progress\n');
+    execFileSync('git', ['add', 'work.txt'], { cwd: first.cwd });
+    execFileSync('git', ['commit', '-q', '-m', 'wip'], { cwd: first.cwd });
+    const unmergedTip = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: first.cwd }).toString().trim();
+
+    // Simulate out-of-band deletion of `.worktrees/<slug>` without `git worktree prune` or branch deletion
+    fs.rmSync(first.cwd, { recursive: true, force: true });
+
+    const recreated = await service.create({
+      projectCwd: repo,
+      branchMode: 'new',
+      branchName: 'feature/unmerged-leftover',
+      reuseExisting: true,
+    });
+
+    expect(recreated.branch).toBe('feature/unmerged-leftover');
+    expect(recreated.cwd).toBe(first.cwd);
+    const wtHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: recreated.cwd }).toString().trim();
+    expect(wtHead).toBe(unmergedTip);
+    expect(fs.readFileSync(path.join(recreated.cwd, 'work.txt'), 'utf8')).toBe('in progress\n');
+  });
+
+  it('mints a suffixed branch when reuseExisting is true and the requested branch is checked out in the main repo', async () => {
+    const result = await service.create({
+      projectCwd: repo,
+      branchMode: 'new',
+      branchName: initialBranch,
+      reuseExisting: true,
+    });
+
+    expect(result.branch).not.toBe(initialBranch);
+    expect(result.branch.startsWith(`${initialBranch}-`)).toBe(true);
+    expect(currentBranch(result.cwd)).toBe(result.branch);
+    expect(currentBranch(repo)).toBe(initialBranch);
+  });
+
   it('rejects a directory that is not a git repository', async () => {
     const notGit = fs.mkdtempSync(path.join(os.tmpdir(), 'pa-wt-notgit-'));
     try {

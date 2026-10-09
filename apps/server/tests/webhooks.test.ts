@@ -2429,6 +2429,24 @@ describe('webhook per-issue conversation whose worktree was deleted (PA-98)', ()
     expect(session?.spec.resumeAgentSessionId).toBe('claude-conversation-98');
   });
 
+  it('recreates a component worktree when the local branch already exists without a worktree directory', async () => {
+    initRepo();
+    // Leftover local branch ref (`feature/planner-agent`) with no `.worktrees/feature-planner-agent` directory
+    execFileSync('git', ['branch', 'feature/planner-agent'], { cwd: ctx.projectDir });
+    const hook = await perIssueWorktreeHook();
+
+    const res = await deliver(SLUG, payloadWithComponents(['planner-agent']), {
+      secret: hook.secret,
+    });
+    const outcome = res.json();
+    expect(outcome.status, res.body).toBe('running');
+
+    const session = ctx.context.sessions.get(outcome.sessionId);
+    expect(session?.spec.cwd).toBe(
+      fs.realpathSync(path.join(ctx.projectDir, '.worktrees', 'feature-planner-agent')),
+    );
+  });
+
   it('starts a fresh conversation when the recreated worktree lands somewhere else', async () => {
     initRepo();
     const hook = await perIssueWorktreeHook();
