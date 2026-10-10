@@ -130,6 +130,11 @@ export interface PlannerLlmStreamOptions {
   /** PA-121: sent as `max_tokens` when set. Omitted otherwise, because some
       OpenAI-compatible servers reject the field outright. */
   maxTokens?: number;
+  /** Sent as `tool_choice: 'none'` when true: the tools stay declared (a
+      history holding tool calls is refused by some providers without them)
+      but the model may not call one. Used for the final summary round at the
+      tool-call limit. */
+  forbidToolCalls?: boolean;
 }
 
 export class PlannerLlmError extends Error {
@@ -492,6 +497,7 @@ export class PlannerLlmClient {
       // below.
       stream_options: { include_usage: true },
       ...(tools && tools.length > 0 ? { tools } : {}),
+      ...(tools && tools.length > 0 && options?.forbidToolCalls ? { tool_choice: 'none' } : {}),
     };
 
     if (options?.thinking === false || options?.effort === 'off') {

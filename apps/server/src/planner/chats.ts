@@ -149,6 +149,18 @@ const GIVE_UP_MESSAGE =
   'I made too many tool calls without reaching an answer — try narrowing your request, ' +
   'or ask me to summarize what I found so far.';
 
+/** Sent as the last user message of the one extra round trip a turn gets at
+    the tool-call limit. Stopping with `GIVE_UP_MESSAGE` alone threw away
+    everything the turn had done: on prod chat a95c510b the requested file was
+    written in round 4 and then 16 rounds of self-verification ran into the
+    cap, so the user was told "too many tool calls" and never that the file
+    existed. One tools-forbidden round costs one request and recovers that.
+    `GIVE_UP_MESSAGE` is still the answer when this round produces no text. */
+export const TOOL_LIMIT_SUMMARY_PROMPT =
+  '[PocketAgent] You have reached the tool-call limit for this turn, so no more tools can run. ' +
+  'Do not call any tool. Reply to the user now: say what you produced or found (with file paths), ' +
+  'what is finished, what is unverified or still broken, and what you would do next if asked to continue.';
+
 /**
  * PA-121: the backstop on what any one tool result contributes to the next
  * request. Each tool still truncates its own output more intelligently (a
@@ -208,6 +220,15 @@ export function basePlannerSystemPrompt(workspacePath: string): string {
     '- Tools that change things may wait for the user to approve them. If a call is denied, do not retry ' +
       'it unchanged.',
     '- When a tool call fails, read the error and correct the call rather than repeating it.',
+    // Prod chat a95c510b: a correct file in round 4, then 16 rounds of
+    // geometry maths, XML parsing, renderer hunting and a fake-DOM harness
+    // (whose own bugs it then debugged) until the tool-call cap. A turn has a
+    // fixed round budget, and nothing told the model verification spends it.
+    '- Keep verification proportionate. When you create a file, write it carefully once, then at most run a ' +
+      'quick check (e.g. a syntax check). Do not build test harnesses, simulations or install tools to verify ' +
+      'it unless the user asked. If you cannot view the result (for example a page you cannot render), say ' +
+      'so and let the user check it, rather than trying to prove it works. Each turn has a limited number of ' +
+      'tool calls, so finish with a reply that names what you made and where it is.',
   ].join('\n');
 }
 
@@ -2216,7 +2237,7 @@ export class PlannerChatService {
     iteration: number,
     initialStats: PlannerTurnStats,
     signal?: AbortSignal,
-    loopOpts: { overflowRecovery?: boolean } = {},
+    loopOpts: { overflowRecovery?: boolean; finalSummary?: boolean } = {},
   ): AsyncGenerator<AgentEvent> {
     let stats = initialStats;
     if (signal?.aborted) {
@@ -2225,9 +2246,19 @@ export class PlannerChatService {
     }
 
     const settings = readPlannerSettings(this.opts.db);
-    if (iteration >= settings.maxToolIterations) {
-      yield* this.finishTurn(chat, workspacePath, modelId, GIVE_UP_MESSAGE, true, stats);
-      return;
+    // At the cap, one more round trip with tool calls forbidden, so the turn
+    // ends with an account of what it did rather than a bare refusal — see
+    // `TOOL_LIMIT_SUMMARY_PROMPT`. `finalSummary` survives the in-place
+    // retries below (cache-marker refusal, overflow recovery), so this round
+    // happens at most once and the cap still bounds the turn.
+    const finalSummary = loopOpts.finalSummary === true || iteration >= settings.maxToolIterations;
+    if (finalSummary && !loopOpts.finalSummary) {
+      loopOpts = { ...loopOpts, finalSummary: true };
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'notice',
+        level: 'warn',
+        text: `Reached the limit of ${settings.maxToolIterations} tool-call rounds for one turn; asking the model to summarize instead of continuing.`,
+      });
     }
 
     const toolSpecs = toOpenAiToolSpecs(this.toolsFor(chat.workspaceId));
@@ -2237,7 +2268,10 @@ export class PlannerChatService {
     // PA-122: images are budgeted before anything is estimated, so the
     // estimate counts only the images that will actually be sent.
     const imageBudget = { supportsImages: plannerModelSupportsImages(modelId, modelRow?.supportsImages), modelId };
-    let messages = budgetContextImages(await this.buildTurnContext(chat, workspacePath, settings, events), imageBudget);
+    let messages = this.withFinalSummaryPrompt(
+      budgetContextImages(await this.buildTurnContext(chat, workspacePath, settings, events), imageBudget),
+      finalSummary,
+    );
     let rawEstimate = estimateRequestTokens(messages, toolSpecs);
 
     // PA-121: compact before the request when the context would leave less
@@ -2258,7 +2292,10 @@ export class PlannerChatService {
       }
       if (outcome.compacted) {
         events = await this.readEvents(workspacePath, chat.id);
-        messages = budgetContextImages(await this.buildTurnContext(chat, workspacePath, settings, events), imageBudget);
+        messages = this.withFinalSummaryPrompt(
+          budgetContextImages(await this.buildTurnContext(chat, workspacePath, settings, events), imageBudget),
+          finalSummary,
+        );
         rawEstimate = estimateRequestTokens(messages, toolSpecs);
       }
     }
@@ -2310,6 +2347,7 @@ export class PlannerChatService {
         thinking: chat.thinkingEnabled !== false,
         idleTimeoutMs: settings.llmIdleTimeoutSeconds * 1000,
         ...(maxTokens !== undefined ? { maxTokens } : {}),
+        ...(finalSummary ? { forbidToolCalls: true } : {}),
       })) {
         if (chunk.type === 'retry') {
           // PA-121: persisted as an `info` notice — visible in the chat so a
@@ -2372,6 +2410,7 @@ export class PlannerChatService {
           const recoveredStats = addCompactionStats(failedStats, outcome, modelRow);
           if (outcome.compacted && !signal?.aborted) {
             yield* this.driveLoop(chat, workspacePath, modelId, iteration, recoveredStats, signal, {
+              ...loopOpts,
               overflowRecovery: true,
             });
             return;
@@ -2439,6 +2478,16 @@ export class PlannerChatService {
         true,
         nextStats,
       );
+      return;
+    }
+
+    if (finalSummary) {
+      // Any tool call here is ignored, never run: `tool_choice: 'none'` is a
+      // request, and an endpoint that does not honour it must not buy the
+      // turn a 21st round. Still `isError`, so PA-100's timer cleanup runs and
+      // the footer shows the turn did not finish on its own terms.
+      const summary = completion.content?.trim() ? completion.content : GIVE_UP_MESSAGE;
+      yield* this.finishTurn(chat, workspacePath, modelId, summary, true, nextStats);
       return;
     }
 
@@ -3565,6 +3614,13 @@ export class PlannerChatService {
   private stableSystemPrefix(chat: PlannerChat, workspacePath: string, settings: PlannerSettingsSnapshot): string {
     const workspace = chat.workspaceId ? this.opts.plannerWorkspaces.get(chat.workspaceId) : undefined;
     return buildSystemMessage(workspace ?? null, settings, [], workspacePath);
+  }
+
+  /** Appends `TOOL_LIMIT_SUMMARY_PROMPT` for the final round at the
+      tool-call limit. Request-only: it is never persisted, so the transcript
+      and every later turn see the conversation exactly as it happened. */
+  private withFinalSummaryPrompt(messages: PlannerChatMessage[], finalSummary: boolean): PlannerChatMessage[] {
+    return finalSummary ? [...messages, { role: 'user', content: TOOL_LIMIT_SUMMARY_PROMPT }] : messages;
   }
 
   private async buildTurnContext(

@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PlannerLlmClient, PlannerLlmError } from '../src/planner/llm-client.js';
-import { buildWakePrompt } from '../src/planner/chats.js';
+import { buildWakePrompt, TOOL_LIMIT_SUMMARY_PROMPT } from '../src/planner/chats.js';
 import { authHeaders, createTestApp, type TestApp } from './helpers.js';
 
 function startFakeLiveStt(
@@ -1033,12 +1033,49 @@ describe('planner chat routes over HTTP', () => {
 
     const { res: turn, events } = await sendMessage(t, chat.id, 'loop forever');
     expect(turn.statusCode).toBe(200);
+    // The final summary round also answered with a tool call (this fake
+    // ignores `tool_choice`), which is never run: the turn falls back to the
+    // fixed message rather than buying itself another round.
     const textEvent = findEvent(events, 'text');
     expect(textEvent?.text).toMatch(/too many tool calls/);
     const doneEvent = findEvent(events, 'turn_complete');
     expect(doneEvent).toMatchObject({ isError: true });
-    // Capped, not unbounded.
-    expect(fetchImpl.mock.calls.length).toBeLessThanOrEqual(3);
+    // Capped, not unbounded: the cap's rounds plus exactly one summary round.
+    expect(fetchImpl.mock.calls.length).toBe(4);
+    expect(events.filter((e) => e.kind === 'tool_result')).toHaveLength(3);
+  });
+
+  it('asks for a tools-forbidden summary at the tool-call limit and ends the turn with it', async () => {
+    let calls = 0;
+    const fetchImpl = vi.fn().mockImplementation(() => {
+      calls += 1;
+      return calls <= 2
+        ? fakeToolCallResponse('list_workspaces', {}, `call_${calls}`)
+        : fakeCompletionResponse('I listed your workspaces twice; nothing else was done.');
+    });
+    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com' });
+    await patch(t, '/api/planner/settings', { maxToolIterations: 2 });
+    const chat = (await post(t, '/api/planner/chats', { modelId: 'gpt-4o' })).json();
+
+    const { events } = await sendMessage(t, chat.id, 'loop forever');
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    const finalBody = JSON.parse(fetchImpl.mock.calls[2]![1].body as string);
+    expect(finalBody.tool_choice).toBe('none');
+    expect(finalBody.tools.length).toBeGreaterThan(0);
+    expect(finalBody.messages.at(-1)).toEqual({ role: 'user', content: TOOL_LIMIT_SUMMARY_PROMPT });
+    // Earlier rounds never carry either.
+    const firstBody = JSON.parse(fetchImpl.mock.calls[0]![1].body as string);
+    expect(firstBody.tool_choice).toBeUndefined();
+
+    expect(events.find((e) => e.kind === 'notice')).toMatchObject({ level: 'warn' });
+    expect(findEvent(events, 'text')).toMatchObject({ text: 'I listed your workspaces twice; nothing else was done.' });
+    expect(findEvent(events, 'turn_complete')).toMatchObject({ isError: true });
+
+    // The summary prompt is request-only, never part of the transcript.
+    const history = (await get(t, `/api/planner/chats/${chat.id}/history`)).json().events as Array<{ kind: string; text?: string }>;
+    expect(history.some((e) => e.text === TOOL_LIMIT_SUMMARY_PROMPT)).toBe(false);
+    expect(history.filter((e) => e.kind === 'user_prompt')).toHaveLength(1);
   });
 
   it('maxToolIterations defaults to 20 and is configurable over the settings route', async () => {
