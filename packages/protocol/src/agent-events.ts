@@ -83,6 +83,10 @@ export const ToolResultEvent = z.object({
   content: z.string(),
   truncated: z.boolean(),
   isError: z.boolean(),
+  /** An image the tool produced for the model to look at — a Pocket Agent's
+      `read_file` on a PNG, say. Stored inline like `UserPromptEvent.image`.
+      Optional, so an older bundle simply ignores it. */
+  image: PromptImage.optional(),
 });
 
 /**

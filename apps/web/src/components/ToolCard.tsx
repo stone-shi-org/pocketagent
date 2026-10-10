@@ -112,6 +112,13 @@ export function ToolCard({ item }: { item: ToolItem }): JSX.Element {
                 {item.result || '(empty)'}
                 {item.resultTruncated && '\n… truncated'}
               </pre>
+              {item.resultImage && (
+                <img
+                  className="prompt-image tool-result-image"
+                  src={`data:${item.resultImage.mediaType};base64,${item.resultImage.data}`}
+                  alt="Image the tool returned"
+                />
+              )}
             </>
           )}
         </div>

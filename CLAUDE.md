@@ -62,6 +62,20 @@ load-bearing and easy to undo by accident:
   `opencode --version`/`codex --version` as root with the image's `HOME`, shipped root-owned
   `~/.local`, `~/.config`, `~/.codex` and `~/.cache`, and `claude update` from Settings then
   failed on a brand-new test01 deployment. `docker-smoke.mjs` checks every locally built tag.
+- **The `all` image carries a headless browser, `playwright-cli`, and it follows the same rules.**
+  Microsoft's `@playwright/cli` (pinned as `PLAYWRIGHT_CLI_VERSION` in `docker/agent-versions.env`,
+  the one non-agent pin, which `agent-install.test.ts` names explicitly) plus the Chromium revision
+  its *bundled* playwright-core expects, installed by that copy in the same layer, under
+  `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers` (outside `$HOME`). About 760 MB uncompressed, so it is
+  not in `runtime` or `claude`. Found by running it: it needs full Chromium (`--no-shell`) and
+  `PLAYWRIGHT_MCP_BROWSER=chromium` or it looks for Google Chrome; it blocks `file://` unless
+  `PLAYWRIGHT_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS=true` (which grants nothing to callers that already
+  have a shell); and without `NO_UPDATE_NOTIFIER=1` every run checks npm and caches the answer in
+  `~/.cache` — the first cut ran `--version` as root and leaked that file into `/home/pocketagent`,
+  which the layer's own ownership check caught. The build renders a page as the app user;
+  `docker-smoke.mjs` renders one again with `$HOME` mounted. There is no browser *tool*: agents use
+  the CLI from `bash`, and a Pocket Agent's base prompt mentions it only when `resolveExecutable`
+  finds it.
 
 The entrypoint's own rule: **it never chowns a mounted volume.** It remaps the `pocketagent`
 account to `PUID`/`PGID` (so `git` can match the owner of a bind-mounted repo — a uid mismatch
@@ -1097,7 +1111,14 @@ mode 0600 under the chat's workspace `.tool-output/` (pruned after a day), which
 open; a non-zero exit is `isError`. `-l` stays, for the PATH reasons above.
 
 **File tools.** `read_file` pages (`offset`/`limit`, 2 000 lines / 50 KB a page, with the offset
-to continue from) and refuses binary files. `edit_file` (mutating, gated) replaces `oldText`s that
+to continue from) and refuses binary files — except an image (PNG/JPEG/GIF/WebP, sniffed by magic
+bytes, up to `MAX_IMAGE_BYTES`), which it returns *as an image* so an agent can look at a
+screenshot it took with `playwright-cli` rather than reasoning about pixels from source.
+`PlannerToolResult.image` → `ToolResultEvent.image` (stored inline, like `UserPromptEvent.image`)
+→ `eventsToLlmMessages`, which sends a batch's images as one `user` message *after* its `tool`
+messages, because the OpenAI-compatible format has no image part for a `tool` message and nothing
+may sit between `tool_calls` and their results. `budgetContextImages` then applies unchanged
+(text-only note, newest four, oversize), and the tool card shows the image. `edit_file` (mutating, gated) replaces `oldText`s that
 must each occur exactly once, all matched against the original, overlaps refused; a tolerant
 match (trailing whitespace, typographic quotes and dashes) rewrites only the lines it touches and
 only trusts a mid-line position where normalization kept the line's length. CRLF and a BOM

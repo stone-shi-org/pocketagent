@@ -30,6 +30,15 @@
       "depNameTemplate": "opencode-ai",
       "datasourceTemplate": "npm",
       "groupName": "opencode agent pin"
+    },
+    {
+      "customType": "regex",
+      "description": "playwright-cli pin for the `all` image (docker/agent-versions.env). The Chromium revision follows from the playwright-core the CLI bundles.",
+      "fileMatch": ["^docker/agent-versions\\.env$"],
+      "matchStrings": ["PLAYWRIGHT_CLI_VERSION=(?<currentValue>[0-9.]+)"],
+      "depNameTemplate": "@playwright/cli",
+      "datasourceTemplate": "npm",
+      "groupName": "playwright-cli pin"
     }
   ],
 

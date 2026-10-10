@@ -27,7 +27,7 @@ import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
 import type { SessionManager } from '../sessions/manager.js';
 import type { SessionHistoryDeps } from '../sessions/history.js';
 import type { WorktreeService } from '../git/worktree.js';
-import type { AgentRegistry } from '../agents/registry.js';
+import { resolveExecutable, type AgentRegistry } from '../agents/registry.js';
 import type { CustomClaudeProviderStore } from '../agents/custom-providers-store.js';
 import type { WebhookService } from '../webhooks/index.js';
 import type { CronService } from '../cron/index.js';
@@ -206,7 +206,10 @@ const MISSING_TOOL_RESULT_MESSAGE =
  * brief: it is sent on every round trip, and every rule in it is one the
  * loop cannot enforce by itself.
  */
-export function basePlannerSystemPrompt(workspacePath: string): string {
+export function basePlannerSystemPrompt(
+  workspacePath: string,
+  host: { playwrightCli?: boolean } = {},
+): string {
   return [
     "You are a Pocket Agent: an assistant running inside PocketAgent on the user's own machine, with " +
       'tools to read and change files, run commands, and start or instruct coding-agent sessions. ' +
@@ -229,7 +232,32 @@ export function basePlannerSystemPrompt(workspacePath: string): string {
       'it unless the user asked. If you cannot view the result (for example a page you cannot render), say ' +
       'so and let the user check it, rather than trying to prove it works. Each turn has a limited number of ' +
       'tool calls, so finish with a reply that names what you made and where it is.',
+    // Only when it is really on PATH (the `all` image ships it): a line
+    // naming a tool the host lacks would send the model hunting for it,
+    // which is how a95c510b's renderer search started.
+    ...(host.playwrightCli
+      ? [
+          '- `playwright-cli` (a headless Chromium) is installed, so you can look at a web page or HTML file ' +
+            'you made instead of reasoning about it from source. In bash: `playwright-cli open ' +
+            'file:///abs/path.html`, then `playwright-cli screenshot --filename=/abs/path/shot.png` and view ' +
+            'the PNG with read_file; `playwright-cli console` lists JavaScript errors. One look is usually ' +
+            'enough; fix what you see, then stop. Run `playwright-cli close` when done. `playwright-cli --help` ' +
+            'lists the other commands (click, fill, eval, resize).',
+        ]
+      : []),
   ].join('\n');
+}
+
+/**
+ * Whether this host has `playwright-cli`, resolved the way every agent binary
+ * is (`resolveExecutable`). Once per process: it arrives with an image or a
+ * deliberate install, both of which mean a restart, and the base prompt has
+ * to stay byte-stable across a turn's round trips for prompt caching.
+ */
+let playwrightCliOnHost: boolean | null = null;
+function hostBrowserTools(): { playwrightCli: boolean } {
+  playwrightCliOnHost ??= resolveExecutable('playwright-cli') !== null;
+  return { playwrightCli: playwrightCliOnHost };
 }
 
 /** PA-121: tokens kept free beyond the estimate when sizing `max_tokens` —
@@ -245,6 +273,23 @@ interface CompactionOutcome {
   tokensAfter: number;
   usage: PlannerLlmUsage | null;
   elapsedMs: number;
+}
+
+/** The `tool_result` event for one executed call; `image` only when the tool
+    returned one. */
+function toolResultEvent(
+  toolUseId: string,
+  result: { content: string; truncated: boolean; isError: boolean; image?: PromptImage | undefined },
+): AgentEvent {
+  return {
+    kind: 'tool_result',
+    id: crypto.randomUUID(),
+    toolUseId,
+    content: result.content,
+    truncated: result.truncated,
+    isError: result.isError,
+    ...(result.image ? { image: result.image } : {}),
+  };
 }
 
 /** Keeps both ends of an oversized result: the head usually says what it is,
@@ -1612,7 +1657,7 @@ export class PlannerChatService {
     // `tools` JSON-schema param) but is exactly the kind of "what's in
     // context" a human asking this question wants to see.
     const workspace = chat.workspaceId ? this.opts.plannerWorkspaces.get(chat.workspaceId) : undefined;
-    const base = basePlannerSystemPrompt(workspacePath);
+    const base = basePlannerSystemPrompt(workspacePath, hostBrowserTools());
     const systemPrompt: PlannerSystemPromptSection[] = [
       // PA-121: sent first on every turn — see `basePlannerSystemPrompt`.
       { id: 'base', label: 'Pocket Agent basics', text: base, tokens: estimateTokens(base) },
@@ -2124,14 +2169,7 @@ export class PlannerChatService {
       message: scopeMessage(choice),
     });
     const result = await this.executeTool(tool, call.function.arguments, chat, signal);
-    yield* this.emit(workspacePath, chat.id, {
-      kind: 'tool_result',
-      id: crypto.randomUUID(),
-      toolUseId: call.id,
-      content: result.content,
-      truncated: result.truncated,
-      isError: result.isError,
-    });
+    yield* this.emit(workspacePath, chat.id, toolResultEvent(call.id, result));
   }
 
   /** Every transcript read in this service, so a skipped corrupt line is
@@ -2576,14 +2614,7 @@ export class PlannerChatService {
           ),
         );
         for (let i = 0; i < remaining.length; i++) {
-          yield* this.emit(workspacePath, chat.id, {
-            kind: 'tool_result',
-            id: crypto.randomUUID(),
-            toolUseId: remaining[i]!.id,
-            content: results[i]!.content,
-            truncated: results[i]!.truncated,
-            isError: results[i]!.isError,
-          });
+          yield* this.emit(workspacePath, chat.id, toolResultEvent(remaining[i]!.id, results[i]!));
         }
         if (signal?.aborted) {
           yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'interrupted');
@@ -2656,14 +2687,7 @@ export class PlannerChatService {
       }
 
       const result = await this.executeTool(gate.tool, call.function.arguments, chat, signal);
-      yield* this.emit(workspacePath, chat.id, {
-        kind: 'tool_result',
-        id: crypto.randomUUID(),
-        toolUseId: call.id,
-        content: result.content,
-        truncated: result.truncated,
-        isError: result.isError,
-      });
+      yield* this.emit(workspacePath, chat.id, toolResultEvent(call.id, result));
       if (signal?.aborted) {
         yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'interrupted');
         return;
@@ -2962,6 +2986,7 @@ export class PlannerChatService {
           let output: string;
           let isError: boolean;
           let truncated = false;
+          let image: PromptImage | undefined;
           if (gate.kind === 'unavailable') {
             output = gate.message;
             isError = true;
@@ -2973,15 +2998,11 @@ export class PlannerChatService {
             output = result.content;
             isError = result.isError;
             truncated = result.truncated;
+            image = result.image;
           }
-          await this.persist(workspacePath, chat.id, {
-            kind: 'tool_result',
-            id: crypto.randomUUID(),
-            toolUseId: call.id,
-            content: output,
-            truncated,
-            isError,
-          });
+          // Gemini is answered with `output` only; the image is persisted so
+          // the planner LLM sees it once live mode ends.
+          await this.persist(workspacePath, chat.id, toolResultEvent(call.id, { content: output, truncated, isError, image }));
           results.push({ ...base, status: isError ? 'refused' : 'completed', output, approvalId: null });
         }
         return results;
@@ -3052,12 +3073,17 @@ export class PlannerChatService {
     rawArguments: string,
     chat: PlannerChat,
     signal?: AbortSignal,
-  ): Promise<{ content: string; isError: boolean; truncated: boolean }> {
+  ): Promise<{ content: string; isError: boolean; truncated: boolean; image?: PromptImage }> {
     const prepared = prepareToolArguments(tool.name, tool.parameters, rawArguments, tool.prepareArguments);
     if (!prepared.ok) return { content: prepared.message, isError: true, truncated: false };
     const outcome = await this.runTool(tool, prepared.args, chat, signal);
     const capped = capToolOutput(outcome.content);
-    return { content: capped.content, isError: outcome.isError, truncated: capped.truncated };
+    return {
+      content: capped.content,
+      isError: outcome.isError,
+      truncated: capped.truncated,
+      ...(outcome.image ? { image: outcome.image } : {}),
+    };
   }
 
   private async runTool(
@@ -3065,7 +3091,7 @@ export class PlannerChatService {
     args: Record<string, unknown>,
     chat: PlannerChat,
     signal?: AbortSignal,
-  ): Promise<{ content: string; isError: boolean }> {
+  ): Promise<{ content: string; isError: boolean; image?: PromptImage }> {
     // PA-31: read fresh on every call, like `resolveModelId`'s own
     // `readPlannerSettings` above — a provider toggled or rekeyed in
     // Settings must take effect on the very next tool call.
@@ -3190,7 +3216,7 @@ export class PlannerChatService {
         args,
       );
       if (typeof raw === 'object' && raw !== null && 'content' in raw) {
-        return { content: raw.content, isError: Boolean(raw.isError) };
+        return { content: raw.content, isError: Boolean(raw.isError), ...(raw.image ? { image: raw.image } : {}) };
       }
       return { content: String(raw), isError: false };
     } catch (err) {
@@ -4055,6 +4081,7 @@ export function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatM
   // `content` alongside `tool_calls`.
   let pendingNarration: string | null = null;
   const resultsById = new Map<string, string>();
+  const imagesById = new Map<string, PromptImage>();
 
   const flushPendingCalls = (): void => {
     if (!pendingCalls) return;
@@ -4069,6 +4096,21 @@ export function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatM
         content: resultsById.get(call.id) ?? MISSING_TOOL_RESULT_MESSAGE,
       });
     }
+    // Images a tool returned travel in one `user` message after the batch's
+    // `tool` messages: the OpenAI-compatible format has no image part for a
+    // `tool` message, and nothing may sit between an assistant's `tool_calls`
+    // and their results. `budgetContextImages` then treats them exactly like
+    // an attached screenshot (text-only models, newest-four, oversize).
+    const imageParts: PlannerUserContentPart[] = [];
+    for (const call of calls) {
+      const image = imagesById.get(call.id);
+      if (!image) continue;
+      imageParts.push(
+        { type: 'text', text: `[Image returned by ${call.function.name} (call ${call.id}):]` },
+        { type: 'image_url', image_url: { url: `data:${image.mediaType};base64,${image.data}` } },
+      );
+    }
+    if (imageParts.length > 0) messages.push({ role: 'user', content: imageParts });
   };
   const flushNarration = (): void => {
     if (pendingNarration === null) return;
@@ -4111,6 +4153,7 @@ export function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatM
         // PA-121: the `tool` message has no error field, so an error has to
         // say so in its text or the model reads a refusal as output.
         resultsById.set(event.toolUseId, event.isError ? markToolError(event.content) : event.content);
+        if (event.image) imagesById.set(event.toolUseId, event.image);
         break;
       default:
         // `notice`, `turn_complete`, `permission_request`, `permission_resolved`,
@@ -4211,7 +4254,7 @@ function buildSystemMessage(
   memories: readonly PlannerMemory[],
   workspacePath: string,
 ): string {
-  const parts = [basePlannerSystemPrompt(workspacePath)];
+  const parts = [basePlannerSystemPrompt(workspacePath, hostBrowserTools())];
   const persona = buildPersonaSystemMessage(workspace, settings);
   if (persona) parts.push(persona);
   if (memories.length > 0) parts.push(buildMemorySystemMessage(memories));

@@ -13,7 +13,9 @@ import {
   UpdateCustomClaudeProviderRequest,
   UpdateTelegramBotRequest,
   isTerminalStatus,
+  MAX_IMAGE_BYTES,
   type AgentEvent,
+  type PromptImage,
   type SessionInfo,
 } from '@pocketagent/protocol';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
@@ -30,6 +32,7 @@ import type { PlannerMemoryService } from './memory.js';
 import type { McpRegistryService } from './mcp/registry-service.js';
 import { SkillRegistryError, type SkillRegistryService } from './skills.js';
 import { DEFAULT_COMMAND_TIMEOUT_SECONDS } from './store.js';
+import { imageDimensions } from './image-budget.js';
 import { applyEdits, normalizeEditsArgument } from './edit-file.js';
 import type { Db } from '../db/index.js';
 import { readMcpOwnedWork } from '../db/index.js';
@@ -425,6 +428,9 @@ export const TOOL_INTEGRATION_DISABLED: ToolIntegrationConfig = {
 export interface PlannerToolResult {
   content: string;
   isError?: boolean;
+  /** An image for the model to look at (`read_file` on a picture). Sent to
+      the model after the batch's tool messages — see `eventsToLlmMessages`. */
+  image?: PromptImage;
 }
 
 export interface PlannerToolDefinition {
@@ -489,6 +495,51 @@ const MAX_GREP_LINE_CHARS = 500;
 const MAX_READ_FILE_TOTAL_BYTES = 10 * 1024 * 1024;
 
 /** A NUL in the first 8 KB is the same "binary" heuristic `grep -I` uses. */
+/** The image formats a model can be sent (`PromptImage.mediaType`), by their
+    magic bytes rather than the file name — a screenshot's name is whatever the
+    model asked for. */
+function sniffImageType(buffer: Buffer): PromptImage['mediaType'] | null {
+  if (buffer.length >= 8 && buffer.readUInt32BE(0) === 0x89504e47) return 'image/png';
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (buffer.length >= 6 && buffer.toString('latin1', 0, 4) === 'GIF8') return 'image/gif';
+  if (buffer.length >= 12 && buffer.toString('latin1', 0, 4) === 'RIFF' && buffer.toString('latin1', 8, 12) === 'WEBP') {
+    return 'image/webp';
+  }
+  return null;
+}
+
+/**
+ * `read_file` on a picture: the image itself, for the model to look at. It
+ * exists so an agent can check what it made — a page it screenshotted with
+ * `playwright-cli`, a chart it plotted — rather than reasoning about pixels
+ * from source code, which on prod chat a95c510b took 16 tool rounds and a
+ * fake DOM. Whether the model can actually see it, and whether it is still
+ * sent once newer images exist, is `budgetContextImages`'s call, the same as
+ * for an image a person attached.
+ */
+async function readImageFile(
+  requested: string,
+  real: string,
+  size: number,
+  mediaType: PromptImage['mediaType'],
+): Promise<PlannerToolResult> {
+  if (size > MAX_IMAGE_BYTES) {
+    return {
+      content:
+        `${requested} is a ${size}-byte image, over the ${MAX_IMAGE_BYTES}-byte limit for showing one to the model. ` +
+        'Take a smaller screenshot (a smaller viewport, or one element) and read that instead.',
+      isError: true,
+    };
+  }
+  const data = (await fs.readFile(real)).toString('base64');
+  const dims = imageDimensions(mediaType, data);
+  if (!dims) return { content: `${requested} looks like ${mediaType} but its header could not be read.`, isError: true };
+  return {
+    content: `${requested}: ${mediaType}, ${dims.width}×${dims.height}, ${Math.round(size / 1024)} KB. The image is attached below.`,
+    image: { mediaType, data },
+  };
+}
+
 function looksBinary(buffer: Buffer): boolean {
   return buffer.subarray(0, 8192).includes(0);
 }
@@ -905,9 +956,11 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
   {
     name: 'read_file',
     description:
-      'Read a text file. The path must be inside an added project workspace or a planner workspace. ' +
-      `Shows at most ${MAX_COMMAND_OUTPUT_LINES} lines / ${MAX_COMMAND_OUTPUT_BYTES / 1024} KB at a time; for a longer ` +
-      'file, the result says which lines it showed and the offset to continue from.',
+      'Read a text file, or look at an image (PNG, JPEG, GIF or WebP, e.g. a screenshot you took). The path must ' +
+      'be inside an added project workspace or a planner workspace. ' +
+      `Shows at most ${MAX_COMMAND_OUTPUT_LINES} lines / ${MAX_COMMAND_OUTPUT_BYTES / 1024} KB of text at a time; for a ` +
+      'longer file, the result says which lines it showed and the offset to continue from. offset and limit do ' +
+      'not apply to an image.',
     parameters: {
       type: 'object',
       properties: {
@@ -929,6 +982,18 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       }
       const stat = await fs.stat(real);
       if (!stat.isFile()) return { content: `${requested} is not a file.`, isError: true };
+      // Sniffed before the size limit, which is a text limit: an image has
+      // its own, smaller one.
+      const head = Buffer.alloc(16);
+      const handle = await fs.open(real, 'r');
+      let headBytes: number;
+      try {
+        ({ bytesRead: headBytes } = await handle.read(head, 0, head.length, 0));
+      } finally {
+        await handle.close();
+      }
+      const imageType = sniffImageType(head.subarray(0, headBytes));
+      if (imageType) return readImageFile(requested, real, stat.size, imageType);
       if (stat.size > MAX_READ_FILE_TOTAL_BYTES) {
         return {
           content:

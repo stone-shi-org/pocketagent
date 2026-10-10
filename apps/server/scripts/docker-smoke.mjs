@@ -602,6 +602,46 @@ heading('A pinned agent CLI survives the $HOME mount (if that tag is built)');
   }
 }
 
+heading('The -all image renders a page with playwright-cli, $HOME mounted (if that tag is built)');
+{
+  // A browser that installs cleanly and cannot launch is what a `--version`
+  // check misses, and the image's build-time render runs without the home
+  // volume. So: the host uid, $HOME mounted over the image's, a login shell
+  // (the planner's bash is `-l`), and a PNG on disk at the end.
+  const tag = `${IMAGE}:latest-all`;
+  if (tryRun('docker', ['image', 'inspect', '-f', '{{.Id}}', tag]).status !== 0) {
+    ok(`skipped — ${tag} not built locally (docker/build.sh all)`);
+  } else {
+    const probe = 'pa-smoke-all-browser';
+    tryRun('docker', ['rm', '-f', probe]);
+    run('docker', [
+      'run', '--detach', '--name', probe,
+      '--env', `POCKETAGENT_AUTH_TOKEN=${TOKEN}`,
+      '--env', `POCKETAGENT_WORKSPACE_ROOTS=${workspace}`,
+      '--env', `PUID=${HOST_UID}`, '--env', `PGID=${HOST_GID}`,
+      '--volume', `${homeDir}:/home/pocketagent`,
+      '--volume', `${workspace}:${workspace}`,
+      tag,
+    ]);
+    const page = `${workspace}/pa-smoke-page.html`;
+    fs.writeFileSync(page, '<title>pa-smoke-page</title><svg width="80" height="80"><circle cx="40" cy="40" r="30"/></svg>');
+    const shot = `${workspace}/pa-smoke-shot.png`;
+    const script = [
+      `cd ${workspace}`,
+      `playwright-cli open file://${page}`,
+      `playwright-cli screenshot --filename=${shot}`,
+      'playwright-cli console',
+      'playwright-cli close',
+    ].join(' && ');
+    const res = tryRun('docker', ['exec', '--user', `${HOST_UID}:${HOST_GID}`, probe, 'bash', '-lc', script]);
+    check(res.status === 0 && res.stdout.includes('pa-smoke-page'), 'playwright-cli opens a file:// page from a login shell', res.stderr.split('\n').slice(-3).join(' '));
+    check(res.stdout.includes('Errors: 0'), 'the page logged no console errors');
+    const png = fs.existsSync(shot) ? fs.readFileSync(shot) : null;
+    check(png !== null && png.readUInt32BE(0) === 0x89504e47, 'the screenshot is a PNG on the mounted workspace');
+    tryRun('docker', ['rm', '-f', probe]);
+  }
+}
+
 heading('No image ships files the app user cannot write into $HOME (PA-104)');
 {
   // Docker copies an image directory into an *empty named volume* on first

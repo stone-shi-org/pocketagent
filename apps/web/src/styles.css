@@ -2183,6 +2183,14 @@ input[type='number']::-webkit-outer-spin-button {
   object-fit: contain;
 }
 
+/* A tool card's returned image: the prompt thumbnail's frame, wider, since a
+   screenshot is the point of the card rather than an attachment to a line. */
+.tool-result-image {
+  max-width: min(100%, 480px);
+  max-height: 360px;
+  margin-top: 6px;
+}
+
 .answer { margin: 12px 0; overflow-wrap: anywhere; }
 .answer.streaming::after {
   content: '▌';

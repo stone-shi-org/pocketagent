@@ -438,6 +438,58 @@ RUN test -n "${CODEX_VERSION}" && test -n "${OPENCODE_VERSION}" \
     && { test -z "$(find /home/pocketagent ! -user pocketagent -print -quit)" \
          || { echo "root-owned files leaked into /home/pocketagent:" >&2; find /home/pocketagent ! -user pocketagent >&2; exit 1; }; }
 
+# A headless browser agents drive from the shell: Microsoft's `playwright-cli`
+# (`@playwright/cli`) plus the Chromium build *its own bundled* playwright-core
+# expects. Without one, an agent asked for an HTML page could not look at what
+# it made; prod chat a95c510b spent 16 tool rounds on geometry maths and a
+# fake-DOM harness instead. About 700 MB (Chromium ~400, its apt libraries and
+# fonts ~300), which is why it is here and not in `runtime` or `claude`.
+# Four things were found by running it and are load-bearing:
+#   - The browser comes from the CLI's bundled playwright-core, in the same
+#     layer: each Playwright release expects one browser revision, and the
+#     CLI bundles its own (an alpha at 0.1.22), so the repo's playwright
+#     devDependency would install the wrong one.
+#   - Full Chromium (`--no-shell`): the CLI refuses the headless shell, and
+#     without PLAYWRIGHT_MCP_BROWSER it looks for Google Chrome in /opt/google.
+#   - file:// is blocked by default. Lifting it grants nothing, since every
+#     caller of this CLI already has a shell as the same user.
+#   - Outside $HOME (PLAYWRIGHT_BROWSERS_PATH), like every other baked-in
+#     tool here, or the home volume hides it on first run.
+#   - NO_UPDATE_NOTIFIER: otherwise every run asks the npm registry for a newer
+#     CLI and caches the answer in ~/.cache/ms-playwright. The first cut of
+#     this layer ran `--version` as root with the image's HOME and left that
+#     file root-owned in /home/pocketagent (the check below caught it), and a
+#     pinned image has no use for an "update available" line an agent might
+#     act on anyway.
+# The build renders a page as the app user at the end, because a browser that
+# installs fine and cannot launch is the failure a `--version` check misses.
+ARG PLAYWRIGHT_CLI_VERSION
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers \
+    PLAYWRIGHT_MCP_BROWSER=chromium \
+    PLAYWRIGHT_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS=true \
+    NO_UPDATE_NOTIFIER=1
+RUN test -n "${PLAYWRIGHT_CLI_VERSION}" \
+    || { echo "PLAYWRIGHT_CLI_VERSION is unset. Build via docker/build.sh, which reads docker/agent-versions.env." >&2; exit 1; } \
+    && env -u NPM_CONFIG_PREFIX HOME=/root npm install --global --prefix /usr/local --no-audit --no-fund \
+        "@playwright/cli@${PLAYWRIGHT_CLI_VERSION}" \
+    && PWCORE=/usr/local/lib/node_modules/@playwright/cli/node_modules/playwright-core \
+    && test -f "$PWCORE/cli.js" \
+    && HOME=/root node "$PWCORE/cli.js" install --with-deps --no-shell chromium \
+    && rm -rf /var/lib/apt/lists/* /root/.npm /root/.cache \
+    && chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH" \
+    && test -x /usr/local/bin/playwright-cli \
+    && HOME=/root playwright-cli --version | grep -qF "${PLAYWRIGHT_CLI_VERSION}" \
+    && probe="$(mktemp -d)" && chmod 0777 "$probe" \
+    && printf '<title>pa-probe</title><svg width="40" height="40"><circle cx="20" cy="20" r="18"/></svg>' > "$probe/p.html" \
+    && cd "$probe" \
+    && gosu pocketagent env HOME="$probe" playwright-cli open "file://$probe/p.html" | grep -qF 'pa-probe' \
+    && gosu pocketagent env HOME="$probe" playwright-cli screenshot --filename=p.png >/dev/null \
+    && gosu pocketagent env HOME="$probe" playwright-cli close >/dev/null \
+    && test -s "$probe/p.png" \
+    && cd / && rm -rf "$probe" \
+    && { test -z "$(find /home/pocketagent ! -user pocketagent -print -quit)" \
+         || { echo "root-owned files leaked into /home/pocketagent:" >&2; find /home/pocketagent ! -user pocketagent >&2; exit 1; }; }
+
 # ---------------------------------------------------------------------------
 # hub-deps — production dependencies for the Hub alone
 # ---------------------------------------------------------------------------

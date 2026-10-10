@@ -570,6 +570,50 @@ describe('planner tools against a real app context', () => {
     const result = await runText(tool, depsFor(t), { path: t.projectDir });
     expect(result).toMatch(/is not a file/);
   });
+
+  // A 1×1 PNG. read_file returns a picture as an image for the model to look
+  // at (a playwright-cli screenshot, say), sniffed by its bytes, not its name.
+  const ONE_PIXEL_PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+    'base64',
+  );
+
+  it('read_file returns an image file as an image, whatever its name', async () => {
+    t = await createTestApp();
+    const filePath = path.join(t.projectDir, 'shot.bin');
+    await fs.writeFile(filePath, ONE_PIXEL_PNG);
+    const result = await findPlannerTool('read_file')!.execute(depsFor(t), { path: filePath });
+    expect(result).toMatchObject({
+      content: expect.stringMatching(/image\/png, 1×1/),
+      image: { mediaType: 'image/png', data: ONE_PIXEL_PNG.toString('base64') },
+    });
+    expect((result as { isError?: boolean }).isError).toBeFalsy();
+  });
+
+  it('read_file refuses an image over the size a model can be shown, and one whose header is broken', async () => {
+    t = await createTestApp();
+    const tool = findPlannerTool('read_file')!;
+    const big = path.join(t.projectDir, 'big.png');
+    // A PNG signature and IHDR, then padding past MAX_IMAGE_BYTES.
+    await fs.writeFile(big, Buffer.concat([ONE_PIXEL_PNG.subarray(0, 33), Buffer.alloc(5 * 1024 * 1024 + 1)]));
+    expect(await tool.execute(depsFor(t), { path: big })).toMatchObject({
+      isError: true,
+      content: expect.stringMatching(/over the \d+-byte limit/),
+    });
+    const broken = path.join(t.projectDir, 'broken.png');
+    await fs.writeFile(broken, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0, 0, 0]));
+    const res = await tool.execute(depsFor(t), { path: broken });
+    expect(res).toMatchObject({ isError: true, content: expect.stringMatching(/header could not be read/) });
+    expect((res as { image?: unknown }).image).toBeUndefined();
+  });
+
+  it('read_file still refuses a non-image binary file', async () => {
+    t = await createTestApp();
+    const filePath = path.join(t.projectDir, 'blob.dat');
+    await fs.writeFile(filePath, Buffer.from([1, 2, 0, 3, 4]));
+    const res = await findPlannerTool('read_file')!.execute(depsFor(t), { path: filePath });
+    expect(res).toMatchObject({ isError: true, content: expect.stringMatching(/binary file/) });
+  });
 });
 
 // ---- PA-6, phase 4: mutating tools ------------------------------------------

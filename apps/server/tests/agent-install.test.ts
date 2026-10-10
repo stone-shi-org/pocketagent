@@ -93,6 +93,10 @@ function fakeHost(): FakeHost {
   };
 }
 
+/** Pins in docker/agent-versions.env for image tooling rather than an agent
+    (`playwright-cli` in the `all` target). */
+const IMAGE_TOOL_PINS = ['PLAYWRIGHT_CLI_VERSION'];
+
 describe('agent install catalog', () => {
   /**
    * PA-104's pinning model, enforced: pins exist only for image builds, and
@@ -121,7 +125,22 @@ describe('agent install catalog', () => {
       expected.add(entry.imagePinVar as string);
       expect(pins.get(entry.imagePinVar as string), id).toMatch(/^\d+\.\d+\.\d+/);
     }
+    // Image tooling that is not an agent, so no catalog entry names it. Listed
+    // here rather than ignored by pattern, so a stray pin still fails.
+    for (const toolPin of IMAGE_TOOL_PINS) {
+      expect(pins.get(toolPin), toolPin).toMatch(/^\d+\.\d+\.\d+/);
+      expected.add(toolPin);
+    }
     expect([...pins.keys()].sort()).toEqual([...expected].sort());
+  });
+
+  it('has the Dockerfile and docker/build.sh consume every non-agent image pin', () => {
+    const dockerfile = readFileSync(path.resolve(import.meta.dirname, '../../../docker/Dockerfile'), 'utf8');
+    const buildSh = readFileSync(path.resolve(import.meta.dirname, '../../../docker/build.sh'), 'utf8');
+    for (const toolPin of IMAGE_TOOL_PINS) {
+      expect(dockerfile, toolPin).toContain(`ARG ${toolPin}`);
+      expect(buildSh, toolPin).toContain(`--build-arg "${toolPin}=\${${toolPin}}"`);
+    }
   });
 
   /**

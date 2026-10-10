@@ -180,6 +180,20 @@ describe('transcript: tools', () => {
     expect(tool.isError).toBe(false);
   });
 
+  it('keeps an image the tool returned, so the card can show what the model saw', () => {
+    const image = { mediaType: 'image/png' as const, data: 'iVBORw0KGgo=' };
+    const state = applyEvents(emptyTranscript(), [
+      toolUse('t1'),
+      { kind: 'tool_result', id: 'r1', toolUseId: 't1', content: 'shot.png', truncated: false, isError: false, image },
+    ]);
+    expect((state.items[0] as ToolItem).resultImage).toEqual(image);
+    const plain = applyEvents(emptyTranscript(), [
+      toolUse('t1'),
+      { kind: 'tool_result', id: 'r1', toolUseId: 't1', content: 'x', truncated: false, isError: false },
+    ]);
+    expect((plain.items[0] as ToolItem).resultImage).toBeUndefined();
+  });
+
   it('ignores a result with no matching call rather than inventing a card', () => {
     const state = applyEvent(emptyTranscript(), {
       kind: 'tool_result',

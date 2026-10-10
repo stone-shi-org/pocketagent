@@ -30,6 +30,9 @@ export interface ToolItem {
   result: string | null;
   resultTruncated: boolean;
   isError: boolean;
+  /** An image the tool returned for the model to look at (a Pocket Agent's
+      `read_file` on a screenshot) — shown so a person sees what it saw. */
+  resultImage?: PromptImage;
   /** Set while an approval for this call is outstanding. */
   awaitingApproval: boolean;
   denied: boolean;
@@ -317,6 +320,7 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
         resultTruncated: event.truncated,
         isError: event.isError,
         awaitingApproval: false,
+        ...(event.image ? { resultImage: event.image } : {}),
       };
       return { ...state, items };
     }
