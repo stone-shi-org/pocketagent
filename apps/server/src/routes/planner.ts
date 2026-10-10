@@ -1881,13 +1881,44 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       const stat = await fsPromises.stat(filePath);
       if (!stat.isFile()) return badRequest(reply, 'Requested path is not a file.');
       await fsPromises.unlink(filePath);
-      const response: DeletePlannerArtifactResponse = { ok: true };
+      const response: DeletePlannerArtifactResponse = { ok: true, count: 1 };
       return response;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return notFound(reply, 'Artifact not found.');
       }
       return badRequest(reply, `Could not delete artifact: ${(err as Error).message}`);
+    }
+  }
+
+  async function handleDeleteAllArtifacts(
+    artifactsDir: string,
+    reply: FastifyReply,
+  ) {
+    try {
+      let entries: fs.Dirent[];
+      try {
+        entries = await fsPromises.readdir(artifactsDir, { withFileTypes: true });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          const response: DeletePlannerArtifactResponse = { ok: true, count: 0 };
+          return response;
+        }
+        throw err;
+      }
+      let count = 0;
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue;
+        const target = path.join(artifactsDir, entry.name);
+        if (isContained(artifactsDir, target) && target !== artifactsDir) {
+          await fsPromises.rm(target, { recursive: true, force: true });
+          count++;
+        }
+      }
+      const response: DeletePlannerArtifactResponse = { ok: true, count };
+      return response;
+    } catch (err) {
+      return badRequest(reply, `Could not clean artifacts: ${(err as Error).message}`);
     }
   }
 
@@ -1909,6 +1940,20 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const artifacts = await listArtifactFiles(artifactsDir);
     const response: PlannerArtifactsResponse = { artifacts };
     return response;
+  });
+
+  app.delete('/api/planner/workspaces/:id/artifacts', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const artifactsDir = artifactsDirForWorkspace(id);
+    if (!artifactsDir) return notFound(reply, 'Workspace not found.');
+    return handleDeleteAllArtifacts(artifactsDir, reply);
+  });
+
+  app.delete('/api/planner/chats/:id/artifacts', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const artifactsDir = artifactsDirForChat(id);
+    if (!artifactsDir) return notFound(reply, 'Chat not found.');
+    return handleDeleteAllArtifacts(artifactsDir, reply);
   });
 
   app.get('/api/planner/workspaces/:id/artifacts/file', async (request, reply) => {

@@ -1186,6 +1186,7 @@ export type PlannerArtifactsResponse = z.infer<typeof PlannerArtifactsResponse>;
 
 export const DeletePlannerArtifactResponse = z.object({
   ok: z.literal(true),
+  count: z.number().int().nonnegative().optional(),
 });
 export type DeletePlannerArtifactResponse = z.infer<typeof DeletePlannerArtifactResponse>;
 

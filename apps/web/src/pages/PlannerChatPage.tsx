@@ -253,6 +253,7 @@ export function PlannerChatPage({
   const [artifactsLoading, setArtifactsLoading] = useState(false);
   const [artifactsError, setArtifactsError] = useState<string | null>(null);
   const [pendingDeleteArtifact, setPendingDeleteArtifact] = useState<PlannerArtifact | null>(null);
+  const [confirmCleanAll, setConfirmCleanAll] = useState(false);
   const [deletingArtifact, setDeletingArtifact] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [geminiLiveActive, setGeminiLiveActive] = useState(false);
@@ -504,6 +505,19 @@ export function PlannerChatPage({
       setDeletingArtifact(false);
     }
   }, [api, chatId, pendingDeleteArtifact, refreshArtifacts]);
+
+  const handleCleanAllArtifacts = useCallback(async () => {
+    setDeletingArtifact(true);
+    try {
+      await api.deleteAllPlannerChatArtifacts(chatId);
+      setConfirmCleanAll(false);
+      await refreshArtifacts();
+    } catch (err) {
+      setArtifactsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeletingArtifact(false);
+    }
+  }, [api, chatId, refreshArtifacts]);
 
   const removeCodingSubagent = async (subagent: SessionInfo, e: React.MouseEvent): Promise<void> => {
     e.preventDefault();
@@ -1739,6 +1753,18 @@ export function PlannerChatPage({
                 <span className="planner-artifacts-badge">{artifacts.length}</span>
               </div>
               <div className="planner-artifacts-actions">
+                {artifacts.length > 0 && (
+                  <button
+                    type="button"
+                    className="planner-artifact-btn danger"
+                    onClick={() => setConfirmCleanAll(true)}
+                    disabled={artifactsLoading || deletingArtifact}
+                    aria-label="Clean all artifacts"
+                    title="Clean all artifacts"
+                  >
+                    <Icon name="trash" size={14} />
+                  </button>
+                )}
                 <button
                   type="button"
                   className="planner-artifact-btn"
@@ -1837,6 +1863,18 @@ export function PlannerChatPage({
           busy={deletingArtifact}
           onConfirm={() => void handleDeleteArtifact()}
           onCancel={() => setPendingDeleteArtifact(null)}
+        />
+      )}
+
+      {confirmCleanAll && (
+        <ConfirmDialog
+          title="Clean all artifacts?"
+          body={`Are you sure you want to delete all ${artifacts.length} artifact${artifacts.length === 1 ? '' : 's'} in this workspace? This cannot be undone.`}
+          confirmLabel={deletingArtifact ? 'Cleaning…' : 'Clean all'}
+          danger={true}
+          busy={deletingArtifact}
+          onConfirm={() => void handleCleanAllArtifacts()}
+          onCancel={() => setConfirmCleanAll(false)}
         />
       )}
     </div>

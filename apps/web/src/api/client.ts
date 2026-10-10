@@ -1315,6 +1315,16 @@ export function createApiClient(endpoint: HostEndpoint) {
         { method: 'DELETE' },
       ),
 
+    deleteAllPlannerArtifacts: (workspaceId: string) =>
+      request<DeletePlannerArtifactResponse>(`/api/planner/workspaces/${encodeURIComponent(workspaceId)}/artifacts`, {
+        method: 'DELETE',
+      }),
+
+    deleteAllPlannerChatArtifacts: (chatId: string) =>
+      request<DeletePlannerArtifactResponse>(`/api/planner/chats/${encodeURIComponent(chatId)}/artifacts`, {
+        method: 'DELETE',
+      }),
+
     plannerArtifactFileUrl: (workspaceId: string, name: string, download = false) =>
       hostUrl(
         endpoint,

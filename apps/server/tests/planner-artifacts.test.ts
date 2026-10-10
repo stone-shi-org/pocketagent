@@ -152,4 +152,33 @@ describe('planner artifacts (PA-128)', () => {
     const outsideDecision = chatsService.gateToolCall(chat, writeOutsideCall);
     expect(outsideDecision.kind).toBe('needs_approval');
   });
+
+  it('cleans all artifacts in workspace or chat', async () => {
+    const ws = t.context.plannerWorkspaces.getDefault()!;
+    const artifactsDir = path.join(ws.path, 'artifacts');
+    await fs.mkdir(artifactsDir, { recursive: true });
+    await fs.writeFile(path.join(artifactsDir, 'file1.txt'), 'one');
+    await fs.writeFile(path.join(artifactsDir, 'file2.txt'), 'two');
+
+    const chat = t.context.plannerChats.create({
+      workspaceId: ws.id,
+      title: 'Chat With Multiple Artifacts',
+    });
+
+    const listRes1 = await get(`/api/planner/chats/${chat.id}/artifacts`);
+    expect(listRes1.statusCode).toBe(200);
+    const body1 = listRes1.json() as PlannerArtifactsResponse;
+    expect(body1.artifacts.length).toBe(2);
+
+    const cleanRes = await del(`/api/planner/chats/${chat.id}/artifacts`);
+    expect(cleanRes.statusCode).toBe(200);
+    const cleanBody = cleanRes.json() as DeletePlannerArtifactResponse;
+    expect(cleanBody.ok).toBe(true);
+    expect(cleanBody.count).toBe(2);
+
+    const listRes2 = await get(`/api/planner/chats/${chat.id}/artifacts`);
+    expect(listRes2.statusCode).toBe(200);
+    const body2 = listRes2.json() as PlannerArtifactsResponse;
+    expect(body2.artifacts.length).toBe(0);
+  });
 });
