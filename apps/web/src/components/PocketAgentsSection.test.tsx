@@ -182,4 +182,31 @@ describe('PocketAgentsSection (PA-106)', () => {
     expect(htmlBeta).not.toContain('project-caret closed');
     expect(htmlBeta).toContain('Regular Chat 1');
   });
+
+  it('renders code-server button pointing to workspace folder when codeServerBaseUrl is configured (PA-130)', () => {
+    const htmlWithoutCodeServer = renderToStaticMarkup(
+      <PocketAgentsSection
+        workspaces={workspaces}
+        chats={[]}
+        refresh={async () => {}}
+        onOpenChat={() => {}}
+        onApiError={() => {}}
+        codeServerBaseUrl={null}
+      />,
+    );
+    expect(htmlWithoutCodeServer).not.toContain('Open Agent Alpha in code-server');
+
+    const htmlWithCodeServer = renderToStaticMarkup(
+      <PocketAgentsSection
+        workspaces={workspaces}
+        chats={[]}
+        refresh={async () => {}}
+        onOpenChat={() => {}}
+        onApiError={() => {}}
+        codeServerBaseUrl="https://code.example.com"
+      />,
+    );
+    expect(htmlWithCodeServer).toContain('aria-label="Open Agent Alpha in code-server"');
+    expect(htmlWithCodeServer).toContain('href="https://code.example.com/?folder=%2Fpath%2Falpha"');
+  });
 });

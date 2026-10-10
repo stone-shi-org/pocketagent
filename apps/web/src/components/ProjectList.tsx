@@ -72,7 +72,7 @@ function rateLimitLabel(chat: ChatSummary): string | null {
  * — see `POCKETAGENT_CODE_SERVER_URL` in `.env.example`. code-server opens the
  * folder named in `?folder=`, appended to whatever path it is served under.
  */
-function codeServerLink(base: string, cwd: string): string {
+export function codeServerLink(base: string, cwd: string): string {
   const root = base.endsWith('/') ? base : `${base}/`;
   return `${root}?folder=${encodeURIComponent(cwd)}`;
 }

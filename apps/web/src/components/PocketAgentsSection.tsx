@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { PlannerChat, PlannerWorkspace } from '@pocketagent/protocol';
 import { Icon } from './Icon.js';
+import { codeServerLink } from './ProjectList.js';
 import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
 import {
   loadPocketAgentsTreeState,
@@ -24,6 +25,10 @@ interface Props {
   onCloseChat?: (chatId: string) => void;
   onApiError: (error: unknown) => void;
   activeChatId?: string | null;
+  /** PA-130: base URL of code-server on this host (`HostInfo.codeServerBaseUrl`),
+      so each Pocket Agent workspace row can offer the same "Open in code-server"
+      button that coding-agent project folders have. */
+  codeServerBaseUrl?: string | null;
 }
 
 /**
@@ -48,6 +53,7 @@ export function PocketAgentsSection({
   onCloseChat,
   onApiError,
   activeChatId,
+  codeServerBaseUrl,
 }: Props): JSX.Element | null {
   const api = useHostApi();
   const endpoint = useHostEndpoint();
@@ -267,6 +273,9 @@ export function PocketAgentsSection({
           );
         };
 
+        const codeServerHref =
+          codeServerBaseUrl && ws.path ? codeServerLink(codeServerBaseUrl, ws.path) : null;
+
         return (
           <div key={ws.id}>
             <div className="project-head">
@@ -294,6 +303,18 @@ export function PocketAgentsSection({
               >
                 <Icon name="compose" size={19} />
               </button>
+              {codeServerHref && (
+                <a
+                  className="round-btn plain"
+                  href={codeServerHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={`Open ${ws.name} in code-server`}
+                  title={`Open ${ws.name} in code-server`}
+                >
+                  <Icon name="code" size={19} />
+                </a>
+              )}
               <button
                 type="button"
                 className="round-btn plain"
