@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   PlannerModel,
   PlannerSettingsDto,
@@ -74,6 +74,8 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   const [newModelId, setNewModelId] = useState('');
   const [newModelLabel, setNewModelLabel] = useState('');
   const [newModelSupportsEffort, setNewModelSupportsEffort] = useState(true);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(true);
+  const newModelLabelInputRef = useRef<HTMLInputElement | null>(null);
   const [newApprovalScope, setNewApprovalScope] = useState<'global' | 'workspace'>('global');
   const [newApprovalWorkspaceId, setNewApprovalWorkspaceId] = useState('');
   const [newApprovalTool, setNewApprovalTool] = useState('');
@@ -419,16 +421,19 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   };
 
   const addModel = (): void => {
-    if (!newModelId.trim() || !newModelLabel.trim()) return;
+    const trimmedId = newModelId.trim();
+    const trimmedLabel = newModelLabel.trim() || trimmedId;
+    if (!trimmedId) return;
     void withBusy(async () => {
       await api.createPlannerModel({
-        modelId: newModelId.trim(),
-        label: newModelLabel.trim(),
+        modelId: trimmedId,
+        label: trimmedLabel,
         supportsEffort: newModelSupportsEffort,
       });
       setNewModelId('');
       setNewModelLabel('');
       setNewModelSupportsEffort(true);
+      setSuggestionsOpen(false);
     });
   };
 
@@ -441,6 +446,7 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
 
   // PA-121: a model's context window / output limit; `null` = not set.
   // PA-122: the same path carries prompt caching, prices and image support.
+  // PA-129: also carries `label` updates from `ModelLabelEditor`.
   const setModelLimit = (id: string, patch: UpdatePlannerModelRequest): void => {
     void withBusy(async () => {
       await api.updatePlannerModel(id, patch);
@@ -458,8 +464,7 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
    * "Query model will only 'cache' the model, and don't add. This is to
    * provide user type ahead suggestion"). A provider can list hundreds of
    * models; adding them all made the catalog and every chat's model picker
-   * unusable. Adding stays an explicit click on a suggestion, or the
-   * id + label form below.
+   * unusable. Adding stays an explicit action via the id + label form below.
    */
   const discoverModels = (): void => {
     setDiscovering(true);
@@ -483,16 +488,15 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   };
 
   /**
-   * Adds one suggestion straight from the type-ahead list, labelled with its
-   * own id — the label field is for a nickname, and requiring one before a
-   * one-click add would defeat the point of the list.
-   *
-   * Deliberately leaves the typed filter alone: the id just added drops out
-   * of `modelSuggestions` by itself (it is now configured), so "type gemin,
-   * click three of them" works without retyping between each.
+   * PA-129: fills the model-id input from a type-ahead suggestion and moves
+   * focus to the label input so the user has the chance to enter a label
+   * before clicking Add, rather than immediately creating the model with its
+   * raw id as the label.
    */
-  const addDiscoveredModel = (modelId: string): void => {
-    void withBusy(() => api.createPlannerModel({ modelId, label: modelId }));
+  const selectDiscoveredModel = (modelId: string): void => {
+    setNewModelId(modelId);
+    setSuggestionsOpen(false);
+    newModelLabelInputRef.current?.focus();
   };
 
   const confirmDeleteAllModels = (): void => {
@@ -596,16 +600,16 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
    * Type-ahead matches for whatever is typed in the model-id field: cached
    * ids that contain it, minus ones already in the catalog, capped so a
    * provider listing hundreds of models can't turn this into an endless
-   * scroll. Empty input shows nothing — the list is a filter, not a browser.
+   * scroll. Empty input (or a dismissed list after picking a suggestion)
+   * shows nothing — the list is a filter, not a browser.
    */
   const configuredModelIds = new Set((models ?? []).map((m) => m.modelId));
-  const typedModelId = newModelId.trim().toLowerCase();
-  const modelSuggestions =
-    typedModelId.length === 0
-      ? []
-      : discoveredIds
-          .filter((id) => !configuredModelIds.has(id) && id.toLowerCase().includes(typedModelId))
-          .slice(0, 12);
+  const modelSuggestions = computeModelSuggestions(
+    discoveredIds,
+    configuredModelIds,
+    newModelId,
+    suggestionsOpen,
+  );
 
   const workspaceName = (id: string | null): string =>
     (id && workspaces?.find((w) => w.id === id)?.name) || (id ? '(deleted workspace)' : '');
@@ -876,7 +880,13 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
           return (
             <div key={m.id} className="planner-model-row">
               <span>
-                {m.label} <span className="planner-row-meta">({m.modelId})</span>
+                <ModelLabelEditor
+                  label={m.label}
+                  modelId={m.modelId}
+                  disabled={busy}
+                  onSave={(nextLabel) => setModelLimit(m.id, { label: nextLabel })}
+                />{' '}
+                <span className="planner-row-meta">({m.modelId})</span>
                 <button
                   type="button"
                   className={`planner-badge-btn${m.supportsEffort !== false ? ' active' : ''}`}
@@ -979,13 +989,24 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
             type="text"
             placeholder="Model id, e.g. gpt-4o-mini"
             value={newModelId}
-            onChange={(e) => setNewModelId(e.target.value)}
+            onChange={(e) => {
+              setNewModelId(e.target.value);
+              setSuggestionsOpen(true);
+            }}
+            onFocus={() => setSuggestionsOpen(true)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') addModel();
+            }}
           />
           <input
+            ref={newModelLabelInputRef}
             type="text"
             placeholder="Label, e.g. Fast"
             value={newModelLabel}
             onChange={(e) => setNewModelLabel(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') addModel();
+            }}
           />
           <label className="planner-inline-checkbox" title="Allow configuring reasoning effort for this model">
             <input
@@ -1009,9 +1030,9 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
                 aria-selected={false}
                 className="planner-suggestion"
                 disabled={busy}
-                onClick={() => addDiscoveredModel(modelId)}
+                onClick={() => selectDiscoveredModel(modelId)}
               >
-                <Icon name="plus" size={13} /> {modelId}
+                {modelId}
               </button>
             ))}
           </div>
@@ -1807,5 +1828,114 @@ function ModelLimitInput({
         onBlur={commit}
       />
     </label>
+  );
+}
+
+/**
+ * PA-129: type-ahead matches for whatever is typed in the model-id field.
+ * Selecting a suggestion fills the model-id input (and closes the list via
+ * `suggestionsOpen = false`) so the user can enter a friendly label before
+ * clicking Add, instead of immediately creating the model with `label = id`.
+ */
+export function computeModelSuggestions(
+  discoveredIds: readonly string[],
+  configuredModelIds: ReadonlySet<string>,
+  typedInput: string,
+  suggestionsOpen = true,
+): string[] {
+  if (!suggestionsOpen) return [];
+  const typedModelId = typedInput.trim().toLowerCase();
+  if (typedModelId.length === 0) return [];
+  return discoveredIds
+    .filter((id) => !configuredModelIds.has(id) && id.toLowerCase().includes(typedModelId))
+    .slice(0, 12);
+}
+
+/**
+ * PA-129: a model row's display label, with an inline edit toggle so a typo
+ * or nickname tweak does not require deleting and re-creating the model.
+ */
+export function ModelLabelEditor({
+  label,
+  modelId,
+  disabled,
+  initialEditing = false,
+  onSave,
+}: {
+  label: string;
+  modelId: string;
+  disabled: boolean;
+  initialEditing?: boolean;
+  onSave: (label: string) => void;
+}): JSX.Element {
+  const [editing, setEditing] = useState(initialEditing);
+  const [text, setText] = useState(label);
+
+  useEffect(() => {
+    if (!editing) {
+      setText(label);
+    }
+  }, [label, editing]);
+
+  const startEditing = (): void => {
+    setText(label);
+    setEditing(true);
+  };
+
+  const commit = (): void => {
+    setEditing(false);
+    const trimmed = text.trim();
+    if (!trimmed || trimmed.length > 128 || trimmed === label) {
+      setText(label);
+      return;
+    }
+    onSave(trimmed);
+  };
+
+  const cancel = (): void => {
+    setText(label);
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <input
+        type="text"
+        autoFocus
+        className="planner-model-label-input"
+        aria-label={`Edit label for ${modelId}`}
+        value={text}
+        maxLength={128}
+        disabled={disabled}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            (e.target as HTMLInputElement).blur();
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            cancel();
+          }
+        }}
+      />
+    );
+  }
+
+  return (
+    <>
+      <span>{label}</span>
+      <button
+        type="button"
+        className="planner-model-label-edit"
+        disabled={disabled}
+        onClick={startEditing}
+        aria-label={`Edit label for ${label}`}
+        title="Edit label"
+      >
+        <Icon name="edit" size={13} />
+      </button>
+    </>
   );
 }

@@ -8964,3 +8964,10 @@ button.chat-rate-limit-badge {
 .planner-queue-cancel { flex: none; display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: none; border-radius: 50%; background: transparent; color: var(--text-dim); }
 .promptbar button.primary.queue { margin-right: 6px; }
 .attach-note { max-width: 240px; font-size: 12px; line-height: 1.35; color: var(--text-dim); }
+
+/* PA-129: inline edit button and input for a configured model's label. */
+.planner-model-label-edit { display: inline-flex; align-items: center; justify-content: center; margin-left: 4px; padding: 2px 4px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--text-dim); cursor: pointer; vertical-align: middle; }
+.planner-model-label-edit:hover:not(:disabled) { border-color: var(--border); background: var(--bg-elev); color: var(--text); }
+.planner-model-label-edit:disabled { opacity: 0.5; cursor: default; }
+.planner-model-label-input { width: 150px; padding: 2px 6px; font-size: 13.5px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--bg); color: var(--text); }
+

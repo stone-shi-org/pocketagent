@@ -669,6 +669,19 @@ describe('planner routes over HTTP', () => {
     expect((await get('/api/planner/models')).json().models).toHaveLength(1);
   });
 
+  it('updates a model label via PATCH /api/planner/models/:id (PA-129)', async () => {
+    const created = (await post('/api/planner/models', { modelId: 'gpt-4o-mini', label: 'Fst' })).json();
+
+    const updated = await patch(`/api/planner/models/${created.id}`, { label: 'Fast' });
+    expect(updated.statusCode).toBe(200);
+
+    const list = (await get('/api/planner/models')).json().models;
+    expect(list.find((m: { id: string }) => m.id === created.id)?.label).toBe('Fast');
+
+    const emptyLabel = await patch(`/api/planner/models/${created.id}`, { label: '' });
+    expect(emptyLabel.statusCode).toBe(400);
+  });
+
   // ---- PA-6 round 7: emptying the model catalog -----------------------------
 
   it('deletes every model at once', async () => {
