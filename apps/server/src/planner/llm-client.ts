@@ -174,6 +174,31 @@ function httpError(prefix: string, status: number, body: string, headers: Header
 }
 
 /**
+ * The error for a `data: {"error": …}` frame inside a 200 stream, classified
+ * like `httpError`. There are no headers to read, so the status comes from
+ * the frame itself (`status`/`code` when numeric) or from a `[429]` in the
+ * message, the shape omniroute relays a provider's failure in.
+ */
+function streamError(raw: unknown): PlannerLlmError {
+  const obj = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+  const text =
+    typeof raw === 'string'
+      ? raw
+      : typeof obj.message === 'string'
+        ? obj.message
+        : JSON.stringify(raw);
+  const numeric = [obj.status, obj.code, obj.status_code].find((v) => typeof v === 'number' && v >= 400 && v < 600) as
+    | number
+    | undefined;
+  const bracketed = /\[(\d{3})\]/.exec(text);
+  const status = numeric ?? (bracketed ? Number(bracketed[1]) : undefined);
+  const message = `Planner LLM endpoint reported an error mid-stream${status ? ` (${status})` : ''}: ${text.slice(0, 500)}`;
+  if (isQuotaMessage(text)) return new PlannerLlmError(message, status, { retryable: false });
+  if (isContextOverflowMessage(text)) return new PlannerLlmError(message, status, { contextOverflow: true });
+  return new PlannerLlmError(message, status, { retryable: status !== undefined && isRetryableStatus(status) });
+}
+
+/**
  * PA-121: retry policy for `streamComplete` — pi's agent-level defaults
  * (3 retries, 2s doubling, at most 60s). A server asking for a longer wait
  * than `maxDelayMs` is not waited for: a minute-plus `retry-after` means the
@@ -569,6 +594,17 @@ export class PlannerLlmClient {
       }
       sawAnyChunk = true;
 
+      // A gateway that has already answered 200 (omniroute sends keepalive
+      // chunks while it waits on the provider) can only report a provider
+      // failure in-band, as `data: {"error": …}`, before closing the stream.
+      // Ignoring the frame made it look like an empty reply ("no message
+      // content or tool calls") and hid the real cause, on prod chat 2c1054bb
+      // a 429 from the model the gateway routed an image request to.
+      const streamedError = (parsed as { error?: unknown }).error;
+      if (streamedError !== undefined && streamedError !== null) {
+        throw streamError(streamedError);
+      }
+
       // The `stream_options.include_usage` chunk carries a top-level `usage`
       // alongside an empty `choices: []` — captured here rather than
       // returned as its own stream event, the same "assemble internally,
@@ -691,6 +727,8 @@ export class PlannerLlmClient {
         }
       }
     } catch (err) {
+      // An in-band error frame (above) is already classified.
+      if (err instanceof PlannerLlmError) throw err;
       const idle = idleFailure();
       if (idle) throw idle;
       throw new PlannerLlmError(`Lost connection to the planner LLM endpoint: ${(err as Error).message}`, undefined, {

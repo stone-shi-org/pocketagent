@@ -2476,7 +2476,10 @@ export class PlannerChatService {
       yield* this.emit(workspacePath, chat.id, {
         kind: 'notice',
         level: 'error',
-        text: `Could not reach the LLM endpoint: ${message}`,
+        // "Could not reach" was this line's wording, and it was wrong for most
+        // of what lands here: an endpoint that answered with an error was
+        // reached. A network failure's own message already says so.
+        text: `The LLM request failed: ${message}`,
       });
       yield* this.finishTurn(chat, workspacePath, modelId, '', true, failedStats);
       return;

@@ -1151,7 +1151,7 @@ describe('planner chat routes over HTTP', () => {
     // the model as something it said.
     expect(events.map((e) => e.kind)).toEqual(['user_prompt', 'notice', 'turn_complete']);
     expect(findEvent(events, 'notice')).toMatchObject({ level: 'error' });
-    expect(findEvent(events, 'notice')?.text).toMatch(/Could not reach the LLM endpoint/);
+    expect(findEvent(events, 'notice')?.text).toMatch(/The LLM request failed: .*returned 400: boom/);
     expect(findEvent(events, 'turn_complete')).toMatchObject({ isError: true });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });

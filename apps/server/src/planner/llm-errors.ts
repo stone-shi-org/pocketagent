@@ -56,6 +56,9 @@ const QUOTA_PATTERNS: readonly RegExp[] = [
   /out of budget/i,
   /usage limit reached/i,
   /credit balance is too low/i,
+  // omniroute relaying a provider with no credits for the routed model, as a
+  // 429 (prod chat 2c1054bb): waiting does not buy credits.
+  /usage credits are required/i,
 ];
 
 export function isContextOverflowMessage(message: string): boolean {

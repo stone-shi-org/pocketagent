@@ -180,3 +180,54 @@ describe('llm-errors classification', () => {
     expect(retryAfterMs(new Headers())).toBeNull();
   });
 });
+
+/**
+ * A gateway that has already answered 200 can only report a provider failure
+ * as an in-band `data: {"error": …}` frame. Prod chat 2c1054bb: omniroute sent
+ * keepalives, then a 429 from the model it routed an image request to, and the
+ * frame was ignored, so the turn failed as "no message content or tool calls".
+ */
+describe('PlannerLlmClient in-band error frames', () => {
+  const keepalive = { id: 'chatcmpl-keepalive', model: 'keepalive', choices: [{ index: 0, delta: {}, finish_reason: null }] };
+
+  it("surfaces the frame's own message instead of an empty reply, and does not retry a quota error", async () => {
+    const fetchImpl = vi.fn().mockImplementation(() =>
+      sse([
+        keepalive,
+        keepalive,
+        { error: { message: '[claude/claude-fable-5-1] [429]: Usage credits are required for this model. (reset after 5s)' } },
+      ]),
+    );
+    const failure = collect(client(fetchImpl).streamComplete('m', []));
+    await expect(failure).rejects.toMatchObject({
+      statusCode: 429,
+      retryable: false,
+      message: expect.stringMatching(/mid-stream \(429\): .*Usage credits are required/),
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a transient one, since keepalives are not output', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce(() => sse([keepalive, { error: { message: 'upstream [503]: overloaded' } }]))
+      .mockImplementation(() => ok('hi'));
+    const events = await collect(client(fetchImpl).streamComplete('m', []));
+    expect(events.filter((e) => e.type === 'retry')).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({ type: 'done', content: 'hi' });
+  });
+
+  it('accepts a numeric status on the frame, and a bare string error', async () => {
+    const numeric = vi.fn().mockImplementation(() => sse([{ error: { message: 'bad things', code: 400 } }]));
+    await expect(collect(client(numeric).streamComplete('m', []))).rejects.toMatchObject({ statusCode: 400, retryable: false });
+    const bare = vi.fn().mockImplementation(() => sse([{ error: 'model not found' }]));
+    await expect(collect(client(bare).streamComplete('m', []))).rejects.toMatchObject({
+      message: expect.stringMatching(/mid-stream: model not found/),
+      retryable: false,
+    });
+  });
+
+  it('classifies "usage credits are required" as an account problem', () => {
+    expect(isQuotaMessage('[429]: Usage credits are required for this model.')).toBe(true);
+  });
+});
