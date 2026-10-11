@@ -49,6 +49,10 @@ const KNOWN_MODEL_WINDOWS: ReadonlyArray<readonly [RegExp, number, number]> = [
   [/^gpt-3\.5/, 16_385, 4_096],
   [/^o[134](-|$)/, 200_000, 100_000],
   [/^gemini-/, 1_048_576, 65_536],
+  // V4 (flash and pro): 1M context, 384k output — omniroute's /v1/models and
+  // DeepSeek's own catalog both report it. Earlier DeepSeek models keep the
+  // family default below.
+  [/^deepseek-(v4|flash)/, 1_000_000, 393_216],
   [/^deepseek/, 128_000, 8_192],
   [/^qwen3-coder/, 262_144, 65_536],
   [/^qwen/, 131_072, 8_192],
