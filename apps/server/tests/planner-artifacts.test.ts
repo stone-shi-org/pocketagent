@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { APP_CSP, ARTIFACT_CSP } from '../src/security-headers.js';
 import { authHeaders, createTestApp, type TestApp } from './helpers.js';
 
 describe('planner artifacts (PA-128)', () => {
@@ -63,6 +64,31 @@ describe('planner artifacts (PA-128)', () => {
     expect(dlRes.statusCode).toBe(200);
     expect(dlRes.headers['content-disposition']).toContain('attachment');
     expect(dlRes.body).toBe('# Plan MD Content');
+  });
+
+  it('serves an artifact under a sandboxed CSP that lets inline script run on an opaque origin', async () => {
+    // Self-contained animated HTML played from disk but sat still in the
+    // panel: the app's CSP (script-src 'self') blocked its inline <script>.
+    const ws = t.context.plannerWorkspaces.getDefault()!;
+    const artifactsDir = path.join(ws.path, 'artifacts');
+    await fs.mkdir(artifactsDir, { recursive: true });
+    await fs.writeFile(path.join(artifactsDir, 'anim.html'), '<script>requestAnimationFrame(() => {})</script>');
+
+    const res = await get(`/api/planner/workspaces/${ws.id}/artifacts/file?name=anim.html`);
+    expect(res.statusCode).toBe(200);
+    const csp = String(res.headers['content-security-policy']);
+    expect(csp).toBe(ARTIFACT_CSP);
+    expect(csp).toContain('sandbox allow-scripts');
+    // Without this the script would run as the logged-in operator.
+    expect(csp).not.toContain('allow-same-origin');
+    expect(csp).toContain("script-src 'unsafe-inline'");
+    expect(csp).toContain("connect-src 'none'");
+
+    // Everything else, including an artifact route's own error, keeps the app's policy.
+    expect((await get('/api/planner/workspaces')).headers['content-security-policy']).toBe(APP_CSP);
+    const missing = await get(`/api/planner/workspaces/${ws.id}/artifacts/file?name=nope.html`);
+    expect(missing.statusCode).toBe(404);
+    expect(missing.headers['content-security-policy']).toBe(APP_CSP);
   });
 
   it('rejects path traversal attempts on artifact download and deletion', async () => {

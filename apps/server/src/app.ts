@@ -91,6 +91,7 @@ import { MemoryConsolidationService } from './planner/memory-consolidation.js';
 import type { PocketContext } from './types.js';
 import { PromptQueueService } from './sessions/prompt-queue.js';
 import { VERSION, VERSION_WARNING } from './version.js';
+import { APP_CSP, ARTIFACT_CSP } from './security-headers.js';
 
 /**
  * Re-exported so `server.ts` and every existing importer keep their one import
@@ -828,21 +829,12 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('X-Frame-Options', 'DENY');
     reply.header('Referrer-Policy', 'no-referrer');
-    reply.header(
-      'Content-Security-Policy',
-      [
-        "default-src 'self'",
-        "script-src 'self'",
-        // xterm.js injects inline styles for cell rendering.
-        "style-src 'self' 'unsafe-inline'",
-        "img-src 'self' data:",
-        "font-src 'self' data:",
-        "connect-src 'self' ws: wss:",
-        "frame-ancestors 'none'",
-        "base-uri 'none'",
-        "form-action 'none'",
-      ].join('; '),
-    );
+    // An inline artifact carries its own sandboxed policy (`ARTIFACT_CSP`);
+    // anything else gets the app's. Matched on the exact value, so no route
+    // can loosen the app policy by setting a header of its own.
+    if (reply.getHeader('Content-Security-Policy') !== ARTIFACT_CSP) {
+      reply.header('Content-Security-Policy', APP_CSP);
+    }
     return payload;
   });
 

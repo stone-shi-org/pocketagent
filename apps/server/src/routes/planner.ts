@@ -77,6 +77,7 @@ import { PlannerLlmClient, PlannerLlmError } from '../planner/llm-client.js';
 import { PLANNER_TOOLS, postJsonToIntegration } from '../planner/tools.js';
 import { SkillRegistryError, type SkillSummary } from '../planner/skills.js';
 import { auditConfigChange } from './shared.js';
+import { ARTIFACT_CSP } from '../security-headers.js';
 import { isContained, WorkspaceError } from '../workspaces/index.js';
 import { treeRootOf } from '../git/worktree-paths.js';
 import { createLiveSttClient } from '../voice/live-stt-client.js';
@@ -1863,6 +1864,8 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     reply.header('Content-Type', mimeType);
     reply.header('Content-Length', stat.size);
     reply.header('Content-Disposition', `${dispositionType}; filename="${encodeURIComponent(filename)}"`);
+    // Agent-written content: runs sandboxed on an opaque origin — see ARTIFACT_CSP.
+    reply.header('Content-Security-Policy', ARTIFACT_CSP);
 
     const stream = fs.createReadStream(filePath);
     return reply.send(stream);
