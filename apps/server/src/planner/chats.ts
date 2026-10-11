@@ -2533,6 +2533,30 @@ export class PlannerChatService {
     }
 
     if (completion.toolCalls.length === 0) {
+      if (completion.finishReason === 'length') {
+        // A reply cut off at the output-token limit used to end the turn as a
+        // clean `end_turn`. With a reasoning model the whole budget can go to
+        // thinking (prod chat a38f292f: deepseek-v4-flash at `high`, no
+        // `max_tokens` sent, the gateway's 4096 default, all 4096 reasoning
+        // tokens), so the chat showed a thinking block and then nothing, with
+        // no sign anything went wrong. Whatever text did arrive is kept; the
+        // notice names the cause and the fix.
+        const limit = modelRow?.maxOutputTokens;
+        yield* this.emit(workspacePath, chat.id, {
+          kind: 'notice',
+          level: 'error',
+          text:
+            `The reply was cut off at the output token limit` +
+            (completion.usage ? ` after ${completion.usage.completionTokens} tokens` : '') +
+            (completion.content?.trim() ? '. ' : ', all of it spent thinking. ') +
+            (limit != null
+              ? `This model's "Max out" is ${limit}; raise it in Pocket Agent settings, or lower the effort.`
+              : 'No output limit is set for this model, so the endpoint used its own default. ' +
+                'Set "Max out" on this model in Pocket Agent settings, or lower the effort.'),
+        });
+        yield* this.finishTurn(chat, workspacePath, modelId, completion.content ?? '', true, nextStats, 'max_tokens');
+        return;
+      }
       yield* this.finishTurn(chat, workspacePath, modelId, completion.content ?? '', false, nextStats);
       return;
     }

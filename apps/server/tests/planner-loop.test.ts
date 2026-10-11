@@ -160,6 +160,28 @@ describe('Pocket Agent turn loop (PA-121)', () => {
     await expect(fs.stat(target)).rejects.toThrow();
   });
 
+  it('reports a reply that spent its whole output budget thinking, instead of ending silently', async () => {
+    // Prod chat a38f292f: deepseek-v4-flash at high effort, no max_tokens sent,
+    // the gateway's 4096 default all spent on reasoning — the chat showed a
+    // thinking block and then nothing, as a clean end_turn.
+    const { fetchImpl } = scripted([
+      () =>
+        sse([
+          { choices: [{ delta: { reasoning_content: 'Let me plan the pelican…' } }] },
+          { choices: [{ delta: {}, finish_reason: 'length' }] },
+          { choices: [], usage: { prompt_tokens: 50, completion_tokens: 4096 } },
+        ]),
+    ]);
+    const chat = await setup(fetchImpl);
+    const events = await send(chat.id, 'draw a pelican');
+    const notice = events.find((e) => e.kind === 'notice');
+    expect(notice).toMatchObject({ level: 'error' });
+    expect(String(notice && 'text' in notice ? notice.text : '')).toContain('all of it spent thinking');
+    expect(String(notice && 'text' in notice ? notice.text : '')).toContain('Max out');
+    const done = events.find((e) => e.kind === 'turn_complete')!;
+    expect(done).toMatchObject({ isError: true, stopReason: 'max_tokens' });
+  });
+
   // ---- narration ------------------------------------------------------------
 
   it('persists text written before a tool call as interim, and replays it with the call', async () => {

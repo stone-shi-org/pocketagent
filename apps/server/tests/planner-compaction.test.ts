@@ -73,6 +73,12 @@ describe('context-budget', () => {
     expect(knownModelLimits('gemini-2.5-pro')?.contextWindow).toBe(1_048_576);
   });
 
+  it('knows DeepSeek V4 is not the older 128k / 8k family', () => {
+    expect(knownModelLimits('deepseek-v4-flash')).toEqual({ contextWindow: 1_000_000, maxOutputTokens: 393_216 });
+    expect(knownModelLimits('ds/deepseek-v4-pro')?.contextWindow).toBe(1_000_000);
+    expect(knownModelLimits('deepseek-chat')).toEqual({ contextWindow: 128_000, maxOutputTokens: 8_192 });
+  });
+
   it('never puts the threshold below a quarter of the window', () => {
     expect(compactionThreshold(128_000, 16_384)).toBe(111_616);
     expect(compactionThreshold(8_000, 16_384)).toBe(2_000);
