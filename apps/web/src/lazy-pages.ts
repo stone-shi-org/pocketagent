@@ -18,6 +18,10 @@ export const SettingsPage = lazy(() =>
   import('./pages/SettingsPage.js').then((m) => ({ default: m.SettingsPage })),
 );
 
+export const ProvidersAndModelsPage = lazy(() =>
+  import('./pages/ProvidersAndModelsPage.js').then((m) => ({ default: m.ProvidersAndModelsPage })),
+);
+
 export const AgentsFleetPage = lazy(() =>
   import('./pages/AgentsFleetPage.js').then((m) => ({ default: m.AgentsFleetPage })),
 );

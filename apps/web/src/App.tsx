@@ -18,6 +18,7 @@ import {
   PlannerAgentEditorPage,
   PlannerChatPage,
   PlannerPage,
+  ProvidersAndModelsPage,
   SettingsPage,
   WebhookEditorPage,
   WebhooksPage,
@@ -249,6 +250,7 @@ function AuthenticatedApp({ onAnonymous }: { onAnonymous: () => void }): JSX.Ele
         onOpenWebhooks={() => navigate({ name: 'webhooks' })}
         onOpenWebhook={(hostId, webhookId) => nav.openOn(hostId, { name: 'webhook', webhookId })}
         onOpenPlanner={() => navigate({ name: 'planner' })}
+        onOpenProviders={() => navigate({ name: 'providers' })}
         onOpenPlannerChat={(hostId, chatId) => nav.openOn(hostId, { name: 'planner-chat', chatId })}
         onApiError={handleApiError}
         onLogout={logout}
@@ -344,6 +346,17 @@ function PhoneRoute({
           onBack={() => navigate({ name: 'list' })}
           onApiError={onApiError}
           hubVersion={hubVersion}
+        />
+      </Suspense>
+    );
+  }
+
+  if (route.name === 'providers') {
+    return (
+      <Suspense fallback={<PageFallback />}>
+        <ProvidersAndModelsPage
+          onBack={() => navigate({ name: 'list' })}
+          onApiError={onApiError}
         />
       </Suspense>
     );

@@ -13,6 +13,8 @@ export type Route =
   | { name: 'agents' }
   /** The full settings page — see `SettingsPage`. */
   | { name: 'settings' }
+  /** Providers and Models settings (LLM endpoint, models, TTS/STT, Gemini Live) — see `ProvidersAndModelsPage`. */
+  | { name: 'providers' }
   /** The list of scheduled jobs — see `CronJobsPage`. */
   | { name: 'cron' }
   /** One job's editor and run history. `jobId` is `'new'` for an unsaved one. */
@@ -21,7 +23,7 @@ export type Route =
   | { name: 'webhooks' }
   /** One webhook's editor and delivery history. `'new'` for an unsaved one. */
   | { name: 'webhook'; webhookId: string }
-  /** The list of planner chats and its inline LLM/model setup — see `PlannerPage`. */
+  /** The list of planner chats and agents — see `PlannerPage`. */
   | { name: 'planner' }
   /** One planner chat — see `PlannerChatPage`. */
   | { name: 'planner-chat'; chatId: string }
@@ -174,6 +176,8 @@ function parse(hash: string): Route {
 
   if (/^#\/agents$/.exec(hash)) return { name: 'agents' };
 
+  if (/^#\/providers$/.exec(hash)) return { name: 'providers' };
+
   if (/^#\/settings$/.exec(hash)) return { name: 'settings' };
 
   return { name: 'list' };
@@ -191,6 +195,8 @@ function toHash(route: Route): string {
       return '#/agents';
     case 'settings':
       return '#/settings';
+    case 'providers':
+      return '#/providers';
     case 'cron':
       return '#/cron';
     case 'cron-job':

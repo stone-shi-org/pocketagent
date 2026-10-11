@@ -44,8 +44,10 @@ interface Props {
   onOpenWebhooks: () => void;
   /** Opens one webhook's editor, from its row in the project tree. */
   onOpenWebhook: (hostId: string, webhookId: string) => void;
-  /** PA-6: opens the Pocket Agent settings page (LLM endpoint, agents, tools). */
+  /** PA-6: opens the Pocket Agent settings page (agents, skills, tools). */
   onOpenPlanner: () => void;
+  /** PA-132: opens the Providers and Models settings page (LLM endpoint, models, TTS/STT, Gemini Live). */
+  onOpenProviders: () => void;
   /** PA-6: opens one Pocket Agent chat, from the home screen's own "Pocket Agents" section. */
   onOpenPlannerChat: (hostId: string, chatId: string) => void;
   onApiError: (error: unknown) => void;
@@ -84,6 +86,7 @@ export function ProjectsPage({
   onOpenWebhooks,
   onOpenWebhook,
   onOpenPlanner,
+  onOpenProviders,
   onOpenPlannerChat,
   onApiError,
   onLogout,
@@ -188,6 +191,7 @@ export function ProjectsPage({
               cron: onOpenCron,
               webhooks: onOpenWebhooks,
               planner: onOpenPlanner,
+              providers: onOpenProviders,
               advanced: () => setShowAdvanced(here),
               settings: onOpenSettings,
               signout: onLogout,

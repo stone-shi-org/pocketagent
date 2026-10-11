@@ -12,8 +12,6 @@ import { getTerminalFontOverride, setTerminalFontOverride } from '../agent/termi
 import { getVoiceDirectSendPref, setVoiceDirectSendPref } from '../agent/voice-prefs.js';
 import { formatBuildInfo } from '../version.js';
 import { useHostApi } from '../hosts/HostContext.js';
-import { TtsPlaybackQueue } from '../audio/playback.js';
-import { unlockAudioContext } from '../audio/audio-context.js';
 import { useAudioInputDevices } from '../audio/devices.js';
 import { exportToJsonFile } from '../agent/json-transfer.js';
 import { useJsonImport } from '../hooks/useJsonImport.js';
@@ -90,91 +88,6 @@ export function SettingsPage({ onApiError, onBack, hubVersion = null }: Props): 
     return list;
   }, [audioDevices, micDeviceId]);
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-
-
-  const [voiceModels, setVoiceModels] = useState<{ asr: string[]; tts: string[] }>({ asr: [], tts: [] });
-  const [testingStt, setTestingStt] = useState(false);
-  const [sttResult, setSttResult] = useState<{ ok: boolean; message: string; durationMs?: number } | null>(null);
-  const [testingTts, setTestingTts] = useState(false);
-  const [playingTts, setPlayingTts] = useState(false);
-  const [ttsResult, setTtsResult] = useState<{ ok: boolean; message: string; durationMs?: number } | null>(null);
-  const ttsPlaybackRef = useRef<TtsPlaybackQueue | null>(null);
-
-  useEffect(() => {
-    if (!data?.settings.liveSttUrl) {
-      setVoiceModels({ asr: [], tts: [] });
-      return;
-    }
-    let cancelled = false;
-    api.listVoiceModels()
-      .then((res) => {
-        if (cancelled) return;
-        const asr = res.models.filter((m) => m.type === 'asr').map((m) => m.id);
-        const tts = res.models.filter((m) => m.type === 'tts').map((m) => m.id);
-        setVoiceModels({ asr, tts });
-      })
-      .catch(() => {
-        // Fallback gracefully if live-stt is unreachable
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [api, data?.settings.liveSttUrl]);
-
-  useEffect(() => {
-    return () => {
-      ttsPlaybackRef.current?.stop();
-    };
-  }, []);
-
-  const runTestStt = async (): Promise<void> => {
-    if (!data?.settings.liveSttUrl) return;
-    setTestingStt(true);
-    setSttResult(null);
-    try {
-      const res = await api.testVoiceStt({
-        liveSttUrl: data.settings.liveSttUrl,
-        model: data.settings.liveSttModel || undefined,
-      });
-      setSttResult({ ok: true, message: res.transcript, durationMs: res.durationMs });
-    } catch (err) {
-      setSttResult({
-        ok: false,
-        message: err instanceof ApiError ? err.message : (err instanceof Error ? err.message : 'STT test failed'),
-      });
-    } finally {
-      setTestingStt(false);
-    }
-  };
-
-  const runTestTts = async (): Promise<void> => {
-    if (!data?.settings.liveSttUrl) return;
-    void unlockAudioContext();
-    setTestingTts(true);
-    setTtsResult(null);
-    try {
-      const res = await api.testVoiceTts({
-        liveSttUrl: data.settings.liveSttUrl,
-        model: data.settings.liveSttTtsModel || undefined,
-      });
-      setTtsResult({
-        ok: true,
-        message: `Playing audio (${res.sampleRateHz}Hz)`,
-        durationMs: res.durationMs,
-      });
-      ttsPlaybackRef.current?.stop();
-      const queue = new TtsPlaybackQueue((playing) => setPlayingTts(playing));
-      ttsPlaybackRef.current = queue;
-      queue.enqueue(res.audio, res.sampleRateHz);
-    } catch (err) {
-      setTtsResult({
-        ok: false,
-        message: err instanceof ApiError ? err.message : (err instanceof Error ? err.message : 'TTS test failed'),
-      });
-    } finally {
-      setTestingTts(false);
-    }
-  };
 
   const load = useCallback(async () => {
     try {
@@ -680,108 +593,6 @@ export function SettingsPage({ onApiError, onBack, hubVersion = null }: Props): 
               value={settings.codeServerUrl}
               busy={busy('codeServerUrl')}
               onChange={(v) => saveDebounced('codeServerUrl', v)}
-            />
-            <TextRow
-              label="Live STT URL"
-              help="Base URL of the self-hosted live-stt service's HTTP admin port (PA-20). Reachable only from this server, never the browser. Blank hides the voice-input mic button entirely."
-              placeholder="http://10.100.0.50:8000"
-              value={settings.liveSttUrl}
-              busy={busy('liveSttUrl')}
-              onChange={(v) => saveDebounced('liveSttUrl', v)}
-            />
-            <TextRow
-              label="STT Model"
-              help="Model name for Speech-to-Text (e.g. whisper-large-v3-turbo-q8_0, realtime_eou_120m-v1). Blank uses live-stt's configured default model."
-              placeholder="realtime_eou_120m-v1 (default)"
-              value={settings.liveSttModel}
-              busy={busy('liveSttModel')}
-              listId="stt-models-list"
-              onChange={(v) => saveDebounced('liveSttModel', v)}
-            >
-              <datalist id="stt-models-list">
-                {voiceModels.asr.map((id) => (
-                  <option key={id} value={id} />
-                ))}
-              </datalist>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
-                <button
-                  type="button"
-                  disabled={testingStt || !settings.liveSttUrl}
-                  onClick={() => void runTestStt()}
-                >
-                  {testingStt ? 'Testing STT…' : 'Test STT'}
-                </button>
-                {sttResult && (
-                  <span
-                    className={sttResult.ok ? 'planner-test-ok' : 'planner-test-fail'}
-                    style={{ fontSize: '13px' }}
-                  >
-                    {sttResult.ok
-                      ? `✓ (${sttResult.durationMs}ms): "${sttResult.message}"`
-                      : `✗ ${sttResult.message}`}
-                  </span>
-                )}
-              </div>
-            </TextRow>
-            <TextRow
-              label="TTS Model"
-              help="Model name for Text-to-Speech (e.g. kokoro-82m-v1, piper-en-us). Blank uses live-stt's configured default model."
-              placeholder="kokoro-82m-v1 (default)"
-              value={settings.liveSttTtsModel}
-              busy={busy('liveSttTtsModel')}
-              listId="tts-models-list"
-              onChange={(v) => saveDebounced('liveSttTtsModel', v)}
-            >
-              <datalist id="tts-models-list">
-                {voiceModels.tts.map((id) => (
-                  <option key={id} value={id} />
-                ))}
-              </datalist>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
-                <button
-                  type="button"
-                  disabled={testingTts || playingTts || !settings.liveSttUrl}
-                  onClick={() => void runTestTts()}
-                >
-                  {testingTts ? 'Testing TTS…' : playingTts ? 'Playing…' : 'Test TTS'}
-                </button>
-                {ttsResult && (
-                  <span
-                    className={ttsResult.ok ? 'planner-test-ok' : 'planner-test-fail'}
-                    style={{ fontSize: '13px' }}
-                  >
-                    {ttsResult.ok
-                      ? `✓ (${ttsResult.durationMs}ms): ${ttsResult.message}`
-                      : `✗ ${ttsResult.message}`}
-                  </span>
-                )}
-              </div>
-            </TextRow>
-            <NumberRow
-              label="Live-listen sensitivity"
-              help="1 (least sensitive — needs louder, clearer speech) to 10 (most sensitive — picks up quieter speech). 5 is the original, unconfigurable default."
-              value={settings.voiceTurnSensitivity}
-              min={1}
-              max={10}
-              busy={busy('voiceTurnSensitivity')}
-              onChange={(v) => saveDebounced('voiceTurnSensitivity', v)}
-            />
-            <NumberRow
-              label="Live-listen silence before turn ends"
-              unit="ms"
-              help="How long the mic must stay quiet before live-listen mode treats what you said as finished and sends it. Lower ends a turn sooner but risks cutting off a mid-sentence pause."
-              value={settings.voiceTurnSilenceMs}
-              min={200}
-              max={3000}
-              busy={busy('voiceTurnSilenceMs')}
-              onChange={(v) => saveDebounced('voiceTurnSilenceMs', v)}
-            />
-            <BoolRow
-              label="Spoken summary for talk-back"
-              help="Asks the agent to open a voice turn with a short, spoken-friendly summary that talk-back reads instead of the written reply. Code blocks, file paths and URLs are left out of speech either way — turning this off only stops the request being added to your prompt."
-              checked={settings.voiceSpokenSummaryEnabled}
-              busy={busy('voiceSpokenSummaryEnabled')}
-              onChange={(v) => saveNow('voiceSpokenSummaryEnabled', v)}
             />
             <TextRow
               label="Push contact"

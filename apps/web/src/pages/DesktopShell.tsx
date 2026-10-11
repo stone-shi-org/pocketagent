@@ -52,6 +52,7 @@ import {
   PlannerAgentEditorPage,
   PlannerChatPage,
   PlannerPage,
+  ProvidersAndModelsPage,
   SettingsPage,
   WebhookEditorPage,
   WebhooksPage,
@@ -102,6 +103,8 @@ function storedToRoute(stored: StoredTabRoute): TabRoute {
       return { name: 'planner-chat', chatId: stored.chatId };
     case 'settings':
       return { name: 'settings' };
+    case 'providers':
+      return { name: 'providers' };
     case 'cron':
       return { name: 'cron' };
     case 'cron-job':
@@ -127,6 +130,8 @@ function routeToStored(route: TabRoute): StoredRouteShape {
       return { name: 'planner-chat', chatId: route.chatId };
     case 'settings':
       return { name: 'settings' };
+    case 'providers':
+      return { name: 'providers' };
     case 'cron':
       return { name: 'cron' };
     case 'cron-job':
@@ -152,6 +157,7 @@ type UtilityTabRoute = Exclude<TabRoute, { name: 'terminal' } | { name: 'chat' }
 function isUtilityTabRoute(route: TabRoute): route is UtilityTabRoute {
   return (
     route.name === 'settings' ||
+    route.name === 'providers' ||
     route.name === 'cron' ||
     route.name === 'cron-job' ||
     route.name === 'webhooks' ||
@@ -180,6 +186,8 @@ function utilityTabTitle(route: UtilityTabRoute): string {
   switch (route.name) {
     case 'settings':
       return 'Settings';
+    case 'providers':
+      return 'Providers and Models';
     case 'cron':
     case 'cron-job':
       return 'Cron Jobs';
@@ -811,6 +819,7 @@ export function DesktopShell({
                       cron: () => onNavigate({ name: 'cron' }),
                       webhooks: () => onNavigate({ name: 'webhooks' }),
                       planner: () => onNavigate({ name: 'planner' }),
+                      providers: () => onNavigate({ name: 'providers' }),
                       advanced: () => setShowAdvanced(here),
                       signout: onLogout,
                     },
@@ -1020,11 +1029,11 @@ export function DesktopShell({
                     />
                   </Suspense>
                 ) : tab.route.name === 'settings' ? (
-                  // PA-36 round 2: Settings, Cron, Webhooks and Pocket Agents
-                  // (the `planner` route) all share this one tab now — see
-                  // `isUtilityTabRoute`'s own comment. Each list route's own
-                  // "back" closes the whole tab (there's nothing above it
-                  // within the group, same as Settings' own pre-existing
+                  // PA-36 round 2: Settings, Providers and Models, Cron, Webhooks
+                  // and Pocket Agents (the `planner` route) all share this one
+                  // tab now — see `isUtilityTabRoute`'s own comment. Each list
+                  // route's own "back" closes the whole tab (there's nothing
+                  // above it within the group, same as Settings' own pre-existing
                   // behavior); each detail/editor sub-route's "back"/"done"
                   // instead navigates to its own list route, staying inside
                   // this same tab exactly as it did when these were their own
@@ -1034,6 +1043,13 @@ export function DesktopShell({
                       onBack={() => closeTab(tab.id)}
                       onApiError={onApiError}
                       hubVersion={directory.hubVersion}
+                    />
+                  </Suspense>
+                ) : tab.route.name === 'providers' ? (
+                  <Suspense fallback={<PageFallback />}>
+                    <ProvidersAndModelsPage
+                      onBack={() => closeTab(tab.id)}
+                      onApiError={onApiError}
                     />
                   </Suspense>
                 ) : tab.route.name === 'cron' ? (

@@ -104,7 +104,7 @@ interface Props {
 const GEMINI_LIVE_DISCLOSURE =
   'Live mode in this chat uses Gemini Live. While it is on, your voice, this conversation and tool results (such as files it reads and session output) are sent to Google. Gemini bills audio for as long as the mic is open.';
 const GEMINI_LIVE_UNAVAILABLE =
-  'This agent is set to use Gemini Live for live mode, but no usable Gemini API key is configured on this server, so live mode is unavailable here. Add one in Settings → Pocket Agent.';
+  'This agent is set to use Gemini Live for live mode, but no usable Gemini API key is configured on this server, so live mode is unavailable here. Add one in Providers and Models.';
 
 function toModelInfos(models: PlannerModel[]): ModelInfo[] {
   return models.map((m) => ({
@@ -1343,7 +1343,7 @@ export function PlannerChatPage({
               }
               title={
                 !geminiAvailable
-                  ? 'Gemini Live is not configured on this server (add Gemini API key in Settings → Pocket Agent)'
+                  ? 'Gemini Live is not configured on this server (add Gemini API key in Providers and Models)'
                   : !geminiSelected
                     ? 'Gemini Live is not enabled for this agent (select Gemini Live in agent settings)'
                     : geminiLive
@@ -1662,14 +1662,14 @@ export function PlannerChatPage({
                     {contextPreview.budget.contextWindowSource === 'model'
                       ? ')'
                       : contextPreview.budget.contextWindowSource === 'known'
-                        ? '; window assumed from the model name — set it under Settings → Models)'
-                        : '; window unknown, assumed — set it under Settings → Models)'}
+                        ? '; window assumed from the model name — set it under Providers and Models → Models)'
+                        : '; window unknown, assumed — set it under Providers and Models → Models)'}
                     .{' '}
                     {contextPreview.budget.compactionEnabled
                       ? `Compacts automatically at about ${contextPreview.budget.thresholdTokens.toLocaleString()}; /compact does it now.`
                       : 'Automatic compaction is off.'}
                     {contextPreview.budget.spentUsd != null &&
-                      ` Turns in this chat have cost about $${contextPreview.budget.spentUsd.toFixed(4)} (from the model prices in Settings, or the provider's own figure).`}
+                      ` Turns in this chat have cost about $${contextPreview.budget.spentUsd.toFixed(4)} (from the model prices in Providers and Models, or the provider's own figure).`}
                   </p>
                 )}
               </div>

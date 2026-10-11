@@ -14,6 +14,7 @@ const ROUTES: { hash: string; route: Route }[] = [
   { hash: '#/new/%2Fhome%2Fme%2Fsrc', route: { name: 'compose', cwd: '/home/me/src' } },
   { hash: '#/agents', route: { name: 'agents' } },
   { hash: '#/settings', route: { name: 'settings' } },
+  { hash: '#/providers', route: { name: 'providers' } },
   { hash: '#/cron', route: { name: 'cron' } },
   { hash: '#/cron/job-1', route: { name: 'cron-job', jobId: 'job-1' } },
   { hash: '#/hooks', route: { name: 'webhooks' } },

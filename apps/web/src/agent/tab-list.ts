@@ -16,6 +16,7 @@ export type TabRoute = Extract<
   | { name: 'chat' }
   | { name: 'planner-chat' }
   | { name: 'settings' }
+  | { name: 'providers' }
   | { name: 'cron' }
   | { name: 'cron-job' }
   | { name: 'webhooks' }
@@ -51,6 +52,7 @@ export function isTabRoute(route: Route): route is TabRoute {
     route.name === 'chat' ||
     route.name === 'planner-chat' ||
     route.name === 'settings' ||
+    route.name === 'providers' ||
     route.name === 'cron' ||
     route.name === 'cron-job' ||
     route.name === 'webhooks' ||
@@ -61,10 +63,10 @@ export function isTabRoute(route: Route): route is TabRoute {
 }
 
 /**
- * Every admin-page route kind (`settings`/`cron`/`cron-job`/`webhooks`/
- * `webhook`/`planner`/`planner-agent`) maps to one sentinel id per host —
- * `s:settings:<hostId>`. Within a host that gives the whole group "only one
- * tab, ever, showing whichever of the seven you're currently on" for free:
+ * Every admin-page route kind (`settings`/`providers`/`cron`/`cron-job`/
+ * `webhooks`/`webhook`/`planner`/`planner-agent`) maps to one sentinel id per
+ * host — `s:settings:<hostId>`. Within a host that gives the whole group "only
+ * one tab, ever, showing whichever of the eight you're currently on" for free:
  * `openPermanent`/`sync` already dedup by id, so navigating from Cron to
  * Webhooks just updates the one existing tab's route (see `sync`'s own comment
  * on why it has to, unlike every other tab kind) rather than opening a second
@@ -89,6 +91,7 @@ export function tabIdFor(route: TabRoute, hostId: string): string {
     case 'planner-chat':
       return `p:${hostId}:${route.chatId}`;
     case 'settings':
+    case 'providers':
     case 'cron':
     case 'cron-job':
     case 'webhooks':

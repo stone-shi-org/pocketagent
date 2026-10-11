@@ -43,6 +43,7 @@ export type MenuItemId =
   | 'cron'
   | 'webhooks'
   | 'planner'
+  | 'providers'
   | 'advanced'
   | 'settings'
   | 'hub-overview'
@@ -106,6 +107,7 @@ export function overflowMenuItems(context: MenuContext): MenuItem[] {
     { id: 'cron', label: 'Cron jobs…' },
     { id: 'webhooks', label: 'Webhooks…' },
     { id: 'planner', label: 'Pocket Agent settings…' },
+    { id: 'providers', label: 'Providers and Models…' },
     { id: 'advanced', label: 'More session options…' },
     { id: 'settings', label: 'Settings…' },
     SIGN_OUT,

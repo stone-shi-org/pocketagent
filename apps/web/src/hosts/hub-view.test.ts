@@ -10,6 +10,7 @@ const SERVER_ONLY: MenuItemId[] = [
   'cron',
   'webhooks',
   'planner',
+  'providers',
   'advanced',
   'settings',
 ];

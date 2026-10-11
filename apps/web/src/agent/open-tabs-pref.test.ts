@@ -28,6 +28,7 @@ describe('open tabs preference', () => {
       { name: 'chat', conversationId: 'c-1', hostId: 'local' },
       { name: 'planner-chat', chatId: 'p-1', hostId: 'dev02' },
       { name: 'settings', hostId: 'local' },
+      { name: 'providers', hostId: 'local' },
       { name: 'cron', hostId: 'dev02' },
       { name: 'cron-job', jobId: 'j-1', hostId: 'local' },
       { name: 'webhooks', hostId: 'local' },

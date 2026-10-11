@@ -31,6 +31,7 @@ describe('tabIdFor', () => {
     // all share one tab": dedup-by-id in `openPermanent`/`sync` does the
     // rest for free, exactly as it already did for Settings alone.
     expect(tabIdFor({ name: 'settings' }, H)).toBe('s:settings:local');
+    expect(tabIdFor({ name: 'providers' }, H)).toBe('s:settings:local');
     expect(tabIdFor({ name: 'cron' }, H)).toBe('s:settings:local');
     expect(tabIdFor({ name: 'cron-job', jobId: 'j1' }, H)).toBe('s:settings:local');
     expect(tabIdFor({ name: 'webhooks' }, H)).toBe('s:settings:local');
