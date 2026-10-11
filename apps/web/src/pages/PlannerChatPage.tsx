@@ -1745,7 +1745,13 @@ export function PlannerChatPage({
         </div>
 
         {artifactsOpen && (
-          <aside className="planner-artifacts-panel" aria-label="Workspace artifacts side panel">
+          <>
+            <div
+              className="planner-artifacts-backdrop"
+              onClick={() => setArtifactsOpen(false)}
+              aria-hidden="true"
+            />
+            <aside className="planner-artifacts-panel" aria-label="Workspace artifacts side panel">
             <div className="planner-artifacts-header">
               <div className="planner-artifacts-title">
                 <Icon name="file" size={15} />
@@ -1851,8 +1857,9 @@ export function PlannerChatPage({
               </ul>
             )}
           </aside>
-        )}
-      </div>
+        </>
+      )}
+    </div>
 
       {pendingDeleteArtifact && (
         <ConfirmDialog

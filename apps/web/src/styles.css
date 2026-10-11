@@ -7190,13 +7190,17 @@ button.chat-rate-limit-badge {
   margin-left: 2px;
 }
 
+.planner-artifacts-backdrop {
+  display: none;
+}
+
 .planner-artifacts-panel {
   width: 320px;
   flex: none;
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--border);
-  background: var(--bg-elev-1);
+  background: var(--bg-elev);
   min-height: 0;
   height: 100%;
   overflow: hidden;
@@ -7209,6 +7213,7 @@ button.chat-rate-limit-badge {
   justify-content: space-between;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
   flex: none;
 }
 
@@ -7396,15 +7401,30 @@ button.chat-rate-limit-badge {
 }
 
 @media (max-width: 768px) {
+  .planner-artifacts-backdrop {
+    display: block;
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 15;
+  }
+
   .planner-artifacts-panel {
     position: absolute;
     top: 0;
     right: 0;
     bottom: 0;
     width: 100%;
-    max-width: 360px;
+    max-width: 380px;
     z-index: 20;
-    box-shadow: -4px 0 20px rgba(0, 0, 0, 0.4);
+    background: var(--bg-elev);
+    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.45);
+  }
+}
+
+@media (max-width: 480px) {
+  .planner-artifacts-panel {
+    max-width: 100%;
   }
 }
 
@@ -7414,7 +7434,7 @@ button.chat-rate-limit-badge {
   align-items: center;
   gap: 8px;
   padding: 8px 16px;
-  background: var(--bg-elev-1);
+  background: var(--bg-elev);
   border-bottom: 1px solid var(--border);
   font-size: 13px;
   color: var(--text-dim);
@@ -7437,7 +7457,7 @@ button.chat-rate-limit-badge {
 .planner-subagents-panel {
   border-bottom: 1px solid var(--border);
   padding: 8px 16px;
-  background: var(--bg-elev-1);
+  background: var(--bg-elev);
   flex: none;
 }
 
