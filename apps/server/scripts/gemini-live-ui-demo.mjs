@@ -182,13 +182,20 @@ await until(() => page.locator('.home-bar').isVisible());
 
 heading('The chat discloses Gemini Live on every visit');
 await page.goto(`${BASE}/#/planner/${chat.id}`);
-const disclosed = await until(() => page.locator('.planner-gemini-disclosure').isVisible());
-check(disclosed, 'the disclosure callout is rendered');
+// PA-131: a standing ⓘ beside the toggle, its text one tap away (iOS has no hover).
+const disclosed = await until(() => page.locator('.gemini-info-btn').isVisible());
+check(disclosed, 'the disclosure ⓘ is rendered');
+await page.tap('.gemini-info-btn');
 check(
-  (await page.locator('.planner-gemini-disclosure').innerText()).includes('sent to Google'),
+  await until(() => page.locator('.gemini-info-pop').isVisible()),
+  'tapping it shows the disclosure',
+);
+check(
+  (await page.locator('.gemini-info-pop').innerText()).includes('sent to Google'),
   'it says voice and tool results go to Google',
 );
 await page.screenshot({ path: path.join(SHOTS, 'pa96-1-disclosure.png') });
+await page.tap('.gemini-info-btn');
 
 heading('Live mode connects straight to Google with a minted token');
 await page.click('button[aria-label="Turn on Gemini Live"]');

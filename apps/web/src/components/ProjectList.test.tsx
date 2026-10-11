@@ -127,4 +127,38 @@ describe('ProjectList tree status (PA-117)', () => {
     expect(htmlHost2).toContain('Project Chat 1');
     expect(htmlHost2).not.toContain('project-caret closed');
   });
+
+  // PA-131: on a phone a long list put "Add a project folder" a full scroll
+  // away, so it is the + on the Projects heading — and the old bottom row is gone.
+  function render(search: string): string {
+    return renderToStaticMarkup(
+      <HostProvider endpoint={hostEndpoint('host-1', '/h/host-1')}>
+        <ProjectList
+          state={dummyState}
+          search={search}
+          emptyHint="Nothing here"
+          onAddProject={() => {}}
+          onCompose={() => {}}
+          onApiError={() => {}}
+        />
+      </HostProvider>,
+    );
+  }
+
+  it('puts the add-folder action on the Projects heading, before any project', () => {
+    vi.stubGlobal('localStorage', fakeStorage());
+    const html = render('');
+    const add = html.indexOf('aria-label="Add a project folder"');
+    expect(add).toBeGreaterThan(-1);
+    expect(add).toBeGreaterThan(html.indexOf('>Projects</h2>'));
+    expect(add).toBeLessThan(html.indexOf('Project Chat 1'));
+    expect(html).not.toContain('>Add a project folder<');
+  });
+
+  it('hides the add-folder action while the heading reads "Results"', () => {
+    vi.stubGlobal('localStorage', fakeStorage());
+    const html = render('Project');
+    expect(html).toContain('>Results</h2>');
+    expect(html).not.toContain('Add a project folder');
+  });
 });

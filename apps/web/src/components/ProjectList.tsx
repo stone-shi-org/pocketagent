@@ -698,7 +698,22 @@ export function ProjectList({
       {projects === null && <div className="spinner">Loading…</div>}
 
       {projects !== null && (
-        <h2 className="section-heading">{searching ? 'Results' : 'Projects'}</h2>
+        // PA-131: the add action sits on the heading rather than after the
+        // list — on a phone a long project list put it a full scroll away.
+        <div className="section-head">
+          <h2 className="section-heading">{searching ? 'Results' : 'Projects'}</h2>
+          {!searching && (
+            <button
+              type="button"
+              className="round-btn plain section-head-action add-project"
+              onClick={onAddProject}
+              aria-label="Add a project folder"
+              title="Add a project folder"
+            >
+              <Icon name="plus" size={18} />
+            </button>
+          )}
+        </div>
       )}
 
       {projects !== null && visible.length === 0 && (
@@ -711,12 +726,6 @@ export function ProjectList({
         <ProjectSection key={project.cwd} project={project} nested={false} {...sectionProps} />
       ))}
 
-      {!searching && projects !== null && (
-        <button type="button" className="add-project" onClick={onAddProject}>
-          <Icon name="folder" size={17} />
-          Add a project folder
-        </button>
-      )}
     </>
   );
 }

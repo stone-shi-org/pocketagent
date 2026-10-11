@@ -72,6 +72,8 @@ describe('Icon component', () => {
       'hub',
       'broadcast',
       'brain',
+      'file',
+      'info',
     ];
 
     for (const name of iconNames) {

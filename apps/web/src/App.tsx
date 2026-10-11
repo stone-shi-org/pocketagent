@@ -442,7 +442,7 @@ function PhoneRoute({
         <PlannerChatPage
           key={route.chatId}
           chatId={route.chatId}
-          onBack={() => navigate({ name: 'planner' })}
+          onBack={() => navigate({ name: 'list' })}
           onOpenSession={(sessionId) => navigate({ name: 'terminal', sessionId })}
           onOpenPlannerChat={(chatId) => navigate({ name: 'planner-chat', chatId })}
           onApiError={onApiError}

@@ -3028,7 +3028,7 @@ button.chat-rate-limit-badge {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 10px 14px;
+  padding: 6px 14px;
   border-top: 1px solid var(--border);
 }
 
@@ -3047,21 +3047,6 @@ button.chat-rate-limit-badge {
   font-size: 11.5px;
   font-weight: 650;
   color: var(--text-dim);
-}
-
-/* The whole title row is the toggle, not just the arrow — a bigger tap target
-   than the 13px icon alone, same reasoning as any other icon-plus-label
-   button in this file. */
-.usage-agent-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  width: 100%;
-  padding: 0;
-  border: none;
-  background: none;
-  text-align: left;
 }
 
 .usage-chevron {
@@ -3133,6 +3118,72 @@ button.chat-rate-limit-badge {
 
 .usage-fill-danger {
   background: var(--danger);
+}
+
+/* PA-131: the collapsed form — one row of two-ring gauges, centred, the whole
+   row a single toggle. The ring fills reuse `.usage-fill-*` for their level,
+   so they need `stroke` where the bars use `background`. */
+.usage-rings {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  width: 100%;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+}
+
+.usage-rings:hover:not(:disabled) {
+  border-color: transparent;
+}
+
+.usage-bars.expanded .usage-rings {
+  margin-bottom: 2px;
+}
+
+.usage-ring {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: none;
+}
+
+.usage-ring svg {
+  grid-area: 1 / 1;
+}
+
+.usage-ring-label {
+  grid-area: 1 / 1;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+}
+
+.usage-ring-warn .usage-ring-label { color: var(--warn); }
+.usage-ring-danger .usage-ring-label { color: var(--danger); }
+
+.usage-ring-track {
+  /* `--border`, not `--bg-elev`: the latter is the desktop sidebar's own
+     background, which made the unfilled part of every ring vanish there. */
+  stroke: var(--border);
+}
+
+.usage-ring-fill {
+  stroke: var(--accent);
+  transition: stroke-dasharray 400ms ease;
+}
+
+.usage-ring-fill.usage-fill-warn { stroke: var(--warn); }
+.usage-ring-fill.usage-fill-danger { stroke: var(--danger); }
+
+.sidebar .usage-rings {
+  gap: 10px;
 }
 
 .spacer {
@@ -3302,15 +3353,15 @@ button.chat-rate-limit-badge {
 }
 
 /* A folded worktree renders as a smaller project section indented under its
-   main checkout's card, connected by a rule rather than a border — it is
-   part of that project, not a sibling of equal weight. Its label shows the
+   main checkout, carried by indent and a lighter weight rather than a guide
+   rule (PA-131) — it is part of that project, not a sibling of equal weight. Its label shows the
    branch rather than the folder name (often just an auto-slugified branch
    already), which is the thing that actually distinguishes it. */
 .project--worktree {
   margin-top: 2px;
-  margin-left: 11px;
-  padding-left: 15px;
-  border-left: 1px solid var(--border);
+  /* PA-131: depth is indent alone — no guide rule. On a phone the rules
+     read as visual noise rather than structure. */
+  padding-left: 22px;
 }
 
 .project--worktree .project-name {
@@ -3329,9 +3380,9 @@ button.chat-rate-limit-badge {
 
 .deleted-worktrees-group {
   margin-top: 2px;
-  margin-left: 11px;
-  padding-left: 15px;
-  border-left: 1px solid var(--border);
+  /* PA-131: depth is indent alone — no guide rule. On a phone the rules
+     read as visual noise rather than structure. */
+  padding-left: 22px;
 }
 
 .deleted-worktrees-head {
@@ -3350,17 +3401,17 @@ button.chat-rate-limit-badge {
    grouping row that is not a directory. */
 .queued-group {
   margin-top: 2px;
-  margin-left: 11px;
-  padding-left: 15px;
-  border-left: 1px solid var(--border);
+  /* PA-131: depth is indent alone — no guide rule. On a phone the rules
+     read as visual noise rather than structure. */
+  padding-left: 22px;
 }
 
 /* PA-75: Collapsible subagents group under projects */
 .subagents-group {
   margin-top: 2px;
-  margin-left: 11px;
-  padding-left: 15px;
-  border-left: 1px solid var(--border);
+  /* PA-131: depth is indent alone — no guide rule. On a phone the rules
+     read as visual noise rather than structure. */
+  padding-left: 22px;
 }
 
 .subagents-head {
@@ -4111,8 +4162,7 @@ button.chat-rate-limit-badge {
    sidebar's rule would win by source order alone and a folded worktree would
    read at the same size as a top-level project — only the indent would show. */
 .sidebar .project--worktree {
-  margin-left: 9px;
-  padding-left: 12px;
+  padding-left: 16px;
 }
 
 .sidebar .project--worktree .project-name {
@@ -4120,17 +4170,16 @@ button.chat-rate-limit-badge {
 }
 
 .sidebar .deleted-worktrees-group {
-  margin-left: 9px;
-  padding-left: 12px;
+  padding-left: 16px;
 }
 
 .sidebar .deleted-worktrees-group .project-name {
   font-size: 13.5px;
 }
 
-.sidebar .subagents-group {
-  margin-left: 9px;
-  padding-left: 12px;
+.sidebar .subagents-group,
+.sidebar .queued-group {
+  padding-left: 16px;
 }
 
 .sidebar .subagents-group .project-name {
@@ -4668,33 +4717,38 @@ button.chat-rate-limit-badge {
   font-size: 12px;
 }
 
-/* Add-a-project ------------------------------------------------------------ */
+/* Section heading with an action (PA-131) ---------------------------------
+   "Projects" carries its own add button, so adding a folder never needs a
+   scroll to the bottom of a long list on a phone. The heading keeps its own
+   margins; the button just sits on its baseline row. */
 
-.add-project {
+.section-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  width: 100%;
-  margin-top: 14px;
-  padding: 11px 4px;
-  border: none;
-  background: none;
-  color: var(--text-dim);
-  font: inherit;
-  font-size: 15px;
-  text-align: left;
-  border-radius: 10px;
+  gap: 6px;
 }
 
-.add-project:hover:not(:disabled) {
-  background: var(--bg-elev);
-  border-color: transparent;
-  color: var(--text);
+.section-head .section-heading {
+  flex: 1;
+  min-width: 0;
 }
 
-.sidebar .add-project {
-  font-size: 13.5px;
-  padding: 8px 10px;
+.section-head-action {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  margin-top: 4px;
+}
+
+.sidebar .section-head-action {
+  width: 24px;
+  height: 24px;
+  margin-top: 0;
+}
+
+.sidebar .section-head-action .icon {
+  width: 15px;
+  height: 15px;
 }
 
 /* Show-more chats -----------------------------------------------------------
@@ -5179,6 +5233,9 @@ button.chat-rate-limit-badge {
 }
 
 .settings-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-left: auto;
   flex: none;
 }
@@ -6581,13 +6638,12 @@ button.chat-rate-limit-badge {
   background-color: var(--bg-hover, rgba(255, 255, 255, 0.08));
 }
 
-/* "Pocket Agents" (PA-6) — parallel to the project list above it on the home
-   screen; a top border is enough separation since `.section-heading` already
-   carries its own vertical rhythm. */
+/* "Pocket Agents" (PA-6) — parallel to the project list on the home screen.
+   Separated by space alone since PA-131: `.section-heading` already carries
+   the weight that marks a new category, and a full-width rule between each
+   one was the "horizontal line" that made the tree read as busy on a phone. */
 .agents-section {
-  border-top: 1px solid var(--border);
-  padding-top: 4px;
-  margin-top: 8px;
+  margin-top: 20px;
 }
 
 /* "Shell" (PA-25) — the third top-level category, between "Pocket Agents" and
@@ -6747,6 +6803,13 @@ button.chat-rate-limit-badge {
   }
 }
 
+.planner-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
 .planner-head h2 {
   font-size: 20px;
   margin: 0;
@@ -6876,6 +6939,12 @@ button.chat-rate-limit-badge {
 }
 
 .planner-btn {
+  /* inline-flex so an icon sits beside its label rather than stacking above
+     it (an inline SVG is block-level here) — PA-131. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   padding: 8px 12px;
@@ -7592,9 +7661,7 @@ button.chat-rate-limit-badge {
 }
 
 .subagent-chat-line {
-  margin-left: 14px;
-  padding-left: 10px;
-  border-left: 2px solid var(--border);
+  padding-left: 24px;
 }
 
 /* PA-6: the inline stand-in for `ApprovalSheet` — see `PlannerChatPage`'s
@@ -7988,9 +8055,7 @@ button.chat-rate-limit-badge {
 /* Indented so a host's categories read as belonging to its heading, which is
    the whole reason the heading exists instead of a badge per row. */
 .host-group-body {
-  padding-left: 2px;
-  border-left: 2px solid var(--border);
-  margin-left: 12px;
+  padding-left: 14px;
 }
 
 .host-group-problem {
@@ -8429,15 +8494,51 @@ button.chat-rate-limit-badge {
   pointer-events: auto;
 }
 
-.planner-gemini-disclosure {
-  margin: 0 16px 6px;
-  padding: 5px 10px;
-  border-radius: 6px;
-  font-size: 11.5px;
-  line-height: 1.4;
+/* PA-131: the PA-96 disclosure as a popover off an ⓘ in the chat header,
+   replacing the banner. Open on hover where hover exists, and on tap
+   everywhere (iOS has no hover; the button toggles `.open`). */
+.gemini-info {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.gemini-info-btn {
   color: var(--text-dim);
+}
+
+.gemini-info-btn.warn {
+  color: var(--warn);
+}
+
+.gemini-info-pop {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  width: min(300px, calc(100vw - 32px));
+  padding: 9px 11px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.45;
+  color: var(--text);
   background: var(--bg-elev-2);
   border: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
+  white-space: normal;
+  text-align: left;
+}
+
+.gemini-info.open .gemini-info-pop {
+  display: block;
+}
+
+@media (hover: hover) {
+  .gemini-info:hover .gemini-info-pop {
+    display: block;
+  }
 }
 
 /* PA-98: compact MCP description in registry cards (retained for compatibility) */
@@ -8991,3 +9092,67 @@ button.chat-rate-limit-badge {
 .planner-model-label-edit:disabled { opacity: 0.5; cursor: default; }
 .planner-model-label-input { width: 150px; padding: 2px 6px; font-size: 13.5px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--bg); color: var(--text); }
 
+
+/* ---- Page headers on a phone (PA-131) ----------------------------------
+   Cron, Webhooks, Pocket Agent settings and Settings each put a title, a
+   subtitle and their actions on one row that never wrapped, so on a phone the
+   buttons ran off the right edge and the page scrolled sideways to reach
+   them. Below 600px the actions get a row of their own directly under the
+   title, left-aligned and free to wrap. Nothing hides overflow: the layout
+   itself fits. Import/export is icon-only everywhere (`.icon-only`), with the
+   label kept in `aria-label` and `title`. */
+
+.cron-secondary.icon-only,
+.settings-close-btn.icon-only,
+.planner-btn.icon-only {
+  display: inline-grid;
+  place-items: center;
+  min-width: 38px;
+  padding: 8px;
+}
+
+@media (max-width: 600px) {
+  .cron-head,
+  .planner-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .cron-head-actions,
+  .planner-head-actions {
+    flex-wrap: wrap;
+  }
+
+  .settings-header {
+    flex-wrap: wrap;
+    gap: 12px 14px;
+  }
+
+  .settings-header-title {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .settings-header-actions {
+    flex-basis: 100%;
+    flex-wrap: wrap;
+    margin-left: 0;
+  }
+}
+
+/* PA-131: a Pocket Agent chat's header carried the title plus "Artifacts" and
+   "Gemini Live" as labelled buttons, and on a phone the title was squeezed to
+   nothing. Below 600px those two show their icon only (each keeps its
+   aria-label and title), and the row tightens. */
+@media (max-width: 600px) {
+  .planner-chat-header {
+    gap: 6px;
+    padding: 10px 12px;
+  }
+
+  .planner-chat-header .planner-artifacts-toggle > span:not(.planner-artifacts-count),
+  .planner-chat-header .gemini-live-toggle > span:not(.live-listen-dot) {
+    display: none;
+  }
+}

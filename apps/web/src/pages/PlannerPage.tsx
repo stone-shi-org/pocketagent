@@ -743,24 +743,24 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
             Agents" section on the home screen.
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+        <div className="planner-head-actions">
           <button
             type="button"
-            className="planner-btn"
+            className="planner-btn icon-only"
             onClick={handleExportEndpoint}
             title="Export LLM endpoint and model settings to JSON"
+            aria-label="Export LLM endpoint and model settings to JSON"
           >
-            <Icon name="download" size={14} />
-            Export endpoint JSON
+            <Icon name="download" size={16} />
           </button>
           <button
             type="button"
-            className="planner-btn"
+            className="planner-btn icon-only"
             onClick={triggerImportEndpoint}
             title="Import LLM endpoint and model settings from JSON"
+            aria-label="Import LLM endpoint and model settings from JSON"
           >
-            <Icon name="upload" size={14} />
-            Import endpoint JSON
+            <Icon name="upload" size={16} />
           </button>
           {onBack && (
             <button type="button" className="planner-btn" onClick={onBack}>
@@ -1376,12 +1376,13 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
           </button>
           <button
             type="button"
-            className="planner-btn"
+            className="planner-btn icon-only"
             disabled={busy}
             onClick={triggerImportAgent}
             title="Import agent from a JSON file"
+            aria-label="Import agent from a JSON file"
           >
-            <Icon name="upload" size={14} /> Import agent
+            <Icon name="upload" size={16} />
           </button>
         </div>
         {newAgentPath ? (

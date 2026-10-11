@@ -337,24 +337,24 @@ export function SettingsPage({ onApiError, onBack, hubVersion = null }: Props): 
             Manage server configurations, agent execution paths, timeouts, and device preferences.
           </p>
         </div>
-        <div className="settings-header-actions" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+        <div className="settings-header-actions">
           <button
             type="button"
-            className="settings-close-btn"
+            className="settings-close-btn icon-only"
             onClick={handleExport}
             title="Export server settings to a JSON file"
+            aria-label="Export server settings to a JSON file"
           >
-            <Icon name="download" size={14} />
-            Export JSON
+            <Icon name="download" size={16} />
           </button>
           <button
             type="button"
-            className="settings-close-btn"
+            className="settings-close-btn icon-only"
             onClick={triggerImport}
             title="Import server settings from a JSON file"
+            aria-label="Import server settings from a JSON file"
           >
-            <Icon name="upload" size={14} />
-            Import JSON
+            <Icon name="upload" size={16} />
           </button>
           {onBack && (
             <button type="button" className="settings-close-btn" onClick={onBack} aria-label="Close settings">

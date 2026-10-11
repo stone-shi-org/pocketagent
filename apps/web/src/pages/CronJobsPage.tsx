@@ -175,25 +175,25 @@ export function CronJobsPage({ onOpenJob, onApiError, onBack }: Props): JSX.Elem
             Each job starts an agent on its own schedule and sends it a prompt.
           </p>
         </div>
-        <div className="cron-head-actions" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+        <div className="cron-head-actions">
           <button
             type="button"
-            className="cron-secondary"
+            className="cron-secondary icon-only"
             disabled={!jobs || jobs.length === 0}
             onClick={exportAllJobs}
             title="Export all jobs to a JSON file"
+            aria-label="Export all jobs to a JSON file"
           >
             <Icon name="download" size={16} />
-            Export all
           </button>
           <button
             type="button"
-            className="cron-secondary"
+            className="cron-secondary icon-only"
             onClick={triggerImport}
             title="Import job from a JSON file"
+            aria-label="Import job from a JSON file"
           >
             <Icon name="upload" size={16} />
-            Import JSON
           </button>
           <button type="button" className="cron-new" onClick={() => onOpenJob('new')}>
             <Icon name="plus" size={18} />

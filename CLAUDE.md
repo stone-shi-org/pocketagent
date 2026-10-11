@@ -1661,8 +1661,11 @@ them on the audio clock instead (`scheduleChunk`). Mic audio uses `StreamingResa
 resampling each 128-frame worklet quantum independently buzzes at the quantum rate. A dead socket
 turns the mic indicator off (PA-83), and there are at most three resume attempts. The idle
 auto-off defaults to 5 minutes, because Gemini bills audio for as long as the socket is open.
-Typed messages go to Gemini (`realtimeInput.text`) while live. The disclosure renders on every
-visit to a chat whose agent uses Gemini Live.
+Typed messages go to Gemini (`realtimeInput.text`) while live. The disclosure is present on every
+visit to a chat whose agent uses Gemini Live, as a standing ⓘ beside the toggle rather than a
+banner (PA-131): its text opens on hover where hover exists and on tap everywhere, since iOS has
+none. The ⓘ turns warning-coloured when no usable key is configured, so a disabled toggle never
+reads as a broken one.
 
 Known limitations: images cannot be sent while live. Resume-after-`goAway` is exercised by the
 unit suite and was verified against the service in a spike, but a real `goAway` is not forced by

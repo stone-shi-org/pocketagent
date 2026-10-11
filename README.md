@@ -109,7 +109,7 @@ your [data root](#the-data-root) (this also clears session history) or
 
 ### Project folders
 
-Folders are managed from the app: **Add a project folder** at the bottom of the list opens
+Folders are managed from the app: the **+** beside the **Projects** heading ("Add a project folder") opens
 a picker with two tabs.
 
 - **Suggested** — directories Claude Code and Codex have already run in, read from their

@@ -97,6 +97,15 @@ interface Props {
  * `description: ''` is falsy, so `PromptBox` simply renders no second line
  * for it, same as any other backend with nothing to say there.
  */
+/**
+ * The PA-96 disclosure, shown from the ⓘ beside the Gemini Live toggle
+ * (PA-131) rather than as a standing banner.
+ */
+const GEMINI_LIVE_DISCLOSURE =
+  'Live mode in this chat uses Gemini Live. While it is on, your voice, this conversation and tool results (such as files it reads and session output) are sent to Google. Gemini bills audio for as long as the mic is open.';
+const GEMINI_LIVE_UNAVAILABLE =
+  'This agent is set to use Gemini Live for live mode, but no usable Gemini API key is configured on this server, so live mode is unavailable here. Add one in Settings → Pocket Agent.';
+
 function toModelInfos(models: PlannerModel[]): ModelInfo[] {
   return models.map((m) => ({
     value: m.modelId,
@@ -339,6 +348,17 @@ export function PlannerChatPage({
     };
   }, [api, chatWorkspaceId]);
   const geminiSelected = liveProvider === 'gemini-live';
+  const [geminiInfoOpen, setGeminiInfoOpen] = useState(false);
+  const geminiInfoRef = useRef<HTMLSpanElement | null>(null);
+  // A tap anywhere outside the ⓘ closes its popover, the way a tooltip does.
+  useEffect(() => {
+    if (!geminiInfoOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (!geminiInfoRef.current?.contains(e.target as Node)) setGeminiInfoOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [geminiInfoOpen]);
   /** Live mode on this page means Gemini Live, not the live-stt pipeline. */
   const geminiMode = geminiSelected && geminiAvailable;
   const geminiLive = geminiMode && geminiLiveActive;
@@ -1335,6 +1355,30 @@ export function PlannerChatPage({
               <span>Gemini Live</span>
               {geminiLive && <span className="live-listen-dot" aria-hidden="true" />}
             </button>
+            {geminiSelected && (
+              // PA-96 disclosure, on every visit to a chat whose agent uses
+              // Gemini Live. Since PA-131 it is a standing ⓘ beside the toggle
+              // rather than a banner: the text is one hover (desktop) or one tap
+              // (a phone has no hover) away, and the button itself is always
+              // there, which is what "on every visit" asks of it. Warning-coloured
+              // when live mode is unavailable, so a disabled toggle never reads
+              // as a broken one.
+              <span className={`gemini-info${geminiInfoOpen ? ' open' : ''}`} ref={geminiInfoRef}>
+                <button
+                  type="button"
+                  className={`planner-btn gemini-info-btn${geminiAvailable ? '' : ' warn'}`}
+                  onClick={() => setGeminiInfoOpen((v) => !v)}
+                  aria-expanded={geminiInfoOpen}
+                  aria-describedby="gemini-live-disclosure"
+                  aria-label="About Gemini Live in this chat"
+                >
+                  <Icon name="info" size={15} />
+                </button>
+                <span id="gemini-live-disclosure" className="gemini-info-pop" role="tooltip">
+                  {geminiAvailable ? GEMINI_LIVE_DISCLOSURE : GEMINI_LIVE_UNAVAILABLE}
+                </span>
+              </span>
+            )}
           </>
         )}
       </div>
@@ -1368,16 +1412,6 @@ export function PlannerChatPage({
         <div className="warn-callout" role="status">
           Tool approvals are bypassed in this chat. It was started by a trigger
           configured to skip them, so its file and command tools run without asking.
-        </div>
-      )}
-
-      {geminiSelected && (
-        // PA-96 disclosure, on every visit to a chat whose agent uses Gemini
-        // Live — rendered compactly per PA-98.
-        <div className="planner-gemini-disclosure" role="status">
-          {geminiAvailable
-            ? 'Live mode in this chat uses Gemini Live. While it is on, your voice, this conversation and tool results (such as files it reads and session output) are sent to Google. Gemini bills audio for as long as the mic is open.'
-            : 'This agent is set to use Gemini Live for live mode, but no usable Gemini API key is configured on this server, so live mode is unavailable here. Add one in Settings → Pocket Agent.'}
         </div>
       )}
 

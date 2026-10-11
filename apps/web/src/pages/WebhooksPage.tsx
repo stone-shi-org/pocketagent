@@ -186,15 +186,15 @@ export function WebhooksPage({
             Each webhook gives an outside system a URL. A matching event starts an agent here.
           </p>
         </div>
-        <div className="cron-head-actions" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+        <div className="cron-head-actions">
           <button
             type="button"
-            className="cron-secondary"
+            className="cron-secondary icon-only"
             onClick={triggerImport}
             title="Import webhook from a JSON file"
+            aria-label="Import webhook from a JSON file"
           >
             <Icon name="upload" size={16} />
-            Import JSON
           </button>
           <button type="button" className="cron-new" onClick={() => onOpenWebhook('new')}>
             <Icon name="plus" size={18} />

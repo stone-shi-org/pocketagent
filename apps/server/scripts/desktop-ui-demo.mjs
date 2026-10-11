@@ -141,7 +141,7 @@ try {
 
   heading('A folder can be added from the app');
   const projectsAtStart = await page.locator('.sidebar .project').count();
-  await page.click('.sidebar .add-project');
+  await page.click('.sidebar .add-project'); // PA-131: the + on the Projects heading
   await page.waitForSelector('[role="dialog"][aria-label="Add a project"]');
 
   await page.click('[role="tab"]:has-text("Browse")');

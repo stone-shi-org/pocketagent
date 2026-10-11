@@ -52,8 +52,8 @@ const DANGER_AT = 95;
 const FIVE_HOUR_RE = /\b5[\s-]?h(?:our)?s?\b/i;
 
 /**
- * The window(s) shown while a group is collapsed (the default state — see
- * `UsageAgentGroup`): just the 5-hour one, since it resets soon enough to be
+ * The window(s) a collapsed gauge leads with (its outer ring — see
+ * `ringWindows`): just the 5-hour one, since it resets soon enough to be
  * worth a glance without tapping anything, while the weekly number is one
  * tap away behind the expand arrow. agy additionally multiplexes quota
  * across model families into separate windows (Gemini, Claude/GPT, ... — see
@@ -72,13 +72,92 @@ export function collapsedWindows(usage: AgentUsageInfo, windows: UsageWindowInfo
   return gemini5h.length > 0 ? gemini5h : fiveHour.length > 0 ? fiveHour : windows;
 }
 
+/** Matches a weekly window however each source spells it ("Weekly", "7-day", agy's "... weekly"). */
+const WEEKLY_RE = /\b(?:week(?:ly)?|7[\s-]?d(?:ays?)?)\b/i;
+
 /**
- * Progress bars per agent in the status area: percent of rate-limit window(s)
- * used (5-hour, weekly, etc.), labelled by agent and window, and when it resets.
- * Renders nothing while loading and nothing for an agent whose usage could not be read.
+ * The two windows one ring gauge draws (PA-131): the outer ring is the window
+ * the collapsed view always led with (`collapsedWindows`' first — the 5-hour
+ * one), the inner ring the weekly one. For agy the weekly window is taken from
+ * the same model group as the outer ring when there is one, so the two rings
+ * describe one quota rather than two unrelated ones. `inner` is null when the
+ * agent reports a single window, and the gauge then draws one ring.
+ */
+export function ringWindows(
+  usage: AgentUsageInfo,
+  windows: UsageWindowInfo[],
+): { outer: UsageWindowInfo | null; inner: UsageWindowInfo | null } {
+  const outer = collapsedWindows(usage, windows)[0] ?? null;
+  if (!outer) return { outer: null, inner: null };
+  const rest = windows.filter((w) => w !== outer);
+  const weekly = rest.filter((w) => WEEKLY_RE.test(w.label));
+  const group = outer.label.replace(FIVE_HOUR_RE, '').trim().toLowerCase();
+  const sameGroup = group ? weekly.find((w) => w.label.toLowerCase().includes(group)) : undefined;
+  return { outer, inner: sameGroup ?? weekly[0] ?? rest[0] ?? null };
+}
+
+const AGENT_ABBREVIATIONS: Record<string, string> = { claude: 'CC', codex: 'CX', agy: 'AG' };
+
+/** The two letters inside a gauge — CC / CX / AG, else the display name's initials. */
+export function agentAbbreviation(usage: Pick<AgentUsageInfo, 'agent' | 'agentDisplayName'>): string {
+  const known = AGENT_ABBREVIATIONS[usage.agent];
+  if (known) return known;
+  const words = usage.agentDisplayName.split(/\s+/).filter(Boolean);
+  const letters = words.length > 1 ? words.map((w) => w[0]).join('') : usage.agentDisplayName;
+  return letters.slice(0, 2).toUpperCase();
+}
+
+function levelOf(pct: number): 'ok' | 'warn' | 'danger' {
+  return pct >= DANGER_AT ? 'danger' : pct >= WARN_AT ? 'warn' : 'ok';
+}
+
+function clampPct(pct: number): number {
+  return Math.max(0, Math.min(100, pct));
+}
+
+function windowsOf(usage: AgentUsageInfo): UsageWindowInfo[] {
+  if (usage.windows && usage.windows.length > 0) return usage.windows;
+  if (usage.percentUsed === null) return [];
+  return [
+    {
+      label: usage.windowLabel ?? '',
+      percentUsed: usage.percentUsed,
+      resetsAtLabel: usage.resetsAtLabel,
+      timezone: usage.timezone,
+    },
+  ];
+}
+
+const EXPANDED_KEY = 'pocketagent:usage-expanded';
+
+function loadExpanded(): boolean {
+  try {
+    return globalThis.localStorage?.getItem(EXPANDED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function saveExpanded(value: boolean): void {
+  try {
+    globalThis.localStorage?.setItem(EXPANDED_KEY, value ? '1' : '0');
+  } catch {
+    // Private browsing or a blocked store — the toggle still works for this page.
+  }
+}
+
+/**
+ * Rate-limit status per agent. Collapsed (the default) it is one row of small
+ * two-ring gauges — outer ring the 5-hour window, inner the weekly one, the
+ * agent's initials in the middle — because a full bar per agent per window
+ * took a third of a phone screen (PA-131). Tapping the row expands it in place
+ * to every window as a labelled bar with its reset time; the choice is
+ * remembered. Renders nothing while loading and nothing for an agent whose
+ * usage could not be read.
  */
 export function UsageBar(): JSX.Element | null {
   const usage = useUsage();
+  const [expanded, setExpanded] = useState(loadExpanded);
   const rows =
     usage?.filter(
       (u) =>
@@ -87,51 +166,84 @@ export function UsageBar(): JSX.Element | null {
     ) ?? [];
   if (rows.length === 0) return null;
 
+  const toggle = () => {
+    setExpanded((v) => {
+      saveExpanded(!v);
+      return !v;
+    });
+  };
+
   return (
-    <div className="usage-bars">
-      {rows.map((u) => (
-        <UsageAgentGroup key={u.agent} usage={u} />
-      ))}
+    <div className={`usage-bars${expanded ? ' expanded' : ''}`}>
+      <button
+        type="button"
+        className="usage-rings"
+        onClick={toggle}
+        aria-expanded={expanded}
+        aria-label={`Agent usage — ${expanded ? 'hide details' : 'show every window'}`}
+      >
+        {rows.map((u) => (
+          <UsageRing key={u.agent} usage={u} />
+        ))}
+        <Icon name="chevron-down" size={13} className={expanded ? 'usage-chevron expanded' : 'usage-chevron'} />
+      </button>
+      {expanded &&
+        rows.map((u) => <UsageAgentDetail key={u.agent} usage={u} />)}
     </div>
   );
 }
 
-function UsageAgentGroup({ usage }: { usage: AgentUsageInfo }): JSX.Element {
-  // Collapsed by default: a glanceable 5-hour number beats four bars per
-  // agent taking over the sidebar every time this renders.
-  const [expanded, setExpanded] = useState(false);
-  const windows: UsageWindowInfo[] =
-    usage.windows && usage.windows.length > 0
-      ? usage.windows
-      : usage.percentUsed !== null
-        ? [
-            {
-              label: usage.windowLabel ?? '',
-              percentUsed: usage.percentUsed,
-              resetsAtLabel: usage.resetsAtLabel,
-              timezone: usage.timezone,
-            },
-          ]
-        : [];
-  const visible = expanded ? windows : collapsedWindows(usage, windows);
+const OUTER_R = 19;
+const INNER_R = 13.5;
+
+function UsageRing({ usage }: { usage: AgentUsageInfo }): JSX.Element {
+  const { outer, inner } = ringWindows(usage, windowsOf(usage));
+  const describe = (w: UsageWindowInfo | null) =>
+    w ? `${w.label ? `${w.label} ` : ''}${clampPct(w.percentUsed)}% used${w.resetsAtLabel ? `, resets ${w.resetsAtLabel}` : ''}` : null;
+  const title = [usage.agentDisplayName, describe(outer), describe(inner)].filter(Boolean).join(' · ');
+  const worst = Math.max(outer ? clampPct(outer.percentUsed) : 0, inner ? clampPct(inner.percentUsed) : 0);
 
   return (
-    <div className="usage-agent-group">
-      <button
-        type="button"
-        className="usage-agent-header"
-        onClick={() => setExpanded((v) => !v)}
-        aria-expanded={expanded}
-        aria-label={`${usage.agentDisplayName} usage — ${expanded ? 'collapse' : 'expand'} to ${expanded ? 'show only the 5-hour window' : 'show every window'}`}
-      >
-        <span className="usage-agent-title">{usage.agentDisplayName}</span>
-        <Icon name="chevron-down" size={13} className={expanded ? 'usage-chevron expanded' : 'usage-chevron'} />
-      </button>
-      {visible.map((w, idx) => {
-        const pct = Math.max(0, Math.min(100, w.percentUsed));
-        const level = pct >= DANGER_AT ? 'danger' : pct >= WARN_AT ? 'warn' : 'ok';
-        const title = w.timezone && w.resetsAtLabel ? `Resets ${w.resetsAtLabel} (${w.timezone})` : undefined;
+    <span className={`usage-ring usage-ring-${levelOf(worst)}`} title={title} role="img" aria-label={title}>
+      <svg viewBox="0 0 44 44" width="44" height="44" aria-hidden="true">
+        {outer && <RingArc r={OUTER_R} width={3.5} pct={clampPct(outer.percentUsed)} />}
+        {inner && <RingArc r={INNER_R} width={3} pct={clampPct(inner.percentUsed)} />}
+      </svg>
+      <span className="usage-ring-label">{agentAbbreviation(usage)}</span>
+    </span>
+  );
+}
 
+function RingArc({ r, width, pct }: { r: number; width: number; pct: number }): JSX.Element {
+  return (
+    <>
+      <circle className="usage-ring-track" cx="22" cy="22" r={r} strokeWidth={width} fill="none" />
+      {pct > 0 && (
+        <circle
+          className={`usage-ring-fill usage-fill-${levelOf(pct)}`}
+          cx="22"
+          cy="22"
+          r={r}
+          strokeWidth={width}
+          fill="none"
+          pathLength={100}
+          strokeDasharray={`${pct} 100`}
+          strokeLinecap="round"
+          // Start at twelve o'clock and run clockwise.
+          transform="rotate(-90 22 22)"
+        />
+      )}
+    </>
+  );
+}
+
+function UsageAgentDetail({ usage }: { usage: AgentUsageInfo }): JSX.Element {
+  return (
+    <div className="usage-agent-group">
+      <span className="usage-agent-title">{usage.agentDisplayName}</span>
+      {windowsOf(usage).map((w, idx) => {
+        const pct = clampPct(w.percentUsed);
+        const title = w.timezone && w.resetsAtLabel ? `Resets ${w.resetsAtLabel} (${w.timezone})` : undefined;
         return (
           <div key={idx} className="usage-bar" title={title}>
             <div className="usage-bar-head">
@@ -142,7 +254,7 @@ function UsageAgentGroup({ usage }: { usage: AgentUsageInfo }): JSX.Element {
               </span>
             </div>
             <div className="usage-track">
-              <div className={`usage-fill usage-fill-${level}`} style={{ width: `${pct}%` }} />
+              <div className={`usage-fill usage-fill-${levelOf(pct)}`} style={{ width: `${pct}%` }} />
             </div>
           </div>
         );

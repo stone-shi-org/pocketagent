@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentUsageInfo, UsageWindowInfo } from '@pocketagent/protocol';
-import { collapsedWindows } from './UsageBar.js';
+import { agentAbbreviation, collapsedWindows, ringWindows } from './UsageBar.js';
 
 function usage(agent: string, overrides: Partial<AgentUsageInfo> = {}): AgentUsageInfo {
   return {
@@ -56,5 +56,48 @@ describe('collapsedWindows', () => {
 
   it('returns an empty list unchanged', () => {
     expect(collapsedWindows(usage('claude'), [])).toEqual([]);
+  });
+});
+
+describe('ringWindows (PA-131)', () => {
+  it('puts the 5-hour window outside and the weekly one inside', () => {
+    const five = window('5-hour', 40);
+    const weekly = window('Weekly', 10);
+    expect(ringWindows(usage('claude'), [weekly, five])).toEqual({ outer: five, inner: weekly });
+  });
+
+  it('recognises Codex-style "7-day" as the weekly window', () => {
+    const five = window('5h');
+    const week = window('7-day');
+    expect(ringWindows(usage('codex'), [five, week]).inner).toBe(week);
+  });
+
+  it('pairs agy rings within one model group', () => {
+    const windows = [window('Claude/GPT 5h'), window('Claude/GPT weekly'), window('Gemini 5h'), window('Gemini weekly')];
+    const rings = ringWindows(usage('agy'), windows);
+    expect(rings.outer).toBe(windows[2]);
+    expect(rings.inner).toBe(windows[3]);
+  });
+
+  it('draws one ring when only one window is reported', () => {
+    const only = window('5-hour');
+    expect(ringWindows(usage('claude'), [only])).toEqual({ outer: only, inner: null });
+  });
+
+  it('draws nothing for no windows', () => {
+    expect(ringWindows(usage('claude'), [])).toEqual({ outer: null, inner: null });
+  });
+});
+
+describe('agentAbbreviation (PA-131)', () => {
+  it('uses CC / CX / AG for the three known agents', () => {
+    expect(agentAbbreviation({ agent: 'claude', agentDisplayName: 'Claude' })).toBe('CC');
+    expect(agentAbbreviation({ agent: 'codex', agentDisplayName: 'Codex' })).toBe('CX');
+    expect(agentAbbreviation({ agent: 'agy', agentDisplayName: 'Antigravity CLI' })).toBe('AG');
+  });
+
+  it('falls back to initials, then to the first two letters', () => {
+    expect(agentAbbreviation({ agent: 'x', agentDisplayName: 'Open Code' })).toBe('OC');
+    expect(agentAbbreviation({ agent: 'pi', agentDisplayName: 'pi' })).toBe('PI');
   });
 });
