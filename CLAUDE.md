@@ -345,11 +345,17 @@ could see. Three things replaced that, and each is load-bearing:
 - **Resolution follows a login shell, not the service's `PATH`.** `executableSearchDirs`
   (`agents/registry.ts`) is the one search order everything uses — sessions, probes, `available`,
   post-install verification: the official directories (`~/.opencode/bin`, `~/.local/bin`,
-  `~/.pi/agent/bin`) first, then `PATH`, then `~/.cargo/bin`, then the install prefix
-  (`~/.npm-global/bin` plus the configured `agentInstallPrefix`) **last**, removed from wherever
-  `PATH` put it. Official-first rather than `PATH`-first because a systemd `PATH` carries
-  `/usr/bin`, where stale system-npm copies live (`/usr/bin/codex` 0.147.0 beside an official
-  0.157.0). Prefix-last is "no `~/.npm-global` copy may shadow the official one" stated as an
+  `~/.pi/agent/bin`) first, then `PATH` (augmented on `darwin` with `/opt/homebrew/bin` and
+  `/usr/local/bin` via `darwinSystemBinDirs` when `PATH` carries `/usr/bin`, so a `launchd`
+  service with a minimal system `PATH` still finds Homebrew `tmux`, `git`, and `node`), then
+  `~/.cargo/bin`, then the install prefix (`~/.npm-global/bin` plus the configured
+  `agentInstallPrefix`) **last**, removed from wherever `PATH` put it. Official-first rather than
+  `PATH`-first because a systemd `PATH` carries `/usr/bin`, where stale system-npm copies live
+  (`/usr/bin/codex` 0.147.0 beside an official 0.157.0). And because `exec_command`/`bash` spawns
+  `$SHELL -lc`, where macOS `/etc/zprofile` (`/usr/libexec/path_helper -s`) and Debian
+  `/etc/profile` reorder or overwrite `PATH` after the process starts, `wrapLoginShellCommand`
+  re-applies `executableSearchDirs` inside the login shell before running the user command
+  (PA-126). Prefix-last is "no `~/.npm-global` copy may shadow the official one" stated as an
   ordering: such a copy runs only when nothing else exists, and is otherwise *reported*.
 - **Install and update use the vendor's own path.** `agents/catalog.ts` holds, per agent, the
   official installer's fixed `https://` URL, its interpreter, the arguments that read off the
@@ -502,8 +508,14 @@ there is the *conversation*, not the process.
   `usage/probe-cwd.ts`: the rate-limit poller ran `claude -p "/usage"` every five minutes from
   `workspaceRoots[0] ?? process.cwd()`, so it filed 288 transcripts a day *inside a workspace*
   and the project tree grew a project named after that directory, full of chats titled
-  `/usage`. The poller now probes from `os.tmpdir()`, which is outside every workspace root by
-  construction. Anything else that shells out to an agent must pick its cwd the same way.
+  `/usage`. The poller now probes from `fs.realpathSync(os.tmpdir())` (realpath'd so macOS
+  `/var/folders/...` symlinks match `/private/var/folders/...`), which is outside every workspace
+  root by construction. Anything else that shells out to an agent must pick its cwd the same way.
+  `listRunningAgentCwds()` detects live `claude` processes outside PocketAgent (for the "something
+  is running here" warning): on Linux via `/proc/<pid>/cmdline` + `/proc/<pid>/cwd`, on macOS
+  (`darwin`) via `ps -axo pid=,comm=` + `lsof -a -d cwd -p <pids> -Fn` (argv-only, no shell), and
+  on any other platform by logging an explicit warning once rather than silently returning `[]`
+  (PA-126).
 - `adopt/index.ts` — attaches to a pane on a *foreign* tmux socket. Off unless
   `POCKETAGENT_ADOPT_TMUX_SOCKET` is set. The browser only ever sends an opaque
   sha256-derived id; the server builds the argv. Adopted sessions always use the direct
@@ -2298,7 +2310,12 @@ on stone-dev01 and are load-bearing:
 - **The Hub ranks addresses** (`usableAddresses`/`preferredAddress`): avahi-style responders
   advertise `127.0.0.1`, `::1` and link-local IPv6 beside the LAN address. Link-local is never
   offered (no URL can carry a zone id); loopback is a last resort; an advertised address a
-  packet actually arrived from wins, since that is evidence of a route.
+  packet actually arrived from wins, since that is evidence of a route. On the advertiser side,
+  `localIpv4Addresses` demotes Linux (`docker`, `br-`, `veth`, `virbr`, `cni`, `flannel`,
+  `tailscale`, `utun`) and macOS (`awdl`, `llw`, `anpi`, `bridge`, `ap`, `gif`, `stf`, `xhc`)
+  virtual/peer-to-peer interfaces behind physical ones (`en0`), and `reuseAddr: true` sets
+  `SO_REUSEPORT` via libuv (`uv__udp_bind`) on Darwin/BSDs so UDP 5353 coexists with macOS
+  `mDNSResponder` (PA-126).
 
 The backend's advertiser is started from `server.ts` after `listen` (never `buildApp`, so no
 test multicasts), is off by default, refuses a loopback bind with a warning, and advertises only
@@ -2323,8 +2340,9 @@ the schema has no other key, because a server that could be told which image to 
 hands out, and one that survives every later revocation.
 
 **The exit status is deliberately non-zero, and that is the load-bearing detail.** The ticket
-assumed `Restart=always`; this repo's README recommends `Restart=on-failure` and production
-uses it, under which a clean `exit(0)` is a *successful* exit that systemd correctly ignores —
+assumed `Restart=always`; this repo's README recommends `Restart=on-failure` (systemd),
+`restart: unless-stopped` (Docker), and `KeepAlive` with `SuccessfulExit=false` (macOS
+`launchd`), under which a clean `exit(0)` is a *successful* exit that the supervisor ignores —
 so `POST /api/admin/restart` would have been a remote off switch on every deployment following
 our own documentation. `RESTART_EXIT_CODE` is 75 (`EX_TEMPFAIL`, beside the 78 `EX_CONFIG`
 already used for a bad config), which restarts under every supervisor policy that restarts at
@@ -3131,6 +3149,18 @@ each other too.
 auto-generated) and `POCKETAGENT_WORKSPACE_ROOTS` (no default — unset must never mean the
 whole filesystem). The server refuses to start without both. `.env.example` documents every
 setting; the README covers deployment, the security model, and known limitations.
+
+**macOS source-checkout support (`process.platform === 'darwin'`, PA-126):** Where behaviour is
+Linux-specific, the code branches on `darwin` or refuses explicitly rather than silently
+degrading. `POCKETAGENT_TMUX_SESSION_SCOPE_SLICE` (`systemd-run --user --scope`) is refused at
+config load, `PATCH /api/settings` and `update_settings` (`tmuxSessionScopeSliceProblem`) on
+non-Linux platforms rather than failing when a tmux session spawns. `POCKETAGENT_SHELL` defaults
+to `$SHELL`, then `/bin/zsh` on `darwin` and `/bin/bash` on Linux. On macOS, `/tmp` →
+`/private/tmp` and `/var` → `/private/var` are symlinks and APFS is case-insensitive
+(case-preserving) by default: `fs.realpath` resolves both symlinks and the canonical on-disk
+casing (`F_GETPATH`), so containment (`workspaces/index.ts`), `treeRootOf` (`RunQueue`) and
+`PlannerWorkspaceRegistry` work on canonicalized paths, while `resolveDataDir` compares paths
+case-insensitively on `darwin` before the directories exist on disk.
 
 Default bind is `127.0.0.1`. This grants terminal access as your user, so exposing it is a
 deliberate act — prefer Tailscale over `0.0.0.0`.

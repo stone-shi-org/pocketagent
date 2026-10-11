@@ -142,9 +142,9 @@ export function HostAdminSection({ onApiError }: Props): JSX.Element {
     <>
       <p className="transport-hint" style={{ marginBottom: 10 }}>
         This host is running <strong>{version ?? 'an unreported version'}</strong>. Restarting asks
-        it to finish what it is doing and exit; whatever supervises it — systemd, Docker — starts
-        it again, on whatever image that unit points at. This app never downloads or installs
-        anything, and cannot choose a version.
+        it to finish what it is doing and exit; whatever supervises it — systemd, launchd, Docker —
+        starts it again, on whatever image or checkout that unit points at. This app never downloads
+        or installs anything, and cannot choose a version.
       </p>
 
       {error && (
@@ -167,15 +167,16 @@ export function HostAdminSection({ onApiError }: Props): JSX.Element {
         <div className="notice inline warn" role="status">
           This host has not answered for two minutes. It exited cleanly, so if it has not come
           back its supervisor is not configured to restart it — check for{' '}
-          <code>Restart=always</code> or <code>Restart=on-failure</code> in the unit, or a restart
-          policy on the container.
+          <code>Restart=always</code> or <code>Restart=on-failure</code> in the systemd unit,{' '}
+          <code>KeepAlive</code> (<code>SuccessfulExit=false</code>) in the launchd plist, or a
+          restart policy on the container.
         </div>
       )}
 
       {supported === false && (
         <div className="notice inline warn" role="status">
           This process has no supervisor that could restart it, so it will not exit on request.
-          Run it under systemd or Docker with a restart policy.
+          Run it under systemd, launchd, or Docker with a restart policy.
         </div>
       )}
 

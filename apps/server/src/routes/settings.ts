@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { UpdateSettingsRequest, type SettingsResponse } from '@pocketagent/protocol';
+import { tmuxSessionScopeSliceProblem } from '../config/index.js';
 import type { PocketContext } from '../types.js';
 import {
   SETTINGS_FIELDS,
@@ -62,6 +63,14 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
       });
     }
     const patch = parsed.data as Record<string, unknown>;
+    if (typeof patch.tmuxSessionScopeSlice === 'string') {
+      const sliceProblem = tmuxSessionScopeSliceProblem(patch.tmuxSessionScopeSlice);
+      if (sliceProblem !== null) {
+        return reply.code(400).send({
+          error: { code: 'bad_request', message: sliceProblem },
+        });
+      }
+    }
     const { config, sessions, db } = app.pocket;
 
     if (patch.skipPermissionsEnabled !== undefined) {

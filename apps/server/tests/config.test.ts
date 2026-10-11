@@ -299,5 +299,58 @@ describe('config', () => {
         loadConfig(env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN, POCKETAGENT_DATA_DIR: '/' })),
       ).toThrow(/refuses to use "\/"/);
     });
+
+    it('compares uncreated path segments case-insensitively on darwin (APFS) (PA-126)', () => {
+      const ws = makeWorkspace();
+      try {
+        // On case-insensitive APFS, `realpathUncreated` preserves the caller's
+        // casing for the uncreated tail (`ws.project` exists, `State` does not;
+        // or `ws.root/PROJECT/state` when `PROJECT` is uncreated).
+        const upperProject = path.join(ws.root, 'MyProject');
+        fs.mkdirSync(upperProject);
+        const mixedCaseTarget = path.join(ws.root, 'myproject', 'uncreated-data');
+        expect(() =>
+          loadConfig(
+            env({
+              POCKETAGENT_AUTH_TOKEN: TEST_TOKEN,
+              POCKETAGENT_WORKSPACE_ROOTS: upperProject,
+              POCKETAGENT_DATA_DIR: mixedCaseTarget,
+            }),
+            'darwin',
+          ),
+        ).toThrow(/is inside the workspace root/);
+      } finally {
+        ws.cleanup();
+      }
+    });
+  });
+
+  describe('macOS (darwin) platform handling (PA-126)', () => {
+    it('refuses POCKETAGENT_TMUX_SESSION_SCOPE_SLICE on darwin at config load', () => {
+      expect(() =>
+        loadConfig(
+          env({
+            POCKETAGENT_AUTH_TOKEN: TEST_TOKEN,
+            POCKETAGENT_TMUX_SESSION_SCOPE_SLICE: 'pocketagent-tmux.slice',
+          }),
+          'darwin',
+        ),
+      ).toThrow(/POCKETAGENT_TMUX_SESSION_SCOPE_SLICE.*only supported on Linux.*darwin.*systemd-run --user --scope/);
+
+      const linuxCfg = loadConfig(
+        env({
+          POCKETAGENT_AUTH_TOKEN: TEST_TOKEN,
+          POCKETAGENT_TMUX_SESSION_SCOPE_SLICE: 'pocketagent-tmux.slice',
+        }),
+        'linux',
+      );
+      expect(linuxCfg.tmuxSessionScopeSlice).toBe('pocketagent-tmux.slice');
+    });
+
+    it('defaults shell to /bin/zsh on darwin and /bin/bash on linux when SHELL is unset', () => {
+      const base = env({ POCKETAGENT_AUTH_TOKEN: TEST_TOKEN, POCKETAGENT_SHELL: undefined, SHELL: undefined });
+      expect(loadConfig(base, 'darwin').shell).toBe('/bin/zsh');
+      expect(loadConfig(base, 'linux').shell).toBe('/bin/bash');
+    });
   });
 });

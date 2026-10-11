@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,7 +6,7 @@ import type { AgentInfo, AgentInstallEvent, InstallableAgentListResponse } from 
 import { INSTALLABLE_AGENT_IDS, installActionFor } from '@pocketagent/protocol';
 import { buildApp } from '../src/app.js';
 import { openDatabase } from '../src/db/index.js';
-import { catalogEntry, installableAgents, isOfficialInstallPath } from '../src/agents/catalog.js';
+import { catalogEntry, catalogPlatformProblem, installableAgents, isOfficialInstallPath } from '../src/agents/catalog.js';
 import { deriveSetupState } from '../src/agents/auth-probe.js';
 import {
   agentBinaryReport,
@@ -22,6 +22,7 @@ import {
   executableSearchDirs,
   resolveExecutable,
   setAgentInstallPrefixSource,
+  wrapLoginShellCommand,
 } from '../src/agents/registry.js';
 import { createClaudeAdapter } from '../src/agents/claude.js';
 import { createCodexAdapter } from '../src/agents/codex.js';
@@ -62,8 +63,8 @@ interface FakeHost {
 }
 
 function fakeHost(): FakeHost {
-  const home = mkdtempSync(path.join(os.tmpdir(), 'pa104-home-'));
-  const pathDir = mkdtempSync(path.join(os.tmpdir(), 'pa104-path-'));
+  const home = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'pa104-home-')));
+  const pathDir = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'pa104-path-')));
   const origPath = process.env.PATH;
   vi.spyOn(os, 'homedir').mockReturnValue(home);
   process.env.PATH = pathDir;
@@ -361,7 +362,7 @@ describe('executable resolution (PA-104)', () => {
    * expected, unremovable baseline rather than a stray.
    */
   it('classifies the image’s baked-in copy as image, not other', () => {
-    const imageHome = mkdtempSync(path.join(os.tmpdir(), 'pa104-img-'));
+    const imageHome = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'pa104-img-')));
     const orig = process.env.AGENT_IMAGE_HOME;
     process.env.AGENT_IMAGE_HOME = imageHome;
     try {
@@ -444,7 +445,7 @@ describe('image PATH matches the resolver (PA-104)', () => {
     const origPath = process.env.PATH;
     process.env.PATH = '/usr/local/bin:/usr/bin';
     try {
-      const dirs = executableSearchDirs();
+      const dirs = executableSearchDirs('linux');
       const expected = [
         ...dirs.slice(0, 3),
         '$PATH',
@@ -462,6 +463,71 @@ describe('image PATH matches the resolver (PA-104)', () => {
     } finally {
       process.env.PATH = origPath;
       vi.restoreAllMocks();
+    }
+  });
+
+  it('places /opt/homebrew/bin and /usr/local/bin ahead of /usr/bin on darwin even when launchd starts with a minimal PATH (PA-126)', () => {
+    const home = '/Users/pocketagent';
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    const origPath = process.env.PATH;
+    process.env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
+    try {
+      const dirs = executableSearchDirs('darwin');
+      expect(dirs.slice(0, 5)).toEqual([
+        '/Users/pocketagent/.opencode/bin',
+        '/Users/pocketagent/.local/bin',
+        '/Users/pocketagent/.pi/agent/bin',
+        '/opt/homebrew/bin',
+        '/usr/local/bin',
+      ]);
+      expect(dirs.indexOf('/opt/homebrew/bin')).toBeLessThan(dirs.indexOf('/usr/bin'));
+      expect(dirs.at(-1)).toBe('/Users/pocketagent/.npm-global/bin');
+
+      const installerDirs = officialInstallerPath('darwin').split(path.delimiter);
+      expect(installerDirs.slice(0, 5)).toEqual([
+        '/Users/pocketagent/.local/bin',
+        '/opt/homebrew/bin',
+        '/usr/local/bin',
+        '/usr/bin',
+        '/bin',
+      ]);
+
+      const wrapped = wrapLoginShellCommand('/bin/zsh', 'claude --version', 'darwin');
+      expect(wrapped).toContain(
+        `export PATH='/Users/pocketagent/.opencode/bin':` +
+          `'/Users/pocketagent/.local/bin':` +
+          `'/Users/pocketagent/.pi/agent/bin':` +
+          `'/opt/homebrew/bin':` +
+          `'/usr/local/bin':"$PATH":` +
+          `'/Users/pocketagent/.cargo/bin':` +
+          `'/Users/pocketagent/.npm-global/bin'\nclaude --version`,
+      );
+      // Non-POSIX shells are left unwrapped.
+      expect(wrapLoginShellCommand('/opt/homebrew/bin/fish', 'claude --version', 'darwin')).toBe(
+        'claude --version',
+      );
+    } finally {
+      process.env.PATH = origPath;
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('recognizes macOS official install layouts and refuses unsupported platforms with a clear reason (PA-126)', () => {
+    expect(isOfficialInstallPath('claude', '/Users/me/.local/share/claude/versions/2.1.112')).toBe(true);
+    expect(isOfficialInstallPath('codex', '/Users/me/.codex/packages/standalone/codex-aarch64-apple-darwin/codex')).toBe(
+      true,
+    );
+    expect(isOfficialInstallPath('opencode', '/Users/me/.opencode/bin/opencode')).toBe(true);
+    expect(isOfficialInstallPath('agy', '/Users/me/.local/bin/agy')).toBe(true);
+    expect(isOfficialInstallPath('pi', '/Users/me/.pi/agent/install/node_modules/.bin/pi')).toBe(true);
+
+    for (const id of INSTALLABLE_AGENT_IDS) {
+      const entry = catalogEntry(id);
+      expect(catalogPlatformProblem(entry, 'linux'), id).toBeNull();
+      expect(catalogPlatformProblem(entry, 'darwin'), id).toBeNull();
+      expect(catalogPlatformProblem(entry, 'win32'), id).toMatch(
+        /does not support platform "win32" \(supported platforms: linux, darwin\)/,
+      );
     }
   });
 });
@@ -764,7 +830,7 @@ describe('install routes', () => {
     await t.context.agentInstall.settle();
     const call = calls[0]!;
     expect(call.command).toBe('sh');
-    expect(call.cwd).toBe(os.tmpdir());
+    expect(call.cwd).toBe(realpathSync(os.tmpdir()));
     expect(call.cwd).not.toBe(process.cwd());
     expect(call.env.PATH?.split(path.delimiter)[0]).toBe(path.join(host.home, '.local', 'bin'));
     expect(call.env.PATH).not.toContain(path.join(host.home, '.npm-global'));

@@ -26,7 +26,7 @@ import type { WorktreeService } from '../git/worktree.js';
 import { WorktreeError } from '../git/worktree.js';
 import { treeRootOf } from '../git/worktree-paths.js';
 import { buildChildEnv } from '../sessions/env.js';
-import type { AgentRegistry } from '../agents/registry.js';
+import { executableSearchDirs, wrapLoginShellCommand, type AgentRegistry } from '../agents/registry.js';
 import type { PlannerWorkspaceRegistry } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
 import type { McpRegistryService } from './mcp/registry-service.js';
@@ -36,7 +36,7 @@ import { imageDimensions } from './image-budget.js';
 import { applyEdits, normalizeEditsArgument } from './edit-file.js';
 import type { Db } from '../db/index.js';
 import { readMcpOwnedWork } from '../db/index.js';
-import type { Config } from '../config/index.js';
+import { tmuxSessionScopeSliceProblem, type Config } from '../config/index.js';
 import {
   SETTINGS_FIELDS,
   dtoKeyFor,
@@ -2554,6 +2554,12 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         return `Refusing: ${parsed.error.issues[0]?.message ?? 'invalid settings patch.'}`;
       }
       const validated = parsed.data as Record<string, unknown>;
+      const sliceProblem = tmuxSessionScopeSliceProblem(
+        validated.tmuxSessionScopeSlice as string | null | undefined,
+      );
+      if (sliceProblem !== null) {
+        return `Refusing: ${sliceProblem}`;
+      }
       const applied: string[] = [];
       for (const field of SETTINGS_FIELDS) {
         const dtoKey = dtoKeyFor(field);
@@ -2880,9 +2886,12 @@ function runShellCommand(
 
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(shell, ['-lc', command], {
+      child = spawn(shell, ['-lc', wrapLoginShellCommand(shell, command)], {
         cwd,
-        env: buildChildEnv({ cwd }),
+        env: buildChildEnv({
+          cwd,
+          overrides: { PATH: executableSearchDirs().join(path.delimiter) },
+        }),
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
       });

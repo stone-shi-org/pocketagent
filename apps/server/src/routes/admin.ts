@@ -69,7 +69,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           error: {
             code: 'restart_unsupported',
             message:
-              'This process cannot ask a supervisor to restart it, so it will not exit. Run it under systemd or Docker with a restart policy.',
+              'This process cannot ask a supervisor to restart it, so it will not exit. Run it under systemd, launchd (macOS), or Docker with a restart policy.',
           },
         });
       }

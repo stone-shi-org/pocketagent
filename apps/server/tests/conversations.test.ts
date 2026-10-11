@@ -4,6 +4,9 @@ import path from 'node:path';
 import {
   ConversationStore,
   encodeProjectDir,
+  listRunningAgentCwds,
+  parseDarwinClaudePids,
+  parseLsofCwds,
   readTranscriptMeta,
   transcriptRecordToEvents,
 } from '../src/conversations/index.js';
@@ -42,7 +45,7 @@ describe('readTranscriptMeta', () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = fs.mkdtempSync('/tmp/pa-meta-');
+    dir = fs.realpathSync(fs.mkdtempSync('/tmp/pa-meta-'));
   });
   afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
@@ -701,7 +704,7 @@ describe('ConversationStore.history', () => {
 
   beforeEach(() => {
     ws = makeWorkspace();
-    projectsDir = fs.mkdtempSync('/tmp/pa-hist-');
+    projectsDir = fs.realpathSync(fs.mkdtempSync('/tmp/pa-hist-'));
     store = new ConversationStore({
       projectsDir,
       workspaces: new WorkspaceRegistry([ws.root]),
@@ -738,7 +741,7 @@ describe('ConversationStore.history', () => {
   });
 
   it('refuses a conversation outside the workspace roots', async () => {
-    const outside = fs.mkdtempSync('/tmp/pa-hist-out-');
+    const outside = fs.realpathSync(fs.mkdtempSync('/tmp/pa-hist-out-'));
     try {
       const dir = path.join(projectsDir, encodeProjectDir(outside));
       fs.mkdirSync(dir, { recursive: true });
@@ -789,5 +792,98 @@ describe('ConversationStore.history', () => {
     );
     const events = await store.history('c1');
     expect(events).toHaveLength(1);
+  });
+});
+
+describe('listRunningAgentCwds on darwin and unsupported platforms (PA-126)', () => {
+  it('parses claude PIDs from ps -axo pid=,comm= output', () => {
+    const psOut = [
+      '    1 /sbin/launchd',
+      ' 4210 /Users/me/.local/share/claude/versions/2.1.112',
+      ' 4211 /Users/me/.local/bin/claude',
+      ' 4212 /opt/homebrew/bin/node',
+      ' 4213 claude',
+      ' 4214 /Applications/Claude.app/Contents/MacOS/Claude',
+    ].join('\n');
+    expect(parseDarwinClaudePids(psOut)).toEqual(['4211', '4213']);
+  });
+
+  it('parses cwd entries from lsof -Fn output', () => {
+    const lsofOut = ['p4211', 'fcwd', 'n/Users/me/src/repo-a', 'p4213', 'fcwd', 'n/Users/me/src/repo-b', ''].join(
+      '\n',
+    );
+    expect(parseLsofCwds(lsofOut)).toEqual(['/Users/me/src/repo-a', '/Users/me/src/repo-b']);
+  });
+
+  it('runs ps and lsof via argv-only execFile on darwin and canonicalizes realpaths', async () => {
+    const ws = makeWorkspace();
+    try {
+      const calls: { file: string; args: readonly string[] }[] = [];
+      const cwds = await listRunningAgentCwds({
+        platform: 'darwin',
+        execFileImpl: async (file, args) => {
+          calls.push({ file, args });
+          if (file === 'ps') {
+            return { stdout: ' 101 /Users/me/.local/bin/claude\n 202 /bin/zsh\n' };
+          }
+          if (file === 'lsof') {
+            return { stdout: `p101\nfcwd\nn${ws.project}\n` };
+          }
+          throw new Error(`unexpected command: ${file}`);
+        },
+      });
+      expect(calls).toEqual([
+        { file: 'ps', args: ['-axo', 'pid=,comm='] },
+        { file: 'lsof', args: ['-a', '-d', 'cwd', '-p', '101', '-Fn'] },
+      ]);
+      expect(cwds).toEqual([ws.project]);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('recovers partial lsof stdout when one PID exits between ps and lsof on darwin', async () => {
+    const ws = makeWorkspace();
+    try {
+      const cwds = await listRunningAgentCwds({
+        platform: 'darwin',
+        execFileImpl: async (file) => {
+          if (file === 'ps') {
+            return { stdout: ' 101 claude\n 102 claude\n' };
+          }
+          const err = Object.assign(new Error('Command failed: lsof exited 1'), {
+            stdout: `p101\nfcwd\nn${ws.project}\n`,
+          });
+          throw err;
+        },
+      });
+      expect(cwds).toEqual([ws.project]);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('skips lsof entirely when ps reports no running claude process on darwin', async () => {
+    const calls: string[] = [];
+    const cwds = await listRunningAgentCwds({
+      platform: 'darwin',
+      execFileImpl: async (file) => {
+        calls.push(file);
+        return { stdout: '  1 /sbin/launchd\n' };
+      },
+    });
+    expect(calls).toEqual(['ps']);
+    expect(cwds).toEqual([]);
+  });
+
+  it('logs an explicit warning instead of silently degrading on an unsupported platform', async () => {
+    const warnings: string[] = [];
+    const cwds = await listRunningAgentCwds({
+      platform: 'win32',
+      warn: (msg) => warnings.push(msg),
+    });
+    expect(cwds).toEqual([]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/unsupported on platform "win32"/);
   });
 });

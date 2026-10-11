@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '@pocketagent/protocol';
@@ -930,6 +931,38 @@ describe('exec_command', () => {
     const tool = findPlannerTool('exec_command')!;
     const result = await runText(tool, depsFor(t), { cwd: target, command: 'echo hi' });
     expect(result).toMatch(/is not a directory/);
+  });
+
+  it('finds binaries in ~/.local/bin, ~/.opencode/bin and ~/.pi/agent/bin inside a login shell on bare metal (PA-126)', async () => {
+    t = await createTestApp();
+    const fakeHome = path.join(t.workspaceRoot, 'fake-home');
+    await fs.mkdir(path.join(fakeHome, '.local', 'bin'), { recursive: true });
+    await fs.mkdir(path.join(fakeHome, '.opencode', 'bin'), { recursive: true });
+    await fs.mkdir(path.join(fakeHome, '.pi', 'agent', 'bin'), { recursive: true });
+    await fs.mkdir(path.join(fakeHome, '.npm-global', 'bin'), { recursive: true });
+    await fs.writeFile(
+      path.join(fakeHome, '.local', 'bin', 'pa126-agent-probe'),
+      '#!/bin/sh\necho official-local\n',
+      { mode: 0o755 },
+    );
+    await fs.writeFile(
+      path.join(fakeHome, '.npm-global', 'bin', 'pa126-agent-probe'),
+      '#!/bin/sh\necho fallback-npm\n',
+      { mode: 0o755 },
+    );
+    vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    try {
+      const tool = findPlannerTool('exec_command')!;
+      const result = await runText(tool, depsFor(t), {
+        cwd: t.projectDir,
+        command: 'pa126-agent-probe',
+      });
+      expect(result).toContain('exit code 0');
+      expect(result).toContain('official-local');
+      expect(result).not.toContain('fallback-npm');
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });
 

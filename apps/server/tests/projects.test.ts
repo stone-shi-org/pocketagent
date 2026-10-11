@@ -62,7 +62,7 @@ function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
 describe('readGitBranch', () => {
   let dir: string;
   beforeEach(() => {
-    dir = fs.mkdtempSync('/tmp/pa-git-');
+    dir = fs.realpathSync(fs.mkdtempSync('/tmp/pa-git-'));
     fs.mkdirSync(path.join(dir, '.git'));
   });
   afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -85,7 +85,7 @@ describe('readGitBranch', () => {
     // A real `git worktree add` leaves `.git` as a *file* containing
     // `gitdir: <path>`, pointing at a directory under the main repo's
     // `.git/worktrees/<name>` that holds this worktree's own HEAD.
-    const gitDir = fs.mkdtempSync('/tmp/pa-git-wt-');
+    const gitDir = fs.realpathSync(fs.mkdtempSync('/tmp/pa-git-wt-'));
     fs.writeFileSync(path.join(gitDir, 'HEAD'), 'ref: refs/heads/feature/wt\n');
     fs.rmSync(path.join(dir, '.git'), { recursive: true, force: true });
     fs.writeFileSync(path.join(dir, '.git'), `gitdir: ${gitDir}\n`);
@@ -100,7 +100,7 @@ describe('readGitBranch', () => {
 describe('findMainRepoCwd', () => {
   let dir: string;
   beforeEach(() => {
-    dir = fs.mkdtempSync('/tmp/pa-git-');
+    dir = fs.realpathSync(fs.mkdtempSync('/tmp/pa-git-'));
   });
   afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
@@ -115,7 +115,7 @@ describe('findMainRepoCwd', () => {
 
   it('resolves a linked worktree back to its main checkout', async () => {
     // Shape a real `git worktree add` leaves behind: `<main>/.git/worktrees/<name>`.
-    const main = fs.mkdtempSync('/tmp/pa-git-main-');
+    const main = fs.realpathSync(fs.mkdtempSync('/tmp/pa-git-main-'));
     const gitDir = path.join(main, '.git', 'worktrees', 'feature-x');
     fs.mkdirSync(gitDir, { recursive: true });
     fs.writeFileSync(path.join(dir, '.git'), `gitdir: ${gitDir}\n`);
@@ -130,7 +130,7 @@ describe('findMainRepoCwd', () => {
     // A submodule uses the same `gitdir:` indirection, but its target lives
     // under `.git/modules/<name>` rather than `.git/worktrees/<name>` — that
     // segment is what tells the two apart.
-    const superproject = fs.mkdtempSync('/tmp/pa-git-super-');
+    const superproject = fs.realpathSync(fs.mkdtempSync('/tmp/pa-git-super-'));
     const gitDir = path.join(superproject, '.git', 'modules', 'lib');
     fs.mkdirSync(gitDir, { recursive: true });
     fs.writeFileSync(path.join(dir, '.git'), `gitdir: ${gitDir}\n`);
@@ -142,7 +142,7 @@ describe('findMainRepoCwd', () => {
   });
 
   it('resolves a deleted worktree path under .worktrees back to its main checkout', async () => {
-    const main = fs.mkdtempSync('/tmp/pa-git-main-');
+    const main = fs.realpathSync(fs.mkdtempSync('/tmp/pa-git-main-'));
     fs.mkdirSync(path.join(main, '.git'));
     const deletedWtPath = path.join(main, '.worktrees', 'deleted-branch');
     try {
@@ -176,7 +176,7 @@ describe('ProjectService', () => {
 
   beforeEach(() => {
     ws = makeWorkspace();
-    projectsDir = fs.mkdtempSync('/tmp/pa-proj-');
+    projectsDir = fs.realpathSync(fs.mkdtempSync('/tmp/pa-proj-'));
     workspaces = new WorkspaceRegistry([ws.root]);
     db = openDatabase(':memory:');
     service = new ProjectService({
@@ -876,7 +876,7 @@ describe('ProjectService', () => {
       // under the main checkout at all, just added (or already contained) as
       // its own directory elsewhere. Grouping is decided by the `.git`
       // indirection, not by directory containment.
-      const otherRoot = fs.mkdtempSync('/tmp/pa-other-root-');
+      const otherRoot = fs.realpathSync(fs.mkdtempSync('/tmp/pa-other-root-'));
       const otherWorktree = path.join(otherRoot, 'test-1');
       addWorktree(otherWorktree, 'test-1');
 

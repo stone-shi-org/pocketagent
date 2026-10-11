@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import os from 'node:os';
 
 /**
@@ -17,7 +18,16 @@ import os from 'node:os';
  * local telemetry and never looks at the working tree. It is passed only
  * because `execFile` needs one, and inheriting the server's own cwd is what
  * made a *production* deploy under `/opt` quietly accumulate 6,703 of these.
+ *
+ * Canonicalized via `fs.realpathSync` so `/var/folders/...` on macOS resolves
+ * to `/private/var/folders/...`, matching the real working directory a spawned
+ * child process sees.
  */
 export function usageProbeCwd(): string {
-  return os.tmpdir();
+  const tmp = os.tmpdir();
+  try {
+    return fs.realpathSync(tmp);
+  } catch {
+    return tmp;
+  }
 }

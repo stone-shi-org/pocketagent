@@ -18,6 +18,7 @@ import { usageProbeCwd } from '../usage/probe-cwd.js';
 import { recordAgentAuthProbe, recordAgentInstall, readAgentDefaults, type Db } from '../db/index.js';
 import {
   catalogEntry,
+  catalogPlatformProblem,
   installableAgents,
   isOfficialInstallPath,
   npmInstallCommand,
@@ -26,6 +27,7 @@ import {
 } from './catalog.js';
 import {
   agentBinSearchDirs,
+  darwinSystemBinDirs,
   executableSearchDirs,
   findExecutableCandidates,
   installPrefixBinDirs,
@@ -132,7 +134,7 @@ export type ScriptFetcher = (url: string) => Promise<{ body: Buffer; finalUrl: s
 export class AgentInstallError extends Error {
   constructor(
     message: string,
-    readonly code: 'busy' | 'prefix_undetectable' | 'nothing_to_remove' | 'home_not_writable',
+    readonly code: 'busy' | 'prefix_undetectable' | 'nothing_to_remove' | 'home_not_writable' | 'unsupported_platform',
     readonly status: number,
   ) {
     super(message);
@@ -232,6 +234,14 @@ export class AgentInstallService {
       );
     }
     const entry = catalogEntry(id);
+    if (action !== 'remove-prefix-copy') {
+      const platformProblem = catalogPlatformProblem(entry);
+      if (platformProblem !== null) {
+        recordAgentInstall(this.deps.db, id, { ok: false, error: platformProblem });
+        this.deps.logger?.warn({ agent: id, action, error: platformProblem }, 'agent CLI job refused');
+        throw new AgentInstallError(platformProblem, 'unsupported_platform', 409);
+      }
+    }
     if (entry.method === 'npm' && action !== 'remove-prefix-copy' && !this.prefixDetectable()) {
       throw new AgentInstallError(
         `The agent install prefix (${this.deps.installPrefix()}) is not a directory this server searches for agent binaries, so an install there would not be found. Change it in Settings.`,
@@ -608,11 +618,16 @@ function describeCommand(job: InstallJob): string {
  * `node`/`npm` and a systemd unit's PATH often does not name the Node running
  * this process.
  */
-export function officialInstallerPath(): string {
+export function officialInstallerPath(platform: NodeJS.Platform = process.platform): string {
   const demoted = new Set(installPrefixBinDirs().map((d) => path.resolve(d)));
+  const pathDirs = (process.env.PATH ?? '')
+    .split(path.delimiter)
+    .filter(Boolean)
+    .filter((d) => !demoted.has(path.resolve(d)));
   const dirs = [
     path.join(os.homedir(), '.local', 'bin'),
-    ...(process.env.PATH ?? '').split(path.delimiter).filter(Boolean),
+    ...darwinSystemBinDirs(pathDirs, platform),
+    ...pathDirs,
     path.dirname(process.execPath),
   ].filter((d) => !demoted.has(path.resolve(d)));
   return [...new Set(dirs)].join(path.delimiter);

@@ -1,10 +1,14 @@
+import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { PromptImage, type AgentEvent, type ConversationInfo } from '@pocketagent/protocol';
 import { normalizeSdkMessage } from '../sessions/normalize.js';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Discovery of Claude Code conversations that already exist on disk.
@@ -507,6 +511,49 @@ function extractSlashCommandPrompt(candidate: string): string | null {
   return args ? `${cmd} ${args}` : cmd;
 }
 
+const warnedUnsupportedPlatforms = new Set<string>();
+
+export interface ListRunningAgentCwdsOptions {
+  platform?: NodeJS.Platform;
+  execFileImpl?: (file: string, args: readonly string[]) => Promise<{ stdout: string }>;
+  warn?: (message: string) => void;
+}
+
+/**
+ * Parse `ps -axo pid=,comm=` output and return the PIDs whose command basename
+ * is `claude`. Exported so the Darwin parser is unit-tested on Linux CI too.
+ */
+export function parseDarwinClaudePids(psOutput: string): string[] {
+  const pids: string[] = [];
+  for (const rawLine of psOutput.split('\n')) {
+    const match = /^\s*(\d+)\s+(.+?)\s*$/.exec(rawLine);
+    if (!match?.[1] || !match[2]) continue;
+    if (path.basename(match[2]) === 'claude') {
+      pids.push(match[1]);
+    }
+  }
+  return pids;
+}
+
+/**
+ * Parse `lsof -a -d cwd -p <pids> -Fn` output and return the canonicalized
+ * working directories (`n<path>` lines).
+ */
+export function parseLsofCwds(lsofOutput: string): string[] {
+  const cwds = new Set<string>();
+  for (const rawLine of lsofOutput.split('\n')) {
+    const line = rawLine.trim();
+    if (!line.startsWith('n/')) continue;
+    const rawCwd = line.slice(1);
+    try {
+      cwds.add(fsSync.realpathSync(rawCwd));
+    } catch {
+      cwds.add(rawCwd);
+    }
+  }
+  return [...cwds];
+}
+
 /**
  * Working directories of agent processes running right now.
  *
@@ -514,35 +561,85 @@ function extractSlashCommandPrompt(candidate: string): string | null {
  * open, and its command line does not reliably name the session id. So this
  * answers "is something running here", which is enough to warn the user, and
  * is reported as such rather than dressed up as certainty.
+ *
+ * Platform handling (PA-126):
+ * - `linux`: reads `/proc/<pid>/cmdline` and `/proc/<pid>/cwd`.
+ * - `darwin`: runs `ps -axo pid=,comm=` and `lsof -a -d cwd -p <pids> -Fn`
+ *   (argv-only, no shell) because macOS has no `/proc`.
+ * - Any other platform: logs an explicit warning once rather than silently
+ *   returning `[]`.
  */
-export async function listRunningAgentCwds(): Promise<string[]> {
-  const cwds = new Set<string>();
-  let pids: string[];
-  try {
-    pids = (await fs.readdir('/proc')).filter((p) => /^\d+$/.test(p));
-  } catch {
-    return [];
+export async function listRunningAgentCwds(options: ListRunningAgentCwdsOptions = {}): Promise<string[]> {
+  const platform = options.platform ?? process.platform;
+
+  if (platform === 'linux') {
+    const cwds = new Set<string>();
+    let pids: string[];
+    try {
+      pids = (await fs.readdir('/proc')).filter((p) => /^\d+$/.test(p));
+    } catch {
+      return [];
+    }
+
+    for (const pid of pids) {
+      let cmdline: string;
+      try {
+        cmdline = fsSync.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+      } catch {
+        continue;
+      }
+      // argv is NUL-separated; the executable is the first entry.
+      const argv0 = cmdline.split('\0')[0] ?? '';
+      if (path.basename(argv0) !== 'claude') continue;
+
+      try {
+        cwds.add(fsSync.readlinkSync(`/proc/${pid}/cwd`));
+      } catch {
+        /* process exited, or not ours */
+      }
+    }
+
+    return [...cwds];
   }
 
-  for (const pid of pids) {
-    let cmdline: string;
+  if (platform === 'darwin') {
+    const run =
+      options.execFileImpl ??
+      ((file: string, args: readonly string[]) => execFileAsync(file, [...args], { timeout: 5_000 }));
+    let psStdout: string;
     try {
-      cmdline = fsSync.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+      ({ stdout: psStdout } = await run('ps', ['-axo', 'pid=,comm=']));
     } catch {
-      continue;
+      return [];
     }
-    // argv is NUL-separated; the executable is the first entry.
-    const argv0 = cmdline.split('\0')[0] ?? '';
-    if (path.basename(argv0) !== 'claude') continue;
+    const pids = parseDarwinClaudePids(psStdout);
+    if (pids.length === 0) return [];
 
+    let lsofStdout = '';
     try {
-      cwds.add(fsSync.readlinkSync(`/proc/${pid}/cwd`));
-    } catch {
-      /* process exited, or not ours */
+      ({ stdout: lsofStdout } = await run('lsof', ['-a', '-d', 'cwd', '-p', pids.join(','), '-Fn']));
+    } catch (err) {
+      // `lsof` exits 1 when one of the listed PIDs exited between `ps` and
+      // `lsof` or belongs to another user, while still writing the remaining
+      // `n<cwd>` lines to stdout.
+      const partial = (err as { stdout?: unknown } | null)?.stdout;
+      if (typeof partial === 'string') {
+        lsofStdout = partial;
+      } else {
+        return [];
+      }
     }
+    return parseLsofCwds(lsofStdout);
   }
 
-  return [...cwds];
+  const message = `[pocketagent] listRunningAgentCwds is unsupported on platform "${platform}" (supported: linux, darwin); live-agent cwd detection is disabled.`;
+  if (options.warn) {
+    options.warn(message);
+  } else if (!warnedUnsupportedPlatforms.has(platform)) {
+    warnedUnsupportedPlatforms.add(platform);
+    console.warn(message);
+  }
+  return [];
 }
 
 function fallbackTitle(firstPrompt: string): string | null {

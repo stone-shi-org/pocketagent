@@ -46,7 +46,7 @@ const heading = (title) => console.log(`\n[${++step}] ${title}`);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../..');
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'pa-hub-ui-demo-'));
+const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pa-hub-ui-demo-')));
 const shots = process.env.PA_SCREENSHOTS ?? path.join(scratch, 'screenshots');
 fs.mkdirSync(shots, { recursive: true });
 // Kept past cleanup so the screenshots survive the run.

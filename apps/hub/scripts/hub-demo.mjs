@@ -36,7 +36,7 @@ const heading = (title) => console.log(`\n[${++step}] ${title}`);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../..');
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'pa-hub-demo-'));
+const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pa-hub-demo-')));
 const children = [];
 
 const token = () => crypto.randomBytes(32).toString('base64url');

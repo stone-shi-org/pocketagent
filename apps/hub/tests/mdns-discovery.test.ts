@@ -6,6 +6,7 @@ import {
   RR_TYPE,
   decodePacket,
   encodePacket,
+  localIpv4Addresses,
   type MdnsRemote,
   type MdnsTransport,
 } from '@pocketagent/node-kit';
@@ -393,5 +394,34 @@ describe('choosing the address to dial', () => {
 
   it('falls back to the packet source when nothing advertised is usable', () => {
     expect(preferredAddress({ addresses: ['fe80::1'], sourceAddresses: ['192.168.1.4'] })).toBe('192.168.1.4');
+  });
+
+  it('demotes macOS peer-to-peer, tunnel and bridge interfaces behind physical en0 (PA-126)', () => {
+    const ipv4 = (address: string, internal = false) => ({
+      address,
+      netmask: '255.255.255.0',
+      family: 'IPv4' as const,
+      mac: '00:00:00:00:00:00',
+      internal,
+      cidr: `${address}/24`,
+    });
+    const list = localIpv4Addresses(() => ({
+      lo0: [ipv4('127.0.0.1', true)],
+      awdl0: [ipv4('10.200.0.1')],
+      llw0: [ipv4('10.200.0.2')],
+      utun3: [ipv4('100.64.0.9')],
+      bridge0: [ipv4('192.168.64.1')],
+      anpi0: [ipv4('192.168.2.1')],
+      en0: [ipv4('192.168.1.50')],
+    }));
+    expect(list[0]).toEqual({ interfaceName: 'en0', address: '192.168.1.50' });
+    expect(list.map((i) => i.interfaceName)).toEqual([
+      'en0',
+      'awdl0',
+      'llw0',
+      'utun3',
+      'bridge0',
+      'anpi0',
+    ]);
   });
 });

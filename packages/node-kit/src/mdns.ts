@@ -458,13 +458,21 @@ export interface MdnsInterfaceAddress {
  * browser taking "the first address" should get the LAN one. Ordering rather
  * than omitting, because a Hub in a container on that very bridge *can* reach
  * the bridge address, and is the one case where it is the right answer.
+ *
+ * On macOS (`darwin`), `os.networkInterfaces()` also reports Apple Wireless
+ * Direct Link / AirDrop (`awdl*`, `llw*`), Apple Network Private Interface
+ * (`anpi*`), Thunderbolt / VM bridges (`bridge*`), SoftAP (`ap*`), and tunnel
+ * interfaces (`utun*`, `gif*`, `stf*`, `xhc*`), often before physical `en0`.
  */
-const VIRTUAL_INTERFACE = /^(docker|br-|veth|virbr|vmnet|vboxnet|cni|flannel|cali|tailscale|zt|utun|tun|tap)/;
+const VIRTUAL_INTERFACE =
+  /^(docker|br-|veth|virbr|vmnet|vboxnet|cni|flannel|cali|tailscale|zt|utun|tun|tap|awdl|llw|anpi|bridge|ap|gif|stf|xhc)/;
 
 /** Non-internal IPv4 addresses of this machine, physical interfaces first. */
-export function localIpv4Addresses(): MdnsInterfaceAddress[] {
+export function localIpv4Addresses(
+  networkInterfaces: () => NodeJS.Dict<os.NetworkInterfaceInfo[]> = os.networkInterfaces,
+): MdnsInterfaceAddress[] {
   const out: MdnsInterfaceAddress[] = [];
-  for (const [interfaceName, entries] of Object.entries(os.networkInterfaces())) {
+  for (const [interfaceName, entries] of Object.entries(networkInterfaces())) {
     for (const entry of entries ?? []) {
       if (entry.family === 'IPv4' && !entry.internal) out.push({ interfaceName, address: entry.address });
     }
@@ -476,10 +484,13 @@ export function localIpv4Addresses(): MdnsInterfaceAddress[] {
 /**
  * Opens the real UDP socket: port 5353, shared.
  *
- * `reuseAddr` is not optional. On any machine running avahi or
- * mDNSResponder, port 5353 is already bound, and the multicast group is the
- * whole point — every member socket gets a copy. Without it the bind fails
- * with `EADDRINUSE` on exactly the machines most likely to have working mDNS.
+ * `reuseAddr` is not optional. On any machine running avahi (Linux) or
+ * mDNSResponder (macOS, always bound to UDP 5353), port 5353 is already in use,
+ * and the multicast group is the whole point — every member socket gets a copy.
+ * On Darwin/BSDs, `reuseAddr: true` causes libuv (`uv__udp_bind`) to set both
+ * `SO_REUSEADDR` and `SO_REUSEPORT` before `bind(2)`, which is required to
+ * share a multicast UDP port with `mDNSResponder`. Without it the bind fails
+ * with `EADDRINUSE` on every Mac and on any Linux host running avahi.
  */
 export async function openMdnsSocket(
   interfaces: () => readonly MdnsInterfaceAddress[] = localIpv4Addresses,

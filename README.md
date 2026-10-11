@@ -1,7 +1,7 @@
 # PocketAgent
 
 Self-hosted remote control for terminal-based AI coding agents. Run Claude Code (or a
-plain shell) on your Linux box and drive it from your phone's browser.
+plain shell) on your Linux or macOS machine and drive it from your phone's browser.
 
 PocketAgent runs the CLI you already have installed inside a server-managed pseudo-terminal
 and streams it to a browser over a WebSocket. The CLI cannot tell the difference between
@@ -15,7 +15,7 @@ iPhone / Android / desktop browser
             ↕  PTY
    claude / shell / future agents
             ↕
-     local Linux filesystem
+     local Linux / macOS filesystem
 ```
 
 **What it is not:** it does not automate Claude authentication, scrape provider websites,
@@ -56,11 +56,12 @@ or use private remote-control APIs. It launches `claude` exactly the way you wou
 
 ## Requirements
 
-- **Linux** (this is Linux-first; macOS likely works, Windows does not)
+- **Linux or macOS** (Apple Silicon and Intel; Windows is not supported)
 - **Node.js 22+**
 - **pnpm 12+**
 - A C++ toolchain for the two native modules (`node-pty`, `better-sqlite3`):
-  `sudo apt install build-essential python3` on Debian/Ubuntu
+  - **Debian / Ubuntu:** `sudo apt install build-essential python3`
+  - **macOS:** `xcode-select --install` (`node-pty` ships prebuilt macOS binaries; `better-sqlite3` needs Xcode Command Line Tools when compiling from source)
 - Whatever agent CLI you want to drive, already installed and already logged in
   (`claude`, etc.)
 
@@ -156,8 +157,9 @@ running keeps running.
 | `POCKETAGENT_TMUX_BIN` | `tmux` | tmux executable. |
 | `POCKETAGENT_TMUX_SOCKET` | `pocketagent` | Private tmux socket name. |
 | `POCKETAGENT_ADOPT_TMUX_SOCKET` | unset | Foreign tmux socket to adopt existing user panes from. |
+| `POCKETAGENT_TMUX_SESSION_SCOPE_SLICE` | unset | Linux-only `systemd-run --user --scope` slice for the tmux server. Refused at config load on macOS. |
 | `POCKETAGENT_GLOBAL_SKIP_PERMISSIONS` | `false` | **Dangerous:** Boot-time seed to globally bypass tool approvals. |
-| `POCKETAGENT_SHELL` | `$SHELL` | Shell for the `shell` agent. |
+| `POCKETAGENT_SHELL` | `$SHELL` (`/bin/zsh` on macOS, `/bin/bash` on Linux) | Shell for the `shell` agent and `exec_command`. |
 | `POCKETAGENT_CLAUDE_BIN` | `claude` | Claude Code executable, resolved on `PATH`. |
 | `POCKETAGENT_AGY_BIN` | `agy` | Google Antigravity CLI executable, resolved on `PATH`. |
 | `POCKETAGENT_OPENCODE_BIN` | `opencode` | Opencode CLI executable, resolved on `PATH`. |
@@ -198,6 +200,8 @@ Starts the API on `:8787` and Vite on `:5173`, with `/api` and `/health` proxied
 
 ### Running it as a service
 
+**Linux (`systemd`):**
+
 ```ini
 # ~/.config/systemd/user/pocketagent.service
 [Unit]
@@ -222,23 +226,64 @@ systemctl --user enable --now pocketagent
 loginctl enable-linger "$USER"     # keep it running when you are logged out
 ```
 
+**macOS (`launchd`):**
+
+```xml
+<!-- ~/Library/LaunchAgents/com.pocketagent.server.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.pocketagent.server</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/me/src/pocketagent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>apps/server/dist/server.js</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE_ENV</key>
+    <string>production</string>
+    <key>PATH</key>
+    <string>/Users/me/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
+```
+
+```bash
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.pocketagent.server.plist
+launchctl kickstart -k "gui/$(id -u)/com.pocketagent.server"
+```
+
 With the default `direct` backend, restarting the service **kills every running session**.
 Set `POCKETAGENT_BACKEND=tmux` and they survive restarts — see
 [Process backends](#process-backends).
 
 A note on the restart policy, because it interacts with
 [Restarting a host](#restarting-a-host). When asked to restart over the API the server drains
-and exits with status **75**, deliberately non-zero, so that `on-failure` *and* `always` both
-bring it back — a clean `exit(0)` is a *successful* exit, which `on-failure` correctly ignores,
-and the endpoint would then be a remote off switch. The only policy that cannot work is
-`Restart=no` (the default if you omit the line), and there the endpoint refuses to exit at all
-rather than taking the host down. Docker's `always`, `unless-stopped` and `on-failure` all
-behave the same way.
+and exits with status **75**, deliberately non-zero, so that systemd's `on-failure` *and*
+`always`, `launchd`'s `KeepAlive` (`SuccessfulExit=false` or `true`), and Docker's `always`,
+`unless-stopped` and `on-failure` all bring it back — a clean `exit(0)` is a *successful* exit,
+which `on-failure` and `SuccessfulExit=false` correctly ignore, and the endpoint would then be a
+remote off switch. The only policy that cannot work is `Restart=no` (or omitting `KeepAlive`),
+and there the endpoint refuses to exit at all rather than taking the host down.
 
-Independently of that, `Restart=always` is the safer choice: a `SIGTERM` from anywhere — a
-stray `pkill -f dist/server.js` aimed at a scratch server in another checkout matches this one
-too — is a graceful shutdown that exits `0`, which `on-failure` will not restart, and the
-journal shows nothing but a clean stop.
+Independently of that, `Restart=always` (or `<key>KeepAlive</key><true/>` under `launchd`) is
+the safer choice: a `SIGTERM` from anywhere — a stray `pkill -f dist/server.js` aimed at a
+scratch server in another checkout matches this one too — is a graceful shutdown that exits `0`,
+which `on-failure` / `SuccessfulExit=false` will not restart, and the log shows nothing but a
+clean stop.
 
 ---
 
@@ -1052,9 +1097,9 @@ feed on the internet to ask.
 
 Settings → **This Host** shows the build it is running and a **Restart** button. The server's
 only role is picking a safe moment to stop: it drains, exits, and whatever supervises it starts
-it again **on whatever image that unit points at**. There is no version picker and no upgrade
+it again **on whatever image or checkout that unit points at**. There is no version picker and no upgrade
 button, and the API has no field for naming an image, tag or digest — the update source is
-fixed at deploy time, in your compose file or systemd unit. "Upgrade this host from a browser"
+fixed at deploy time, in your compose file, systemd unit, or `launchd` plist. "Upgrade this host from a browser"
 would otherwise mean "run an arbitrary image on that host".
 
 By default it **refuses while anything is mid-turn** and names what: a session whose agent is
@@ -1872,16 +1917,20 @@ The test suite uses `/bin/bash` and never requires Claude Code.
 
 ## Troubleshooting
 
-**`node-pty` fails to build.** It compiles native code:
+**`node-pty` fails to build.** It compiles native code (or uses prebuilt binaries on macOS):
 
 ```bash
+# Debian / Ubuntu
 sudo apt install build-essential python3
+# macOS
+xcode-select --install
+
 pnpm rebuild node-pty
 ```
 
 If you upgraded Node, native modules must be rebuilt: `pnpm rebuild`.
 
-**`better-sqlite3` fails to build.** Same toolchain. `pnpm rebuild better-sqlite3`.
+**`better-sqlite3` fails to build.** Same toolchain (`build-essential python3` on Linux, `xcode-select --install` on macOS). `pnpm rebuild better-sqlite3`.
 
 **Login appears to do nothing / immediately logs out again.** The cookie is being dropped
 because it is marked `Secure` but you are on plain `http://`. Set
@@ -2020,7 +2069,14 @@ should have told you. Raise `OUTPUT_BUFFER_BYTES`, or press `^L` to redraw.
 7. **A webhook cannot tell you whether Jira can reach it.** Nothing in the server can prove the
    inbound path works — the URL is composed in your browser, and `Host` headers are claims. The
    first received delivery is the only evidence, so the UI shows `never fired` until one arrives.
-8. **Linux-first.** macOS is untested; Windows is not supported.
+8. **Unix-only (Linux and macOS).** Windows is not supported. On macOS (`darwin`), container
+   deployment (`docker/`) runs a Linux guest VM via Docker Desktop / OrbStack; native bare-metal
+   runs from a source checkout use `launchd` instead of `systemd`, `ps` + `lsof` instead of
+   `/proc` for conversation liveness, and `POCKETAGENT_TMUX_SESSION_SCOPE_SLICE` (a Linux cgroup
+   slice via `systemd-run`) is refused at config load and in Settings. On case-insensitive APFS,
+   `fs.realpath` canonicalizes existing directories to their on-disk casing before workspace
+   containment and `RunQueue` (`treeRootOf`) comparisons, and `resolveDataDir` compares uncreated
+   tail segments case-insensitively on `darwin`.
 9. **Push notifications need HTTPS**, and on iOS the site must be installed to the home
    screen before the browser will allow them at all. PocketAgent pushes for two events —
    a pending approval, and a structured agent finishing its turn (or, best-effort, a

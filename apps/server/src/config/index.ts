@@ -445,7 +445,32 @@ function resolveAgentInstallPrefix(raw: string | undefined): string {
   return path.resolve(expanded);
 }
 
-function resolveDataDir(raw: string | undefined, workspaceRoots: string[]): string {
+/**
+ * Why `tmuxSessionScopeSlice` is refused outside Linux (PA-126).
+ *
+ * `TmuxBackend` uses `tmuxSessionScopeSlice` by wrapping `tmux start-server` in
+ * `systemd-run --user --scope --slice=<slice>`. On macOS (`darwin`) there is no
+ * `systemd-run`, so accepting the setting at config load or in `PATCH /api/settings`
+ * would only fail later when spawning the first tmux session.
+ */
+export function tmuxSessionScopeSliceProblem(
+  slice: string | null | undefined,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  const trimmed = slice?.trim() ?? '';
+  if (!trimmed || platform === 'linux') return null;
+  return (
+    `POCKETAGENT_TMUX_SESSION_SCOPE_SLICE (${JSON.stringify(trimmed)}) is only supported on Linux ` +
+    `(current platform: ${platform}). It wraps the tmux server in \`systemd-run --user --scope\`, which requires systemd. ` +
+    `Leave POCKETAGENT_TMUX_SESSION_SCOPE_SLICE unset or empty on ${platform}.`
+  );
+}
+
+function resolveDataDir(
+  raw: string | undefined,
+  workspaceRoots: string[],
+  platform: NodeJS.Platform = process.platform,
+): string {
   const configured = raw?.trim();
   if (!configured) return path.join(REPO_ROOT, 'data');
 
@@ -459,7 +484,15 @@ function resolveDataDir(raw: string | undefined, workspaceRoots: string[]): stri
   }
 
   for (const root of workspaceRoots) {
-    const rel = path.relative(root, resolved);
+    // On macOS (`darwin`), the default APFS volume is case-insensitive.
+    // `realpathUncreated` canonicalizes the existing ancestor via `F_GETPATH`,
+    // but any uncreated tail segments keep their input casing — so compare
+    // case-insensitively on `darwin` to prevent a differently-cased uncreated
+    // child from bypassing the workspace-root containment refusal.
+    const rel =
+      platform === 'darwin'
+        ? path.relative(root.toLowerCase(), resolved.toLowerCase())
+        : path.relative(root, resolved);
     const inside = rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
     if (inside) {
       throw new ConfigError(
@@ -478,7 +511,10 @@ function resolveDataDir(raw: string | undefined, workspaceRoots: string[]): stri
   return resolved;
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+export function loadConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): Config {
   const parsed = RawEnv.safeParse(env);
   if (!parsed.success) {
     const details = parsed.error.issues
@@ -519,7 +555,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   // test the data root against these.
   const workspaceRoots = canonicalizeRoots(rootsRaw);
 
-  const dataDir = resolveDataDir(e.POCKETAGENT_DATA_DIR, workspaceRoots);
+  const dataDir = resolveDataDir(e.POCKETAGENT_DATA_DIR, workspaceRoots, platform);
   const databasePath = path.join(dataDir, 'pocketagent.db');
 
   const webDistPath = e.POCKETAGENT_WEB_DIST
@@ -550,6 +586,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     }
   }
 
+  const tmuxSessionScopeSlice = e.POCKETAGENT_TMUX_SESSION_SCOPE_SLICE.trim() || null;
+  const sliceProblem = tmuxSessionScopeSliceProblem(tmuxSessionScopeSlice, platform);
+  if (sliceProblem !== null) {
+    throw new ConfigError(sliceProblem);
+  }
+
   return {
     nodeEnv: e.NODE_ENV,
     isProduction,
@@ -571,7 +613,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         : ['1', 'true', 'yes', 'on'].includes(e.POCKETAGENT_COOKIE_SECURE.trim().toLowerCase()),
     trustProxy: e.POCKETAGENT_TRUST_PROXY,
     globalSkipPermissionsDefault: e.POCKETAGENT_GLOBAL_SKIP_PERMISSIONS,
-    shell: e.POCKETAGENT_SHELL?.trim() || env.SHELL || '/bin/bash',
+    shell: e.POCKETAGENT_SHELL?.trim() || env.SHELL || (platform === 'darwin' ? '/bin/zsh' : '/bin/bash'),
     claudeBin: e.POCKETAGENT_CLAUDE_BIN.trim(),
     agyBin: e.POCKETAGENT_AGY_BIN.trim(),
     opencodeBin: e.POCKETAGENT_OPENCODE_BIN.trim(),
@@ -584,7 +626,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     tmuxBin: e.POCKETAGENT_TMUX_BIN.trim(),
     tmuxSocket: e.POCKETAGENT_TMUX_SOCKET.trim(),
     adoptTmuxSocket: e.POCKETAGENT_ADOPT_TMUX_SOCKET.trim(),
-    tmuxSessionScopeSlice: e.POCKETAGENT_TMUX_SESSION_SCOPE_SLICE.trim() || null,
+    tmuxSessionScopeSlice,
     pushContact: e.POCKETAGENT_PUSH_CONTACT.trim(),
     isNetworkExposed,
     mdnsAdvertise: e.POCKETAGENT_MDNS_ADVERTISE,

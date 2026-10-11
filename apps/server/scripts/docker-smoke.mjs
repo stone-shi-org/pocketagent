@@ -106,7 +106,7 @@ const inContainer = (script) =>
 // Scratch state. A throwaway data root, a throwaway HOME, and a real git repo
 // standing in for one of the operator's checkouts.
 // ---------------------------------------------------------------------------
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pa-docker-smoke-'));
+const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pa-docker-smoke-')));
 const dataDir = path.join(tmp, 'data');
 const homeDir = path.join(tmp, 'home');
 // Mounted at the same absolute path inside the container, which is the rule

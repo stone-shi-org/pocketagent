@@ -75,6 +75,8 @@ export interface OfficialScriptEntry {
   binName: string;
   scriptUrl: string;
   interpreter: 'bash' | 'sh';
+  /** Platforms (`process.platform`) verified in the upstream installer script (PA-126). */
+  supportedPlatforms: readonly NodeJS.Platform[];
   /** Fixed arguments for a Settings install: the vendor's current release. */
   installArgs: readonly string[];
   /**
@@ -126,6 +128,7 @@ export interface NpmEntry {
   binName: string;
   packageName: string;
   version: string;
+  supportedPlatforms?: readonly NodeJS.Platform[];
   imagePinVar: string | null;
   legacyNpmPackage: string;
   notes: readonly string[];
@@ -140,6 +143,7 @@ const CATALOG: Readonly<Record<InstallableAgentId, CatalogEntry>> = Object.freez
     binName: 'claude',
     scriptUrl: 'https://claude.ai/install.sh',
     interpreter: 'bash',
+    supportedPlatforms: ['linux', 'darwin'],
     // `install.sh [stable|latest|VERSION]`: the script downloads the latest
     // binary, verifies it against the release manifest's sha256, and hands
     // the optional target to `claude install`, which is what writes
@@ -162,6 +166,7 @@ const CATALOG: Readonly<Record<InstallableAgentId, CatalogEntry>> = Object.freez
     binName: 'codex',
     scriptUrl: 'https://chatgpt.com/codex/install.sh',
     interpreter: 'sh',
+    supportedPlatforms: ['linux', 'darwin'],
     installArgs: [],
     // `--release <x.y.z|latest>`, validated by the script's own regex.
     imageInstallArgs: (version) => ['--release', version],
@@ -191,6 +196,7 @@ const CATALOG: Readonly<Record<InstallableAgentId, CatalogEntry>> = Object.freez
     binName: 'opencode',
     scriptUrl: 'https://opencode.ai/install',
     interpreter: 'bash',
+    supportedPlatforms: ['linux', 'darwin'],
     installArgs: [],
     imageInstallArgs: (version) => ['--version', version],
     imagePinVar: 'OPENCODE_VERSION',
@@ -213,6 +219,7 @@ const CATALOG: Readonly<Record<InstallableAgentId, CatalogEntry>> = Object.freez
     binName: 'agy',
     scriptUrl: 'https://antigravity.google/cli/install.sh',
     interpreter: 'bash',
+    supportedPlatforms: ['linux', 'darwin'],
     installArgs: [],
     // The script always takes the latest release from its manifest.
     imageInstallArgs: null,
@@ -236,6 +243,7 @@ const CATALOG: Readonly<Record<InstallableAgentId, CatalogEntry>> = Object.freez
     binName: 'pi',
     scriptUrl: 'https://pi.dev/install.sh',
     interpreter: 'sh',
+    supportedPlatforms: ['linux', 'darwin'],
     // Default "managed" mode: `npm ci --ignore-scripts` into
     // `~/.pi/agent/install`, then a launcher linked from the first of
     // `~/.pi/agent/bin`, `~/.local/bin`, … that is on PATH. With no terminal
@@ -292,6 +300,22 @@ export function installableAgents(): InstallableAgent[] {
 
 export function catalogEntry(id: InstallableAgentId): CatalogEntry {
   return CATALOG[id];
+}
+
+/**
+ * Whether an installer entry supports the current OS platform (PA-126).
+ * Returns a clear refusal reason when it does not, or `null` when supported.
+ */
+export function catalogPlatformProblem(
+  entry: CatalogEntry,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  const supported = entry.supportedPlatforms;
+  if (!supported || supported.includes(platform)) return null;
+  return (
+    `The official installer for ${entry.displayName} does not support platform "${platform}" ` +
+    `(supported platforms: ${supported.join(', ')}).`
+  );
 }
 
 /**

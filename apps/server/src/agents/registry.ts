@@ -291,12 +291,33 @@ export function agentBinSearchDirs(): string[] {
 }
 
 /**
- * The full search order for a bare name: official locations, then `PATH`
- * (minus the install-prefix directories), then `~/.cargo/bin`, then the
- * install prefix. One function so resolution, the "other copies" report and
- * post-install verification cannot disagree about which copy runs.
+ * Homebrew bin directories on macOS (`/opt/homebrew/bin` on Apple Silicon,
+ * `/usr/local/bin` on Intel) (PA-126).
+ *
+ * `launchd` starts services with a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`),
+ * and macOS's `/usr/libexec/path_helper` reads `/etc/paths` (`/usr/local/bin`,
+ * `/usr/bin`, …) which omits `/opt/homebrew/bin`. When the server's `PATH`
+ * carries `/usr/bin` — a real system `PATH`, not a test fixture's isolated
+ * scratch directory — Homebrew's bin directories are placed ahead of `/usr/bin`
+ * on `darwin` (still after `officialAgentBinDirs()`, which always win).
  */
-export function executableSearchDirs(): string[] {
+export function darwinSystemBinDirs(
+  pathDirs: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  if (platform !== 'darwin') return [];
+  if (!pathDirs.some((dir) => normalizeDir(dir) === '/usr/bin')) return [];
+  return ['/opt/homebrew/bin', '/usr/local/bin'];
+}
+
+/**
+ * The full search order for a bare name: official locations, then `PATH`
+ * (minus the install-prefix directories, plus Homebrew on `darwin`), then
+ * `~/.cargo/bin`, then the install prefix. One function so resolution, the
+ * "other copies" report and post-install verification cannot disagree about
+ * which copy runs.
+ */
+export function executableSearchDirs(platform: NodeJS.Platform = process.platform): string[] {
   const home = os.homedir();
   const prefixBins = installPrefixBinDirs();
   const demoted = new Set(prefixBins.map(normalizeDir));
@@ -304,7 +325,48 @@ export function executableSearchDirs(): string[] {
     .split(path.delimiter)
     .filter(Boolean)
     .filter((dir) => !demoted.has(normalizeDir(dir)));
-  return unique([...officialAgentBinDirs(), ...pathDirs, path.join(home, '.cargo', 'bin'), ...prefixBins]);
+  return unique([
+    ...officialAgentBinDirs(),
+    ...darwinSystemBinDirs(pathDirs, platform),
+    ...pathDirs,
+    path.join(home, '.cargo', 'bin'),
+    ...prefixBins,
+  ]);
+}
+
+/**
+ * Re-applies the server's agent `PATH` priority inside a POSIX login shell
+ * (`sh`, `bash`, `zsh`, `dash`, `ksh`) before running `command` (PA-104, PA-126).
+ *
+ * The Docker image achieves this with `/etc/profile.d/10-pocketagent-path.sh`
+ * and `/etc/zsh/zshenv`. Neither exists on a bare-metal Linux or macOS host:
+ * `/etc/profile` on Debian/Ubuntu overwrites `PATH` unconditionally, and on
+ * macOS `/etc/zprofile` and `/etc/profile` run `/usr/libexec/path_helper -s`
+ * (which moves `/usr/local/bin:/usr/bin:/bin` to the front of `PATH`, pushing
+ * `~/.opencode/bin`, `~/.local/bin`, `~/.pi/agent/bin` and `/opt/homebrew/bin`
+ * behind them), while `zsh -lc` is non-interactive and never sources
+ * `~/.zshrc` (where the official installers write their `PATH` exports on
+ * macOS). Prepending the high-priority directories and appending the fallback
+ * directories after `-l` has finished sourcing profiles keeps `exec_command` /
+ * `bash` and `resolveExecutable` in agreement on bare metal without needing
+ * container-only `/etc` files.
+ */
+export function wrapLoginShellCommand(
+  shell: string,
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const base = path.basename(shell);
+  if (!['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(base)) {
+    return command;
+  }
+  const home = os.homedir();
+  const pathDirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
+  const prepend = unique([...officialAgentBinDirs(), ...darwinSystemBinDirs(pathDirs, platform)]);
+  const append = unique([path.join(home, '.cargo', 'bin'), ...installPrefixBinDirs()]);
+  const quote = (dirs: string[]) =>
+    dirs.map((d) => `'${d.replace(/'/g, "'\\''")}'`).join(path.delimiter);
+  return `export PATH=${quote(prepend)}:"$PATH":${quote(append)}\n${command}`;
 }
 
 /** Resolve a bare name against the search order above, or validate an explicit path. */

@@ -166,9 +166,9 @@ Build images using `docker/build.sh` (never bare `docker build`, which misses pi
 | `POCKETAGENT_TMUX_BIN` | `tmux` | Path to tmux binary. |
 | `POCKETAGENT_TMUX_SOCKET` | `pocketagent` | Private tmux socket name. |
 | `POCKETAGENT_ADOPT_TMUX_SOCKET` | unset | Foreign tmux socket to adopt existing user panes from. |
-| `POCKETAGENT_TMUX_SESSION_SCOPE_SLICE` | unset | systemd user slice for tmux process isolation. |
+| `POCKETAGENT_TMUX_SESSION_SCOPE_SLICE` | unset | Linux-only (`systemd-run --user --scope`) user slice for tmux process isolation; refused at config load and settings update on macOS. |
 | `POCKETAGENT_GLOBAL_SKIP_PERMISSIONS` | `false` | **Dangerous:** Initial seed to globally bypass tool approvals. |
-| `POCKETAGENT_SHELL` | `$SHELL` or `/bin/bash`| Default shell executable. |
+| `POCKETAGENT_SHELL` | `$SHELL` (`/bin/zsh` on macOS, `/bin/bash` on Linux) | Default shell executable. |
 | `POCKETAGENT_CLAUDE_BIN` | `claude` | Path to Claude Code CLI binary. |
 | `POCKETAGENT_AGY_BIN` | `agy` | Path to Google Antigravity CLI binary. |
 | `POCKETAGENT_OPENCODE_BIN` | `opencode` | Path to Opencode CLI binary. |
