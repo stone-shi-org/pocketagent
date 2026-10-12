@@ -8,6 +8,7 @@ import {
   PermissionDecision,
 } from './agent-events.js';
 import { PromptImage } from './prompt-image.js';
+import { AttachmentIdList } from './prompt-attachment.js';
 import { LIMITS } from './limits.js';
 import type { ProtocolRange } from './protocol-negotiation.js';
 
@@ -60,8 +61,15 @@ import type { ProtocolRange } from './protocol-negotiation.js';
  * know `tts_audio` and would otherwise silently discard talk-back audio
  * while continuing on the same socket — same reasoning as v10's
  * `rate_limit` event.
+ * v17 added the optional `attachments` field on `PromptMessage` and
+ * `UserPromptEvent` (PA-136), for non-image files uploaded first through
+ * `POST /api/attachments`. The bump runs the other way from v10–v16: an old
+ * *server* would not fail the frame, Zod would silently strip the unknown
+ * key, and the prompt would go out with its files missing and nobody told.
+ * A v17 bundle therefore must not reach a v16 server, which the range check
+ * guarantees; a v16 bundle never sends the field, so the floor stays put.
  */
-export const PROTOCOL_VERSION = 16;
+export const PROTOCOL_VERSION = 17;
 
 /**
  * Oldest version the server still accepts on `/api/ws` (PA-61).
@@ -257,6 +265,9 @@ export const PromptMessage = z.object({
   sessionId: SessionId,
   text: z.string().max(LIMITS.maxInputChars),
   image: PromptImage.optional(),
+  /** PA-136: ids from `POST /api/attachments`, landed into the session's cwd
+      when this prompt is handled. */
+  attachments: AttachmentIdList.optional(),
 });
 
 /** Answer a pending `permission_request`. */

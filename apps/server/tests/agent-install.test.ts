@@ -1218,6 +1218,7 @@ describe('agent setup state over HTTP', () => {
       db,
       plannerWorkspacesRoot: path.join(ws.root, 'pw'),
       plannerSkillsRoot: path.join(ws.root, 'ps'),
+      attachmentStagingDir: path.join(ws.root, 'as'),
       legacyProviderEnv: {},
       serveStatic: false,
     });

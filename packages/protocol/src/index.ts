@@ -4,6 +4,7 @@ export * from './session.js';
 export * from './agent-install.js';
 export * from './custom-claude-providers.js';
 export * from './prompt-image.js';
+export * from './prompt-attachment.js';
 export * from './protocol-negotiation.js';
 export * from './version-drift.js';
 export * from './voice-audio.js';

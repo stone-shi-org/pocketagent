@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import type { PlannerChat, PlannerLiveProvider, PlannerMemory, PlannerMemoryTier } from '@pocketagent/protocol';
-import { PromptImage } from '@pocketagent/protocol';
+import { PromptAttachment, PromptImage } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import { readSetting, writeSetting } from '../db/index.js';
 import type { PlannerWorkspaceRow, PlannerWorkspaceStore } from './workspaces.js';
@@ -1377,6 +1377,10 @@ export interface PlannerQueuedPromptRow {
   chatId: string;
   content: string;
   image: PromptImage | null;
+  /** PA-136: files already landed in the workspace — metadata only. Landed at
+      queue time, because a staging id would not survive the restart a
+      queued message must. */
+  attachments: PromptAttachment[];
   createdAt: number;
 }
 
@@ -1385,6 +1389,7 @@ interface PlannerQueuedPromptDbRow {
   chat_id: string;
   content: string;
   image_json: string | null;
+  attachments_json?: string | null;
   created_at: number;
 }
 
@@ -1398,18 +1403,28 @@ function queuedPromptFromDbRow(row: PlannerQueuedPromptDbRow): PlannerQueuedProm
       image = null;
     }
   }
-  return { id: row.id, chatId: row.chat_id, content: row.content, image, createdAt: row.created_at };
+  let attachments: PromptAttachment[] = [];
+  if (row.attachments_json) {
+    try {
+      const parsed = PromptAttachment.array().safeParse(JSON.parse(row.attachments_json));
+      attachments = parsed.success ? parsed.data : [];
+    } catch {
+      attachments = [];
+    }
+  }
+  return { id: row.id, chatId: row.chat_id, content: row.content, image, attachments, createdAt: row.created_at };
 }
 
 export function insertPlannerQueuedPrompt(db: Db, row: PlannerQueuedPromptRow): void {
   db.prepare(
-    `INSERT INTO planner_prompt_queue (id, chat_id, content, image_json, created_at)
-     VALUES (@id, @chatId, @content, @imageJson, @createdAt)`,
+    `INSERT INTO planner_prompt_queue (id, chat_id, content, image_json, attachments_json, created_at)
+     VALUES (@id, @chatId, @content, @imageJson, @attachmentsJson, @createdAt)`,
   ).run({
     id: row.id,
     chatId: row.chatId,
     content: row.content,
     imageJson: row.image ? JSON.stringify(row.image) : null,
+    attachmentsJson: row.attachments.length > 0 ? JSON.stringify(row.attachments) : null,
     createdAt: row.createdAt,
   });
 }

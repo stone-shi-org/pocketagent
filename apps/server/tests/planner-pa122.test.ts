@@ -742,6 +742,7 @@ describe('PA-122 Pocket Agent loop', () => {
       chatId: chat.id,
       content: 'sent just before the restart',
       image: null,
+      attachments: [],
       createdAt: Date.now(),
     });
     t.app.pocket.plannerChats.resumeQueuedPrompts();

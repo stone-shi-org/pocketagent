@@ -1486,6 +1486,13 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE webhook_deliveries ADD COLUMN retry_of TEXT;
   `,
+
+  // PA-136: a queued Pocket Agent message's files, as `PromptAttachment[]`
+  // JSON. Metadata only — the files themselves have already landed in the
+  // workspace by the time the row is written.
+  `
+  ALTER TABLE planner_prompt_queue ADD COLUMN attachments_json TEXT;
+  `,
 ];
 
 /**
@@ -1841,6 +1848,16 @@ export function openDatabase(databasePath: string): Db {
   );
   if (deliveryColumnsForRetry.size > 0 && !deliveryColumnsForRetry.has('retry_of')) {
     db.exec('ALTER TABLE webhook_deliveries ADD COLUMN retry_of TEXT');
+  }
+  // PA-136, same positional-migration hazard: `insertPlannerQueuedPrompt`
+  // writes `attachments_json` unconditionally.
+  const plannerQueueColumns = new Set(
+    (db.prepare('PRAGMA table_info(planner_prompt_queue)').all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (plannerQueueColumns.size > 0 && !plannerQueueColumns.has('attachments_json')) {
+    db.exec('ALTER TABLE planner_prompt_queue ADD COLUMN attachments_json TEXT');
   }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 

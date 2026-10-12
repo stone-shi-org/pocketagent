@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { LIMITS } from './limits.js';
 import { AgentEvent, EffortLevel, QueuedPromptSummary } from './agent-events.js';
 import { PromptImage } from './prompt-image.js';
+import { AttachmentIdList } from './prompt-attachment.js';
 import { SessionInfo } from './session.js';
 import { PlannerLiveProvider } from './gemini-live.js';
 
@@ -687,11 +688,19 @@ export const PlannerChatHistoryResponse = z.object({
 });
 export type PlannerChatHistoryResponse = z.infer<typeof PlannerChatHistoryResponse>;
 
+/** A planner message needs *something*: text, an image, or at least one file. */
+function hasPromptContent(data: { content: string; image?: unknown; attachments?: unknown[] | undefined }): boolean {
+  return data.content.trim().length > 0 || !!data.image || (data.attachments?.length ?? 0) > 0;
+}
+
 export const PlannerSendMessageRequest = z
   .object({
     content: z.string().max(LIMITS.maxInputChars).default(''),
     /** Optional image attachment for multimodal turns. */
     image: PromptImage.optional(),
+    /** PA-136: ids from `POST /api/attachments`, landed into the chat's
+        workspace under `artifacts/uploads/`. */
+    attachments: AttachmentIdList.optional(),
     /** Overrides the chat's remembered model for this turn onward. */
     modelId: z.string().max(200).optional(),
     /** PA-89: whether voice mode / live listen is active for this turn */
@@ -701,9 +710,7 @@ export const PlannerSendMessageRequest = z
     /** PA-113: Overrides whether thinking is enabled for this turn onward. */
     thinking: z.boolean().optional(),
   })
-  .refine((data) => data.content.trim().length > 0 || !!data.image, {
-    message: 'Must provide content or an image.',
-  });
+  .refine(hasPromptContent, { message: 'Must provide content, an image or a file.' });
 export type PlannerSendMessageRequest = z.infer<typeof PlannerSendMessageRequest>;
 
 /** PA-122: how many undelivered messages one chat may hold. A person typing
@@ -720,11 +727,10 @@ export const QueuePlannerPromptRequest = z
   .object({
     content: z.string().max(LIMITS.maxInputChars).default(''),
     image: PromptImage.optional(),
+    attachments: AttachmentIdList.optional(),
     voiceMode: z.boolean().optional(),
   })
-  .refine((data) => data.content.trim().length > 0 || !!data.image, {
-    message: 'Must provide content or an image.',
-  });
+  .refine(hasPromptContent, { message: 'Must provide content, an image or a file.' });
 export type QueuePlannerPromptRequest = z.infer<typeof QueuePlannerPromptRequest>;
 
 export const QueuePlannerPromptResponse = z.object({

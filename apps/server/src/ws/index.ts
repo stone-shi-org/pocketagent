@@ -4,6 +4,7 @@ import {
   LIMITS,
   PROTOCOL_VERSION,
   appendSpokenSummaryInstruction,
+  attachedFileNote,
   SERVER_PROTOCOL_RANGE,
   isSupportedProtocolVersion,
   WsCloseCode,
@@ -18,7 +19,14 @@ import { isOriginAllowed } from '../auth/index.js';
 import type { ManagedSession, StructuredLikeSession } from '../sessions/manager.js';
 import { StructuredSession } from '../sessions/structured-session.js';
 import type { PtySession } from '../sessions/pty-session.js';
-import { saveAttachmentToWorkspace } from '../sessions/attachments.js';
+import {
+  AttachmentError,
+  landStagedAttachments,
+  saveAttachmentToWorkspace,
+  sessionLandingTarget,
+  type StagedAttachment,
+} from '../attachments/index.js';
+import { attachmentPrincipal } from '../routes/attachments.js';
 import type { TtsAudioChunk } from '../voice/tts-service.js';
 
 /**
@@ -104,7 +112,7 @@ interface Attachment {
 }
 
 export const websocketRoutes: FastifyPluginAsync = async (app) => {
-  const { sessions, config, promptQueue, voiceTts } = app.pocket;
+  const { sessions, config, promptQueue, voiceTts, attachmentStaging } = app.pocket;
 
   /**
    * Every live attachment, across every connection, indexed by session id —
@@ -638,20 +646,59 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
         case 'prompt': {
           const session = requireStructured(message.sessionId);
           if (!session) break;
-          if (message.text.length === 0 && !message.image) {
-            sendError('bad_message', 'A prompt needs text, an image, or both.', message.sessionId);
+          const attachmentIds = message.attachments ?? [];
+          if (message.text.length === 0 && !message.image && attachmentIds.length === 0) {
+            sendError('bad_message', 'A prompt needs text, an image, a file, or a mix.', message.sessionId);
+            break;
+          }
+
+          // PA-136: files first, because they are the half that can fail for a
+          // reason the user must hear about (an upload that expired). A prompt
+          // never goes out with an attachment silently missing, so any failure
+          // here refuses the whole prompt, with a visible error, before
+          // anything is written or sent.
+          let staged: StagedAttachment[] = [];
+          try {
+            staged = attachmentStaging.take(attachmentIds, attachmentPrincipal(request));
+          } catch (err) {
+            sendError('not_found', err instanceof Error ? err.message : 'An attached file is no longer available.', message.sessionId);
             break;
           }
 
           let promptText = message.text;
-          if (message.image) {
-            try {
+          const notes: string[] = [];
+          try {
+            if (message.image) {
               const relPath = saveAttachmentToWorkspace(session.spec.cwd, message.image);
-              const fileNote = `[Attached image saved to: ${relPath}]`;
-              promptText = promptText ? `${promptText}\n\n${fileNote}` : fileNote;
-            } catch (err) {
-              app.log.warn({ err }, 'failed to save attachment to workspace');
+              notes.push(`[Attached image saved to: ${relPath}]`);
             }
+            // The note is the agent's only way to learn the file exists, and
+            // the one thing that survives a queued re-send (PA-11 persists the
+            // text alone) — so it is added here, above `promptQueue.submit`,
+            // exactly as the image note always was.
+            const landed = landStagedAttachments(attachmentStaging, sessionLandingTarget(session.spec.cwd), staged);
+            for (const file of landed) notes.push(attachedFileNote(file.path));
+            if (landed.length > 0) {
+              request.log.info(
+                { sessionId: message.sessionId, files: landed.length, bytes: landed.reduce((n, f) => n + f.size, 0) },
+                'prompt attachments landed',
+              );
+            }
+          } catch (err) {
+            // Used to be a `warn` and carry on, which sent the image with its
+            // path note missing and told nobody. Now nothing is sent.
+            attachmentStaging.release(staged);
+            request.log.warn({ err }, 'failed to save attachment to workspace');
+            sendError(
+              err instanceof AttachmentError && err.code === 'forbidden' ? 'bad_message' : 'internal',
+              `Could not save the attachment: ${err instanceof Error ? err.message : String(err)}`,
+              message.sessionId,
+            );
+            break;
+          }
+          if (notes.length > 0) {
+            const block = notes.join('\n');
+            promptText = promptText ? `${promptText}\n\n${block}` : block;
           }
 
           // PA-84: a voice-enabled turn asks for a spoken paraphrase wrapped in

@@ -32,6 +32,7 @@ import { judgeUtterance } from '../audio/utterance-harness.js';
 import { MIC_CHANGE_EVENT } from '../audio/devices.js';
 import { GeminiLiveController, type GeminiLiveState } from '../audio/gemini-live.js';
 import { getGeminiLivePref, setGeminiLivePref } from '../agent/voice-prefs.js';
+import { AttachmentHrefContext } from '../components/FileChips.js';
 
 
 
@@ -776,6 +777,22 @@ export function PlannerChatPage({
   }, [shouldStream, load]);
 
   const pending = transcript?.pending[0] ?? null;
+
+  /** PA-136: files are uploaded as soon as they are attached. */
+  const uploadFile = useCallback(
+    (file: File, signal: AbortSignal) => api.uploadAttachment(file, signal),
+    [api],
+  );
+  /** An upload lands under the workspace's `artifacts/`, so the artifact route
+      serves it; the name it wants is the path below `artifacts/`. */
+  const attachmentHref = useCallback(
+    (relPath: string): string | null =>
+      relPath.startsWith('artifacts/')
+        ? api.plannerChatArtifactFileUrl(chatId, relPath.slice('artifacts/'.length), true)
+        : null,
+    [api, chatId],
+  );
+
   // PA-122: warn before sending an image to a model that cannot read it.
   const selectedModel = models.find((m) => m.modelId === chat?.lastModelId) ?? null;
   const imageNote =
@@ -790,11 +807,16 @@ export function PlannerChatPage({
 
   /** PA-122: a message for a busy chat goes into its queue, and is read by
       the agent after its current step (or as the next turn). */
-  const queueMessage = (content: string, image?: PromptImage): boolean => {
+  const queueMessage = (content: string, image?: PromptImage, attachments?: string[]): boolean => {
     setError(null);
     void (async () => {
       try {
-        const res = await api.queuePlannerPrompt(chatId, { content, image, voiceMode: pipelineLiveActive });
+        const res = await api.queuePlannerPrompt(chatId, {
+          content,
+          image,
+          ...(attachments && attachments.length > 0 ? { attachments } : {}),
+          voiceMode: pipelineLiveActive,
+        });
         setQueued(res.queuedPrompts);
       } catch (err) {
         onApiError(err);
@@ -822,8 +844,11 @@ export function PlannerChatPage({
   /** `PromptBox.onSend` is synchronous by contract (see its own props doc):
       a `true` return clears the composer immediately, matching how a real
       session's prompt clears on submit rather than waiting for a reply. */
-  const handleSend = (content: string, image?: PromptImage): boolean => {
+  const handleSend = (content: string, image?: PromptImage, attachments?: string[]): boolean => {
     const trimmed = content.trim();
+    const files = attachments ?? [];
+    // A message carrying anything is a message, never a slash command.
+    const hasMedia = !!image || files.length > 0;
     // PA-96: one model drives the chat at a time — while Gemini Live is on, a
     // typed message is Gemini's to answer, and the server records it in the
     // transcript as if it had been heard.
@@ -831,6 +856,10 @@ export function PlannerChatPage({
       if (pending !== null || !trimmed) return false;
       if (image) {
         setError('Images cannot be sent while Gemini Live is on. Turn live mode off to attach one.');
+        return false;
+      }
+      if (files.length > 0) {
+        setError('Files cannot be sent while Gemini Live is on. Turn live mode off to attach one.');
         return false;
       }
       if (!trimmed.startsWith('/')) {
@@ -841,15 +870,15 @@ export function PlannerChatPage({
         return true;
       }
     }
-    if (!trimmed && !image) return false;
+    if (!trimmed && !hasMedia) return false;
     if (isChatBusy || pending !== null) {
       // Slash commands act on the chat now; they are not messages to queue.
-      if (!image && trimmed.startsWith('/')) return false;
-      return queueMessage(trimmed, image);
+      if (!hasMedia && trimmed.startsWith('/')) return false;
+      return queueMessage(trimmed, image, files);
     }
 
     // Handle slash commands without sending to LLM:
-    if (!image && (trimmed === '/clear' || trimmed === '/reset')) {
+    if (!hasMedia && (trimmed === '/clear' || trimmed === '/reset')) {
       void (async () => {
         try {
           await api.clearPlannerChatHistory(chatId);
@@ -876,14 +905,14 @@ export function PlannerChatPage({
       return true;
     }
 
-    if (!image && trimmed === '/context') {
+    if (!hasMedia && trimmed === '/context') {
       togglePreview();
       return true;
     }
 
     // PA-121: `/compact [focus]`. One LLM call; the divider it produces comes
     // back with the reloaded history.
-    if (!image && (trimmed === '/compact' || trimmed.startsWith('/compact '))) {
+    if (!hasMedia && (trimmed === '/compact' || trimmed.startsWith('/compact '))) {
       const focus = trimmed.slice('/compact'.length).trim();
       const note = (text: string, level: 'info' | 'warn'): void =>
         setTranscript((prev) => ({
@@ -905,7 +934,7 @@ export function PlannerChatPage({
       return true;
     }
 
-    if (!image && trimmed === '/mcp') {
+    if (!hasMedia && trimmed === '/mcp') {
       void (async () => {
         try {
           const regList = await api.listMcpRegistries();
@@ -959,6 +988,7 @@ export function PlannerChatPage({
           {
             content: trimmed,
             image,
+            ...(files.length > 0 ? { attachments: files } : {}),
             voiceMode: pipelineLiveActive,
             effort: chat?.lastEffort ?? undefined,
             thinking: chat?.thinkingEnabled !== false,
@@ -980,7 +1010,7 @@ export function PlannerChatPage({
         // PA-122: a turn began on the server first (a subagent waking the
         // chat, say) — queue the message behind it instead of losing it.
         if (err instanceof ApiError && err.code === 'busy') {
-          queueMessage(trimmed, image);
+          queueMessage(trimmed, image, files);
           return;
         }
         onApiError(err);
@@ -1538,11 +1568,13 @@ export function PlannerChatPage({
       {transcript === null ? (
         <div className="spinner">Loading…</div>
       ) : (
-        <Transcript
-          state={transcript}
-          starterPrompts={PLANNER_STARTER_PROMPTS}
-          onSelectPrompt={(text) => void handleSend(text)}
-        />
+        <AttachmentHrefContext.Provider value={attachmentHref}>
+          <Transcript
+            state={transcript}
+            starterPrompts={PLANNER_STARTER_PROMPTS}
+            onSelectPrompt={(text) => void handleSend(text)}
+          />
+        </AttachmentHrefContext.Provider>
       )}
 
       {pending && (
@@ -1724,6 +1756,9 @@ export function PlannerChatPage({
             <div key={q.id} className="planner-queue-item">
               <span className="planner-queue-text">
                 {q.hasImage && <span className="planner-queue-image">image</span>}
+                {q.attachmentNames?.map((name) => (
+                  <span key={name} className="planner-queue-image">{name}</span>
+                ))}
                 {q.text}
               </span>
               <button
@@ -1747,6 +1782,7 @@ export function PlannerChatPage({
         disabled={disabled}
         supportsImageAttachment={true}
         attachmentNote={imageNote}
+        onUploadFile={uploadFile}
         supportsVoiceInput={voiceEnabled}
         onTranscribeVoice={
           voiceEnabled

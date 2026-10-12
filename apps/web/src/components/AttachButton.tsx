@@ -1,11 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { Icon } from './Icon.js';
 
-const ACCEPT = 'image/jpeg,image/png,image/gif,image/webp';
+const IMAGE_ACCEPT = 'image/jpeg,image/png,image/gif,image/webp';
 
 interface Props {
-  /** A file the user picked from the menu's "Add photos & files" item. */
-  onFile: (file: File) => void;
+  /** The files the user picked from the menu's "Add photos & files" item. */
+  onFiles: (files: File[]) => void;
+  /**
+   * PA-136: any type, several at once. Off where only an inline image can be
+   * sent, which keeps the picker honest about what will work there.
+   */
+  anyFile?: boolean;
   disabled?: boolean;
   /** Optional ref forwarded to the underlying file input. */
   inputRef?: React.RefObject<HTMLInputElement>;
@@ -21,7 +26,7 @@ interface Props {
  * about the trigger has to change to add "Add from library" or anything else
  * later, only another row here.
  */
-export function AttachButton({ onFile, disabled = false, inputRef }: Props): JSX.Element {
+export function AttachButton({ onFiles, anyFile = false, disabled = false, inputRef }: Props): JSX.Element {
   const [open, setOpen] = useState(false);
   const fallbackRef = useRef<HTMLInputElement>(null);
   const fileInputRef = inputRef ?? fallbackRef;
@@ -54,12 +59,14 @@ export function AttachButton({ onFile, disabled = false, inputRef }: Props): JSX
       <input
         ref={fileInputRef}
         type="file"
-        accept={ACCEPT}
+        // No `accept` at all for files, rather than `*/*`: some mobile
+        // browsers read an explicit wildcard as "photos only".
+        {...(anyFile ? { multiple: true } : { accept: IMAGE_ACCEPT })}
         hidden
         onChange={(e) => {
-          const file = e.target.files?.[0];
+          const files = Array.from(e.target.files ?? []);
           e.target.value = ''; // lets the same file be picked again later
-          if (file) onFile(file);
+          if (files.length > 0) onFiles(files);
         }}
       />
       <button

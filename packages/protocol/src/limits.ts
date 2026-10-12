@@ -1,4 +1,5 @@
 import { MAX_IMAGE_BASE64_CHARS, MAX_IMAGE_BYTES } from './prompt-image.js';
+import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_PROMPT } from './prompt-attachment.js';
 import { MAX_VOICE_AUDIO_BASE64_CHARS, MAX_VOICE_AUDIO_BYTES } from './voice-audio.js';
 
 /**
@@ -25,6 +26,12 @@ export const LIMITS = {
   maxImageBytes: MAX_IMAGE_BYTES,
   /** Base64 inflates by 4/3; this is the cap actually applied to `image.data`. */
   maxImageBase64Chars: MAX_IMAGE_BASE64_CHARS,
+  /** PA-136: raw size cap for one non-image attachment. It travels as a raw
+      upload body (`POST /api/attachments`), never inside a frame, which is why
+      it can exceed `maxMessageBytes`. */
+  maxAttachmentBytes: MAX_ATTACHMENT_BYTES,
+  /** PA-136: files per prompt, on top of at most one image. */
+  maxAttachmentsPerPrompt: MAX_ATTACHMENTS_PER_PROMPT,
   /** Raw PCM16 byte cap for a push-to-talk utterance (PA-20), before base64 encoding. */
   maxVoiceAudioBytes: MAX_VOICE_AUDIO_BYTES,
   /** Base64 inflates by 4/3; this is the cap actually applied to `audio.data`. */

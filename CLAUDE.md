@@ -19,6 +19,7 @@ pnpm demo:docker        # the backend image's whole contract, against a real con
 pnpm demo:hub           # PA-66's acceptance criteria: two real backends, a real Hub
 pnpm demo:hub-ui        # PA-110: the Hub's own UI and mDNS discovery, in real Chrome
 pnpm demo:mcp           # PA-118: /mcp as an external agent sees it, against a scratch server
+pnpm demo:attachments-ui  # PA-136: PDF/xlsx/md attached in real Chrome, both chat kinds, both viewports
 
 pnpm version:set 1.2.3  # the repo's semver, written to all six package.json files (PA-65, PA-66)
 ./test.sh               # CI: install --frozen-lockfile, vitest (JUnit XML), lint, typecheck
@@ -146,7 +147,7 @@ and `adopt.test.ts` skip themselves when `tmux` is not installed.
 ### Live demos
 
 The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
-decision. Twenty-one demo scripts do; all but five run against a *running* server:
+decision. Twenty-two demo scripts do; all but six run against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -170,6 +171,7 @@ PA_TOKEN=... pnpm demo:multi-host-ui     # multi-host: rail, sheet, aggregate ho
 PA_TOKEN=... pnpm demo:agent-install-ui  # agent setup dialog: four states, streamed install, phone viewport
 PA_TOKEN=... PA_GEMINI_KEY=... pnpm demo:gemini-live-ui  # PA-96: real speech → Gemini Live → tool → approval card, phone viewport
 pnpm demo:mcp             # PA-118: scratch server + SDK client; PA_MCP_REAL_AGENT=1 / PA_MCP_CLAUDE_CLIENT=1 add real claude
+pnpm demo:attachments-ui  # PA-136: scratch server + fake LLM; files attached in real Chrome, phone and desktop
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -234,6 +236,16 @@ revocation ending an open MCP session. Two opt-in steps use real agents:
 `PA_MCP_REAL_AGENT=1` runs `run_coding_task` against a real `claude` (with your real `HOME`, so it
 can sign in, which files one transcript under the scratch path), and `PA_MCP_CLAUDE_CLIENT=1` has
 a real Claude Code call `get_host_info` through `--mcp-config` — PocketAgent as the server end.
+
+`pnpm demo:attachments-ui` is the sixth, and where PA-136's acceptance criteria live: a scratch
+backend plus a fake OpenAI-compatible endpoint (so no LLM is called), then real Chrome at phone
+and desktop viewports attaching a PDF, an `.xlsx` and a `.md` through the real picker to a
+structured `claude` session and to a Pocket Agent chat. Each file is checked *on disk* in its
+documented directory, the agent's prompt is checked for each path, an image is checked to still
+go inline, an oversized file to be refused visibly, and a drop on the composer to attach. The
+`claude` there runs with a scratch `HOME` and is not signed in, which does not matter: the files
+land and the prompt is handed over before it answers. If Playwright cannot find its browser,
+`PLAYWRIGHT_BROWSERS_PATH` is pointing at a directory without the revision it wants.
 
 `pnpm demo:docker` is the other odd one out: it needs no running server and no `PA_BASE`, because it
 builds the image and starts its own container with a throwaway data root, HOME and git
@@ -1829,6 +1841,88 @@ directory *or any below it*, and a picked chat supplies its own `cwd`; resuming 
 conversation in a directory it did not belong to would point the agent at the wrong tree.
 Picking a chat that is already live navigates to it instead of creating anything.
 
+### Prompt attachments (PA-136)
+
+The composer's "+" takes any file. An image (JPEG, PNG, GIF, WebP) still rides **inline**,
+exactly as before: base64 inside the prompt, downscaled in the browser, an SDK image block for
+`claude` and an `image_url` part for a Pocket Agent. Only the first image per message goes
+inline. Everything else, and any further image, is a **file**, and a file never travels inside
+a frame. It is uploaded on its own the moment it is attached, as raw bytes, to
+`POST /api/attachments?name=…` (20 MB, at most 5 per message, `LIMITS.maxAttachmentBytes`/
+`maxAttachmentsPerPrompt`). The answer is an opaque `att_…` id, and the prompt carries only
+that id: `PromptMessage.attachments` over the WebSocket (`PROTOCOL_VERSION` 17), or
+`attachments` on the planner's message and queue requests. Picker, paste and drag-and-drop
+all go through `PromptBox.attachAll`. The rules are pure functions in
+`agent/file-attachment.ts`.
+
+**Staged first, landed only on send** (`attachments/index.ts`). An upload streams into
+`<dataDir>/attachment-staging/` (0600). Nothing touches a working tree until the prompt
+naming it is handled, so a chip the user removes or a tab that closes leaves nothing in
+anybody's repository. Staging is in memory, emptied at boot, and an unsent upload is swept
+after an hour. That TTL is not the no-decay rule bending: an unsent upload is nobody's
+decision. An id is single-use and bound to the principal that uploaded it (`session`, or
+`hub:<id>`), and `take` claims every id of a prompt or none. An unknown or expired id
+refuses the whole prompt with a visible error; a prompt never goes out with a file silently
+missing. The upload route owns its body parsing in its own plugin scope, like webhook
+delivery, but the reason is the mirror image: that one buffers for an HMAC, this one
+*streams*, so 20 MB never sits in memory and an oversized body is cut off at the cap. Fastify
+enforces `bodyLimit` only for buffered parsers, so the cap is counted while streaming. Sibling
+routes keep the 1 MiB JSON limit, which a test proves. Through a Hub it is an ordinary
+`/h/<id>/api/**` request; the Hub's proxy streams bodies and adds no limit. A reverse proxy in
+front may have its own (`client_max_body_size` in nginx).
+
+**Where a file lands, and the rules it lands by:**
+- **Coding agents** land in `<cwd>/.pocketagent/attachments/`, next to the images that were
+  always there. The first landing also writes `.pocketagent/.gitignore` (`*`), which keeps
+  attachments out of `git status` without editing `.git/info/exclude`. That works the same
+  in a linked worktree, where `.git` is a file. `ws/index.ts` appends one
+  `[Attached file saved to: <rel path>]` line per file, **above** `promptQueue.submit`, so a
+  queued prompt (persisted as text) keeps its paths and the queue needed no change. Non-images
+  get only the note, for every backend, claude included: Claude Code's `Read` handles PDF and
+  Markdown, and anything else is the agent's own tools' business. The web reducer reads the
+  notes back into chips (`userPromptView`, `parseAttachedFileNotes`), so a live turn, a queued
+  re-send and a transcript replayed from the agent's own JSONL render the same.
+- **Pocket Agents** land in `<planner workspace>/artifacts/uploads/`, so PA-128's Artifacts
+  panel lists, downloads and deletes them with no extra work, and each chip links to that
+  download. The trade-off is that writes under `artifacts/` are approval-exempt, so the agent
+  may change an upload without asking. `user_prompt.attachments` records metadata only
+  (`PromptAttachment`: name, path, size, type), never bytes, and `content` stays what was
+  typed. `plannerAttachmentNote` builds the model's path note from that metadata every time
+  the context is assembled, with a hint to use `read_file` for text and a command for
+  PDF/xlsx/docx. A queued message's files are landed **at queue time**, into
+  `planner_prompt_queue.attachments_json`, because a staging id would not survive the restart
+  a queued message must. `assertCanAcceptFiles` runs the chat's preconditions *before*
+  anything lands, so a refused message writes nothing.
+- **Names** are the browser's only input, and `sanitizeAttachmentName` reduces one to a
+  basename:
+  - both separators are split, NFC applied, and controls, bidi and zero-width characters
+    stripped;
+  - leading dots go, so no `.env`, `.` or `..`;
+  - the name is capped at 120 bytes, keeping a plausible extension;
+  - `uniqueAttachmentName` then adds `_YYYYMMDD-HHmmss_xxxx`.
+- **Writes are exclusive and never follow a symlink.** Each directory segment below the root
+  is `lstat`ed and refused if it is a link (PA-55's `.claude` rule), the result is realpath'd
+  and must still be inside the realpath'd root, and the file goes in by `link`,
+  `COPYFILE_EXCL` or `O_EXCL|O_NOFOLLOW`, retried under a fresh suffix on `EEXIST`. Nothing
+  existing is ever overwritten, even under a race. A landing that fails rolls back what it
+  landed and releases the rest to staging, so the retry the error invites still works. The
+  image path now goes through the same rules, and its failure is a visible error rather than
+  the `warn` that used to send the image with its path note missing.
+
+Also fixed here: the planner's message and queue routes now carry
+`bodyLimit: LIMITS.maxMessageBytes`. An inline image is up to ~4.5 MB of base64 after the
+browser's downscale, and the server's 1 MiB default had answered 413 to any planner image over
+~750 KB, which in practice was every phone photo.
+
+Known limitations: attachments are never garbage-collected (true of images before), and
+cancelling a queued Pocket Agent message leaves its already-landed files in `artifacts/uploads/`,
+where the Artifacts panel can delete them. Not done, and left as follow-ups:
+- server-side text extraction (PDF/xlsx/docx);
+- inlining small text files into a planner prompt;
+- a per-model "accepts PDF" flag (most OpenAI-compatible servers reject PDF input);
+- Telegram documents;
+- attachments over MCP.
+
 ### Hiding and removing
 
 Nothing in the UI deletes a transcript. "Remove" means: drop the session row
@@ -2904,6 +2998,14 @@ These are load-bearing. Several were bugs first.
   environment. Adding a folder via `POST /api/workspaces/add` is the moment access is
   granted, and it is logged. `GET /api/browse` is read-only and can see any directory the
   server's user can; that is a deliberate widening and the cost of picking any folder.
+- **The browser never chooses where a file lands, and a landing never overwrites or follows a
+  link** (PA-136). An attachment is named by the browser and placed by the server: a
+  sanitised basename plus a unique suffix, under `.pocketagent/attachments/` (coding agents)
+  or `artifacts/uploads/` (Pocket Agents), written exclusive-create through `lstat`-checked,
+  realpath-contained directories. No request field is a path. An upload lands only when the
+  prompt naming it is handled, and a prompt whose attachment cannot be claimed is refused
+  visibly rather than sent without it. Asserted in `apps/server/tests/attachments.test.ts` and
+  `attachments-route.test.ts`.
 - **The browser never supplies an executable or argv.** Adoption and resume both take their
   `cwd` from the server-validated target. **PA-68 extends this to installing one**, which is the
   sharpest case yet: `POST /api/agents/install` takes an id out of a closed set plus an *action*

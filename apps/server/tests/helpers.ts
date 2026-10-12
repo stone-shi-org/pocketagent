@@ -129,6 +129,7 @@ export async function createTestApp(
     piTranscripts,
     plannerWorkspacesRoot,
     plannerSkillsRoot,
+    attachmentStagingDir: path.join(ws.root, 'attachment-staging'),
     ...(plannerLlmFetch ? { plannerLlmFetch } : {}),
     ...(telegramFetch ? { telegramFetch } : {}),
     ...(agentInstallRunner ? { agentInstallRunner } : {}),

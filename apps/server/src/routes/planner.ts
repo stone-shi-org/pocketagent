@@ -68,6 +68,8 @@ import {
   type TestPlannerModelResponse,
   type TestPlannerUrlFetchResponse,
   type TestPlannerWebSearchResponse,
+  LIMITS,
+  type PromptAttachment,
 } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import { PlannerWorkspaceError } from '../planner/workspaces.js';
@@ -77,6 +79,8 @@ import { PlannerLlmClient, PlannerLlmError } from '../planner/llm-client.js';
 import { PLANNER_TOOLS, postJsonToIntegration } from '../planner/tools.js';
 import { SkillRegistryError, type SkillSummary } from '../planner/skills.js';
 import { auditConfigChange } from './shared.js';
+import { attachmentPrincipal, sendAttachmentError } from './attachments.js';
+import { AttachmentError } from '../attachments/index.js';
 import { ARTIFACT_CSP } from '../security-headers.js';
 import { isContained, WorkspaceError } from '../workspaces/index.js';
 import { treeRootOf } from '../git/worktree-paths.js';
@@ -393,6 +397,45 @@ async function streamPlannerEvents(
  * phases that add them.
  */
 export const plannerRoutes: FastifyPluginAsync = async (app) => {
+  /**
+   * PA-136: claims a message's uploads and lands them in the chat's workspace,
+   * or answers the error itself and returns `null`. Runs after the body has
+   * validated and after the chat's own preconditions, so a refused message
+   * lands nothing; any failure past that point hands the uploads back to
+   * staging, so the retry the error invites still finds them.
+   *
+   * Also why the two routes carry `bodyLimit: LIMITS.maxMessageBytes`: an
+   * image still rides inline as base64, the browser shrinks one to about
+   * 4.5 MB of it, and the server's 1 MiB default answered 413 to any image
+   * over roughly 750 KB — every phone photo, in practice.
+   */
+  function landPlannerFiles(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    chatId: string,
+    ids: string[] | undefined,
+    mode: 'send' | 'queue',
+  ): PromptAttachment[] | null {
+    if (!ids || ids.length === 0) return [];
+    try {
+      app.pocket.plannerChats.assertCanAcceptFiles(chatId, mode);
+      const staged = app.pocket.attachmentStaging.take(ids, attachmentPrincipal(request));
+      const landed = app.pocket.plannerChats.landAttachments(chatId, app.pocket.attachmentStaging, staged);
+      request.log.info(
+        { chatId, files: landed.length, bytes: landed.reduce((n, f) => n + f.size, 0) },
+        'planner attachments landed',
+      );
+      return landed;
+    } catch (err) {
+      if (err instanceof AttachmentError) {
+        sendAttachmentError(reply, err);
+        return null;
+      }
+      mapChatError(reply, err);
+      return null;
+    }
+  }
+
   app.get('/api/planner/workspaces', async () => {
     const response: PlannerWorkspaceListResponse = {
       workspaces: app.pocket.plannerWorkspaces.list(),
@@ -1484,12 +1527,14 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
    * composer for the duration, the same "one turn in flight at a time"
    * discipline `PromptBox` already applies to a structured session.
    */
-  app.post('/api/planner/chats/:id/messages', async (request, reply) => {
+  app.post('/api/planner/chats/:id/messages', { bodyLimit: LIMITS.maxMessageBytes }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const parsed = PlannerSendMessageRequest.safeParse(request.body);
     if (!parsed.success) {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
+    const files = landPlannerFiles(request, reply, id, parsed.data.attachments, 'send');
+    if (files === null) return reply;
     const generator = app.pocket.plannerChats.sendMessage(
       id,
       parsed.data.content,
@@ -1498,6 +1543,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
         ...(parsed.data.effort !== undefined ? { effort: parsed.data.effort } : {}),
         ...(parsed.data.thinking !== undefined ? { thinking: parsed.data.thinking } : {}),
         ...(parsed.data.image ? { image: parsed.data.image } : {}),
+        ...(files.length > 0 ? { attachments: files } : {}),
         ...(parsed.data.voiceMode !== undefined ? { voiceMode: parsed.data.voiceMode } : {}),
       },
     );
@@ -1514,15 +1560,18 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
    * answers 409 `busy` for a busy chat: cron, webhooks and MCP rely on that,
    * and only a person at the chat should be able to steer a turn.
    */
-  app.post('/api/planner/chats/:id/queue', async (request, reply) => {
+  app.post('/api/planner/chats/:id/queue', { bodyLimit: LIMITS.maxMessageBytes }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const parsed = QueuePlannerPromptRequest.safeParse(request.body);
     if (!parsed.success) {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
+    const files = landPlannerFiles(request, reply, id, parsed.data.attachments, 'queue');
+    if (files === null) return reply;
     try {
       const prompt = app.pocket.plannerChats.queuePrompt(id, parsed.data.content, {
         ...(parsed.data.image ? { image: parsed.data.image } : {}),
+        ...(files.length > 0 ? { attachments: files } : {}),
         ...(parsed.data.voiceMode !== undefined ? { voiceMode: parsed.data.voiceMode } : {}),
       });
       const response: QueuePlannerPromptResponse = {

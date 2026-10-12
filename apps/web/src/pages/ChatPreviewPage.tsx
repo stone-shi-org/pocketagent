@@ -106,8 +106,13 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
   // there is no live session here, so this transcript state never changes.
   const liveState = useMemo(() => emptyTranscript(), []);
 
+  const uploadFile = useCallback(
+    (file: File, signal: AbortSignal) => api.uploadAttachment(file, signal),
+    [api],
+  );
+
   const start = useCallback(
-    (text: string, image?: PromptImage): boolean => {
+    (text: string, image?: PromptImage, attachments?: string[]): boolean => {
       if (!conversation || starting) return false;
       setStarting(true);
       void api
@@ -128,7 +133,7 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
           title: conversation.title,
         })
         .then((created) => {
-          setPendingPrompt(created.id, text, image);
+          setPendingPrompt(created.id, text, image, attachments);
           onStarted(created.id);
         })
         .catch((err) => {
@@ -248,6 +253,9 @@ export function ChatPreviewPage({ conversationId, onBack, onApiError, onStarted 
           // discovers Claude Code transcripts — see the `agent: 'claude'`
           // comment in `start` above.
           supportsImageAttachment
+          // PA-136: uploaded now, landed into the new session's cwd when the
+          // handed-off prompt is sent.
+          onUploadFile={uploadFile}
         />
       )}
     </div>

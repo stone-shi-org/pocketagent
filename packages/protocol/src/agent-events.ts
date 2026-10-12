@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { PromptImage } from './prompt-image.js';
+import { PromptAttachment } from './prompt-attachment.js';
 
 /**
  * Normalized agent events.
@@ -226,6 +227,9 @@ export const UserPromptEvent = z.object({
   text: z.string(),
   /** Present when the turn attached a screenshot — see `PromptImage`. */
   image: PromptImage.optional(),
+  /** PA-136: non-image files the turn attached, as they landed. Metadata
+      only — the bytes are on disk at `path`, never in a transcript. */
+  attachments: z.array(PromptAttachment).optional(),
 });
 
 /**
@@ -445,6 +449,8 @@ export const QueuedPromptSummary = z.object({
   id: z.string(),
   text: z.string(),
   hasImage: z.boolean(),
+  /** PA-136: names of the files the message carries, for the queue's row. */
+  attachmentNames: z.array(z.string()).optional(),
   createdAt: z.number().int(),
 });
 export type QueuedPromptSummary = z.infer<typeof QueuedPromptSummary>;

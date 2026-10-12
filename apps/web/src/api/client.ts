@@ -87,6 +87,7 @@ import type {
   DeleteAllPlannerChatsResponse,
   InterruptPlannerChatResponse,
   QueuePlannerPromptRequest,
+  UploadAttachmentResponse,
   QueuePlannerPromptResponse,
   CompactPlannerChatResponse,
   PlannerChatHistoryResponse,
@@ -1104,6 +1105,20 @@ export function createApiClient(endpoint: HostEndpoint) {
       request<CompactPlannerChatResponse>(`/api/planner/chats/${encodeURIComponent(id)}/compact`, {
         method: 'POST',
         body: JSON.stringify({ focus }),
+      }),
+
+    /**
+     * PA-136: uploads one file as its own raw bytes, before the prompt that
+     * names it is sent. Answers an id to put in that prompt's `attachments`;
+     * nothing lands in a working tree until then. The type header is the
+     * file's own, never JSON — the route streams the body rather than parsing it.
+     */
+    uploadAttachment: (file: File, signal?: AbortSignal) =>
+      request<UploadAttachmentResponse>(`/api/attachments?name=${encodeURIComponent(file.name || 'file')}`, {
+        method: 'POST',
+        body: file,
+        headers: { 'content-type': file.type || 'application/octet-stream' },
+        ...(signal ? { signal } : {}),
       }),
 
     /** PA-122: a message for a busy chat, delivered after its current step. */

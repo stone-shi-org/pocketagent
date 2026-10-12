@@ -10,6 +10,7 @@ import { ToolCard } from './ToolCard.js';
 import { CopyButton } from './CopyButton.js';
 import { FollowUpChips } from './FollowUpChips.js';
 import { Icon } from './Icon.js';
+import { SentFileChips } from './FileChips.js';
 
 /**
  * Only the most recent turns' prompts stay pinned at the top as their output
@@ -371,7 +372,13 @@ function TurnPanel({
                     </>
                   )
                   : promptHeadline(turn.prompt.text)
-              : (turn.prompt.image ? 'Sent an image' : '')}
+              : turn.prompt.image
+                ? 'Sent an image'
+                : turn.prompt.files?.length
+                  ? turn.prompt.files.length === 1
+                    ? `Sent ${turn.prompt.files[0]!.name}`
+                    : `Sent ${turn.prompt.files.length} files`
+                  : ''}
           </div>
           {turn.prompt.text && <CopyButton text={turn.prompt.text} label="Copy prompt" />}
           {isMultiline && (
@@ -398,6 +405,7 @@ function TurnPanel({
           />
         </div>
       )}
+      {turn.prompt?.files && turn.prompt.files.length > 0 && <SentFileChips files={turn.prompt.files} />}
       <div className="turn-body">
         {turn.leaves.map((leaf) => (
           <Item key={leaf.key} item={leaf} onSelectPrompt={onSelectPrompt} busy={busy} />

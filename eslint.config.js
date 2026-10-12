@@ -77,6 +77,7 @@ export default tseslint.config(
       'apps/server/scripts/provider-ui-demo.mjs',
       'apps/server/scripts/agent-install-ui-demo.mjs',
       'apps/server/scripts/multi-host-ui-demo.mjs',
+      'apps/server/scripts/attachments-ui-demo.mjs',
       'apps/hub/scripts/hub-demo.mjs',
     ],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },

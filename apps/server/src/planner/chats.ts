@@ -69,8 +69,16 @@ import {
   MAX_QUEUED_PROMPTS_PER_CHAT,
   isTerminalStatus,
   plannerModelSupportsImages,
+  type PromptAttachment,
   type PromptImage,
 } from '@pocketagent/protocol';
+import {
+  landStagedAttachments,
+  plannerLandingTarget,
+  withPlannerAttachmentNote,
+  type AttachmentStaging,
+  type StagedAttachment,
+} from '../attachments/index.js';
 import { treeRootOf } from '../git/worktree-paths.js';
 import { resolveApprovalStatus, rememberDecisionIfAsked } from './approval.js';
 import { appendTranscriptEvent, clearTranscriptEvents, readTranscriptEvents } from './transcript.js';
@@ -606,6 +614,7 @@ function queuedPromptSummary(row: PlannerQueuedPromptRow): QueuedPromptSummary {
     id: row.id,
     text: stripSpokenSummaryInstruction(row.content),
     hasImage: row.image !== null,
+    ...(row.attachments.length > 0 ? { attachmentNames: row.attachments.map((a) => a.name) } : {}),
     createdAt: row.createdAt,
   };
 }
@@ -1128,16 +1137,58 @@ export class PlannerChatService {
   // queued while a turn is parked on an approval waits for a human to answer
   // it; queueing never answers, denies or dismisses anything.
 
+  /**
+   * PA-136: moves a message's uploaded files from staging into this chat's
+   * workspace, under `artifacts/uploads/`, and returns what the transcript
+   * records about them. Called by the route once the message is known to be
+   * acceptable (`assertCanAcceptFiles`), so a refused message lands nothing.
+   * A failure lands nothing either, and hands the uploads back to staging so
+   * the user's retry still finds them.
+   */
+  landAttachments(chatId: string, staging: AttachmentStaging, staged: StagedAttachment[]): PromptAttachment[] {
+    if (staged.length === 0) return [];
+    let workspacePath: string;
+    try {
+      workspacePath = this.workspacePathFor(this.requireChat(chatId));
+    } catch (err) {
+      staging.release(staged);
+      throw err;
+    }
+    return landStagedAttachments(staging, plannerLandingTarget(workspacePath), staged);
+  }
+
+  /**
+   * PA-136: the preconditions a message with files must pass *before* its
+   * files land, so a 409 does not leave an upload in the workspace. The same
+   * checks `sendMessage`/`queuePrompt` make again; this only moves them ahead
+   * of the one side effect that cannot wait for the generator to start.
+   */
+  assertCanAcceptFiles(chatId: string, mode: 'send' | 'queue'): void {
+    this.requireChat(chatId);
+    if (this.isLiveActive(chatId)) {
+      throw new PlannerChatError('Files cannot be sent while Gemini Live is on. Turn live mode off to attach one.', 'busy');
+    }
+    if (mode === 'send' && this.isBusy(chatId)) {
+      throw new PlannerChatError('A turn is already in flight for this chat.', 'busy');
+    }
+  }
+
   /** PA-122: queue a message for a busy chat — or, if the chat turned out to
       be idle by the time it arrived, deliver it at once as a turn. */
-  queuePrompt(chatId: string, content: string, opts: { image?: PromptImage; voiceMode?: boolean } = {}): QueuedPromptSummary {
+  queuePrompt(
+    chatId: string,
+    content: string,
+    opts: { image?: PromptImage; attachments?: PromptAttachment[]; voiceMode?: boolean } = {},
+  ): QueuedPromptSummary {
     this.requireChat(chatId);
     if (this.isLiveActive(chatId)) {
       throw new PlannerChatError('Gemini Live is on in this chat; a typed message goes to Gemini while it is.', 'busy');
     }
     const text =
       opts.voiceMode && this.opts.config?.voiceSpokenSummaryEnabled ? appendSpokenSummaryInstruction(content) : content;
-    if (!text.trim() && !opts.image) throw new PlannerChatError('Must provide content or an image.', 'invalid');
+    if (!text.trim() && !opts.image && !opts.attachments?.length) {
+      throw new PlannerChatError('Must provide content, an image or a file.', 'invalid');
+    }
     if (countPlannerQueuedPrompts(this.opts.db, chatId) >= MAX_QUEUED_PROMPTS_PER_CHAT) {
       throw new PlannerChatError(
         `This chat already has ${MAX_QUEUED_PROMPTS_PER_CHAT} messages waiting. Cancel one, or wait for the turn to finish.`,
@@ -1149,6 +1200,7 @@ export class PlannerChatService {
       chatId,
       content: text,
       image: opts.image ?? null,
+      attachments: opts.attachments ?? [],
       createdAt: Date.now(),
     };
     insertPlannerQueuedPrompt(this.opts.db, row);
@@ -1294,6 +1346,7 @@ export class PlannerChatService {
         id: crypto.randomUUID(),
         text: row.content,
         ...(row.image ? { image: row.image } : {}),
+        ...(row.attachments.length > 0 ? { attachments: row.attachments } : {}),
       });
       deletePlannerQueuedPrompt(this.opts.db, chat.id, row.id);
       delivered++;
@@ -1944,6 +1997,9 @@ export class PlannerChatService {
     opts: {
       modelId?: string;
       image?: PromptImage;
+      /** PA-136: files already landed in this chat's workspace — see
+          `landAttachments`. */
+      attachments?: PromptAttachment[];
       signal?: AbortSignal;
       isWake?: boolean;
       voiceMode?: boolean;
@@ -2008,7 +2064,10 @@ export class PlannerChatService {
       if (opts.fromQueue) {
         const first = readPlannerQueuedPrompts(this.opts.db, chat.id)[0];
         if (chat.title === null && first) {
-          const title = deriveChatTitle(stripSpokenSummaryInstruction(first.content) || (first.image ? 'Image prompt' : ''));
+          const title = deriveChatTitle(
+            stripSpokenSummaryInstruction(first.content) ||
+              (first.attachments[0]?.name ?? (first.image ? 'Image prompt' : '')),
+          );
           if (title) updatePlannerChat(this.opts.db, chat.id, { title });
         }
         // Everything was cancelled between the drain deciding to run and
@@ -2016,7 +2075,10 @@ export class PlannerChatService {
         if ((yield* this.deliverQueuedPrompts(chat, workspacePath)) === 0) return;
       } else {
         if (chat.title === null) {
-          const title = deriveChatTitle(stripSpokenSummaryInstruction(promptContent) || (opts.image ? 'Image prompt' : ''));
+          const title = deriveChatTitle(
+            stripSpokenSummaryInstruction(promptContent) ||
+              (opts.attachments?.[0]?.name ?? (opts.image ? 'Image prompt' : '')),
+          );
           if (title) updatePlannerChat(this.opts.db, chat.id, { title });
         }
 
@@ -2025,6 +2087,7 @@ export class PlannerChatService {
           id: crypto.randomUUID(),
           text: promptContent,
           ...(opts.image ? { image: opts.image } : {}),
+          ...(opts.attachments?.length ? { attachments: opts.attachments } : {}),
         };
         yield* this.emit(workspacePath, chat.id, userEvent);
       }
@@ -4008,7 +4071,11 @@ export function eventsToSeedTurns(events: readonly AgentEvent[]): GeminiLiveSeed
   for (const event of events) {
     switch (event.kind) {
       case 'user_prompt':
-        push('user', stripSpokenSummaryInstruction(event.text) || (event.image ? '[sent an image]' : ''));
+        push(
+          'user',
+          withPlannerAttachmentNote(stripSpokenSummaryInstruction(event.text), event.attachments) ||
+            (event.image ? '[sent an image]' : ''),
+        );
         break;
       case 'text':
         push('model', stripSpokenSummary(event.text));
@@ -4150,17 +4217,22 @@ export function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatM
       case 'user_prompt':
         flushPendingCalls();
         flushNarration();
-        if (event.image) {
-          const parts: PlannerUserContentPart[] = [
-            {
-              type: 'image_url',
-              image_url: { url: `data:${event.image.mediaType};base64,${event.image.data}` },
-            },
-            ...(event.text ? [{ type: 'text' as const, text: event.text }] : []),
-          ];
-          messages.push({ role: 'user', content: parts });
-        } else {
-          messages.push({ role: 'user', content: event.text });
+        {
+          // PA-136: a file is a path note, generated from the event's metadata
+          // here rather than stored in its text — see `plannerAttachmentNote`.
+          const userText = withPlannerAttachmentNote(event.text, event.attachments);
+          if (event.image) {
+            const parts: PlannerUserContentPart[] = [
+              {
+                type: 'image_url',
+                image_url: { url: `data:${event.image.mediaType};base64,${event.image.data}` },
+              },
+              ...(userText ? [{ type: 'text' as const, text: userText }] : []),
+            ];
+            messages.push({ role: 'user', content: parts });
+          } else {
+            messages.push({ role: 'user', content: userText });
+          }
         }
         break;
       case 'text':

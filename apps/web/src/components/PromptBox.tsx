@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type ClipboardEvent,
+  type DragEvent,
   type KeyboardEvent,
 } from 'react';
 import {
@@ -12,8 +13,18 @@ import {
   type ModelInfo,
   type PromptImage,
   type SlashCommandInfo,
+  type UploadAttachmentResponse,
 } from '@pocketagent/protocol';
 import { readImageFile } from '../agent/image-attachment.js';
+import {
+  fileAttachProblem,
+  filesBlockSend,
+  filesFromDataTransfer,
+  readyAttachmentIds,
+  routeAttachment,
+  type PendingFile,
+} from '../agent/file-attachment.js';
+import { PendingFileChips } from './FileChips.js';
 import { resolveCurrentModel } from '../agent/transcript.js';
 import { getVoiceDirectSendPref } from '../agent/voice-prefs.js';
 import type { RecordedUtterance } from '../audio/capture.js';
@@ -72,8 +83,17 @@ interface Props {
    * structured Claude Agent SDK session — see `readImageFile`'s caller here
    * for the only place one gets attached.
    */
-  onSend: (text: string, image?: PromptImage) => boolean;
+  onSend: (text: string, image?: PromptImage, attachments?: string[]) => boolean;
   disabled: boolean;
+  /**
+   * PA-136: uploads one non-image file (`POST /api/attachments`) and resolves
+   * with its id, which `onSend` then carries in `attachments`. Its presence is
+   * what turns on files: the picker takes any type and several at once, and
+   * paste and drag-and-drop take files too. The caller owns the request, for
+   * the same reason `onTranscribeVoice` is a prop — this component never
+   * talks to the API itself.
+   */
+  onUploadFile?: (file: File, signal: AbortSignal) => Promise<UploadAttachmentResponse>;
   /**
    * Shows the attach button (file picker + paste-an-image). Only the Claude
    * Agent SDK backend's `prompt()` actually understands an image content
@@ -286,6 +306,7 @@ export function PromptBox({
   sessionId,
   onSend,
   disabled,
+  onUploadFile,
   supportsImageAttachment = false,
   attachmentNote = null,
   supportsVoiceInput = false,
@@ -341,6 +362,27 @@ export function PromptBox({
   // still going to be sent.
   const [attachedImage, setAttachedImage] = useState<PromptImage | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
+  // PA-136: files, uploaded as soon as they are attached so Send is not a
+  // long wait. Not persisted either, for the same reason as the image.
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  const pendingFilesRef = useRef<PendingFile[]>([]);
+  pendingFilesRef.current = pendingFiles;
+  const uploadControllers = useRef(new Map<string, AbortController>());
+  const [dragActive, setDragActive] = useState(false);
+  const supportsFiles = onUploadFile !== undefined;
+  const canAttach = supportsImageAttachment || supportsFiles;
+  const fileBlock = filesBlockSend(pendingFiles);
+  const hasAttachment = attachedImage !== null || pendingFiles.length > 0;
+
+  // An upload still running when the composer goes away has nobody to hand
+  // its id to.
+  useEffect(() => {
+    const controllers = uploadControllers.current;
+    return () => {
+      for (const controller of controllers.values()) controller.abort();
+      controllers.clear();
+    };
+  }, []);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
   const [voiceLevel, setVoiceLevel] = useState(0);
@@ -497,11 +539,31 @@ export function PromptBox({
     };
   }, [modelPickerOpen]);
 
+  /** What `onSend` is handed for the files: ready ids, or nothing. */
+  function sendableIds(): string[] | undefined {
+    const ids = readyAttachmentIds(pendingFiles);
+    return ids.length > 0 ? ids : undefined;
+  }
+
+  function clearAttachments(): void {
+    setAttachedImage(null);
+    setPendingFiles([]);
+    uploadControllers.current.clear();
+  }
+
   function send(): void {
     const value = text;
-    if ((value.length === 0 && !attachedImage) || disabled || value.length > LIMITS.maxInputChars) return;
+    if ((value.length === 0 && !hasAttachment) || disabled || value.length > LIMITS.maxInputChars) return;
+    if (fileBlock !== null) {
+      setAttachError(
+        fileBlock === 'uploading'
+          ? 'Still uploading — it will be ready to send in a moment.'
+          : 'A file failed to upload. Remove it, or attach it again, before sending.',
+      );
+      return;
+    }
     void unlockAudioContext();
-    if (onSend(value, attachedImage ?? undefined)) {
+    if (onSend(value, attachedImage ?? undefined, sendableIds())) {
       if (value.trim()) {
         const trimmed = value.trim();
         if (historyKey) {
@@ -516,18 +578,111 @@ export function PromptBox({
         draftBeforeHistoryRef.current = '';
       }
       setText('');
-      setAttachedImage(null);
+      clearAttachments();
     }
   }
 
-  /** Shared by the attach button's file input and pasting an image directly. */
-  async function attach(file: File): Promise<void> {
+  /**
+   * Shared by the attach button's picker, paste and drag-and-drop. Each file
+   * goes inline (the first supported image, exactly as before PA-136) or is
+   * uploaded as a file. One at a time, so "is there already an inline image"
+   * is answered by the previous file rather than a stale render.
+   */
+  async function attachAll(files: readonly File[]): Promise<void> {
     setAttachError(null);
-    try {
-      setAttachedImage(await readImageFile(file));
-    } catch (err) {
-      setAttachError(err instanceof Error ? err.message : 'Could not attach that image.');
+    let hasInlineImage = attachedImage !== null;
+    for (const file of files) {
+      const route = routeAttachment(file, { hasInlineImage, supportsFiles });
+      if (route === null) {
+        setAttachError('Only JPEG, PNG, GIF or WebP images can be attached here.');
+        continue;
+      }
+      if (route === 'inline-image') {
+        try {
+          setAttachedImage(await readImageFile(file));
+          hasInlineImage = true;
+          continue;
+        } catch (err) {
+          // An image this browser cannot shrink or decode still has a home
+          // when files are supported: it goes up as a file instead.
+          if (!supportsFiles) {
+            setAttachError(err instanceof Error ? err.message : 'Could not attach that image.');
+            continue;
+          }
+        }
+      }
+      uploadFile(file);
     }
+  }
+
+  function uploadFile(file: File): void {
+    if (!onUploadFile) return;
+    const problem = fileAttachProblem(file, pendingFilesRef.current.length);
+    if (problem) {
+      setAttachError(problem);
+      return;
+    }
+    const localId = `f_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const entry: PendingFile = {
+      localId,
+      name: file.name || 'file',
+      size: file.size,
+      mediaType: file.type || 'application/octet-stream',
+      state: 'uploading',
+    };
+    pendingFilesRef.current = [...pendingFilesRef.current, entry];
+    setPendingFiles(pendingFilesRef.current);
+    const controller = new AbortController();
+    uploadControllers.current.set(localId, controller);
+    const update = (patch: Partial<PendingFile>): void =>
+      setPendingFiles((prev) => prev.map((f) => (f.localId === localId ? { ...f, ...patch } : f)));
+    onUploadFile(file, controller.signal).then(
+      (res) => {
+        if (controller.signal.aborted) return;
+        uploadControllers.current.delete(localId);
+        update({ state: 'ready', attachmentId: res.attachmentId, name: res.name });
+      },
+      (err: unknown) => {
+        if (controller.signal.aborted) return;
+        uploadControllers.current.delete(localId);
+        const message = err instanceof Error ? err.message : 'Upload failed.';
+        update({ state: 'error', error: message });
+        setAttachError(`Could not upload “${entry.name}”: ${message}`);
+      },
+    );
+  }
+
+  function removeFile(localId: string): void {
+    uploadControllers.current.get(localId)?.abort();
+    uploadControllers.current.delete(localId);
+    setPendingFiles((prev) => prev.filter((f) => f.localId !== localId));
+    setAttachError(null);
+  }
+
+  function attach(file: File): void {
+    void attachAll([file]);
+  }
+
+  function onDragOver(event: DragEvent<HTMLDivElement>): void {
+    if (!canAttach || disabled || !Array.from(event.dataTransfer.types).includes('Files')) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    if (!dragActive) setDragActive(true);
+  }
+
+  function onDragLeave(event: DragEvent<HTMLDivElement>): void {
+    // Leaving for one of this element's own children is not leaving.
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDragActive(false);
+  }
+
+  function onDrop(event: DragEvent<HTMLDivElement>): void {
+    if (!canAttach || disabled) return;
+    const files = filesFromDataTransfer(event.dataTransfer);
+    setDragActive(false);
+    if (files.length === 0) return;
+    event.preventDefault();
+    void attachAll(files);
   }
 
   /**
@@ -560,7 +715,13 @@ export function PromptBox({
     if (getVoiceDirectSendPref()) {
       void unlockAudioContext();
       const fullText = text.trim() ? `${text.trim()} ${trimmed}` : trimmed;
-      if (onSend(fullText, attachedImage ?? undefined)) {
+      if (fileBlock !== null) {
+        // Never send past a file still uploading (or failed): park the
+        // transcript in the box instead, where Send will pick it all up.
+        setText(fullText);
+        return;
+      }
+      if (onSend(fullText, attachedImage ?? undefined, sendableIds())) {
         if (fullText.trim()) {
           const finalTrimmed = fullText.trim();
           if (historyKey) {
@@ -575,7 +736,7 @@ export function PromptBox({
           draftBeforeHistoryRef.current = '';
         }
         setText('');
-        setAttachedImage(null);
+        clearAttachments();
       }
     } else {
       setText((prev) => (prev.trim() ? `${prev.trim()} ${trimmed}` : trimmed));
@@ -590,6 +751,15 @@ export function PromptBox({
   }
 
   function onPaste(event: ClipboardEvent<HTMLTextAreaElement>): void {
+    if (supportsFiles) {
+      // PA-136: any file on the clipboard (a copied PDF in Finder, say), not
+      // just an image. A plain text paste carries none and is left alone.
+      const files = filesFromDataTransfer(event.clipboardData);
+      if (files.length === 0) return;
+      event.preventDefault();
+      void attachAll(files);
+      return;
+    }
     const item = Array.from(event.clipboardData.items).find((i) => i.type.startsWith('image/'));
     if (!item) return; // an ordinary text paste — let the browser handle it
     const file = item.getAsFile();
@@ -598,11 +768,11 @@ export function PromptBox({
     // paste — but prevent it anyway in case the OS also puts a filename or a
     // data URL on the clipboard as a text fallback.
     event.preventDefault();
-    void attach(file);
+    attach(file);
   }
 
   function pick(command: SlashCommandInfo): void {
-    if (command.name === 'add' && supportsImageAttachment) {
+    if (command.name === 'add' && canAttach) {
       setText('');
       setDismissed(true);
       fileInputRef.current?.click();
@@ -742,7 +912,12 @@ export function PromptBox({
   }
 
   return (
-    <div className={isVoiceRecording ? 'promptbar recording' : isTranscribing ? 'promptbar transcribing' : 'promptbar'}>
+    <div
+      className={`${isVoiceRecording ? 'promptbar recording' : isTranscribing ? 'promptbar transcribing' : 'promptbar'}${dragActive ? ' drag-active' : ''}`}
+      onDragOver={canAttach ? onDragOver : undefined}
+      onDragLeave={canAttach ? onDragLeave : undefined}
+      onDrop={canAttach ? onDrop : undefined}
+    >
       {micPickerOpen && (
         <MicPicker
           devices={audioDevices}
@@ -849,35 +1024,45 @@ export function PromptBox({
           ))}
         </div>
       )}
-      {!pickerOpen && !isVoiceRecording && (attachedImage || attachError || voiceError || liveListenError) && (
-        <div className="attach-preview">
-          {attachedImage ? (
-            <>
-              <img
-                src={`data:${attachedImage.mediaType};base64,${attachedImage.data}`}
-                alt="Attached"
-              />
-              <button
-                type="button"
-                className="attach-remove"
-                onClick={() => setAttachedImage(null)}
-                aria-label="Remove attached image"
-              >
-                <Icon name="close" size={13} />
-              </button>
-              {attachmentNote && <span className="attach-note">{attachmentNote}</span>}
-            </>
-          ) : (
-            <span className="attach-error">{attachError ?? voiceError ?? liveListenError}</span>
+      {!pickerOpen && !isVoiceRecording && (hasAttachment || attachError || voiceError || liveListenError) && (
+        // One stack above the bar, so file chips and an image preview (or an
+        // error) sit one above the other instead of on top of each other.
+        <div className="attach-stack">
+          {pendingFiles.length > 0 && <PendingFileChips files={pendingFiles} onRemove={removeFile} />}
+          {(attachedImage || attachError || voiceError || liveListenError) && (
+            <div className="attach-preview">
+              {attachedImage ? (
+                <>
+                  <img
+                    src={`data:${attachedImage.mediaType};base64,${attachedImage.data}`}
+                    alt="Attached"
+                  />
+                  <button
+                    type="button"
+                    className="attach-remove"
+                    onClick={() => setAttachedImage(null)}
+                    aria-label="Remove attached image"
+                  >
+                    <Icon name="close" size={13} />
+                  </button>
+                  {attachmentNote && <span className="attach-note">{attachmentNote}</span>}
+                  {/* PA-136: an image no longer hides a file error behind it. */}
+                  {attachError && <span className="attach-error">{attachError}</span>}
+                </>
+              ) : (
+                <span className="attach-error">{attachError ?? voiceError ?? liveListenError}</span>
+              )}
+            </div>
           )}
         </div>
       )}
       {isVoiceRecording ? (
         <>
-          {supportsImageAttachment && (
+          {canAttach && (
             <AttachButton
               inputRef={fileInputRef}
-              onFile={(file) => void attach(file)}
+              onFiles={(files) => void attachAll(files)}
+              anyFile={supportsFiles}
               disabled={true}
             />
           )}
@@ -912,10 +1097,11 @@ export function PromptBox({
         </>
       ) : isTranscribing ? (
         <>
-          {supportsImageAttachment && (
+          {canAttach && (
             <AttachButton
               inputRef={fileInputRef}
-              onFile={(file) => void attach(file)}
+              onFiles={(files) => void attachAll(files)}
+              anyFile={supportsFiles}
               disabled={true}
             />
           )}
@@ -937,7 +1123,7 @@ export function PromptBox({
                 historyIndexRef.current = -1;
               }}
               onKeyDown={onKeyDown}
-              onPaste={supportsImageAttachment ? onPaste : undefined}
+              onPaste={canAttach ? onPaste : undefined}
               placeholder="Type a prompt…"
               rows={1}
               aria-label="Prompt"
@@ -946,10 +1132,11 @@ export function PromptBox({
           </div>
           <div className="promptbar-tools-row">
             <div className="promptbar-tools-left">
-              {supportsImageAttachment && (
+              {canAttach && (
                 <AttachButton
                   inputRef={fileInputRef}
-                  onFile={(file) => void attach(file)}
+                  onFiles={(files) => void attachAll(files)}
+                  anyFile={supportsFiles}
                   disabled={disabled}
                 />
               )}
@@ -1097,12 +1284,12 @@ export function PromptBox({
                     : `${text.length.toLocaleString()} / ${LIMITS.maxInputChars.toLocaleString()}`}
                 </span>
               )}
-              {busy && queueWhileBusy && (text.trim().length > 0 || attachedImage) && (
+              {busy && queueWhileBusy && (text.trim().length > 0 || hasAttachment) && (
                 <button
                   type="button"
                   className="primary queue"
                   onClick={send}
-                  disabled={disabled || text.length > LIMITS.maxInputChars}
+                  disabled={disabled || text.length > LIMITS.maxInputChars || fileBlock !== null}
                   aria-label="Send after the current step"
                   title="Send after the current step — the agent reads it before its next move"
                 >
@@ -1117,8 +1304,9 @@ export function PromptBox({
                   busy
                     ? disabled
                     : disabled ||
-                      (text.length === 0 && !attachedImage) ||
-                      text.length > LIMITS.maxInputChars
+                      (text.length === 0 && !hasAttachment) ||
+                      text.length > LIMITS.maxInputChars ||
+                      fileBlock !== null
                 }
                 aria-label={busy ? 'Stop generating' : 'Send prompt'}
               >

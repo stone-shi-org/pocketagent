@@ -669,9 +669,15 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
     };
   }, [sessionId]);
 
-  const sendPrompt = useCallback((text: string, image?: PromptImage): boolean => {
-    return connRef.current?.sendPrompt(text, image) ?? false;
+  const sendPrompt = useCallback((text: string, image?: PromptImage, attachments?: string[]): boolean => {
+    return connRef.current?.sendPrompt(text, image, attachments) ?? false;
   }, []);
+
+  /** PA-136: a file is uploaded the moment it is attached; the prompt sends its id. */
+  const uploadFile = useCallback(
+    (file: File, signal: AbortSignal) => api.uploadAttachment(file, signal),
+    [api],
+  );
 
   const setModel = useCallback((model: string) => {
     connRef.current?.sendModel(model);
@@ -727,7 +733,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   // path so this does not pile up duplicate chats.
   const canResume = !alive && !!session?.agentSessionId;
   const resumeAndSend = useCallback(
-    (text: string, image?: PromptImage): boolean => {
+    (text: string, image?: PromptImage, attachments?: string[]): boolean => {
       if (!session?.agentSessionId || resuming) return false;
       setResuming(true);
       void api
@@ -750,7 +756,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
           effort: transcript.effort !== undefined ? transcript.effort : undefined,
         })
         .then((created) => {
-          setPendingPrompt(created.id, text, image);
+          setPendingPrompt(created.id, text, image, attachments);
           onResumed(created.id);
         })
         .catch((err) => {
@@ -764,8 +770,8 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   );
 
   const handleSend = useCallback(
-    (text: string, image?: PromptImage): boolean =>
-      alive ? sendPrompt(text, image) : resumeAndSend(text, image),
+    (text: string, image?: PromptImage, attachments?: string[]): boolean =>
+      alive ? sendPrompt(text, image, attachments) : resumeAndSend(text, image, attachments),
     [alive, sendPrompt, resumeAndSend],
   );
 
@@ -919,7 +925,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
   useEffect(() => {
     if (inputDisabled) return;
     const queued = takePendingPrompt(sessionId);
-    if (queued) sendPrompt(queued.text, queued.image);
+    if (queued) sendPrompt(queued.text, queued.image, queued.attachments);
   }, [inputDisabled, sessionId, sendPrompt]);
 
   const currentModelInfo = useMemo(
@@ -1110,6 +1116,7 @@ export function AgentPage({ sessionId, onBack, onApiError, onResumed }: Props): 
         onSend={handleSend}
         disabled={inputDisabled}
         supportsImageAttachment={session?.transport === 'structured'}
+        onUploadFile={session?.transport === 'structured' ? uploadFile : undefined}
         supportsVoiceInput={voiceEnabled}
         onTranscribeVoice={
           voiceEnabled ? (audio) => api.transcribeVoice(sessionId, audio).then((res) => res.text) : undefined

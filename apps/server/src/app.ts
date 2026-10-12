@@ -90,6 +90,8 @@ import { PlannerLlmClient } from './planner/llm-client.js';
 import { MemoryConsolidationService } from './planner/memory-consolidation.js';
 import type { PocketContext } from './types.js';
 import { PromptQueueService } from './sessions/prompt-queue.js';
+import { AttachmentStaging } from './attachments/index.js';
+import { attachmentRoutes } from './routes/attachments.js';
 import { VERSION, VERSION_WARNING } from './version.js';
 import { APP_CSP, ARTIFACT_CSP } from './security-headers.js';
 
@@ -190,6 +192,9 @@ export interface BuildAppOptions {
       skills root defaults to a real `<REPO_ROOT>/data/planner-skills`, so a
       test that registers or deletes a skill needs an isolated directory too. */
   plannerSkillsRoot?: string;
+  /** PA-136: same reasoning again — uploads stage under `<dataDir>/attachment-staging`
+      by default, which for a test is the real checkout's data directory. */
+  attachmentStagingDir?: string;
   /** Injected in tests so a planner chat turn never makes a real network call. */
   plannerLlmFetch?: typeof fetch;
   /**
@@ -680,6 +685,13 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // PA-11: one queue, shared. A webhook delivery, a scheduled run and a human's
   // own prompt all contend for the same working trees, so they have to be
   // ordered against each other rather than each keeping a private queue.
+  // PA-136: uploads wait here, outside every working tree, until the prompt
+  // naming them is sent. Emptied at boot: nothing staged survives a restart.
+  const attachmentStaging = new AttachmentStaging({
+    dir: options.attachmentStagingDir ?? path.join(config.dataDir, 'attachment-staging'),
+  });
+  attachmentStaging.init();
+
   const promptQueue = new PromptQueueService({
     db,
     sessions,
@@ -730,6 +742,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     webhooks,
     voiceTts,
     promptQueue,
+    attachmentStaging,
     workspaces,
     plannerWorkspaces,
     plannerWorkspacesRoot,
@@ -973,6 +986,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(authRoutes);
   await app.register(mcpServerRoutes);
   await app.register(sessionRoutes);
+  await app.register(attachmentRoutes);
   await app.register(agentInstallRoutes);
   await app.register(adminRoutes);
   await app.register(worktreeRoutes);
@@ -1043,6 +1057,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   app.addHook('onClose', async () => {
     usage.stop();
+    attachmentStaging.stop();
     // Before `sessions.shutdown()`: no new run may be started into a manager
     // that is already tearing down.
     cron.stop();

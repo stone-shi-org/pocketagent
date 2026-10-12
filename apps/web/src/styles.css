@@ -9156,3 +9156,86 @@ button.chat-rate-limit-badge {
     display: none;
   }
 }
+
+/* ---- PA-136: file attachments ------------------------------------------- */
+
+/* The composer's attachments, stacked above the bar: file chips, then the
+   image preview or an error. Takes over the absolute positioning
+   `.attach-preview` has on its own. */
+.attach-stack {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 8px;
+  right: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  pointer-events: none;
+}
+.attach-stack > * { pointer-events: auto; }
+.attach-stack .attach-preview { position: static; }
+
+.file-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+}
+.file-chip-row.pending {
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-elev-2);
+  box-shadow: var(--shadow-md);
+}
+/* Under a sent prompt's header, aligned with the image row. */
+.turn-header + .file-chip-row,
+.prompt-image-row + .file-chip-row {
+  margin: 8px calc(12px + var(--safe-right)) 0 calc(12px + var(--safe-left));
+  justify-content: flex-end;
+}
+
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 260px;
+  padding: 4px 6px 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  font-size: 13px;
+  line-height: 1.3;
+  color: var(--text);
+}
+.file-chip.uploading { color: var(--text-dim); }
+.file-chip.error { border-color: var(--danger); }
+.file-chip.error .file-chip-detail { color: var(--danger); }
+.file-chip-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+a.file-chip-link:hover .file-chip-name { text-decoration: underline; }
+.file-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-chip-detail { flex: none; font-size: 11px; color: var(--text-dim); }
+.file-chip-remove {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+}
+.file-chip-remove:hover { background: var(--border); color: var(--text); }
+
+/* A file being dragged over the composer. */
+.promptbar.drag-active { outline: 2px dashed var(--accent); outline-offset: 2px; }

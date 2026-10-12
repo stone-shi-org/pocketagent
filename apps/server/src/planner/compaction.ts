@@ -1,3 +1,4 @@
+import { withPlannerAttachmentNote } from '../attachments/index.js';
 import type { AgentEvent, ContextCompactionEvent } from '@pocketagent/protocol';
 import { IMAGE_TOKEN_ESTIMATE } from './context-budget.js';
 
@@ -153,7 +154,10 @@ function eventId(event: AgentEvent): string | null {
 export function estimateEventTokens(event: AgentEvent): number {
   switch (event.kind) {
     case 'user_prompt':
-      return Math.ceil(event.text.length / 4) + (event.image ? IMAGE_TOKEN_ESTIMATE : 0);
+      return (
+        Math.ceil(withPlannerAttachmentNote(event.text, event.attachments).length / 4) +
+        (event.image ? IMAGE_TOKEN_ESTIMATE : 0)
+      );
     case 'text':
       return Math.ceil(event.text.length / 4);
     case 'tool_use':
@@ -267,7 +271,12 @@ export function serializeForSummary(events: readonly AgentEvent[], maxChars: num
   for (const event of events) {
     switch (event.kind) {
       case 'user_prompt':
-        lines.push(`[User]: ${event.text}${event.image ? '\n[The user attached an image.]' : ''}`);
+        lines.push(
+          `[User]: ${event.text}${event.image ? '\n[The user attached an image.]' : ''}` +
+            (event.attachments?.length
+              ? `\n[The user attached: ${event.attachments.map((a) => a.path).join(', ')}]`
+              : ''),
+        );
         break;
       case 'text':
         lines.push(`[Assistant]: ${event.text}`);

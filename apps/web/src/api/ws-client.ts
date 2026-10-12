@@ -459,9 +459,17 @@ export class TerminalConnection {
   }
 
   /** Send a conversational turn to a structured session. */
-  sendPrompt(text: string, image?: PromptImage): boolean {
+  sendPrompt(text: string, image?: PromptImage, attachments?: string[]): boolean {
     if (!this.sessionId) return false;
-    return this.send({ type: 'prompt', sessionId: this.sessionId, text, ...(image ? { image } : {}) });
+    return this.send({
+      type: 'prompt',
+      sessionId: this.sessionId,
+      text,
+      ...(image ? { image } : {}),
+      // PA-136: ids from `POST /api/attachments`; the server lands the files
+      // and appends their paths before the prompt reaches the agent.
+      ...(attachments && attachments.length > 0 ? { attachments } : {}),
+    });
   }
 
   /**

@@ -1,9 +1,15 @@
-import { cleanCompactionErrorMessage, stripSpokenSummaryInstruction } from '@pocketagent/protocol';
+import {
+  cleanCompactionErrorMessage,
+  displayNameForLandedPath,
+  parseAttachedFileNotes,
+  stripSpokenSummaryInstruction,
+} from '@pocketagent/protocol';
 import type {
   AgentEvent,
   EffortLevel,
   ModelInfo,
   PermissionRequestEvent,
+  PromptAttachment,
   PromptImage,
   RateLimitEvent,
   SlashCommandInfo,
@@ -47,6 +53,37 @@ export interface TextItem {
   streaming: boolean;
   /** Set on a user turn that attached a screenshot. Never set for `assistant`. */
   image?: PromptImage;
+  /** PA-136: files the user turn attached. `size`/`mediaType` are known only
+      when the event carried metadata (a Pocket Agent), not when the chip was
+      read back out of a coding agent's prompt text. */
+  files?: PromptFileChip[];
+}
+
+export interface PromptFileChip {
+  name: string;
+  path: string;
+  size?: number;
+  mediaType?: string;
+}
+
+/**
+ * PA-136: a user turn's text and file chips. A Pocket Agent's event carries the
+ * files as metadata beside the text it was typed with. A coding agent's
+ * carries them only as `[Attached file saved to: …]` lines in the text,
+ * because that text is what the agent was sent and what its own transcript
+ * replays. Parsing the lines back out gives one rendering for a live turn, a
+ * queued re-send and a reload alike.
+ */
+export function userPromptView(event: { text: string; attachments?: PromptAttachment[] | undefined }): {
+  text: string;
+  files: PromptFileChip[];
+} {
+  const shown = stripSpokenSummaryInstruction(event.text);
+  if (event.attachments && event.attachments.length > 0) {
+    return { text: shown, files: event.attachments.map((a) => ({ ...a })) };
+  }
+  const parsed = parseAttachedFileNotes(shown);
+  return { text: parsed.text, files: parsed.paths.map((p) => ({ name: displayNameForLandedPath(p), path: p })) };
 }
 
 export interface ThinkingItem {
@@ -191,7 +228,8 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
       };
     }
 
-    case 'user_prompt':
+    case 'user_prompt': {
+      const view = userPromptView(event);
       return {
         ...state,
         busy: true,
@@ -209,12 +247,14 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
             // there is no partially-streamed state to corrupt — so every
             // consumer (the turn header, "Copy prompt", the fleet preview)
             // gets it right for free.
-            text: stripSpokenSummaryInstruction(event.text),
+            text: view.text,
             streaming: false,
             image: event.image,
+            ...(view.files.length > 0 ? { files: view.files } : {}),
           },
         ],
       };
+    }
 
     case 'text': {
       // A completed block supersedes the streaming preview that preceded it.
