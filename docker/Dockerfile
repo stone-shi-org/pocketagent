@@ -60,8 +60,9 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Manifests only, so this layer is reused until a dependency actually changes.
+# Manifests and pnpm patches only, so this layer is reused until a dependency actually changes.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches/ patches/
 COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 COPY apps/hub/package.json apps/hub/
@@ -526,6 +527,7 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches/ patches/
 COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 COPY apps/hub/package.json apps/hub/

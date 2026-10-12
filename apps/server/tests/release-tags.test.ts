@@ -150,6 +150,18 @@ describe("docker/build.sh's target table", () => {
     expect(script).toMatch(/imageForTarget/);
     expect(script).not.toMatch(/PA_IMAGE:-[^}$]*pocketagent-/);
   });
+
+  it('copies patches/ in every Dockerfile stage that copies pnpm-workspace.yaml', () => {
+    // `pnpm-workspace.yaml` declares `patchedDependencies` under `patches/`,
+    // so any manifest-only stage that runs `pnpm install --frozen-lockfile`
+    // (`deps` and `hub-deps`) fails unless `patches/` is copied alongside it.
+    const dockerfile = fs.readFileSync(new URL('../../../docker/Dockerfile', import.meta.url), 'utf8');
+    const workspaceCopies = [...dockerfile.matchAll(/^COPY .*pnpm-workspace\.yaml .*\n([^\n]*)/gm)];
+    expect(workspaceCopies.length).toBeGreaterThanOrEqual(2);
+    for (const [, nextLine] of workspaceCopies) {
+      expect(nextLine).toBe('COPY patches/ patches/');
+    }
+  });
 });
 
 describe('the repo version', () => {
