@@ -7,7 +7,7 @@ import {
 } from './ProvidersAndModelsPage.js';
 
 describe('ProvidersAndModelsPage (PA-132)', () => {
-  it('renders LLM endpoint, Models, TTS / STT, and Gemini Live sections under one settings page', () => {
+  it('renders LLM endpoint, Models, Embeddings, TTS / STT, and Gemini Live sections under one settings page', () => {
     const html = renderToStaticMarkup(
       <ProvidersAndModelsPage onApiError={vi.fn()} onBack={vi.fn()} />,
     );
@@ -15,6 +15,7 @@ describe('ProvidersAndModelsPage (PA-132)', () => {
     expect(html).toContain('<h2>Providers and Models</h2>');
     expect(html).toContain('<h3>LLM endpoint</h3>');
     expect(html).toContain('<h3>Models</h3>');
+    expect(html).toContain('<h3>Embeddings</h3>');
     expect(html).toContain('<h3>TTS / STT</h3>');
     expect(html).toContain('<h3>Gemini Live</h3>');
   });

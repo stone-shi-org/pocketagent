@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { computeModelSuggestions, ModelLabelEditor, PlannerPage } from './PlannerPage.js';
 
 describe('PlannerPage model label & typeahead (PA-129, PA-132)', () => {
-  it('renders Agents, Skills, MCP servers, and Default agent tools without LLM endpoint, Models, or Gemini Live (moved to Providers and Models in PA-132)', () => {
+  it('renders Agents, Skills, MCP servers, and Default agent tools without LLM endpoint, Models, Embeddings, or Gemini Live (moved to Providers and Models in PA-132)', () => {
     const html = renderToStaticMarkup(
       <PlannerPage onApiError={vi.fn()} onOpenAgent={vi.fn()} onBack={vi.fn()} />,
     );
@@ -15,6 +15,7 @@ describe('PlannerPage model label & typeahead (PA-129, PA-132)', () => {
     expect(html).toContain('<h3>Web search</h3>');
     expect(html).not.toContain('<h3>LLM endpoint</h3>');
     expect(html).not.toContain('<h3>Models</h3>');
+    expect(html).not.toContain('<h3>Embeddings</h3>');
     expect(html).not.toContain('<h3>Gemini Live</h3>');
   });
 

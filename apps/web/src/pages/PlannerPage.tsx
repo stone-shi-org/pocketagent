@@ -5,7 +5,6 @@ import type {
   PlannerToolInfo,
   PlannerWorkspace,
   PocketAgentExportData,
-  TestPlannerEmbeddingResponse,
   TestPlannerUrlFetchResponse,
   TestPlannerWebSearchResponse,
 } from '@pocketagent/protocol';
@@ -47,12 +46,6 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const [embeddingBaseUrlInput, setEmbeddingBaseUrlInput] = useState('');
-  const [embeddingApiKeyInput, setEmbeddingApiKeyInput] = useState('');
-  const [revealedEmbeddingApiKey, setRevealedEmbeddingApiKey] = useState<string | null>(null);
-  const [embeddingModelIdInput, setEmbeddingModelIdInput] = useState('');
-  const [testingEmbeddings, setTestingEmbeddings] = useState(false);
-  const [embeddingTestResult, setEmbeddingTestResult] = useState<TestPlannerEmbeddingResponse | null>(null);
   // PA-31: the web_search/url_fetch tools' own providers.
   const [webSearchBaseUrlInput, setWebSearchBaseUrlInput] = useState('');
   const [webSearchApiKeyInput, setWebSearchApiKeyInput] = useState('');
@@ -96,8 +89,6 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       ]);
       setWorkspaces(ws.workspaces);
       setSettings(se);
-      setEmbeddingBaseUrlInput(se.embeddingBaseUrl ?? '');
-      setEmbeddingModelIdInput(se.embeddingModelId ?? '');
       setWebSearchBaseUrlInput(se.webSearchBaseUrl ?? '');
       setUrlFetchBaseUrlInput(se.urlFetchBaseUrl ?? '');
       setMeInstructionInput(se.meInstruction ?? '');
@@ -234,58 +225,6 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
     );
   const setCompactionEnabled = (enabled: boolean): void => {
     void withBusy(() => api.updatePlannerSettings({ compactionEnabled: enabled }));
-  };
-
-  /**
-   * PA-29: the embedding provider's own settings — deliberately a separate
-   * base URL/API key/model from the chat endpoint.
-   */
-  const saveEmbeddingEndpoint = (): void => {
-    void withBusy(() =>
-      api.updatePlannerSettings({ embeddingBaseUrl: embeddingBaseUrlInput.trim() || null }),
-    );
-  };
-
-  const saveEmbeddingApiKey = (): void => {
-    void withBusy(async () => {
-      await api.updatePlannerSettings({ embeddingApiKey: embeddingApiKeyInput });
-      setEmbeddingApiKeyInput('');
-      setRevealedEmbeddingApiKey(null);
-    });
-  };
-
-  const revealEmbeddingKey = (): void => {
-    void withBusy(async () => {
-      const { apiKey } = await api.revealPlannerEmbeddingApiKey();
-      setRevealedEmbeddingApiKey(apiKey);
-    });
-  };
-
-  const saveEmbeddingModelId = (): void => {
-    void withBusy(() =>
-      api.updatePlannerSettings({ embeddingModelId: embeddingModelIdInput.trim() || null }),
-    );
-  };
-
-  const testEmbeddings = (): void => {
-    setTestingEmbeddings(true);
-    setEmbeddingTestResult(null);
-    void (async () => {
-      try {
-        const result = await api.testPlannerEmbeddings();
-        setEmbeddingTestResult(result);
-      } catch (err) {
-        onApiError(err);
-        setEmbeddingTestResult({
-          ok: false,
-          message: err instanceof ApiError ? err.message : 'Test failed.',
-          dims: 0,
-          latencyMs: 0,
-        });
-      } finally {
-        setTestingEmbeddings(false);
-      }
-    })();
   };
 
   /**
@@ -507,8 +446,9 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
         <div>
           <h2>Pocket Agent settings</h2>
           <p className="planner-sub">
-            Agents, instructions, tools, and tool safety. LLM endpoint, models, and Gemini Live live in
-            "Providers and Models"; chats live in the "Pocket Agents" section on the home screen.
+            Agents, instructions, tools, and tool safety. Providers and models (chat, embeddings,
+            TTS/STT, Gemini Live) live in "Providers and Models"; chats live in the "Pocket Agents"
+            section on the home screen.
           </p>
         </div>
         {onBack && (
@@ -653,97 +593,6 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
               rows={3}
               style={{ width: '100%', resize: 'vertical' }}
             />
-          </div>
-
-          <div className="planner-section">
-            <h3>Embeddings</h3>
-            <p className="planner-row-meta" style={{ marginBottom: 10 }}>
-              A separate provider from the chat endpoint — its own base URL, API key, and
-              model, since an embedding service is often deployed somewhere else entirely. Optional:
-              the memory system works lexically without this; configuring it adds semantic ranking
-              on top.
-            </p>
-            <div className="planner-field">
-              <label htmlFor="planner-embedding-base-url">Base URL (OpenAI-compatible)</label>
-              <input
-                id="planner-embedding-base-url"
-                type="text"
-                placeholder="https://api.openai.com/v1"
-                value={embeddingBaseUrlInput}
-                onChange={(e) => setEmbeddingBaseUrlInput(e.target.value)}
-              />
-            </div>
-            <div className="planner-inline">
-              <button type="button" className="planner-btn" disabled={busy} onClick={saveEmbeddingEndpoint}>
-                Save endpoint
-              </button>
-              <span className="planner-row-meta">
-                {settings?.embeddingBaseUrl ? 'Configured' : 'Not configured'}
-              </span>
-            </div>
-
-            <div className="planner-field" style={{ marginTop: 12 }}>
-              <label htmlFor="planner-embedding-api-key">API key</label>
-              <input
-                id="planner-embedding-api-key"
-                type="password"
-                placeholder={settings?.embeddingHasApiKey ? '••••••••  (leave blank to keep)' : 'sk-…'}
-                value={embeddingApiKeyInput}
-                onChange={(e) => setEmbeddingApiKeyInput(e.target.value)}
-              />
-            </div>
-            <div className="planner-inline">
-              <button type="button" className="planner-btn" disabled={busy} onClick={saveEmbeddingApiKey}>
-                Save key
-              </button>
-              <button
-                type="button"
-                className="planner-btn"
-                disabled={busy || !settings?.embeddingHasApiKey}
-                onClick={revealEmbeddingKey}
-              >
-                Reveal
-              </button>
-              <span className="planner-row-meta">
-                {settings?.embeddingHasApiKey ? 'A key is configured' : 'No key configured'}
-              </span>
-            </div>
-            {revealedEmbeddingApiKey && (
-              <p className="planner-row-meta" style={{ marginTop: 6, wordBreak: 'break-all' }}>
-                {revealedEmbeddingApiKey}
-              </p>
-            )}
-
-            <div className="planner-field" style={{ marginTop: 12 }}>
-              <label htmlFor="planner-embedding-model-id">Model id</label>
-              <input
-                id="planner-embedding-model-id"
-                type="text"
-                placeholder="text-embedding-3-small"
-                value={embeddingModelIdInput}
-                onChange={(e) => setEmbeddingModelIdInput(e.target.value)}
-              />
-            </div>
-            <div className="planner-inline">
-              <button type="button" className="planner-btn" disabled={busy} onClick={saveEmbeddingModelId}>
-                Save model
-              </button>
-              <button
-                type="button"
-                className="planner-btn"
-                disabled={testingEmbeddings || !settings?.embeddingBaseUrl || !settings?.embeddingModelId}
-                onClick={testEmbeddings}
-              >
-                {testingEmbeddings ? 'Testing…' : 'Test embeddings'}
-              </button>
-            </div>
-            {embeddingTestResult && (
-              <p className={embeddingTestResult.ok ? 'planner-test-ok' : 'planner-test-fail'}>
-                {embeddingTestResult.ok
-                  ? `OK (${embeddingTestResult.latencyMs}ms, ${embeddingTestResult.dims} dims): ${embeddingTestResult.message}`
-                  : `Failed: ${embeddingTestResult.message}`}
-              </p>
-            )}
           </div>
 
           <div className="planner-section">
