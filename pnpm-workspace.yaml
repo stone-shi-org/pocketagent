@@ -10,3 +10,7 @@ allowBuilds:
   better-sqlite3: true
   esbuild: true
   node-pty: true
+
+patchedDependencies:
+  better-sqlite3@11.10.0: patches/better-sqlite3@11.10.0.patch
+  node-pty@1.1.0: patches/node-pty@1.1.0.patch

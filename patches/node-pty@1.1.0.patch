@@ -1,0 +1,24 @@
+diff --git a/scripts/post-install.js b/scripts/post-install.js
+index 8dbac507ea9c64169ea500a0115816056c0bc309..6eb81ebe93f03e7c7dfdb4f6c4d81923354f0c10 100644
+--- a/scripts/post-install.js
++++ b/scripts/post-install.js
+@@ -77,4 +77,19 @@ if (os.platform() !== 'win32') {
+   }
+ }
+ 
++// Ensure prebuilt spawn-helper is executable on macOS / Unix
++const prebuildsDir = path.join(__dirname, '../prebuilds');
++if (fs.existsSync(prebuildsDir)) {
++  for (const dir of fs.readdirSync(prebuildsDir)) {
++    const helper = path.join(prebuildsDir, dir, 'spawn-helper');
++    if (fs.existsSync(helper)) {
++      try { fs.chmodSync(helper, 0o755); } catch {}
++    }
++  }
++}
++const releaseHelper = path.join(RELEASE_DIR, 'spawn-helper');
++if (fs.existsSync(releaseHelper)) {
++  try { fs.chmodSync(releaseHelper, 0o755); } catch {}
++}
++
+ process.exit(0);

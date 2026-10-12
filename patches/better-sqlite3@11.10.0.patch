@@ -1,0 +1,76 @@
+diff --git a/src/better_sqlite3.cpp b/src/better_sqlite3.cpp
+index 8fe2c68288103fae5872eed439d18386e40b925e..4aa7d5ea3d875856f3c9001bc5edc4ff7de353dc 100644
+--- a/src/better_sqlite3.cpp
++++ b/src/better_sqlite3.cpp
+@@ -43,7 +43,7 @@ static inline v8::MaybeLocal<v8::Object> BufferSandboxNew(v8::Isolate* isolate,
+ #endif
+ #line 39 "./src/util/binder.lzz"
+ 	static bool IsPlainObject(v8::Isolate* isolate, v8::Local<v8::Object> obj) {
+-		v8::Local<v8::Value> proto = obj->GetPrototype();
++		v8::Local<v8::Value> proto = GET_PROTOTYPE(obj);
+ 
+ 		#if defined NODE_MODULE_VERSION && NODE_MODULE_VERSION < 93
+ 		v8::Local<v8::Context> ctx = obj->CreationContext();
+@@ -52,13 +52,17 @@ static inline v8::MaybeLocal<v8::Object> BufferSandboxNew(v8::Isolate* isolate,
+ 		#endif
+ 
+ 		ctx->Enter();
+-		v8::Local<v8::Value> baseProto = v8::Object::New(isolate)->GetPrototype();
++		v8::Local<v8::Value> baseProto = GET_PROTOTYPE(v8::Object::New(isolate));
+ 		ctx->Exit();
+ 		return proto->StrictEquals(baseProto) || proto->StrictEquals(v8::Null(isolate));
+ 	}
+ #line 67 "./src/better_sqlite3.lzz"
+ NODE_MODULE_INIT(/* exports, context */) {
++	#if defined(NODE_MODULE_VERSION) && NODE_MODULE_VERSION >= 140
++	v8::Isolate* isolate = v8::Isolate::GetCurrent();
++	#else
+ 	v8::Isolate* isolate = context->GetIsolate();
++	#endif
+ 	v8::HandleScope scope(isolate);
+ 
+ 	// Initialize addon instance.
+@@ -758,13 +762,13 @@ void Database::JS_unsafeMode (v8::FunctionCallbackInfo <v8 :: Value> const & inf
+ void Database::JS_open (v8::Local <v8 :: Name> _, v8::PropertyCallbackInfo <v8 :: Value> const & info)
+ #line 415 "./src/objects/database.lzz"
+                              {
+-                info.GetReturnValue().Set( node :: ObjectWrap :: Unwrap <Database>(info.This())->open);
++                info.GetReturnValue().Set( node :: ObjectWrap :: Unwrap <Database>(PROPERTY_HOLDER(info))->open);
+ }
+ #line 419 "./src/objects/database.lzz"
+ void Database::JS_inTransaction (v8::Local <v8 :: Name> _, v8::PropertyCallbackInfo <v8 :: Value> const & info)
+ #line 419 "./src/objects/database.lzz"
+                                       {
+-                Database* db = node :: ObjectWrap :: Unwrap <Database>(info.This());
++                Database* db = node :: ObjectWrap :: Unwrap <Database>(PROPERTY_HOLDER(info));
+                 info.GetReturnValue().Set(db->open && !static_cast<bool>(sqlite3_get_autocommit(db->db_handle)));
+ }
+ #line 424 "./src/objects/database.lzz"
+@@ -1133,7 +1137,7 @@ void Statement::JS_columns (v8::FunctionCallbackInfo <v8 :: Value> const & info)
+ void Statement::JS_busy (v8::Local <v8 :: Name> _, v8::PropertyCallbackInfo <v8 :: Value> const & info)
+ #line 321 "./src/objects/statement.lzz"
+                              {
+-                Statement* stmt = node :: ObjectWrap :: Unwrap <Statement>(info.This());
++                Statement* stmt = node :: ObjectWrap :: Unwrap <Statement>(PROPERTY_HOLDER(info));
+                 info.GetReturnValue().Set(stmt->alive && stmt->locked);
+ }
+ #line 4 "./src/objects/statement-iterator.lzz"
+diff --git a/src/better_sqlite3.hpp b/src/better_sqlite3.hpp
+index 27ae83b0e425a7a5b2ab9682413001553d6b2558..7d25a11fef066d6266205c3f042b275573d194c9 100644
+--- a/src/better_sqlite3.hpp
++++ b/src/better_sqlite3.hpp
+@@ -16,6 +16,14 @@
+ #include <node.h>
+ #include <node_object_wrap.h>
+ #include <node_buffer.h>
++
++#if defined(V8_MAJOR_VERSION) && V8_MAJOR_VERSION >= 13
++#define PROPERTY_HOLDER(info) (info).HolderV2()
++#define GET_PROTOTYPE(obj) ((obj)->GetPrototypeV2())
++#else
++#define PROPERTY_HOLDER(info) (info).This()
++#define GET_PROTOTYPE(obj) ((obj)->GetPrototype())
++#endif
+ #line 145 "./src/util/macros.lzz"
+ void SetPrototypeGetter(
+ 	v8::Isolate* isolate,

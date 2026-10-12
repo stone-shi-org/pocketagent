@@ -123,7 +123,7 @@ describe('planner artifacts (PA-128)', () => {
     const chat = t.context.plannerChats.create({ workspaceId: ws.id, title: 'Chat' });
     const delRes = await del(`/api/planner/chats/${chat.id}/artifacts/file?name=to-delete.txt`);
     expect(delRes.statusCode).toBe(200);
-    expect(delRes.json()).toEqual({ ok: true });
+    expect(delRes.json()).toEqual({ ok: true, count: 1 });
 
     // Verify file is gone on disk
     await expect(fs.stat(filePath)).rejects.toThrow();

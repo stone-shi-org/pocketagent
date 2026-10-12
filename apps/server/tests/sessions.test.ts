@@ -655,7 +655,7 @@ describe('PTY lifecycle', () => {
     const session = t.context.sessions.getOrThrow(id);
     await sleep(300);
     session.write('echo "TOKENCOUNT=$(env | grep -c POCKETAGENT || true)"\n');
-    const output = await waitForOutput(t, id, 'TOKENCOUNT=');
+    const output = await waitForOutput(t, id, 'TOKENCOUNT=0');
     expect(output).toContain('TOKENCOUNT=0');
   });
 
