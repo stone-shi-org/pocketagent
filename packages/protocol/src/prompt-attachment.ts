@@ -58,6 +58,29 @@ export const PromptAttachment = z.object({
   path: z.string().max(4096),
   size: z.number().int().nonnegative(),
   mediaType: z.string().max(255),
+  /**
+   * PA-137: the file is UTF-8 text (judged when it landed, from its type and
+   * its bytes), so a Pocket Agent may inline it when it is small enough.
+   * Absent on anything landed before PA-137, which reads as "not text".
+   */
+  text: z.boolean().optional(),
+  /**
+   * PA-137: text extracted from a PDF, docx, xlsx or pptx when it landed, as
+   * a sidecar `<landed name>.txt` beside it. Relative like `path`. Plain text,
+   * so `read_file` (or any agent's own file tool) can page through it with no
+   * shell and no approval.
+   */
+  extractedPath: z.string().max(4096).optional(),
+  /** Characters in the sidecar. */
+  extractedChars: z.number().int().nonnegative().optional(),
+  /** The extract stopped at a cap (pages or characters) before the document ended. */
+  truncated: z.boolean().optional(),
+  /**
+   * Why extraction failed, in a short sentence the model can be shown — a
+   * timeout, a heap cap, a document that would not parse. Never fails the
+   * turn: the file is still there and the note says it could not be read.
+   */
+  extractError: z.string().max(300).optional(),
 });
 export type PromptAttachment = z.infer<typeof PromptAttachment>;
 
@@ -74,6 +97,32 @@ export function attachedFileNote(relPath: string): string {
 }
 
 /**
+ * PA-137: the line that follows a file's note when its text was extracted
+ * into a sidecar (non-claude coding agents only). Parsed back out with the
+ * file notes, but it names no chip of its own: the sidecar is a byproduct of
+ * the file above it, not something the user attached.
+ */
+export const EXTRACTED_TEXT_NOTE_PREFIX = '[Extracted text saved to: ';
+
+export function extractedTextNote(relPath: string, truncated = false): string {
+  return `${EXTRACTED_TEXT_NOTE_PREFIX}${relPath}${truncated ? ' (truncated)' : ''}]`;
+}
+
+/** PA-137: inline caps a Pocket Agent applies when Settings leave them alone. */
+export const DEFAULT_INLINE_TEXT_MAX_BYTES = 32 * 1024;
+export const DEFAULT_INLINE_EXTRACT_MAX_TOKENS = 8000;
+/** PA-137: the most Settings may raise either cap to. */
+export const MAX_INLINE_TEXT_MAX_BYTES = 256 * 1024;
+export const MAX_INLINE_EXTRACT_MAX_TOKENS = 64_000;
+
+/**
+ * PA-137: largest file an MCP client may upload with `upload_attachment`.
+ * Smaller than `MAX_ATTACHMENT_BYTES` because it rides inside a JSON-RPC
+ * message as base64, and the MCP endpoint's body limit has to hold it.
+ */
+export const MAX_MCP_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+
+/**
  * Splits trailing `[Attached file saved to: …]` lines off a prompt. Only
  * *trailing* lines, and only whole lines: the note is always appended last by
  * the server, so a prompt that merely quotes the phrase mid-text keeps it.
@@ -87,6 +136,15 @@ export function parseAttachedFileNotes(text: string): { text: string; paths: str
       paths.unshift(last.slice(ATTACHED_FILE_NOTE_PREFIX.length, -1));
       lines.pop();
       continue;
+    }
+    // PA-137: a sidecar line belongs to the file note above it. Only taken
+    // once inside the trailing block, or a prompt ending in one would lose it.
+    if (last.startsWith(EXTRACTED_TEXT_NOTE_PREFIX) && last.endsWith(']') && lines.length > 1) {
+      const above = lines[lines.length - 2]!;
+      if (above.startsWith(ATTACHED_FILE_NOTE_PREFIX) || above.startsWith(EXTRACTED_TEXT_NOTE_PREFIX)) {
+        lines.pop();
+        continue;
+      }
     }
     // Blank separator lines between the notes (and before them) go with them.
     if (paths.length > 0 && last.trim() === '') {

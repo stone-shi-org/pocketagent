@@ -677,6 +677,14 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                       disabled={busy}
                       onSave={(v) => setModelLimit(m.id, { supportsImages: v })}
                     />
+                    <TriStateSelect
+                      label="PDFs"
+                      title="Whether to send an attached PDF itself (as an OpenAI file part) beside its extracted text. Off by default: most OpenAI-compatible servers reject PDF input. If the server refuses one, the turn continues with the text only."
+                      value={m.supportsPdf ?? null}
+                      disabled={busy}
+                      noAuto
+                      onSave={(v) => setModelLimit(m.id, { supportsPdf: v })}
+                    />
                     <span
                       className="planner-model-prices"
                       title="USD per million tokens, used to show each turn's cost. Optional — with no input and output price a turn shows no cost. An empty cache price is charged at the input price. A cost the provider reports itself is used instead."
@@ -1078,15 +1086,18 @@ function TriStateSelect({
   title,
   value,
   disabled,
+  noAuto = false,
   onSave,
 }: {
   label: string;
   title: string;
   value: boolean | null;
   disabled: boolean;
+  /** PA-137: a flag whose unset value simply means off (`supportsPdf`). */
+  noAuto?: boolean;
   onSave: (value: boolean | null) => void;
 }): JSX.Element {
-  const current = value === null ? 'auto' : value ? 'on' : 'off';
+  const current = value === null ? (noAuto ? 'off' : 'auto') : value ? 'on' : 'off';
   return (
     <label className="planner-model-limit" title={title}>
       <span>{label}</span>
@@ -1098,7 +1109,7 @@ function TriStateSelect({
           if (next !== value) onSave(next);
         }}
       >
-        <option value="auto">Auto</option>
+        {!noAuto && <option value="auto">Auto</option>}
         <option value="on">On</option>
         <option value="off">Off</option>
       </select>

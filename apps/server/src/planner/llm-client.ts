@@ -22,7 +22,9 @@ export type PlannerTextContentPart = { type: 'text'; text: string; cache_control
 
 export type PlannerUserContentPart =
   | PlannerTextContentPart
-  | { type: 'image_url'; image_url: { url: string }; cache_control?: PlannerCacheControl };
+  | { type: 'image_url'; image_url: { url: string }; cache_control?: PlannerCacheControl }
+  /** PA-137: a PDF, for a model whose row sets `supportsPdf` — see `attachments/inline.ts`. */
+  | { type: 'file'; file: { filename: string; file_data: string }; cache_control?: PlannerCacheControl };
 
 export type PlannerChatMessage =
   | { role: 'system'; content: string | PlannerTextContentPart[] }

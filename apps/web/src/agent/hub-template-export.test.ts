@@ -150,6 +150,8 @@ describe('hub-template-export payloads', () => {
       compactionEnabled: true,
       compactionReserveTokens: 16384,
       compactionKeepRecentTokens: 20000,
+      attachmentInlineTextMaxBytes: 32768,
+      attachmentInlineExtractMaxTokens: 8000,
     };
     const models: PlannerModel[] = [
       { id: 'm-1', modelId: 'gpt-4o', label: 'GPT-4o', createdAt: 1000, sortOrder: 0, supportsEffort: true },

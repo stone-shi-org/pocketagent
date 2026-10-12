@@ -3,7 +3,11 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import {
+  AttachmentIdList,
   EffortLevel,
+  MAX_ATTACHMENT_NAME_CHARS,
+  MAX_ATTACHMENTS_PER_PROMPT,
+  MAX_MCP_ATTACHMENT_BYTES,
   MCP_SERVER_PATH,
   type AgentInfo,
   type McpProtocolEra,
@@ -64,6 +68,9 @@ export interface McpToolDeps {
 export interface McpToolDefinition {
   name: string;
   scope: McpScope;
+  /** PA-137: further scopes that also offer this tool (`upload_attachment`
+      serves both `sessions` and `planner`). Any one is enough. */
+  alsoScopes?: readonly McpScope[];
   title: string;
   description: string;
   input: z.ZodRawShape;
@@ -73,6 +80,23 @@ export interface McpToolDefinition {
 }
 
 const MAX_TEXT = 20_000;
+
+/** PA-137: whether a token holding `scopes` may use `tool`. */
+export function toolAllowed(tool: McpToolDefinition, scopes: Iterable<McpScope>): boolean {
+  const held = new Set(scopes);
+  return held.has(tool.scope) || (tool.alsoScopes ?? []).some((s) => held.has(s));
+}
+
+/** PA-137: base64 of `MAX_MCP_ATTACHMENT_BYTES`, the longest `dataBase64` accepted. */
+const MAX_MCP_ATTACHMENT_BASE64 = Math.ceil(MAX_MCP_ATTACHMENT_BYTES / 3) * 4;
+
+const attachmentsInput = AttachmentIdList.optional().describe(
+  `Up to ${MAX_ATTACHMENTS_PER_PROMPT} attachment ids from upload_attachment. Each is single-use and only this client's.`,
+);
+
+function attachmentIds(args: Record<string, unknown>): string[] {
+  return Array.isArray(args.attachments) ? (args.attachments as string[]) : [];
+}
 const sessionId = z.string().min(1).max(200).describe('A session id from list_sessions.');
 const chatId = z.string().min(1).max(200).describe('A Pocket Agent chat id from list_pocket_chats.');
 const limit = (max: number, def: number) =>
@@ -528,6 +552,38 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
     },
   },
 
+  // ---- attachments (PA-137) -------------------------------------------------
+  {
+    name: 'upload_attachment',
+    scope: 'sessions',
+    alsoScopes: ['planner'],
+    title: 'Upload a file to attach to a prompt',
+    description:
+      `Stage a file (at most ${MAX_MCP_ATTACHMENT_BYTES / (1024 * 1024)} MB, base64) to attach to a prompt, and get back an ` +
+      'attachmentId. Pass it in `attachments` on start_session, send_prompt, run_coding_task, send_pocket_message or ' +
+      'run_pocket_task. Nothing is written into a project until that prompt is sent: then the file lands in the ' +
+      "session's .pocketagent/attachments/ (or the Pocket Agent's artifacts/uploads/) and the agent is told its path. " +
+      'An id is single-use, expires after an hour unsent, and only this client can use it.',
+    input: {
+      name: z.string().min(1).max(MAX_ATTACHMENT_NAME_CHARS).describe('The file name, e.g. "report.pdf". Sanitised to a basename.'),
+      mediaType: z.string().max(255).optional().describe('e.g. "application/pdf". Informational only.'),
+      dataBase64: z.string().min(1).max(MAX_MCP_ATTACHMENT_BASE64).describe('The file\'s bytes, base64-encoded.'),
+    },
+    readOnly: false,
+    async handler(deps, ctx, args) {
+      const encoded = String(args.dataBase64).replace(/\s+/g, '');
+      if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 === 1) {
+        throw new Error('dataBase64 is not valid base64.');
+      }
+      const staged = await deps.work.uploadAttachment(ctx.principal, {
+        name: String(args.name),
+        ...(typeof args.mediaType === 'string' ? { mediaType: args.mediaType } : {}),
+        data: Buffer.from(encoded, 'base64'),
+      });
+      return { ...staged, expiresInSeconds: 3600 };
+    },
+  },
+
   // ---- sessions ------------------------------------------------------------
   {
     name: 'start_session',
@@ -550,6 +606,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
         .describe('"new-branch" works in a fresh git worktree on a newly minted branch. Default "none".'),
       branchBase: z.string().max(60).optional().describe('Readable base for the minted branch name.'),
       resumeConversationId: z.string().max(200).optional().describe('Continue an existing conversation (claude).'),
+      attachments: attachmentsInput,
     },
     readOnly: false,
     async handler(deps, ctx, args) {
@@ -564,10 +621,10 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
     description:
       'Send a follow-up prompt to a structured session. A finished session is resumed into a new one. ' +
       'If another session is mid-turn in the same tree, the prompt queues.',
-    input: { sessionId, prompt: z.string().min(1).max(100_000) },
+    input: { sessionId, prompt: z.string().min(1).max(100_000), attachments: attachmentsInput },
     readOnly: false,
     async handler(deps, ctx, args) {
-      return deps.work.sendPrompt(ctx.principal, ctx.depth, String(args.sessionId), String(args.prompt));
+      return deps.work.sendPrompt(ctx.principal, ctx.depth, String(args.sessionId), String(args.prompt), attachmentIds(args));
     },
   },
   {
@@ -601,6 +658,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
       effort: EffortLevel.nullable().optional(),
       worktree: z.enum(['none', 'new-branch']).optional(),
       branchBase: z.string().max(60).optional(),
+      attachments: attachmentsInput,
       timeoutSeconds: waitSeconds,
     },
     readOnly: false,
@@ -663,11 +721,11 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
     scope: 'planner',
     title: 'Message a Pocket Agent',
     description: 'Send a message to a Pocket Agent chat and wait (up to timeoutSeconds) for its reply.',
-    input: { chatId, message: z.string().min(1).max(100_000), timeoutSeconds: waitSeconds },
+    input: { chatId, message: z.string().min(1).max(100_000), attachments: attachmentsInput, timeoutSeconds: waitSeconds },
     readOnly: false,
     async handler(deps, ctx, args) {
       const id = String(args.chatId);
-      await deps.work.sendPocketMessage(ctx.principal, id, String(args.message));
+      await deps.work.sendPocketMessage(ctx.principal, id, String(args.message), attachmentIds(args));
       return waitWithProgress(ctx, (o) =>
         deps.work.waitForPocketTurn(id, (args.timeoutSeconds as number | undefined) ?? DEFAULT_WAIT_SECONDS, o),
       );
@@ -682,6 +740,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
       workspaceId: z.string().min(1).max(200),
       message: z.string().min(1).max(100_000),
       title: z.string().max(200).optional(),
+      attachments: attachmentsInput,
       timeoutSeconds: waitSeconds,
     },
     readOnly: false,
@@ -690,7 +749,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
         workspaceId: String(args.workspaceId),
         ...(typeof args.title === 'string' ? { title: args.title } : {}),
       });
-      await deps.work.sendPocketMessage(ctx.principal, id, String(args.message));
+      await deps.work.sendPocketMessage(ctx.principal, id, String(args.message), attachmentIds(args));
       return waitWithProgress(ctx, (o) =>
         deps.work.waitForPocketTurn(id, (args.timeoutSeconds as number | undefined) ?? MAX_WAIT_SECONDS, o),
       );
@@ -822,5 +881,6 @@ function startInput(args: Record<string, unknown>): StartSessionInput {
       : {}),
     ...(typeof args.branchBase === 'string' ? { branchBase: args.branchBase } : {}),
     ...(typeof args.resumeConversationId === 'string' ? { resumeConversationId: args.resumeConversationId } : {}),
+    ...(attachmentIds(args).length > 0 ? { attachments: attachmentIds(args) } : {}),
   };
 }

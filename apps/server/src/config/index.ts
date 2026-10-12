@@ -302,6 +302,12 @@ export interface Config {
    */
   voiceTurnSilenceMs: number;
   /**
+   * PA-137: delete landed attachments older than this many days (`0` =
+   * never, the default). Config-literal-only, like the voice knobs: there is
+   * no env var, it is a Settings field — see `attachments/retention.ts`.
+   */
+  attachmentRetentionDays: number;
+  /**
    * PA-84: whether a voice-enabled turn asks the model for a spoken paraphrase
    * wrapped in `<speak>` (`SPOKEN_SUMMARY_INSTRUCTION`). Same
    * "config-literal-only, no env var" shape as the two fields above.
@@ -639,5 +645,6 @@ export function loadConfig(
     voiceTurnSensitivity: 5,
     voiceTurnSilenceMs: 800,
     voiceSpokenSummaryEnabled: true,
+    attachmentRetentionDays: 0,
   };
 }

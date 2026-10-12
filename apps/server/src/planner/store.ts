@@ -1,6 +1,13 @@
 import crypto from 'node:crypto';
 import type { PlannerChat, PlannerLiveProvider, PlannerMemory, PlannerMemoryTier } from '@pocketagent/protocol';
-import { PromptAttachment, PromptImage } from '@pocketagent/protocol';
+import {
+  DEFAULT_INLINE_EXTRACT_MAX_TOKENS,
+  DEFAULT_INLINE_TEXT_MAX_BYTES,
+  MAX_INLINE_EXTRACT_MAX_TOKENS,
+  MAX_INLINE_TEXT_MAX_BYTES,
+  PromptAttachment,
+  PromptImage,
+} from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import { readSetting, writeSetting } from '../db/index.js';
 import type { PlannerWorkspaceRow, PlannerWorkspaceStore } from './workspaces.js';
@@ -295,6 +302,8 @@ export interface PlannerModelRow {
   cacheWritePricePerMTok: number | null;
   /** PA-122: `null` = auto, see `plannerModelSupportsImages`. */
   supportsImages: boolean | null;
+  /** PA-137: `null` = off — see `PlannerModel.supportsPdf`. */
+  supportsPdf: boolean | null;
 }
 
 /** PA-122: the price columns, camelCase → column name. */
@@ -308,7 +317,13 @@ type PriceField = keyof typeof PRICE_COLUMNS;
 
 /** The columns a caller may leave out when adding a row — each defaults to
     "not set". */
-type OptionalModelColumns = 'contextWindow' | 'maxOutputTokens' | 'promptCaching' | 'supportsImages' | PriceField;
+type OptionalModelColumns =
+  | 'contextWindow'
+  | 'maxOutputTokens'
+  | 'promptCaching'
+  | 'supportsImages'
+  | 'supportsPdf'
+  | PriceField;
 
 function nullableBool(value: number | null | undefined): boolean | null {
   return value === null || value === undefined ? null : value !== 0;
@@ -334,6 +349,7 @@ interface PlannerModelDbRow {
   price_cache_read?: number | null;
   price_cache_write?: number | null;
   supports_images?: number | null;
+  supports_pdf?: number | null;
 }
 
 function modelFromDbRow(row: PlannerModelDbRow): PlannerModelRow {
@@ -353,6 +369,7 @@ function modelFromDbRow(row: PlannerModelDbRow): PlannerModelRow {
     cacheReadPricePerMTok: row.price_cache_read ?? null,
     cacheWritePricePerMTok: row.price_cache_write ?? null,
     supportsImages: nullableBool(row.supports_images),
+    supportsPdf: nullableBool(row.supports_pdf),
   };
 }
 
@@ -369,10 +386,10 @@ export function insertPlannerModel(
   db.prepare(
     `INSERT INTO planner_models
        (id, model_id, label, sort_order, created_at, supports_effort, default_effort, context_window, max_output_tokens,
-        prompt_caching, price_input, price_output, price_cache_read, price_cache_write, supports_images)
+        prompt_caching, price_input, price_output, price_cache_read, price_cache_write, supports_images, supports_pdf)
      VALUES (@id, @modelId, @label, @sortOrder, @createdAt, @supportsEffort, @defaultEffort, @contextWindow, @maxOutputTokens,
         @promptCaching, @inputPricePerMTok, @outputPricePerMTok, @cacheReadPricePerMTok, @cacheWritePricePerMTok,
-        @supportsImages)`,
+        @supportsImages, @supportsPdf)`,
   ).run({
     id: row.id,
     modelId: row.modelId,
@@ -389,6 +406,7 @@ export function insertPlannerModel(
     cacheReadPricePerMTok: row.cacheReadPricePerMTok ?? null,
     cacheWritePricePerMTok: row.cacheWritePricePerMTok ?? null,
     supportsImages: boolParam(row.supportsImages),
+    supportsPdf: boolParam(row.supportsPdf),
   });
 }
 
@@ -413,6 +431,7 @@ export function updatePlannerModel(
     maxOutputTokens?: number | null;
     promptCaching?: boolean | null;
     supportsImages?: boolean | null;
+    supportsPdf?: boolean | null;
   } & Partial<Record<PriceField, number | null>>,
 ): boolean {
   const assignments: string[] = [];
@@ -444,6 +463,10 @@ export function updatePlannerModel(
   if (patch.supportsImages !== undefined) {
     assignments.push('supports_images = @supportsImages');
     params.supportsImages = boolParam(patch.supportsImages);
+  }
+  if (patch.supportsPdf !== undefined) {
+    assignments.push('supports_pdf = @supportsPdf');
+    params.supportsPdf = boolParam(patch.supportsPdf);
   }
   for (const field of Object.keys(PRICE_COLUMNS) as PriceField[]) {
     if (patch[field] === undefined) continue;
@@ -631,6 +654,15 @@ export const PLANNER_COMPACTION_KEEP_RECENT_TOKENS_KEY = 'planner_compaction_kee
 export const DEFAULT_COMPACTION_RESERVE_TOKENS = 16_384;
 export const DEFAULT_COMPACTION_KEEP_RECENT_TOKENS = 20_000;
 
+/**
+ * PA-137: how big an attachment may be and still have its content put into
+ * the message (`attachments/inline.ts`) — a UTF-8 text file in bytes, an
+ * extracted document in tokens. `0` never inlines. Settings, with these
+ * defaults, by the reporter's choice on the ticket.
+ */
+export const PLANNER_ATTACHMENT_INLINE_TEXT_MAX_BYTES_KEY = 'planner_attachment_inline_text_max_bytes';
+export const PLANNER_ATTACHMENT_INLINE_EXTRACT_MAX_TOKENS_KEY = 'planner_attachment_inline_extract_max_tokens';
+
 export interface PlannerSettingsSnapshot {
   baseUrl: string | null;
   hasApiKey: boolean;
@@ -655,6 +687,8 @@ export interface PlannerSettingsSnapshot {
   compactionEnabled: boolean;
   compactionReserveTokens: number;
   compactionKeepRecentTokens: number;
+  attachmentInlineTextMaxBytes: number;
+  attachmentInlineExtractMaxTokens: number;
 }
 
 export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
@@ -696,7 +730,34 @@ export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
       1024,
       1_000_000,
     ),
+    attachmentInlineTextMaxBytes: readBoundedInt(
+      db,
+      PLANNER_ATTACHMENT_INLINE_TEXT_MAX_BYTES_KEY,
+      DEFAULT_INLINE_TEXT_MAX_BYTES,
+      0,
+      MAX_INLINE_TEXT_MAX_BYTES,
+    ),
+    attachmentInlineExtractMaxTokens: readBoundedInt(
+      db,
+      PLANNER_ATTACHMENT_INLINE_EXTRACT_MAX_TOKENS_KEY,
+      DEFAULT_INLINE_EXTRACT_MAX_TOKENS,
+      0,
+      MAX_INLINE_EXTRACT_MAX_TOKENS,
+    ),
   };
+}
+
+/** PA-137: see `PLANNER_ATTACHMENT_INLINE_TEXT_MAX_BYTES_KEY`. */
+export function writePlannerAttachmentInlineCaps(
+  db: Db,
+  patch: { textMaxBytes?: number; extractMaxTokens?: number },
+): void {
+  if (patch.textMaxBytes !== undefined) {
+    writeSetting(db, PLANNER_ATTACHMENT_INLINE_TEXT_MAX_BYTES_KEY, String(patch.textMaxBytes));
+  }
+  if (patch.extractMaxTokens !== undefined) {
+    writeSetting(db, PLANNER_ATTACHMENT_INLINE_EXTRACT_MAX_TOKENS_KEY, String(patch.extractMaxTokens));
+  }
 }
 
 /** An integer setting, clamped defensively on the way out like the three

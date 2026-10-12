@@ -21,7 +21,17 @@ export function SentFileChips({ files }: { files: readonly PromptFileChip[] }): 
     <div className="file-chip-row" aria-label="Attached files">
       {files.map((file) => {
         const href = hrefFor?.(file.path) ?? null;
-        const detail = file.size !== undefined ? formatFileSize(file.size) : null;
+        const size = file.size !== undefined ? formatFileSize(file.size) : null;
+        // PA-137: whether the agent could read a document's text, so a reply
+        // that ignores a scan is explained by the chip rather than a mystery.
+        const read =
+          file.extractError !== undefined
+            ? 'text not readable'
+            : file.extractedChars !== undefined
+              ? `text read${file.truncated ? ' (partly)' : ''}`
+              : null;
+        const detail = [size, read].filter(Boolean).join(' · ') || null;
+        const title = file.extractError ? `${file.path}\n${file.extractError}` : file.path;
         const body = (
           <>
             <Icon name="file" size={15} />
@@ -30,7 +40,7 @@ export function SentFileChips({ files }: { files: readonly PromptFileChip[] }): 
           </>
         );
         return (
-          <span key={file.path} className="file-chip" title={file.path}>
+          <span key={file.path} className="file-chip" title={title}>
             {href ? (
               <a className="file-chip-link" href={href} target="_blank" rel="noreferrer" download={file.name}>
                 {body}

@@ -4,7 +4,6 @@ import {
   LIMITS,
   PROTOCOL_VERSION,
   appendSpokenSummaryInstruction,
-  attachedFileNote,
   SERVER_PROTOCOL_RANGE,
   isSupportedProtocolVersion,
   WsCloseCode,
@@ -19,14 +18,9 @@ import { isOriginAllowed } from '../auth/index.js';
 import type { ManagedSession, StructuredLikeSession } from '../sessions/manager.js';
 import { StructuredSession } from '../sessions/structured-session.js';
 import type { PtySession } from '../sessions/pty-session.js';
-import {
-  AttachmentError,
-  landStagedAttachments,
-  saveAttachmentToWorkspace,
-  sessionLandingTarget,
-  type StagedAttachment,
-} from '../attachments/index.js';
+import { AttachmentError, saveAttachmentToWorkspace, type StagedAttachment } from '../attachments/index.js';
 import { attachmentPrincipal } from '../routes/attachments.js';
+import { landSessionAttachments } from '../attachments/session-landing.js';
 import type { TtsAudioChunk } from '../voice/tts-service.js';
 
 /**
@@ -514,6 +508,9 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
       return session;
     };
 
+    // PA-137: prompts from this tab, delivered strictly in order — see `case 'prompt'`.
+    let promptChain: Promise<void> = Promise.resolve();
+
     ws.on('message', (raw: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
       // Rate window
       const now = Date.now();
@@ -665,73 +662,97 @@ export const websocketRoutes: FastifyPluginAsync = async (app) => {
             break;
           }
 
-          let promptText = message.text;
-          const notes: string[] = [];
-          try {
-            if (message.image) {
-              const relPath = saveAttachmentToWorkspace(session.spec.cwd, message.image);
-              notes.push(`[Attached image saved to: ${relPath}]`);
-            }
-            // The note is the agent's only way to learn the file exists, and
-            // the one thing that survives a queued re-send (PA-11 persists the
-            // text alone) — so it is added here, above `promptQueue.submit`,
-            // exactly as the image note always was.
-            const landed = landStagedAttachments(attachmentStaging, sessionLandingTarget(session.spec.cwd), staged);
-            for (const file of landed) notes.push(attachedFileNote(file.path));
-            if (landed.length > 0) {
-              request.log.info(
-                { sessionId: message.sessionId, files: landed.length, bytes: landed.reduce((n, f) => n + f.size, 0) },
-                'prompt attachments landed',
+          // PA-137: the rest is async — a non-claude agent's documents have
+          // their text extracted as they land — so it runs in a per-connection
+          // chain that keeps this tab's prompts in the order they were sent.
+          const sent = message;
+          promptChain = promptChain.then(async () => {
+            let promptText = sent.text;
+            const notes: string[] = [];
+            try {
+              if (sent.image) {
+                const relPath = saveAttachmentToWorkspace(session.spec.cwd, sent.image);
+                notes.push(`[Attached image saved to: ${relPath}]`);
+              }
+              // The note is the agent's only way to learn the file exists, and
+              // the one thing that survives a queued re-send (PA-11 persists the
+              // text alone) — so it is added here, above `promptQueue.submit`,
+              // exactly as the image note always was.
+              const landed = await landSessionAttachments(
+                attachmentStaging,
+                session.spec.cwd,
+                session.spec.agent,
+                staged,
+                request.log,
+                app.pocket.db,
               );
+              notes.push(...landed.notes);
+              if (landed.attachments.length > 0) {
+                request.log.info(
+                  {
+                    sessionId: sent.sessionId,
+                    files: landed.attachments.length,
+                    bytes: landed.attachments.reduce((n, f) => n + f.size, 0),
+                    extracted: landed.attachments.filter((f) => f.extractedPath).length,
+                  },
+                  'prompt attachments landed',
+                );
+              }
+            } catch (err) {
+              // Used to be a `warn` and carry on, which sent the image with its
+              // path note missing and told nobody. Now nothing is sent.
+              attachmentStaging.release(staged);
+              request.log.warn({ err }, 'failed to save attachment to workspace');
+              sendError(
+                err instanceof AttachmentError && err.code === 'forbidden' ? 'bad_message' : 'internal',
+                `Could not save the attachment: ${err instanceof Error ? err.message : String(err)}`,
+                sent.sessionId,
+              );
+              return;
             }
-          } catch (err) {
-            // Used to be a `warn` and carry on, which sent the image with its
-            // path note missing and told nobody. Now nothing is sent.
-            attachmentStaging.release(staged);
-            request.log.warn({ err }, 'failed to save attachment to workspace');
-            sendError(
-              err instanceof AttachmentError && err.code === 'forbidden' ? 'bad_message' : 'internal',
-              `Could not save the attachment: ${err instanceof Error ? err.message : String(err)}`,
-              message.sessionId,
-            );
-            break;
-          }
-          if (notes.length > 0) {
-            const block = notes.join('\n');
-            promptText = promptText ? `${promptText}\n\n${block}` : block;
-          }
+            if (!session.isAlive()) {
+              sendError('session_not_running', 'Session is not running.', sent.sessionId);
+              return;
+            }
+            if (notes.length > 0) {
+              const block = notes.join('\n');
+              promptText = promptText ? `${promptText}\n\n${block}` : block;
+            }
 
-          // PA-84: a voice-enabled turn asks for a spoken paraphrase wrapped in
-          // `<speak>`, which `VoiceTtsService` then speaks *instead of* the
-          // written reply. This is the seam for all five structured backends at
-          // once: none of them has system-prompt plumbing, an adapter's argv
-          // never reaches a structured session, and the Claude SDK's own
-          // `systemPrompt` is fixed when `query()` is called — so a system
-          // instruction could not follow a mid-session voice toggle, while
-          // prompt text is per-turn and needs no new plumbing. Same shape as
-          // `SUBAGENT_RESULT_TRAILER` (PA-76), and deliberately above
-          // `promptQueue.submit` for the same reason the image note is: a
-          // deferred prompt is re-sent from its persisted text verbatim, so an
-          // instruction added later would be lost exactly on the queued path.
-          // Hidden from the transcript at render, not here — it genuinely is
-          // part of the prompt that ran.
-          if (config.voiceSpokenSummaryEnabled && sessions.isVoiceModeEnabled(message.sessionId)) {
-            promptText = appendSpokenSummaryInstruction(promptText);
-          }
+            // PA-84: a voice-enabled turn asks for a spoken paraphrase wrapped in
+            // `<speak>`, which `VoiceTtsService` then speaks *instead of* the
+            // written reply. This is the seam for all five structured backends at
+            // once: none of them has system-prompt plumbing, an adapter's argv
+            // never reaches a structured session, and the Claude SDK's own
+            // `systemPrompt` is fixed when `query()` is called — so a system
+            // instruction could not follow a mid-session voice toggle, while
+            // prompt text is per-turn and needs no new plumbing. Same shape as
+            // `SUBAGENT_RESULT_TRAILER` (PA-76), and deliberately above
+            // `promptQueue.submit` for the same reason the image note is: a
+            // deferred prompt is re-sent from its persisted text verbatim, so an
+            // instruction added later would be lost exactly on the queued path.
+            // Hidden from the transcript at render, not here — it genuinely is
+            // part of the prompt that ran.
+            if (config.voiceSpokenSummaryEnabled && sessions.isVoiceModeEnabled(sent.sessionId)) {
+              promptText = appendSpokenSummaryInstruction(promptText);
+            }
 
-          // The directory gate for a human's own message. Only ever *defers* it
-          // — the prompt is persisted, the client is told, and it goes in as
-          // soon as whoever is working in the same tree concludes. An attached
-          // image has already been written into the workspace and named in
-          // `promptText` above, which is why deferring does not lose it.
-          const parked = promptQueue.submit(session, promptText);
-          if (parked.queued) break;
+            // The directory gate for a human's own message. Only ever *defers* it
+            // — the prompt is persisted, the client is told, and it goes in as
+            // soon as whoever is working in the same tree concludes. An attached
+            // image has already been written into the workspace and named in
+            // `promptText` above, which is why deferring does not lose it.
+            const parked = promptQueue.submit(session, promptText);
+            if (parked.queued) return;
 
-          if (session instanceof StructuredSession) {
-            session.prompt(promptText, message.image);
-          } else {
-            session.prompt(promptText);
-          }
+            if (session instanceof StructuredSession) {
+              session.prompt(promptText, sent.image);
+            } else {
+              session.prompt(promptText);
+            }
+          }).catch((err: unknown) => {
+            request.log.warn({ err }, 'failed to deliver a prompt');
+          });
           break;
         }
 

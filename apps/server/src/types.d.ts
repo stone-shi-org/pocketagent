@@ -33,6 +33,7 @@ import type { TelegramLinksStore } from './telegram/links-store.js';
 import type { AdminService } from './admin/index.js';
 import type { VoiceTtsService } from './voice/tts-service.js';
 import type { AttachmentStaging } from './attachments/index.js';
+import type { AttachmentRetentionService } from './attachments/retention.js';
 
 export interface PocketContext {
   config: Config;
@@ -52,6 +53,8 @@ export interface PocketContext {
   promptQueue: PromptQueueService;
   /** PA-136: uploaded files waiting for the prompt that names them. */
   attachmentStaging: AttachmentStaging;
+  /** PA-137: the landed-attachment retention sweep. */
+  attachmentRetention: AttachmentRetentionService;
   workspaces: WorkspaceRegistry;
   /** PA-6 phase 1: the planner's own app-owned scratch/skills directories. */
   plannerWorkspaces: PlannerWorkspaceRegistry;

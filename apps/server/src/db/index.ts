@@ -1493,6 +1493,22 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE planner_prompt_queue ADD COLUMN attachments_json TEXT;
   `,
+
+  // PA-137: whether a planner model reads a PDF sent as a `file` part.
+  // NULL = off: most OpenAI-compatible servers reject the part.
+  `
+  ALTER TABLE planner_models ADD COLUMN supports_pdf INTEGER;
+  `,
+
+  // PA-137: every directory a coding-agent prompt has landed a file in, for
+  // the retention sweep (`attachments/retention.ts`). Session rows are
+  // pruned, so their cwds alone would forget where old files are.
+  `
+  CREATE TABLE IF NOT EXISTS attachment_roots (
+    root            TEXT PRIMARY KEY,
+    last_landed_at  INTEGER NOT NULL
+  );
+  `,
 ];
 
 /**
@@ -1822,6 +1838,10 @@ export function openDatabase(databasePath: string): Db {
   }
   if (plannerModelColumns.size > 0 && !plannerModelColumns.has('supports_images')) {
     db.exec('ALTER TABLE planner_models ADD COLUMN supports_images INTEGER');
+  }
+  // PA-137, likewise.
+  if (plannerModelColumns.size > 0 && !plannerModelColumns.has('supports_pdf')) {
+    db.exec('ALTER TABLE planner_models ADD COLUMN supports_pdf INTEGER');
   }
   for (const column of ['price_input', 'price_output', 'price_cache_read', 'price_cache_write']) {
     if (plannerModelColumns.size > 0 && !plannerModelColumns.has(column)) {

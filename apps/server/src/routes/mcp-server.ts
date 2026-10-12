@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import {
   CreateMcpClientTokenRequest,
+  LIMITS,
   MCP_SERVER_API_ALIAS,
   MCP_SERVER_PATH,
   type CreateMcpClientTokenResponse,
@@ -28,6 +29,9 @@ export const mcpServerRoutes: FastifyPluginAsync = async (app) => {
     app.route({
       method: ['GET', 'POST', 'DELETE'],
       url,
+      // PA-137: `upload_attachment` carries up to 5 MB as base64 in one
+      // JSON-RPC message, past the server's 1 MiB default.
+      bodyLimit: LIMITS.maxMessageBytes,
       handler: async (request, reply) => {
         await mcpServer.handle(request, reply);
         return reply;

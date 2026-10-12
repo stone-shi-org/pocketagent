@@ -132,6 +132,8 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   str('adoptTmuxSocket', 'adopt_tmux_socket', false),
   nullableStr('tmuxSessionScopeSlice', 'tmux_session_scope_slice', false),
   str('pushContact', 'push_contact', false),
+  // PA-137: read by every retention sweep, so a change needs no restart.
+  num('attachmentRetentionDays', 'attachment_retention_days', true),
 ] as unknown as readonly SettingsField[];
 
 export const RESTART_REQUIRED_KEYS: readonly string[] = SETTINGS_FIELDS.filter((f) => !f.live).map(

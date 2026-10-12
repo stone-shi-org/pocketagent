@@ -387,6 +387,16 @@ export function SettingsPage({ onApiError, onBack, hubVersion = null }: Props): 
           busy={busy('sessionTtlHours')}
           onChange={(v) => saveDebounced('sessionTtlHours', v)}
         />
+        <NumberRow
+          label="Delete attached files after"
+          help="Files attached to prompts (and their extracted text) older than this are deleted from .pocketagent/attachments/ and Pocket Agent uploads. A file a queued message still needs is kept. 0 keeps them forever."
+          unit="days"
+          value={settings.attachmentRetentionDays}
+          min={0}
+          max={3650}
+          busy={busy('attachmentRetentionDays')}
+          onChange={(v) => saveDebounced('attachmentRetentionDays', v)}
+        />
       </SectionCard>
 
       <SectionCard title="Network & Security" icon="shield">

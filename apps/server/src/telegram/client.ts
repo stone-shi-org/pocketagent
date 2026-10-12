@@ -11,6 +11,9 @@
  * (clearing a pressed inline-keyboard button's loading spinner).
  */
 
+import { PassThrough, Readable } from 'node:stream';
+import type { ReadableStream as WebReadableStream } from 'node:stream/web';
+
 /** The subset of Telegram's `Update` object the bridge reads. Deliberately
     untyped beyond this — Telegram's schema is large, and the bridge cares
     about exactly two update kinds. */
@@ -26,6 +29,30 @@ export interface TelegramMessage {
   chat: { id: number | string; type: string };
   from?: { id: number; username?: string; first_name?: string };
   text?: string;
+  /** PA-137: a file sent as a document (any type, photos sent "as file" included). */
+  document?: TelegramDocument;
+  /** PA-137: a compressed photo, as every size Telegram made of it, smallest first. */
+  photo?: TelegramPhotoSize[];
+  /** PA-137: the text sent with a document or photo; it becomes the prompt. */
+  caption?: string;
+  /** PA-137: shared by every message of one album (several files sent together). */
+  media_group_id?: string;
+}
+
+export interface TelegramDocument {
+  file_id: string;
+  file_unique_id?: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+}
+
+export interface TelegramPhotoSize {
+  file_id: string;
+  file_unique_id?: string;
+  width: number;
+  height: number;
+  file_size?: number;
 }
 
 export interface TelegramCallbackQuery {
@@ -71,6 +98,9 @@ export const LONG_POLL_TIMEOUT_SECONDS = 25;
 /** Bounds every non-`getUpdates` call, which must never block anywhere near
     that long — a stuck `sendMessage` must not stall the poll loop behind it. */
 const REQUEST_TIMEOUT_MS = 15_000;
+
+/** PA-137: a 20 MB file over a slow link, with room to spare. */
+const DOWNLOAD_TIMEOUT_MS = 120_000;
 
 export interface TelegramClientOptions {
   token: string;
@@ -122,6 +152,67 @@ export class TelegramClient {
       ...(opts.parseMode ? { parse_mode: opts.parseMode } : {}),
       ...(opts.replyMarkup ? { reply_markup: opts.replyMarkup } : {}),
     });
+  }
+
+  /**
+   * PA-137: where a file can be downloaded from. The Bot API serves files of
+   * at most 20 MB this way, which is also `MAX_ATTACHMENT_BYTES`.
+   */
+  async getFile(fileId: string): Promise<{ filePath: string; fileSize: number | null }> {
+    const result = (await this.call('getFile', { file_id: fileId })) as { file_path?: string; file_size?: number };
+    if (!result.file_path) throw new TelegramApiError('Telegram did not return a path for that file.');
+    return { filePath: result.file_path, fileSize: result.file_size ?? null };
+  }
+
+  /**
+   * PA-137: the file's bytes, as a stream the caller caps. The URL carries
+   * the bot token, so no error from here ever includes it: a failure is
+   * reported as a fixed sentence plus the status, never the underlying
+   * message (which, for a fetch error, can echo the URL).
+   */
+  async downloadFile(filePath: string, signal?: AbortSignal): Promise<Readable> {
+    if (!/^[A-Za-z0-9_\-./]{1,512}$/.test(filePath) || filePath.includes('..')) {
+      throw new TelegramApiError('Telegram returned an unexpected file path.');
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+    const onExternalAbort = () => controller.abort();
+    signal?.addEventListener('abort', onExternalAbort);
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`https://api.telegram.org/file/bot${this.token}/${filePath}`, {
+        signal: controller.signal,
+      });
+    } catch {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onExternalAbort);
+      throw new TelegramApiError('Downloading the file from Telegram failed.');
+    }
+    if (!res.ok || !res.body) {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onExternalAbort);
+      throw new TelegramApiError(`Downloading the file from Telegram failed (HTTP ${res.status}).`, res.status);
+    }
+    const source = Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
+    const out = new PassThrough();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onExternalAbort);
+    };
+    // A mid-stream failure must not carry the URL either, so it is replaced
+    // rather than forwarded — and destroys `out`, so a reader never hangs.
+    source.once('error', () => {
+      done();
+      out.destroy(new TelegramApiError('Downloading the file from Telegram failed.'));
+    });
+    source.once('end', done);
+    // A reader that gives up (the size cap) stops the download too.
+    out.once('close', () => {
+      done();
+      source.destroy();
+    });
+    source.pipe(out);
+    return out;
   }
 
   /** `text` shows as a small toast on the pressed button; omitted clears the

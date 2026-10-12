@@ -1,5 +1,19 @@
 import type { AgentEvent, EffortLevel, McpTurnState, PermissionRequestEvent } from '@pocketagent/protocol';
-import { MAX_MCP_CALL_DEPTH, MCP_MAX_LIVE_SESSIONS_PER_CLIENT } from '@pocketagent/protocol';
+import {
+  MAX_MCP_ATTACHMENT_BYTES,
+  MAX_MCP_CALL_DEPTH,
+  MCP_MAX_LIVE_SESSIONS_PER_CLIENT,
+  type PromptAttachment,
+  type UploadAttachmentResponse,
+} from '@pocketagent/protocol';
+import { Readable } from 'node:stream';
+import {
+  AttachmentError,
+  removeLandedAttachments,
+  type AttachmentStaging,
+  type StagedAttachment,
+} from '../attachments/index.js';
+import { landSessionAttachments } from '../attachments/session-landing.js';
 import type { McpClientIdentity } from '../auth/mcp-tokens.js';
 import {
   readMcpOwnedTargets,
@@ -96,6 +110,8 @@ export interface StartSessionInput {
   worktree?: 'none' | 'new-branch';
   branchBase?: string;
   resumeConversationId?: string;
+  /** PA-137: ids from `upload_attachment`, claimed by this client only. */
+  attachments?: string[];
 }
 
 export interface StartSessionResult {
@@ -115,6 +131,8 @@ export interface McpWorkServiceOptions {
   plannerChats: PlannerChatService;
   historyDeps: SessionHistoryDeps;
   maxSessions: number;
+  /** PA-137: where `upload_attachment` stages files. */
+  attachmentStaging?: AttachmentStaging;
   logger?: { info: (o: object, m?: string) => void; warn: (o: object, m?: string) => void };
 }
 
@@ -209,6 +227,11 @@ export class McpWorkService {
       throw err;
     }
 
+    // PA-137: claimed before anything is created, so an expired or foreign id
+    // refuses the call with nothing started; landed into the tree the
+    // session will run in, and removed again if it never starts.
+    const staged = this.claimAttachments(principal, input.attachments);
+
     if (input.worktree === 'new-branch') {
       // Minted, never literal — the repeating-job invariant's reason applies to
       // any caller that can ask twice.
@@ -218,8 +241,19 @@ export class McpWorkService {
         const created = await this.opts.worktrees.create({ projectCwd: cwd, branchMode: 'new', branchName });
         cwd = created.cwd;
       } catch (err) {
+        this.opts.attachmentStaging?.release(staged);
         if (err instanceof WorktreeError) throw new McpWorkError(`Could not create a worktree: ${err.message}`, err.code);
         throw err;
+      }
+    }
+
+    let landed: { attachments: PromptAttachment[]; notes: string[] } = { attachments: [], notes: [] };
+    if (staged.length > 0) {
+      try {
+        landed = await landSessionAttachments(this.opts.attachmentStaging!, cwd, input.agent, staged, this.opts.logger, this.opts.db);
+      } catch (err) {
+        this.opts.attachmentStaging!.release(staged);
+        throw attachmentWorkError(err);
       }
     }
 
@@ -243,6 +277,7 @@ export class McpWorkService {
       }
       session = created as StructuredLikeSession;
     } catch (err) {
+      removeLandedAttachments(cwd, landed.attachments);
       if (err instanceof SessionError) throw new McpWorkError(err.message, err.code);
       throw err;
     }
@@ -259,8 +294,54 @@ export class McpWorkService {
       'mcp client started a session',
     );
 
-    const sent = this.deliverPrompt(session, input.prompt);
+    const sent = this.deliverPrompt(session, withNotes(input.prompt, landed.notes));
     return { sessionId: session.id, cwd, ...sent };
+  }
+
+  /**
+   * PA-137: an MCP client's upload ids, claimed under its own principal —
+   * the same `mcp:<id>` the REST upload route would use — so one token can
+   * never claim another's file. All or none, as for a browser's prompt.
+   */
+  private claimAttachments(principal: McpClientIdentity, ids: readonly string[] | undefined): StagedAttachment[] {
+    if (!ids || ids.length === 0) return [];
+    const staging = this.opts.attachmentStaging;
+    if (!staging) throw new McpWorkError('This server does not accept attachments over MCP.', 'attachments_unavailable');
+    try {
+      return staging.take(ids, mcpAttachmentPrincipal(principal));
+    } catch (err) {
+      throw attachmentWorkError(err);
+    }
+  }
+
+  /** PA-137: `upload_attachment`. Staged only; a file lands when a prompt names it. */
+  async uploadAttachment(
+    principal: McpClientIdentity,
+    input: { name: string; mediaType?: string; data: Buffer },
+  ): Promise<UploadAttachmentResponse> {
+    const staging = this.opts.attachmentStaging;
+    if (!staging) throw new McpWorkError('This server does not accept attachments over MCP.', 'attachments_unavailable');
+    if (input.data.length > MAX_MCP_ATTACHMENT_BYTES) {
+      throw new McpWorkError(
+        `Files sent over MCP can be at most ${MAX_MCP_ATTACHMENT_BYTES / (1024 * 1024)} MB.`,
+        'too_large',
+      );
+    }
+    try {
+      const staged = await staging.stage(Readable.from([input.data]), {
+        name: input.name,
+        mediaType: input.mediaType ?? 'application/octet-stream',
+        principal: mcpAttachmentPrincipal(principal),
+      });
+      // Size and type only — never the name or the bytes.
+      this.opts.logger?.info(
+        { mcpClient: principal.label, size: staged.size, mediaType: staged.mediaType },
+        'mcp client staged an attachment',
+      );
+      return staged;
+    } catch (err) {
+      throw attachmentWorkError(err);
+    }
   }
 
   /**
@@ -273,6 +354,7 @@ export class McpWorkService {
     depth: number,
     sessionId: string,
     prompt: string,
+    attachmentIds: readonly string[] = [],
   ): Promise<StartSessionResult & { resumedFrom?: string }> {
     const info = this.opts.sessions.find(sessionId);
     if (!info) throw new McpWorkError(`No session ${sessionId}.`, 'not_found');
@@ -284,7 +366,18 @@ export class McpWorkService {
     }
     const live = this.opts.sessions.get(sessionId);
     if (live && live.transport === 'structured' && (info.status === 'running' || info.status === 'starting')) {
-      const sent = this.deliverPrompt(live as StructuredLikeSession, prompt);
+      const staged = this.claimAttachments(principal, attachmentIds);
+      let notes: string[] = [];
+      if (staged.length > 0) {
+        try {
+          notes = (await landSessionAttachments(this.opts.attachmentStaging!, info.cwd, info.agent, staged, this.opts.logger, this.opts.db))
+            .notes;
+        } catch (err) {
+          this.opts.attachmentStaging!.release(staged);
+          throw attachmentWorkError(err);
+        }
+      }
+      const sent = this.deliverPrompt(live as StructuredLikeSession, withNotes(prompt, notes));
       this.opts.logger?.info({ mcpClient: principal.label, sessionId }, 'mcp client prompted a session');
       return { sessionId, cwd: info.cwd, ...sent };
     }
@@ -297,6 +390,7 @@ export class McpWorkService {
       prompt,
       title: info.title,
       resumeConversationId: info.agentSessionId,
+      ...(attachmentIds.length > 0 ? { attachments: [...attachmentIds] } : {}),
     });
     return { ...resumed, resumedFrom: sessionId };
   }
@@ -495,14 +589,37 @@ export class McpWorkService {
    * because a turn parked on an approval ends its generator while still
    * genuinely running.
    */
-  async sendPocketMessage(principal: McpClientIdentity, chatId: string, content: string): Promise<void> {
+  async sendPocketMessage(
+    principal: McpClientIdentity,
+    chatId: string,
+    content: string,
+    attachmentIds: readonly string[] = [],
+  ): Promise<void> {
     const planner = this.opts.plannerChats;
     if (!planner.get(chatId)) throw new McpWorkError(`No Pocket Agent chat ${chatId}.`, 'not_found');
-    const turn = planner.sendMessage(chatId, content);
+    // PA-137: the web chat's order — preconditions, claim, land — so a
+    // refused message lands nothing.
+    let attachments: PromptAttachment[] = [];
+    if (attachmentIds.length > 0) {
+      try {
+        planner.assertCanAcceptFiles(chatId, 'send');
+      } catch (err) {
+        if (err instanceof PlannerChatError) throw new McpWorkError(err.message, err.code);
+        throw err;
+      }
+      const staged = this.claimAttachments(principal, attachmentIds);
+      try {
+        attachments = await planner.landAttachments(chatId, this.opts.attachmentStaging!, staged);
+      } catch (err) {
+        throw attachmentWorkError(err);
+      }
+    }
+    const turn = planner.sendMessage(chatId, content, attachments.length > 0 ? { attachments } : {});
     try {
       const first = await turn.next();
       if (first.done === true) throw new McpWorkError('The Pocket Agent turn ended without producing anything.', 'empty_turn');
     } catch (err) {
+      if (!(err instanceof McpWorkError)) planner.removeAttachments(chatId, attachments);
       if (err instanceof PlannerChatError) throw new McpWorkError(err.message, err.code);
       throw err;
     }
@@ -620,4 +737,21 @@ function lastOpenApproval(events: readonly AgentEvent[]): PermissionRequestEvent
 
 function hasOpenApproval(events: readonly AgentEvent[]): boolean {
   return lastOpenApproval(events) !== null;
+}
+
+/** PA-137: the staging principal of an MCP client — `attachmentPrincipal`'s `mcp:<id>`. */
+function mcpAttachmentPrincipal(principal: McpClientIdentity): string {
+  return `mcp:${principal.id}`;
+}
+
+function attachmentWorkError(err: unknown): McpWorkError | Error {
+  if (err instanceof AttachmentError) return new McpWorkError(err.message, `attachment_${err.code}`);
+  if (err instanceof PlannerChatError) return new McpWorkError(err.message, err.code);
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+function withNotes(prompt: string, notes: readonly string[]): string {
+  if (notes.length === 0) return prompt;
+  const block = notes.join('\n');
+  return prompt ? `${prompt}\n\n${block}` : block;
 }

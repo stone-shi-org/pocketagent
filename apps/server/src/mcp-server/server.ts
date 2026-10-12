@@ -26,7 +26,7 @@ import {
 } from '@pocketagent/protocol';
 import type { McpClientIdentity } from '../auth/mcp-tokens.js';
 import { summarizeEvents, truncateTail } from '../planner/tools.js';
-import { MCP_TOOLS, type McpToolDefinition, type McpToolDeps } from './tools.js';
+import { MCP_TOOLS, toolAllowed, type McpToolDefinition, type McpToolDeps } from './tools.js';
 
 /**
  * PA-118: the Streamable HTTP endpoint, serving **both protocol eras** from one
@@ -351,7 +351,7 @@ export class McpServerService {
     // `MCP_TOOLS` order is fixed, which is what 2026-07-28's "tools/list in a
     // deterministic order" asks for (client-side caching, prompt-cache hits).
     for (const tool of MCP_TOOLS) {
-      if (!scopes.has(tool.scope)) continue;
+      if (!toolAllowed(tool, scopes)) continue;
       this.registerTool(server, tool, principalId, depth, era);
     }
     if (scopes.has('read')) {
@@ -388,7 +388,7 @@ export class McpServerService {
         // Re-read on every call: a revoked token or a narrowed scope must not
         // keep working for the life of a long-lived session.
         const principal = this.opts.resolve(principalId);
-        if (!principal || !principal.scopes.includes(tool.scope)) {
+        if (!principal || !toolAllowed(tool, principal.scopes)) {
           return errorResult(
             principal
               ? `This token no longer has the "${tool.scope}" scope.`

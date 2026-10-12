@@ -91,6 +91,7 @@ import { MemoryConsolidationService } from './planner/memory-consolidation.js';
 import type { PocketContext } from './types.js';
 import { PromptQueueService } from './sessions/prompt-queue.js';
 import { AttachmentStaging } from './attachments/index.js';
+import { AttachmentRetentionService } from './attachments/retention.js';
 import { attachmentRoutes } from './routes/attachments.js';
 import { VERSION, VERSION_WARNING } from './version.js';
 import { APP_CSP, ARTIFACT_CSP } from './security-headers.js';
@@ -195,6 +196,10 @@ export interface BuildAppOptions {
   /** PA-136: same reasoning again — uploads stage under `<dataDir>/attachment-staging`
       by default, which for a test is the real checkout's data directory. */
   attachmentStagingDir?: string;
+  /** PA-137: tests drive the retention sweep by hand. */
+  disableAttachmentRetention?: boolean;
+  /** PA-137: tests shorten the Telegram album window. */
+  telegramAlbumWindowMs?: number;
   /** Injected in tests so a planner chat turn never makes a real network call. */
   plannerLlmFetch?: typeof fetch;
   /**
@@ -567,7 +572,31 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // for a webhook's Pocket Agent runs) and `mcpRegistry` (its `/mcp` slash
   // command reads it). Started explicitly below alongside `cron.init()`/
   // `webhooks.init()`, and stopped in the same `onClose` hook.
-  const telegramBridge = new TelegramBridge({ links: telegramLinks, plannerChats, mcpRegistry, logger: app.log });
+  // PA-136: uploads wait here, outside every working tree, until the prompt
+  // naming them is sent. Emptied at boot: nothing staged survives a restart.
+  const attachmentStaging = new AttachmentStaging({
+    dir: options.attachmentStagingDir ?? path.join(config.dataDir, 'attachment-staging'),
+  });
+  attachmentStaging.init();
+  // PA-137: off unless Settings set `attachmentRetentionDays`; read per sweep.
+  const attachmentRetention = new AttachmentRetentionService({
+    db,
+    retentionDays: () => config.attachmentRetentionDays,
+    plannerRoots: () => plannerWorkspaces.list().map((w) => w.path),
+    logger: app.log,
+  });
+  if (!options.disableAttachmentRetention) attachmentRetention.init();
+
+  // PA-137: a document or photo sent to a paired bot is staged under the
+  // bot's own principal and landed exactly like a web upload.
+  const telegramBridge = new TelegramBridge({
+    links: telegramLinks,
+    plannerChats,
+    mcpRegistry,
+    attachmentStaging,
+    ...(options.telegramAlbumWindowMs !== undefined ? { albumWindowMs: options.telegramAlbumWindowMs } : {}),
+    logger: app.log,
+  });
   const telegramPoller = new TelegramPollerService({
     bots: telegramBots,
     bridge: telegramBridge,
@@ -685,12 +714,6 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // PA-11: one queue, shared. A webhook delivery, a scheduled run and a human's
   // own prompt all contend for the same working trees, so they have to be
   // ordered against each other rather than each keeping a private queue.
-  // PA-136: uploads wait here, outside every working tree, until the prompt
-  // naming them is sent. Emptied at boot: nothing staged survives a restart.
-  const attachmentStaging = new AttachmentStaging({
-    dir: options.attachmentStagingDir ?? path.join(config.dataDir, 'attachment-staging'),
-  });
-  attachmentStaging.init();
 
   const promptQueue = new PromptQueueService({
     db,
@@ -729,6 +752,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     plannerChats,
     historyDeps: { sessions, conversations, agyTranscripts, piTranscripts },
     maxSessions: config.maxSessions,
+    attachmentStaging,
     logger: app.log,
   });
 
@@ -743,6 +767,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     voiceTts,
     promptQueue,
     attachmentStaging,
+    attachmentRetention,
     workspaces,
     plannerWorkspaces,
     plannerWorkspacesRoot,
@@ -1058,12 +1083,14 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   app.addHook('onClose', async () => {
     usage.stop();
     attachmentStaging.stop();
+    attachmentRetention.stop();
     // Before `sessions.shutdown()`: no new run may be started into a manager
     // that is already tearing down.
     cron.stop();
     webhooks.stop();
     memoryConsolidation.stop();
     telegramPoller.stop();
+    telegramBridge.stop();
     await sessions.shutdown();
     if (ownsDb) db.close();
   });

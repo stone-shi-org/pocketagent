@@ -471,6 +471,17 @@ export class AttachmentStaging {
     return found;
   }
 
+  /** PA-137: drops uploads that will never be sent (a Telegram message that
+      failed halfway), file and all. Unknown ids are ignored. */
+  discard(ids: readonly string[], principal: string): void {
+    for (const id of ids) {
+      const entry = this.entries.get(id);
+      if (!entry || entry.principal !== principal) continue;
+      this.entries.delete(id);
+      fs.rmSync(entry.stagedPath, { force: true });
+    }
+  }
+
   /** Undo a `take` whose landing never happened. */
   release(entries: readonly StagedAttachment[]): void {
     for (const entry of entries) {
@@ -551,39 +562,39 @@ export function landStagedAttachments(
   return landed.map((l) => l.attachment);
 }
 
-// ---- What a Pocket Agent is told ---------------------------------------------
-
-function formatBytes(size: number): string {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-}
+// ---- Removing landed files (PA-137) -------------------------------------------
 
 /**
- * The lines a Pocket Agent's model sees for a message's files. Built from the
- * `user_prompt` event's metadata every time the context is assembled, never
- * stored in the event's text, so the wording can improve without rewriting a
- * single transcript, and the chat replays the message exactly as it was typed.
- *
- * Says how to read each kind, because the model otherwise tends to try
- * `read_file` on a PDF, get "binary file" back, and give up.
+ * Deletes landed attachments — each file and its extracted-text sidecar — from
+ * `root`, and nothing else. Every path is resolved inside the realpath'd root
+ * and must be a regular file reached through no symlink, so a transcript entry
+ * (or an agent that edited one) can never point this at anything outside the
+ * landing directories. Returns how many files went.
  */
-export function plannerAttachmentNote(attachments: readonly PromptAttachment[] | undefined): string {
-  if (!attachments || attachments.length === 0) return '';
-  const lines = attachments.map(
-    (a) => `[Attached file saved to: ${a.path} (${a.name}, ${formatBytes(a.size)}, ${a.mediaType})]`,
-  );
-  lines.push(
-    '(The paths are relative to your workspace directory. Use read_file for text formats such as Markdown, CSV, ' +
-      'JSON or plain text. A binary format such as PDF, xlsx or docx needs a command, for example pdftotext or ' +
-      'a short python script run through bash.)',
-  );
-  return lines.join('\n');
-}
-
-/** `text` plus its attachment note, for anything that hands a prompt to a model. */
-export function withPlannerAttachmentNote(text: string, attachments: readonly PromptAttachment[] | undefined): string {
-  const note = plannerAttachmentNote(attachments);
-  if (!note) return text;
-  return text ? `${text}\n\n${note}` : note;
+export function removeLandedAttachments(root: string, attachments: readonly PromptAttachment[]): number {
+  let realRoot: string;
+  try {
+    realRoot = fs.realpathSync(root);
+  } catch {
+    return 0;
+  }
+  const allowed = [SESSION_ATTACHMENTS_DIR, PLANNER_UPLOADS_DIR].map((dir) => path.join(realRoot, ...dir.split('/')));
+  let removed = 0;
+  for (const attachment of attachments) {
+    for (const rel of [attachment.path, attachment.extractedPath]) {
+      if (!rel) continue;
+      const abs = path.resolve(realRoot, ...rel.split('/'));
+      if (!allowed.some((dir) => path.dirname(abs) === dir)) continue;
+      try {
+        if (fs.realpathSync(path.dirname(abs)) !== path.dirname(abs)) continue;
+        const stat = fs.lstatSync(abs);
+        if (!stat.isFile()) continue;
+        fs.unlinkSync(abs);
+        removed++;
+      } catch {
+        // Already gone, or never landed: nothing to do.
+      }
+    }
+  }
+  return removed;
 }

@@ -1,4 +1,4 @@
-import { withPlannerAttachmentNote } from '../attachments/index.js';
+import { estimateInlineTokens, withPlannerAttachmentNote, type InlineCaps } from '../attachments/inline.js';
 import type { AgentEvent, ContextCompactionEvent } from '@pocketagent/protocol';
 import { IMAGE_TOKEN_ESTIMATE } from './context-budget.js';
 
@@ -151,11 +151,14 @@ function eventId(event: AgentEvent): string | null {
 
 /** Rough tokens one event contributes to a request, for choosing a cut
     point. Same chars ÷ 4 rule as `context-budget.ts`. */
-export function estimateEventTokens(event: AgentEvent): number {
+export function estimateEventTokens(event: AgentEvent, inlineCaps?: InlineCaps): number {
   switch (event.kind) {
     case 'user_prompt':
       return (
         Math.ceil(withPlannerAttachmentNote(event.text, event.attachments).length / 4) +
+        // PA-137: an inlined file is part of what the message sends, so it is
+        // part of what compaction weighs.
+        estimateInlineTokens(event.attachments, inlineCaps) +
         (event.image ? IMAGE_TOKEN_ESTIMATE : 0)
       );
     case 'text':

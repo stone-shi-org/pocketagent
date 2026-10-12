@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { LIMITS } from './limits.js';
 import { AgentEvent, EffortLevel, QueuedPromptSummary } from './agent-events.js';
 import { PromptImage } from './prompt-image.js';
-import { AttachmentIdList } from './prompt-attachment.js';
+import { AttachmentIdList, MAX_INLINE_EXTRACT_MAX_TOKENS, MAX_INLINE_TEXT_MAX_BYTES } from './prompt-attachment.js';
 import { SessionInfo } from './session.js';
 import { PlannerLiveProvider } from './gemini-live.js';
 
@@ -224,6 +224,14 @@ export const PlannerModel = z.object({
    * replaced by a one-line note in what is sent; the transcript keeps it.
    */
   supportsImages: z.boolean().nullable().optional(),
+  /**
+   * PA-137: whether this model reads a PDF sent as an OpenAI `file` content
+   * part. `null` = off. Unlike `supportsImages` there is no "auto": most
+   * OpenAI-compatible servers reject the part outright, so it is an
+   * operator's explicit opt-in per model. The extracted text is sent either
+   * way; the PDF itself rides beside it only when this is on.
+   */
+  supportsPdf: z.boolean().nullable().optional(),
 });
 export type PlannerModel = z.infer<typeof PlannerModel>;
 
@@ -270,6 +278,7 @@ export const PlannerModelOptionalFields = {
   cacheReadPricePerMTok: PRICE_PER_MTOK.optional(),
   cacheWritePricePerMTok: PRICE_PER_MTOK.optional(),
   supportsImages: z.boolean().nullable().optional(),
+  supportsPdf: z.boolean().nullable().optional(),
 };
 
 export const PlannerModelListResponse = z.object({
@@ -454,6 +463,19 @@ export const PlannerSettingsDto = z.object({
   compactionEnabled: z.boolean(),
   compactionReserveTokens: z.number().int().min(1024).max(1_000_000),
   compactionKeepRecentTokens: z.number().int().min(1024).max(1_000_000),
+  /**
+   * PA-137: the largest UTF-8 text attachment (Markdown, CSV, JSON, source…)
+   * whose content goes into the message itself, fenced as data, so the model
+   * can answer with no tool call. Bigger ones get the path note only, and
+   * `read_file` pages through them. `0` never inlines. Default 32 KB.
+   */
+  attachmentInlineTextMaxBytes: z.number().int().min(0).max(MAX_INLINE_TEXT_MAX_BYTES),
+  /**
+   * PA-137: the same for text extracted from a PDF, docx, xlsx or pptx, in
+   * tokens (chars ÷ 4). A bigger extract is a note pointing at its sidecar.
+   * `0` never inlines. Default 8000.
+   */
+  attachmentInlineExtractMaxTokens: z.number().int().min(0).max(MAX_INLINE_EXTRACT_MAX_TOKENS),
 });
 export type PlannerSettingsDto = z.infer<typeof PlannerSettingsDto>;
 
@@ -504,6 +526,9 @@ export const UpdatePlannerSettingsRequest = z.object({
   compactionEnabled: z.boolean().optional(),
   compactionReserveTokens: z.number().int().min(1024).max(1_000_000).optional(),
   compactionKeepRecentTokens: z.number().int().min(1024).max(1_000_000).optional(),
+  /** PA-137: see `PlannerSettingsDto.attachmentInlineTextMaxBytes`. */
+  attachmentInlineTextMaxBytes: z.number().int().min(0).max(MAX_INLINE_TEXT_MAX_BYTES).optional(),
+  attachmentInlineExtractMaxTokens: z.number().int().min(0).max(MAX_INLINE_EXTRACT_MAX_TOKENS).optional(),
 });
 export type UpdatePlannerSettingsRequest = z.infer<typeof UpdatePlannerSettingsRequest>;
 

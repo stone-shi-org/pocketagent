@@ -501,6 +501,14 @@ export const RuntimeSettings = z.object({
   /** `''` disables the systemd-slice wrapping. */
   tmuxSessionScopeSlice: z.string(),
   pushContact: z.string().min(1),
+  /**
+   * PA-137: landed attachments (and their extracted-text sidecars) older
+   * than this many days are deleted from `.pocketagent/attachments/` and
+   * Pocket Agent `artifacts/uploads/` by a daily sweep. `0` = never, the
+   * default: a file may be the very input a running chat still needs. A file
+   * a queued prompt still names is never swept.
+   */
+  attachmentRetentionDays: z.number().int().min(0).max(3650),
 });
 export type RuntimeSettings = z.infer<typeof RuntimeSettings>;
 

@@ -103,6 +103,20 @@ describe('the note a coding agent is sent, read back for a chip', () => {
     expect(parseAttachedFileNotes(quoted)).toEqual({ text: quoted, paths: [] });
   });
 
+  it('takes a sidecar line with its file, and makes no chip of it (PA-137)', () => {
+    const text =
+      'read these\n\n[Attached file saved to: .pocketagent/attachments/r_x.pdf]\n' +
+      '[Extracted text saved to: .pocketagent/attachments/r_x.pdf.txt (truncated)]\n' +
+      '[Attached file saved to: .pocketagent/attachments/n.md]';
+    expect(parseAttachedFileNotes(text)).toEqual({
+      text: 'read these',
+      paths: ['.pocketagent/attachments/r_x.pdf', '.pocketagent/attachments/n.md'],
+    });
+    // A prompt that merely ends with such a line, with no file note above it, keeps it.
+    const lone = 'what is\n[Extracted text saved to: x.txt]';
+    expect(parseAttachedFileNotes(lone)).toEqual({ text: lone, paths: [] });
+  });
+
   it('a file-only prompt has no text left', () => {
     expect(parseAttachedFileNotes('[Attached file saved to: a.md]')).toEqual({ text: '', paths: ['a.md'] });
   });

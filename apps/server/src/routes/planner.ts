@@ -120,6 +120,7 @@ import {
   writePlannerMaxSubagentSpawnsPerTurn,
   writePlannerCommandTimeoutSeconds,
   writePlannerLlmIdleTimeoutSeconds,
+  writePlannerAttachmentInlineCaps,
   writePlannerCompactionSettings,
   writePlannerMcpEnabled,
   writePlannerMeInstruction,
@@ -409,18 +410,20 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
    * 4.5 MB of it, and the server's 1 MiB default answered 413 to any image
    * over roughly 750 KB — every phone photo, in practice.
    */
-  function landPlannerFiles(
+  async function landPlannerFiles(
     request: FastifyRequest,
     reply: FastifyReply,
     chatId: string,
     ids: string[] | undefined,
     mode: 'send' | 'queue',
-  ): PromptAttachment[] | null {
+  ): Promise<PromptAttachment[] | null> {
     if (!ids || ids.length === 0) return [];
     try {
       app.pocket.plannerChats.assertCanAcceptFiles(chatId, mode);
       const staged = app.pocket.attachmentStaging.take(ids, attachmentPrincipal(request));
-      const landed = app.pocket.plannerChats.landAttachments(chatId, app.pocket.attachmentStaging, staged);
+      // PA-137: awaits text extraction for any document, which is bounded per
+      // file (`EXTRACT_TIMEOUT_MS`) and never fails the message.
+      const landed = await app.pocket.plannerChats.landAttachments(chatId, app.pocket.attachmentStaging, staged);
       request.log.info(
         { chatId, files: landed.length, bytes: landed.reduce((n, f) => n + f.size, 0) },
         'planner attachments landed',
@@ -572,6 +575,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       cacheReadPricePerMTok: parsed.data.cacheReadPricePerMTok ?? null,
       cacheWritePricePerMTok: parsed.data.cacheWritePricePerMTok ?? null,
       supportsImages: parsed.data.supportsImages ?? null,
+      supportsPdf: parsed.data.supportsPdf ?? null,
       sortOrder: nextPlannerModelSortOrder(db),
       createdAt: Date.now(),
     };
@@ -680,6 +684,8 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       compactionEnabled,
       compactionReserveTokens,
       compactionKeepRecentTokens,
+      attachmentInlineTextMaxBytes,
+      attachmentInlineExtractMaxTokens,
     } = parsed.data;
     if (baseUrl !== undefined) writePlannerBaseUrl(db, baseUrl);
     if (apiKey !== undefined) writePlannerApiKey(db, apiKey.length > 0 ? apiKey : null);
@@ -721,6 +727,11 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       ...(compactionEnabled !== undefined ? { enabled: compactionEnabled } : {}),
       ...(compactionReserveTokens !== undefined ? { reserveTokens: compactionReserveTokens } : {}),
       ...(compactionKeepRecentTokens !== undefined ? { keepRecentTokens: compactionKeepRecentTokens } : {}),
+    });
+    // PA-137: how big an attachment may be and still be inlined.
+    writePlannerAttachmentInlineCaps(db, {
+      ...(attachmentInlineTextMaxBytes !== undefined ? { textMaxBytes: attachmentInlineTextMaxBytes } : {}),
+      ...(attachmentInlineExtractMaxTokens !== undefined ? { extractMaxTokens: attachmentInlineExtractMaxTokens } : {}),
     });
     // PA-70: the planner endpoint is the one *singleton* a Hub can provision,
     // so this line matters more than the others — it records a change that
@@ -1533,8 +1544,15 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     if (!parsed.success) {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
-    const files = landPlannerFiles(request, reply, id, parsed.data.attachments, 'send');
+    const files = await landPlannerFiles(request, reply, id, parsed.data.attachments, 'send');
     if (files === null) return reply;
+    // PA-137: extracting a document's text takes a moment, and another turn
+    // may have started in it. The message is refused as before, and what it
+    // landed goes again, so a 409 still leaves nothing behind.
+    if (files.length > 0 && app.pocket.plannerChats.isBusy(id)) {
+      app.pocket.plannerChats.removeAttachments(id, files);
+      return mapChatError(reply, new PlannerChatError('A turn is already in flight for this chat.', 'busy'));
+    }
     const generator = app.pocket.plannerChats.sendMessage(
       id,
       parsed.data.content,
@@ -1566,7 +1584,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     if (!parsed.success) {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
-    const files = landPlannerFiles(request, reply, id, parsed.data.attachments, 'queue');
+    const files = await landPlannerFiles(request, reply, id, parsed.data.attachments, 'queue');
     if (files === null) return reply;
     try {
       const prompt = app.pocket.plannerChats.queuePrompt(id, parsed.data.content, {

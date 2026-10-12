@@ -8,13 +8,13 @@ import {
   AttachmentStaging,
   landAttachment,
   landStagedAttachments,
-  plannerAttachmentNote,
   plannerLandingTarget,
   sanitizeAttachmentName,
   saveAttachmentToWorkspace,
   sessionLandingTarget,
   uniqueAttachmentName,
 } from '../src/attachments/index.js';
+import { plannerAttachmentNote } from '../src/attachments/inline.js';
 
 /**
  * PA-136: the half of attachments that writes a browser-named file into a
@@ -307,12 +307,26 @@ describe('AttachmentStaging', () => {
 });
 
 describe('plannerAttachmentNote', () => {
-  it('names each file with its size and type, and says how to read binaries', () => {
+  it('names each file with its size and type, and says a binary with no extract needs a command', () => {
     const note = plannerAttachmentNote([
       { name: 'r.pdf', path: 'artifacts/uploads/r_x.pdf', size: 2_500_000, mediaType: 'application/pdf' },
     ]);
     expect(note).toContain('[Attached file saved to: artifacts/uploads/r_x.pdf (r.pdf, 2.4 MB, application/pdf)]');
-    expect(note).toMatch(/pdftotext/);
+    expect(note).toMatch(/can only be read with a command/);
+    // PA-137: an extracted document names its sidecar instead, and needs no command.
+    const extracted = plannerAttachmentNote([
+      {
+        name: 'r.pdf',
+        path: 'artifacts/uploads/r_x.pdf',
+        size: 2_500_000,
+        mediaType: 'application/pdf',
+        extractedPath: 'artifacts/uploads/r_x.pdf.txt',
+        extractedChars: 120_000,
+        truncated: true,
+      },
+    ]);
+    expect(extracted).toContain('[Its text was extracted to: artifacts/uploads/r_x.pdf.txt (120,000 characters; the document is longer');
+    expect(extracted).not.toMatch(/with a command/);
     expect(plannerAttachmentNote([])).toBe('');
     expect(plannerAttachmentNote(undefined)).toBe('');
   });

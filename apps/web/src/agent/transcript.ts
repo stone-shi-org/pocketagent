@@ -64,6 +64,10 @@ export interface PromptFileChip {
   path: string;
   size?: number;
   mediaType?: string;
+  /** PA-137: what the server read out of a document when it landed (Pocket Agent only). */
+  extractedChars?: number;
+  truncated?: boolean;
+  extractError?: string;
 }
 
 /**

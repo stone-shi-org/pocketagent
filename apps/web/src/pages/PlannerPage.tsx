@@ -78,6 +78,9 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
   const [llmIdleTimeoutSecondsInput, setLlmIdleTimeoutSecondsInput] = useState('300');
   const [compactionReserveTokensInput, setCompactionReserveTokensInput] = useState('16384');
   const [compactionKeepRecentTokensInput, setCompactionKeepRecentTokensInput] = useState('20000');
+  // PA-137: see `PlannerSettingsDto.attachmentInlineTextMaxBytes`.
+  const [inlineTextKbInput, setInlineTextKbInput] = useState('32');
+  const [inlineExtractTokensInput, setInlineExtractTokensInput] = useState('8000');
 
   const load = useCallback(async () => {
     try {
@@ -99,6 +102,8 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       setLlmIdleTimeoutSecondsInput(String(se.llmIdleTimeoutSeconds ?? 300));
       setCompactionReserveTokensInput(String(se.compactionReserveTokens ?? 16384));
       setCompactionKeepRecentTokensInput(String(se.compactionKeepRecentTokens ?? 20000));
+      setInlineTextKbInput(String(Math.round((se.attachmentInlineTextMaxBytes ?? 32768) / 1024)));
+      setInlineExtractTokensInput(String(se.attachmentInlineExtractMaxTokens ?? 8000));
       setTools(to.tools);
       setApprovals(ap.approvals);
       setError(null);
@@ -222,6 +227,23 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
       1_000_000,
       () => setCompactionKeepRecentTokensInput(String(settings?.compactionKeepRecentTokens ?? 20000)),
       (n) => ({ compactionKeepRecentTokens: n }),
+    );
+  // PA-137: the text cap is edited in KB and saved in bytes.
+  const saveInlineTextKb = (): void =>
+    saveBoundedInt(
+      inlineTextKbInput,
+      0,
+      256,
+      () => setInlineTextKbInput(String(Math.round((settings?.attachmentInlineTextMaxBytes ?? 32768) / 1024))),
+      (n) => ({ attachmentInlineTextMaxBytes: n * 1024 }),
+    );
+  const saveInlineExtractTokens = (): void =>
+    saveBoundedInt(
+      inlineExtractTokensInput,
+      0,
+      64_000,
+      () => setInlineExtractTokensInput(String(settings?.attachmentInlineExtractMaxTokens ?? 8000)),
+      (n) => ({ attachmentInlineExtractMaxTokens: n }),
     );
   const setCompactionEnabled = (enabled: boolean): void => {
     void withBusy(() => api.updatePlannerSettings({ compactionEnabled: enabled }));
@@ -942,6 +964,44 @@ export function PlannerPage({ onApiError, onBack, onOpenAgent }: Props): JSX.Ele
               Compaction runs once fewer than <em>Reserve</em> tokens of the model&apos;s context window
               would be left free; the most recent <em>Keep recent</em> tokens of the chat are kept word for
               word. Each model&apos;s context window is set on its row in &quot;Providers and Models&quot;.
+            </p>
+
+            <h3 style={{ marginTop: 14 }}>Attached files</h3>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+              <div className="planner-field" style={{ maxWidth: 180 }}>
+                <label htmlFor="planner-inline-text-kb">Inline text files up to (KB)</label>
+                <input
+                  id="planner-inline-text-kb"
+                  type="number"
+                  min={0}
+                  max={256}
+                  value={inlineTextKbInput}
+                  disabled={busy}
+                  onChange={(e) => setInlineTextKbInput(e.target.value)}
+                  onBlur={saveInlineTextKb}
+                />
+              </div>
+              <div className="planner-field" style={{ maxWidth: 180 }}>
+                <label htmlFor="planner-inline-extract-tokens">Inline document text up to (tokens)</label>
+                <input
+                  id="planner-inline-extract-tokens"
+                  type="number"
+                  min={0}
+                  max={64000}
+                  step={1000}
+                  value={inlineExtractTokensInput}
+                  disabled={busy}
+                  onChange={(e) => setInlineExtractTokensInput(e.target.value)}
+                  onBlur={saveInlineExtractTokens}
+                />
+              </div>
+            </div>
+            <p className="planner-row-meta" style={{ marginTop: 4 }}>
+              A text file (Markdown, CSV, JSON, code…) this small goes into the message itself, marked as
+              data, so the agent can answer without opening it. A PDF, Word, Excel or PowerPoint file has
+              its text extracted when it is attached; an extract this small goes in too, and a bigger one is
+              saved beside the file for the agent to read in pages. 0 never inlines. Content is left out
+              when a chat is too close to its model&apos;s context window, and the agent is told so.
             </p>
 
             <h3 style={{ marginTop: 14 }}>Remembered decisions</h3>

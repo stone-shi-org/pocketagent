@@ -598,6 +598,17 @@ export interface RenderResult {
  * too (keeping `\n` and `\t`), because an ANSI escape or a stray `\r` can make
  * the rendered prompt look nothing like what the editor previewed.
  */
+/**
+ * PA-137: the same cleaning `sanitizeText` gives Jira prose — controls (bar
+ * `\n`/`\t`), zero-width, BOM and bidi characters stripped, runs of blank
+ * lines collapsed — with no truncation, for other untrusted text fenced into
+ * a prompt (a Pocket Agent's inlined attachment). One copy of the rules, so
+ * the two fences cannot drift apart.
+ */
+export function sanitizeUntrustedText(value: string): string {
+  return sanitizeText(value, Number.POSITIVE_INFINITY).text;
+}
+
 function sanitizeText(value: string, max: number): { text: string; truncated: boolean } {
   let out = value
     .replace(/\r\n?/g, '\n')

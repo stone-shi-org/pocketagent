@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import { Writable } from 'node:stream';
@@ -513,6 +515,133 @@ describeEachEra('driving Pocket Agents', () => {
     expect(reply.data.finalText).toBe('Pocket reply.');
   });
 });
+
+describeEachEra('attachments (PA-137)', () => {
+  const b64 = (s: string | Buffer) => Buffer.from(s).toString('base64');
+
+  it('offers upload_attachment to a sessions-only and a planner-only token, and not to read-only', async () => {
+    for (const [scopes, offered] of [
+      [['read'], false],
+      [['sessions'], true],
+      [['planner'], true],
+    ] as const) {
+      const { token } = await mint([...scopes], `scoped-${scopes.join('-')}`);
+      const client = await connect(token);
+      const names = (await client.listTools()).tools.map((tool) => tool.name);
+      expect(names.includes('upload_attachment')).toBe(offered);
+    }
+  });
+
+  it('attaches an uploaded file to run_coding_task: it lands in the cwd and the prompt names it', async () => {
+    const { token } = await mint();
+    const client = await connect(token);
+    const up = await call(client, 'upload_attachment', { name: '../spec.md', mediaType: 'text/markdown', dataBase64: b64('# spec') });
+    expect(up.isError, up.text).toBe(false);
+    expect(up.data).toMatchObject({ name: 'spec.md', size: 6, mediaType: 'text/markdown', expiresInSeconds: 3600 });
+    // Staged only: nothing in the project yet.
+    expect(fs.existsSync(path.join(t.projectDir, '.pocketagent'))).toBe(false);
+
+    const started = await call(client, 'start_session', {
+      cwd: t.projectDir,
+      agent: 'claude',
+      prompt: 'Implement the spec.',
+      attachments: [up.data.attachmentId],
+    });
+    expect(started.isError, started.text).toBe(false);
+    const sent = await waitForPromptText(started.data.sessionId as string);
+    expect(sent).toMatch(/^Implement the spec\.\n\n\[Attached file saved to: \.pocketagent\/attachments\/spec_\d{8}-\d{6}_[0-9a-f]{4}\.md\]$/);
+    const rel = sent.split('[Attached file saved to: ')[1]!.slice(0, -1);
+    expect(fs.readFileSync(path.join(t.projectDir, rel), 'utf8')).toBe('# spec');
+
+    // Single-use: the same id again refuses the whole call and starts nothing.
+    const again = await call(client, 'run_coding_task', {
+      cwd: t.projectDir,
+      agent: 'claude',
+      prompt: 'Again.',
+      attachments: [up.data.attachmentId],
+      timeoutSeconds: 0,
+    });
+    expect(again.isError).toBe(true);
+    expect(again.text).toMatch(/no longer available/);
+  });
+
+  it('a token cannot use another client\'s attachment id', async () => {
+    const a = await connect((await mint(undefined, 'client-a')).token);
+    const b = await connect((await mint(undefined, 'client-b')).token);
+    const up = await call(a, 'upload_attachment', { name: 'secret.txt', dataBase64: b64('mine') });
+    expect(up.isError, up.text).toBe(false);
+    const stolen = await call(b, 'start_session', {
+      cwd: t.projectDir,
+      agent: 'claude',
+      prompt: 'Read it.',
+      attachments: [up.data.attachmentId],
+    });
+    expect(stolen.isError).toBe(true);
+    expect(stolen.text).toMatch(/no longer available/);
+    expect(t.context.sessions.list().length).toBe(0);
+    // Still there for its owner.
+    expect(t.context.attachmentStaging.size()).toBe(1);
+  });
+
+  it('attaches a file to run_pocket_task: it lands in the agent\'s uploads and the model is shown it', async () => {
+    await t.app.inject({
+      method: 'PATCH',
+      url: '/api/planner/settings',
+      headers: authHeaders(t.cookie),
+      payload: { baseUrl: 'https://api.example.com' },
+    });
+    // run_pocket_task takes no model: the chat starts on the last one used.
+    const { writePlannerLastModelId } = await import('../src/planner/store.js');
+    writePlannerLastModelId(t.db, 'gpt-4o-mini');
+    const workspace = t.context.plannerWorkspaces.list()[0]!;
+    const client = await connect((await mint()).token);
+    const up = await call(client, 'upload_attachment', { name: 'data.csv', mediaType: 'text/csv', dataBase64: b64('a,b\n1,2\n') });
+    const before = llm.mock.calls.length;
+    const reply = await call(client, 'run_pocket_task', {
+      workspaceId: workspace.id,
+      message: 'Total column b.',
+      attachments: [up.data.attachmentId],
+      timeoutSeconds: 20,
+    });
+    expect(reply.isError, reply.text).toBe(false);
+    expect(reply.data.state).toBe('complete');
+    const body = JSON.parse(String((llm.mock.calls[before] as unknown as [string, RequestInit])[1].body)) as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    const user = String(body.messages.filter((m) => m.role === 'user').pop()!.content);
+    expect(user).toContain('[Attached file saved to: artifacts/uploads/data_');
+    // Small text is inlined, fenced as data.
+    expect(user).toMatch(/<<<FILE data\.csv [0-9a-f]{16}>>>\na,b\n1,2\n<<<END [0-9a-f]{16}>>>/);
+    expect(fs.readdirSync(path.join(workspace.path, 'artifacts', 'uploads')).some((n) => n.startsWith('data_'))).toBe(true);
+  });
+
+  it('refuses a file over the MCP cap, and logs sizes, never names or bytes', async () => {
+    const client = await connect((await mint()).token);
+    const big = await call(client, 'upload_attachment', {
+      name: 'big.bin',
+      dataBase64: Buffer.alloc(5 * 1024 * 1024 + 1).toString('base64'),
+    });
+    expect(big.isError).toBe(true);
+    const ok = await call(client, 'upload_attachment', { name: 'private-name.txt', dataBase64: b64('the bytes') });
+    expect(ok.isError).toBe(false);
+    const logs = logLines.join('');
+    expect(logs).toContain('mcp client staged an attachment');
+    expect(logs).not.toContain('private-name');
+    expect(logs).not.toContain(b64('the bytes'));
+  });
+});
+
+/** The text of the user prompt a session's own event stream recorded. */
+async function waitForPromptText(sessionId: string): Promise<string> {
+  let text = '';
+  await waitFor(() => {
+    const replay = liveSession(sessionId).buffer.replayAfter(0);
+    const prompt = replay.events.map((e) => e.event).find((e) => e.kind === 'user_prompt');
+    text = prompt && prompt.kind === 'user_prompt' ? prompt.text : '';
+    return text.length > 0;
+  });
+  return text;
+}
 
 describeEachEra('resources and prompts', (era) => {
   it('exposes session transcripts as subscribable resources', async () => {

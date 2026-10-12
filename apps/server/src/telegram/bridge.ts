@@ -1,9 +1,25 @@
-import type { AgentEvent, PermissionRequestEvent, PlannerToolApprovalChoice } from '@pocketagent/protocol';
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS_PER_PROMPT,
+  MAX_IMAGE_BYTES,
+  type AgentEvent,
+  type PermissionRequestEvent,
+  type PlannerToolApprovalChoice,
+  type PromptAttachment,
+  type PromptImage,
+} from '@pocketagent/protocol';
+import { AttachmentError, type AttachmentStaging } from '../attachments/index.js';
 import { PlannerChatError, type PlannerChatService } from '../planner/chats.js';
 import type { McpRegistryService } from '../planner/mcp/registry-service.js';
 import type { TelegramLinksStore } from './links-store.js';
 import { interceptSlashCommand, type TelegramSlashCommand } from './slash-commands.js';
-import type { TelegramCallbackQuery, TelegramClient, TelegramMessage, TelegramUpdate } from './client.js';
+import type {
+  TelegramCallbackQuery,
+  TelegramClient,
+  TelegramMessage,
+  TelegramPhotoSize,
+  TelegramUpdate,
+} from './client.js';
 import { escapeHtml } from './format.js';
 import { sendHtmlWithPlainFallback, sendMarkdown, sendPlainText } from './send.js';
 
@@ -26,7 +42,39 @@ export interface TelegramBridgeDeps {
   links: TelegramLinksStore;
   plannerChats: PlannerChatService;
   mcpRegistry: McpRegistryService;
+  /** PA-137: where a document sent to the bot is staged before it lands.
+      Without it the bridge refuses files, as it did before PA-137. */
+  attachmentStaging?: AttachmentStaging;
+  /** PA-137: how long an album waits for its next part. Default 1.5 s. */
+  albumWindowMs?: number;
   logger?: { warn: (obj: unknown, msg?: string) => void; info: (obj: unknown, msg?: string) => void };
+}
+
+/** PA-137: a message's files, downloaded and landed. */
+interface ReceivedMedia {
+  image?: PromptImage;
+  attachments: PromptAttachment[];
+}
+
+/** PA-137: Telegram's own album limit. */
+const MAX_ALBUM_PARTS = 10;
+const DEFAULT_ALBUM_WINDOW_MS = 1500;
+/** The browser's downscale target (`apps/web/src/agent/image-budget.ts`); a
+    Telegram photo size above it is skipped for a smaller one. */
+const MAX_PHOTO_SIDE_PX = 2000;
+
+/**
+ * PA-137: the photo size to send inline — the largest that fits the image
+ * budget (bytes and sides), else the smallest Telegram made. Telegram lists
+ * sizes smallest first and always encodes them as JPEG.
+ */
+export function pickPhotoSize(sizes: readonly TelegramPhotoSize[]): TelegramPhotoSize | null {
+  if (sizes.length === 0) return null;
+  const fits = sizes.filter(
+    (s) => Math.max(s.width, s.height) <= MAX_PHOTO_SIDE_PX && (s.file_size === undefined || s.file_size <= MAX_IMAGE_BYTES),
+  );
+  const pool = fits.length > 0 ? fits : [...sizes].sort((a, b) => a.width * a.height - b.width * b.height).slice(0, 1);
+  return pool.reduce((best, s) => (s.width * s.height > best.width * best.height ? s : best));
 }
 
 /**
@@ -54,7 +102,39 @@ export class TelegramBridge {
    */
   private readonly relays = new Map<string, () => void>();
 
+  /**
+   * PA-137: albums being collected. An album arrives as several updates
+   * sharing a `media_group_id`, with no marker on the last one, so each part
+   * restarts a short timer and the whole album becomes one message when it
+   * runs out (the reporter's choice on the ticket: coalesce). Nothing is
+   * downloaded while buffering — the pairing check comes first, as for any
+   * message.
+   */
+  private readonly albums = new Map<string, { messages: TelegramMessage[]; timer: NodeJS.Timeout; client: TelegramClient }>();
+
   constructor(private readonly deps: TelegramBridgeDeps) {}
+
+  /** Flushes nothing: pending albums are dropped. Called on shutdown. */
+  stop(): void {
+    for (const album of this.albums.values()) clearTimeout(album.timer);
+    this.albums.clear();
+  }
+
+  private bufferAlbum(botId: string, message: TelegramMessage, client: TelegramClient): void {
+    const key = `${botId}\u0000${String(message.chat.id)}\u0000${message.media_group_id}`;
+    const existing = this.albums.get(key);
+    if (existing) clearTimeout(existing.timer);
+    const messages = existing?.messages ?? [];
+    if (messages.length < MAX_ALBUM_PARTS) messages.push(message);
+    const timer = setTimeout(() => {
+      this.albums.delete(key);
+      void this.handleMessage(botId, messages, client).catch((err: unknown) =>
+        this.deps.logger?.warn({ err, botId }, 'Telegram bridge failed to handle an album'),
+      );
+    }, this.deps.albumWindowMs ?? DEFAULT_ALBUM_WINDOW_MS);
+    timer.unref?.();
+    this.albums.set(key, { messages, timer, client });
+  }
 
   private ensureRelay(botId: string, telegramChatId: string, chatId: string, client: TelegramClient): void {
     const key = `${botId}\u0000${telegramChatId}\u0000${chatId}`;
@@ -87,10 +167,15 @@ export class TelegramBridge {
     chatId: string,
     text: string,
     client: TelegramClient,
+    media: ReceivedMedia = { attachments: [] },
   ): Promise<void> {
     try {
-      this.deps.plannerChats.queuePrompt(chatId, text);
+      this.deps.plannerChats.queuePrompt(chatId, text, {
+        ...(media.image ? { image: media.image } : {}),
+        ...(media.attachments.length > 0 ? { attachments: media.attachments } : {}),
+      });
     } catch (err) {
+      this.deps.plannerChats.removeAttachments(chatId, media.attachments);
       await client.sendMessage(telegramChatId, `Error: ${(err as Error).message}`);
       return;
     }
@@ -104,11 +189,21 @@ export class TelegramBridge {
       return;
     }
     const message = update.message;
-    if (!message || typeof message.text !== 'string' || message.text.length === 0) return;
-    await this.handleMessage(botId, message, client);
+    if (!message) return;
+    const hasText = typeof message.text === 'string' && message.text.length > 0;
+    // PA-137: a document or a photo is a message too, with or without a caption.
+    const hasMedia = message.document !== undefined || (message.photo?.length ?? 0) > 0;
+    if (!hasText && !hasMedia) return;
+    if (hasMedia && message.media_group_id) {
+      this.bufferAlbum(botId, message, client);
+      return;
+    }
+    await this.handleMessage(botId, [message], client);
   }
 
-  private async handleMessage(botId: string, message: TelegramMessage, client: TelegramClient): Promise<void> {
+  /** One message, or (PA-137) every part of one album. */
+  private async handleMessage(botId: string, parts: TelegramMessage[], client: TelegramClient): Promise<void> {
+    const message = parts[0]!;
     const telegramChatId = String(message.chat.id);
     const link = this.deps.links.get(botId, telegramChatId);
     if (!link) {
@@ -125,8 +220,9 @@ export class TelegramBridge {
     const label = message.from?.username ? `@${message.from.username}` : (message.from?.first_name ?? null);
     if (label) this.deps.links.touchLabel(botId, telegramChatId, label);
 
-    const text = message.text!.trim();
-    const command = interceptSlashCommand(text);
+    const text = (parts.map((p) => p.text ?? p.caption ?? '').find((t) => t.trim().length > 0) ?? '').trim();
+    const hasMedia = parts.some((p) => p.document !== undefined || (p.photo?.length ?? 0) > 0);
+    const command = hasMedia ? null : interceptSlashCommand(text);
     if (command) {
       const reply = await this.runSlashCommand(command, link.plannerChatId, link.workspaceId, text);
       // Plain text: these replies are ours, not the model's, and carry no
@@ -159,8 +255,15 @@ export class TelegramBridge {
     }
     const chatId = chat.id;
 
+    let media: ReceivedMedia = { attachments: [] };
+    if (hasMedia) {
+      const received = await this.receiveMedia(botId, telegramChatId, chatId, parts, client);
+      if (!received) return;
+      media = received;
+    }
+
     if (this.deps.plannerChats.isBusy(chatId)) {
-      await this.queueForBusyChat(botId, telegramChatId, chatId, text, client);
+      await this.queueForBusyChat(botId, telegramChatId, chatId, text, client, media);
       return;
     }
 
@@ -170,7 +273,10 @@ export class TelegramBridge {
     // prompt below would never be seen.
     this.ensureRelay(botId, telegramChatId, chatId, client);
 
-    const turn = this.deps.plannerChats.sendMessage(chatId, text);
+    const turn = this.deps.plannerChats.sendMessage(chatId, text, {
+      ...(media.image ? { image: media.image } : {}),
+      ...(media.attachments.length > 0 ? { attachments: media.attachments } : {}),
+    });
     try {
       const first = await turn.next();
       if (first.done === true) {
@@ -180,15 +286,129 @@ export class TelegramBridge {
     } catch (err) {
       // Another turn started between the check above and this one.
       if (err instanceof PlannerChatError && err.code === 'busy') {
-        await this.queueForBusyChat(botId, telegramChatId, chatId, text, client);
+        await this.queueForBusyChat(botId, telegramChatId, chatId, text, client, media);
         return;
       }
+      // Refused outright: what it landed goes, as for a refused web message.
+      this.deps.plannerChats.removeAttachments(chatId, media.attachments);
       this.endRelayIfIdle(botId, telegramChatId, chatId);
       await client.sendMessage(telegramChatId, `Error: ${(err as Error).message}`);
       return;
     }
 
     void this.drain(turn, telegramChatId, client);
+  }
+
+  /**
+   * PA-137: downloads a message's photos and documents and lands them in the
+   * chat's workspace, exactly as a web upload lands (`landAttachments`, so
+   * extraction and inlining follow). Runs only for a paired chat with an
+   * agent: an unpaired chat was refused above before a byte was fetched.
+   * The first photo goes inline as the message's image, as on the web; any
+   * further photo and every document is a file. Returns `null` after
+   * replying when the files cannot be received, and then nothing is sent.
+   *
+   * The download URL carries the bot token, so nothing here logs a URL or a
+   * download error's own message — `TelegramClient.downloadFile` only ever
+   * throws fixed sentences.
+   */
+  private async receiveMedia(
+    botId: string,
+    telegramChatId: string,
+    chatId: string,
+    parts: TelegramMessage[],
+    client: TelegramClient,
+  ): Promise<ReceivedMedia | null> {
+    const staging = this.deps.attachmentStaging;
+    if (!staging) {
+      await client.sendMessage(telegramChatId, 'This server does not accept files over Telegram.');
+      return null;
+    }
+    const chats = this.deps.plannerChats;
+    try {
+      chats.assertCanAcceptFiles(chatId, chats.isBusy(chatId) ? 'queue' : 'send');
+    } catch (err) {
+      await client.sendMessage(telegramChatId, `Error: ${(err as Error).message}`);
+      return null;
+    }
+
+    const principal = `telegram:${botId}`;
+    const stagedIds: string[] = [];
+    let image: PromptImage | undefined;
+    let skipped = 0;
+    try {
+      for (const part of parts) {
+        if (part.photo?.length) {
+          const size = pickPhotoSize(part.photo);
+          if (!size) continue;
+          if (!image) {
+            const data = await downloadToBuffer(client, size.file_id, MAX_IMAGE_BYTES);
+            image = { mediaType: 'image/jpeg', data: data.toString('base64') };
+            continue;
+          }
+          if (stagedIds.length >= MAX_ATTACHMENTS_PER_PROMPT) {
+            skipped++;
+            continue;
+          }
+          stagedIds.push(await this.stageFile(client, staging, size.file_id, `photo_${stagedIds.length + 1}.jpg`, 'image/jpeg', null, principal));
+        }
+        if (part.document) {
+          if (stagedIds.length >= MAX_ATTACHMENTS_PER_PROMPT) {
+            skipped++;
+            continue;
+          }
+          const doc = part.document;
+          stagedIds.push(
+            await this.stageFile(
+              client,
+              staging,
+              doc.file_id,
+              doc.file_name ?? 'file',
+              doc.mime_type ?? 'application/octet-stream',
+              doc.file_size ?? null,
+              principal,
+            ),
+          );
+        }
+      }
+      const staged = staging.take(stagedIds, principal);
+      const attachments = await chats.landAttachments(chatId, staging, staged);
+      this.deps.logger?.info(
+        { botId, files: attachments.length, bytes: attachments.reduce((n, f) => n + f.size, 0), photo: image !== undefined },
+        'telegram attachments received',
+      );
+      if (skipped > 0) {
+        await client.sendMessage(
+          telegramChatId,
+          `Only ${MAX_ATTACHMENTS_PER_PROMPT} files go with one message, so ${skipped} were left out.`,
+        );
+      }
+      return { ...(image ? { image } : {}), attachments };
+    } catch (err) {
+      staging.discard(stagedIds, principal);
+      const reason = err instanceof AttachmentError || err instanceof Error ? err.message : 'unknown error';
+      this.deps.logger?.warn({ botId, code: (err as { code?: string }).code ?? null }, 'telegram attachment could not be received');
+      await client.sendMessage(telegramChatId, `Could not receive the file: ${reason}`);
+      return null;
+    }
+  }
+
+  private async stageFile(
+    client: TelegramClient,
+    staging: AttachmentStaging,
+    fileId: string,
+    name: string,
+    mediaType: string,
+    declaredSize: number | null,
+    principal: string,
+  ): Promise<string> {
+    if (declaredSize !== null && declaredSize > MAX_ATTACHMENT_BYTES) {
+      throw new AttachmentError(`"${name}" is larger than ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB.`, 'too_large');
+    }
+    const { filePath } = await client.getFile(fileId);
+    const body = await client.downloadFile(filePath);
+    const staged = await staging.stage(body, { name, mediaType, principal });
+    return staged.attachmentId;
   }
 
   private async handleCallbackQuery(
@@ -403,4 +623,24 @@ function parseApprovalCallbackData(
   const choice = data.slice(idx + 1);
   if (!approvalId || !VALID_CHOICES.has(choice)) return null;
   return { approvalId, choice: choice as PlannerToolApprovalChoice };
+}
+
+/** PA-137: a small Telegram file (a photo) into memory, refusing past `maxBytes`. */
+async function downloadToBuffer(client: TelegramClient, fileId: string, maxBytes: number): Promise<Buffer> {
+  const { filePath, fileSize } = await client.getFile(fileId);
+  if (fileSize !== null && fileSize > maxBytes) {
+    throw new AttachmentError(`The photo is larger than ${Math.floor(maxBytes / (1024 * 1024))} MB.`, 'too_large');
+  }
+  const stream = await client.downloadFile(filePath);
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of stream) {
+    total += (chunk as Buffer).length;
+    if (total > maxBytes) {
+      stream.destroy();
+      throw new AttachmentError(`The photo is larger than ${Math.floor(maxBytes / (1024 * 1024))} MB.`, 'too_large');
+    }
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks);
 }

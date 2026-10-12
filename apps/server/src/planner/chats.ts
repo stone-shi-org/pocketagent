@@ -75,10 +75,17 @@ import {
 import {
   landStagedAttachments,
   plannerLandingTarget,
-  withPlannerAttachmentNote,
+  removeLandedAttachments,
   type AttachmentStaging,
   type StagedAttachment,
 } from '../attachments/index.js';
+import { enrichLandedAttachments } from '../attachments/extract.js';
+import {
+  AttachmentInliner,
+  budgetContextPdfs,
+  withPlannerAttachmentNote,
+  type InlineCaps,
+} from '../attachments/inline.js';
 import { treeRootOf } from '../git/worktree-paths.js';
 import { resolveApprovalStatus, rememberDecisionIfAsked } from './approval.js';
 import { appendTranscriptEvent, clearTranscriptEvents, readTranscriptEvents } from './transcript.js';
@@ -116,6 +123,7 @@ import { prepareToolArguments, toolUseInput } from './tool-args.js';
 import { applyCacheControl, isCacheControlRejection, resolvePromptCaching } from './prompt-cache.js';
 import { roundTripCostUsd, type PlannerModelPrices } from './cost.js';
 import { budgetContextImages } from './image-budget.js';
+import { isQuotaMessage } from './llm-errors.js';
 import {
   SUMMARIZATION_SYSTEM_PROMPT,
   buildSummaryRequest,
@@ -824,6 +832,9 @@ export class PlannerChatService {
    * reported once rather than once per round trip.
    */
   private readonly cacheControlRefused = new Set<string>();
+  /** PA-137: chats whose endpoint refused a PDF `file` part this turn — the
+      `cacheControlRefused` shape, for the same reason. */
+  private readonly pdfPartsRefused = new Set<string>();
 
   /**
    * PA-122: the memories a turn ranked, kept for that turn's later round
@@ -1145,7 +1156,7 @@ export class PlannerChatService {
    * A failure lands nothing either, and hands the uploads back to staging so
    * the user's retry still finds them.
    */
-  landAttachments(chatId: string, staging: AttachmentStaging, staged: StagedAttachment[]): PromptAttachment[] {
+  async landAttachments(chatId: string, staging: AttachmentStaging, staged: StagedAttachment[]): Promise<PromptAttachment[]> {
     if (staged.length === 0) return [];
     let workspacePath: string;
     try {
@@ -1154,7 +1165,37 @@ export class PlannerChatService {
       staging.release(staged);
       throw err;
     }
-    return landStagedAttachments(staging, plannerLandingTarget(workspacePath), staged);
+    const target = plannerLandingTarget(workspacePath);
+    const landed = landStagedAttachments(staging, target, staged);
+    // PA-137: once, as each file lands — whether it is text a later turn may
+    // inline, and for a document, its text in a sidecar `read_file` can page
+    // through. Failures become a note on the attachment, never a refusal: the
+    // file itself has already landed where the agent will be told it is.
+    return enrichLandedAttachments(target, landed, { extract: true, logger: this.opts.logger });
+  }
+
+  /** PA-137: the files of every message still queued in this chat. */
+  private removeQueuedAttachments(chatId: string): void {
+    const files = readPlannerQueuedPrompts(this.opts.db, chatId).flatMap((r) => r.attachments);
+    if (files.length > 0) this.removeAttachments(chatId, files);
+  }
+
+  /**
+   * PA-137: deletes files this chat landed (and their sidecars) — a message
+   * refused after its files landed, or a queued one cancelled. Only ever
+   * under the workspace's `artifacts/uploads/`; see `removeLandedAttachments`.
+   */
+  removeAttachments(chatId: string, attachments: readonly PromptAttachment[]): number {
+    if (attachments.length === 0) return 0;
+    const chat = this.get(chatId);
+    if (!chat) return 0;
+    let workspacePath: string;
+    try {
+      workspacePath = this.workspacePathFor(chat);
+    } catch {
+      return 0;
+    }
+    return removeLandedAttachments(workspacePath, attachments);
   }
 
   /**
@@ -1213,8 +1254,12 @@ export class PlannerChatService {
   /** PA-122: withdraw a message that has not been delivered yet. */
   cancelQueuedPrompt(chatId: string, promptId: string): boolean {
     this.requireChat(chatId);
+    const row = readPlannerQueuedPrompts(this.opts.db, chatId).find((r) => r.id === promptId);
     const removed = deletePlannerQueuedPrompt(this.opts.db, chatId, promptId);
     if (removed) {
+      // PA-137: the files went into the workspace when the message was
+      // queued; cancelled, it will never be sent, so they go too.
+      if (row && row.attachments.length > 0) this.removeAttachments(chatId, row.attachments);
       this.notifyQueue(chatId);
       if (this.queuedPromptCount(chatId) === 0) this.stalledQueues.delete(chatId);
       this.drainNext(chatId);
@@ -1569,6 +1614,7 @@ export class PlannerChatService {
       this.liveExpiryTimers.delete(id);
     }
     // PA-122: the rows CASCADE with the chat; the in-memory state does not.
+    this.removeQueuedAttachments(id);
     deletePlannerQueuedPromptsForChat(this.opts.db, id);
     this.stalledQueues.delete(id);
     this.queueDrainInProgress.delete(id);
@@ -1607,6 +1653,8 @@ export class PlannerChatService {
     const chat = this.requireChat(id);
     // PA-122: queued messages go with the history they were meant to extend
     // — and before the abort below, whose turn would otherwise deliver them.
+    // PA-137: with the files they landed, as for a cancelled one.
+    this.removeQueuedAttachments(id);
     if (deletePlannerQueuedPromptsForChat(this.opts.db, id) > 0) this.notifyQueue(id);
     this.stalledQueues.delete(id);
     for (const [pendingId, pending] of this.pendingTurns) {
@@ -2292,6 +2340,7 @@ export class PlannerChatService {
     });
     writePlannerLastModelId(this.opts.db, modelId);
     this.cacheControlRefused.delete(chat.id);
+    this.pdfPartsRefused.delete(chat.id);
     this.turnMemories.delete(chat.id);
     this.spawnsThisTurnByChat.delete(chat.id);
     this.turnPollChecksByChat.delete(chat.id);
@@ -2369,10 +2418,25 @@ export class PlannerChatService {
     // PA-122: images are budgeted before anything is estimated, so the
     // estimate counts only the images that will actually be sent.
     const imageBudget = { supportsImages: plannerModelSupportsImages(modelId, modelRow?.supportsImages), modelId };
-    let messages = this.withFinalSummaryPrompt(
-      budgetContextImages(await this.buildTurnContext(chat, workspacePath, settings, events), imageBudget),
-      finalSummary,
-    );
+    // PA-137: small attached files inlined, and PDFs as `file` parts for a
+    // model marked as reading them (unless its endpoint refused one earlier
+    // in this turn). One inliner per round trip, so what it had to drop to
+    // fit stays dropped across the rebuilds below.
+    const inliner = new AttachmentInliner({
+      root: workspacePath,
+      caps: inlineCaps(settings),
+      supportsPdf: modelRow?.supportsPdf === true && !this.pdfPartsRefused.has(chat.id),
+    });
+    const assemble = async (): Promise<PlannerChatMessage[]> => {
+      inliner.reset();
+      return this.withFinalSummaryPrompt(
+        budgetContextPdfs(
+          budgetContextImages(await this.buildTurnContext(chat, workspacePath, settings, events, { inliner }), imageBudget),
+        ),
+        finalSummary,
+      );
+    };
+    let messages = await assemble();
     let rawEstimate = estimateRequestTokens(messages, toolSpecs);
 
     // PA-121: compact before the request when the context would leave less
@@ -2393,12 +2457,19 @@ export class PlannerChatService {
       }
       if (outcome.compacted) {
         events = await this.readEvents(workspacePath, chat.id);
-        messages = this.withFinalSummaryPrompt(
-          budgetContextImages(await this.buildTurnContext(chat, workspacePath, settings, events), imageBudget),
-          finalSummary,
-        );
+        messages = await assemble();
         rawEstimate = estimateRequestTokens(messages, toolSpecs);
       }
+    }
+    // PA-137: inlined file content that still does not fit — compaction has
+    // done what it can, or is off — comes back out, oldest message first,
+    // and each message's note says its content was left out for room.
+    const inlineLimit = compactionThreshold(limits.contextWindow, settings.compactionReserveTokens);
+    while (this.calibration.apply(chat.id, rawEstimate) > inlineLimit && inliner.inlinedTokens > 0) {
+      const excess = this.calibration.apply(chat.id, rawEstimate) - inlineLimit;
+      if (inliner.dropOldest(excess) === 0) break;
+      messages = await assemble();
+      rawEstimate = estimateRequestTokens(messages, toolSpecs);
     }
     const estimatedTokens = this.calibration.apply(chat.id, rawEstimate);
     // PA-121: `max_tokens` only for a model whose row sets an output limit,
@@ -2496,6 +2567,23 @@ export class PlannerChatService {
           text:
             `The LLM endpoint refused prompt-caching markers for ${modelId}, so this turn is sent without them. ` +
             'Set "Prompt caching" to Off for this model in Settings if this keeps happening.',
+        });
+        yield* this.driveLoop(chat, workspacePath, modelId, iteration, failedStats, signal, loopOpts);
+        return;
+      }
+      if (err instanceof PlannerLlmError && hasPdfParts(request.messages) && isPdfPartRejection(err)) {
+        // PA-137: the endpoint refused the PDF part — most OpenAI-compatible
+        // servers do, which is why the flag defaults off. Said once, and the
+        // round trip is sent again without it for the rest of this turn; the
+        // extracted text was in the message all along. Like the cache
+        // markers above, the model row is left alone.
+        this.pdfPartsRefused.add(chat.id);
+        yield* this.emit(workspacePath, chat.id, {
+          kind: 'notice',
+          level: 'warn',
+          text:
+            `The LLM endpoint refused a PDF sent to ${modelId}, so this turn uses the extracted text only. ` +
+            'Turn "Reads PDFs" off for this model in Settings if this keeps happening.',
         });
         yield* this.driveLoop(chat, workspacePath, modelId, iteration, failedStats, signal, loopOpts);
         return;
@@ -3744,17 +3832,18 @@ export class PlannerChatService {
     workspacePath: string,
     settings: PlannerSettingsSnapshot,
     events: readonly AgentEvent[],
-    opts: { dryRun?: boolean } = {},
+    opts: { dryRun?: boolean; inliner?: AttachmentInliner } = {},
   ): Promise<PlannerChatMessage[]> {
     const memoryEnabled = this.memoryEnabledFor(chat.workspaceId);
+    const build = { ...(opts.inliner ? { inliner: opts.inliner } : {}) };
     let history: PlannerChatMessage[];
     if (settings.compactionEnabled) {
-      history = contextMessages(projectContext(events));
+      history = contextMessages(projectContext(events), build);
     } else if (opts.dryRun) {
       const turns = splitIntoTurns(events);
-      history = eventsToLlmMessages(turns.slice(Math.max(0, turns.length - ROLLING_WINDOW_TURNS)).flat());
+      history = eventsToLlmMessages(turns.slice(Math.max(0, turns.length - ROLLING_WINDOW_TURNS)).flat(), build);
     } else {
-      history = eventsToLlmMessages(await this.applyRollingWindow(chat, events, memoryEnabled));
+      history = eventsToLlmMessages(await this.applyRollingWindow(chat, events, memoryEnabled), build);
     }
     let memories: PlannerMemory[] = [];
     if (memoryEnabled && chat.workspaceId) {
@@ -4166,7 +4255,14 @@ function extractFilePath(args: Record<string, unknown>): string | null {
  * matching however many calls one real completion actually returned in a
  * single response — followed by one `tool`-role message per call.
  */
-export function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatMessage[] {
+export function eventsToLlmMessages(
+  events: readonly AgentEvent[],
+  opts: {
+    /** PA-137: inlines small files and adds PDF parts. Without one, a file
+        is its metadata note only, as PA-136 sent it. */
+    inliner?: AttachmentInliner;
+  } = {},
+): PlannerChatMessage[] {
   const messages: PlannerChatMessage[] = [];
   let pendingCalls: PlannerLlmToolCall[] | null = null;
   // PA-121: the `interim` text a round trip wrote before its tool calls goes
@@ -4220,14 +4316,29 @@ export function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatM
         {
           // PA-136: a file is a path note, generated from the event's metadata
           // here rather than stored in its text — see `plannerAttachmentNote`.
-          const userText = withPlannerAttachmentNote(event.text, event.attachments);
-          if (event.image) {
+          // PA-137: with an inliner, small files' content goes in too, fenced
+          // as data, and a PDF may ride beside it as a `file` part.
+          let userText: string;
+          let pdfParts: PlannerUserContentPart[] = [];
+          if (opts.inliner && event.attachments?.length) {
+            const rendered = opts.inliner.render(event.id, event.attachments);
+            userText = event.text ? `${event.text}\n\n${rendered.text}` : rendered.text;
+            pdfParts = rendered.pdfParts;
+          } else {
+            userText = withPlannerAttachmentNote(event.text, event.attachments);
+          }
+          if (event.image || pdfParts.length > 0) {
             const parts: PlannerUserContentPart[] = [
-              {
-                type: 'image_url',
-                image_url: { url: `data:${event.image.mediaType};base64,${event.image.data}` },
-              },
+              ...(event.image
+                ? [
+                    {
+                      type: 'image_url' as const,
+                      image_url: { url: `data:${event.image.mediaType};base64,${event.image.data}` },
+                    },
+                  ]
+                : []),
               ...(userText ? [{ type: 'text' as const, text: userText }] : []),
+              ...pdfParts,
             ];
             messages.push({ role: 'user', content: parts });
           } else {
@@ -4269,6 +4380,34 @@ export function eventsToLlmMessages(events: readonly AgentEvent[]): PlannerChatM
 function firstLine(text: string): string {
   const line = text.split('\n')[0] ?? '';
   return line.length > 200 ? `${line.slice(0, 200)}…` : line;
+}
+
+/** PA-137: the inline caps a turn applies, from Settings. */
+function inlineCaps(settings: PlannerSettingsSnapshot): InlineCaps {
+  return {
+    textMaxBytes: settings.attachmentInlineTextMaxBytes,
+    extractMaxTokens: settings.attachmentInlineExtractMaxTokens,
+  };
+}
+
+function hasPdfParts(messages: readonly PlannerChatMessage[]): boolean {
+  return messages.some((m) => m.role === 'user' && Array.isArray(m.content) && m.content.some((p) => p.type === 'file'));
+}
+
+/**
+ * PA-137: a request carrying a PDF part was refused for its shape — a 400,
+ * 415 or 422 that is neither an overflow nor a quota error. Broader than the
+ * cache-marker test on purpose: servers word this refusal every possible way
+ * ("unsupported content type", "Invalid value: 'file'", "messages[3] is
+ * invalid"), and the cost of a wrong guess is one retry without the part,
+ * which is exactly what a correct guess costs.
+ */
+function isPdfPartRejection(err: PlannerLlmError): boolean {
+  return (
+    !err.contextOverflow &&
+    !isQuotaMessage(err.message) &&
+    (err.statusCode === 400 || err.statusCode === 415 || err.statusCode === 422)
+  );
 }
 
 /** `Error: …` for a failed tool result, unless it already says so. */
@@ -4364,8 +4503,8 @@ function buildSystemMessage(
     of what was kept. Merged into the kept part's first user message when it
     starts with one, since some chat templates refuse two user messages in a
     row. */
-function contextMessages(projection: ContextProjection): PlannerChatMessage[] {
-  const messages = eventsToLlmMessages(projection.events);
+function contextMessages(projection: ContextProjection, opts: { inliner?: AttachmentInliner } = {}): PlannerChatMessage[] {
+  const messages = eventsToLlmMessages(projection.events, opts);
   if (projection.summary === null) return messages;
   const summary = summaryMessageText(projection.summary);
   const first = messages[0];

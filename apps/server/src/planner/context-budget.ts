@@ -11,6 +11,8 @@
  * about it" half.
  */
 
+import { estimatePdfPartTokens } from '../attachments/inline.js';
+
 /** pi's defaults for a model it knows nothing about. 128k is the smallest
     window any current general-purpose chat model ships with; a model with
     less is the one an operator needs to tell us about. */
@@ -109,11 +111,14 @@ export const IMAGE_TOKEN_ESTIMATE = 1_200;
 export function estimateRequestTokens(messages: readonly unknown[], tools: readonly unknown[]): number {
   let chars = 0;
   let images = 0;
+  let fileTokens = 0;
   for (const message of messages) {
     const content = (message as { content?: unknown }).content;
     if (Array.isArray(content)) {
-      for (const part of content as Array<{ type?: string; text?: string }>) {
+      for (const part of content as Array<{ type?: string; text?: string; file?: { file_data?: string } }>) {
         if (part.type === 'image_url') images += 1;
+        // PA-137: a PDF is billed by its pages, not by its base64 length.
+        else if (part.type === 'file') fileTokens += estimatePdfPartTokens(part.file?.file_data?.length ?? 0);
         else chars += JSON.stringify(part).length;
       }
       chars += 32;
@@ -122,7 +127,7 @@ export function estimateRequestTokens(messages: readonly unknown[], tools: reado
     }
   }
   if (tools.length > 0) chars += JSON.stringify(tools).length;
-  return Math.ceil(chars / 4) + images * IMAGE_TOKEN_ESTIMATE;
+  return Math.ceil(chars / 4) + images * IMAGE_TOKEN_ESTIMATE + fileTokens;
 }
 
 /**

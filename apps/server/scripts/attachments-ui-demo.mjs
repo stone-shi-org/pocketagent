@@ -6,6 +6,13 @@
  * directory with the agent told its path; an image still going inline; an
  * oversized file refused visibly.
  *
+ * PA-137 adds the reading half: the documents are real (a PDF with a text
+ * layer, an xlsx with cells), the Pocket Agent's model must receive their
+ * extracted text and the Markdown's content inline, fenced as data, with a
+ * sidecar `.txt` beside each document in `artifacts/uploads/`; each chip says
+ * its text was read; and the claude session gets no sidecar, because Claude
+ * Code's own `Read` handles a PDF.
+ *
  * Needs no running server: it starts a scratch backend (throwaway data root,
  * workspace and HOME — never the real database) and a fake OpenAI-compatible
  * endpoint for the Pocket Agent, so no real LLM is called. The coding-agent
@@ -49,7 +56,9 @@ const home = path.join(scratch, 'home');
 const fixtures = path.join(scratch, 'fixtures');
 for (const dir of [dataDir, project, home, fixtures]) fs.mkdirSync(dir, { recursive: true });
 
-// Real enough to be recognisable on disk; nothing here parses them.
+// PA-137: real documents, built by the same helper the unit suites use
+// (plain TypeScript, which this Node runs by stripping the types).
+const { makePdf, makeXlsx } = await import('../tests/helpers-documents.ts');
 const files = {
   pdf: path.join(fixtures, 'Quarterly report.pdf'),
   xlsx: path.join(fixtures, 'numbers.xlsx'),
@@ -57,8 +66,8 @@ const files = {
   png: path.join(fixtures, 'shot.png'),
   big: path.join(fixtures, 'huge.bin'),
 };
-fs.writeFileSync(files.pdf, '%PDF-1.7\n1 0 obj << /Type /Catalog >> endobj\n%%EOF\n');
-fs.writeFileSync(files.xlsx, Buffer.concat([Buffer.from('PK\u0003\u0004'), crypto.randomBytes(512)]));
+fs.writeFileSync(files.pdf, makePdf(['Revenue grew 12 percent in Q3', 'Headcount stayed flat']));
+fs.writeFileSync(files.xlsx, makeXlsx({ Costs: [['Item', 'Cost'], ['Rent', 1200], ['Cloud', 340]] }));
 fs.writeFileSync(files.md, '# Notes\n\n- one\n- two\n');
 // A 1×1 PNG.
 fs.writeFileSync(
@@ -195,7 +204,7 @@ if (!(await waitForHealth())) {
   process.exit(1);
 }
 browser = await launch();
-console.log('PocketAgent PA-136 attachments demo\n' + '='.repeat(60));
+console.log('PocketAgent PA-136/PA-137 attachments demo\n' + '='.repeat(60));
 
 for (const [label, contextOptions] of [
   ['phone (iPhone 13)', { ...devices['iPhone 13'] }],
@@ -244,6 +253,7 @@ for (const [label, contextOptions] of [
       fs.readFileSync(path.join(project, '.pocketagent', '.gitignore'), 'utf8').includes('*'),
       '.pocketagent/.gitignore keeps them out of git status',
     );
+    check(!all.some((f) => f.endsWith('.txt')), 'claude gets no extracted-text sidecar: its Read tool reads the PDF itself (PA-137)');
     // The chips are read back out of the prompt text the agent was sent
     // (`userPromptView`), so the text must carry one note per file; the
     // copy-path button on each chip holds exactly that path.
@@ -309,6 +319,18 @@ for (const [label, contextOptions] of [
     );
     const transcript = fs.readFileSync(path.join(dataDir, 'planner-workspaces', 'default', '.transcripts', `${chatId}.jsonl`), 'utf8');
     check(!transcript.includes('%PDF') && transcript.includes('"attachments"'), 'the transcript records metadata, never the bytes');
+
+    // PA-137: the model can answer from the files with no tool call at all.
+    check(content.includes('Revenue grew 12 percent in Q3'), "the PDF's extracted text went inline (PA-137)");
+    check(content.includes('Item,Cost\nRent,1200\nCloud,340'), "the xlsx's cells went inline as CSV");
+    check(/<<<FILE notes\.md [0-9a-f]{16}>>>\n# Notes/.test(content), 'the Markdown went inline, fenced as data');
+    check(!transcript.includes('Revenue grew'), 'and none of that content is in the transcript');
+    check(
+      uploads.some((f) => /^Quarterly report_.*\.pdf\.txt$/.test(f)) && uploads.some((f) => /^numbers_.*\.xlsx\.txt$/.test(f)),
+      'each document has a sidecar .txt that read_file can page through',
+    );
+    const details = await page.locator('.file-chip-row[aria-label="Attached files"] .file-chip-detail:visible').allTextContents();
+    check(details.filter((d) => d.includes('text read')).length >= 2, 'the PDF and xlsx chips say their text was read', details.join(', '));
     await page.screenshot({ path: path.join(SHOTS, `pa136-${tag}-pocket-agent.png`) });
 
     // Drag-and-drop, the third way in: a synthetic drop with a real DataTransfer.

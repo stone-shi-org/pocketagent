@@ -765,6 +765,8 @@ describe('planner routes over HTTP', () => {
       compactionEnabled: true,
       compactionReserveTokens: 16384,
       compactionKeepRecentTokens: 20000,
+      attachmentInlineTextMaxBytes: 32768,
+      attachmentInlineExtractMaxTokens: 8000,
     });
   });
 

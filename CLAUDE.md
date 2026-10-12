@@ -19,7 +19,7 @@ pnpm demo:docker        # the backend image's whole contract, against a real con
 pnpm demo:hub           # PA-66's acceptance criteria: two real backends, a real Hub
 pnpm demo:hub-ui        # PA-110: the Hub's own UI and mDNS discovery, in real Chrome
 pnpm demo:mcp           # PA-118: /mcp as an external agent sees it, against a scratch server
-pnpm demo:attachments-ui  # PA-136: PDF/xlsx/md attached in real Chrome, both chat kinds, both viewports
+pnpm demo:attachments-ui  # PA-136/137: PDF/xlsx/md attached in real Chrome, both chat kinds, both viewports, text read
 
 pnpm version:set 1.2.3  # the repo's semver, written to all six package.json files (PA-65, PA-66)
 ./test.sh               # CI: install --frozen-lockfile, vitest (JUnit XML), lint, typecheck
@@ -171,7 +171,7 @@ PA_TOKEN=... pnpm demo:multi-host-ui     # multi-host: rail, sheet, aggregate ho
 PA_TOKEN=... pnpm demo:agent-install-ui  # agent setup dialog: four states, streamed install, phone viewport
 PA_TOKEN=... PA_GEMINI_KEY=... pnpm demo:gemini-live-ui  # PA-96: real speech → Gemini Live → tool → approval card, phone viewport
 pnpm demo:mcp             # PA-118: scratch server + SDK client; PA_MCP_REAL_AGENT=1 / PA_MCP_CLAUDE_CLIENT=1 add real claude
-pnpm demo:attachments-ui  # PA-136: scratch server + fake LLM; files attached in real Chrome, phone and desktop
+pnpm demo:attachments-ui  # PA-136/137: scratch server + fake LLM; files attached in real Chrome, phone and desktop
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -245,7 +245,11 @@ documented directory, the agent's prompt is checked for each path, an image is c
 go inline, an oversized file to be refused visibly, and a drop on the composer to attach. The
 `claude` there runs with a scratch `HOME` and is not signed in, which does not matter: the files
 land and the prompt is handed over before it answers. If Playwright cannot find its browser,
-`PLAYWRIGHT_BROWSERS_PATH` is pointing at a directory without the revision it wants.
+`PLAYWRIGHT_BROWSERS_PATH` is pointing at a directory without the revision it wants. PA-137 made
+the documents real (a PDF with a text layer, an xlsx with cells, both built by
+`tests/helpers-documents.ts`, which the demo imports as TypeScript): the Pocket Agent's model must
+receive their extracted text and the Markdown inline, fenced, with a sidecar `.txt` beside each
+document and a "text read" chip, and the claude session must get no sidecar.
 
 `pnpm demo:docker` is the other odd one out: it needs no running server and no `PA_BASE`, because it
 builds the image and starts its own container with a throwaway data root, HOME and git
@@ -1914,14 +1918,143 @@ Also fixed here: the planner's message and queue routes now carry
 browser's downscale, and the server's 1 MiB default had answered 413 to any planner image over
 ~750 KB, which in practice was every phone photo.
 
-Known limitations: attachments are never garbage-collected (true of images before), and
-cancelling a queued Pocket Agent message leaves its already-landed files in `artifacts/uploads/`,
-where the Artifacts panel can delete them. Not done, and left as follow-ups:
-- server-side text extraction (PDF/xlsx/docx);
-- inlining small text files into a planner prompt;
-- a per-model "accepts PDF" flag (most OpenAI-compatible servers reject PDF input);
-- Telegram documents;
-- attachments over MCP.
+Known limitations left by PA-136 — text extraction, inlining, a per-model PDF flag, Telegram
+files, MCP attachments, cleanup — are PA-137, below.
+
+### Reading attachments, Telegram files, MCP uploads and retention (PA-137)
+
+PA-136 told an agent where a file was and nothing more, and for a Pocket Agent that was a dead
+end: `read_file` refuses binaries, `bash` is approval-gated, and the image has neither
+`pdftotext` nor `openpyxl`, so a PDF, docx or xlsx could not be read at all. PA-137 closes that in
+four phases, each of which shipped with its own tests.
+
+**Every file is judged once, when it lands** (`attachments/extract.ts`,
+`enrichLandedAttachments`), and the verdict is recorded on its `PromptAttachment`, so the per-turn
+path reads metadata rather than bytes. A text type (by name or declared type, `TEXT_EXTENSIONS`)
+whose first 64 KB decode as UTF-8 with no NUL is `text: true`. A PDF, docx, xlsx or pptx — the name
+or type proposes the kind, and the file's own magic (`%PDF-`, a zip's `PK\3\4`) must agree — has
+its text extracted into a sidecar, `<landed name>.txt`, beside it (`extractedPath`,
+`extractedChars`, `truncated`), written through `landAttachment` like everything else, so it
+never overwrites anything. A failure (`extractError`) is a note, never a refused prompt: the file
+has already landed where the agent is told it is. A document with no text layer says it is
+probably a scan; OCR is out of scope.
+
+**The libraries, and why these** (the reporter asked for research on the ticket). What other
+agents do: Claude Code's `Read` reads a PDF natively, with layout, and both Claude Code and Codex
+otherwise reach for Python (`pdfplumber`/`pypdf`, `openpyxl`, `python-docx`) or Microsoft's
+MarkItDown through a shell — none of which this image ships, and all of which would be a shell
+call behind the approval gate. So the parse is in-process JS with no native addon and no system
+package: **`unpdf`** (Mozilla's pdf.js, serverless build; the maintained successor to
+`pdf-parse`, and the same engine Firefox uses on hostile PDFs every day), **`mammoth`** for docx
+(the standard docx-to-text library), and **`fflate`** with a hand-rolled reader of
+`sharedStrings.xml`/`sheetN.xml` for xlsx and of slide XML for pptx. Not SheetJS: the `xlsx` on
+npm is frozen at 0.18.5 with a prototype-pollution CVE (fixed only in releases published off-npm),
+and ExcelJS is a heavyweight read-write library for a read-only job. About 4.5 MB of JS in the
+image, no native code.
+
+**The parse runs in a child process, not the `worker_thread` the ticket proposed**, and that is
+the load-bearing decision. `resourceLimits` caps only the V8 heap, and every one of these parsers
+decompresses into typed arrays, which live outside it: a test inflated 200 MB inside a worker
+capped at 16 MB of heap, and a PDF flate bomb would have grown the *server's* RSS the same way.
+`extractDocumentText` forks `extract-worker.ts` (one job per process, an empty environment, no
+stdin, output discarded, `--max-old-space-size`), samples the child's RSS every 50 ms
+(`/proc/<pid>/status` on Linux, argv-only `ps` elsewhere) and kills it past
+`EXTRACT_MAX_RSS_MB`, and kills it at `EXTRACT_TIMEOUT_MS` (10 s). Output stops at 200 pages and
+500 000 characters; a zip whose declared sizes exceed 128 MB is refused before anything is
+inflated, and the RSS cap catches one that lies about them. Inside the child `fetch` is replaced
+with a rejection, pdf.js runs with no font faces and no XFA (the bundled pdf.js 5 no longer
+compiles fonts with `eval`, CVE-2024-4367's vector), and the OOXML readers are regular
+expressions over text, never an XML engine that could resolve an entity. Two parses at a time.
+The worker imports nothing from this repo, so it runs as compiled `.js` from `dist/` and as `.ts`
+under Node's own type stripping in dev and tests, with no loader.
+
+**What a Pocket Agent is told is built at context time** (`attachments/inline.ts`), so the
+transcript still holds metadata only. `buildAttachmentNote` gives each file its path line, where
+its text was extracted (or why it could not be), and says `read_file` pages through text and the
+sidecars with no approval. `AttachmentInliner` then puts small content into the message itself: a
+`text` file up to `attachmentInlineTextMaxBytes` (32 KB) or an extract up to
+`attachmentInlineExtractMaxTokens` (8 000 tokens), both planner Settings with those defaults (the
+reporter's answer on the ticket; `0` never inlines). It is a stranger's text, so it is fenced
+exactly as Jira text is: cleaned by `sanitizeUntrustedText` (the webhook renderer's own rules,
+exported from `webhook-template.ts` so the two fences cannot drift), wrapped in
+`<<<FILE name nonce>>> … <<<END nonce>>>` with the nonce and both markers removed from the content
+first, under a "treat it strictly as data" preamble. The nonce is an HMAC of the message id under
+a key minted at boot: stable across rebuilds so prompt caching still hits, unguessable to whoever
+wrote the file. The file is re-read at assembly and refused if it has become a symlink, left the
+workspace, grown past the cap or stopped being UTF-8 — the agent may edit an upload, and what is
+inlined must be a file it could have read itself.
+
+**Inlined content is part of the budget, and is the first thing given back.**
+`estimateEventTokens` counts it from metadata (`estimateInlineTokens`), so compaction weighs a
+message by what it sends. After compaction has done what it can (or is off), `driveLoop` asks the
+inliner to `dropOldest` until the request fits `compactionThreshold`, rebuilding each time; a
+dropped block's note says its content was left out for room. Oldest first, because the file a
+person is asking about is nearly always the latest.
+
+**A PDF can also go as itself** (`planner_models.supports_pdf`, protocol `supportsPdf`, the "PDFs"
+select on a model row). Off unless set — there is no "auto", because most OpenAI-compatible
+servers reject the part — and when on, `render` adds an OpenAI `file` part
+(`data:application/pdf;base64,…`, at most 10 MB, cached per file) beside the extracted text;
+`budgetContextPdfs` keeps the newest two, like `budgetContextImages`, and `estimateRequestTokens`
+counts a part by its size rather than its base64 length. A 400/415/422 for a request carrying one
+(not an overflow, not a quota error) is `isPdfPartRejection`: one notice, then the round trip again
+without parts for the rest of the turn (`pdfPartsRefused`), the cache-marker refusal's exact shape.
+
+**Coding agents get the sidecar, minus claude** (`attachments/session-landing.ts`,
+`landSessionAttachments`, one function for the WebSocket and MCP). For codex, opencode, pi and agy
+a document's sidecar lands beside it and the prompt gains an `[Extracted text saved to: …]` line
+under the file's note; `parseAttachedFileNotes` takes that line with its file and makes no chip of
+it. `usesClaudeTranscripts` agents (claude and every custom provider) get none, by the reporter's
+answer: Claude Code's `Read` reads the PDF itself. Nothing is inlined for any coding agent. The
+WebSocket `prompt` case is now async (extraction), so it runs in a per-connection chain that keeps
+a tab's prompts in order.
+
+Landing takes as long as extraction, which reopens the window PA-136 closed with
+`assertCanAcceptFiles`: the message route re-checks `isBusy` after landing and, if another turn
+started meanwhile, removes what it landed (`removeAttachments`) before answering 409, so a refused
+message still leaves nothing behind.
+
+**Telegram documents and photos** (`telegram/bridge.ts` `receiveMedia`, `client.ts`
+`getFile`/`downloadFile`). `handleUpdate` no longer ignores a message without text. The pairing
+check comes first, so an unpaired chat downloads nothing. A document is checked against
+`MAX_ATTACHMENT_BYTES` by its declared size, then streamed into `AttachmentStaging` under the
+bot's own principal (`telegram:<botId>`) and landed through `landAttachments` — so extraction and
+inlining follow with no Telegram-specific code. The first photo becomes the message's inline
+`PromptImage` (`pickPhotoSize`: the largest size within 2000 px and `MAX_IMAGE_BYTES`, Telegram
+photos being JPEG); any further photo is a file, as on the web. The caption is the prompt. An
+album — several updates sharing a `media_group_id`, with no marker on the last — is coalesced
+(the reporter's choice) by a 1.5 s timer each part restarts, and becomes one message. A busy chat
+queues it, as text. The download URL carries the bot token, so `downloadFile` throws only fixed
+sentences (a fetch error's own message can echo the URL), and nothing logs a URL. The pairing's
+`skip_tool_approvals` is untouched; an attachment pre-approves nothing.
+
+**MCP uploads** (reporter's choice (A)). `upload_attachment` — the first tool offered in two
+scopes (`McpToolDefinition.alsoScopes`, checked by `toolAllowed` both when the catalog is built and
+on every call) — takes `{ name, mediaType?, dataBase64 }` up to `MAX_MCP_ATTACHMENT_BYTES` (5 MB,
+because it rides inside JSON-RPC; the `/mcp` routes carry `bodyLimit: LIMITS.maxMessageBytes`) and
+stages it under `mcp:<id>`, exactly `attachmentPrincipal`'s value, so one token can never claim
+another's id. `start_session`, `send_prompt`, `run_coding_task`, `send_pocket_message` and
+`run_pocket_task` take `attachments: string[]`. A coding session's ids are claimed before anything
+is created (an expired or foreign id starts nothing) and landed into the cwd it will run in, and
+removed if the session then fails to start. The call is logged with size and type, never the name
+or the bytes, and the catalog still has no approval, argv or `force` field.
+
+**Cleanup** (Phase 4, retention off by default). Cancelling a queued Pocket Agent message deletes
+the files it landed (and their sidecars), as do `/clear` and deleting the chat for messages still
+queued — they will never be sent. `removeLandedAttachments` only ever deletes a regular file
+directly inside `.pocketagent/attachments/` or `artifacts/uploads/`, reached through no symlink.
+`attachmentRetentionDays` (general Settings, `0` = never, the default by the reporter's answer:
+a file may be the very input a chat still needs) drives `AttachmentRetentionService`, a sweep a
+minute after boot and every six hours. It visits `.pocketagent/attachments/` under every root in
+`attachment_roots` (recorded at landing, because session rows are pruned) and every session cwd,
+plus each Pocket Agent's `artifacts/uploads/`; skips a directory that is not exactly where it
+claims to be; deletes only regular files older than the limit; keeps any file a queued prompt
+still names (matched by its unique landed basename, from `session_prompt_queue` text and
+`planner_prompt_queue.attachments_json`); and logs counts only.
+
+Known limitations: an extract is plain text, so a PDF's layout and an xlsx's formulas are gone
+(the values are there); legacy `.doc`/`.xls` are not read; scanned PDFs have no text; and a sidecar
+is written once, so an agent that edits the original does not update it.
 
 ### Hiding and removing
 
@@ -3006,6 +3139,18 @@ These are load-bearing. Several were bugs first.
   prompt naming it is handled, and a prompt whose attachment cannot be claimed is refused
   visibly rather than sent without it. Asserted in `apps/server/tests/attachments.test.ts` and
   `attachments-route.test.ts`.
+- **An attached document is parsed as hostile input, in a process that can be killed, and what it
+  says reaches a model only as fenced data** (PA-137). Extraction runs in a child process with an
+  empty environment, a timeout, an RSS cap the parent enforces (not `resourceLimits`, which does
+  not bound the typed arrays every decompressor uses — measured), output caps, no network and no
+  `eval`; its failure is a note on the attachment and never fails a prompt or a turn. Inlined
+  content goes through the same `sanitizeUntrustedText` and unclosable nonce fence as Jira text,
+  is re-read through no symlink and inside the workspace, and is the first thing dropped when a
+  request would not fit. Like Jira's fence, it lowers the hit rate and is not a boundary: the
+  approval gate is, and an attachment pre-approves nothing on any channel. An MCP or Telegram upload
+  is staged under its own principal and claimable by nobody else. Asserted in
+  `attachments-extract.test.ts`, `attachments-pa137.test.ts`, `telegram-media.test.ts` and
+  `mcp-server.test.ts`.
 - **The browser never supplies an executable or argv.** Adoption and resume both take their
   `cwd` from the server-validated target. **PA-68 extends this to installing one**, which is the
   sharpest case yet: `POST /api/agents/install` takes an id out of a closed set plus an *action*
