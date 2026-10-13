@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { SettingsResponse, UpdateSettingsRequest } from '@pocketagent/protocol';
+import {
+  HOST_CAPABILITY_TAG_PATTERN,
+  type SettingsResponse,
+  type UpdateSettingsRequest,
+} from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { Icon, type IconName } from '../components/Icon.js';
 import { CustomClaudeProvidersSection } from '../components/CustomClaudeProvidersSection.js';
@@ -472,8 +476,23 @@ export function SettingsPage({ onApiError, onBack, hubVersion = null }: Props): 
           <SectionCard
             title="This Host"
             icon="laptop"
-            desc="The build this host is running, and asking it to drain and restart. The image it comes back on is fixed by its unit, never chosen here."
+            desc="The build this host is running, its capability card description and tags, and asking it to drain and restart. The image it comes back on is fixed by its unit, never chosen here."
           >
+            <TextRow
+              label="Host description"
+              help="Free-text description published in this host’s capability card on the Hub and over MCP (e.g. hardware, signing certificates, or local archives)."
+              placeholder="e.g. Mac mini with iOS distribution certs and Xcode 16"
+              multiline
+              rows={2}
+              value={settings.hostDescription}
+              busy={busy('hostDescription')}
+              onChange={(v) => saveDebounced('hostDescription', v)}
+            />
+            <HostTagsRow
+              tags={settings.hostTags}
+              busy={busy('hostTags')}
+              onChange={(nextTags) => saveDebounced('hostTags', nextTags)}
+            />
             <HostAdminSection onApiError={onApiError} />
           </SectionCard>
 
@@ -913,6 +932,96 @@ export function SelectRow({
           </select>
         </div>
       </div>
+    </div>
+  );
+}
+
+function HostTagsRow({
+  tags,
+  busy,
+  onChange,
+}: {
+  tags: string[];
+  busy: boolean;
+  onChange: (next: string[]) => void;
+}): JSX.Element {
+  const joined = tags.join(', ');
+  const [draft, setDraft] = useState(joined);
+  const [tagError, setTagError] = useState<string | null>(null);
+  const lastCommittedRef = useRef(joined);
+
+  useEffect(() => {
+    if (joined !== lastCommittedRef.current) {
+      lastCommittedRef.current = joined;
+      setDraft(joined);
+      setTagError(null);
+    }
+  }, [joined]);
+
+  const handleInputChange = (raw: string): void => {
+    setDraft(raw);
+    const parts = Array.from(
+      new Set(
+        raw
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
+    );
+    const invalid = parts.find((item) => !HOST_CAPABILITY_TAG_PATTERN.test(item));
+    if (invalid !== undefined) {
+      setTagError(
+        `Invalid tag "${invalid}": use 1–40 lowercase letters, digits, hyphens or underscores.`,
+      );
+      return;
+    }
+    if (parts.length > 32) {
+      setTagError('At most 32 tags are allowed.');
+      return;
+    }
+    setTagError(null);
+    lastCommittedRef.current = parts.join(', ');
+    onChange(parts);
+  };
+
+  return (
+    <div className="settings-row settings-row-stacked">
+      <div className="settings-row-info">
+        <label className="settings-row-label" htmlFor="host-tags-input">
+          Host tags
+        </label>
+      </div>
+      <div className="settings-row-control">
+        <input
+          id="host-tags-input"
+          type="text"
+          className="settings-input mono"
+          value={draft}
+          placeholder="ios-signing, gpu, photo-archive"
+          disabled={busy}
+          spellCheck={false}
+          onChange={(e) => handleInputChange(e.target.value)}
+        />
+      </div>
+      {tags.length > 0 && (
+        <div className="hub-host-cap-tags" aria-label="Configured host tags">
+          {tags.map((tag) => (
+            <span key={tag} className="hub-pill hub-tag-pill">
+              {tag}
+            </span>
+          ))}
+        </div>
+      )}
+      {tagError ? (
+        <p className="transport-hint" style={{ color: 'var(--danger)' }} role="alert">
+          {tagError}
+        </p>
+      ) : (
+        <p className="transport-hint">
+          Comma-separated short slugs (lowercase letters, digits, hyphens or underscores) shown on
+          this host’s capability card.
+        </p>
+      )}
     </div>
   );
 }

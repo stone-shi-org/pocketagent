@@ -3,6 +3,7 @@ import {
   HUB_TOKEN_PREFIX_LENGTH,
   MCP_TOKEN_PREFIX_LENGTH,
   type HubFleetTokenState,
+  type HubHostCapabilities,
   type HubHostEntry,
   type HubHostStatus,
 } from '@pocketagent/protocol';
@@ -49,6 +50,7 @@ export interface ResolvedHost {
  */
 export class HostRegistry {
   private readonly health = new Map<string, HostHealth>();
+  private readonly capabilities = new Map<string, HubHostCapabilities>();
 
   constructor(
     private readonly db: HubDb,
@@ -228,6 +230,7 @@ export class HostRegistry {
     if (row === null) return false;
     this.db.prepare('DELETE FROM hub_hosts WHERE id = ?').run(id);
     this.health.delete(id);
+    this.capabilities.delete(id);
     // Removing the default leaves the bare `/api/*` mount unrouted, so promote
     // the oldest survivor rather than leaving the Hub in a state where its own
     // UI cannot load. Nothing is chosen cleverly: "the next one" is
@@ -247,6 +250,18 @@ export class HostRegistry {
 
   healthFor(id: string): HostHealth {
     return this.health.get(id) ?? UNPROBED;
+  }
+
+  recordCapabilities(id: string, state: HubHostCapabilities | null): void {
+    if (state === null) {
+      this.capabilities.delete(id);
+      return;
+    }
+    this.capabilities.set(id, state);
+  }
+
+  capabilitiesFor(id: string): HubHostCapabilities | null {
+    return this.capabilities.get(id) ?? null;
   }
 
   /** Project a row plus its last probe into the shape the browser reads. */
@@ -275,6 +290,7 @@ export class HostRegistry {
         lastCheckedAt: health.lastCheckedAt,
         error: health.error,
       },
+      capabilities: this.capabilitiesFor(row.id),
     };
   }
 

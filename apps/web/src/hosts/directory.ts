@@ -3,6 +3,7 @@ import {
   HealthResponse,
   HostListResponse,
   HubHostListResponse,
+  type HubHostCapabilities,
   type HubHostEntry,
 } from '@pocketagent/protocol';
 import {
@@ -221,6 +222,8 @@ interface Entry {
   readonly hubHostId?: string;
   /** The address the Hub dials for this host. Omitted in local mode. */
   readonly hubBaseUrl?: string;
+  /** Cached capability card from the Hub registry. Omitted in local mode. */
+  readonly capabilities?: HubHostCapabilities | null;
 }
 
 function entriesFromLocal(local: readonly LocalHostEntry[], defaultLabel: string): Entry[] {
@@ -260,6 +263,7 @@ function entriesFromHub(hosts: readonly HubHostEntry[]): Entry[] {
     hubBound: host.boundAt !== null,
     hubHostId: host.id,
     hubBaseUrl: host.baseUrl,
+    capabilities: host.capabilities ?? null,
     ...(host.enabled
       ? {}
       : { disabledReason: `${host.label} is registered but disabled in the Hub.` }),
@@ -386,6 +390,7 @@ export function useHostDirectory(): HostDirectory {
             ...(entry.hubBound === undefined ? {} : { hubBound: entry.hubBound }),
             ...(entry.hubHostId === undefined ? {} : { hubHostId: entry.hubHostId }),
             ...(entry.hubBaseUrl === undefined ? {} : { hubBaseUrl: entry.hubBaseUrl }),
+            ...(entry.capabilities === undefined ? {} : { capabilities: entry.capabilities }),
             ...(entry.disabledReason === undefined
               ? {}
               : { forced: { status: 'offline' as const, message: entry.disabledReason } }),

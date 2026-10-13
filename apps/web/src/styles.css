@@ -8992,6 +8992,67 @@ button.chat-rate-limit-badge {
 .hub-host-problem { color: var(--warn); }
 .hub-host-note { color: var(--accent); }
 
+/* PA-133: per-backend capability card on HubPage */
+.hub-platform-pill {
+  color: var(--text);
+}
+.hub-host-capabilities {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.hub-host-cap-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.hub-host-cap-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.hub-tag-pill {
+  color: var(--accent);
+  border-color: var(--border-strong);
+}
+.hub-host-cap-facts {
+  font-size: 12.5px;
+}
+.hub-cap-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
+}
+.hub-cap-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text);
+}
+.hub-cap-chip.ok {
+  color: var(--ok);
+}
+.hub-cap-chip.warn {
+  color: var(--warn);
+}
+.hub-host-cap-unavailable {
+  margin: 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
 .hub-host-actions {
   display: flex;
   align-items: center;

@@ -2571,6 +2571,14 @@ only fills `${…}` in the compose file and is never passed into a container, so
 must be in the service's `environment:` (`docker/compose.hub.yaml` wires it as
 `${PA_MDNS_ADVERTISE:-false}`), and a backend with no `hostname:` advertises its container id.
 
+### Host capability cards (PA-133)
+
+Each backend describes what it can do in a single `HostCapabilities` card (`packages/protocol/src/capabilities.ts`, `capabilitiesVersion: 1`), exposed at `GET /api/capabilities` (authenticated) and as the `get_capabilities` MCP tool (`scope: 'read'`, calling the route through `InternalApiClient` so both surfaces return the exact same shape).
+
+- **Measured facts, computed with zero subprocesses.** `routes/capabilities.ts` (`buildHostCapabilities`) reads `platform`, `arch` and `os.release()`; catalog agents (`INSTALLABLE_AGENT_IDS`) with their `AgentSetupState` derived via `deriveSetupState` from filesystem `available` plus the cached `agent_defaults.last_auth_*` columns (never spawning an auth probe on read); notable executables from the closed `NOTABLE_EXECUTABLES` list (`xcodebuild`, `swift`, `xcrun`, `playwright-cli`, `docker`, `git`, `node`, `python3`, `cargo`, `go`) resolved through `resolveExecutable` / `executableSearchDirs`, with `DARWIN_ONLY_EXECUTABLES` (`xcodebuild`, `xcrun`) skipped on non-`darwin` hosts; project folders (`path`, `label`, and `gitRemote` parsed directly from `<folder>/.git/config` or a linked worktree's `gitdir:` `.git` file without spawning `git`); and Pocket Agents (`id`, `name`, `identityPrompt`, effective `enabledTools` from `PlannerChatService.enabledToolNamesFor`, and `skillNames` from `PlannerSkillService.listAvailableSkills`).
+- **Operator-declared fields.** `hostDescription` (free text, up to 500 chars) and `hostTags` (up to 20 lowercase slugs matching `^[a-z0-9][a-z0-9._:-]{0,31}$`) live in `settings` (`host_description`, `host_tags` JSON), are editable in Settings (`PATCH /api/settings` and `update_settings`), and are audited through `auditConfigChange` like other runtime settings.
+- **Hub polling, caching, and fallback.** `HealthPollService.tick()` (`apps/hub/src/registry/health.ts`) probes `GET /api/capabilities` alongside `/health` for bound online hosts using their `pah_` credential (`probeBackendCapabilities`, also called immediately on bind) and caches the `HubHostCapabilities` union in memory on `HostRegistry` (`recordCapabilities` / `capabilitiesFor`, surfaced on `HubHostEntry.capabilities`) with `fetchedAt`. An older backend without the route answers 404, which is cached as `{ status: 'unavailable', fetchedAt }` and shown on `HubPage` as `"Capabilities unavailable (upgrade host)"` rather than as an error — feature detection by probing, never by version comparison, the same rule PA-70 uses.
+
 ### The Fleet agent: a Hub-level `/mcp` and a coordinator Pocket Agent (PA-134)
 
 A Pocket Agent that finds the right host for a task and dispatches it there. **There is no LLM loop
@@ -2646,7 +2654,9 @@ Hub caps dispatch/wait calls in flight at 6 overall and 3 per host (`DispatchLim
 will write; per-host token state; each step's outcome), and a **Fleet** entry in `HubSidebar` and
 the host sheet (`hosts/fleet.ts`) that opens the newest human chat in the Fleet agent — or makes one
 — through the existing proxy, or says "coordinator <host> unreachable — move role?". `HostInfo`
-gained `platform`/`arch` as the interim capability signal until PA-133's cards exist.
+carries `platform`/`arch` alongside PA-133's full `HostCapabilities` card (`get_capabilities` on the
+backend, with a fallback to `get_host_info`/`list_projects`/`list_pocket_agents` when talking to an
+older backend without `get_capabilities`).
 
 ### Version drift and drain-then-exit restart (PA-69)
 
@@ -3173,6 +3183,16 @@ These are load-bearing. Several were bugs first.
   can at worst put a wrong row in front of a human. `GET /api/hub/discovery` sits behind the
   Hub session like every other `/api/hub/*` route, and its refresh is a POST so the Origin
   check covers it.
+- **A capability card is behind authentication, spawns no subprocess, and probes only a closed
+  list of executables** (PA-133). A tool, agent and project inventory is a machine fingerprint, so
+  nothing in `/health` and nothing in the mDNS TXT record may carry it (`health.test.ts` and
+  `mdns-advertise.test.ts` pin both key sets). `GET /api/capabilities` and `get_capabilities`
+  compute `HostCapabilities` exclusively from filesystem checks (`resolveExecutable` over the
+  closed `NOTABLE_EXECUTABLES` list in `packages/protocol/src/capabilities.ts`, and reading
+  `.git/config` directly for git origin URLs) plus the cached `agent_defaults.last_auth_*`
+  columns (`deriveSetupState`) — never spawning a CLI or `git` subprocess on read, never exposing
+  secrets, env values or full `PATH`, and never accepting a path or executable name from the
+  caller. Asserted in `apps/server/tests/capabilities.test.ts`.
 - **A live-listen utterance is never silently discarded, and barge-in commits
   only after the harness has judged it** (PA-85). The mic is open with no
   intent signal, so a filter is unavoidable — but the filter's own mistakes

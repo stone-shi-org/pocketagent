@@ -72,6 +72,7 @@ import { webhookRoutes } from './routes/webhooks.js';
 import { plannerRoutes } from './routes/planner.js';
 import { mcpRegistryRoutes } from './routes/mcp-registries.js';
 import { telegramRoutes } from './routes/telegram.js';
+import { capabilitiesRoutes } from './routes/capabilities.js';
 import { AdminService } from './admin/index.js';
 import { GeminiLiveService } from './planner/gemini-live.js';
 import { TelegramBotStore } from './telegram/bots-store.js';
@@ -1026,6 +1027,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(mcpRegistryRoutes);
   await app.register(telegramRoutes);
   await app.register(settingsRoutes);
+  await app.register(capabilitiesRoutes);
   await app.register(pushRoutes);
   await app.register(usageRoutes);
   await app.register(voiceRoutes);

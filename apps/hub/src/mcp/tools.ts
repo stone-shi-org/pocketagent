@@ -253,19 +253,33 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
       const target = targetFor(deps, args.host);
       const call = (tool: string, toolArgs: Record<string, unknown> = {}) =>
         deps.client.call(target, tool, toolArgs, { depth: ctx.depth, signal: ctx.signal, timeoutMs: 20_000 });
-      const [info, agents, pocket, projects] = await Promise.all([
+      const [info, caps, agents, pocket, projects] = await Promise.all([
         call('get_host_info'),
+        call('get_capabilities').catch(() => null),
         call('list_agents'),
         call('list_pocket_agents'),
         call('list_projects', { maxChatsPerProject: 1 }),
       ]);
       const host = (info.host ?? {}) as Record<string, unknown>;
+      const capsPocket = Array.isArray(caps?.pocketAgents)
+        ? (caps.pocketAgents as Record<string, unknown>[])
+        : null;
+      const capsProjects = new Map<string, Record<string, unknown>>(
+        (Array.isArray(caps?.projects) ? (caps.projects as Record<string, unknown>[]) : []).map((p) => [
+          String(p.path),
+          p,
+        ]),
+      );
       return {
         host: target.hostId,
         label: target.row.label,
-        platform: host.platform ?? null,
-        arch: host.arch ?? null,
+        platform: caps?.platform ?? host.platform ?? null,
+        arch: caps?.arch ?? host.arch ?? null,
+        osVersion: caps?.osVersion ?? null,
         version: host.version ?? null,
+        description: caps?.description ?? '',
+        tags: Array.isArray(caps?.tags) ? caps.tags : [],
+        executables: Array.isArray(caps?.executables) ? caps.executables : [],
         runningSessions: host.runningSessions ?? null,
         codingAgents: ((agents.agents as Record<string, unknown>[] | undefined) ?? []).map((a) => ({
           id: a.id,
@@ -274,16 +288,31 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
           setupState: a.setupState,
           canDispatch: a.available === true && a.structured === true,
         })),
-        pocketAgents: ((pocket.pocketAgents as Record<string, unknown>[] | undefined) ?? []).map((p) => ({
-          id: p.id,
-          name: p.name,
-          defaultModelId: p.defaultModelId ?? null,
-        })),
-        projects: ((projects.projects as Record<string, unknown>[] | undefined) ?? []).map((p) => ({
-          cwd: p.cwd,
-          name: p.name,
-          gitBranch: p.gitBranch ?? null,
-        })),
+        pocketAgents:
+          capsPocket !== null
+            ? capsPocket.map((p) => ({
+                id: p.id,
+                name: p.name,
+                defaultModelId: p.defaultModelId ?? null,
+                identityPrompt: p.identityPrompt ?? null,
+                enabledTools: p.enabledTools ?? [],
+                skills: p.skills ?? [],
+              }))
+            : ((pocket.pocketAgents as Record<string, unknown>[] | undefined) ?? []).map((p) => ({
+                id: p.id,
+                name: p.name,
+                defaultModelId: p.defaultModelId ?? null,
+              })),
+        projects: ((projects.projects as Record<string, unknown>[] | undefined) ?? []).map((p) => {
+          const capProj = capsProjects.get(String(p.cwd));
+          return {
+            cwd: p.cwd,
+            name: p.name,
+            label: capProj?.label ?? p.name,
+            gitBranch: p.gitBranch ?? null,
+            gitRemoteUrl: capProj?.gitRemoteUrl ?? null,
+          };
+        }),
         note:
           'Capabilities are read live from the host. A coding agent with canDispatch false is not installed, ' +
           'or has no structured transport.',

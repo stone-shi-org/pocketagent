@@ -8,6 +8,7 @@ import {
   negotiateProtocol,
   type HostCompatibility,
   type HostInfo,
+  type HubHostCapabilities,
   type VersionDrift,
 } from '@pocketagent/protocol';
 import { DEFAULT_HOST_ID, type HostEndpoint } from '../api/host.js';
@@ -133,6 +134,12 @@ export interface HostRecord {
    * install: one host compared against itself is not evidence of anything.
    */
   readonly drift: VersionDrift;
+  /**
+   * PA-133: per-host capability card cached by the Hub's health poller for
+   * bound hosts (`{ status: 'ok', card }` or `{ status: 'unavailable' }`).
+   * `null` (or omitted) in local mode or before the first bound probe.
+   */
+  readonly capabilities?: HubHostCapabilities | null;
 }
 
 /** Whether `id` names this record, by its routing id or by an alias. */
@@ -221,6 +228,8 @@ export function hostRecordFor(entry: {
   hubHostId?: string;
   /** `HubHostEntry.baseUrl`, or omitted entirely in local mode. */
   hubBaseUrl?: string;
+  /** `HubHostEntry.capabilities`, or omitted in local mode. */
+  capabilities?: HubHostCapabilities | null;
 }): HostRecord {
   const { status, compatibility } = entry.forced
     ? { status: entry.forced.status, compatibility: null }
@@ -256,6 +265,7 @@ export function hostRecordFor(entry: {
     // Filled by `withVersionDrift` below, which is the only thing that can:
     // drift needs the whole list, and this function sees one host.
     drift: detectVersionDrift(info?.version ?? null, null),
+    capabilities: entry.capabilities ?? null,
   };
 }
 

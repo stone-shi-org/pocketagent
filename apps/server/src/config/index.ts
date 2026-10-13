@@ -320,6 +320,13 @@ export interface Config {
    * "narrate my code blocks again".
    */
   voiceSpokenSummaryEnabled: boolean;
+  /**
+   * PA-133: operator-declared free-text description and short slug tags
+   * published on `GET /api/capabilities`. Stored in `settings`, audited on
+   * write, config-literal defaults (`''` and `[]`) with no `.env` counterpart.
+   */
+  hostDescription: string;
+  hostTags: string[];
 }
 
 const MIN_TOKEN_LENGTH = 24;
@@ -646,5 +653,7 @@ export function loadConfig(
     voiceTurnSilenceMs: 800,
     voiceSpokenSummaryEnabled: true,
     attachmentRetentionDays: 0,
+    hostDescription: '',
+    hostTags: [],
   };
 }

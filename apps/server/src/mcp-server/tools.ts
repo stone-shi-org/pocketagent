@@ -10,6 +10,7 @@ import {
   MAX_MCP_ATTACHMENT_BYTES,
   MCP_SERVER_PATH,
   type AgentInfo,
+  type HostCapabilities,
   type McpProtocolEra,
   type McpScope,
   type ProjectInfo,
@@ -210,6 +211,20 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
         client: { label: ctx.principal.label, scopes: ctx.principal.scopes },
         liveSessionsStartedByYou: deps.work.liveSessionsFor(ctx.principal.id),
       };
+    },
+  },
+  {
+    name: 'get_capabilities',
+    scope: 'read',
+    title: 'Host capabilities',
+    description:
+      'What this PocketAgent machine can do: platform/arch/OS version, operator description and tags, ' +
+      'coding agents with setupState, notable executables on disk, project folders (with git origin URL), ' +
+      'and Pocket Agents (identity prompt, enabled tools, skills). Same HostCapabilities card as GET /api/capabilities.',
+    input: {},
+    readOnly: true,
+    async handler(deps, ctx) {
+      return deps.api.call<HostCapabilities>(ctx.principal, 'GET', '/api/capabilities');
     },
   },
   {

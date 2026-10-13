@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ProtocolRange } from './protocol-negotiation.js';
+import { HostCapabilities } from './capabilities.js';
 
 /**
  * PA-67/PA-66: the Hub's *registry* API — which backends exist, how to reach
@@ -95,6 +96,19 @@ export type HubHostStatus = z.infer<typeof HubHostStatus>;
  * rather than silently accepted, because every persisted tab and bookmark for
  * this host id was filed against the old identity.
  */
+export const HubHostCapabilities = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('ok'),
+    card: HostCapabilities,
+    fetchedAt: z.number(),
+  }),
+  z.object({
+    status: z.literal('unavailable'),
+    fetchedAt: z.number(),
+  }),
+]);
+export type HubHostCapabilities = z.infer<typeof HubHostCapabilities>;
+
 export const HubHostEntry = z.object({
   id: HubHostId,
   /** What a human calls this machine, e.g. `stone-dev01`. */
@@ -116,6 +130,13 @@ export const HubHostEntry = z.object({
   backendHostId: z.string().nullable(),
   identityChanged: z.boolean(),
   status: HubHostStatus,
+  /**
+   * PA-133: per-host capability card cached by the Hub's health poller for
+   * bound hosts. `null` (or omitted) when unbound or not yet probed;
+   * `{ status: 'unavailable' }` when the backend answered 404 on
+   * `GET /api/capabilities` (an older host that predates PA-133).
+   */
+  capabilities: HubHostCapabilities.nullable().optional(),
 });
 export type HubHostEntry = z.infer<typeof HubHostEntry>;
 

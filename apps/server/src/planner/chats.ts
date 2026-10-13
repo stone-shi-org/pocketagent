@@ -1930,6 +1930,15 @@ export class PlannerChatService {
   }
 
   /**
+   * PA-133: effective enabled tool names for a Pocket Agent workspace, using
+   * the exact global + per-agent deny-list and MCP/skills/bash omission rules
+   * `toolsFor` applies at turn start.
+   */
+  enabledToolNamesFor(workspaceId: string | null): string[] {
+    return this.toolsFor(workspaceId).map((t) => t.name);
+  }
+
+  /**
    * PA-37: for a `call_mcp_tool` invocation, resolves the *real* underlying
    * MCP tool identity from its own (LLM-authored, not yet trusted)
    * arguments — this is what approval gating, "remember" persistence, and

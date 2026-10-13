@@ -1,4 +1,9 @@
-import { HealthResponse, HostListResponse } from '@pocketagent/protocol';
+import {
+  HealthResponse,
+  HostCapabilities,
+  HostListResponse,
+  type HubHostCapabilities,
+} from '@pocketagent/protocol';
 import type { HostRegistry } from './store.js';
 
 /** How often each enabled host is probed. */
@@ -117,6 +122,22 @@ export class HealthPoller {
     if (health.error !== null) {
       this.options.log?.warn({ hostId: id, error: health.error }, 'host health probe failed');
     }
+    // PA-133: fetch the capability card on the same tick, only for bound hosts
+    // that hold a credential. An older backend without `GET /api/capabilities`
+    // answers 404 → recorded as `unavailable`, never an error.
+    const credential = this.options.registry.credentialFor(row);
+    if (credential === null) {
+      this.options.registry.recordCapabilities(id, null);
+    } else if (health.online) {
+      const capabilities = await probeBackendCapabilities(
+        row.base_url,
+        credential,
+        this.fetchImpl,
+      );
+      if (capabilities !== null) {
+        this.options.registry.recordCapabilities(id, capabilities);
+      }
+    }
     this.schedule(id);
   }
 
@@ -223,6 +244,42 @@ export async function readBackendHostId(
     if (!response.ok) return null;
     const parsed = HostListResponse.safeParse(await response.json());
     return parsed.success ? (parsed.data.hosts[0]?.id ?? null) : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * PA-133: probe a bound backend's `GET /api/capabilities`.
+ *
+ * Detected by probing rather than by version comparison (the same rule PA-70
+ * uses): a backend without the route answers 404, which is recorded as
+ * `{ status: 'unavailable' }` so the UI can show "capabilities unavailable
+ * (upgrade host)" rather than an error.
+ */
+export async function probeBackendCapabilities(
+  baseUrl: string,
+  credential: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<HubHostCapabilities | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+  try {
+    const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/api/capabilities`, {
+      headers: { accept: 'application/json', authorization: `Bearer ${credential}` },
+      signal: controller.signal,
+    });
+    if (response.status === 404) {
+      return { status: 'unavailable', fetchedAt: Date.now() };
+    }
+    if (!response.ok) return null;
+    const parsed = HostCapabilities.safeParse(await response.json());
+    if (!parsed.success) {
+      return { status: 'unavailable', fetchedAt: Date.now() };
+    }
+    return { status: 'ok', card: parsed.data, fetchedAt: Date.now() };
   } catch {
     return null;
   } finally {

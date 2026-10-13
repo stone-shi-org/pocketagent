@@ -92,8 +92,14 @@ for (const era of ['legacy', 'modern'] as Era[]) {
     it('reads a host’s capabilities live: platform, coding agents, Pocket Agents, projects', async () => {
       const res = await callHub(client, 'get_host_capabilities', { host: 'mac01' });
       expect(res.isError, res.text).toBe(false);
+      expect(res.data.capabilitiesVersion).toBe(1);
       expect(res.data.platform).toBe(process.platform);
       expect(res.data.arch).toBe(process.arch);
+      expect(typeof res.data.osVersion).toBe('string');
+      expect(typeof res.data.description).toBe('string');
+      expect(Array.isArray(res.data.tags)).toBe(true);
+      expect(Array.isArray(res.data.executables)).toBe(true);
+      expect(Array.isArray(res.data.agents)).toBe(true);
       expect(res.data.pocketAgents.map((p: { name: string }) => p.name)).toContain('Pocket Agent');
       expect(Array.isArray(res.data.codingAgents)).toBe(true);
     });

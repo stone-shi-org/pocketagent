@@ -1,3 +1,4 @@
+import { HOST_CAPABILITY_TAG_PATTERN } from '@pocketagent/protocol';
 import type { Config } from '../config/index.js';
 
 /**
@@ -134,6 +135,42 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   str('pushContact', 'push_contact', false),
   // PA-137: read by every retention sweep, so a change needs no restart.
   num('attachmentRetentionDays', 'attachment_retention_days', true),
+  // PA-133: operator-declared host capability card fields, read per-request by
+  // `GET /api/capabilities` and `get_capabilities`.
+  str('hostDescription', 'host_description', true),
+  {
+    key: 'hostTags',
+    dbKey: 'host_tags',
+    live: true,
+    parse: (raw) => {
+      const trimmed = raw.trim();
+      if (trimmed === '') return [];
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        if (Array.isArray(parsed)) {
+          return Array.from(
+            new Set(
+              parsed
+                .filter((item): item is string => typeof item === 'string')
+                .map((item) => item.trim())
+                .filter((item) => HOST_CAPABILITY_TAG_PATTERN.test(item)),
+            ),
+          );
+        }
+      } catch {
+        // Fallback for comma-separated storage if ever written by hand.
+      }
+      return Array.from(
+        new Set(
+          trimmed
+            .split(',')
+            .map((item) => item.trim())
+            .filter((item) => HOST_CAPABILITY_TAG_PATTERN.test(item)),
+        ),
+      );
+    },
+    serialize: (value) => JSON.stringify(value),
+  } as SettingsField<'hostTags'>,
 ] as unknown as readonly SettingsField[];
 
 export const RESTART_REQUIRED_KEYS: readonly string[] = SETTINGS_FIELDS.filter((f) => !f.live).map(

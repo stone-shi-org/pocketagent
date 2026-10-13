@@ -368,6 +368,31 @@ export function HubPage({
   );
 }
 
+function formatPlatformBadge(platform: string, arch: string): string {
+  const osLabel =
+    platform === 'darwin'
+      ? 'macOS'
+      : platform === 'linux'
+        ? 'Linux'
+        : platform === 'win32'
+          ? 'Windows'
+          : platform;
+  return `${osLabel} · ${arch}`;
+}
+
+function formatAgentSetupLabel(setupState: string): string {
+  switch (setupState) {
+    case 'ready':
+      return 'ready';
+    case 'signed-out':
+      return 'sign in needed';
+    case 'not-installed':
+      return 'not installed';
+    default:
+      return 'installed';
+  }
+}
+
 function HostCard({
   host,
   push,
@@ -386,12 +411,22 @@ function HostCard({
   onRemove: () => void;
 }): JSX.Element {
   const drift = hostDriftMessage(host);
+  const caps = host.capabilities ?? null;
+  const card = caps?.status === 'ok' ? caps.card : null;
   return (
     <article className="hub-host-card">
       <header className="hub-host-card-head">
         <span className={hostDotClass(host.status)} aria-hidden="true" />
         <Icon name="host" size={18} />
         <strong className="hub-host-card-name">{host.label}</strong>
+        {card !== null && (
+          <span
+            className="hub-pill hub-platform-pill"
+            title={`${card.platform} ${card.arch} · ${card.osVersion}`}
+          >
+            {formatPlatformBadge(card.platform, card.arch)}
+          </span>
+        )}
         {host.isDefault && (
           <span className="hub-pill" title="Also mounted at the bare /api/* root, so links without a host segment reach it">
             default
@@ -427,6 +462,75 @@ function HostCard({
           </>
         )}
       </dl>
+      {caps?.status === 'unavailable' && (
+        <p className="hub-host-cap-unavailable">Capabilities unavailable (upgrade host)</p>
+      )}
+      {card !== null && (
+        <div className="hub-host-capabilities">
+          {card.description.trim() !== '' && (
+            <p className="hub-host-cap-desc">{card.description}</p>
+          )}
+          {card.tags.length > 0 && (
+            <div className="hub-host-cap-tags" aria-label="Host tags">
+              {card.tags.map((tag) => (
+                <span key={tag} className="hub-pill hub-tag-pill">
+                  {tag}
+                </span>
+              ))}
+            </div>
+          )}
+          <dl className="hub-host-facts hub-host-cap-facts">
+            <dt>Agents</dt>
+            <dd className="hub-cap-list">
+              {card.agents.filter((a) => a.available).length === 0 ? (
+                <span className="hub-muted">None installed</span>
+              ) : (
+                card.agents
+                  .filter((a) => a.available)
+                  .map((a) => (
+                    <span
+                      key={a.id}
+                      className={`hub-cap-chip${
+                        a.setupState === 'ready'
+                          ? ' ok'
+                          : a.setupState === 'signed-out'
+                            ? ' warn'
+                            : ''
+                      }`}
+                      title={a.setupDetail ?? a.setupState}
+                    >
+                      {a.displayName} ({formatAgentSetupLabel(a.setupState)})
+                    </span>
+                  ))
+              )}
+            </dd>
+            <dt>Tools</dt>
+            <dd className="hub-cap-list">
+              {card.executables.length === 0 ? (
+                <span className="hub-muted">None detected</span>
+              ) : (
+                card.executables.map((exe) => (
+                  <code key={exe} className="hub-cap-chip hub-mono">
+                    {exe}
+                  </code>
+                ))
+              )}
+            </dd>
+            {card.projects.length > 0 && (
+              <>
+                <dt>Projects</dt>
+                <dd>{card.projects.map((p) => p.label).join(', ')}</dd>
+              </>
+            )}
+            {card.pocketAgents.length > 0 && (
+              <>
+                <dt>Pocket Agents</dt>
+                <dd>{card.pocketAgents.map((pa) => pa.name).join(', ')}</dd>
+              </>
+            )}
+          </dl>
+        </div>
+      )}
       {host.message && <p className="hub-host-problem">{host.message}</p>}
       {drift !== null && <p className="hub-host-note">{drift}</p>}
       <footer className="hub-host-actions">

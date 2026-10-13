@@ -79,12 +79,18 @@ export function dtoKeyFor(field: SettingsField): string {
 
 export function toDtoValue(field: SettingsField, configValue: unknown): unknown {
   if (field.key === 'sessionTtlMs') return Math.round((configValue as number) / 3_600_000);
+  if (field.key === 'hostTags') return Array.isArray(configValue) ? [...(configValue as string[])] : [];
   if (typeof configValue === 'number' || typeof configValue === 'boolean') return configValue;
   return field.serialize(configValue as never);
 }
 
 export function fromDtoValue(field: SettingsField, dtoValue: unknown): unknown {
   if (field.key === 'sessionTtlMs') return Math.round((dtoValue as number) * 3_600_000);
+  if (field.key === 'hostTags') {
+    return Array.isArray(dtoValue)
+      ? field.parse(JSON.stringify(dtoValue))
+      : field.parse(String(dtoValue));
+  }
   if (typeof dtoValue === 'number' || typeof dtoValue === 'boolean') return dtoValue;
   return field.parse(dtoValue as string);
 }

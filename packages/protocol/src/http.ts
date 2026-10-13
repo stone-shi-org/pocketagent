@@ -14,6 +14,7 @@ import { EffortLevel, SessionTransport } from './agent-events.js';
 import { LIMITS } from './limits.js';
 import { ProtocolRange } from './protocol-negotiation.js';
 import { TranscriptWord, VoiceAudioUpload } from './voice-audio.js';
+import { HostCapabilityTag } from './capabilities.js';
 
 export const LoginRequest = z.object({
   token: z.string().min(1).max(512),
@@ -509,6 +510,12 @@ export const RuntimeSettings = z.object({
    * a queued prompt still names is never swept.
    */
   attachmentRetentionDays: z.number().int().min(0).max(3650),
+  /**
+   * PA-133: operator-declared free-text description and short slug tags
+   * published in this backend's capability card (`GET /api/capabilities`).
+   */
+  hostDescription: z.string().max(2000),
+  hostTags: z.array(HostCapabilityTag).max(32),
 });
 export type RuntimeSettings = z.infer<typeof RuntimeSettings>;
 

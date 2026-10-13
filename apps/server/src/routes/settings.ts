@@ -9,6 +9,7 @@ import {
   fromDtoValue,
   buildRuntimeSettingsSnapshot,
 } from '../settings/index.js';
+import { auditConfigChange } from './shared.js';
 
 /**
  * The full settings resource: everything in `SETTINGS_FIELDS` (database-backed,
@@ -77,15 +78,28 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
       await sessions.setGlobalSkipPermissions(patch.skipPermissionsEnabled as boolean);
     }
 
+    const updatedFields: string[] = [];
     for (const field of SETTINGS_FIELDS) {
       const dtoKey = dtoKeyFor(field);
       if (!(dtoKey in patch)) continue;
       const value = fromDtoValue(field, patch[dtoKey]);
       writeSettingsField(db, config, field, value);
+      updatedFields.push(dtoKey);
       // Pino's level is a live setter; nothing else re-reads `config.logLevel`
       // after Fastify's own construction, so this is the one field that needs
       // an explicit push alongside the generic mutate-and-persist above.
       if (field.key === 'logLevel') app.log.level = value as string;
+    }
+
+    if (patch.skipPermissionsEnabled !== undefined) {
+      updatedFields.push('skipPermissionsEnabled');
+    }
+    if (updatedFields.length > 0) {
+      auditConfigChange(request, 'settings updated', {
+        fields: updatedFields,
+        ...(patch.hostDescription !== undefined ? { hostDescription: config.hostDescription } : {}),
+        ...(patch.hostTags !== undefined ? { hostTags: config.hostTags } : {}),
+      });
     }
 
     return reply.send(buildSettingsResponse(app.pocket));

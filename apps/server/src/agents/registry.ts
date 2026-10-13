@@ -370,8 +370,11 @@ export function wrapLoginShellCommand(
 }
 
 /** Resolve a bare name against the search order above, or validate an explicit path. */
-export function resolveExecutable(bin: string): string | null {
-  return findExecutableCandidates(bin)[0]?.path ?? null;
+export function resolveExecutable(
+  bin: string,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  return findExecutableCandidates(bin, platform)[0]?.path ?? null;
 }
 
 /**
@@ -382,13 +385,16 @@ export function resolveExecutable(bin: string): string | null {
  * same file are both returned, so a caller can tell "a second copy" (different
  * `realPath`) from "a second link to the same copy" and only report the first.
  */
-export function findExecutableCandidates(bin: string): { path: string; realPath: string }[] {
+export function findExecutableCandidates(
+  bin: string,
+  platform: NodeJS.Platform = process.platform,
+): { path: string; realPath: string }[] {
   const expanded = bin.startsWith('~') ? path.join(os.homedir(), bin.slice(1)) : bin;
   if (isExplicitPath(bin)) {
     return isExecutable(expanded) ? [withRealPath(path.resolve(expanded))] : [];
   }
   const found: { path: string; realPath: string }[] = [];
-  for (const dir of executableSearchDirs()) {
+  for (const dir of executableSearchDirs(platform)) {
     const candidate = path.join(dir, expanded);
     if (isExecutable(candidate)) found.push(withRealPath(candidate));
   }

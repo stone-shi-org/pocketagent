@@ -30,6 +30,7 @@ import { HUB_VERSION } from '../version.js';
 
 export const BACKEND_TOOL_ALLOWLIST = new Set([
   'get_host_info',
+  'get_capabilities',
   'list_agents',
   'list_pocket_agents',
   'list_projects',

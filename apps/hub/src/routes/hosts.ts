@@ -6,7 +6,7 @@ import {
   UpdateHubHostRequest,
   type HubHostListResponse,
 } from '@pocketagent/protocol';
-import { readBackendHostId } from '../registry/health.js';
+import { probeBackendCapabilities, readBackendHostId } from '../registry/health.js';
 
 /** Ceiling on the one call that carries an operator's master token. */
 const BIND_TIMEOUT_MS = 15_000;
@@ -178,16 +178,18 @@ export const hubHostRoutes: FastifyPluginAsync = async (app) => {
       });
     }
 
-    const backendHostId = await readBackendHostId(
-      row.base_url,
-      minted.data.token,
-      app.hub.fetchImpl,
-    );
+    const [backendHostId, capabilities] = await Promise.all([
+      readBackendHostId(row.base_url, minted.data.token, app.hub.fetchImpl),
+      probeBackendCapabilities(row.base_url, minted.data.token, app.hub.fetchImpl),
+    ]);
     registry.bind(
       request.params.id,
       { id: minted.data.id, token: minted.data.token },
       backendHostId,
     );
+    if (capabilities !== null) {
+      registry.recordCapabilities(request.params.id, capabilities);
+    }
     // The credential id and label, never the token — an audit line must not be
     // one step away from recovering a credential.
     request.log.info(
