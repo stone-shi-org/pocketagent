@@ -530,5 +530,108 @@ describe('PromptBox mobile two-line layout and mode handling (PA-123)', () => {
   });
 });
 
+describe('PromptBox push-to-talk recording and transcribing preservation (PA-138)', () => {
+  it('keeps MicButton and AttachButton mounted inside promptbar-tools-left when recording starts', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
 
+    const htmlIdle = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-test-pa138-idle"
+        onSend={() => true}
+        disabled={false}
+        supportsImageAttachment={true}
+        supportsVoiceInput={true}
+        onTranscribeVoice={async () => 'transcribed'}
+      />,
+    );
 
+    const htmlRecording = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-test-pa138-recording"
+        onSend={() => true}
+        disabled={false}
+        supportsImageAttachment={true}
+        supportsVoiceInput={true}
+        onTranscribeVoice={async () => 'transcribed'}
+        initialVoiceRecording={true}
+        initialVoiceLevel={0.5}
+      />,
+    );
+
+    // Recording mode applies .promptbar.recording and hides the textarea input row
+    expect(htmlRecording).toContain('class="promptbar recording"');
+    expect(htmlRecording).not.toContain('class="promptbar-input-row"');
+    expect(htmlRecording).not.toContain('<textarea');
+
+    // Both idle and recording keep .promptbar-tools-row > .promptbar-tools-left > (.attach-btn, .mic-control-group > .mic-btn)
+    for (const html of [htmlIdle, htmlRecording]) {
+      const toolsRowIdx = html.indexOf('class="promptbar-tools-row"');
+      const toolsLeftIdx = html.indexOf('class="promptbar-tools-left"');
+      const attachIdx = html.indexOf('class="attach-btn"');
+      const micGroupIdx = html.indexOf('class="mic-control-group"');
+      const micBtnIdx = html.indexOf('class="mic-btn');
+      expect(toolsRowIdx).toBeGreaterThan(-1);
+      expect(toolsLeftIdx).toBeGreaterThan(toolsRowIdx);
+      expect(attachIdx).toBeGreaterThan(toolsLeftIdx);
+      expect(micGroupIdx).toBeGreaterThan(attachIdx);
+      expect(micBtnIdx).toBeGreaterThan(micGroupIdx);
+    }
+
+    // In recording mode, .promptbar-recording sits after .promptbar-tools-left inside .promptbar-tools-row
+    const micBtnIdx = htmlRecording.indexOf('class="mic-btn');
+    const recordingBarIdx = htmlRecording.indexOf('class="promptbar-recording"');
+    const discardBtnIdx = htmlRecording.indexOf('class="voice-discard-btn"');
+    expect(recordingBarIdx).toBeGreaterThan(micBtnIdx);
+    expect(discardBtnIdx).toBeGreaterThan(recordingBarIdx);
+
+    // AttachButton and mic-select-btn are disabled during recording, while MicButton stays enabled so a second tap or release finishes recording
+    expect(htmlRecording).toMatch(/<button[^>]+class="attach-btn"[^>]*\sdisabled/);
+    expect(htmlRecording).toMatch(/<button[^>]+class="mic-select-btn"[^>]*\sdisabled/);
+    expect(htmlRecording).not.toMatch(/<button[^>]+class="mic-btn[^"]*"[^>]*\sdisabled/);
+
+    // Audio level scales the waveform bars above the idle floor (0.14) when voiceLevel > 0
+    expect(htmlRecording).toContain('class="promptbar-wave-bar"');
+    expect(htmlRecording).toContain('scaleY(1)');
+  });
+
+  it('keeps MicButton and AttachButton mounted and disabled inside promptbar-tools-left while transcribing', async () => {
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { PromptBox } = await import('./PromptBox.js');
+
+    const htmlTranscribing = renderToStaticMarkup(
+      <PromptBox
+        sessionId="sess-test-pa138-transcribing"
+        onSend={() => true}
+        disabled={false}
+        supportsImageAttachment={true}
+        supportsVoiceInput={true}
+        onTranscribeVoice={async () => 'transcribed'}
+        initialTranscribing={true}
+      />,
+    );
+
+    expect(htmlTranscribing).toContain('class="promptbar transcribing"');
+    expect(htmlTranscribing).not.toContain('class="promptbar-input-row"');
+    expect(htmlTranscribing).not.toContain('<textarea');
+
+    const toolsRowIdx = htmlTranscribing.indexOf('class="promptbar-tools-row"');
+    const toolsLeftIdx = htmlTranscribing.indexOf('class="promptbar-tools-left"');
+    const attachIdx = htmlTranscribing.indexOf('class="attach-btn"');
+    const micGroupIdx = htmlTranscribing.indexOf('class="mic-control-group"');
+    const micBtnIdx = htmlTranscribing.indexOf('class="mic-btn');
+    const transcribingIdx = htmlTranscribing.indexOf('class="promptbar-transcribing"');
+
+    expect(toolsRowIdx).toBeGreaterThan(-1);
+    expect(toolsLeftIdx).toBeGreaterThan(toolsRowIdx);
+    expect(attachIdx).toBeGreaterThan(toolsLeftIdx);
+    expect(micGroupIdx).toBeGreaterThan(attachIdx);
+    expect(micBtnIdx).toBeGreaterThan(micGroupIdx);
+    expect(transcribingIdx).toBeGreaterThan(micBtnIdx);
+
+    // AttachButton, MicButton, and mic-select-btn are all disabled while transcribing
+    expect(htmlTranscribing).toMatch(/<button[^>]+class="attach-btn"[^>]*\sdisabled/);
+    expect(htmlTranscribing).toMatch(/<button[^>]+class="mic-btn[^"]*"[^>]*\sdisabled/);
+    expect(htmlTranscribing).toMatch(/<button[^>]+class="mic-select-btn"[^>]*\sdisabled/);
+  });
+});
