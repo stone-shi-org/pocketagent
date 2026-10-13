@@ -136,6 +136,19 @@ export const MCP_DEPTH_HEADER = 'x-pocketagent-depth';
  */
 export const MCP_DEPTH_META_KEY = 'pocketagent/depth';
 
+/**
+ * PA-134: an optional, namespaced annotation an MCP tool may carry in its own
+ * `_meta`, naming the argument whose value is the *target* of the action — for
+ * the Hub's `dispatch_*` tools, `host`.
+ *
+ * A Pocket Agent's approval gate reads it to remember a decision for one tool
+ * *and one target* ("allow `dispatch_coding_task` on dev01") rather than for
+ * the tool everywhere, and it refuses to remember such a decision globally. A
+ * third-party server will simply never send the key, so its tools behave
+ * exactly as before.
+ */
+export const MCP_APPROVAL_SCOPE_ARG_META_KEY = 'pocketagent/approvalScopeArg';
+
 /** Work-starting tools are refused at or beyond this depth. */
 export const MAX_MCP_CALL_DEPTH = 3;
 

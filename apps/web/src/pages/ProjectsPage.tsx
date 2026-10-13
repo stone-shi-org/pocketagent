@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NewSessionDialog } from '../components/NewSessionDialog.js';
 import { HiddenProjects } from '../components/HiddenProjects.js';
 import { AddProject } from '../components/AddProject.js';
@@ -23,6 +23,7 @@ import { EditHostDialog } from '../components/EditHostDialog.js';
 import { findHostByManageId } from '../hosts/host-status.js';
 import { HostProvider } from '../hosts/HostContext.js';
 import { useHostFleet } from '../hosts/useHostFleet.js';
+import { useFleetEntry, useOpenFleetChat } from '../hosts/fleet.js';
 import { currentHostId, visibleHosts } from '../hosts/selected-host.js';
 import { loadCollapsedHosts, toggleCollapsedHost } from '../hosts/collapsed-pref.js';
 import type { HostDirectory } from '../hosts/directory.js';
@@ -110,6 +111,15 @@ export function ProjectsPage({
   const here = currentHostId(nav.selection, hosts);
   const visible = useMemo(() => visibleHosts(nav.selection, hosts), [nav.selection, hosts]);
   const singleHost = hosts.length <= 1;
+
+  // PA-134: the Fleet *agent* (one Pocket Agent dispatching across hosts) —
+  // not to be confused with `useHostFleet` below, which is the set of hosts.
+  const fleetAgent = useFleetEntry(directory);
+  const openFleetAgent = useOpenFleetChat(
+    fleetAgent,
+    useCallback((hostId: string, chatId: string) => nav.openOn(hostId, { name: 'planner-chat', chatId }), [nav]),
+    onApiError,
+  );
 
   const fleet = useHostFleet({
     hosts,
@@ -298,6 +308,11 @@ export function ProjectsPage({
           hubVersion={directory.hubVersion}
           selectedHostId={selected}
           hub={directory.source === 'hub' && onOpenHub ? { active: false, onSelect: onOpenHub } : null}
+          fleet={
+            fleetAgent
+              ? { problem: fleetAgent.problem, onOpen: openFleetAgent, onProblem: onOpenHub ?? (() => undefined) }
+              : null
+          }
           onSelectAll={() => nav.goToHost(null)}
           onSelect={(hostId) => nav.goToHost(hostId)}
           onAdd={() => setShowAddHost(true)}

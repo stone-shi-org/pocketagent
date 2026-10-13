@@ -1,6 +1,8 @@
 import { decryptSecret, encryptSecret } from '@pocketagent/node-kit';
 import {
   HUB_TOKEN_PREFIX_LENGTH,
+  MCP_TOKEN_PREFIX_LENGTH,
+  type HubFleetTokenState,
   type HubHostEntry,
   type HubHostStatus,
 } from '@pocketagent/protocol';
@@ -181,6 +183,44 @@ export class HostRegistry {
         backendHostId,
         id,
       );
+  }
+
+  // ---- PA-134: the scoped dispatch token -----------------------------------
+
+  /**
+   * The decrypted `pam_` dispatch token for a host, or null. Same posture as
+   * `credentialFor`: a ciphertext that will not open is "no token", never a
+   * throw, and a host with none is never dialed for dispatch.
+   */
+  mcpCredentialFor(row: HubHostRow): string | null {
+    if (row.mcp_credential_enc === null) return null;
+    try {
+      return decryptSecret(row.mcp_credential_enc, this.encKey);
+    } catch {
+      return null;
+    }
+  }
+
+  mcpTokenState(row: HubHostRow): HubFleetTokenState {
+    if (row.mcp_credential_enc !== null) return this.mcpCredentialFor(row) === null ? 'unreadable' : 'ok';
+    return this.credentialFor(row) === null ? 'unbound' : 'missing';
+  }
+
+  /** Store a freshly minted, already-verified dispatch token. */
+  setMcpCredential(id: string, minted: { id: string; token: string }): void {
+    this.db
+      .prepare(
+        `UPDATE hub_hosts SET mcp_credential_enc = ?, mcp_credential_prefix = ?, mcp_client_id = ? WHERE id = ?`,
+      )
+      .run(encryptSecret(minted.token, this.encKey), minted.token.slice(0, MCP_TOKEN_PREFIX_LENGTH), minted.id, id);
+  }
+
+  clearMcpCredential(id: string): void {
+    this.db
+      .prepare(
+        `UPDATE hub_hosts SET mcp_credential_enc = NULL, mcp_credential_prefix = NULL, mcp_client_id = NULL WHERE id = ?`,
+      )
+      .run(id);
   }
 
   remove(id: string): boolean {

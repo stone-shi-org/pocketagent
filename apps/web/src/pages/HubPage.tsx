@@ -19,10 +19,13 @@ import { BindHostDialog } from '../components/BindHostDialog.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { EditHostDialog } from '../components/EditHostDialog.js';
 import { ExportFromHostDialog } from '../components/ExportFromHostDialog.js';
+import { FleetAgentCard } from '../components/FleetAgentCard.js';
+import { fleetChatFor } from '../hosts/fleet.js';
 import { Icon } from '../components/Icon.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import type { HostDirectory } from '../hosts/directory.js';
 import {
+  findHostByManageId,
   hostDotClass,
   hostDriftMessage,
   hostStatusSummary,
@@ -35,6 +38,8 @@ interface Props {
   onOpenHost: (hostId: string) => void;
   onOpenTemplates: () => void;
   onOpenTemplate: (templateId: string) => void;
+  /** PA-134: open a Pocket Agent chat on a host (routing id), for the Fleet agent. */
+  onOpenFleetChat: (hostId: string, chatId: string) => void;
   onApiError: (error: unknown) => void;
 }
 
@@ -65,7 +70,14 @@ const PUSH_POLL_MS = 30_000;
  * Talks only to the Hub origin (`api/hub.ts`, `directory`) — never through a
  * host-scoped client, since there may be no host at all.
  */
-export function HubPage({ directory, onOpenHost, onOpenTemplates, onOpenTemplate, onApiError }: Props): JSX.Element {
+export function HubPage({
+  directory,
+  onOpenHost,
+  onOpenTemplates,
+  onOpenTemplate,
+  onOpenFleetChat,
+  onApiError,
+}: Props): JSX.Element {
   const [discovery, setDiscovery] = useState<HubDiscoveryResponse | null>(null);
   const [scanning, setScanning] = useState(false);
   const [push, setPush] = useState<PushStatusResponse | null>(null);
@@ -222,6 +234,18 @@ export function HubPage({ directory, onOpenHost, onOpenTemplates, onOpenTemplate
           </div>
         )}
       </section>
+
+      <FleetAgentCard
+        hosts={hosts}
+        onApiError={onApiError}
+        onOpenChat={(fleet) => {
+          const coordinator = fleet.coordinatorHostId ? findHostByManageId(hosts, fleet.coordinatorHostId) : null;
+          if (!coordinator || !fleet.pocketAgentId) return;
+          void fleetChatFor(coordinator.endpoint, fleet.pocketAgentId)
+            .then((chatId) => onOpenFleetChat(coordinator.endpoint.id, chatId))
+            .catch(onApiError);
+        }}
+      />
 
       <DiscoverySection
         discovery={discovery}

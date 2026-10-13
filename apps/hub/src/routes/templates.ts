@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import {
   CreateHubTemplateRequest,
   InstantiateHubTemplateRequest,
@@ -8,6 +8,7 @@ import {
   type HubTemplateListResponse,
   type InstantiateHubTemplateResponse,
 } from '@pocketagent/protocol';
+import { isSystemTemplateId } from '../templates/store.js';
 
 /**
  * PA-70: template CRUD, and the one route that writes to other machines.
@@ -61,6 +62,7 @@ export const hubTemplateRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.patch<{ Params: { id: string } }>('/api/hub/templates/:id', async (request, reply) => {
+    if (isSystemTemplateId(request.params.id)) return refuseSystemTemplate(reply);
     const parsed = UpdateHubTemplateRequest.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: { code: 'bad_request', message: 'Invalid patch.' } });
@@ -103,6 +105,7 @@ export const hubTemplateRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.delete<{ Params: { id: string } }>('/api/hub/templates/:id', async (request, reply) => {
+    if (isSystemTemplateId(request.params.id)) return refuseSystemTemplate(reply);
     if (!templates.remove(request.params.id)) {
       return reply.code(404).send({ error: { code: 'not_found', message: 'No such template.' } });
     }
@@ -134,6 +137,7 @@ export const hubTemplateRoutes: FastifyPluginAsync = async (app) => {
   app.post<{ Params: { id: string } }>(
     '/api/hub/templates/:id/instantiate',
     async (request, reply) => {
+      if (isSystemTemplateId(request.params.id)) return refuseSystemTemplate(reply);
       const parsed = InstantiateHubTemplateRequest.safeParse(request.body);
       if (!parsed.success) {
         return reply.code(400).send({
@@ -164,3 +168,13 @@ export const hubTemplateRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 };
+
+/** PA-134: the Fleet agent's own templates are changed only by the fleet flow. */
+function refuseSystemTemplate(reply: FastifyReply): FastifyReply {
+  return reply.code(409).send({
+    error: {
+      code: 'system_template',
+      message: 'This template is managed by the Fleet agent. Change it from the Fleet card on the Hub page.',
+    },
+  });
+}

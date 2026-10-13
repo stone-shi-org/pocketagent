@@ -142,6 +142,39 @@ services:
     networks: [pocketagent]
     restart: unless-stopped
 
+  # --- Optional: a lightweight Fleet agent coordinator (PA-134) -------------
+  # The Fleet agent is an ordinary Pocket Agent on one backend, which reaches
+  # every host through the Hub's /mcp. Any bound backend can be the
+  # coordinator (pick it on the Hub page); this is the variant that does
+  # nothing else — the thin image, no project folders of its own, so the
+  # machine that decides where work goes is not also one an agent can write
+  # to. Uncomment, bind it from the Hub page like any host, set up its Pocket
+  # Agent LLM endpoint in its Settings, then "Fleet agent → Enable" with Hub
+  # address `http://hub:8788` (the service name, as the coordinator reaches
+  # it — not the address your browser used).
+  #
+  # POCKETAGENT_SETTINGS_ENC_KEY is required here rather than optional: the
+  # coordinator's route to the Hub is a bearer-auth MCP registry, whose token a
+  # backend stores encrypted, and refuses to store without a key.
+  #
+  # coordinator:
+  #   image: registry.shifamily.com/homestack/pocketagent-server:latest
+  #   hostname: coordinator
+  #   environment:
+  #     POCKETAGENT_AUTH_TOKEN: ${PA_COORDINATOR_TOKEN:?set PA_COORDINATOR_TOKEN in docker/.env}
+  #     # A root is required; an empty scratch directory inside the volume is enough.
+  #     POCKETAGENT_WORKSPACE_ROOTS: /home/pocketagent/scratch
+  #     POCKETAGENT_SETTINGS_ENC_KEY: ${PA_COORDINATOR_ENC_KEY:?set PA_COORDINATOR_ENC_KEY in docker/.env}
+  #     PUID: ${PUID:-1000}
+  #     PGID: ${PGID:-1000}
+  #     POCKETAGENT_BACKEND: direct
+  #     POCKETAGENT_COOKIE_SECURE: 'false'
+  #   volumes:
+  #     - pocketagent-coordinator-data:/data
+  #     - pocketagent-coordinator-home:/home/pocketagent
+  #   networks: [pocketagent]
+  #   restart: unless-stopped
+
 networks:
   pocketagent:
 
@@ -151,3 +184,5 @@ volumes:
   pocketagent-dev01-home:
   pocketagent-dev02-data:
   pocketagent-dev02-home:
+  # pocketagent-coordinator-data:
+  # pocketagent-coordinator-home:

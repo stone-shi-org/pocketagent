@@ -6,6 +6,7 @@ import {
   type Transport,
 } from '@modelcontextprotocol/client';
 import {
+  MCP_APPROVAL_SCOPE_ARG_META_KEY,
   MCP_DEPTH_META_KEY,
   type McpAuthKind,
   type McpProtocolEra,
@@ -71,6 +72,11 @@ export interface McpToolDescriptor {
       assume mutating" — the same fail-closed default this codebase applies
       everywhere else a tool's safety cannot be established. */
   readOnlyHint: boolean | null;
+  /** PA-134: the argument naming this tool's target, from the tool's own
+      `_meta[MCP_APPROVAL_SCOPE_ARG_META_KEY]` — `null` for every tool that
+      does not declare one, which is every tool not served by a PocketAgent
+      Hub. Narrows what an approval may remember; it never widens anything. */
+  approvalScopeArg: string | null;
 }
 
 /** The auth headers this registry's config implies, sent identically on both
@@ -248,6 +254,7 @@ export class McpClient {
       description: tool.description ?? '',
       inputSchema: (tool.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
       readOnlyHint: tool.annotations?.readOnlyHint ?? null,
+      approvalScopeArg: approvalScopeArgOf(tool._meta),
     }));
   }
 
@@ -289,4 +296,12 @@ function priorFor(verdict: McpEraVerdict | null):
   if (!verdict) return undefined;
   if (verdict.era === 'legacy') return { kind: 'legacy' };
   return verdict.discover ? { kind: 'modern', discover: verdict.discover } : undefined;
+}
+
+/** A well-formed scope-argument name, or null. Anything odd is ignored rather
+    than trusted: the annotation can only ever narrow an approval. */
+function approvalScopeArgOf(meta: unknown): string | null {
+  if (!meta || typeof meta !== 'object') return null;
+  const value = (meta as Record<string, unknown>)[MCP_APPROVAL_SCOPE_ARG_META_KEY];
+  return typeof value === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(value) ? value : null;
 }

@@ -650,6 +650,56 @@ and two dead; and a nightly cron job cloned to three machines runs three times.
 `pnpm demo:provision` exercises all of this against two real backends and a real Hub it starts
 itself.
 
+### The Fleet agent: one chat that dispatches to the right host
+
+With several hosts behind a Hub, the Fleet agent is a Pocket Agent that decides where a task
+belongs and hands it over — Xcode work to the macOS host, work on a project to the host that has
+its files. Turn it on from the Hub page (**Fleet agent → Enable**), pick the host it runs on (the
+*coordinator*), and open it from **Fleet** in the Hub sidebar or the host sheet.
+
+There is no LLM inside the Hub. The Fleet agent is an ordinary Pocket Agent on the coordinator —
+memory, skills, personas, Telegram and Gemini Live all work as on any other — and it reaches the
+other hosts through the Hub's own MCP endpoint (`/mcp` on the Hub): it can list hosts, read what
+each one can run, dispatch a coding task or a Pocket Agent task to one, and wait for the result.
+
+What enabling it does, all of which the confirmation names first:
+
+- **Every bound host gets an MCP token for this Hub** with the `read`, `sessions` and `planner`
+  scopes — never `admin` — visible and revocable in that host's **Settings → MCP**. The Hub asks
+  each new token which scopes it holds, and throws away one that reports anything else. Dispatch
+  never uses the Hub's full-access credential.
+- **The coordinator gets a "Fleet agent" Pocket Agent** (if it has none yet) **and an MCP
+  registry pointing at the Hub**, carrying a Hub-issued token that is valid on the Hub's `/mcp`
+  and nowhere else. Any Pocket Agent on the coordinator with MCP switched on can use that
+  registry, so a dedicated coordinator (below) keeps the reach to one agent you chose.
+- The coordinator needs a Pocket Agent LLM endpoint and `POCKETAGENT_SETTINGS_ENC_KEY`; the Hub
+  refuses to enable it otherwise, naming which is missing.
+- **Hub address** is the address *the coordinator* reaches the Hub by. It starts as your
+  browser's; inside one Docker network it is the service name (`http://hub:8788`). The
+  coordinator dials it during setup, so a wrong one fails there rather than later.
+
+Approvals are where this is careful, because text one host returns could try to talk the Fleet
+agent into sending work to another (prompt injection becoming lateral movement):
+
+- **Every dispatch asks you first, per host.** You can remember "allow for this agent and
+  target" — that tool, on that host — but never "allow globally", and a remembered approval for
+  one host does not cover another. A chat pre-approved by a webhook or Telegram pairing is not
+  pre-approved to dispatch.
+- **Approvals on the target are unchanged.** The Fleet agent sees them and can never answer
+  them. You get a push notification that opens the waiting chat on that host, and you answer it
+  there.
+- Text that comes back from a host is fenced as data before the Fleet agent's model reads it.
+
+Moving the role provisions the new coordinator and cuts the old one off (its token is revoked
+and its registry removed); its Fleet agent and chats stay where they were. **Disable** revokes
+every token the feature minted. `docker/compose.hub.yaml` has a commented-out lightweight
+coordinator — the thin image, no project folders — and `pnpm demo:fleet` runs the whole loop
+against two real backends, a real Hub and real Chrome.
+
+Until host capability cards exist (PA-133), what a host "can run" is read live from it: its
+platform and architecture, its installed coding agents, its Pocket Agents and its project
+folders.
+
 ### What a Hub costs you
 
 Worth reading before you run one, because none of it is hidden:
@@ -664,6 +714,9 @@ Worth reading before you run one, because none of it is hidden:
   that both sides log every provisioning action, so the receiving machine keeps its own record
   of what changed and which Hub changed it. It is not eliminated, and it is the reason to bind
   only Hubs you run.
+- **With the Fleet agent on, the Hub also accepts one bearer token**: the coordinator's, on
+  `/mcp` only, able to start work (gated by your approval on the coordinator) on every host but
+  never to change the Hub, reach its proxy or its host list. Disable revokes it.
 - **It is a single point of failure for *reaching* your backends**, though not for their state.
   Each one stays directly usable with no Hub involved.
 - **An operator can extract a stored credential** by repointing a host's base URL and then

@@ -520,6 +520,14 @@ export const HostInfo = z.object({
    * in the client rather than the client guessing at a URL.
    */
   codeServerBaseUrl: z.string().nullable(),
+  /**
+   * PA-134: `process.platform` / `process.arch` of this backend, so a Fleet
+   * agent can route Xcode work to the `darwin` host. The interim capability
+   * signal until PA-133's capability cards exist. Optional for the same
+   * reason `runningSessions` is: a host built before PA-134 does not send it.
+   */
+  platform: z.string().max(32).optional(),
+  arch: z.string().max(32).optional(),
 });
 export type HostInfo = z.infer<typeof HostInfo>;
 

@@ -95,6 +95,8 @@ export const hubHostRoutes: FastifyPluginAsync = async (app) => {
     // Disabling a host has to cut live connections for the same reason
     // removing one does: the registry row is re-read per HTTP request, but a
     // spliced socket outlives the request that created it.
+    // PA-134: a new address may be a different server; re-probe its MCP era.
+    if (parsed.data.baseUrl !== undefined) app.hub.backendMcp.forget(request.params.id);
     if (parsed.data.enabled === false) {
       const closed = sockets.closeHost(request.params.id);
       if (closed > 0) {
@@ -192,6 +194,11 @@ export const hubHostRoutes: FastifyPluginAsync = async (app) => {
       { hostId: request.params.id, credentialId: minted.data.id, label },
       'host bound',
     );
+    // PA-134: with the Fleet agent on, a newly bound host gets its scoped
+    // dispatch token now rather than at the next enable.
+    await app.hub.fleet.onHostBound(request.params.id).catch((err: unknown) => {
+      request.log.warn({ hostId: request.params.id, err: (err as Error).message }, 'fleet: dispatch token not minted');
+    });
     await health.reconcile();
     await pushRelay.reconcile();
     return reply.send({ host: registry.entryFor(registry.getRow(request.params.id)!) });
@@ -211,6 +218,9 @@ export const hubHostRoutes: FastifyPluginAsync = async (app) => {
     if (row === null) {
       return reply.code(404).send({ error: { code: 'not_found', message: 'No such host.' } });
     }
+    // PA-134: the scoped dispatch token goes first, while the hub credential
+    // that can revoke it still works. Best-effort, like everything here.
+    await app.hub.fleet.beforeHostRemoved(row.id).catch(() => undefined);
     let revokedOnBackend = false;
     const credential = registry.credentialFor(row);
     if (credential !== null && row.credential_id !== null) {

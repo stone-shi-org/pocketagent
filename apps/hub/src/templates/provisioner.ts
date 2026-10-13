@@ -29,7 +29,7 @@ export interface ProvisionerOptions {
   readonly log: FastifyBaseLogger;
 }
 
-interface CallResult {
+export interface CallResult {
   readonly ok: boolean;
   readonly status: number;
   readonly body: unknown;
@@ -368,43 +368,57 @@ export class Provisioner {
    * is the same "one dead host delays neither of the others" property the
    * health poller has.
    */
-  private async send(baseUrl: string, credential: string, c: BackendCall): Promise<CallResult> {
-    const method = c.method;
-    const url = `${baseUrl.replace(/\/$/, '')}${c.path}`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), CALL_TIMEOUT_MS);
-    try {
-      const response = await this.opts.fetchImpl(url, {
-        method,
-        headers: {
-          authorization: `Bearer ${credential}`,
-          ...(c.body === undefined || method === 'GET'
-            ? {}
-            : { 'content-type': 'application/json' }),
-        },
-        ...(c.body === undefined || method === 'GET'
-          ? {}
-          : { body: JSON.stringify(c.body) }),
-        signal: controller.signal,
-      });
-      let body: unknown = null;
-      // A 204 has no body, and a backend erroring behind a proxy may answer
-      // HTML; neither should surface as a crash in a provisioning run.
-      if (response.status !== 204) {
-        body = await response.json().catch(() => null);
-      }
-      return { ok: response.ok, status: response.status, body, transportError: null };
-    } catch (err) {
-      const reason = (err as Error).name === 'AbortError' ? 'timed out' : (err as Error).message;
-      return { ok: false, status: 0, body: null, transportError: reason };
-    } finally {
-      clearTimeout(timer);
+  private send(baseUrl: string, credential: string, c: BackendCall): Promise<CallResult> {
+    return callBackend(this.opts.fetchImpl, baseUrl, credential, c);
+  }
+}
+
+/**
+ * One authenticated REST call to a backend with its `pah_` credential.
+ *
+ * Never throws: a transport failure comes back as a value, because a run
+ * over several hosts must not be ended by the first unreachable one — that
+ * is the same "one dead host delays neither of the others" property the
+ * health poller has. Exported for the PA-134 fleet service, which drives the
+ * same backend routes (and must time out the same way).
+ */
+export async function callBackend(
+  fetchImpl: typeof fetch,
+  baseUrl: string,
+  credential: string,
+  c: BackendCall,
+): Promise<CallResult> {
+  const method = c.method;
+  const url = `${baseUrl.replace(/\/$/, '')}${c.path}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CALL_TIMEOUT_MS);
+  try {
+    const response = await fetchImpl(url, {
+      method,
+      headers: {
+        authorization: `Bearer ${credential}`,
+        ...(c.body === undefined || method === 'GET' ? {} : { 'content-type': 'application/json' }),
+      },
+      ...(c.body === undefined || method === 'GET' ? {} : { body: JSON.stringify(c.body) }),
+      signal: controller.signal,
+    });
+    let body: unknown = null;
+    // A 204 has no body, and a backend erroring behind a proxy may answer
+    // HTML; neither should surface as a crash in a provisioning run.
+    if (response.status !== 204) {
+      body = await response.json().catch(() => null);
     }
+    return { ok: response.ok, status: response.status, body, transportError: null };
+  } catch (err) {
+    const reason = (err as Error).name === 'AbortError' ? 'timed out' : (err as Error).message;
+    return { ok: false, status: 0, body: null, transportError: reason };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
 /** The backend's own error text where it sent one, else the bare status. */
-function errorMessage(result: CallResult): string {
+export function errorMessage(result: CallResult): string {
   const message = (result.body as { error?: { message?: unknown } } | null)?.error?.message;
   return typeof message === 'string' && message.length > 0 ? message : `HTTP ${result.status}`;
 }

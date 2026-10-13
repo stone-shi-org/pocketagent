@@ -26,6 +26,7 @@ import {
   hostStatusSummary,
   serverVersionLine,
 } from '../hosts/host-status.js';
+import { useFleetEntry, useOpenFleetChat } from '../hosts/fleet.js';
 import { hubViewActive, overflowMenuItems } from '../hosts/hub-view.js';
 import { BuildVersions } from '../components/BuildVersions.js';
 import { HostProvider } from '../hosts/HostContext.js';
@@ -274,6 +275,14 @@ export function DesktopShell({
    */
   const tabsAvailable = !(hubMode && hosts.length === 0);
   const openHub = (): void => onNavigate({ name: 'hub' }, { hostId: null });
+  // PA-134: the Fleet agent's entry, in the Hub sidebar and the host sheet.
+  const fleetEntry = useFleetEntry(directory);
+  const openFleet = useOpenFleetChat(
+    fleetEntry,
+    useCallback((hostId: string, chatId: string) => nav.openOn(hostId, { name: 'planner-chat', chatId }), [nav]),
+    onApiError,
+  );
+  const fleetProp = fleetEntry ? { problem: fleetEntry.problem, onOpen: openFleet, onProblem: openHub } : null;
 
   const [tabs, dispatch] = useReducer(tabListReducer, undefined, () =>
     // A tab persisted before PA-67 carries no host and is migrated onto the
@@ -832,6 +841,7 @@ export function DesktopShell({
           <HubSidebar
             route={route}
             hosts={hosts}
+            fleet={fleetProp}
             onOverview={openHub}
             onTemplates={() => onNavigate({ name: 'hub-templates' }, { hostId: null })}
             onOpenHost={(hostId) => nav.goToHost(hostId)}
@@ -1140,6 +1150,7 @@ export function DesktopShell({
               onOpenHost={(hostId) => nav.goToHost(hostId)}
               onOpenTemplates={() => onNavigate({ name: 'hub-templates' }, { hostId: null })}
               onOpenTemplate={(templateId) => onNavigate({ name: 'hub-template', templateId }, { hostId: null })}
+              onOpenFleetChat={(hostId, chatId) => nav.openOn(hostId, { name: 'planner-chat', chatId })}
               onApiError={onApiError}
             />
           </Suspense>
@@ -1205,6 +1216,7 @@ export function DesktopShell({
         <HostSheet
           hosts={hosts}
           hubVersion={directory.hubVersion}
+          fleet={fleetProp}
           selectedHostId={selectedHostId}
           onSelectAll={() => nav.goToHost(null)}
           onSelect={(hostId) => nav.goToHost(hostId)}
@@ -1339,6 +1351,7 @@ function WelcomePane({ onCompose }: { onCompose: () => void }): JSX.Element {
 function HubSidebar({
   route,
   hosts,
+  fleet,
   onOverview,
   onTemplates,
   onOpenHost,
@@ -1347,6 +1360,8 @@ function HubSidebar({
 }: {
   route: Route;
   hosts: readonly HostRecord[];
+  /** PA-134: the Fleet agent's entry, when the fleet is enabled. */
+  fleet: { problem: string | null; onOpen: () => void; onProblem: () => void } | null;
   onOverview: () => void;
   onTemplates: () => void;
   onOpenHost: (hostId: string) => void;
@@ -1368,6 +1383,18 @@ function HubSidebar({
           <Icon name="template" size={17} />
           Config templates
         </button>
+        {fleet && (
+          <button
+            type="button"
+            className={`hub-nav-item${fleet.problem ? ' warn' : ''}`}
+            onClick={fleet.problem ? fleet.onProblem : fleet.onOpen}
+            title={fleet.problem ?? 'Open the Fleet agent’s chat on its coordinator'}
+          >
+            <Icon name="agents" size={17} />
+            Fleet
+            {fleet.problem && <span className="hub-nav-note">{fleet.problem}</span>}
+          </button>
+        )}
       </nav>
       <div className="hub-sidebar-hosts">
         <div className="hub-sidebar-label">Hosts</div>

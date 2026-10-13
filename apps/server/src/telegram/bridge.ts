@@ -514,16 +514,7 @@ export class TelegramBridge {
     await sendHtmlWithPlainFallback(client, telegramChatId, html, plain, {
       logger: this.deps.logger,
       replyMarkup: {
-        inline_keyboard: [
-          row([
-            ['Allow once', 'allow_once'],
-            ['Allow (this agent)', 'allow_workspace'],
-          ]),
-          row([
-            ['Allow (always)', 'allow_global'],
-            ['Deny', 'deny'],
-          ]),
-        ],
+        inline_keyboard: approvalKeyboard(event.rememberScopes).map(row),
       },
     });
   }
@@ -609,6 +600,24 @@ export class TelegramBridge {
     appears in either part so a plain split is exact. */
 function approvalCallbackData(approvalId: string, choice: PlannerToolApprovalChoice): string {
   return `${approvalId}:${choice}`;
+}
+
+/**
+ * The approval buttons. PA-134: `rememberScopes` (set only for a target-scoped
+ * tool, a Hub dispatch) drops the choices the server would refuse, so a
+ * Telegram tap cannot ask to remember a dispatch fleet-wide either.
+ */
+export function approvalKeyboard(
+  rememberScopes: readonly ('workspace' | 'global')[] | undefined,
+): [string, PlannerToolApprovalChoice][][] {
+  const scopes = rememberScopes ?? ['workspace', 'global'];
+  const choices: [string, PlannerToolApprovalChoice][] = [['Allow once', 'allow_once']];
+  if (scopes.includes('workspace')) choices.push(['Allow (this agent)', 'allow_workspace']);
+  if (scopes.includes('global')) choices.push(['Allow (always)', 'allow_global']);
+  choices.push(['Deny', 'deny']);
+  const rows: [string, PlannerToolApprovalChoice][][] = [];
+  for (let i = 0; i < choices.length; i += 2) rows.push(choices.slice(i, i + 2));
+  return rows;
 }
 
 const VALID_CHOICES: ReadonlySet<string> = new Set(['allow_once', 'allow_workspace', 'allow_global', 'deny']);

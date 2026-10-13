@@ -9,6 +9,21 @@ import {
 } from '@pocketagent/protocol';
 import type { HubDb, HubProvisioningRow, HubTemplateRow } from '../db.js';
 
+/**
+ * PA-134: ids of the templates the Fleet agent provisions through. They are
+ * ordinary rows — so a coordinator's Pocket Agent and MCP registry land in
+ * `hub_provisionings` like any other provisioning, and the backend audits each
+ * call as it would any template — but they are managed by the fleet service:
+ * hidden from the template list and refused by the edit, delete and
+ * instantiate routes, since the registry's bearer is a token only the fleet
+ * flow ever holds.
+ */
+export const SYSTEM_TEMPLATE_PREFIX = 'system-';
+
+export function isSystemTemplateId(id: string): boolean {
+  return id.startsWith(SYSTEM_TEMPLATE_PREFIX);
+}
+
 /** A row whose payload has been validated back into its kind's shape. */
 export interface ResolvedTemplate {
   readonly row: HubTemplateRow;
@@ -54,6 +69,35 @@ export class TemplateStore {
       )
       .run(id, input.kind, input.name, input.description, JSON.stringify(input.spec.payload), now, now);
     return this.rowFor(id)!;
+  }
+
+  /**
+   * PA-134: write a system template's current payload, creating it the first
+   * time. The revision bumps only when the payload actually changed, so the
+   * ledger's "dev01 has r3" stays meaningful for these too.
+   */
+  upsertSystem(input: { id: string; name: string; description: string; spec: HubTemplatePayload }, now = Date.now()): ResolvedTemplate {
+    if (!isSystemTemplateId(input.id)) throw new Error(`${input.id} is not a system template id.`);
+    const payload = JSON.stringify(input.spec.payload);
+    const existing = this.rowFor(input.id);
+    if (existing === null) {
+      this.db
+        .prepare(
+          `INSERT INTO hub_templates (id, kind, name, description, revision, payload_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
+        )
+        .run(input.id, input.spec.kind, input.name, input.description, payload, now, now);
+    } else if (existing.payload_json !== payload || existing.name !== input.name) {
+      this.db
+        .prepare(
+          `UPDATE hub_templates SET name = ?, description = ?, payload_json = ?, revision = revision + 1, updated_at = ?
+            WHERE id = ?`,
+        )
+        .run(input.name, input.description, payload, now, input.id);
+    }
+    const resolved = this.resolve(input.id);
+    if (resolved === null) throw new Error(`System template ${input.id} did not read back.`);
+    return resolved;
   }
 
   rowFor(id: string): HubTemplateRow | null {
@@ -217,6 +261,7 @@ export class TemplateStore {
     const templates: HubTemplate[] = [];
     let unreadable = 0;
     for (const row of rows) {
+      if (isSystemTemplateId(row.id)) continue;
       const parsed = parseTemplatePayload(row.kind as HubTemplateKind, safeJson(row.payload_json));
       if (!parsed.ok) {
         unreadable += 1;

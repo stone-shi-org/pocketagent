@@ -1,9 +1,10 @@
-import { Suspense, useState } from 'react';
+import { Suspense, useCallback, useState } from 'react';
 import { AddHostDialog } from '../components/AddHostDialog.js';
 import { HostSheet } from '../components/HostSheet.js';
 import { Icon } from '../components/Icon.js';
 import { PushToggle } from '../components/PushToggle.js';
 import { findHostByManageId } from '../hosts/host-status.js';
+import { useFleetEntry, useOpenFleetChat } from '../hosts/fleet.js';
 import { overflowMenuItems } from '../hosts/hub-view.js';
 import type { HostDirectory } from '../hosts/directory.js';
 import type { HostNav } from '../hosts/HostNav.js';
@@ -42,6 +43,12 @@ export function HubHomePage({
   const [bindId, setBindId] = useState<string | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
   const hosts = directory.hosts;
+  const fleetEntry = useFleetEntry(directory);
+  const openFleet = useOpenFleetChat(
+    fleetEntry,
+    useCallback((hostId: string, chatId: string) => nav.openOn(hostId, { name: 'planner-chat', chatId }), [nav]),
+    onApiError,
+  );
 
   return (
     <div className="app hub-home">
@@ -99,6 +106,7 @@ export function HubHomePage({
             onOpenHost={(hostId) => nav.goToHost(hostId)}
             onOpenTemplates={onOpenTemplates}
             onOpenTemplate={onOpenTemplate}
+            onOpenFleetChat={(hostId, chatId) => nav.openOn(hostId, { name: 'planner-chat', chatId })}
             onApiError={onApiError}
           />
         </Suspense>
@@ -110,6 +118,7 @@ export function HubHomePage({
           hubVersion={directory.hubVersion}
           selectedHostId={null}
           hub={{ active: true, onSelect: () => undefined }}
+          fleet={fleetEntry ? { problem: fleetEntry.problem, onOpen: openFleet, onProblem: () => undefined } : null}
           onSelectAll={() => nav.goToHost(null)}
           onSelect={(hostId) => nav.goToHost(hostId)}
           onAdd={() => setShowAdd(true)}

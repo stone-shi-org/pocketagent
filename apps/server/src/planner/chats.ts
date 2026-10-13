@@ -483,9 +483,27 @@ type ToolGateDecision =
   | {
       kind: 'needs_approval';
       tool: PlannerToolDefinition;
-      mcpIdentity: { name: string; displayName: string; readOnly: boolean } | null;
+      mcpIdentity: McpToolIdentity | null;
     }
   | { kind: 'run'; tool: PlannerToolDefinition };
+
+/**
+ * The real identity of a `call_mcp_tool` invocation, for the gate. `name` is
+ * the approval *subject* — the qualified MCP tool name, plus `@<arg>:<value>`
+ * for a target-scoped tool (PA-134), so "remember" can mean "this tool on this
+ * host" and nothing wider.
+ */
+interface McpToolIdentity {
+  name: string;
+  displayName: string;
+  readOnly: boolean;
+  /**
+   * PA-134: which remembered scopes this call may be given. `undefined` for
+   * every ordinary tool (both, as before). Target-scoped: `['workspace']`, or
+   * `[]` when the call's own target argument is missing or not a string.
+   */
+  rememberScopes?: readonly ('workspace' | 'global')[];
+}
 
 /**
  * PA-96: what Gemini hears back, at once, for a call parked on approval. It
@@ -1928,10 +1946,7 @@ export class PlannerChatService {
    * individually disabled still pauses for a human rather than silently
    * running once approved elsewhere.
    */
-  private effectiveMcpToolIdentity(
-    workspaceId: string | null,
-    call: PlannerLlmToolCall,
-  ): { name: string; displayName: string; readOnly: boolean } | null {
+  private effectiveMcpToolIdentity(workspaceId: string | null, call: PlannerLlmToolCall): McpToolIdentity | null {
     if (call.function.name !== CALL_MCP_TOOL_NAME) return null;
     const args = safeParseArgs(call.function.arguments);
     const requested = typeof args.tool === 'string' ? args.tool.trim() : '';
@@ -1940,10 +1955,32 @@ export class PlannerChatService {
     }
     const enabled = this.opts.mcpRegistry.listEnabledTools(workspaceId).some((t) => t.qualifiedName === requested);
     const resolved = this.opts.mcpRegistry.resolveTool(requested);
+    const readOnly = enabled && resolved ? resolved.tool.readOnlyHint === true : false;
+    const scopeArg = resolved?.tool.approvalScopeArg ?? null;
+    if (resolved && scopeArg !== null) {
+      // PA-134: a target-scoped tool (the Hub's `dispatch_*`, scoped by
+      // `host`). The subject carries the target the *call itself* names, so a
+      // decision remembered for host A is simply a different row from host B
+      // — which is the whole prompt-injection defence: text from host A
+      // telling the model to dispatch to host B still stops for a human.
+      const inner = args.arguments && typeof args.arguments === 'object' ? (args.arguments as Record<string, unknown>) : {};
+      const target = inner[scopeArg];
+      const display = `"${resolved.tool.name}" on "${resolved.registryName}"`;
+      if (typeof target !== 'string' || target.trim() === '' || target.length > 200) {
+        // Nothing to scope to, so nothing may be remembered: allow once only.
+        return { name: requested, displayName: display, readOnly, rememberScopes: [] };
+      }
+      return {
+        name: `${requested}@${scopeArg}:${target.trim()}`,
+        displayName: `${display} for ${scopeArg} "${target.trim()}"`,
+        readOnly,
+        rememberScopes: ['workspace'],
+      };
+    }
     return {
       name: requested,
       displayName: resolved ? `"${resolved.tool.name}" on "${resolved.registryName}"` : requested,
-      readOnly: enabled && resolved ? resolved.tool.readOnlyHint === true : false,
+      readOnly,
     };
   }
 
@@ -2171,6 +2208,22 @@ export class PlannerChatService {
     const pending = this.pendingTurns.get(approvalId);
     if (!pending || pending.chatId !== chatId) {
       throw new PlannerChatError('No pending approval with that id for this chat.', 'not_found');
+    }
+    // PA-134: the card offers only the scopes the gate allows for this call,
+    // and this is the half that makes that a rule rather than a UI choice —
+    // a crafted request cannot remember a target-scoped dispatch fleet-wide.
+    const pendingCall = pending.kind === 'live' ? pending.call : pending.toolCalls[pending.index];
+    if (pendingCall && (choice === 'allow_workspace' || choice === 'allow_global')) {
+      const allowed = this.effectiveMcpToolIdentity(pending.workspaceId, pendingCall)?.rememberScopes;
+      const wanted = choice === 'allow_workspace' ? 'workspace' : 'global';
+      if (allowed !== undefined && !allowed.includes(wanted)) {
+        throw new PlannerChatError(
+          allowed.length === 0
+            ? 'This call can only be allowed once.'
+            : 'This call can be remembered for this agent and this target only, never everywhere.',
+          'invalid',
+        );
+      }
     }
     this.pendingTurns.delete(approvalId);
     // The turn was already in flight — parked, but in flight — so it moves
@@ -2921,7 +2974,19 @@ export class PlannerChatService {
     if (this.isArtifactsOperation(chat, tool.name, prepared.args)) {
       return { kind: 'run', tool };
     }
-    const decision = resolveApprovalStatus(this.opts.db, gateName, chat.workspaceId, chat.skipToolApprovalsEnabled);
+    // PA-134: a chat pre-approved by its unattended trigger
+    // (`skipToolApprovalsEnabled`, a webhook or a Telegram pairing) is *not*
+    // pre-approved to reach other machines. That trigger's decision was about
+    // this chat's own tools; dispatching to another host is lateral movement,
+    // and it waits for a human like any unremembered call. Yolo, the
+    // operator's own standing switch, still applies.
+    const targetScoped = mcpIdentity?.rememberScopes !== undefined;
+    const decision = resolveApprovalStatus(
+      this.opts.db,
+      gateName,
+      chat.workspaceId,
+      chat.skipToolApprovalsEnabled && !targetScoped,
+    );
     if (decision === null) return { kind: 'needs_approval', tool, mcpIdentity };
     if (decision === 'deny') return { kind: 'denied' };
     return { kind: 'run', tool };
@@ -4122,7 +4187,7 @@ function permissionRequestEvent(
   approvalId: string,
   call: PlannerLlmToolCall,
   tool: PlannerToolDefinition,
-  mcpIdentity: { name: string; displayName: string } | null,
+  mcpIdentity: McpToolIdentity | null,
 ): AgentEvent {
   const args = toolUseInput(call.function.arguments);
   return {
@@ -4136,6 +4201,7 @@ function permissionRequestEvent(
     reason: null,
     canAllowForSession: false,
     questions: null,
+    ...(mcpIdentity?.rememberScopes !== undefined ? { rememberScopes: [...mcpIdentity.rememberScopes] } : {}),
   };
 }
 

@@ -1580,24 +1580,31 @@ export function PlannerChatPage({
       {pending && (
         <div className="planner-approval-card" role="alertdialog" aria-label="Tool approval">
           <p className="planner-approval-title">
-            This agent wants to run <code>{pending.toolName}</code>
+            This agent wants to run <code>{pending.displayName ?? pending.toolName}</code>
           </p>
           <pre className="planner-approval-args">{JSON.stringify(pending.input, null, 2)}</pre>
           <div className="planner-approval-actions">
             <button type="button" className="planner-btn" disabled={sending} onClick={() => decide('allow_once')}>
               Allow once
             </button>
-            <button
-              type="button"
-              className="planner-btn"
-              disabled={sending}
-              onClick={() => decide('allow_workspace')}
-            >
-              Allow for this workspace
-            </button>
-            <button type="button" className="planner-btn" disabled={sending} onClick={() => decide('allow_global')}>
-              Allow globally
-            </button>
+            {/* PA-134: a target-scoped tool (a Hub dispatch) may be remembered
+                for this agent and that host only, never globally; the server
+                refuses the same choices this hides. Absent means both. */}
+            {(pending.rememberScopes ?? ['workspace', 'global']).includes('workspace') && (
+              <button
+                type="button"
+                className="planner-btn"
+                disabled={sending}
+                onClick={() => decide('allow_workspace')}
+              >
+                {pending.rememberScopes ? 'Allow for this agent and target' : 'Allow for this workspace'}
+              </button>
+            )}
+            {(pending.rememberScopes ?? ['workspace', 'global']).includes('global') && (
+              <button type="button" className="planner-btn" disabled={sending} onClick={() => decide('allow_global')}>
+                Allow globally
+              </button>
+            )}
             <button type="button" className="planner-btn danger" disabled={sending} onClick={() => decide('deny')}>
               Deny
             </button>

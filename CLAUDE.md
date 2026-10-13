@@ -20,6 +20,7 @@ pnpm demo:hub           # PA-66's acceptance criteria: two real backends, a real
 pnpm demo:hub-ui        # PA-110: the Hub's own UI and mDNS discovery, in real Chrome
 pnpm demo:mcp           # PA-118: /mcp as an external agent sees it, against a scratch server
 pnpm demo:attachments-ui  # PA-136/137: PDF/xlsx/md attached in real Chrome, both chat kinds, both viewports, text read
+pnpm demo:fleet           # PA-134: Hub /mcp + Fleet agent: route, approve, push deep link, complete — real Chrome
 
 pnpm version:set 1.2.3  # the repo's semver, written to all six package.json files (PA-65, PA-66)
 ./test.sh               # CI: install --frozen-lockfile, vitest (JUnit XML), lint, typecheck
@@ -147,7 +148,7 @@ and `adopt.test.ts` skip themselves when `tmux` is not installed.
 ### Live demos
 
 The unit suite cannot cover xterm rendering, a real agent, a real tmux server, or a layout
-decision. Twenty-two demo scripts do; all but six run against a *running* server:
+decision. Twenty-three demo scripts do; all but seven run against a *running* server:
 
 ```bash
 pnpm demo:protocol        # terminal transport over HTTP+WS
@@ -172,6 +173,7 @@ PA_TOKEN=... pnpm demo:agent-install-ui  # agent setup dialog: four states, stre
 PA_TOKEN=... PA_GEMINI_KEY=... pnpm demo:gemini-live-ui  # PA-96: real speech → Gemini Live → tool → approval card, phone viewport
 pnpm demo:mcp             # PA-118: scratch server + SDK client; PA_MCP_REAL_AGENT=1 / PA_MCP_CLAUDE_CLIENT=1 add real claude
 pnpm demo:attachments-ui  # PA-136/137: scratch server + fake LLM; files attached in real Chrome, phone and desktop
+pnpm demo:fleet           # PA-134: two real backends + a real Hub + fake LLM and push service; real Chrome
 ```
 
 The first four read the token from `.env` and default to `:8787`. The rest expect a
@@ -250,6 +252,19 @@ the documents real (a PDF with a text layer, an xlsx with cells, both built by
 `tests/helpers-documents.ts`, which the demo imports as TypeScript): the Pocket Agent's model must
 receive their extracted text and the Markdown inline, fenced, with a sidecar `.txt` beside each
 document and a "text read" chip, and the claude session must get no sidecar.
+
+`pnpm demo:fleet` is the seventh, and where PA-134's acceptance criteria live: two real backends
+and a real Hub, a fake OpenAI-compatible endpoint that plays both the coordinator (reading the real
+tool results the Hub returns, so routing is decided from what the hosts report) and the target's
+Xcode Pocket Agent, and a fake Web Push service over a self-signed `https://` that the Hub alone
+trusts (`NODE_EXTRA_CA_CERTS`, so verification stays on) and that **decrypts** what it receives
+(RFC 8291). In real Chrome: the Fleet agent is enabled from the Hub page; each backend's own API is
+checked for exactly one `read, sessions, planner` token and the `hub:` audit line; "Build the iOS
+app" routes to mac01 and parks for approval on the coordinator with no "Allow globally"; the
+target's approval arrives as a push whose deep link is `/#/h/mac01/planner/…` and is answered in a
+second tab; and the coordinator's `wait` reports `complete`. A darwin capability card is PA-133's,
+so the demo routes on the Pocket Agent the host advertises. Like `demo:attachments-ui`, it needs
+`PLAYWRIGHT_BROWSERS_PATH` pointing at a directory with the revision Playwright wants.
 
 `pnpm demo:docker` is the other odd one out: it needs no running server and no `PA_BASE`, because it
 builds the image and starts its own container with a throwaway data root, HOME and git
@@ -2425,8 +2440,7 @@ and the turn stays parked until a person answers in PocketAgent.
 
 Nothing about a tool call's arguments or results is logged — prompts and transcripts sit with
 terminal I/O. Each call logs its name, principal, era, duration and outcome. Known limitations: no
-OAuth (clients send a static bearer header, which Claude Code and Codex both accept); a Hub-level
-`/mcp` aggregating every host is a follow-up; a coding agent started over MCP that is itself
+OAuth (clients send a static bearer header, which Claude Code and Codex both accept); a coding agent started over MCP that is itself
 configured to call `/mcp` sends no depth, so only the caps bound that loop.
 
 **The outbound client negotiates too, and caches the answer** (`planner/mcp/client.ts`,
@@ -2556,6 +2570,83 @@ stone-test01's `home-net`); the trap found there was Compose, not multicast: a p
 only fills `${…}` in the compose file and is never passed into a container, so the variable
 must be in the service's `environment:` (`docker/compose.hub.yaml` wires it as
 `${PA_MDNS_ADVERTISE:-false}`), and a backend with no `hostname:` advertises its container id.
+
+### The Fleet agent: a Hub-level `/mcp` and a coordinator Pocket Agent (PA-134)
+
+A Pocket Agent that finds the right host for a task and dispatches it there. **There is no LLM loop
+in the Hub** (option B on the ticket): the chat is an ordinary Pocket Agent on one backend, the
+*coordinator*, so memory, skills, personas, Telegram, Gemini Live and the PA-121/122 loop all apply
+unchanged, and the Hub keeps holding no upstream LLM key. The Hub is the switchboard: it serves its
+own MCP endpoint at **`/mcp`** (`apps/hub/src/mcp/`), and the coordinator reaches it through an
+ordinary MCP registry. This is the "Hub-level `/mcp`" PA-118 listed as a follow-up.
+
+**Six tools, and every one is the target host's own `/mcp`** (`mcp/tools.ts` over
+`mcp/backend-client.ts`): `list_hosts`, `get_host_capabilities`, `dispatch_pocket_task`
+(`create_pocket_chat` then `send_pocket_message`, timeout 0), `dispatch_coding_task`
+(`start_session`), `wait` (`wait_for_turn` / `wait_for_pocket_turn`, by the `session:`/`chat:` ref
+prefix, same states), `list_pending_approvals` (fanned out, with deep links, naming hosts it could not
+ask). The PA-70 rule applied to dispatch — no new backend contract — so a dispatch inherits the
+target's validation, caps (3 live sessions per client, the reserved human slots), ownership and
+approval gate untouched. The Hub calls only `BACKEND_TOOL_ALLOWLIST`, by name in code, so nothing a
+model writes can name a backend tool. The endpoint is a narrowed port of the backend's (both eras,
+the SDK's classifier, per-principal modern handlers, principal-bound legacy sessions, the principal
+re-read on every call) rather than a node-kit module: moving it would drag Fastify and both MCP SDKs
+into the leaf package that holds the security primitives. Logged per call: tool, principal, target
+host, era, duration, outcome — never arguments or results.
+
+**Two credential directions, both scoped.** *Hub → backend*: enabling mints a `pam_` token on every
+bound host through that host's own `POST /api/mcp/tokens` (with the `pah_` credential, so the
+backend audits it as `hub:<label>`), scopes `HUB_FLEET_BACKEND_SCOPES` (`read`, `sessions`,
+`planner`, never `admin`), stored as `secret-box` ciphertext in `hub_hosts.mcp_credential_enc`.
+The Hub then **asks the new token** (`get_host_info`) which scopes it holds and revokes it on the
+spot if they are not exactly those — it does not rely on the route's decision unseen. Dispatch
+never uses `pah_`. A host bound later gets one on bind; removing a host revokes it first.
+*Coordinator → Hub*: a `phm_` token (`hub_mcp_tokens`, `sha256` only, no expiry, no reveal, read
+fresh per request), minted by the enable flow behind the operator's cookie and handed to the
+provisioner as the registry's bearer secret hole — it exists in plaintext for that one request.
+
+**Setup is ordinary PA-70 provisioning** (`fleet/service.ts`): two system templates
+(`system-fleet-agent`, `system-fleet-registry`; hidden from the template list, refused by its
+edit/delete/instantiate routes) go through the same `Provisioner`, so they land in
+`hub_provisionings`. The agent is created once and never overwritten (it is the operator's from
+then on); the registry is always rewritten (new bearer). Refused up front, naming the problem, when
+the coordinator has no Pocket Agent LLM endpoint or model, or has MCP switched off. `hubUrl` is
+entered by the operator (prefilled with the browser's origin) because the Hub cannot know the
+address the *coordinator* reaches it by; the real test is the coordinator's own registry
+connection check, read back, and a failure rolls back what the run created. Moving provisions the
+new host, revokes the old `phm_` and removes the old registry, and keeps the old Fleet agent with
+its chats. Note the registry is global on the coordinator: any MCP-enabled Pocket Agent there can
+use it, which is the reason for the dedicated coordinator in `docker/compose.hub.yaml`.
+
+**The approval gate learned one thing: "remember for this host".** A tool may declare
+`_meta[MCP_APPROVAL_SCOPE_ARG_META_KEY] = '<arg>'` (the Hub's `dispatch_*` declare `host`), read by
+`McpClient.listTools` as `approvalScopeArg`. `effectiveMcpToolIdentity` then makes the approval
+subject `<qualifiedName>@host:<value>` from the call's own arguments, so a decision remembered for
+host A is a different `planner_tool_approvals` row from host B. Such a call offers only "this agent
+and target" (`PermissionRequestEvent.rememberScopes: ['workspace']`, honoured by the web card and
+Telegram's keyboard) and `resolveApproval` refuses `allow_global` for it; a call whose target
+argument is missing can only be allowed once. A chat pre-approved by its trigger
+(`skipToolApprovalsEnabled`) is **not** pre-approved to dispatch; yolo, the operator's own switch,
+still applies. This is the prompt-injection defence — text from host A telling the model to
+dispatch to host B still stops for a human — and the fence is the second line: every free-text
+field a host returns reaches the coordinator inside a per-call nonce fence (`mcp/fence.ts`,
+`sanitizeUntrustedText`), which lowers the hit rate and is not a boundary.
+
+**Target-host approvals reach a human by push.** A Pocket Agent approval used to push nothing,
+since its own tab shows the card. A chat an MCP client created (a Fleet dispatch, or any PA-118
+client) has no tab, so `push/planner-approvals.ts` pushes `/#/planner/<chatId>` for those and
+replays any still parked to a Hub that connects; the PA-73 relay rewrites it to
+`/#/h/<host>/planner/<chatId>`, the link `wait` reports. A human's own chat is not pushed.
+
+**Loop guard and caps.** The incoming `_meta[MCP_DEPTH_META_KEY]` is read and forwarded unchanged
+(the coordinator already counted the hop), and dispatch is refused at `MAX_MCP_CALL_DEPTH`. The
+Hub caps dispatch/wait calls in flight at 6 overall and 3 per host (`DispatchLimiter`).
+
+**Web.** `FleetAgentCard` on `HubPage` (enable / move / repair / disable, each confirmed with what it
+will write; per-host token state; each step's outcome), and a **Fleet** entry in `HubSidebar` and
+the host sheet (`hosts/fleet.ts`) that opens the newest human chat in the Fleet agent — or makes one
+— through the existing proxy, or says "coordinator <host> unreachable — move role?". `HostInfo`
+gained `platform`/`arch` as the interim capability signal until PA-133's cards exist.
 
 ### Version drift and drain-then-exit restart (PA-69)
 
@@ -2961,14 +3052,20 @@ These are load-bearing. Several were bugs first.
   the backend's gate already documents as the Hub's case. The check itself is run by the Hub's
   own single `onRequest` gate, which is where the ambient cookie actually is. `Cookie` is
   stripped for the same one-way reason, and `Set-Cookie` is stripped on the way back.
-- **The Hub holds no root credential and answers to no bearer** (PA-66). A master token exists
+- **The Hub holds no root credential and answers to one bearer, on one path** (PA-66, amended by
+  PA-134). A master token exists
   in the bind request body, is spent on exactly one call to that backend, and is never
   persisted — `bind.test.ts` scans every column of every row to prove it. What is stored is the
   minted `pah_` credential as a `secret-box` ciphertext plus its prefix in the clear; a row that
   will not decrypt (a rotated `POCKETAGENT_SETTINGS_ENC_KEY`) is **listed, marked unbound and
   refused** rather than dropped from the list or dialed without a credential. The Hub itself
-  accepts only its own session cookie — it presents credentials and does not take them, so there
-  is no bearer path to front a Hub with, and `POCKETAGENT_HUB_AUTH_TOKEN` is deliberately a
+  accepts its own session cookie and, since PA-134, exactly one bearer class: a `phm_` coordinator
+  token, on the exact path `/mcp` and nowhere else — checked before the gate's early return, by
+  exact match (`/mcpx`, `/mcp/x` stay the shell), with the cookie counting for nothing there. A
+  `phm_` token on `/api/hub/*`, `/h/**`, the WebSocket upgrade or push is a 401, so there is still
+  no bearer path to front the registry or the proxy with (asserted in
+  `apps/hub/tests/fleet-mcp-gate.test.ts`). `/api/mcp` is deliberately *not* that alias on the Hub:
+  the bare `/api/*` root is the default host's mount. `POCKETAGENT_HUB_AUTH_TOKEN` is deliberately a
   different variable from any backend's `POCKETAGENT_AUTH_TOKEN`. Removing a host *attempts*
   revocation on the backend and reports whether it worked, but never blocks on it: a machine
   that is down is precisely when an operator most wants it gone.
@@ -3019,6 +3116,16 @@ These are load-bearing. Several were bugs first.
   unauthorized hosts are reported at `GET /api/push/status` and surfaced as warning badges in
   the UI rather than silently dropping notifications. Crucially, terminal I/O is never sent or
   stored over this mechanism — only high-level approval/message notification metadata.
+- **A Fleet dispatch is approved on the coordinator, per host, and never by the Hub** (PA-134). The
+  Hub's `/mcp` has no approve tool and no decision, `skipPermissions`, `force`, executable or argv
+  field (asserted by grepping its catalog in `apps/hub/tests/fleet-mcp-tools.test.ts`), and calls
+  only allowlisted backend tools with a scoped, verified `pam_` token that never holds `admin`.
+  A `dispatch_*` call is mutating and target-scoped: it parks for a human on the coordinator unless
+  that agent was told it may use *that host*, it can never be remembered globally, a trigger's
+  `skipToolApprovals` does not cover it, and an approval it then needs on the target is answered
+  there, by a person, from a push deep link. Asserted in
+  `apps/server/tests/planner-mcp-host-approval.test.ts` (including the prompt-injection case) and
+  end to end by `pnpm demo:fleet`.
 - **An MCP client can see an approval and can never answer one** (PA-118). `/mcp` exposes no
   tool that resolves a permission, and no tool input carries `skipPermissions`, `force`, a
   decision, an executable or an argv — asserted by grepping `MCP_TOOLS` in
@@ -3273,7 +3380,9 @@ These are load-bearing. Several were bugs first.
   the browser derives origin and `ws:`/`wss:` itself, exactly as it already does for `fetch` —
   one rule for both transports instead of a hand-rolled scheme map that can disagree with the
   page. The remaining `window.location.origin` reads are `SecretReveal.tsx` and, by the same
-  reasoning, `McpClientsSection.tsx` (PA-118's `/mcp` URL for a client config). `SecretReveal.tsx` composes a
+  reasoning, `McpClientsSection.tsx` (PA-118's `/mcp` URL for a client config) and
+  `FleetAgentCard.tsx` (PA-134's prefill for the Hub address a coordinator dials, labelled as the
+  browser's and editable). `SecretReveal.tsx` composes a
   webhook's *delivery* URL for a human to paste into Jira; the server deliberately has no notion
   of its own external origin, so that one stays — but it is only valid for the host that served
   the bundle. For any host reached through a path prefix, this origin is the *gateway's*, and a

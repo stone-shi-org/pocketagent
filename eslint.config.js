@@ -65,6 +65,7 @@ export default tseslint.config(
     files: [
       'apps/server/scripts/browser-demo.mjs',
       'apps/hub/scripts/hub-ui-demo.mjs',
+      'apps/hub/scripts/fleet-demo.mjs',
       'apps/server/scripts/gemini-live-ui-demo.mjs',
       'apps/server/scripts/native-ui-demo.mjs',
       'apps/server/scripts/resume-adopt-ui-demo.mjs',

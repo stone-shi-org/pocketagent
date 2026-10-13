@@ -25,6 +25,7 @@ export * from './hub.js';
 export * from './hub-registry.js';
 export * from './hub-discovery.js';
 export * from './hub-templates.js';
+export * from './hub-fleet.js';
 export * from './push.js';
 export * from './admin.js';
 export * from './export-import.js';

@@ -6,8 +6,8 @@ import Fastify, { LogController, type FastifyInstance, type FastifyReply, type F
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
-import { isOriginAllowed, type MdnsTransport } from '@pocketagent/node-kit';
-import { SERVER_PROTOCOL_RANGE, type HealthResponse } from '@pocketagent/protocol';
+import { bearerTokenFrom, isOriginAllowed, type MdnsTransport } from '@pocketagent/node-kit';
+import { MCP_SERVER_PATH, SERVER_PROTOCOL_RANGE, type HealthResponse } from '@pocketagent/protocol';
 import { HubAuthService, HUB_AUTH_COOKIE_NAME } from './auth.js';
 import type { HubConfig } from './config.js';
 import { openHubDatabase, purgeExpiredHubSessions, type HubDb } from './db.js';
@@ -19,6 +19,12 @@ import { hubTemplateRoutes } from './routes/templates.js';
 import { hubPushRoutes } from './routes/push.js';
 import { hubDiscoveryRoutes } from './routes/discovery.js';
 import { DiscoveryService } from './discovery/service.js';
+import { FleetService } from './fleet/service.js';
+import { BackendMcpClient } from './mcp/backend-client.js';
+import { HubMcpServer } from './mcp/server.js';
+import { HubMcpTokenStore } from './mcp/tokens.js';
+import { DispatchLimiter } from './mcp/tools.js';
+import { hubFleetRoutes } from './routes/fleet.js';
 import { HubPushService } from './push/service.js';
 import { PushNotificationRelay } from './push/relay.js';
 import { Provisioner } from './templates/provisioner.js';
@@ -80,6 +86,11 @@ export interface HubContext {
   readonly pushRelay: PushNotificationRelay;
   /** PA-110: backends heard advertising on mDNS — suggestions, never registry rows. */
   readonly discovery: DiscoveryService;
+  /** PA-134: the Hub's own `/mcp`, its `phm_` tokens, and the Fleet agent. */
+  readonly mcpTokens: HubMcpTokenStore;
+  readonly mcpServer: HubMcpServer;
+  readonly backendMcp: BackendMcpClient;
+  readonly fleet: FleetService;
 }
 
 declare module 'fastify' {
@@ -156,6 +167,26 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
     log: app.log,
   });
 
+  const mcpTokens = new HubMcpTokenStore(db);
+  const backendMcp = new BackendMcpClient(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {});
+  const mcpServer = new HubMcpServer({
+    deps: { registry, client: backendMcp, limiter: new DispatchLimiter() },
+    version: HUB_VERSION,
+    resolve: (id) => mcpTokens.resolve(id),
+    log: app.log,
+  });
+  const fleet = new FleetService({
+    db,
+    registry,
+    templates,
+    provisioner,
+    tokens: mcpTokens,
+    mcpServer,
+    backendClient: backendMcp,
+    fetchImpl,
+    log: app.log,
+  });
+
   const context: HubContext = {
     config,
     db,
@@ -169,6 +200,10 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
     push,
     pushRelay,
     discovery,
+    mcpTokens,
+    mcpServer,
+    backendMcp,
+    fleet,
   };
   app.decorate('hub', context);
 
@@ -207,13 +242,31 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
    * acquire a weaker one. The upgrade handler below calls the same helpers
    * rather than repeating the logic.
    *
-   * Note there is no bearer branch. A Hub *presents* credentials; it does not
-   * accept them. Adding one would make the Hub itself a thing that can be
-   * fronted, which nothing asks for and which would need its own revocation
-   * story.
+   * There is exactly **one** bearer branch, and it is PA-134's deliberate,
+   * scoped exception to "a Hub presents credentials, it does not accept them":
+   * a `phm_` token, on the exact path `/mcp`, and nowhere else. It is checked
+   * *before* the early return below, because `/mcp` is outside `/api/` and
+   * would otherwise be served the SPA shell with a 200 (the trap PA-118 found
+   * on the backend). The match is exact — `/mcp/x` and `/mcpx` stay the shell
+   * — and on `/mcp` the session cookie counts for nothing: an MCP client holds
+   * no cookie, and an ambient credential on an endpoint that dispatches work
+   * to other machines is CSRF surface for nothing. Everywhere else a `phm_`
+   * bearer is simply not looked at, so `/api/hub/*`, `/h/**`, the WebSocket
+   * upgrade and push all answer it 401.
    */
   app.addHook('onRequest', async (request, reply) => {
     const url = request.url.split('?')[0] ?? '';
+    if (url === MCP_SERVER_PATH) {
+      const principal = mcpTokens.validate(bearerTokenFrom(request.headers.authorization));
+      if (principal) {
+        request.hubMcpPrincipal = principal;
+        return;
+      }
+      return reply
+        .code(401)
+        .header('www-authenticate', 'Bearer')
+        .send({ error: { code: 'unauthorized', message: 'A Hub MCP token is required.' } });
+    }
     if (!url.startsWith('/api/') && !url.startsWith('/h/') && url !== '/health') return;
     if (PUBLIC_API_PATHS.has(url)) return;
 
@@ -253,6 +306,17 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
   await app.register(hubHostRoutes);
   await app.register(hubTemplateRoutes);
   await app.register(hubPushRoutes);
+  await app.register(hubFleetRoutes);
+  // PA-134: the Hub's own MCP endpoint. Authenticated by the gate above
+  // (`request.hubMcpPrincipal`), served by `HubMcpServer`.
+  app.route({
+    method: ['GET', 'POST', 'DELETE'],
+    url: MCP_SERVER_PATH,
+    handler: async (request, reply) => {
+      await mcpServer.handle(request, reply);
+      return reply;
+    },
+  });
   await app.register(hubDiscoveryRoutes, {
     ...(options.discoveryRefreshWaitMs === undefined ? {} : { refreshWaitMs: options.discoveryRefreshWaitMs }),
   });
@@ -414,6 +478,7 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
   // connection is the Hub's normal steady state rather than an edge case.
   app.addHook('preClose', async () => {
     sockets.closeAll();
+    await mcpServer.closeAll();
   });
 
   app.addHook('onClose', async () => {

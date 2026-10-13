@@ -9239,3 +9239,41 @@ a.file-chip-link:hover .file-chip-name { text-decoration: underline; }
 
 /* A file being dragged over the composer. */
 .promptbar.drag-active { outline: 2px dashed var(--accent); outline-offset: 2px; }
+
+/* ---- PA-134: the Fleet agent card, sidebar entry and sheet entry ---------- */
+
+.fleet-card { align-items: flex-start; }
+.fleet-card .hub-row-main { gap: 6px; }
+.hub-row-main .warn,
+.fleet-tokens .warn,
+.fleet-steps .warn { color: var(--warn); }
+.fleet-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.fleet-field select,
+.fleet-field input {
+  max-width: 420px;
+  font-size: 13.5px;
+  color: var(--text);
+}
+.fleet-tokens,
+.fleet-steps {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.hub-nav-item.warn { color: var(--warn); flex-wrap: wrap; }
+.hub-nav-note {
+  flex-basis: 100%;
+  padding-left: 26px;
+  font-size: 11.5px;
+  font-weight: 450;
+}
+.sheet-option-detail.warn { color: var(--warn); }

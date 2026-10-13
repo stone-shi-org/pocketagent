@@ -32,6 +32,10 @@ export interface TestMcpServerOptions {
   instructions?: string;
   /** If set, registers an extra tool (`fail_tool`) that returns isError: true. */
   includeFailTool?: boolean;
+  /** PA-134: registers `dispatch_thing`, a mutating tool scoped by its `host`
+      argument (`_meta['pocketagent/approvalScopeArg'] = 'host'`) — the shape
+      of the Hub's `dispatch_*` tools. Its result is `replyText` when set. */
+  includeScopedTool?: { replyText?: string };
 }
 
 export interface TestMcpServerHandle {
@@ -64,6 +68,21 @@ function buildMcpServer(opts: TestMcpServerOptions = {}): McpServer {
     },
     async ({ id }: { id: string }) => ({ content: [{ type: 'text' as const, text: `deleted ${id}` }] }),
   );
+  if (opts.includeScopedTool) {
+    const reply = opts.includeScopedTool.replyText;
+    server.registerTool(
+      'dispatch_thing',
+      {
+        description: 'Pretends to dispatch a task to a host.',
+        inputSchema: { host: z.string(), task: z.string() },
+        annotations: { readOnlyHint: false },
+        _meta: { 'pocketagent/approvalScopeArg': 'host' },
+      },
+      async ({ host, task }: { host: string; task: string }) => ({
+        content: [{ type: 'text' as const, text: reply ?? `dispatched "${task}" to ${host}` }],
+      }),
+    );
+  }
   if (opts.includeFailTool) {
     server.registerTool(
       'fail_tool',

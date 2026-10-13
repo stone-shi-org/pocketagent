@@ -18,6 +18,33 @@ export interface HubHostRow {
   bound_at: number | null;
   backend_host_id: string | null;
   created_at: number;
+  /** PA-134: `secret-box` ciphertext of the scoped `pam_` dispatch token, or NULL. */
+  mcp_credential_enc: string | null;
+  mcp_credential_prefix: string | null;
+  /** The backend's own id for that token, so it can be revoked there. */
+  mcp_client_id: string | null;
+}
+
+/** PA-134: a Hub-issued `phm_` MCP token. Only its digest is stored. */
+export interface HubMcpTokenRow {
+  id: string;
+  label: string;
+  token_sha256: string;
+  token_prefix: string;
+  created_at: number;
+  last_seen_at: number | null;
+}
+
+/** PA-134: the Fleet agent's one row (`id = 1`), or absent when never enabled. */
+export interface HubFleetRow {
+  id: number;
+  enabled: number;
+  coordinator_host_id: string | null;
+  hub_url: string | null;
+  mcp_token_id: string | null;
+  pocket_agent_remote_id: string | null;
+  registry_remote_id: string | null;
+  updated_at: number;
 }
 
 export interface HubTemplateRow {
@@ -158,6 +185,45 @@ export const HUB_MIGRATIONS: readonly string[] = [
     p256dh     TEXT NOT NULL,
     auth       TEXT NOT NULL,
     created_at INTEGER NOT NULL
+  );
+  `,
+  // 3 — PA-134. The Fleet agent: the Hub's own MCP endpoint and its two
+  // credential directions.
+  `
+  -- Hub -> backend. The scoped pam_ token minted on each bound host for
+  -- dispatch (read, sessions, planner; never admin), beside the full-access
+  -- pah_ credential and stored the same way. Dispatch never uses credential_enc.
+  ALTER TABLE hub_hosts ADD COLUMN mcp_credential_enc TEXT;
+  ALTER TABLE hub_hosts ADD COLUMN mcp_credential_prefix TEXT;
+  ALTER TABLE hub_hosts ADD COLUMN mcp_client_id TEXT;
+
+  -- Coordinator -> Hub. The first bearer this Hub accepts, valid on its /mcp
+  -- endpoint and nowhere else. Shaped like the backend's hub_credentials:
+  -- sha256 only, a prefix in the clear for the UI, no expiry (revocation is
+  -- its only lifecycle) and no reveal path, so a copied hub.db yields nothing
+  -- presentable.
+  CREATE TABLE IF NOT EXISTS hub_mcp_tokens (
+    id           TEXT PRIMARY KEY,
+    label        TEXT NOT NULL,
+    token_sha256 TEXT NOT NULL UNIQUE,
+    token_prefix TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    last_seen_at INTEGER
+  );
+
+  -- Which host the Fleet agent runs on and what was provisioned there.
+  -- coordinator_host_id is SET NULL rather than CASCADE: removing the host
+  -- leaves a fleet with nowhere to run, which the page shows and offers to
+  -- move, rather than one that silently vanished.
+  CREATE TABLE IF NOT EXISTS hub_fleet (
+    id                     INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled                INTEGER NOT NULL DEFAULT 0,
+    coordinator_host_id    TEXT REFERENCES hub_hosts (id) ON DELETE SET NULL,
+    hub_url                TEXT,
+    mcp_token_id           TEXT,
+    pocket_agent_remote_id TEXT,
+    registry_remote_id     TEXT,
+    updated_at             INTEGER NOT NULL
   );
   `,
 ];

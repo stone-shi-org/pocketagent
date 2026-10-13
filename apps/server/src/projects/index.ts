@@ -171,6 +171,8 @@ export class ProjectService {
       // or a future embedding) should not claim nothing is running.
       ...(this.getRunningSessions ? { runningSessions: this.getRunningSessions() } : {}),
       codeServerBaseUrl: this.getCodeServerBaseUrl(),
+      platform: process.platform,
+      arch: process.arch,
     };
   }
 

@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { pendingPlannerApprovalPayloads } from '../push/planner-approvals.js';
 import { z } from 'zod';
 import { openSseStream } from './sse.js';
 
@@ -102,7 +103,11 @@ export const pushRoutes: FastifyPluginAsync = async (app) => {
     });
 
     // Replay currently pending approvals on connect.
-    const pending = sessions.getPendingApprovals();
+    const pending = [
+      ...sessions.getPendingApprovals(),
+      // PA-134: Pocket Agent chats an MCP client started, parked on approval.
+      ...pendingPlannerApprovalPayloads(app.pocket.db, app.pocket.plannerChats),
+    ];
     for (const payload of pending) {
       stream.write(payload);
     }

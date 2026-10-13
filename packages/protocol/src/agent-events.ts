@@ -150,6 +150,14 @@ export const PermissionRequestEvent = z.object({
    * instead of crashing on an unrecognized payload.
    */
   questions: z.array(AskUserQuestionItem).nullable(),
+  /**
+   * PA-134, Pocket Agent only: which "remember" scopes the approval card may
+   * offer. Absent means both (every approval before PA-134). A tool scoped to
+   * a target (`MCP_APPROVAL_SCOPE_ARG_META_KEY`) offers `workspace` only, so
+   * no approval can become fleet-wide; one whose target could not be read
+   * offers neither, leaving "allow once". The server enforces the same list.
+   */
+  rememberScopes: z.array(z.enum(['workspace', 'global'])).optional(),
 });
 
 export const PermissionDecision = z.enum(['allow', 'allow_session', 'deny']);

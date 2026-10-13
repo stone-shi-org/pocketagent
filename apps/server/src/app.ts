@@ -43,6 +43,7 @@ import { createBackend, DirectPtyBackend } from './backends/index.js';
 import { SessionManager } from './sessions/manager.js';
 import { buildChildEnv } from './sessions/env.js';
 import { PushService } from './push/index.js';
+import { wirePlannerApprovalPush } from './push/planner-approvals.js';
 import { ConversationStore } from './conversations/index.js';
 import { AgyTranscriptStore } from './conversations/agy.js';
 import { PiTranscriptStore } from './conversations/pi.js';
@@ -807,6 +808,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   });
   app.decorate('pocket', context);
   internalApi.attach(app);
+  // PA-134: an approval in a chat an MCP client started reaches a human by push.
+  const unwirePlannerPush = wirePlannerApprovalPush(db, plannerChats, push);
+  app.addHook('onClose', async () => unwirePlannerPush());
 
   /**
    * An MCP session's principal, re-read by id. A hub credential reaching the

@@ -42,7 +42,14 @@ export function HostSheet({
   canManage,
   hubVersion = null,
   hub = null,
+  fleet = null,
 }: {
+  /**
+   * PA-134: the Fleet agent, under the Hub entry. Opens its chat on the
+   * coordinator; with a `problem` (coordinator unreachable) it opens the Hub
+   * page instead, where the role can be moved.
+   */
+  fleet?: { problem: string | null; onOpen: () => void; onProblem: () => void } | null;
   /**
    * The Hub's own entry (PA-110), first in the list — the phone's
    * counterpart of the rail's Hub tile, and the same third selection: while
@@ -109,6 +116,24 @@ export function HostSheet({
               <Icon name="hub" size={18} />
               <span>Hub</span>
               <span className="sheet-option-detail">Hosts, discovery and templates</span>
+            </button>
+          )}
+
+          {fleet && (
+            <button
+              type="button"
+              className="sheet-option"
+              onClick={() => {
+                if (fleet.problem) fleet.onProblem();
+                else fleet.onOpen();
+                onClose();
+              }}
+            >
+              <Icon name="agents" size={18} />
+              <span>Fleet</span>
+              <span className={`sheet-option-detail${fleet.problem ? ' warn' : ''}`}>
+                {fleet.problem ?? 'Dispatch tasks to the right host'}
+              </span>
             </button>
           )}
 

@@ -9,6 +9,9 @@ import {
   type InstantiateHubTemplateRequest,
   type ProvisioningResult,
   type HubHostEntry,
+  type HubFleetActionResponse,
+  type HubFleetState,
+  type HubFleetStep,
   type UpdateHubTemplateRequest,
 } from '@pocketagent/protocol';
 import { ApiError } from './client.js';
@@ -181,4 +184,50 @@ export async function getHubPushStatus(): Promise<PushStatusResponse> {
 /** Sends a test notification to every browser subscribed to this Hub. */
 export async function sendHubTestPush(): Promise<{ sent: number; pruned: number }> {
   return hubRequest<{ sent: number; pruned: number }>('/api/push/test', { method: 'POST' });
+}
+
+// ---- PA-134: the Fleet agent -------------------------------------------------
+
+export async function getHubFleet(): Promise<HubFleetState> {
+  return hubRequest<HubFleetState>('/api/hub/fleet');
+}
+
+/**
+ * The outcome of an enable / move / disable, success or not. A refusal still
+ * carries the steps that ran (a dispatch token minted on one host before the
+ * coordinator turned out to have no LLM endpoint, say) and the state after,
+ * because "what did it do before it stopped" is the question an operator has.
+ */
+export interface HubFleetActionOutcome {
+  ok: boolean;
+  fleet: HubFleetState | null;
+  steps: HubFleetStep[];
+  error: string | null;
+}
+
+export async function runHubFleetAction(
+  action: 'enable' | 'move' | 'disable',
+  body?: { hostId: string; hubUrl?: string },
+): Promise<HubFleetActionOutcome> {
+  const response = await fetch(`/api/hub/fleet/${action}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: body ? { 'content-type': 'application/json' } : { accept: 'application/json' },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  let parsed: Partial<HubFleetActionResponse> & { error?: { code?: string; message?: string } } = {};
+  try {
+    parsed = (await response.json()) as typeof parsed;
+  } catch {
+    /* not JSON */
+  }
+  if (response.status === 401) {
+    throw new ApiError(parsed.error?.message ?? 'Authentication required.', 401, 'unauthorized');
+  }
+  return {
+    ok: response.ok,
+    fleet: parsed.fleet ?? null,
+    steps: parsed.steps ?? [],
+    error: response.ok ? null : (parsed.error?.message ?? `The Hub refused that (${response.status}).`),
+  };
 }
