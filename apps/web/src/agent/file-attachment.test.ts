@@ -103,14 +103,21 @@ describe('the note a coding agent is sent, read back for a chip', () => {
     expect(parseAttachedFileNotes(quoted)).toEqual({ text: quoted, paths: [] });
   });
 
-  it('takes a sidecar line with its file, and makes no chip of it (PA-137)', () => {
+  it('takes sidecar lines (including per-sheet CSVs and PA-139 truncation details) with their file, and makes no chip of them', () => {
     const text =
       'read these\n\n[Attached file saved to: .pocketagent/attachments/r_x.pdf]\n' +
-      '[Extracted text saved to: .pocketagent/attachments/r_x.pdf.txt (truncated)]\n' +
+      '[Extracted text saved to: .pocketagent/attachments/r_x.pdf.txt (truncated at page 812 of 1400 (time limit))]\n' +
+      '[Attached file saved to: .pocketagent/attachments/book_x.xlsx]\n' +
+      '[Extracted text saved to: .pocketagent/attachments/book_x.xlsx.txt]\n' +
+      '[Extracted text saved to: .pocketagent/attachments/book_x.xlsx.Budget.csv]\n' +
       '[Attached file saved to: .pocketagent/attachments/n.md]';
     expect(parseAttachedFileNotes(text)).toEqual({
       text: 'read these',
-      paths: ['.pocketagent/attachments/r_x.pdf', '.pocketagent/attachments/n.md'],
+      paths: [
+        '.pocketagent/attachments/r_x.pdf',
+        '.pocketagent/attachments/book_x.xlsx',
+        '.pocketagent/attachments/n.md',
+      ],
     });
     // A prompt that merely ends with such a line, with no file note above it, keeps it.
     const lone = 'what is\n[Extracted text saved to: x.txt]';

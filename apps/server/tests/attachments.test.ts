@@ -327,6 +327,26 @@ describe('plannerAttachmentNote', () => {
     ]);
     expect(extracted).toContain('[Its text was extracted to: artifacts/uploads/r_x.pdf.txt (120,000 characters; the document is longer');
     expect(extracted).not.toMatch(/with a command/);
+    // PA-139: truncation reason/stoppedAt and per-sheet CSV sidecars are shown in the note.
+    const richNote = plannerAttachmentNote([
+      {
+        name: 'book.xlsx',
+        path: 'artifacts/uploads/book_x.xlsx',
+        size: 50_000,
+        mediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        extractedPath: 'artifacts/uploads/book_x.xlsx.txt',
+        extractedFiles: [
+          { path: 'artifacts/uploads/book_x.xlsx.txt', kind: 'overview', label: 'Extracted text' },
+          { path: 'artifacts/uploads/book_x.xlsx.Budget.csv', kind: 'sheet_csv', label: 'Budget' },
+        ],
+        extractedChars: 4000,
+        truncated: true,
+        truncatedReason: 'time',
+        stoppedAt: 'sheet 1 of 4, row 500',
+      },
+    ]);
+    expect(richNote).toContain('extraction stopped at sheet 1 of 4, row 500 (time limit))]');
+    expect(richNote).toContain('[Per-sheet CSVs extracted to: artifacts/uploads/book_x.xlsx.Budget.csv (Budget)]');
     expect(plannerAttachmentNote([])).toBe('');
     expect(plannerAttachmentNote(undefined)).toBe('');
   });

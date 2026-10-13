@@ -236,6 +236,35 @@ export type LandingSource = { kind: 'file'; path: string } | { kind: 'buffer'; d
 const MAX_NAME_ATTEMPTS = 8;
 
 /**
+ * Opens a brand-new regular file in `target` under a name from `nameFor`
+ * (retried on `EEXIST`), through the same `lstat`-walked, realpath-contained
+ * directory check as `landAttachment`. Used by `extract.ts` so chunks arriving
+ * from the extraction worker are written straight to disk without buffering
+ * the whole extract in the server's heap.
+ */
+export function openExclusiveAttachment(
+  target: LandingTarget,
+  nameFor: () => string,
+): { fd: number; absPath: string; relPath: string } {
+  const { realRoot, realDir } = prepareLandingDir(target);
+  for (let attempt = 0; attempt < MAX_NAME_ATTEMPTS; attempt++) {
+    const absPath = path.join(realDir, nameFor());
+    try {
+      const fd = fs.openSync(
+        absPath,
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+        0o644,
+      );
+      return { fd, absPath, relPath: path.relative(realRoot, absPath).split(path.sep).join('/') };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+      throw err;
+    }
+  }
+  throw new AttachmentError('Could not find a free name for the attachment.', 'invalid');
+}
+
+/**
  * Writes `source` into the target directory under a name from `nameFor`
  * (called again, for a fresh suffix, whenever the name is taken), never
  * overwriting anything. A staged file is *moved*: hard-linked (atomic and
@@ -581,8 +610,13 @@ export function removeLandedAttachments(root: string, attachments: readonly Prom
   const allowed = [SESSION_ATTACHMENTS_DIR, PLANNER_UPLOADS_DIR].map((dir) => path.join(realRoot, ...dir.split('/')));
   let removed = 0;
   for (const attachment of attachments) {
-    for (const rel of [attachment.path, attachment.extractedPath]) {
-      if (!rel) continue;
+    const rels = new Set<string>();
+    if (attachment.path) rels.add(attachment.path);
+    if (attachment.extractedPath) rels.add(attachment.extractedPath);
+    for (const file of attachment.extractedFiles ?? []) {
+      if (file.path) rels.add(file.path);
+    }
+    for (const rel of rels) {
       const abs = path.resolve(realRoot, ...rel.split('/'));
       if (!allowed.some((dir) => path.dirname(abs) === dir)) continue;
       try {

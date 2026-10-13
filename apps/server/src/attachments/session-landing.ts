@@ -10,17 +10,16 @@ import { landStagedAttachments, sessionLandingTarget, type AttachmentStaging, ty
 import { recordAttachmentRoot } from './retention.js';
 
 /**
- * PA-136/137: lands a coding-agent prompt's files in `<cwd>/.pocketagent/attachments/`
+ * PA-136/137/139: lands a coding-agent prompt's files in `<cwd>/.pocketagent/attachments/`
  * and returns the note lines its prompt carries. One function for every
  * caller that prompts a session — the WebSocket and MCP — so the two cannot
  * disagree about where a file goes or what the agent is told.
  *
- * PA-137 adds the sidecar for every agent that is not Claude Code: a PDF,
- * docx, xlsx or pptx gets its text extracted beside it, and the note names
- * both paths. Claude Code is left out (the reporter's answer on the ticket)
- * because its own `Read` tool reads a PDF natively, with layout. codex,
- * opencode, pi and agy have no such tool, and an agent with only a shell is
- * one missing `pdftotext` from not reading the file at all.
+ * PA-137 adds extracted-text sidecars for PDF, docx, xlsx and pptx; PA-139
+ * extends that to `claude` sessions for Office documents (`docx`, `xlsx`,
+ * `pptx`) while continuing to skip `pdf` for `claude`, because Claude Code's
+ * own `Read` tool reads PDFs natively with layout, whereas an Office file
+ * would otherwise require the agent to write its own Python to inspect it.
  *
  * Throws what landing throws (and has then landed nothing); extraction never
  * throws — a failure is simply no sidecar.
@@ -38,13 +37,28 @@ export async function landSessionAttachments(
   const target = sessionLandingTarget(cwd);
   const landed = landStagedAttachments(staging, target, staged);
   if (db) recordAttachmentRoot(db, cwd);
-  const attachments = usesClaudeTranscripts(agent)
-    ? landed
-    : await enrichLandedAttachments(target, landed, { extract: true, ...(logger ? { logger } : {}) });
+  const attachments = await enrichLandedAttachments(target, landed, {
+    extract: true,
+    ...(usesClaudeTranscripts(agent) ? { skipKinds: ['pdf'] } : {}),
+    ...(logger ? { logger } : {}),
+  });
   const notes: string[] = [];
   for (const file of attachments) {
     notes.push(attachedFileNote(file.path));
-    if (file.extractedPath) notes.push(extractedTextNote(file.extractedPath, file.truncated === true));
+    if (file.extractedPath) {
+      notes.push(
+        extractedTextNote(file.extractedPath, {
+          truncated: file.truncated === true,
+          truncatedReason: file.truncatedReason,
+          stoppedAt: file.stoppedAt,
+        }),
+      );
+    }
+    for (const extra of file.extractedFiles ?? []) {
+      if (extra.path !== file.extractedPath) {
+        notes.push(extractedTextNote(extra.path, false));
+      }
+    }
   }
   return { attachments, notes };
 }

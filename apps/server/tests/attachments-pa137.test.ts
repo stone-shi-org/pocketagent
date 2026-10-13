@@ -216,19 +216,36 @@ describe('Pocket Agent reads attached documents with no shell', () => {
     expect(events.some((e) => e.kind === 'turn_complete')).toBe(true);
   });
 
-  it('cancelling a queued message deletes the files it landed', async () => {
+  it('cancelling a queued message deletes the files it landed (including all per-sheet CSVs of an xlsx)', async () => {
     const chat = await newChat();
     (t.context.plannerChats as unknown as { activeTurns: Map<string, number> }).activeTurns.set(chat.id, 1);
     const res = await t.app.inject({
       method: 'POST',
       url: `/api/planner/chats/${chat.id}/queue`,
       headers: authHeaders(t.cookie),
-      payload: { content: 'later', attachments: [await upload('q.pdf', makePdf(['queued']), 'application/pdf')] },
+      payload: {
+        content: 'later',
+        attachments: [
+          await upload('q.pdf', makePdf(['queued']), 'application/pdf'),
+          await upload(
+            'sheets.xlsx',
+            makeXlsx({ Alpha: [['A', 1]], Beta: [['B', 2]] }),
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          ),
+        ],
+      },
     });
     expect(res.statusCode).toBe(201);
     const { readPlannerQueuedPrompts } = await import('../src/planner/store.js');
     const [row] = readPlannerQueuedPrompts(t.db, chat.id);
-    const files = [row!.attachments[0]!.path, row!.attachments[0]!.extractedPath!];
+    const xlsxAtt = row!.attachments[1]!;
+    expect(xlsxAtt.extractedFiles?.map((f) => f.kind)).toEqual(['overview', 'sheet_csv', 'sheet_csv']);
+    const files = [
+      row!.attachments[0]!.path,
+      row!.attachments[0]!.extractedPath!,
+      xlsxAtt.path,
+      ...(xlsxAtt.extractedFiles?.map((f) => f.path) ?? []),
+    ];
     for (const rel of files) expect(fs.existsSync(path.join(workspaceRoot(), rel))).toBe(true);
 
     const cancel = await t.app.inject({
@@ -257,7 +274,7 @@ describe('Pocket Agent reads attached documents with no shell', () => {
   });
 });
 
-describe('coding-agent sidecars (non-claude agents only)', () => {
+describe('coding-agent sidecars (PA-137 / PA-139 §6)', () => {
   let cwd: string;
   let staging: AttachmentStaging;
 
@@ -273,8 +290,8 @@ describe('coding-agent sidecars (non-claude agents only)', () => {
     fs.rmSync(staging.dir, { recursive: true, force: true });
   });
 
-  const stage = async (name: string, data: Buffer) =>
-    staging.take([(await staging.stage(Readable.from([data]), { name, mediaType: 'application/pdf', principal: 'session' })).attachmentId], 'session');
+  const stage = async (name: string, data: Buffer, mediaType = 'application/pdf') =>
+    staging.take([(await staging.stage(Readable.from([data]), { name, mediaType, principal: 'session' })).attachmentId], 'session');
 
   it('writes a sidecar for codex and names it after the file note', async () => {
     const { notes, attachments } = await landSessionAttachments(staging, cwd, 'codex', await stage('r.pdf', makePdf(['Hello codex'])));
@@ -284,12 +301,43 @@ describe('coding-agent sidecars (non-claude agents only)', () => {
     expect(fs.readFileSync(path.join(cwd, attachments[0]!.extractedPath!), 'utf8')).toContain('Hello codex');
   });
 
-  it('leaves claude alone: its Read tool reads PDFs itself', async () => {
+  it('skips PDF extraction for claude (its Read tool reads PDFs natively), but extracts docx, xlsx and pptx for claude', async () => {
+    const { makePptx } = await import('./helpers-documents.js');
     for (const agent of ['claude', 'custom-claude:deepseek']) {
       const { notes } = await landSessionAttachments(staging, cwd, agent, await stage('r.pdf', makePdf(['x'])));
       expect(notes).toHaveLength(1);
     }
     expect(fs.readdirSync(path.join(cwd, '.pocketagent', 'attachments')).some((n) => n.endsWith('.txt'))).toBe(false);
+
+    // Office documents ARE extracted for claude:
+    const docxLanded = await landSessionAttachments(
+      staging,
+      cwd,
+      'claude',
+      await stage('memo.docx', makeDocx(['Claude reads docx via sidecar']), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+    );
+    expect(docxLanded.notes).toHaveLength(2);
+    expect(docxLanded.attachments[0]!.extractedPath).toMatch(/\.docx\.txt$/);
+
+    const xlsxLanded = await landSessionAttachments(
+      staging,
+      cwd,
+      'claude',
+      await stage('book.xlsx', makeXlsx({ SheetA: [['k', 1]] }), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+    );
+    // Original file note + overview .txt note + SheetA.csv note:
+    expect(xlsxLanded.notes).toHaveLength(3);
+    expect(xlsxLanded.notes[1]).toMatch(/\.xlsx\.txt\]$/);
+    expect(xlsxLanded.notes[2]).toMatch(/\.xlsx\.SheetA\.csv\]$/);
+
+    const pptxLanded = await landSessionAttachments(
+      staging,
+      cwd,
+      'claude',
+      await stage('deck.pptx', makePptx([['Slide text']]), 'application/vnd.openxmlformats-officedocument.presentationml.presentation'),
+    );
+    expect(pptxLanded.notes).toHaveLength(2);
+    expect(pptxLanded.attachments[0]!.extractedPath).toMatch(/\.pptx\.txt$/);
   });
 });
 

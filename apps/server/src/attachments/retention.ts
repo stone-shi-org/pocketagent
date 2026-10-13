@@ -173,7 +173,9 @@ export class AttachmentRetentionService {
     for (const row of this.opts.db.prepare('SELECT text FROM session_prompt_queue').all() as { text: string }[]) {
       for (const line of row.text.split('\n')) {
         for (const prefix of [ATTACHED_FILE_NOTE_PREFIX, EXTRACTED_TEXT_NOTE_PREFIX, '[Attached image saved to: ']) {
-          if (line.startsWith(prefix) && line.endsWith(']')) add(line.slice(prefix.length, -1).replace(/ \(truncated\)$/, ''));
+          if (line.startsWith(prefix) && line.endsWith(']')) {
+            add(line.slice(prefix.length, -1).replace(/ \(truncated(?:\s[\s\S]*)?\)$/, ''));
+          }
         }
       }
     }
@@ -193,6 +195,9 @@ export class AttachmentRetentionService {
         if (!attachment.success) continue;
         add(attachment.data.path);
         add(attachment.data.extractedPath);
+        for (const file of attachment.data.extractedFiles ?? []) {
+          add(file.path);
+        }
       }
     }
     return names;

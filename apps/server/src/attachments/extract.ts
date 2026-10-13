@@ -4,12 +4,20 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import type { PromptAttachment } from '@pocketagent/protocol';
-import { landAttachment, type LandingTarget } from './index.js';
-import type { ExtractJob, ExtractKind, ExtractReply } from './extract-worker.js';
+import type { ExtractedAttachmentFile, PromptAttachment } from '@pocketagent/protocol';
+import { openExclusiveAttachment, type LandingTarget } from './index.js';
+import type {
+  ExtractFileKind,
+  ExtractFileOutput,
+  ExtractJob,
+  ExtractKind,
+  ExtractReply,
+  ExtractTruncatedReason,
+  ExtractWorkerMessage,
+} from './extract-worker.js';
 
 /**
- * PA-137: what happens to an attached file right after it lands.
+ * PA-137 / PA-139: what happens to an attached file right after it lands.
  *
  * Two judgements, both made once and recorded on the `PromptAttachment`:
  *
@@ -19,19 +27,22 @@ import type { ExtractJob, ExtractKind, ExtractReply } from './extract-worker.js'
  *   so the per-turn path reads metadata, not bytes, until it actually
  *   inlines something.
  * - **Can its text be extracted?** A PDF, docx, xlsx or pptx gets a sidecar,
- *   `<landed name>.txt`, beside it. That is what removes the dead end PA-136
+ *   `<landed name>.txt`, beside it (plus one `<landed name>.<Sheet>.csv` per
+ *   worksheet for an xlsx, PA-139). That is what removes the dead end PA-136
  *   left: `read_file` refuses binaries and the image has no `pdftotext`, so a
- *   Pocket Agent could not read a PDF at all. The sidecar is plain text, so
- *   `read_file` pages through it with no shell and no approval.
+ *   Pocket Agent could not read a PDF at all. The sidecars are plain text, so
+ *   `read_file` pages through them with no shell and no approval.
  *
  * The document is a stranger's file, so the parse runs in a child process
- * with a CPU timeout, a memory cap and output caps, and its failure is a note,
- * never a refused prompt. See `extract-worker.ts` for what the parse may not
- * do (fetch, eval).
+ * with a CPU timeout, a memory cap and an output-bytes cap, streaming chunks
+ * over IPC as each page, sheet or slide completes. If a cap stops the parse
+ * partway through, the chunks already written stay on disk as a partial
+ * extract and `truncatedReason` / `stoppedAt` record why and where it stopped.
+ * See `extract-worker.ts` for what the parse may not do (fetch, eval).
  */
 
-/** How long one document may take to parse. */
-export const EXTRACT_TIMEOUT_MS = 10_000;
+/** How long one document may take to parse (PA-139: raised from 10 s to 60 s; partial extracts are kept on timeout). */
+export const EXTRACT_TIMEOUT_MS = 60_000;
 /** V8 heap the parse may use, in MB. */
 export const EXTRACT_MAX_HEAP_MB = 256;
 /**
@@ -40,8 +51,12 @@ export const EXTRACT_MAX_HEAP_MB = 256;
  * PDF needs well under it; a decompression bomb reaches it and is killed.
  */
 export const EXTRACT_MAX_RSS_MB = 768;
-export const EXTRACT_MAX_PAGES = 200;
-export const EXTRACT_MAX_CHARS = 500_000;
+/**
+ * Total UTF-8 bytes allowed across all extracted files of one upload (PA-139:
+ * replaces the 500k-char and 200-page caps; `read_file` pages, so a large
+ * extract costs disk rather than context).
+ */
+export const EXTRACT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 /** Declared uncompressed size a docx/xlsx/pptx may unpack to before it is refused unopened. */
 export const EXTRACT_MAX_UNZIPPED_BYTES = 128 * 1024 * 1024;
 /** Parses that may run at once, so five PDFs in one message do not start five processes. */
@@ -192,20 +207,30 @@ export interface ExtractLimits {
   maxHeapMb?: number;
   /** Resident memory the child may reach, in MB, before it is killed. */
   maxRssMb?: number;
+  /** Total UTF-8 output bytes across all extracted files of one upload. */
+  maxOutputBytes?: number;
+  /** Optional page/sheet/slide limit override. */
   maxPages?: number;
+  /** Optional character limit override. */
   maxChars?: number;
   maxUnzippedBytes?: number;
+  /**
+   * Optional streaming sink called as each chunk arrives from the child.
+   * When provided (`enrichLandedAttachments`), chunks go straight to disk and
+   * are not accumulated in the parent's heap.
+   */
+  onChunk?: (chunk: ExtractWorkerMessage & { type: 'chunk' }) => void;
 }
 
 /**
- * Parses one document in a child process. Never throws: every failure — a
- * timeout, the memory cap, a document the library cannot read — is
- * `{ ok: false }` with a sentence the model can be shown.
+ * Parses one document in a child process. Never throws: a complete failure is
+ * `{ ok: false }` with a sentence the model can be shown, while a timeout or
+ * memory cap reached *after* earlier pages/sheets were already streamed keeps
+ * the partial extract (`{ ok: true, truncated: true, truncatedReason, stoppedAt }`).
  *
  * The child gets an empty environment (so not even the `POCKETAGENT_*`
  * stripping in `sessions/env.ts` is needed: there is nothing to strip), no
- * stdin, no inherited flags, and its output discarded. It reads one file and
- * sends one message back.
+ * stdin, no inherited flags, and its output discarded.
  */
 export function extractDocumentText(absPath: string, kind: ExtractKind, limits: ExtractLimits = {}): Promise<ExtractReply> {
   const timeoutMs = limits.timeoutMs ?? EXTRACT_TIMEOUT_MS;
@@ -213,8 +238,9 @@ export function extractDocumentText(absPath: string, kind: ExtractKind, limits: 
   const job: ExtractJob = {
     path: absPath,
     kind,
-    maxChars: limits.maxChars ?? EXTRACT_MAX_CHARS,
-    maxPages: limits.maxPages ?? EXTRACT_MAX_PAGES,
+    maxOutputBytes: limits.maxOutputBytes ?? EXTRACT_MAX_OUTPUT_BYTES,
+    ...(limits.maxChars !== undefined ? { maxChars: limits.maxChars } : {}),
+    ...(limits.maxPages !== undefined ? { maxPages: limits.maxPages } : {}),
     maxUnzippedBytes: limits.maxUnzippedBytes ?? EXTRACT_MAX_UNZIPPED_BYTES,
   };
   return withSlot(
@@ -235,6 +261,40 @@ export function extractDocumentText(absPath: string, kind: ExtractKind, limits: 
         }
         let settled = false;
         let sampling = false;
+
+        // State accumulated from streaming chunks so a mid-parse timeout or
+        // memory kill still returns what was already extracted.
+        const bufferedStreams = new Map<string, ExtractFileOutput>();
+        let contentChars = 0;
+        let pages = 0;
+        let totalPages = 0;
+        let stoppedAt: string | undefined;
+
+        const buildPartialOrFullReply = (
+          truncated: boolean,
+          truncatedReason?: ExtractTruncatedReason,
+          finalStoppedAt?: string,
+        ): ExtractReply => {
+          const files = [...bufferedStreams.values()].map((f) => ({
+            ...f,
+            text: kind === 'xlsx' ? f.text.replace(/\n$/, '') : f.text,
+          }));
+          const mainText = bufferedStreams.get('main')?.text ?? '';
+          const text = kind === 'xlsx' ? mainText.replace(/\n$/, '') : mainText;
+          const resolvedStoppedAt = finalStoppedAt ?? stoppedAt;
+          return {
+            ok: true,
+            text,
+            ...(files.length > 0 ? { files } : {}),
+            pages,
+            totalPages,
+            truncated,
+            ...(truncated && truncatedReason ? { truncatedReason } : {}),
+            ...(truncated && resolvedStoppedAt ? { stoppedAt: resolvedStoppedAt } : {}),
+            contentChars,
+          };
+        };
+
         const finish = (reply: ExtractReply): void => {
           if (settled) return;
           settled = true;
@@ -243,8 +303,17 @@ export function extractDocumentText(absPath: string, kind: ExtractKind, limits: 
           if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
           resolve(reply);
         };
+
+        const finishCap = (reason: 'time' | 'memory', errorMsg: string): void => {
+          if (contentChars > 0) {
+            finish(buildPartialOrFullReply(true, reason, stoppedAt));
+          } else {
+            finish({ ok: false, error: errorMsg });
+          }
+        };
+
         const timer = setTimeout(
-          () => finish({ ok: false, error: `Reading the document took longer than ${Math.round(timeoutMs / 1000)} s.` }),
+          () => finishCap('time', `Reading the document took longer than ${Math.round(timeoutMs / 1000)} s.`),
           timeoutMs,
         );
         const watch = setInterval(() => {
@@ -253,21 +322,66 @@ export function extractDocumentText(absPath: string, kind: ExtractKind, limits: 
           void residentBytes(child.pid).then((rss) => {
             sampling = false;
             if (rss !== null && rss > maxRssBytes) {
-              finish({ ok: false, error: 'Reading the document needed more memory than allowed.' });
+              finishCap('memory', 'Reading the document needed more memory than allowed.');
             }
           });
         }, RSS_POLL_MS);
-        child.on('message', (reply: ExtractReply) => finish(reply));
+
+        child.on('message', (msg: ExtractWorkerMessage | ExtractReply) => {
+          // Support both the streaming protocol and legacy single-message replies.
+          if ('ok' in msg) {
+            finish(msg);
+            return;
+          }
+          if (msg.type === 'chunk') {
+            contentChars += msg.contentChars;
+            pages = msg.pages;
+            totalPages = msg.totalPages;
+            if (msg.stoppedAt) stoppedAt = msg.stoppedAt;
+            if (limits.onChunk) {
+              limits.onChunk(msg);
+            } else {
+              const existing = bufferedStreams.get(msg.stream);
+              if (existing) {
+                existing.text += msg.data;
+              } else {
+                bufferedStreams.set(msg.stream, {
+                  stream: msg.stream,
+                  kind: msg.kind,
+                  label: msg.label,
+                  suffix: msg.suffix,
+                  text: msg.data,
+                });
+              }
+            }
+            return;
+          }
+          if (msg.type === 'done') {
+            pages = msg.pages;
+            totalPages = msg.totalPages;
+            contentChars = msg.contentChars;
+            if (msg.stoppedAt) stoppedAt = msg.stoppedAt;
+            const reason: ExtractTruncatedReason | undefined = msg.truncated
+              ? (msg.truncatedReason ?? 'size')
+              : undefined;
+            finish(buildPartialOrFullReply(msg.truncated, reason, msg.stoppedAt));
+            return;
+          }
+          if (msg.type === 'error') {
+            finish({ ok: false, error: msg.error });
+          }
+        });
         child.on('error', (err) => finish({ ok: false, error: `The text extractor failed: ${err.message.slice(0, 200)}` }));
-        child.on('exit', (code, signal) =>
+        child.on('exit', (code, signal) => {
+          if (code === 134 || signal === 'SIGABRT') {
+            finishCap('memory', 'Reading the document needed more memory than allowed.');
+            return;
+          }
           finish({
             ok: false,
-            error:
-              code === 134 || signal === 'SIGABRT'
-                ? 'Reading the document needed more memory than allowed.'
-                : `The text extractor stopped unexpectedly (${signal ?? `exit ${code}`}).`,
-          }),
-        );
+            error: `The text extractor stopped unexpectedly (${signal ?? `exit ${code}`}).`,
+          });
+        });
         child.send(job);
       }),
   );
@@ -276,16 +390,59 @@ export function extractDocumentText(absPath: string, kind: ExtractKind, limits: 
 // ---- After landing -------------------------------------------------------------
 
 export interface EnrichOptions {
-  /** Extract documents into sidecars. Off for claude, whose `Read` handles a PDF itself. */
+  /** Extract documents into sidecars. */
   extract: boolean;
+  /**
+   * PA-139 §6: document kinds to skip extracting (e.g. `['pdf']` for `claude`,
+   * whose native `Read` tool reads PDFs but cannot read `.docx`/`.xlsx`/`.pptx`).
+   */
+  skipKinds?: readonly ExtractKind[];
   limits?: ExtractLimits;
   logger?: { info?: (obj: object, msg?: string) => void; warn: (obj: object, msg?: string) => void };
 }
 
-/** The sidecar for a landed file: `report_…_a1b2.pdf` → `report_…_a1b2.pdf.txt`. */
-function sidecarName(landedRelPath: string, attempt: number): string {
+/**
+ * The sidecar name for a landed file and suffix:
+ * - `('report_…_a1b2.pdf', '.txt', 0)` → `'report_…_a1b2.pdf.txt'`
+ * - `('report_…_a1b2.pdf', '.txt', 1)` → `'report_…_a1b2.pdf.2.txt'`
+ * - `('book_…_a1b2.xlsx', '.Budget.csv', 0)` → `'book_…_a1b2.xlsx.Budget.csv'`
+ */
+function sidecarName(landedRelPath: string, suffix: string, attempt: number): string {
   const base = landedRelPath.split('/').pop() ?? 'file';
-  return attempt === 0 ? `${base}.txt` : `${base}.${attempt + 1}.txt`;
+  if (attempt === 0) return `${base}${suffix}`;
+  const dot = suffix.lastIndexOf('.');
+  if (dot <= 0) return `${base}.${attempt + 1}${suffix}`;
+  return `${base}${suffix.slice(0, dot)}.${attempt + 1}${suffix.slice(dot)}`;
+}
+
+interface DiskStream {
+  fd: number;
+  absPath: string;
+  relPath: string;
+  kind: ExtractFileKind;
+  label: string;
+  suffix: string;
+  chars: number;
+  endsWithNewline: boolean;
+  closed: boolean;
+}
+
+function closeAndRemoveStreams(streams: Iterable<DiskStream>): void {
+  for (const s of streams) {
+    if (!s.closed) {
+      s.closed = true;
+      try {
+        fs.closeSync(s.fd);
+      } catch {
+        // Ignore close error.
+      }
+    }
+    try {
+      fs.unlinkSync(s.absPath);
+    } catch {
+      // Ignore unlink error.
+    }
+  }
 }
 
 /**
@@ -321,35 +478,125 @@ export async function enrichLandedAttachments(
       continue;
     }
     const kind = opts.extract ? documentKindFor(attachment.name, attachment.mediaType, head) : null;
-    if (!kind) {
+    if (!kind || opts.skipKinds?.includes(kind)) {
       out.push(attachment);
       continue;
     }
     const startedAt = Date.now();
-    const reply = await extractDocumentText(absPath, kind, opts.limits);
+    const opened = new Map<string, DiskStream>();
+    let writeFailed = false;
+
+    const onChunk = (msg: ExtractWorkerMessage & { type: 'chunk' }): void => {
+      if (writeFailed || msg.data.length === 0) return;
+      let ds = opened.get(msg.stream);
+      if (!ds) {
+        try {
+          let attempt = 0;
+          const { fd, absPath: streamAbs, relPath } = openExclusiveAttachment(target, () =>
+            sidecarName(attachment.path, msg.suffix, attempt++),
+          );
+          ds = {
+            fd,
+            absPath: streamAbs,
+            relPath,
+            kind: msg.kind,
+            label: msg.label,
+            suffix: msg.suffix,
+            chars: 0,
+            endsWithNewline: false,
+            closed: false,
+          };
+          opened.set(msg.stream, ds);
+        } catch (err) {
+          writeFailed = true;
+          opts.logger?.warn({ err, kind }, 'could not open sidecar file for extracted text');
+          return;
+        }
+      }
+      try {
+        fs.writeSync(ds.fd, msg.data, null, 'utf8');
+        ds.chars += msg.data.length;
+        ds.endsWithNewline = msg.data.endsWith('\n');
+      } catch (err) {
+        writeFailed = true;
+        opts.logger?.warn({ err, kind }, 'could not write chunk to extracted text sidecar');
+      }
+    };
+
+    const reply = await extractDocumentText(absPath, kind, { ...opts.limits, onChunk });
+    if (writeFailed) {
+      closeAndRemoveStreams(opened.values());
+      out.push({ ...attachment, extractError: 'The extracted text could not be saved.' });
+      continue;
+    }
     if (!reply.ok) {
+      closeAndRemoveStreams(opened.values());
       opts.logger?.warn({ kind, size: attachment.size, ms: Date.now() - startedAt }, 'attachment text extraction failed');
       out.push({ ...attachment, extractError: reply.error.slice(0, 300) });
       continue;
     }
-    const text = reply.text.trim();
-    if (reply.contentChars === 0 || text.length === 0) {
+    const mainStream = opened.get('main');
+    if (reply.contentChars === 0 || !mainStream || mainStream.chars === 0) {
+      closeAndRemoveStreams(opened.values());
       // A scanned PDF has no text layer; OCR is out of scope, so say so.
       out.push({ ...attachment, extractError: 'No text was found in the document (it may be a scan, which is not read).' });
       continue;
     }
+
     try {
-      let attempt = 0;
-      const { relPath } = landAttachment(target, { kind: 'buffer', data: Buffer.from(`${text}\n`, 'utf8') }, () =>
-        sidecarName(attachment.path, attempt++),
-      );
+      const sheetStreams = [...opened.values()].filter((s) => s.kind === 'sheet_csv');
+      if (sheetStreams.length > 0) {
+        const pointerLines = [
+          mainStream.endsWithNewline ? '' : '\n',
+          '\nSheet CSV files:\n',
+          ...sheetStreams.map((s) => `- ${s.label}: ${s.relPath}\n`),
+        ].join('');
+        fs.writeSync(mainStream.fd, pointerLines, null, 'utf8');
+        mainStream.chars += pointerLines.length;
+        mainStream.endsWithNewline = true;
+      }
+
+      for (const s of opened.values()) {
+        if (!s.endsWithNewline) {
+          fs.writeSync(s.fd, '\n', null, 'utf8');
+        }
+        s.closed = true;
+        fs.closeSync(s.fd);
+      }
+
+      // Trim any trailing newline from `extractedChars` to match the content length before the final `\n`.
+      const extractedChars = mainStream.endsWithNewline ? Math.max(0, mainStream.chars - 1) : mainStream.chars;
+      const extractedFiles: ExtractedAttachmentFile[] = [...opened.values()].map((s) => ({
+        path: s.relPath,
+        kind: s.kind,
+        label: s.label,
+      }));
+
       // Metadata only, like every other attachment log line.
       opts.logger?.info?.(
-        { kind, size: attachment.size, chars: text.length, pages: reply.pages, truncated: reply.truncated, ms: Date.now() - startedAt },
+        {
+          kind,
+          size: attachment.size,
+          chars: extractedChars,
+          files: extractedFiles.length,
+          pages: reply.pages,
+          truncated: reply.truncated,
+          ...(reply.truncatedReason ? { truncatedReason: reply.truncatedReason } : {}),
+          ms: Date.now() - startedAt,
+        },
         'attachment text extracted',
       );
-      out.push({ ...attachment, extractedPath: relPath, extractedChars: text.length, truncated: reply.truncated });
+      out.push({
+        ...attachment,
+        extractedPath: mainStream.relPath,
+        ...(extractedFiles.length > 0 ? { extractedFiles } : {}),
+        extractedChars,
+        truncated: reply.truncated,
+        ...(reply.truncated && reply.truncatedReason ? { truncatedReason: reply.truncatedReason } : {}),
+        ...(reply.truncated && reply.stoppedAt ? { stoppedAt: reply.stoppedAt } : {}),
+      });
     } catch (err) {
+      closeAndRemoveStreams(opened.values());
       opts.logger?.warn({ err, kind }, 'could not write the extracted text of an attachment');
       out.push({ ...attachment, extractError: 'The extracted text could not be saved.' });
     }

@@ -146,7 +146,7 @@ async function waitForHealth() {
 }
 
 async function launch() {
-  for (const options of [{}, { channel: 'chrome' }, { executablePath: '/usr/bin/google-chrome', args: ['--no-sandbox'] }]) {
+  for (const options of [{}, { args: ['--no-sandbox'] }, { channel: 'chrome' }, { executablePath: '/usr/bin/google-chrome', args: ['--no-sandbox'] }]) {
     try {
       return await chromium.launch(options);
     } catch {
@@ -253,7 +253,13 @@ for (const [label, contextOptions] of [
       fs.readFileSync(path.join(project, '.pocketagent', '.gitignore'), 'utf8').includes('*'),
       '.pocketagent/.gitignore keeps them out of git status',
     );
-    check(!all.some((f) => f.endsWith('.txt')), 'claude gets no extracted-text sidecar: its Read tool reads the PDF itself (PA-137)');
+    check(
+      !onDisk.some((f) => /^Quarterly report_.*\.pdf\.txt$/.test(f)) &&
+        onDisk.some((f) => /^numbers_.*\.xlsx\.txt$/.test(f)) &&
+        onDisk.some((f) => /^numbers_.*\.xlsx\.Costs\.csv$/.test(f)),
+      'claude skips PDF extraction (its Read tool reads PDFs) and extracts xlsx into .txt + per-sheet .csv (PA-139)',
+      onDisk.join(', '),
+    );
     // The chips are read back out of the prompt text the agent was sent
     // (`userPromptView`), so the text must carry one note per file; the
     // copy-path button on each chip holds exactly that path.
@@ -326,8 +332,15 @@ for (const [label, contextOptions] of [
     check(/<<<FILE notes\.md [0-9a-f]{16}>>>\n# Notes/.test(content), 'the Markdown went inline, fenced as data');
     check(!transcript.includes('Revenue grew'), 'and none of that content is in the transcript');
     check(
-      uploads.some((f) => /^Quarterly report_.*\.pdf\.txt$/.test(f)) && uploads.some((f) => /^numbers_.*\.xlsx\.txt$/.test(f)),
-      'each document has a sidecar .txt that read_file can page through',
+      uploads.some((f) => /^Quarterly report_.*\.pdf\.txt$/.test(f)) &&
+        uploads.some((f) => /^numbers_.*\.xlsx\.txt$/.test(f)) &&
+        uploads.some((f) => /^numbers_.*\.xlsx\.Costs\.csv$/.test(f)),
+      'each document has a sidecar .txt (plus per-sheet .csv for xlsx) that read_file can page through (PA-139)',
+      uploads.join(', '),
+    );
+    check(
+      /\[Per-sheet CSVs extracted to: artifacts\/uploads\/numbers_.*\.xlsx\.Costs\.csv \(Costs\)\]/.test(content),
+      'the prompt note points the agent at each per-sheet CSV sidecar',
     );
     const details = await page.locator('.file-chip-row[aria-label="Attached files"] .file-chip-detail:visible').allTextContents();
     check(details.filter((d) => d.includes('text read')).length >= 2, 'the PDF and xlsx chips say their text was read', details.join(', '));

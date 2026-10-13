@@ -48,6 +48,22 @@ export const UploadAttachmentResponse = z.object({
 });
 export type UploadAttachmentResponse = z.infer<typeof UploadAttachmentResponse>;
 
+export const TruncatedReason = z.enum(['time', 'size', 'memory']);
+export type TruncatedReason = z.infer<typeof TruncatedReason>;
+
+/**
+ * PA-139: one file produced by extracting an attachment — the `.txt` overview
+ * (`kind: 'overview'`) or a per-sheet `.csv` (`kind: 'sheet_csv'`) or formula
+ * sidecar (`kind: 'formulas'`). `PromptAttachment.extractedPath` continues to
+ * name the primary `.txt` file so older readers keep working.
+ */
+export const ExtractedAttachmentFile = z.object({
+  path: z.string().max(4096),
+  kind: z.enum(['overview', 'sheet_csv', 'formulas']),
+  label: z.string().max(255),
+});
+export type ExtractedAttachmentFile = z.infer<typeof ExtractedAttachmentFile>;
+
 /**
  * A file that has landed, as the transcript records it: metadata only, never
  * bytes. `path` is relative to the session's cwd (a coding agent) or to the
@@ -71,10 +87,20 @@ export const PromptAttachment = z.object({
    * shell and no approval.
    */
   extractedPath: z.string().max(4096).optional(),
-  /** Characters in the sidecar. */
+  /**
+   * PA-139: all files written by extraction (the `.txt` overview plus, for a
+   * spreadsheet, one `.csv` per sheet). `extractedPath` stays set to the
+   * primary `.txt` file for compatibility.
+   */
+  extractedFiles: z.array(ExtractedAttachmentFile).max(200).optional(),
+  /** Characters across the extracted sidecar(s). */
   extractedChars: z.number().int().nonnegative().optional(),
-  /** The extract stopped at a cap (pages or characters) before the document ended. */
+  /** The extract stopped at a cap (time, size or memory) before the document ended. */
   truncated: z.boolean().optional(),
+  /** PA-139: which abuse cap stopped the extract when `truncated` is true. */
+  truncatedReason: TruncatedReason.optional(),
+  /** PA-139: where in the document extraction stopped, e.g. `"page 812 of 1400"`. */
+  stoppedAt: z.string().max(255).optional(),
   /**
    * Why extraction failed, in a short sentence the model can be shown — a
    * timeout, a heap cap, a document that would not parse. Never fails the
@@ -97,15 +123,47 @@ export function attachedFileNote(relPath: string): string {
 }
 
 /**
- * PA-137: the line that follows a file's note when its text was extracted
- * into a sidecar (non-claude coding agents only). Parsed back out with the
- * file notes, but it names no chip of its own: the sidecar is a byproduct of
- * the file above it, not something the user attached.
+ * PA-137/139: the line that follows a file's note when its text was extracted
+ * into a sidecar (or per-sheet CSVs). Parsed back out with the file notes,
+ * but it names no chip of its own: the sidecar is a byproduct of the file
+ * above it, not something the user attached.
  */
 export const EXTRACTED_TEXT_NOTE_PREFIX = '[Extracted text saved to: ';
 
-export function extractedTextNote(relPath: string, truncated = false): string {
-  return `${EXTRACTED_TEXT_NOTE_PREFIX}${relPath}${truncated ? ' (truncated)' : ''}]`;
+export interface ExtractedTextNoteOptions {
+  truncated?: boolean | undefined;
+  truncatedReason?: TruncatedReason | undefined;
+  stoppedAt?: string | undefined;
+}
+
+export function formatTruncationDetail(
+  truncatedReason?: TruncatedReason | undefined,
+  stoppedAt?: string | undefined,
+): string {
+  const reason =
+    truncatedReason === 'time'
+      ? 'time limit'
+      : truncatedReason === 'size'
+        ? 'output size limit'
+        : truncatedReason === 'memory'
+          ? 'memory limit'
+          : 'limit';
+  if (stoppedAt && truncatedReason) return `at ${stoppedAt} (${reason})`;
+  if (stoppedAt) return `at ${stoppedAt}`;
+  if (truncatedReason) return `at its ${reason}`;
+  return 'at its limit';
+}
+
+export function extractedTextNote(
+  relPath: string,
+  truncated: boolean | ExtractedTextNoteOptions = false,
+): string {
+  const opts: ExtractedTextNoteOptions = typeof truncated === 'boolean' ? { truncated } : truncated;
+  if (!opts.truncated) return `${EXTRACTED_TEXT_NOTE_PREFIX}${relPath}]`;
+  if (opts.truncatedReason || opts.stoppedAt) {
+    return `${EXTRACTED_TEXT_NOTE_PREFIX}${relPath} (truncated ${formatTruncationDetail(opts.truncatedReason, opts.stoppedAt)})]`;
+  }
+  return `${EXTRACTED_TEXT_NOTE_PREFIX}${relPath} (truncated)]`;
 }
 
 /** PA-137: inline caps a Pocket Agent applies when Settings leave them alone. */

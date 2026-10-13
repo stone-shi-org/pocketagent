@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   DEFAULT_INLINE_EXTRACT_MAX_TOKENS,
   DEFAULT_INLINE_TEXT_MAX_BYTES,
+  formatTruncationDetail,
   sanitizeUntrustedText,
   type PromptAttachment,
 } from '@pocketagent/protocol';
@@ -64,9 +65,10 @@ export function inlineSourceFor(
   a: PromptAttachment,
   caps: InlineCaps = DEFAULT_INLINE_CAPS,
 ): { relPath: string; kind: 'text' | 'extract'; chars: number } | null {
-  if (a.extractedPath && a.extractedChars !== undefined && caps.extractMaxTokens > 0) {
+  const primaryExtract = a.extractedPath ?? a.extractedFiles?.[0]?.path;
+  if (primaryExtract && a.extractedChars !== undefined && caps.extractMaxTokens > 0) {
     return a.extractedChars <= caps.extractMaxTokens * 4
-      ? { relPath: a.extractedPath, kind: 'extract', chars: a.extractedChars }
+      ? { relPath: primaryExtract, kind: 'extract', chars: a.extractedChars }
       : null;
   }
   if (a.text && caps.textMaxBytes > 0 && a.size <= caps.textMaxBytes) {
@@ -120,11 +122,19 @@ export function buildAttachmentNote(
   let unreadBinary = false;
   attachments.forEach((a, i) => {
     lines.push(`[Attached file saved to: ${a.path} (${a.name}, ${formatBytes(a.size)}, ${a.mediaType})]`);
-    if (a.extractedPath) {
+    const primaryExtract = a.extractedPath ?? a.extractedFiles?.[0]?.path;
+    if (primaryExtract) {
+      const truncDetail = a.truncated
+        ? `; the document is longer, and extraction stopped ${formatTruncationDetail(a.truncatedReason, a.stoppedAt)}`
+        : '';
       lines.push(
-        `[Its text was extracted to: ${a.extractedPath} (${(a.extractedChars ?? 0).toLocaleString('en-US')} characters` +
-          `${a.truncated ? '; the document is longer, and extraction stopped at its limit' : ''})]`,
+        `[Its text was extracted to: ${primaryExtract} (${(a.extractedChars ?? 0).toLocaleString('en-US')} characters` +
+          `${truncDetail})]`,
       );
+      const extraFiles = (a.extractedFiles ?? []).filter((f) => f.path !== primaryExtract);
+      if (extraFiles.length > 0) {
+        lines.push(`[Per-sheet CSVs extracted to: ${extraFiles.map((f) => `${f.path} (${f.label})`).join(', ')}]`);
+      }
     } else if (a.extractError) {
       lines.push(`[Its text could not be extracted: ${a.extractError}]`);
       unreadBinary = true;

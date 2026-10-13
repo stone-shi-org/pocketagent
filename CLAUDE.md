@@ -1936,23 +1936,26 @@ browser's downscale, and the server's 1 MiB default had answered 413 to any plan
 Known limitations left by PA-136 — text extraction, inlining, a per-model PDF flag, Telegram
 files, MCP attachments, cleanup — are PA-137, below.
 
-### Reading attachments, Telegram files, MCP uploads and retention (PA-137)
+### Reading attachments, Telegram files, MCP uploads and retention (PA-137, PA-139)
 
 PA-136 told an agent where a file was and nothing more, and for a Pocket Agent that was a dead
 end: `read_file` refuses binaries, `bash` is approval-gated, and the image has neither
-`pdftotext` nor `openpyxl`, so a PDF, docx or xlsx could not be read at all. PA-137 closes that in
-four phases, each of which shipped with its own tests.
+`pdftotext` nor `openpyxl`, so a PDF, docx or xlsx could not be read at all. PA-137 closed that in
+four phases, and PA-139 removed arbitrary information-dropping caps in favour of abuse-only bounds,
+streaming partial extracts, per-sheet CSVs, structured Office/PDF extraction, and Office sidecars
+for `claude`.
 
 **Every file is judged once, when it lands** (`attachments/extract.ts`,
 `enrichLandedAttachments`), and the verdict is recorded on its `PromptAttachment`, so the per-turn
 path reads metadata rather than bytes. A text type (by name or declared type, `TEXT_EXTENSIONS`)
 whose first 64 KB decode as UTF-8 with no NUL is `text: true`. A PDF, docx, xlsx or pptx — the name
 or type proposes the kind, and the file's own magic (`%PDF-`, a zip's `PK\3\4`) must agree — has
-its text extracted into a sidecar, `<landed name>.txt`, beside it (`extractedPath`,
-`extractedChars`, `truncated`), written through `landAttachment` like everything else, so it
-never overwrites anything. A failure (`extractError`) is a note, never a refused prompt: the file
-has already landed where the agent is told it is. A document with no text layer says it is
-probably a scan; OCR is out of scope.
+its text extracted into `<landed name>.txt` beside it (`extractedPath`, `extractedChars`,
+`truncated`, `truncatedReason`, `stoppedAt`) plus any additional sidecars in `extractedFiles`
+(`[{ path, kind, label }]`, e.g. one `<landed name>.<Sheet>.csv` per worksheet), all opened via
+`openExclusiveAttachment` so nothing is ever overwritten. A failure (`extractError`) is a note,
+never a refused prompt: the file has already landed where the agent is told it is. A document with
+no text layer says it is probably a scan; OCR is out of scope.
 
 **The libraries, and why these** (the reporter asked for research on the ticket). What other
 agents do: Claude Code's `Read` reads a PDF natively, with layout, and both Claude Code and Codex
@@ -1961,11 +1964,21 @@ MarkItDown through a shell — none of which this image ships, and all of which 
 call behind the approval gate. So the parse is in-process JS with no native addon and no system
 package: **`unpdf`** (Mozilla's pdf.js, serverless build; the maintained successor to
 `pdf-parse`, and the same engine Firefox uses on hostile PDFs every day), **`mammoth`** for docx
-(the standard docx-to-text library), and **`fflate`** with a hand-rolled reader of
-`sharedStrings.xml`/`sheetN.xml` for xlsx and of slide XML for pptx. Not SheetJS: the `xlsx` on
-npm is frozen at 0.18.5 with a prototype-pollution CVE (fixed only in releases published off-npm),
-and ExcelJS is a heavyweight read-write library for a read-only job. About 4.5 MB of JS in the
-image, no native code.
+(`convertToHtml` lowered to Markdown through a small emit-only allowlist of headings, lists,
+tables, safe links and footnotes, plus direct regex reads of `word/header*.xml`,
+`word/footer*.xml`, `word/comments.xml` and `<w:ins>`/`<w:del>` tracked changes), and **`fflate`**
+with hand-rolled regex readers over OOXML: for xlsx, one RFC 4180 CSV per sheet preserving row
+positions plus a `.txt` overview with `xl/styles.xml` number formatting (ISO dates/times,
+percentages, currencies, `date1904`), `<f>` formulas, `[hidden]` sheet markers, `<mergeCell>`
+ranges and `xl/comments*.xml` / `threadedComment*.xml`; for pptx, slides ordered by
+`ppt/presentation.xml` `<p:sldIdLst>`, `show="0"` `[hidden]` markers, `<a:tbl>` tables, chart
+titles/series (`ppt/charts/chart*.xml`) and speaker notes (`ppt/notesSlides/notesSlide*.xml`). For
+PDFs, `extractPdf` inserts spaces at intra-line horizontal gaps (`dx > 0.25 * em`), reads
+`getMetadata()` (`Title`, `Author`) and `page.getAnnotations()` (form widget values and text
+annotations), and notes when a subset of pages had no text layer. Not SheetJS: the `xlsx` on npm
+is frozen at 0.18.5 with a prototype-pollution CVE (fixed only in releases published off-npm), and
+ExcelJS is a heavyweight read-write library for a read-only job. About 4.5 MB of JS in the image,
+no native code.
 
 **The parse runs in a child process, not the `worker_thread` the ticket proposed**, and that is
 the load-bearing decision. `resourceLimits` caps only the V8 heap, and every one of these parsers
@@ -1974,18 +1987,25 @@ capped at 16 MB of heap, and a PDF flate bomb would have grown the *server's* RS
 `extractDocumentText` forks `extract-worker.ts` (one job per process, an empty environment, no
 stdin, output discarded, `--max-old-space-size`), samples the child's RSS every 50 ms
 (`/proc/<pid>/status` on Linux, argv-only `ps` elsewhere) and kills it past
-`EXTRACT_MAX_RSS_MB`, and kills it at `EXTRACT_TIMEOUT_MS` (10 s). Output stops at 200 pages and
-500 000 characters; a zip whose declared sizes exceed 128 MB is refused before anything is
-inflated, and the RSS cap catches one that lies about them. Inside the child `fetch` is replaced
-with a rejection, pdf.js runs with no font faces and no XFA (the bundled pdf.js 5 no longer
-compiles fonts with `eval`, CVE-2024-4367's vector), and the OOXML readers are regular
-expressions over text, never an XML engine that could resolve an entity. Two parses at a time.
-The worker imports nothing from this repo, so it runs as compiled `.js` from `dist/` and as `.ts`
-under Node's own type stripping in dev and tests, with no loader.
+`EXTRACT_MAX_RSS_MB` (768 MB), and bounds wall-clock time at `EXTRACT_TIMEOUT_MS` (60 s). The child
+flushes output in `{ type: 'chunk' }` IPC messages after each page, sheet or slide, and the parent
+streams those chunks straight to disk up to `EXTRACT_MAX_OUTPUT_BYTES` (32 MB across all sidecar
+files of one upload; `MAX_COLUMNS` is 16 384, Excel's own limit, with no arbitrary page or char
+count cap). If a multi-page parse stops on time, output size or RSS after earlier chunks were
+written, the partial sidecars are kept on disk and annotated with `truncated: true`,
+`truncatedReason` (`'time' | 'size' | 'memory'`) and `stoppedAt` (e.g. `"page 812 of 1400"`). A
+zip whose declared sizes exceed 128 MB is refused before anything is inflated, and the RSS cap
+catches one that lies about them. Inside the child `fetch` is replaced with a rejection, pdf.js
+runs with no font faces and no XFA (the bundled pdf.js 5 no longer compiles fonts with `eval`,
+CVE-2024-4367's vector), and the OOXML readers are regular expressions over text, never an XML
+engine that could resolve an entity. Two parses at a time. The worker imports nothing from this
+repo, so it runs as compiled `.js` from `dist/` and as `.ts` under Node's own type stripping in dev
+and tests, with no loader.
 
 **What a Pocket Agent is told is built at context time** (`attachments/inline.ts`), so the
 transcript still holds metadata only. `buildAttachmentNote` gives each file its path line, where
-its text was extracted (or why it could not be), and says `read_file` pages through text and the
+its text and per-sheet CSVs were extracted (including `truncatedReason` and `stoppedAt` when
+truncated, or why extraction could not run), and says `read_file` pages through text and the
 sidecars with no approval. `AttachmentInliner` then puts small content into the message itself: a
 `text` file up to `attachmentInlineTextMaxBytes` (32 KB) or an extract up to
 `attachmentInlineExtractMaxTokens` (8 000 tokens), both planner Settings with those defaults (the
@@ -2015,14 +2035,17 @@ counts a part by its size rather than its base64 length. A 400/415/422 for a req
 (not an overflow, not a quota error) is `isPdfPartRejection`: one notice, then the round trip again
 without parts for the rest of the turn (`pdfPartsRefused`), the cache-marker refusal's exact shape.
 
-**Coding agents get the sidecar, minus claude** (`attachments/session-landing.ts`,
+**Coding agents get the sidecars; `claude` skips only PDF** (`attachments/session-landing.ts`,
 `landSessionAttachments`, one function for the WebSocket and MCP). For codex, opencode, pi and agy
-a document's sidecar lands beside it and the prompt gains an `[Extracted text saved to: …]` line
-under the file's note; `parseAttachedFileNotes` takes that line with its file and makes no chip of
-it. `usesClaudeTranscripts` agents (claude and every custom provider) get none, by the reporter's
-answer: Claude Code's `Read` reads the PDF itself. Nothing is inlined for any coding agent. The
-WebSocket `prompt` case is now async (extraction), so it runs in a per-connection chain that keeps
-a tab's prompts in order.
+every document's sidecars (`.txt` and any per-sheet `.csv` files in `extractedFiles`) land beside
+it and the prompt gains `[Extracted text saved to: …]` lines under the file's note (with
+`truncatedReason`/`stoppedAt` when partial); `parseAttachedFileNotes` absorbs all consecutive
+`[Extracted text saved to: …]` lines with their file and makes no chip of them.
+`usesClaudeTranscripts` agents (claude and every custom provider) pass `skipKinds: ['pdf']`
+(PA-139): Claude Code's `Read` reads PDFs natively, but cannot read binary `.docx`, `.xlsx` or
+`.pptx` without shelling out to Python, so Office uploads now get their `.txt` and `.csv` sidecars
+for `claude` too. Nothing is inlined for any coding agent. The WebSocket `prompt` case is async
+(extraction), so it runs in a per-connection chain that keeps a tab's prompts in order.
 
 Landing takes as long as extraction, which reopens the window PA-136 closed with
 `assertCanAcceptFiles`: the message route re-checks `isBusy` after landing and, if another turn
@@ -2055,21 +2078,22 @@ removed if the session then fails to start. The call is logged with size and typ
 or the bytes, and the catalog still has no approval, argv or `force` field.
 
 **Cleanup** (Phase 4, retention off by default). Cancelling a queued Pocket Agent message deletes
-the files it landed (and their sidecars), as do `/clear` and deleting the chat for messages still
-queued — they will never be sent. `removeLandedAttachments` only ever deletes a regular file
-directly inside `.pocketagent/attachments/` or `artifacts/uploads/`, reached through no symlink.
+the files it landed (and all of their sidecars in `extractedPath` and `extractedFiles`), as do
+`/clear` and deleting the chat for messages still queued — they will never be sent.
+`removeLandedAttachments` only ever deletes a regular file directly inside
+`.pocketagent/attachments/` or `artifacts/uploads/`, reached through no symlink.
 `attachmentRetentionDays` (general Settings, `0` = never, the default by the reporter's answer:
 a file may be the very input a chat still needs) drives `AttachmentRetentionService`, a sweep a
 minute after boot and every six hours. It visits `.pocketagent/attachments/` under every root in
 `attachment_roots` (recorded at landing, because session rows are pruned) and every session cwd,
 plus each Pocket Agent's `artifacts/uploads/`; skips a directory that is not exactly where it
-claims to be; deletes only regular files older than the limit; keeps any file a queued prompt
-still names (matched by its unique landed basename, from `session_prompt_queue` text and
-`planner_prompt_queue.attachments_json`); and logs counts only.
+claims to be; deletes only regular files older than the limit; keeps any file or sidecar a queued
+prompt still names (matched by its unique landed basename, from `session_prompt_queue` text and
+`planner_prompt_queue.attachments_json`, including `extractedFiles`); and logs counts only.
 
-Known limitations: an extract is plain text, so a PDF's layout and an xlsx's formulas are gone
-(the values are there); legacy `.doc`/`.xls` are not read; scanned PDFs have no text; and a sidecar
-is written once, so an agent that edits the original does not update it.
+Known limitations: legacy binary `.doc`/`.xls`/`.ppt` are not read; scanned PDF pages without a
+text layer have no text (and are noted as such); and sidecars are written once at landing, so an
+agent that edits the original does not update them.
 
 ### Hiding and removing
 
@@ -3267,9 +3291,12 @@ These are load-bearing. Several were bugs first.
   visibly rather than sent without it. Asserted in `apps/server/tests/attachments.test.ts` and
   `attachments-route.test.ts`.
 - **An attached document is parsed as hostile input, in a process that can be killed, and what it
-  says reaches a model only as fenced data** (PA-137). Extraction runs in a child process with an
-  empty environment, a timeout, an RSS cap the parent enforces (not `resourceLimits`, which does
-  not bound the typed arrays every decompressor uses — measured), output caps, no network and no
+  says reaches a model only as fenced data** (PA-137, PA-139). Extraction runs in a child process
+  with an empty environment, a 60 s timeout, a 768 MB RSS cap the parent enforces (not
+  `resourceLimits`, which does not bound the typed arrays every decompressor uses — measured), a
+  128 MB unzipped-size bomb check, a 32 MB total output-bytes cap streamed in chunks to
+  exclusive-create files on disk (keeping partial extracts with `truncatedReason` and `stoppedAt`),
+  regex-only OOXML readers, an emit-only HTML-to-Markdown allowlist for docx, no network and no
   `eval`; its failure is a note on the attachment and never fails a prompt or a turn. Inlined
   content goes through the same `sanitizeUntrustedText` and unclosable nonce fence as Jira text,
   is re-read through no symlink and inside the workspace, and is the first thing dropped when a
