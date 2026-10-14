@@ -62,6 +62,9 @@ import type {
   PlannerProviderListResponse,
   CreatePlannerProviderRequest,
   UpdatePlannerProviderRequest,
+  ClaudeOAuthAuthorizeResponse,
+  ClaudeOAuthExchangeRequest,
+  ClaudeProviderUsageResponse,
   PlannerModel,
   PlannerModelListResponse,
   CreatePlannerModelRequest,
@@ -1015,6 +1018,23 @@ export function createApiClient(endpoint: HostEndpoint) {
     discoverPlannerProviderModels: (id: string) =>
       request<DiscoverPlannerModelsResponse>(
         `/api/planner/providers/${encodeURIComponent(id)}/models/discover`,
+      ),
+
+    authorizeClaudePlannerProvider: (id: string) =>
+      request<ClaudeOAuthAuthorizeResponse>(
+        `/api/planner/providers/${encodeURIComponent(id)}/oauth/authorize`,
+        { method: 'POST' },
+      ),
+
+    exchangeClaudePlannerProvider: (id: string, body: ClaudeOAuthExchangeRequest) =>
+      request<PlannerProvider>(
+        `/api/planner/providers/${encodeURIComponent(id)}/oauth/exchange`,
+        { method: 'POST', body: JSON.stringify(body) },
+      ),
+
+    getClaudePlannerProviderUsage: (id: string) =>
+      request<ClaudeProviderUsageResponse>(
+        `/api/planner/providers/${encodeURIComponent(id)}/usage`,
       ),
 
     listPlannerModels: (providerId?: string) =>

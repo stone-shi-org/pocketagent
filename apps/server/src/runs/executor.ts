@@ -440,6 +440,17 @@ export class RunExecutor {
       return fail('This trigger names a Pocket Agent, but Pocket Agents are not available here.');
     }
 
+    const unattendedProblem =
+      planner.checkUnattendedModel?.({
+        workspaceId: spec.plannerWorkspaceId,
+        modelId: spec.model ?? null,
+        chatId: spec.resumeChatId ?? null,
+        noun: 'triggered by a webhook',
+      }) ?? null;
+    if (unattendedProblem !== null) {
+      return fail(unattendedProblem);
+    }
+
     // 1. Resolve the chat. `resumeChatId` is a cache hint, so a stale one
     //    starts a fresh chat rather than failing the run.
     let chat = spec.resumeChatId !== undefined ? planner.get(spec.resumeChatId) : null;

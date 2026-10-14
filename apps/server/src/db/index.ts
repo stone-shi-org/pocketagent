@@ -387,7 +387,7 @@ export const PLANNER_PROVIDERS_DDL = `
   CREATE TABLE IF NOT EXISTS planner_providers (
     id                TEXT PRIMARY KEY,
     label             TEXT NOT NULL,
-    kind              TEXT NOT NULL DEFAULT 'openai-compatible' CHECK (kind IN ('openai-compatible')),
+    kind              TEXT NOT NULL DEFAULT 'openai-compatible' CHECK (kind IN ('openai-compatible', 'claude-oauth', 'codex-oauth', 'gemini-oauth')),
     base_url          TEXT NOT NULL,
     secret_ciphertext TEXT,
     allow_unattended  INTEGER NOT NULL DEFAULT 0,
@@ -1770,6 +1770,45 @@ export function remapLegacyPlannerModelReferences(db: Db): void {
 
 function migratePlannerProvidersSchema(db: Db): void {
   db.exec(PLANNER_PROVIDERS_DDL);
+  const existingProviderTable = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'planner_providers'")
+    .get() as { sql?: string } | undefined;
+  if (existingProviderTable?.sql && !existingProviderTable.sql.includes('claude-oauth')) {
+    db.pragma('foreign_keys = OFF');
+    try {
+      const widenTx = db.transaction(() => {
+        db.exec(`
+          CREATE TABLE planner_providers_new (
+            id                TEXT PRIMARY KEY,
+            label             TEXT NOT NULL,
+            kind              TEXT NOT NULL DEFAULT 'openai-compatible' CHECK (kind IN ('openai-compatible', 'claude-oauth', 'codex-oauth', 'gemini-oauth')),
+            base_url          TEXT NOT NULL,
+            secret_ciphertext TEXT,
+            allow_unattended  INTEGER NOT NULL DEFAULT 0,
+            sort_order        INTEGER NOT NULL DEFAULT 0,
+            created_at        INTEGER NOT NULL,
+            last_tested_at    INTEGER,
+            last_error        TEXT
+          );
+          INSERT INTO planner_providers_new (
+            id, label, kind, base_url, secret_ciphertext, allow_unattended,
+            sort_order, created_at, last_tested_at, last_error
+          )
+          SELECT
+            id, label, kind, base_url, secret_ciphertext, allow_unattended,
+            sort_order, created_at, last_tested_at, last_error
+          FROM planner_providers;
+          DROP TABLE planner_providers;
+          ALTER TABLE planner_providers_new RENAME TO planner_providers;
+          CREATE INDEX IF NOT EXISTS idx_planner_providers_sort
+            ON planner_providers (sort_order, created_at);
+        `);
+      });
+      widenTx();
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
+  }
   const modelCols = new Set(
     (db.prepare('PRAGMA table_info(planner_models)').all() as { name: string }[]).map(
       (c) => c.name,

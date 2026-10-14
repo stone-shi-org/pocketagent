@@ -104,6 +104,11 @@ export function exportPlannerProviderPayload(
   provider: Pick<PlannerProvider, 'id' | 'label' | 'kind' | 'baseUrl' | 'allowUnattended'>,
   models: PlannerModel[],
 ): PlannerProviderTemplatePayload {
+  if (provider.kind !== 'openai-compatible') {
+    throw new Error(
+      `Provider "${provider.label}" is a subscription provider (${provider.kind}) and cannot be exported as a Hub template.`,
+    );
+  }
   if (!provider.baseUrl) {
     throw new Error(`Provider "${provider.label}" has no baseUrl configured.`);
   }
@@ -112,7 +117,7 @@ export function exportPlannerProviderPayload(
   );
   return {
     label: provider.label,
-    kind: provider.kind,
+    kind: 'openai-compatible',
     baseUrl: provider.baseUrl,
     allowUnattended: provider.allowUnattended,
     models: providerModels.map(exportPlannerModelToTemplate),
@@ -170,7 +175,9 @@ export async function listHostExportableItems(
     case 'planner-provider': {
       const res = await client.listPlannerProviders();
       return (res.providers ?? [])
-        .filter((p) => p.baseUrl.trim().length > 0)
+        .filter(
+          (p) => (p.kind ?? 'openai-compatible') === 'openai-compatible' && p.baseUrl.trim().length > 0,
+        )
         .map((p) => ({
           id: p.id,
           label: p.label,

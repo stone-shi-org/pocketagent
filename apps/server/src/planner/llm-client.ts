@@ -78,11 +78,20 @@ export function parseUsage(raw: unknown): PlannerLlmUsage | null {
     : {}) as Record<string, unknown>;
   const read = finiteNonNegative(details.cached_tokens) ?? finiteNonNegative(u.cache_read_input_tokens);
   const write = finiteNonNegative(details.cache_write_tokens) ?? finiteNonNegative(u.cache_creation_input_tokens);
-  let promptTokens = finiteNonNegative(u.prompt_tokens) ?? 0;
-  if ((read ?? 0) + (write ?? 0) > promptTokens) promptTokens += (read ?? 0) + (write ?? 0);
+  const explicitPromptTokens = finiteNonNegative(u.prompt_tokens);
+  const anthropicInputTokens = finiteNonNegative(u.input_tokens);
+  let promptTokens: number;
+  if (explicitPromptTokens !== null) {
+    promptTokens = explicitPromptTokens;
+    if ((read ?? 0) + (write ?? 0) > promptTokens) promptTokens += (read ?? 0) + (write ?? 0);
+  } else if (anthropicInputTokens !== null) {
+    promptTokens = anthropicInputTokens + (read ?? 0) + (write ?? 0);
+  } else {
+    promptTokens = (read ?? 0) + (write ?? 0);
+  }
   return {
     promptTokens,
-    completionTokens: finiteNonNegative(u.completion_tokens) ?? 0,
+    completionTokens: finiteNonNegative(u.completion_tokens) ?? finiteNonNegative(u.output_tokens) ?? 0,
     cacheReadTokens: read,
     cacheWriteTokens: write,
     costUsd: finiteNonNegative(u.cost),
@@ -165,7 +174,7 @@ export class PlannerLlmError extends Error {
  * are decided from the body text first, because a provider will happily
  * report either with a 429 or a 400.
  */
-function httpError(prefix: string, status: number, body: string, headers: Headers): PlannerLlmError {
+export function httpError(prefix: string, status: number, body: string, headers: Headers): PlannerLlmError {
   const message = `${prefix} returned ${status}: ${body.slice(0, 500)}`;
   if (isQuotaMessage(body)) return new PlannerLlmError(message, status, { retryable: false });
   if (isContextOverflowMessage(body)) return new PlannerLlmError(message, status, { contextOverflow: true });
@@ -181,7 +190,7 @@ function httpError(prefix: string, status: number, body: string, headers: Header
  * the frame itself (`status`/`code` when numeric) or from a `[429]` in the
  * message, the shape omniroute relays a provider's failure in.
  */
-function streamError(raw: unknown): PlannerLlmError {
+export function streamError(raw: unknown): PlannerLlmError {
   const obj = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
   const text =
     typeof raw === 'string'
@@ -219,7 +228,7 @@ export const DEFAULT_LLM_RETRY_POLICY: PlannerLlmRetryPolicy = {
 };
 
 /** Resolves after `ms`, or rejects as soon as `signal` aborts. */
-function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new PlannerLlmError('Aborted.'));

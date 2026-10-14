@@ -557,6 +557,14 @@ export class McpWorkService {
         'too_deep',
       );
     }
+    const unattendedProblem = this.opts.plannerChats.checkUnattendedModel({
+      workspaceId: input.workspaceId,
+      modelId: input.modelId ?? null,
+      noun: 'started over MCP',
+    });
+    if (unattendedProblem !== null) {
+      throw new McpWorkError(unattendedProblem, 'agent_not_allowed');
+    }
     try {
       // `skipToolApprovals` is deliberately never passed: it is a server-only
       // field (the fifth override) that only an unattended trigger with its
@@ -596,7 +604,17 @@ export class McpWorkService {
     attachmentIds: readonly string[] = [],
   ): Promise<void> {
     const planner = this.opts.plannerChats;
-    if (!planner.get(chatId)) throw new McpWorkError(`No Pocket Agent chat ${chatId}.`, 'not_found');
+    const chat = planner.get(chatId);
+    if (!chat) throw new McpWorkError(`No Pocket Agent chat ${chatId}.`, 'not_found');
+    const unattendedProblem = planner.checkUnattendedModel({
+      workspaceId: chat.workspaceId,
+      modelId: chat.lastModelId,
+      chatId,
+      noun: 'started over MCP',
+    });
+    if (unattendedProblem !== null) {
+      throw new McpWorkError(unattendedProblem, 'agent_not_allowed');
+    }
     // PA-137: the web chat's order — preconditions, claim, land — so a
     // refused message lands nothing.
     let attachments: PromptAttachment[] = [];

@@ -339,6 +339,7 @@ export function PlannerChatPage({
   // whenever the chat (and so possibly its agent) changes; a failure leaves
   // the default pipeline, which is what every agent had before this existed.
   const chatWorkspaceId = chat?.workspaceId ?? null;
+  const [agentDefaultModelId, setAgentDefaultModelId] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     void Promise.all([api.listPlannerWorkspaces(), api.getGeminiLiveSettings()])
@@ -346,6 +347,7 @@ export function PlannerChatPage({
         if (cancelled) return;
         const agent = workspaces.find((w) => w.id === chatWorkspaceId);
         setLiveProvider(agent?.liveProvider ?? 'pipeline');
+        setAgentDefaultModelId(agent?.defaultModelId ?? null);
         setGeminiAvailable(gemini.available);
       })
       .catch(() => {});
@@ -1000,9 +1002,18 @@ export function PlannerChatPage({
     [api, chatId, attachedDocWorkspaceId],
   );
 
-  // PA-122: warn before sending an image to a model that cannot read it.
+  // PA-122 / PA-149: resolve the active model and its provider so we can warn
+  // about image support and render standing subscription provider disclosures.
+  const effectiveModelRef = chat?.lastModelId ?? agentDefaultModelId;
   const selectedModel =
-    models.find((m) => m.id === chat?.lastModelId || m.modelId === chat?.lastModelId) ?? null;
+    (effectiveModelRef
+      ? models.find((m) => m.id === effectiveModelRef || m.modelId === effectiveModelRef)
+      : undefined) ??
+    models[0] ??
+    null;
+  const selectedProvider = selectedModel?.providerId
+    ? providers.find((p) => p.id === selectedModel.providerId) ?? null
+    : null;
   const imageNote =
     selectedModel && !plannerModelSupportsImages(selectedModel.modelId, selectedModel.supportsImages)
       ? `${selectedModel.label} cannot read images — it will see a note instead. Pick a vision model to have it look.`
@@ -1710,6 +1721,13 @@ export function PlannerChatPage({
           >
             parent chat
           </button>
+        </div>
+      )}
+
+      {selectedProvider?.providerDisclosure && (
+        // PA-149 standing disclosure on every chat using a subscription provider.
+        <div className="warn-callout" role="status" data-testid="provider-disclosure-banner">
+          <strong>{selectedProvider.label}:</strong> {selectedProvider.providerDisclosure}
         </div>
       )}
 

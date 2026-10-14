@@ -1245,8 +1245,40 @@ provider so nothing breaks. `PlannerLlmProvider` (`streamComplete`, `listModels`
 `PlannerLlmClient` as the OpenAI-compatible implementation) and `PlannerChatService.clientFor`
 route chat turns, compaction, memory consolidation, subagents, model discovery, and the model
 `Test` button to each model's own provider. `PATCH /api/planner/settings` remains a one-release
-compatibility shim for the default provider, and `PATCH /api/planner/models/:id` returns the
 updated `PlannerModel` DTO.
+
+**Claude subscription provider (`claude-oauth`, PA-149).** `PlannerProviderKind` widens to
+`'openai-compatible' | 'claude-oauth'`, implemented by `ClaudeOAuthPlannerProvider`
+(`planner/claude-oauth.ts`) and `planner/claude-messages-translator.ts` (ported from OmniRoute,
+MIT). It calls Anthropic's Messages API (`POST /v1/messages?beta=true`) directly with the
+operator's Claude subscription credential rather than spawning the `claude` CLI, and **never
+reads or writes `~/.claude/.credentials.json`** (which the CLI owns and whose refresh rotation
+would sign one side out). Two credential modes live inside `planner_providers.secret_ciphertext`
+(AES-256-GCM via `secret-box`, never returned or logged): (1) a `claude setup-token` (`sk-ant-oat`
+prefix, inference-only, validated with a live `max_tokens: 1` request before saving, no refresh
+token); or (2) a copy-paste PKCE S256 OAuth sign-in (`POST /api/planner/providers/:id/oauth/authorize`
+and `.../oauth/exchange`, client ID `9d1c250a-e61b-44d9-88ed-5944d1962f5e`, scopes
+`user:profile user:inference user:sessions:claude_code`, redirect
+`https://platform.claude.com/oauth/code/callback`) with per-provider serialized refresh token
+rotation (`inFlightRefreshes`) and atomic SQLite persistence (`invalid_grant` surfaces as "sign
+in again"). Requests start minimal — `Authorization: Bearer`, `anthropic-version: 2023-06-01`,
+`anthropic-beta` (`claude-code-20250219`, `oauth-2025-04-20`, `interleaved-thinking-2025-05-14`,
+`fine-grained-tool-streaming-2025-05-14`, `prompt-caching-scope-2026-01-05`, plus
+`effort-2025-11-24` and `pdfs-2024-09-25` when used), `User-Agent: claude-cli/<ver> (external, cli)`
+(resolved once from `claude --version` or `2.1.280`), `x-app: cli`, and the two un-cached
+Claude Code system blocks (`x-anthropic-billing-header: cc_version=<ver>; cc_entrypoint=cli; cch=00000;`
+and `"You are Claude Code, Anthropic's official CLI for Claude."`) ahead of Pocket Agent's
+own system message, with no evasion layer. `buildAnthropicMessagesRequest` and
+`AnthropicMessagesSseParser` translate OpenAI-shaped messages, `tool_calls`/`tool` results
+(enforcing strict `tool_use` → `tool_result` adjacency), base64/URL images, PDF `document`
+blocks, adaptive/budget thinking, and our three `cache_control` breakpoints, while `parseUsage`
+reads native `input_tokens` (additive with `cache_read_input_tokens` + `cache_creation_input_tokens`)
+and `output_tokens`. Every chat using a `claude-oauth` model shows `CLAUDE_OAUTH_PROVIDER_DISCLOSURE`
+(subscription use, ToS/enterprise seat policy risk, 5h/7d windows rather than per-token billing),
+`GET /api/planner/providers/:id/usage` reads `/api/oauth/usage`, `allowUnattended` (off by
+default) gates cron, webhook, and MCP-started chats (`unattendedPlannerModelProblem`), and
+`PlannerProviderTemplatePayload` rejects `claude-oauth` so personal subscriptions are never
+exported as Hub fleet templates.
 
 **Images** (`image-budget.ts`, both sides). The browser downscales an attachment to at most
 2000×2000 and ~4.5 MB of base64 (`apps/web/src/agent/image-budget.ts`) rather than refusing

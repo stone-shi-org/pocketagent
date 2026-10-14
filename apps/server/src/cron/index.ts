@@ -584,6 +584,22 @@ export class CronService {
       return readCronRun(this.db, runId) as CronRunRow;
     }
 
+    const unattendedProblem =
+      plannerChats.checkUnattendedModel?.({
+        workspaceId: ws.id,
+        modelId: job.model ?? null,
+        noun: 'scheduled',
+      }) ?? null;
+    if (unattendedProblem !== null) {
+      updateCronRun(this.db, runId, { status: 'failed', error: unattendedProblem, finished_at: this.now() });
+      updateCronJob(this.db, job.id, {
+        last_run_at: startedAt,
+        last_run_status: 'failed',
+        last_error: unattendedProblem,
+      });
+      return readCronRun(this.db, runId) as CronRunRow;
+    }
+
     const title = formatCronRunTitle(job.name, job.time_zone, startedAt);
     let chat: ReturnType<PlannerChatService['create']>;
     try {

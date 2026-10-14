@@ -6,6 +6,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { openSseStream } from './sse.js';
 import {
   CALL_MCP_TOOL_NAME,
+  ClaudeOAuthExchangeRequest,
   CreatePlannerChatRequest,
   CreatePlannerModelRequest,
   CreatePlannerProviderRequest,
@@ -36,6 +37,8 @@ import {
   UpdatePlannerModelRequest,
   UpdatePlannerSettingsRequest,
   type AgentEvent,
+  type ClaudeOAuthAuthorizeResponse,
+  type ClaudeProviderUsageResponse,
   type DeleteAllPlannerChatsResponse,
   type DiscoverPlannerModelsResponse,
   type GeminiLiveSettingsDto,
@@ -80,6 +83,12 @@ import type { Db } from '../db/index.js';
 import { DocWorkspaceNotFoundError, DocWorkspaceValidationError } from '../doc-workspaces/index.js';
 import { PlannerWorkspaceError } from '../planner/workspaces.js';
 import { PlannerChatError } from '../planner/chats.js';
+import {
+  exchangeClaudeOAuthCode,
+  fetchClaudeOAuthUsage,
+  startClaudeOAuthAuthorization,
+  validateClaudeSetupToken,
+} from '../planner/claude-oauth.js';
 import { GEMINI_LIVE_WS_URL, GeminiLiveError } from '../planner/gemini-live.js';
 import { PlannerLlmClient, PlannerLlmError } from '../planner/llm-client.js';
 import { PLANNER_TOOLS, postJsonToIntegration } from '../planner/tools.js';
@@ -95,11 +104,13 @@ import { SpokenTextPipeline } from '../voice/spoken-text-pipeline.js';
 import { TurnTtsPump } from '../voice/turn-tts-pump.js';
 import type { Config } from '../config/index.js';
 import {
+  DEFAULT_CLAUDE_OAUTH_BASE_URL,
   PlannerProviderStoreError,
   deleteAllPlannerModels,
   deletePlannerModel,
   deletePlannerProvider,
   deletePlannerToolApproval,
+  encryptClaudeOAuthCredentials,
   encryptPlannerProviderSecret,
   ensureDefaultPlannerProvider,
   insertPlannerModel,
@@ -115,6 +126,7 @@ import {
   readPlannerProviders,
   readPlannerSettings,
   readPlannerToolApprovals,
+  requirePlannerProviderEncKey,
   resolvePlannerUrlFetchApiKey,
   resolvePlannerWebSearchApiKey,
   revealPlannerEmbeddingApiKey,
@@ -190,13 +202,12 @@ function mapChatError(reply: FastifyReply, err: unknown): FastifyReply | never {
     return reply.code(status).send({ error: { code: err.code, message: err.message } });
   }
   if (err instanceof PlannerLlmError) {
+    if (err.statusCode === 400) {
+      return reply.code(400).send({ error: { code: 'bad_request', message: err.message } });
+    }
     // 502: the request into this server was fine, the configured upstream
     // failed or is unreachable — not this server's own fault, and not the
-    // caller's either. In practice this branch is now unreachable from the
-    // streaming routes below (`PlannerChatService.driveLoop` catches its own
-    // `PlannerLlmError` and yields an in-band error event instead — see that
-    // method's doc comment for why), but kept for any future caller that
-    // still surfaces the LLM client's own error type as a rejection.
+    // caller's either.
     return reply.code(502).send({ error: { code: 'llm_error', message: err.message } });
   }
   throw err;
@@ -582,22 +593,45 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     if (!parsed.success) {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
-    const { db, config } = app.pocket;
+    const { db, config, plannerChats } = app.pocket;
     try {
-      const trimmedKey = (parsed.data.apiKey ?? '').trim();
-      const secretCiphertext =
-        trimmedKey.length > 0
-          ? encryptPlannerProviderSecret(trimmedKey, config.settingsEncKey)
-          : null;
+      const kind = parsed.data.kind ?? 'openai-compatible';
+      const baseUrl =
+        (parsed.data.baseUrl ?? '').trim() ||
+        (kind === 'claude-oauth' ? DEFAULT_CLAUDE_OAUTH_BASE_URL : '');
+      let secretCiphertext: string | null = null;
+      let lastTestedAt: number | null = null;
+
+      if (kind === 'claude-oauth') {
+        const trimmedSetup = (parsed.data.setupToken ?? parsed.data.apiKey ?? '').trim();
+        if (trimmedSetup.length > 0) {
+          requirePlannerProviderEncKey(config.settingsEncKey);
+          const creds = await validateClaudeSetupToken({
+            setupToken: trimmedSetup,
+            baseUrl,
+            ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
+          });
+          secretCiphertext = encryptClaudeOAuthCredentials(creds, config.settingsEncKey);
+          lastTestedAt = Date.now();
+        }
+      } else {
+        const trimmedKey = (parsed.data.apiKey ?? '').trim();
+        secretCiphertext =
+          trimmedKey.length > 0
+            ? encryptPlannerProviderSecret(trimmedKey, config.settingsEncKey)
+            : null;
+      }
+
       const row = insertPlannerProvider(db, {
         id: crypto.randomUUID(),
         label: parsed.data.label.trim(),
-        kind: parsed.data.kind ?? 'openai-compatible',
-        baseUrl: parsed.data.baseUrl.trim(),
+        kind,
+        baseUrl,
         secretCiphertext,
         allowUnattended: parsed.data.allowUnattended ?? false,
         sortOrder: nextPlannerProviderSortOrder(db),
         createdAt: Date.now(),
+        lastTestedAt,
       });
       auditConfigChange(request, 'planner provider created', {
         provider: row.id,
@@ -619,23 +653,44 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     if (!parsed.success) {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
-    const { db, config } = app.pocket;
+    const { db, config, plannerChats } = app.pocket;
     const existing = readPlannerProvider(db, id);
     if (!existing) return notFound(reply, 'Provider not found.');
     try {
-      const trimmedKey = (parsed.data.apiKey ?? '').trim();
-      // `apiKey` omitted or blank keeps the stored key (like custom Claude
-      // providers); `clearApiKey: true` clears it explicitly.
-      const secretPatch =
-        parsed.data.clearApiKey === true
-          ? { secretCiphertext: null as string | null }
-          : trimmedKey.length > 0
-            ? { secretCiphertext: encryptPlannerProviderSecret(trimmedKey, config.settingsEncKey) }
-            : {};
+      let secretPatch: { secretCiphertext?: string | null; lastTestedAt?: number | null } = {};
+      let hasNewSecret = false;
+
+      if (parsed.data.clearApiKey === true) {
+        secretPatch = { secretCiphertext: null };
+      } else if (existing.kind === 'claude-oauth') {
+        const trimmedSetup = (parsed.data.setupToken ?? parsed.data.apiKey ?? '').trim();
+        if (trimmedSetup.length > 0) {
+          requirePlannerProviderEncKey(config.settingsEncKey);
+          const effectiveBaseUrl =
+            parsed.data.baseUrl?.trim() || existing.baseUrl || DEFAULT_CLAUDE_OAUTH_BASE_URL;
+          const creds = await validateClaudeSetupToken({
+            setupToken: trimmedSetup,
+            baseUrl: effectiveBaseUrl,
+            ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
+          });
+          secretPatch = {
+            secretCiphertext: encryptClaudeOAuthCredentials(creds, config.settingsEncKey),
+            lastTestedAt: Date.now(),
+          };
+          hasNewSecret = true;
+        }
+      } else {
+        const trimmedKey = (parsed.data.apiKey ?? '').trim();
+        if (trimmedKey.length > 0) {
+          secretPatch = {
+            secretCiphertext: encryptPlannerProviderSecret(trimmedKey, config.settingsEncKey),
+          };
+          hasNewSecret = true;
+        }
+      }
+
       const resetError =
-        parsed.data.baseUrl !== undefined ||
-        parsed.data.clearApiKey === true ||
-        trimmedKey.length > 0
+        parsed.data.baseUrl !== undefined || parsed.data.clearApiKey === true || hasNewSecret
           ? { lastError: null as string | null }
           : {};
       const updated = updatePlannerProvider(db, id, {
@@ -660,6 +715,78 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     } catch (err) {
       return mapChatError(reply, err);
     }
+  });
+
+  app.post('/api/planner/providers/:id/oauth/authorize', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { db, config } = app.pocket;
+    const provider = readPlannerProvider(db, id);
+    if (!provider) return notFound(reply, 'Provider not found.');
+    if (provider.kind !== 'claude-oauth') {
+      return badRequest(reply, 'OAuth sign-in is only supported for claude-oauth providers.');
+    }
+    try {
+      requirePlannerProviderEncKey(config.settingsEncKey);
+      const response: ClaudeOAuthAuthorizeResponse = startClaudeOAuthAuthorization(id);
+      return noStore(reply).send(response);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  app.post('/api/planner/providers/:id/oauth/exchange', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = ClaudeOAuthExchangeRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    const { db, config, plannerChats } = app.pocket;
+    const provider = readPlannerProvider(db, id);
+    if (!provider) return notFound(reply, 'Provider not found.');
+    if (provider.kind !== 'claude-oauth') {
+      return badRequest(reply, 'OAuth code exchange is only supported for claude-oauth providers.');
+    }
+    try {
+      requirePlannerProviderEncKey(config.settingsEncKey);
+      const creds = await exchangeClaudeOAuthCode({
+        providerId: id,
+        rawCode: parsed.data.code,
+        explicitState: parsed.data.state,
+        baseUrl: provider.baseUrl || DEFAULT_CLAUDE_OAUTH_BASE_URL,
+        ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
+      });
+      const updated = updatePlannerProvider(db, id, {
+        secretCiphertext: encryptClaudeOAuthCredentials(creds, config.settingsEncKey),
+        lastTestedAt: Date.now(),
+        lastError: null,
+      });
+      if (!updated) return notFound(reply, 'Provider not found.');
+      auditConfigChange(request, 'planner provider oauth connected', {
+        provider: id,
+        authMode: 'oauth',
+      });
+      const dto: PlannerProvider = toPlannerProviderDto(updated, config.settingsEncKey);
+      return noStore(reply).send(dto);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  app.get('/api/planner/providers/:id/usage', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { db, config, plannerChats } = app.pocket;
+    const provider = readPlannerProvider(db, id);
+    if (!provider) return notFound(reply, 'Provider not found.');
+    if (provider.kind !== 'claude-oauth') {
+      return badRequest(reply, 'Subscription usage is only supported for claude-oauth providers.');
+    }
+    const response: ClaudeProviderUsageResponse = await fetchClaudeOAuthUsage({
+      db,
+      providerId: id,
+      encKey: config.settingsEncKey,
+      ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
+    });
+    return noStore(reply).send(response);
   });
 
   app.delete('/api/planner/providers/:id', async (request, reply) => {

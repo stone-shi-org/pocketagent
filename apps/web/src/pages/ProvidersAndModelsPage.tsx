@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import type {
-  PlannerModel,
-  PlannerProvider,
-  PlannerProviderTemplatePayload,
-  PlannerSettingsDto,
-  SettingsResponse,
-  TestPlannerEmbeddingResponse,
-  TestPlannerModelResponse,
-  UpdatePlannerModelRequest,
-  UpdateSettingsRequest,
+import {
+  CLAUDE_OAUTH_PROVIDER_DISCLOSURE,
+  type ClaudeOAuthAuthorizeResponse,
+  type ClaudeProviderUsageResponse,
+  type PlannerModel,
+  type PlannerProvider,
+  type PlannerProviderKind,
+  type PlannerProviderTemplatePayload,
+  type PlannerSettingsDto,
+  type SettingsResponse,
+  type TestPlannerEmbeddingResponse,
+  type TestPlannerModelResponse,
+  type UpdatePlannerModelRequest,
+  type UpdateSettingsRequest,
 } from '@pocketagent/protocol';
-import { ApiError } from '../api/client.js';
+import { ApiError, type ApiClient } from '../api/client.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { GeminiLiveSettingsSection } from '../components/GeminiLiveSettingsSection.js';
 import { Icon } from '../components/Icon.js';
@@ -50,9 +54,11 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
 
   // Add new provider state
   const [addingProvider, setAddingProvider] = useState(false);
+  const [newProviderKind, setNewProviderKind] = useState<PlannerProviderKind>('openai-compatible');
   const [newProviderLabel, setNewProviderLabel] = useState('');
   const [newProviderBaseUrl, setNewProviderBaseUrl] = useState('');
   const [newProviderApiKey, setNewProviderApiKey] = useState('');
+  const [newProviderSetupToken, setNewProviderSetupToken] = useState('');
   const [confirmingDeleteProvider, setConfirmingDeleteProvider] = useState<PlannerProvider | null>(null);
   const [confirmingDeleteAllForProvider, setConfirmingDeleteAllForProvider] = useState<PlannerProvider | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestPlannerModelResponse | 'testing'>>({});
@@ -253,20 +259,36 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
     const label = newProviderLabel.trim();
     const baseUrl = newProviderBaseUrl.trim();
     const apiKey = newProviderApiKey.trim();
-    if (!label || !baseUrl) {
-      setError('Provider label and base URL are required.');
+    const setupToken = newProviderSetupToken.trim();
+    if (!label) {
+      setError('Provider label is required.');
+      return;
+    }
+    if (newProviderKind === 'openai-compatible' && !baseUrl) {
+      setError('Base URL is required for OpenAI-compatible providers.');
       return;
     }
     void withBusy(async () => {
-      await api.createPlannerProvider({
-        label,
-        kind: 'openai-compatible',
-        baseUrl,
-        ...(apiKey.length > 0 ? { apiKey } : {}),
-      });
+      if (newProviderKind === 'claude-oauth') {
+        await api.createPlannerProvider({
+          label,
+          kind: 'claude-oauth',
+          ...(baseUrl.length > 0 ? { baseUrl } : {}),
+          ...(setupToken.length > 0 ? { setupToken } : {}),
+        });
+      } else {
+        await api.createPlannerProvider({
+          label,
+          kind: 'openai-compatible',
+          baseUrl,
+          ...(apiKey.length > 0 ? { apiKey } : {}),
+        });
+      }
       setNewProviderLabel('');
       setNewProviderBaseUrl('');
       setNewProviderApiKey('');
+      setNewProviderSetupToken('');
+      setNewProviderKind('openai-compatible');
       setAddingProvider(false);
     });
   };
@@ -460,7 +482,9 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
 
   const runtimeBusy = (key: string): boolean => pendingRuntime.has(key);
   const runtimeSettings = runtimeData?.settings;
-  const exportableProvider = (providers ?? []).find((p) => p.baseUrl.trim().length > 0) ?? providers?.[0];
+  const exportableProvider = (providers ?? []).find(
+    (p) => p.kind === 'openai-compatible' && p.baseUrl.trim().length > 0,
+  );
 
   return (
     <div className="planner-page">
@@ -529,51 +553,107 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
             </div>
             <p className="planner-row-meta" style={{ marginBottom: 10 }}>
               Configure one or more OpenAI-compatible LLM providers (for example a local vLLM and
-              OpenRouter side by side). Each provider has its own encrypted API key and model catalog.
+              OpenRouter side by side) or a Claude subscription provider (setup-token / OAuth). Each
+              provider has its own encrypted credential and model catalog.
             </p>
 
             {(addingProvider || (providers !== null && providers.length === 0)) && (
               <div className="planner-provider-add-form" style={{ marginBottom: 16 }}>
                 <h4>New provider</h4>
                 <div className="planner-field">
+                  <label htmlFor="new-provider-kind">Kind</label>
+                  <select
+                    id="new-provider-kind"
+                    value={newProviderKind}
+                    disabled={busy}
+                    onChange={(e) => {
+                      const nextKind = e.target.value as PlannerProviderKind;
+                      setNewProviderKind(nextKind);
+                      if (nextKind === 'claude-oauth' && !newProviderLabel.trim()) {
+                        setNewProviderLabel('Claude Subscription');
+                      }
+                    }}
+                  >
+                    <option value="openai-compatible">OpenAI-compatible endpoint</option>
+                    <option value="claude-oauth">Claude subscription (setup-token / OAuth)</option>
+                  </select>
+                </div>
+                <div className="planner-field" style={{ marginTop: 8 }}>
                   <label htmlFor="new-provider-label">Label</label>
                   <input
                     id="new-provider-label"
                     type="text"
-                    placeholder="e.g. OpenRouter, Local vLLM"
+                    placeholder={
+                      newProviderKind === 'claude-oauth'
+                        ? 'e.g. Claude Subscription'
+                        : 'e.g. OpenRouter, Local vLLM'
+                    }
                     value={newProviderLabel}
                     disabled={busy}
                     onChange={(e) => setNewProviderLabel(e.target.value)}
                   />
                 </div>
-                <div className="planner-field" style={{ marginTop: 8 }}>
-                  <label htmlFor="new-provider-base-url">Base URL (OpenAI-compatible)</label>
-                  <input
-                    id="new-provider-base-url"
-                    type="text"
-                    placeholder="https://openrouter.ai/api/v1"
-                    value={newProviderBaseUrl}
-                    disabled={busy}
-                    onChange={(e) => setNewProviderBaseUrl(e.target.value)}
-                  />
-                </div>
-                <div className="planner-field" style={{ marginTop: 8 }}>
-                  <label htmlFor="new-provider-api-key">API key (optional, write-only)</label>
-                  <input
-                    id="new-provider-api-key"
-                    type="password"
-                    autoComplete="off"
-                    placeholder="sk-…"
-                    value={newProviderApiKey}
-                    disabled={busy}
-                    onChange={(e) => setNewProviderApiKey(e.target.value)}
-                  />
-                </div>
+                {newProviderKind === 'claude-oauth' ? (
+                  <>
+                    <div className="warn-callout" role="note" style={{ marginTop: 8 }}>
+                      {CLAUDE_OAUTH_PROVIDER_DISCLOSURE}
+                    </div>
+                    <div className="planner-field" style={{ marginTop: 8 }}>
+                      <label htmlFor="new-provider-setup-token">
+                        Setup token from <code>claude setup-token</code> (recommended, optional on create)
+                      </label>
+                      <input
+                        id="new-provider-setup-token"
+                        type="password"
+                        autoComplete="off"
+                        placeholder="sk-ant-oat… (validated live before saving, or leave blank to use OAuth after creating)"
+                        value={newProviderSetupToken}
+                        disabled={busy}
+                        onChange={(e) => setNewProviderSetupToken(e.target.value)}
+                      />
+                      <span className="planner-row-meta">
+                        Run <code>claude setup-token</code> in a terminal to mint an inference-only token
+                        (~1 year, no refresh token, no conflict with the <code>claude</code> CLI&apos;s own
+                        login). Or leave blank and sign in via OAuth after creating the provider.
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="planner-field" style={{ marginTop: 8 }}>
+                      <label htmlFor="new-provider-base-url">Base URL (OpenAI-compatible)</label>
+                      <input
+                        id="new-provider-base-url"
+                        type="text"
+                        placeholder="https://openrouter.ai/api/v1"
+                        value={newProviderBaseUrl}
+                        disabled={busy}
+                        onChange={(e) => setNewProviderBaseUrl(e.target.value)}
+                      />
+                    </div>
+                    <div className="planner-field" style={{ marginTop: 8 }}>
+                      <label htmlFor="new-provider-api-key">API key (optional, write-only)</label>
+                      <input
+                        id="new-provider-api-key"
+                        type="password"
+                        autoComplete="off"
+                        placeholder="sk-…"
+                        value={newProviderApiKey}
+                        disabled={busy}
+                        onChange={(e) => setNewProviderApiKey(e.target.value)}
+                      />
+                    </div>
+                  </>
+                )}
                 <div className="planner-inline" style={{ marginTop: 10 }}>
                   <button
                     type="button"
                     className="planner-btn"
-                    disabled={busy || !newProviderLabel.trim() || !newProviderBaseUrl.trim()}
+                    disabled={
+                      busy ||
+                      !newProviderLabel.trim() ||
+                      (newProviderKind === 'openai-compatible' && !newProviderBaseUrl.trim())
+                    }
                     onClick={createProvider}
                   >
                     Create provider
@@ -590,6 +670,7 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
             return (
               <PlannerProviderSection
                 key={provider.id}
+                api={api}
                 provider={provider}
                 models={providerModels}
                 busy={busy}
@@ -598,6 +679,7 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                 onSaveProvider={(patch) =>
                   withBusy(() => api.updatePlannerProvider(provider.id, patch))
                 }
+                onReload={load}
                 onDeleteProvider={() => setConfirmingDeleteProvider(provider)}
                 onExportProvider={() => handleExportProvider(provider)}
                 onDiscoverModels={() => api.discoverPlannerProviderModels(provider.id)}
@@ -864,6 +946,7 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
 }
 
 interface PlannerProviderSectionProps {
+  api: ApiClient;
   provider: PlannerProvider;
   models: PlannerModel[];
   busy: boolean;
@@ -873,8 +956,11 @@ interface PlannerProviderSectionProps {
     label?: string;
     baseUrl?: string;
     apiKey?: string;
+    setupToken?: string;
     clearApiKey?: boolean;
+    allowUnattended?: boolean;
   }) => void;
+  onReload: () => Promise<void>;
   onDeleteProvider: () => void;
   onExportProvider: () => void;
   onDiscoverModels: () => Promise<{ modelIds: string[] }>;
@@ -890,12 +976,14 @@ interface PlannerProviderSectionProps {
 }
 
 function PlannerProviderSection({
+  api,
   provider,
   models,
   busy,
   testingAll,
   testResults,
   onSaveProvider,
+  onReload,
   onDeleteProvider,
   onExportProvider,
   onDiscoverModels,
@@ -909,9 +997,16 @@ function PlannerProviderSection({
   onApiError,
   onError,
 }: PlannerProviderSectionProps): JSX.Element {
+  const isClaudeOAuth = provider.kind === 'claude-oauth';
   const [labelInput, setLabelInput] = useState(provider.label);
   const [baseUrlInput, setBaseUrlInput] = useState(provider.baseUrl);
   const [apiKeyInput, setApiKeyInput] = useState('');
+  const [setupTokenInput, setSetupTokenInput] = useState('');
+  const [oauthAuthorize, setOauthAuthorize] = useState<ClaudeOAuthAuthorizeResponse | null>(null);
+  const [oauthCodeInput, setOauthCodeInput] = useState('');
+  const [oauthBusy, setOauthBusy] = useState(false);
+  const [usage, setUsage] = useState<ClaudeProviderUsageResponse | null>(null);
+  const [loadingUsage, setLoadingUsage] = useState(false);
   const [newModelId, setNewModelId] = useState('');
   const [newModelLabel, setNewModelLabel] = useState('');
   const [newModelSupportsEffort, setNewModelSupportsEffort] = useState(true);
@@ -930,21 +1025,85 @@ function PlannerProviderSection({
     const trimmedLabel = labelInput.trim();
     const trimmedBaseUrl = baseUrlInput.trim();
     const trimmedKey = apiKeyInput.trim();
-    if (!trimmedLabel || !trimmedBaseUrl) {
-      onError('Provider label and base URL are required.');
+    const trimmedSetupToken = setupTokenInput.trim();
+    if (!trimmedLabel || (!isClaudeOAuth && !trimmedBaseUrl)) {
+      onError(isClaudeOAuth ? 'Provider label is required.' : 'Provider label and base URL are required.');
       return;
     }
     onSaveProvider({
       label: trimmedLabel,
-      baseUrl: trimmedBaseUrl,
-      ...(trimmedKey.length > 0 ? { apiKey: trimmedKey } : {}),
+      ...(trimmedBaseUrl.length > 0 ? { baseUrl: trimmedBaseUrl } : {}),
+      ...(!isClaudeOAuth && trimmedKey.length > 0 ? { apiKey: trimmedKey } : {}),
+      ...(isClaudeOAuth && trimmedSetupToken.length > 0 ? { setupToken: trimmedSetupToken } : {}),
     });
     setApiKeyInput('');
+    setSetupTokenInput('');
   };
 
   const clearApiKey = (): void => {
     onSaveProvider({ clearApiKey: true });
     setApiKeyInput('');
+    setSetupTokenInput('');
+    setUsage(null);
+  };
+
+  const toggleAllowUnattended = (next: boolean): void => {
+    onSaveProvider({ allowUnattended: next });
+  };
+
+  const startOAuth = (): void => {
+    setOauthBusy(true);
+    onError(null);
+    void (async () => {
+      try {
+        const res = await api.authorizeClaudePlannerProvider(provider.id);
+        setOauthAuthorize(res);
+        setOauthCodeInput('');
+        window.open(res.authorizeUrl, '_blank', 'noopener,noreferrer');
+      } catch (err) {
+        onApiError(err);
+        onError(err instanceof ApiError ? err.message : 'Could not start Claude OAuth sign-in.');
+      } finally {
+        setOauthBusy(false);
+      }
+    })();
+  };
+
+  const completeOAuth = (): void => {
+    if (!oauthAuthorize || !oauthCodeInput.trim()) return;
+    setOauthBusy(true);
+    onError(null);
+    void (async () => {
+      try {
+        await api.exchangeClaudePlannerProvider(provider.id, {
+          state: oauthAuthorize.state,
+          code: oauthCodeInput.trim(),
+        });
+        setOauthAuthorize(null);
+        setOauthCodeInput('');
+        await onReload();
+      } catch (err) {
+        onApiError(err);
+        onError(err instanceof ApiError ? err.message : 'Could not complete Claude OAuth sign-in.');
+      } finally {
+        setOauthBusy(false);
+      }
+    })();
+  };
+
+  const loadUsage = (): void => {
+    setLoadingUsage(true);
+    void (async () => {
+      try {
+        const res = await api.getClaudePlannerProviderUsage(provider.id);
+        setUsage(res);
+      } catch (err) {
+        onApiError(err);
+        onError(err instanceof ApiError ? err.message : 'Could not read Claude usage.');
+      } finally {
+        setLoadingUsage(false);
+      }
+    })();
   };
 
   const addModel = (): void => {
@@ -1007,16 +1166,18 @@ function PlannerProviderSection({
           </span>
         </h3>
         <div className="planner-section-actions">
-          <button
-            type="button"
-            className="planner-btn icon-only"
-            disabled={busy || !provider.baseUrl}
-            onClick={onExportProvider}
-            title={`Export "${provider.label}" provider and models to JSON`}
-            aria-label={`Export "${provider.label}" provider and models to JSON`}
-          >
-            <Icon name="download" size={14} />
-          </button>
+          {!isClaudeOAuth && (
+            <button
+              type="button"
+              className="planner-btn icon-only"
+              disabled={busy || !provider.baseUrl}
+              onClick={onExportProvider}
+              title={`Export "${provider.label}" provider and models to JSON`}
+              aria-label={`Export "${provider.label}" provider and models to JSON`}
+            >
+              <Icon name="download" size={14} />
+            </button>
+          )}
           <button
             type="button"
             className="planner-btn danger"
@@ -1029,10 +1190,16 @@ function PlannerProviderSection({
         </div>
       </div>
 
+      {provider.providerDisclosure && (
+        <div className="warn-callout" role="note" style={{ marginBottom: 10 }}>
+          {provider.providerDisclosure}
+        </div>
+      )}
+
       {provider.keyUnreadable && (
         <div className="error-box" role="alert" style={{ marginBottom: 10 }}>
-          The stored API key for this provider cannot be decrypted with the current{' '}
-          <code>POCKETAGENT_SETTINGS_ENC_KEY</code>. Enter a new key below and save to replace it.
+          The stored credential for this provider cannot be decrypted with the current{' '}
+          <code>POCKETAGENT_SETTINGS_ENC_KEY</code>. Enter a new credential below and save to replace it.
         </div>
       )}
       {provider.lastError && (
@@ -1053,49 +1220,200 @@ function PlannerProviderSection({
         />
       </div>
 
-      <div className="planner-field" style={{ marginTop: 8 }}>
-        <label htmlFor={`provider-base-url-${provider.id}`}>Base URL (OpenAI-compatible)</label>
-        <input
-          id={`provider-base-url-${provider.id}`}
-          type="text"
-          placeholder="https://api.openai.com/v1"
-          value={baseUrlInput}
-          disabled={busy}
-          onChange={(e) => setBaseUrlInput(e.target.value)}
-        />
-      </div>
+      {isClaudeOAuth ? (
+        <>
+          <div className="planner-field" style={{ marginTop: 8 }}>
+            <label htmlFor={`provider-setup-token-${provider.id}`}>
+              Setup token from <code>claude setup-token</code> (recommended, write-only)
+            </label>
+            <input
+              id={`provider-setup-token-${provider.id}`}
+              type="password"
+              autoComplete="off"
+              placeholder={
+                provider.hasApiKey
+                  ? '••••••••  (leave blank to keep current credential)'
+                  : 'sk-ant-oat…'
+              }
+              value={setupTokenInput}
+              disabled={busy}
+              onChange={(e) => setSetupTokenInput(e.target.value)}
+            />
+            <span className="planner-row-meta">
+              Paste a token from <code>claude setup-token</code> (prefix <code>sk-ant-oat</code>, ~1 year,
+              inference-only, no refresh token — never conflicts with the <code>claude</code> CLI&apos;s own
+              login). Validated with one live request before saving.
+            </span>
+          </div>
 
-      <div className="planner-field" style={{ marginTop: 8 }}>
-        <label htmlFor={`provider-api-key-${provider.id}`}>API key (write-only)</label>
-        <input
-          id={`provider-api-key-${provider.id}`}
-          type="password"
-          autoComplete="off"
-          placeholder={provider.hasApiKey ? '••••••••  (leave blank to keep)' : 'sk-…'}
-          value={apiKeyInput}
-          disabled={busy}
-          onChange={(e) => setApiKeyInput(e.target.value)}
-        />
-      </div>
+          <div className="planner-inline" style={{ marginTop: 8, flexWrap: 'wrap', gap: 8 }}>
+            <button type="button" className="planner-btn" disabled={busy} onClick={saveProvider}>
+              {setupTokenInput.trim() ? 'Verify & save setup token' : 'Save provider'}
+            </button>
+            <button
+              type="button"
+              className="planner-btn"
+              disabled={busy || oauthBusy}
+              onClick={startOAuth}
+            >
+              {oauthBusy && !oauthAuthorize ? 'Starting OAuth…' : 'Sign in with OAuth (copy-paste)'}
+            </button>
+            {provider.hasApiKey && (
+              <>
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={busy || loadingUsage}
+                  onClick={loadUsage}
+                >
+                  {loadingUsage ? 'Checking usage…' : 'Check 5h / 7d usage'}
+                </button>
+                <button type="button" className="planner-btn danger" disabled={busy} onClick={clearApiKey}>
+                  Sign out
+                </button>
+              </>
+            )}
+            <span className="planner-row-meta">
+              {provider.keyUnreadable
+                ? 'Credential unreadable'
+                : provider.authMode === 'setup-token'
+                  ? 'Signed in via setup-token'
+                  : provider.authMode === 'oauth'
+                    ? `Signed in via OAuth${provider.accountEmail ? ` · ${provider.accountEmail}` : ''}${
+                        provider.organizationName ? ` (${provider.organizationName})` : ''
+                      }${provider.rateLimitTier ? ` · ${provider.rateLimitTier}` : ''}`
+                    : provider.hasApiKey
+                      ? 'Credential configured'
+                      : 'Not signed in'}
+            </span>
+          </div>
 
-      <div className="planner-inline" style={{ marginTop: 8 }}>
-        <button type="button" className="planner-btn" disabled={busy} onClick={saveProvider}>
-          Save provider
-        </button>
-        {provider.hasApiKey && (
-          <button type="button" className="planner-btn" disabled={busy} onClick={clearApiKey}>
-            Clear key
-          </button>
-        )}
-        <span className="planner-row-meta">
-          {provider.baseUrl ? 'Endpoint configured' : 'Endpoint not configured'} ·{' '}
-          {provider.keyUnreadable
-            ? 'Key unreadable'
-            : provider.hasApiKey
-              ? 'API key set'
-              : 'No API key'}
-        </span>
-      </div>
+          {oauthAuthorize && (
+            <div className="planner-provider-add-form" style={{ marginTop: 10 }}>
+              <p className="planner-row-meta" style={{ marginBottom: 6 }}>
+                1. Authorize in the browser tab that opened (or{' '}
+                <a href={oauthAuthorize.authorizeUrl} target="_blank" rel="noreferrer">
+                  open authorization link
+                </a>
+                ).
+                <br />
+                2. Copy the <code>code#state</code> shown on the callback page and paste it below:
+              </p>
+              <div className="planner-inline" style={{ gap: 8 }}>
+                <input
+                  type="text"
+                  placeholder="Paste code#state from callback page"
+                  value={oauthCodeInput}
+                  disabled={oauthBusy}
+                  onChange={(e) => setOauthCodeInput(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={oauthBusy || !oauthCodeInput.trim()}
+                  onClick={completeOAuth}
+                >
+                  {oauthBusy ? 'Exchanging…' : 'Complete sign-in'}
+                </button>
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={oauthBusy}
+                  onClick={() => {
+                    setOauthAuthorize(null);
+                    setOauthCodeInput('');
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {usage && (
+            <div className="planner-row-meta" style={{ marginTop: 8 }}>
+              {usage.available && usage.windows.length > 0 ? (
+                <span>
+                  {usage.windows.map((w, idx) => (
+                    <span key={w.label}>
+                      {idx > 0 ? ' · ' : ''}
+                      {w.label}: {Math.round(w.percentUsed)}% used
+                      {w.resetsAt
+                        ? ` (resets ${new Date(w.resetsAt).toLocaleString()})`
+                        : ''}
+                    </span>
+                  ))}
+                </span>
+              ) : (
+                <span>
+                  Usage windows unavailable:{' '}
+                  {usage.error ?? 'Not supported for this token.'}
+                </span>
+              )}
+            </div>
+          )}
+
+          <div style={{ marginTop: 10 }}>
+            <label className="planner-inline-checkbox">
+              <input
+                type="checkbox"
+                checked={provider.allowUnattended}
+                disabled={busy}
+                onChange={(e) => toggleAllowUnattended(e.target.checked)}
+              />
+              <span>
+                Allow unattended runs (scheduled jobs, inbound webhooks, and MCP-started chats)
+              </span>
+            </label>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="planner-field" style={{ marginTop: 8 }}>
+            <label htmlFor={`provider-base-url-${provider.id}`}>Base URL (OpenAI-compatible)</label>
+            <input
+              id={`provider-base-url-${provider.id}`}
+              type="text"
+              placeholder="https://api.openai.com/v1"
+              value={baseUrlInput}
+              disabled={busy}
+              onChange={(e) => setBaseUrlInput(e.target.value)}
+            />
+          </div>
+
+          <div className="planner-field" style={{ marginTop: 8 }}>
+            <label htmlFor={`provider-api-key-${provider.id}`}>API key (write-only)</label>
+            <input
+              id={`provider-api-key-${provider.id}`}
+              type="password"
+              autoComplete="off"
+              placeholder={provider.hasApiKey ? '••••••••  (leave blank to keep)' : 'sk-…'}
+              value={apiKeyInput}
+              disabled={busy}
+              onChange={(e) => setApiKeyInput(e.target.value)}
+            />
+          </div>
+
+          <div className="planner-inline" style={{ marginTop: 8 }}>
+            <button type="button" className="planner-btn" disabled={busy} onClick={saveProvider}>
+              Save provider
+            </button>
+            {provider.hasApiKey && (
+              <button type="button" className="planner-btn" disabled={busy} onClick={clearApiKey}>
+                Clear key
+              </button>
+            )}
+            <span className="planner-row-meta">
+              {provider.baseUrl ? 'Endpoint configured' : 'Endpoint not configured'} ·{' '}
+              {provider.keyUnreadable
+                ? 'Key unreadable'
+                : provider.hasApiKey
+                  ? 'API key set'
+                  : 'No API key'}
+            </span>
+          </div>
+        </>
+      )}
 
       <div style={{ marginTop: 16, borderTop: '1px solid var(--border, #2a2f3a)', paddingTop: 12 }}>
         <div className="planner-section-header">
@@ -1104,9 +1422,17 @@ function PlannerProviderSection({
             <button
               type="button"
               className="planner-btn"
-              disabled={discovering || !provider.baseUrl}
+              disabled={discovering || (isClaudeOAuth ? !provider.hasApiKey : !provider.baseUrl)}
               onClick={discoverModels}
-              title={provider.baseUrl ? undefined : 'Save a base URL on this provider first.'}
+              title={
+                isClaudeOAuth
+                  ? provider.hasApiKey
+                    ? undefined
+                    : 'Sign in with a setup token or OAuth first.'
+                  : provider.baseUrl
+                    ? undefined
+                    : 'Save a base URL on this provider first.'
+              }
             >
               {discovering ? 'Querying…' : 'Query models'}
             </button>

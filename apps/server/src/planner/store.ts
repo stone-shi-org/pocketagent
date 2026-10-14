@@ -6,9 +6,11 @@ import type {
   PlannerMemory,
   PlannerMemoryTier,
   PlannerProvider,
+  PlannerProviderAuthMode,
   PlannerProviderKind,
 } from '@pocketagent/protocol';
 import {
+  CLAUDE_OAUTH_PROVIDER_DISCLOSURE,
   DEFAULT_INLINE_EXTRACT_MAX_TOKENS,
   DEFAULT_INLINE_TEXT_MAX_BYTES,
   MAX_INLINE_EXTRACT_MAX_TOKENS,
@@ -302,6 +304,17 @@ export function setMcpRegistryEnabledForWorkspace(
 
 export const DEFAULT_PLANNER_PROVIDER_ID = 'default';
 export const DEFAULT_PLANNER_PROVIDER_LABEL = 'Default';
+export const DEFAULT_CLAUDE_OAUTH_BASE_URL = 'https://api.anthropic.com';
+
+export interface ClaudeOAuthStoredCredentials {
+  mode: PlannerProviderAuthMode;
+  accessToken: string;
+  refreshToken?: string | null;
+  expiresAt?: number | null;
+  accountEmail?: string | null;
+  organizationName?: string | null;
+  rateLimitTier?: string | null;
+}
 
 export class PlannerProviderStoreError extends Error {
   override readonly name = 'PlannerProviderStoreError';
@@ -340,7 +353,8 @@ interface PlannerProviderDbRow {
   last_error: string | null;
 }
 
-function toProviderKind(_raw: string | null | undefined): PlannerProviderKind {
+function toProviderKind(raw: string | null | undefined): PlannerProviderKind {
+  if (raw === 'claude-oauth') return 'claude-oauth';
   return 'openai-compatible';
 }
 
@@ -359,10 +373,92 @@ function providerFromDbRow(row: PlannerProviderDbRow): PlannerProviderRow {
   };
 }
 
+export function decryptClaudeOAuthCredentials(
+  provider: PlannerProviderRow,
+  encKey: Buffer | undefined,
+): { credentials: ClaudeOAuthStoredCredentials | null; error: string | null } {
+  if (!provider.secretCiphertext) return { credentials: null, error: null };
+  if (encKey === undefined) {
+    return {
+      credentials: null,
+      error: `Set ${SETTINGS_ENC_KEY_VAR} to decrypt this provider's credentials.`,
+    };
+  }
+  let raw: string;
+  try {
+    raw = decryptSecret(provider.secretCiphertext, encKey);
+  } catch {
+    return {
+      credentials: null,
+      error: `Could not decrypt this provider's credentials with the configured ${SETTINGS_ENC_KEY_VAR}. Re-enter or sign in again in Settings to repair it.`,
+    };
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<ClaudeOAuthStoredCredentials>;
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      typeof parsed.accessToken === 'string' &&
+      parsed.accessToken.trim().length > 0 &&
+      (parsed.mode === 'setup-token' || parsed.mode === 'oauth')
+    ) {
+      return {
+        credentials: {
+          mode: parsed.mode,
+          accessToken: parsed.accessToken.trim(),
+          refreshToken: typeof parsed.refreshToken === 'string' ? parsed.refreshToken : null,
+          expiresAt: typeof parsed.expiresAt === 'number' ? parsed.expiresAt : null,
+          accountEmail: typeof parsed.accountEmail === 'string' ? parsed.accountEmail : null,
+          organizationName: typeof parsed.organizationName === 'string' ? parsed.organizationName : null,
+          rateLimitTier: typeof parsed.rateLimitTier === 'string' ? parsed.rateLimitTier : null,
+        },
+        error: null,
+      };
+    }
+  } catch {
+    // Fall through if raw string is a bare token.
+  }
+  if (raw.trim().length > 0) {
+    return {
+      credentials: {
+        mode: 'setup-token',
+        accessToken: raw.trim(),
+        refreshToken: null,
+        expiresAt: null,
+        accountEmail: null,
+        organizationName: null,
+        rateLimitTier: null,
+      },
+      error: null,
+    };
+  }
+  return { credentials: null, error: 'Stored provider credentials are invalid.' };
+}
+
+export function encryptClaudeOAuthCredentials(
+  creds: ClaudeOAuthStoredCredentials,
+  encKey: Buffer | undefined,
+): string {
+  const normalized: ClaudeOAuthStoredCredentials = {
+    mode: creds.mode,
+    accessToken: creds.accessToken.trim(),
+    refreshToken: creds.refreshToken ?? null,
+    expiresAt: creds.expiresAt ?? null,
+    accountEmail: creds.accountEmail ?? null,
+    organizationName: creds.organizationName ?? null,
+    rateLimitTier: creds.rateLimitTier ?? null,
+  };
+  return encryptSecret(JSON.stringify(normalized), requirePlannerProviderEncKey(encKey));
+}
+
 export function decryptPlannerProviderSecret(
   provider: PlannerProviderRow,
   encKey: Buffer | undefined,
 ): { apiKey: string | null; error: string | null } {
+  if (provider.kind === 'claude-oauth') {
+    const { credentials, error } = decryptClaudeOAuthCredentials(provider, encKey);
+    return { apiKey: credentials?.accessToken ?? null, error };
+  }
   if (!provider.secretCiphertext) return { apiKey: null, error: null };
   if (encKey === undefined) {
     return {
@@ -385,6 +481,30 @@ export function encryptPlannerProviderSecret(apiKey: string, encKey: Buffer | un
 }
 
 export function toPlannerProviderDto(row: PlannerProviderRow, encKey?: Buffer): PlannerProvider {
+  if (row.kind === 'claude-oauth') {
+    const { credentials, error } = row.secretCiphertext
+      ? decryptClaudeOAuthCredentials(row, encKey)
+      : { credentials: null, error: null };
+    return {
+      id: row.id,
+      label: row.label,
+      kind: row.kind,
+      baseUrl: row.baseUrl,
+      hasApiKey: row.secretCiphertext !== null && row.secretCiphertext.length > 0,
+      keyUnreadable: error !== null,
+      allowUnattended: row.allowUnattended,
+      sortOrder: row.sortOrder,
+      createdAt: row.createdAt,
+      lastTestedAt: row.lastTestedAt,
+      lastError: row.lastError ?? error,
+      authMode: credentials?.mode ?? null,
+      accountEmail: credentials?.accountEmail ?? null,
+      organizationName: credentials?.organizationName ?? null,
+      rateLimitTier: credentials?.rateLimitTier ?? null,
+      tokenExpiresAt: credentials?.expiresAt ?? null,
+      providerDisclosure: CLAUDE_OAUTH_PROVIDER_DISCLOSURE,
+    };
+  }
   const decryptStatus = row.secretCiphertext
     ? decryptPlannerProviderSecret(row, encKey)
     : { apiKey: null, error: null };
@@ -400,6 +520,12 @@ export function toPlannerProviderDto(row: PlannerProviderRow, encKey?: Buffer): 
     createdAt: row.createdAt,
     lastTestedAt: row.lastTestedAt,
     lastError: row.lastError ?? decryptStatus.error,
+    authMode: null,
+    accountEmail: null,
+    organizationName: null,
+    rateLimitTier: null,
+    tokenExpiresAt: null,
+    providerDisclosure: null,
   };
 }
 
@@ -855,6 +981,40 @@ export function resolvePlannerModel(
     provider: readDefaultOrFirstPlannerProvider(db),
     modelId: trimmed,
   };
+}
+
+/**
+ * PA-149: Checks whether the model a Pocket Agent unattended run (cron job,
+ * inbound webhook, or MCP-started chat/turn) would use belongs to a
+ * subscription provider (`kind !== 'openai-compatible'`) with
+ * `allowUnattended === false`. Returns a clear human-readable refusal reason
+ * when blocked, or `null` when allowed.
+ */
+export function unattendedPlannerModelProblem(
+  db: Db,
+  opts: {
+    modelId?: string | null;
+    workspaceDefaultModelId?: string | null;
+    noun: 'scheduled' | 'triggered by a webhook' | 'started over MCP';
+  },
+): string | null {
+  const candidate =
+    opts.modelId ??
+    opts.workspaceDefaultModelId ??
+    readSetting(db, PLANNER_LAST_MODEL_ID_KEY) ??
+    null;
+  const resolved = resolvePlannerModel(db, candidate);
+  if (
+    resolved.provider &&
+    resolved.provider.kind !== 'openai-compatible' &&
+    !resolved.provider.allowUnattended
+  ) {
+    return (
+      `Pocket Agent provider "${resolved.provider.label}" cannot be ${opts.noun}: ` +
+      'subscription providers have unattended use disabled by default. Enable "Allow unattended use" on this provider in Settings → Providers & Models, or choose a model from an API-key provider.'
+    );
+  }
+  return null;
 }
 
 export function updatePlannerModel(

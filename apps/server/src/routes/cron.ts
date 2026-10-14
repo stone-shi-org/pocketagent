@@ -10,6 +10,8 @@ import type { WorkspaceRegistry } from '../workspaces/index.js';
 import { WorkspaceError } from '../workspaces/index.js';
 import type { PlannerWorkspaceRegistry } from '../planner/workspaces.js';
 import type { AgentRegistry } from '../agents/registry.js';
+import type { Db } from '../db/index.js';
+import { unattendedPlannerModelProblem } from '../planner/store.js';
 import { auditConfigChange, resolveWorkspaceCwdOrReply, structuredAgentProblem } from './shared.js';
 
 /** Default page size for a run list. Enough to fill a phone screen several times. */
@@ -45,6 +47,7 @@ export interface CronJobUpdateDeps {
   workspaces: WorkspaceRegistry;
   plannerWorkspaces: PlannerWorkspaceRegistry;
   agents: AgentRegistry;
+  db?: Db;
 }
 
 export type CronJobUpdatePatchResult =
@@ -65,6 +68,7 @@ export async function resolveCronJobUpdatePatch(
   deps: CronJobUpdateDeps,
   existingAgent: string,
   body: UpdateCronJobRequest,
+  existingContext?: { model?: string | null; cwd?: string },
 ): Promise<CronJobUpdatePatchResult> {
   if (body.timeZone !== undefined && !isKnownTimeZone(body.timeZone)) {
     return { ok: false, error: `Unknown time zone "${body.timeZone}".` };
@@ -93,6 +97,21 @@ export async function resolveCronJobUpdatePatch(
     }
   }
 
+  if (targetAgent === 'pocketagent' && deps.db) {
+    const effectiveCwd = cwd ?? body.cwd ?? existingContext?.cwd;
+    const plannerWs =
+      (effectiveCwd
+        ? deps.plannerWorkspaces.list().find((w) => w.path === effectiveCwd || w.id === effectiveCwd)
+        : undefined) ?? deps.plannerWorkspaces.getDefault();
+    const effectiveModel = body.model !== undefined ? body.model : (existingContext?.model ?? null);
+    const modelProblem = unattendedPlannerModelProblem(deps.db, {
+      workspaceDefaultModelId: plannerWs?.defaultModelId ?? null,
+      modelId: effectiveModel,
+      noun: 'scheduled',
+    });
+    if (modelProblem !== null) return { ok: false, error: modelProblem };
+  }
+
   const patch: Partial<CronJobSpec> = {
     ...(body.name !== undefined ? { name: body.name } : {}),
     ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
@@ -116,7 +135,7 @@ export async function resolveCronJobUpdatePatch(
 }
 
 export const cronRoutes: FastifyPluginAsync = async (app) => {
-  const { cron, workspaces, agents, plannerWorkspaces } = app.pocket;
+  const { cron, workspaces, agents, plannerWorkspaces, db } = app.pocket;
 
   const mapError = (reply: FastifyReply, err: unknown): FastifyReply | never => {
     if (err instanceof CronServiceError) {
@@ -159,6 +178,7 @@ export const cronRoutes: FastifyPluginAsync = async (app) => {
     }
 
     let cwd: string;
+    let plannerDefaultModelId: string | null = null;
     if (body.agent === 'pocketagent') {
       const plannerWs = plannerWorkspaces.list().find((w) => w.path === body.cwd || w.id === body.cwd)
         ?? plannerWorkspaces.getDefault();
@@ -166,6 +186,7 @@ export const cronRoutes: FastifyPluginAsync = async (app) => {
         return badRequest(reply, 'No Pocket Agent workspace found.');
       }
       cwd = plannerWs.path;
+      plannerDefaultModelId = plannerWs.defaultModelId ?? null;
     } else {
       const resolved = await resolveWorkspaceCwdOrReply(workspaces, body.cwd, reply);
       if (resolved === null) return reply;
@@ -174,6 +195,15 @@ export const cronRoutes: FastifyPluginAsync = async (app) => {
 
     const agentCheck = checkCronAgent(agents, body.agent);
     if (agentCheck !== null) return badRequest(reply, agentCheck);
+
+    if (body.agent === 'pocketagent') {
+      const modelProblem = unattendedPlannerModelProblem(db, {
+        workspaceDefaultModelId: plannerDefaultModelId,
+        modelId: body.model ?? null,
+        noun: 'scheduled',
+      });
+      if (modelProblem !== null) return badRequest(reply, modelProblem);
+    }
 
     const spec: CronJobSpec = {
       name: body.name,
@@ -222,9 +252,10 @@ export const cronRoutes: FastifyPluginAsync = async (app) => {
     }
 
     const result = await resolveCronJobUpdatePatch(
-      { workspaces, plannerWorkspaces, agents },
+      { workspaces, plannerWorkspaces, agents, db },
       existing.agent,
       parsed.data,
+      { model: existing.model, cwd: existing.cwd },
     );
     if (!result.ok) return badRequest(reply, result.error);
 

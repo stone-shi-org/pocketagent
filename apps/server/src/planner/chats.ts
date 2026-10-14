@@ -36,7 +36,9 @@ import type { WebhookService } from '../webhooks/index.js';
 import type { CronService } from '../cron/index.js';
 import type { PlannerWorkspaceRegistry, PlannerWorkspaceRow } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
+import { ClaudeOAuthPlannerProvider } from './claude-oauth.js';
 import {
+  decryptClaudeOAuthCredentials,
   decryptPlannerProviderSecret,
   deletePlannerChat,
   insertPlannerChat,
@@ -63,6 +65,7 @@ import {
   readPlannerSettings,
   resolvePlannerUrlFetchApiKey,
   resolvePlannerWebSearchApiKey,
+  unattendedPlannerModelProblem,
   updatePlannerChat,
   writePlannerChatMemoryFoldedTurns,
   writePlannerLastEffort,
@@ -2018,11 +2021,62 @@ export class PlannerChatService {
       base-url/api-key lookup never drift between them. Throws `not_configured`
       if the provider has no endpoint set or its encrypted API key cannot be
       decrypted. */
+  get llmFetch(): typeof fetch | undefined {
+    return this.opts.llmFetch;
+  }
+
+  /**
+   * PA-149: Checks whether the model an unattended Pocket Agent trigger
+   * (scheduled job, webhook, or MCP-started chat/turn) would resolve to belongs
+   * to a subscription provider (`kind !== 'openai-compatible'`) with
+   * `allowUnattended === false`.
+   */
+  checkUnattendedModel(opts: {
+    workspaceId?: string | null;
+    modelId?: string | null;
+    chatId?: string | null;
+    noun: 'scheduled' | 'triggered by a webhook' | 'started over MCP';
+  }): string | null {
+    const chat = opts.chatId ? this.get(opts.chatId) : null;
+    const effectiveModelId = opts.modelId ?? chat?.lastModelId ?? null;
+    const effectiveWorkspaceId = opts.workspaceId ?? chat?.workspaceId ?? null;
+    const ws = effectiveWorkspaceId
+      ? this.opts.plannerWorkspaces.get(effectiveWorkspaceId)
+      : this.opts.plannerWorkspaces.getDefault();
+    return unattendedPlannerModelProblem(this.opts.db, {
+      modelId: effectiveModelId,
+      workspaceDefaultModelId: ws?.defaultModelId ?? null,
+      noun: opts.noun,
+    });
+  }
+
   clientForProvider(
     provider: PlannerProviderRow | null,
     opts: { retry?: boolean } = {},
   ): PlannerLlmProvider {
-    if (!provider || !provider.baseUrl) {
+    if (!provider) {
+      throw new PlannerChatError('Planner LLM endpoint is not configured.', 'not_configured');
+    }
+    if (provider.kind === 'claude-oauth') {
+      const { credentials, error } = decryptClaudeOAuthCredentials(provider, this.opts.config?.settingsEncKey);
+      if (error !== null) {
+        throw new PlannerChatError(error, 'not_configured');
+      }
+      if (!credentials || !credentials.accessToken) {
+        throw new PlannerChatError(
+          `Claude provider "${provider.label}" has no credentials configured. Paste a setup-token or sign in with OAuth in Settings → Providers & Models.`,
+          'not_configured',
+        );
+      }
+      return new ClaudeOAuthPlannerProvider({
+        db: this.opts.db,
+        providerId: provider.id,
+        encKey: this.opts.config?.settingsEncKey,
+        ...(this.opts.llmFetch ? { fetchImpl: this.opts.llmFetch } : {}),
+        ...(opts.retry === false ? { retry: { maxRetries: 0 } } : this.opts.llmRetry ? { retry: this.opts.llmRetry } : {}),
+      });
+    }
+    if (!provider.baseUrl) {
       throw new PlannerChatError('Planner LLM endpoint is not configured.', 'not_configured');
     }
     const { apiKey, error } = decryptPlannerProviderSecret(provider, this.opts.config?.settingsEncKey);
@@ -2802,7 +2856,7 @@ export class PlannerChatService {
         ? Math.max(1024, Math.min(modelRow.maxOutputTokens, limits.contextWindow - estimatedTokens - CONTEXT_SAFETY_TOKENS))
         : undefined;
 
-    if (!resolved.provider || !resolved.provider.baseUrl) {
+    if (!resolved.provider || (resolved.provider.kind === 'openai-compatible' && !resolved.provider.baseUrl)) {
       // Checked before the first yield by `resolveModelId`, so only an
       // endpoint cleared in Settings mid-turn lands here — reported in-band,
       // since `clientForProvider()` would throw past a stream already started.
@@ -2814,7 +2868,7 @@ export class PlannerChatService {
       yield* this.finishTurn(chat, workspacePath, modelId, '', true, stats);
       return;
     }
-    const { error: keyError } = decryptPlannerProviderSecret(resolved.provider, this.opts.config?.settingsEncKey);
+    const { apiKey, error: keyError } = decryptPlannerProviderSecret(resolved.provider, this.opts.config?.settingsEncKey);
     if (keyError !== null) {
       yield* this.emit(workspacePath, chat.id, {
         kind: 'notice',
@@ -2824,14 +2878,28 @@ export class PlannerChatService {
       yield* this.finishTurn(chat, workspacePath, modelId, '', true, stats);
       return;
     }
+    if (resolved.provider.kind === 'claude-oauth' && !apiKey) {
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'notice',
+        level: 'error',
+        text: `Claude provider "${resolved.provider.label}" has no credentials configured. Paste a setup-token or sign in with OAuth in Settings → Providers & Models.`,
+      });
+      yield* this.finishTurn(chat, workspacePath, modelId, '', true, stats);
+      return;
+    }
     const client = this.clientForProvider(resolved.provider);
 
-    // PA-122: Anthropic-style cache breakpoints, for a model whose caching is
-    // on and whose endpoint has not refused them earlier in this turn. The
-    // unmarked `messages` are kept for the estimate and the calibration, so
-    // the markers never change what we think the prompt weighs.
+    // PA-122 / PA-149: Anthropic-style cache breakpoints, for a model whose
+    // caching is on (always on by default for `claude-oauth` unless the row
+    // explicitly sets `promptCaching: false`) and whose endpoint has not
+    // refused them earlier in this turn. The unmarked `messages` are kept for
+    // the estimate and the calibration, so the markers never change what we
+    // think the prompt weighs.
     const cacheControl =
-      resolvePromptCaching(wireModelId, modelRow?.promptCaching) && !this.cacheControlRefused.has(chat.id);
+      (resolved.provider.kind === 'claude-oauth'
+        ? modelRow?.promptCaching !== false
+        : resolvePromptCaching(wireModelId, modelRow?.promptCaching)) &&
+      !this.cacheControlRefused.has(chat.id);
     const request = cacheControl
       ? applyCacheControl(messages, toolSpecs, this.stableSystemPrefix(chat, workspacePath, settings))
       : { messages, tools: toolSpecs };
@@ -3959,18 +4027,24 @@ export class PlannerChatService {
     const candidate = requested ?? chat.lastModelId ?? settings.lastModelId;
     if (!candidate) {
       const defaultProvider = readDefaultOrFirstPlannerProvider(this.opts.db);
-      if (!defaultProvider || !defaultProvider.baseUrl) {
+      if (!defaultProvider || (defaultProvider.kind === 'openai-compatible' && !defaultProvider.baseUrl)) {
         throw new PlannerChatError('Planner LLM endpoint is not configured.', 'not_configured');
       }
       throw new PlannerChatError('No model selected, and none is configured.', 'not_configured');
     }
     const resolved = resolvePlannerModel(this.opts.db, candidate);
-    if (!resolved.provider || !resolved.provider.baseUrl) {
+    if (!resolved.provider || (resolved.provider.kind === 'openai-compatible' && !resolved.provider.baseUrl)) {
       throw new PlannerChatError('Planner LLM endpoint is not configured.', 'not_configured');
     }
-    const { error } = decryptPlannerProviderSecret(resolved.provider, this.opts.config?.settingsEncKey);
+    const { apiKey, error } = decryptPlannerProviderSecret(resolved.provider, this.opts.config?.settingsEncKey);
     if (error !== null) {
       throw new PlannerChatError(error, 'not_configured');
+    }
+    if (resolved.provider.kind === 'claude-oauth' && !apiKey) {
+      throw new PlannerChatError(
+        `Claude provider "${resolved.provider.label}" has no credentials configured. Paste a setup-token or sign in with OAuth in Settings → Providers & Models.`,
+        'not_configured',
+      );
     }
     return resolved.row ? resolved.row.id : candidate;
   }

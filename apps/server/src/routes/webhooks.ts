@@ -8,6 +8,7 @@ import {
   WEBHOOK_RESERVED_SLUGS,
   WEBHOOK_SLUG_RE,
   WebhookTestRequest,
+  parsePocketAgentId,
 } from '@pocketagent/protocol';
 import type {
   BambooPlanMapEntry,
@@ -17,11 +18,12 @@ import type {
 } from '@pocketagent/protocol';
 import type { WorkspaceRegistry } from '../workspaces/index.js';
 import { WorkspaceError } from '../workspaces/index.js';
-import type { WebhookRow } from '../db/index.js';
+import type { Db, WebhookRow } from '../db/index.js';
 import type { WebhookSpec, WebhookSpecCommon } from '../webhooks/index.js';
 import { WebhookServiceError } from '../webhooks/index.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type { PlannerWorkspaceRegistry } from '../planner/workspaces.js';
+import { unattendedPlannerModelProblem } from '../planner/store.js';
 import { auditConfigChange, resolveWorkspaceCwdOrReply, webhookAgentProblem } from './shared.js';
 import { webhookDeliveryRoutes } from './webhook-delivery.js';
 
@@ -37,6 +39,7 @@ export interface WebhookUpdateDeps {
   workspaces: WorkspaceRegistry;
   agents: AgentRegistry;
   plannerWorkspaces: PlannerWorkspaceRegistry;
+  db?: Db;
 }
 
 export type WebhookUpdatePatchResult =
@@ -83,6 +86,19 @@ export async function resolveWebhookUpdatePatch(
   if (body.agent !== undefined) {
     const agentProblem = webhookAgentProblem(deps.agents, deps.plannerWorkspaces, body.agent);
     if (agentProblem !== null) return { ok: false, error: agentProblem };
+  }
+
+  const targetAgent = body.agent ?? existing.agent;
+  const targetPlannerWsId = parsePocketAgentId(targetAgent);
+  if (targetPlannerWsId !== null && deps.db) {
+    const effectiveModel = body.model !== undefined ? body.model : existing.model;
+    const plannerWs = deps.plannerWorkspaces.get(targetPlannerWsId);
+    const modelProblem = unattendedPlannerModelProblem(deps.db, {
+      workspaceDefaultModelId: plannerWs?.defaultModelId ?? null,
+      modelId: effectiveModel ?? null,
+      noun: 'triggered by a webhook',
+    });
+    if (modelProblem !== null) return { ok: false, error: modelProblem };
   }
 
   const effectiveAuthMode = body.authMode ?? existing.auth_mode;
@@ -167,7 +183,7 @@ export async function resolveWebhookUpdatePatch(
 }
 
 export const webhookRoutes: FastifyPluginAsync = async (app) => {
-  const { webhooks, workspaces, agents, plannerWorkspaces } = app.pocket;
+  const { webhooks, workspaces, agents, plannerWorkspaces, db } = app.pocket;
 
   const mapError = (reply: FastifyReply, err: unknown): FastifyReply | never => {
     if (err instanceof WebhookServiceError) {
@@ -231,6 +247,17 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     const agentProblem = webhookAgentProblem(agents, plannerWorkspaces, body.agent);
     if (agentProblem !== null) return badRequest(reply, agentProblem);
 
+    const plannerWsId = parsePocketAgentId(body.agent);
+    if (plannerWsId !== null) {
+      const plannerWs = plannerWorkspaces.get(plannerWsId);
+      const modelProblem = unattendedPlannerModelProblem(db, {
+        workspaceDefaultModelId: plannerWs?.defaultModelId ?? null,
+        modelId: body.model ?? null,
+        noun: 'triggered by a webhook',
+      });
+      if (modelProblem !== null) return badRequest(reply, modelProblem);
+    }
+
     // Bamboo cannot compute a request signature — it only supports a static
     // custom header — so `hmac` would 401 every real delivery forever with no
     // way for the operator to diagnose why. Reject the configuration outright
@@ -274,7 +301,7 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     }
     try {
       const existing = webhooks.get(request.params.id);
-      const result = await resolveWebhookUpdatePatch({ workspaces, agents, plannerWorkspaces }, existing, parsed.data);
+      const result = await resolveWebhookUpdatePatch({ workspaces, agents, plannerWorkspaces, db }, existing, parsed.data);
       if (!result.ok) return badRequest(reply, result.error, result.code);
       const updated = webhooks.update(request.params.id, result.patch);
       auditConfigChange(request, 'webhook updated', {

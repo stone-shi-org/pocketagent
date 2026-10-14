@@ -4520,7 +4520,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       try {
         const existing = webhooks.get(id);
         const result = await resolveWebhookUpdatePatch(
-          { workspaces: deps.workspaces, agents: deps.agents, plannerWorkspaces: deps.plannerWorkspaces },
+          { workspaces: deps.workspaces, agents: deps.agents, plannerWorkspaces: deps.plannerWorkspaces, db: deps.db },
           existing,
           parsed.data,
         );
@@ -4564,9 +4564,10 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       const parsed = UpdateCronJobRequest.safeParse(args.patch ?? {});
       if (!parsed.success) return `Refusing: ${parsed.error.issues[0]?.message ?? 'invalid job patch.'}`;
       const result = await resolveCronJobUpdatePatch(
-        { workspaces: deps.workspaces, plannerWorkspaces: deps.plannerWorkspaces, agents: deps.agents },
+        { workspaces: deps.workspaces, plannerWorkspaces: deps.plannerWorkspaces, agents: deps.agents, db: deps.db },
         existing.agent,
         parsed.data,
+        { model: existing.model, cwd: existing.cwd },
       );
       if (!result.ok) return `Refusing: ${result.error}`;
       try {
