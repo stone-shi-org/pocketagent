@@ -638,6 +638,16 @@ heading('The -all image renders a page with playwright-cli, $HOME mounted (if th
     check(res.stdout.includes('Errors: 0'), 'the page logged no console errors');
     const png = fs.existsSync(shot) ? fs.readFileSync(shot) : null;
     check(png !== null && png.readUInt32BE(0) === 0x89504e47, 'the screenshot is a PNG on the mounted workspace');
+
+    const sheetDeps = tryRun('docker', [
+      'exec', '--user', `${HOST_UID}:${HOST_GID}`, probe, 'bash', '-lc',
+      'soffice --headless --version && python3 -c "import openpyxl; print(\'openpyxl-ok\')"',
+    ]);
+    check(
+      sheetDeps.status === 0 && /libreoffice/i.test(sheetDeps.stdout) && sheetDeps.stdout.includes('openpyxl-ok'),
+      'libreoffice-calc (soffice) and python3-openpyxl are runnable from a login shell (PA-140)',
+      sheetDeps.stdout.split('\n')[0],
+    );
     tryRun('docker', ['rm', '-f', probe]);
   }
 }

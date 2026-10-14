@@ -43,6 +43,30 @@ export const TOOL_METADATA: Record<string, ToolMeta> = {
     shortDescription: 'Create or overwrite files in a workspace',
     category: 'Files & Workspaces',
   },
+  edit_file: {
+    shortDescription: 'Apply exact text replacements to a file in a workspace',
+    category: 'Files & Workspaces',
+  },
+  sheet_info: {
+    shortDescription: 'Inspect .xlsx/.xlsm sheets, ranges, tables, charts, pivots, and macros',
+    category: 'Files & Workspaces',
+  },
+  sheet_read: {
+    shortDescription: 'Read cell values, expanded formulas, number formats, merges, and comments',
+    category: 'Files & Workspaces',
+  },
+  sheet_find: {
+    shortDescription: 'Search cell values or formulas across all sheets in a workbook',
+    category: 'Files & Workspaces',
+  },
+  sheet_check: {
+    shortDescription: 'Recalculate a workbook copy and report formula errors and stale caches',
+    category: 'Files & Workspaces',
+  },
+  sheet_edit: {
+    shortDescription: 'Patch .xlsx/.xlsm cells, tables, or sheets in place into a new file',
+    category: 'Files & Workspaces',
+  },
   find_files: {
     shortDescription: 'Search for files matching name or glob pattern',
     category: 'Files & Workspaces',

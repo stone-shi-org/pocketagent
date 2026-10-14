@@ -508,7 +508,7 @@ export class TelegramBridge {
     // because a human is being asked to approve exactly this call, and
     // before PA-105 the prompt did not show them at all.
     const title = truncate(event.title, APPROVAL_TITLE_MAX);
-    const input = Object.keys(event.input).length > 0 ? truncate(JSON.stringify(event.input, null, 2), APPROVAL_INPUT_MAX) : '';
+    const input = formatApprovalInput(event, APPROVAL_INPUT_MAX);
     const html = `Approval needed: <b>${escapeHtml(title)}</b>` + (input ? `\n<pre>${escapeHtml(input)}</pre>` : '');
     const plain = `Approval needed: ${title}` + (input ? `\n${input}` : '');
     await sendHtmlWithPlainFallback(client, telegramChatId, html, plain, {
@@ -600,6 +600,58 @@ export class TelegramBridge {
     appears in either part so a plain split is exact. */
 function approvalCallbackData(approvalId: string, choice: PlannerToolApprovalChoice): string {
   return `${approvalId}:${choice}`;
+}
+
+/**
+ * Formats the `<pre>` body of a Telegram approval prompt.
+ * PA-140: for `sheet_edit`, formats cell-level diff lines
+ * (`Summary!B7: =SUM(B2:B6) → =SUM(B2:B8)`) instead of raw JSON.
+ */
+export function formatApprovalInput(
+  event: Pick<PermissionRequestEvent, 'toolName' | 'input' | 'filePath'>,
+  maxChars = APPROVAL_INPUT_MAX,
+): string {
+  if (event.toolName === 'sheet_edit') {
+    const rawDiff = event.input._diff;
+    if (
+      rawDiff &&
+      typeof rawDiff === 'object' &&
+      typeof (rawDiff as { before?: unknown }).before === 'string' &&
+      typeof (rawDiff as { after?: unknown }).after === 'string'
+    ) {
+      const beforeLines = (rawDiff as { before: string }).before.split('\n');
+      const afterLines = (rawDiff as { after: string }).after.split('\n');
+      const count = Math.max(beforeLines.length, afterLines.length);
+      const lines: string[] = [];
+      if (event.filePath) lines.push(event.filePath);
+      for (let i = 0; i < count; i++) {
+        const b = beforeLines[i] ?? '';
+        const a = afterLines[i] ?? '';
+        if (b === a) {
+          if (b) lines.push(b);
+          continue;
+        }
+        const bColon = b.indexOf(': ');
+        const aColon = a.indexOf(': ');
+        if (bColon > 0 && bColon === aColon && b.slice(0, bColon) === a.slice(0, aColon)) {
+          const prefix = b.slice(0, bColon);
+          lines.push(`${prefix}: ${b.slice(bColon + 2)} → ${a.slice(aColon + 2)}`);
+        } else if (b && a) {
+          lines.push(`${b} → ${a}`);
+        } else {
+          lines.push(a || b);
+        }
+      }
+      if (lines.length > 0) {
+        return truncate(lines.join('\n'), maxChars);
+      }
+    }
+  }
+  const cleanInput =
+    '_diff' in event.input
+      ? Object.fromEntries(Object.entries(event.input).filter(([k]) => k !== '_diff'))
+      : event.input;
+  return Object.keys(cleanInput).length > 0 ? truncate(JSON.stringify(cleanInput, null, 2), maxChars) : '';
 }
 
 /**

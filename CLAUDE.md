@@ -77,7 +77,11 @@ load-bearing and easy to undo by accident:
   which the layer's own ownership check caught. The build renders a page as the app user;
   `docker-smoke.mjs` renders one again with `$HOME` mounted. There is no browser *tool*: agents use
   the CLI from `bash`, and a Pocket Agent's base prompt mentions it only when `resolveExecutable`
-  finds it.
+  finds it. The `all` stage also installs `libreoffice-calc` (`--no-install-recommends`) and
+  `python3-openpyxl` (PA-140) so `sheet_check` and `sheet_edit` can recalculate formula caches
+  headlessly (`soffice --headless --convert-to xlsx` with an isolated `-env:UserInstallation=file://…`
+  profile) and agents can build brand-new `.xlsx` files from scratch when needed; both are checked
+  at image build time and by `docker-smoke.mjs`.
 
 The entrypoint's own rule: **it never chowns a mounted volume.** It remaps the `pocketagent`
 account to `PUID`/`PGID` (so `git` can match the owner of a bind-mounted repo — a uid mismatch
@@ -3305,6 +3309,32 @@ These are load-bearing. Several were bugs first.
   is staged under its own principal and claimable by nobody else. Asserted in
   `attachments-extract.test.ts`, `attachments-pa137.test.ts`, `telegram-media.test.ts` and
   `mcp-server.test.ts`.
+- **A workbook is inspected and patched in a sandboxed child process, and `sheet_edit` splices only
+  the XML spans it touches into a new file** (PA-140). All five spreadsheet tools (`sheet_info`,
+  `sheet_read`, `sheet_find`, `sheet_check`, `sheet_edit`) run in `sheets/sheet-worker.ts` under
+  `sheets/runner.ts` with the same sandbox posture as `attachments/extract.ts`: empty environment
+  (`env: {}`), no network (`fetch` disabled), 60 s timeout, 768 MB RSS cap enforced by the parent,
+  128 MB declared-size zip-bomb pre-check (`sheets/xlsx-shared.ts`), and an explicit refusal of any
+  XML entry containing `<!DOCTYPE` or `<!ENTITY`. `sheet_edit` never parses and re-serializes XML
+  and never overwrites the input workbook: `outputPath` must not exist and is written via an
+  exclusive-create `.tmp` + `fs.link` + `unlink` so a concurrent creation still fails `EEXIST`;
+  touched worksheets, `workbook.xml`, `styles.xml` and `tables/table*.xml` are patched by
+  byte/character offset spans from `scanXmlTags` / `findElements` (spliced right-to-left so
+  untouched XML spans, namespaces and `mc:Ignorable` attributes stay byte-identical), while every
+  untouched zip entry (`vbaProject.bin`, `charts/*`, `pivotTables/*`, `drawings/*`,
+  `sharedStrings.xml`, …) is copied through as its original `Uint8Array`. Edited strings use
+  `t="inlineStr"` so `sharedStrings.xml` is never re-indexed; a touched shared-formula group
+  (`t="shared"`) is expanded into standalone `<f>` elements before patching; array formulas
+  (`t="array"`, `cm=`) and row/column insertions or deletions are refused; and pre-approval
+  validation (`prepareSheetEditApproval`) runs before `gateToolCall` so a bad edit returns
+  `tool_result` (`isError: true`) directly to the model while a valid edit attaches a cell-level
+  `_diff` (`Summary!B7: =SUM(B2:B6) → =SUM(B2:B8)`) rendered by `diffFromToolInput` on the web and
+  inside `<pre>` in Telegram (and stripped before re-sending history to the LLM). When headless
+  LibreOffice (`soffice`/`libreoffice`, reported in `HostCapabilities.executables` as
+  `'libreoffice'`) is installed, `sheet_check` and `sheet_edit` recalculate a scratch copy with an
+  isolated `-env:UserInstallation=file://…` profile and `sheet_edit` back-patches only `<v>` caches
+  into the patched XML. Asserted in `apps/server/tests/sheet-tools.test.ts` and
+  `apps/web/src/agent/diff.test.ts`.
 - **The browser never supplies an executable or argv.** Adoption and resume both take their
   `cwd` from the server-validated target. **PA-68 extends this to installing one**, which is the
   sharpest case yet: `POST /api/agents/install` takes an id out of a closed set plus an *action*

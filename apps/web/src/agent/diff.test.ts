@@ -87,9 +87,45 @@ describe('diffFromToolInput', () => {
     expect(diffFromToolInput('Write', { content: 'hello' })).toEqual({ before: '', after: 'hello' });
   });
 
+  it('reads a sheet_edit with worker-computed _diff as cell-level before/after lines', () => {
+    expect(
+      diffFromToolInput('sheet_edit', {
+        path: 'budget.xlsx',
+        outputPath: 'budget-next.xlsx',
+        edits: [{ sheet: 'Summary', cell: 'B7', formula: '=SUM(B2:B8)' }],
+        _diff: {
+          before: 'Summary!B7: =SUM(B2:B6)\nData!C4: 1200',
+          after: 'Summary!B7: =SUM(B2:B8)\nData!C4: 1350',
+          context: 'budget.xlsx → budget-next.xlsx',
+        },
+      }),
+    ).toEqual({
+      before: 'Summary!B7: =SUM(B2:B6)\nData!C4: 1200',
+      after: 'Summary!B7: =SUM(B2:B8)\nData!C4: 1350',
+    });
+  });
+
+  it('falls back to formatting sheet_edit edits when _diff is absent', () => {
+    expect(
+      diffFromToolInput('sheet_edit', {
+        path: 'budget.xlsx',
+        outputPath: 'budget-next.xlsx',
+        edits: [
+          { sheet: 'Summary', cell: 'B7', formula: 'SUM(B2:B8)', numFmt: '$#,##0.00' },
+          { op: 'append_table_rows', table: 'Sales', rows: [[1, 2]] },
+          { op: 'add_sheet', name: 'Notes' },
+        ],
+      }),
+    ).toEqual({
+      before: 'Summary!B7: (current)\nTable Sales\n(sheets)',
+      after: 'Summary!B7: =SUM(B2:B8) [numFmt: $#,##0.00]\nTable Sales: +1 row(s)\n(sheets) + Notes',
+    });
+  });
+
   it('returns null for tools that are not edits', () => {
     expect(diffFromToolInput('Bash', { command: 'ls' })).toBeNull();
     expect(diffFromToolInput('Read', { file_path: '/a' })).toBeNull();
     expect(diffFromToolInput('Edit', { old_string: 'a' })).toBeNull();
+    expect(diffFromToolInput('sheet_edit', { path: 'a.xlsx', outputPath: 'b.xlsx', edits: [] })).toBeNull();
   });
 });

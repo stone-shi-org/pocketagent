@@ -72,10 +72,11 @@ export async function buildHostCapabilities(
   const executables: NotableExecutable[] = [];
   for (const bin of NOTABLE_EXECUTABLES) {
     if (DARWIN_ONLY_EXECUTABLES.has(bin) && platform !== 'darwin') continue;
+    const candidates = bin === 'libreoffice' ? ['libreoffice', 'soffice'] : [bin];
     const found =
       opts?.searchDirs !== undefined
-        ? hasExecutableInDirs(bin, opts.searchDirs)
-        : resolveExecutable(bin, platform) !== null;
+        ? candidates.some((c) => hasExecutableInDirs(c, opts.searchDirs!))
+        : candidates.some((c) => resolveExecutable(c, platform) !== null);
     if (found) {
       executables.push(bin);
     }

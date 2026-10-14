@@ -54,6 +54,16 @@ import type { CustomClaudeProviderStore } from '../agents/custom-providers-store
 import { CustomClaudeProviderError } from '../agents/custom-providers-store.js';
 import type { TelegramBotStore } from '../telegram/bots-store.js';
 import { TelegramBotError } from '../telegram/bots-store.js';
+import {
+  executeSheetCheck,
+  executeSheetEdit,
+  executeSheetFind,
+  executeSheetInfo,
+  executeSheetRead,
+  previewSheetEdit,
+  type SheetRunnerLimits,
+} from '../sheets/runner.js';
+import type { SheetCellEditInput, SheetDiffPayload } from '../sheets/sheet-worker.js';
 
 /**
  * PA-6: the planner's tool catalog.
@@ -263,6 +273,8 @@ export interface PlannerToolDeps {
    * next call rather than requiring a fresh chat.
    */
   telegram: PlannerTelegramDeps;
+  /** PA-140: optional resource/binary overrides for spreadsheet tool workers in tests. */
+  sheetLimits?: SheetRunnerLimits;
 }
 
 /** See `PlannerToolDeps.telegram`'s own doc comment. */
@@ -883,6 +895,83 @@ export async function postJsonToIntegration(
   } finally {
     clearTimeout(timer);
   }
+}
+
+export function normalizeSheetEditsArgument(args: Record<string, unknown>): SheetCellEditInput[] | null {
+  let raw: unknown = args.edits;
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    raw = [raw];
+  }
+  if (!Array.isArray(raw)) {
+    if (
+      typeof args.sheet === 'string' &&
+      (typeof args.cell === 'string' || args.op === 'add_sheet')
+    ) {
+      raw = [
+        {
+          ...(typeof args.op === 'string' ? { op: args.op } : {}),
+          sheet: args.sheet,
+          ...(typeof args.cell === 'string' ? { cell: args.cell } : {}),
+          ...(args.value !== undefined ? { value: args.value } : {}),
+          ...(typeof args.formula === 'string' ? { formula: args.formula } : {}),
+          ...(typeof args.clear === 'boolean' ? { clear: args.clear } : {}),
+          ...(typeof args.numFmt === 'string' ? { numFmt: args.numFmt } : {}),
+        },
+      ];
+    } else {
+      return null;
+    }
+  }
+  const edits = (raw as unknown[]).filter(
+    (e): e is SheetCellEditInput => Boolean(e && typeof e === 'object'),
+  );
+  return edits.length > 0 ? edits : null;
+}
+
+/**
+ * PA-140: Validates a `sheet_edit` call against the source workbook and target
+ * `outputPath` before pausing for human approval, returning either the computed
+ * cell-level diff (`{ before, after, lines }`) or an actionable refusal error.
+ */
+export async function prepareSheetEditApproval(
+  deps: PlannerToolDeps,
+  args: Record<string, unknown>,
+): Promise<
+  | { ok: true; diff: SheetDiffPayload }
+  | { ok: false; error: string }
+> {
+  const requestedPath = String(args.path ?? '').trim();
+  const requestedOutputPath = String(args.outputPath ?? '').trim();
+  if (!requestedPath || !requestedOutputPath) {
+    return { ok: false, error: 'sheet_edit requires both "path" and "outputPath".' };
+  }
+  const edits = normalizeSheetEditsArgument(args);
+  if (!edits) {
+    return { ok: false, error: 'sheet_edit requires a non-empty "edits" array.' };
+  }
+  let realPath: string;
+  let targetOutputPath: string;
+  try {
+    realPath = await resolveExistingPathWithin(deps, requestedPath);
+    targetOutputPath = await resolveCreatablePath(deps, requestedOutputPath);
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+  const res = await previewSheetEdit(realPath, targetOutputPath, edits, deps.sheetLimits);
+  if (!res.ok) {
+    return { ok: false, error: res.error };
+  }
+  return {
+    ok: true,
+    diff: res.diff ?? { before: '', after: '', lines: [] },
+  };
 }
 
 export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
@@ -1900,6 +1989,258 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         return { content: `Could not write ${requested}: ${(err as Error).message}`, isError: true };
       }
       return `Replaced ${outcome.replaced} block${outcome.replaced === 1 ? '' : 's'} in ${requested} (first change at line ${outcome.firstChangedLine}).`;
+    },
+  },
+  // ---- PA-140: Spreadsheet tools (.xlsx / .xlsm) ----------------------------
+  {
+    name: 'sheet_info',
+    description:
+      'Inspect an Excel workbook (.xlsx or .xlsm) without modifying it: lists sheets (with hidden/veryHidden flags ' +
+      'and used ranges), defined names, tables (xl/tables) and their ranges/columns, charts and the cell ranges ' +
+      'each series reads, pivot tables and their cache sources, data validations, conditional formatting rules, ' +
+      'and whether macros (vbaProject.bin) or external links are present.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path to the .xlsx or .xlsm workbook inside a workspace.' },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    async execute(deps, args) {
+      const requested = String(args.path ?? '').trim();
+      if (!requested) return { content: 'sheet_info requires a "path" argument.', isError: true };
+      let real: string;
+      try {
+        real = await resolveExistingPathWithin(deps, requested);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+      const res = await executeSheetInfo(real, deps.sheetLimits);
+      if (!res.ok) return { content: res.error, isError: true };
+      return res.text;
+    },
+  },
+  {
+    name: 'sheet_read',
+    description:
+      'Read cells in a worksheet range of an Excel workbook (.xlsx or .xlsm): returns each cell’s cached value, ' +
+      'expanded formula (including shared formulas expanded to per-cell coordinates), number format (numFmt), ' +
+      'and formatted display string, plus intersecting merged cell ranges and cell comments. Paged by A1 range ' +
+      '(e.g. "A1:G50").',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path to the .xlsx or .xlsm workbook.' },
+        sheet: { type: 'string', description: 'Worksheet name to read.' },
+        range: {
+          type: 'string',
+          description: 'Optional A1 cell or range such as "A1:G50" or "B7". Defaults to the sheet’s used range.',
+        },
+        include: {
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: ['values', 'formulas', 'formats', 'merges', 'comments'],
+          },
+          description: 'Optional subset of details to include (defaults to all).',
+        },
+      },
+      required: ['path', 'sheet'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    prepareArguments(args) {
+      if (typeof args.include === 'string') {
+        const list = args.include
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        return { ...args, include: list };
+      }
+      return args;
+    },
+    async execute(deps, args) {
+      const requested = String(args.path ?? '').trim();
+      const sheet = String(args.sheet ?? '').trim();
+      const range = typeof args.range === 'string' ? args.range.trim() : undefined;
+      const include = Array.isArray(args.include)
+        ? args.include.map((x) => String(x))
+        : undefined;
+      if (!requested || !sheet) {
+        return { content: 'sheet_read requires both "path" and "sheet".', isError: true };
+      }
+      let real: string;
+      try {
+        real = await resolveExistingPathWithin(deps, requested);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+      const res = await executeSheetRead(real, sheet, range, include, deps.sheetLimits);
+      if (!res.ok) return { content: res.error, isError: true };
+      return res.text;
+    },
+  },
+  {
+    name: 'sheet_find',
+    description:
+      'Search across worksheets of an Excel workbook (.xlsx or .xlsm) for a value or formula substring ' +
+      '(answers "where is X used?"), returning matching sheet!cell references with their values and formulas.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path to the .xlsx or .xlsm workbook.' },
+        query: { type: 'string', description: 'Case-insensitive substring to search for in cell values or formulas.' },
+        scope: {
+          type: 'string',
+          enum: ['values', 'formulas', 'both'],
+          description: 'Where to search: "values", "formulas", or "both" (default "both").',
+        },
+        sheet: { type: 'string', description: 'Optional worksheet name to restrict the search to.' },
+      },
+      required: ['path', 'query'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    async execute(deps, args) {
+      const requested = String(args.path ?? '').trim();
+      const query = String(args.query ?? '').trim();
+      const rawScope = typeof args.scope === 'string' ? args.scope.trim().toLowerCase() : 'both';
+      const scope: 'values' | 'formulas' | 'both' =
+        rawScope === 'values' || rawScope === 'formulas' ? rawScope : 'both';
+      const sheet = typeof args.sheet === 'string' && args.sheet.trim() ? args.sheet.trim() : undefined;
+      if (!requested || !query) {
+        return { content: 'sheet_find requires both "path" and "query".', isError: true };
+      }
+      let real: string;
+      try {
+        real = await resolveExistingPathWithin(deps, requested);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+      const res = await executeSheetFind(real, query, scope, sheet, deps.sheetLimits);
+      if (!res.ok) return { content: res.error, isError: true };
+      return res.text;
+    },
+  },
+  {
+    name: 'sheet_check',
+    description:
+      'Recalculate a scratch copy of an Excel workbook (.xlsx or .xlsm) with headless LibreOffice (when available) ' +
+      'and report every error cell (#REF!, #DIV/0!, #NAME?, #VALUE!, #N/A, #NUM!, #NULL!) with its formula, ' +
+      'plus any formula cells whose cached value disagrees with the recalculated value (stale cache). ' +
+      'Never modifies the workbook.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path to the .xlsx or .xlsm workbook.' },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    async execute(deps, args) {
+      const requested = String(args.path ?? '').trim();
+      if (!requested) return { content: 'sheet_check requires a "path" argument.', isError: true };
+      let real: string;
+      try {
+        real = await resolveExistingPathWithin(deps, requested);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+      const res = await executeSheetCheck(real, deps.sheetLimits);
+      if (!res.ok) return { content: res.error, isError: true };
+      return res.text;
+    },
+  },
+  {
+    name: 'sheet_edit',
+    description:
+      'Patch an Excel workbook (.xlsx or .xlsm) in place at the XML byte level and write the result to a new ' +
+      'outputPath (never overwriting the original file), preserving charts, pivot tables, macros (vbaProject.bin), ' +
+      'and all untouched zip entries and XML bytes unchanged. Supports cell edits ({ sheet, cell, value | formula | clear, numFmt? }), ' +
+      'appending rows below a table ({ op: "append_table_rows", table, rows }), and adding a worksheet ({ op: "add_sheet", sheet }). ' +
+      'Row/column insert/delete and edits inside array formulas/spill ranges are refused.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path to the source .xlsx or .xlsm workbook.' },
+        outputPath: {
+          type: 'string',
+          description: 'New destination path for the patched workbook (must not already exist).',
+        },
+        edits: {
+          type: 'array',
+          description: 'List of cell or structural edits to apply.',
+          items: {
+            type: 'object',
+            properties: {
+              op: {
+                type: 'string',
+                enum: ['set_cell', 'append_table_rows', 'add_sheet'],
+                description: 'Operation kind (defaults to "set_cell").',
+              },
+              sheet: { type: 'string', description: 'Worksheet name (for set_cell or add_sheet).' },
+              cell: { type: 'string', description: 'A1 cell reference such as "B7" (for set_cell).' },
+              value: {
+                type: ['string', 'number', 'boolean', 'null'],
+                description: 'Literal value to write to the cell.',
+              },
+              formula: {
+                type: 'string',
+                description: 'Formula to write to the cell (e.g. "=SUM(B2:B8)").',
+              },
+              clear: { type: 'boolean', description: 'Set true to clear the cell’s value and formula while keeping its style.' },
+              numFmt: { type: 'string', description: 'Optional Excel number format code (e.g. "$#,##0.00", "0.0%", "yyyy-mm-dd").' },
+              table: { type: 'string', description: 'Table name or displayName for op="append_table_rows".' },
+              rows: {
+                type: 'array',
+                description: 'Rows to append below the table (each row is an array of values or a column-name object).',
+                items: { type: ['array', 'object'] },
+              },
+              addSheet: { type: 'string', description: 'New worksheet name when adding a sheet.' },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['path', 'outputPath', 'edits'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    prepareArguments(args) {
+      const edits = normalizeSheetEditsArgument(args);
+      const { _diff: _ignored, ...rest } = args;
+      return edits ? { ...rest, edits } : rest;
+    },
+    async execute(deps, args) {
+      const requestedPath = String(args.path ?? '').trim();
+      const requestedOutputPath = String(args.outputPath ?? '').trim();
+      if (!requestedPath || !requestedOutputPath) {
+        return { content: 'sheet_edit requires both "path" and "outputPath".', isError: true };
+      }
+      const edits = normalizeSheetEditsArgument(args);
+      if (!edits) {
+        return { content: 'sheet_edit requires a non-empty "edits" array.', isError: true };
+      }
+      let realPath: string;
+      let targetOutputPath: string;
+      try {
+        realPath = await resolveExistingPathWithin(deps, requestedPath);
+        targetOutputPath = await resolveCreatablePath(deps, requestedOutputPath);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+      const res = await executeSheetEdit(
+        realPath,
+        targetOutputPath,
+        requestedOutputPath,
+        edits,
+        deps.sheetLimits,
+      );
+      if (!res.ok) return { content: res.error, isError: true };
+      return res.text;
     },
   },
   {
@@ -3144,6 +3485,10 @@ async function findExecutableOnPath(names: readonly string[]): Promise<string | 
  */
 export const PARALLEL_SAFE_TOOLS: ReadonlySet<string> = new Set([
   'read_file',
+  'sheet_info',
+  'sheet_read',
+  'sheet_find',
+  'sheet_check',
   'list_dir',
   'grep_files',
   'find_files',

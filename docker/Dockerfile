@@ -491,6 +491,23 @@ RUN test -n "${PLAYWRIGHT_CLI_VERSION}" \
     && { test -z "$(find /home/pocketagent ! -user pocketagent -print -quit)" \
          || { echo "root-owned files leaked into /home/pocketagent:" >&2; find /home/pocketagent ! -user pocketagent >&2; exit 1; }; }
 
+# PA-140: Headless LibreOffice Calc (`soffice`) for `sheet_check` and
+# `sheet_edit` formula recalculation, plus `python3-openpyxl` for creating
+# brand-new `.xlsx` workbooks from scratch. Installed only in `all` (~250 MB
+# with `--no-install-recommends`); `runtime` and `claude` stay lean and
+# `sheet_check`/`sheet_edit` degrade gracefully when `soffice` is absent.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libreoffice-calc \
+        python3-openpyxl \
+    && rm -rf /var/lib/apt/lists/* \
+    && lo_probe="$(mktemp -d)" && chmod 0777 "$lo_probe" \
+    && gosu pocketagent env HOME="$lo_probe" soffice "-env:UserInstallation=file://$lo_probe/profile" --headless --version | grep -qi "libreoffice" \
+    && gosu pocketagent env HOME="$lo_probe" python3 -c "import openpyxl; wb = openpyxl.Workbook(); assert wb.active is not None" \
+    && rm -rf "$lo_probe" \
+    && { test -z "$(find /home/pocketagent ! -user pocketagent -print -quit)" \
+         || { echo "root-owned files leaked into /home/pocketagent:" >&2; find /home/pocketagent ! -user pocketagent >&2; exit 1; }; }
+
 # ---------------------------------------------------------------------------
 # hub-deps — production dependencies for the Hub alone
 # ---------------------------------------------------------------------------

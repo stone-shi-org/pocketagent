@@ -137,6 +137,51 @@ export function diffFromToolInput(
     const after = str(input.content);
     if (after !== null) return { before: '', after };
   }
+  // PA-140: `sheet_edit` carries a worker-computed `_diff` (`{ before, after }`)
+  // with cell-level before/after lines; fall back to formatting `input.edits`
+  // if `_diff` is absent.
+  if (name === 'sheet_edit') {
+    const rawDiff = input._diff;
+    if (rawDiff && typeof rawDiff === 'object') {
+      const before = str((rawDiff as { before?: unknown }).before);
+      const after = str((rawDiff as { after?: unknown }).after);
+      if (before !== null && after !== null) return { before, after };
+    }
+    if (Array.isArray(input.edits)) {
+      const beforeLines: string[] = [];
+      const afterLines: string[] = [];
+      for (const raw of input.edits as unknown[]) {
+        if (!raw || typeof raw !== 'object') continue;
+        const edit = raw as Record<string, unknown>;
+        if (edit.op === 'add_sheet' && typeof edit.name === 'string') {
+          beforeLines.push('(sheets)');
+          afterLines.push(`(sheets) + ${edit.name}`);
+        } else if (edit.op === 'append_table_rows' && typeof edit.table === 'string') {
+          const count = Array.isArray(edit.rows) ? edit.rows.length : 0;
+          beforeLines.push(`Table ${edit.table}`);
+          afterLines.push(`Table ${edit.table}: +${count} row(s)`);
+        } else if (typeof edit.sheet === 'string' && typeof edit.cell === 'string') {
+          const ref = `${edit.sheet}!${edit.cell}`;
+          beforeLines.push(`${ref}: (current)`);
+          const nextDesc =
+            edit.clear === true
+              ? '(empty)'
+              : typeof edit.formula === 'string'
+                ? edit.formula.startsWith('=')
+                  ? edit.formula
+                  : `=${edit.formula}`
+                : edit.value !== undefined
+                  ? JSON.stringify(edit.value)
+                  : '(unchanged)';
+          const fmtSuffix = typeof edit.numFmt === 'string' && edit.numFmt ? ` [numFmt: ${edit.numFmt}]` : '';
+          afterLines.push(`${ref}: ${nextDesc}${fmtSuffix}`);
+        }
+      }
+      if (afterLines.length > 0) {
+        return { before: beforeLines.join('\n'), after: afterLines.join('\n') };
+      }
+    }
+  }
   if (name === 'NotebookEdit') {
     const after = str(input.new_source);
     if (after !== null) return { before: str(input.old_source) ?? '', after };

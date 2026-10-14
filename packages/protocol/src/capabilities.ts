@@ -30,6 +30,7 @@ export const NOTABLE_EXECUTABLES = [
   'python3',
   'cargo',
   'go',
+  'libreoffice',
 ] as const;
 
 export const NotableExecutable = z.enum(NOTABLE_EXECUTABLES);

@@ -33,6 +33,7 @@
  *   resolve an entity or a DTD.
  */
 import fs from 'node:fs';
+import type * as XlsxSharedModule from '../sheets/xlsx-shared.js';
 
 export type ExtractKind = 'pdf' | 'docx' | 'xlsx' | 'pptx';
 export type ExtractTruncatedReason = 'time' | 'size' | 'memory';
@@ -374,27 +375,22 @@ async function extractPdf(data: Uint8Array, out: OutputStream, job: ExtractJob):
 
 // ---- Zip containers (docx, xlsx, pptx) ---------------------------------------
 
+let xlsxSharedPromise: Promise<typeof XlsxSharedModule> | null = null;
+function loadXlsxShared(): Promise<typeof XlsxSharedModule> {
+  xlsxSharedPromise ??= import(
+    new URL(import.meta.url.endsWith('.ts') ? '../sheets/xlsx-shared.ts' : '../sheets/xlsx-shared.js', import.meta.url).href
+  ) as Promise<typeof XlsxSharedModule>;
+  return xlsxSharedPromise;
+}
+
 /**
  * Reads a zip's central directory and refuses it before inflating anything if
- * the declared sizes add up to more than the cap — the cheap half of the zip
- * bomb defence. The other half is the worker's RSS cap, because a declared
- * size is the attacker's own claim.
+ * the declared sizes add up to more than the cap — shared with the spreadsheet
+ * tools (`sheets/xlsx-shared.ts`).
  */
 async function readZip(data: Uint8Array, job: ExtractJob, want: (name: string) => boolean): Promise<Record<string, Uint8Array>> {
-  const { unzipSync } = await import('fflate');
-  let declared = 0;
-  unzipSync(data, {
-    filter(file) {
-      declared += file.originalSize;
-      return false;
-    },
-  });
-  if (declared > job.maxUnzippedBytes) {
-    throw new Error(
-      `The document unpacks to ${Math.round(declared / (1024 * 1024))} MB, over the ${Math.round(job.maxUnzippedBytes / (1024 * 1024))} MB limit.`,
-    );
-  }
-  return unzipSync(data, { filter: (file) => want(file.name) });
+  const { readZipSafe } = await loadXlsxShared();
+  return readZipSafe(data, job.maxUnzippedBytes, want);
 }
 
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
@@ -708,29 +704,6 @@ async function extractDocx(data: Uint8Array, out: OutputStream, job: ExtractJob)
 
 // ---- XLSX (PA-139 §2) --------------------------------------------------------
 
-/** `B12` → 1 (zero-based column). */
-function columnIndex(ref: string): number {
-  let n = 0;
-  for (const ch of ref) {
-    const code = ch.charCodeAt(0);
-    if (code < 65 || code > 90) break;
-    n = n * 26 + (code - 64);
-  }
-  return n - 1;
-}
-
-/** Zero-based column index → Excel column letters (`0` → `A`, `26` → `AA`). */
-function columnLetters(col: number): string {
-  let n = col + 1;
-  let out = '';
-  while (n > 0) {
-    const rem = (n - 1) % 26;
-    out = String.fromCharCode(65 + rem) + out;
-    n = Math.floor((n - 1) / 26);
-  }
-  return out || 'A';
-}
-
 function csvCell(value: string): string {
   return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
@@ -739,131 +712,6 @@ function csvCell(value: string): string {
 const MAX_COLUMNS = 16_384;
 /** Maximum consecutive blank lines emitted for an empty row gap in one sheet. */
 const MAX_EMPTY_ROW_GAP = 5_000;
-
-type XlsxNumberStyle =
-  | { kind: 'general' }
-  | { kind: 'date' }
-  | { kind: 'datetime' }
-  | { kind: 'time' }
-  | { kind: 'percent'; decimals: number }
-  | { kind: 'currency'; symbol: string; decimals: number };
-
-const BUILTIN_DATE_IDS = new Set([14, 15, 16, 17, 27, 28, 29, 30, 31, 36, 50, 51, 52, 53, 54, 55, 56, 57, 58]);
-const BUILTIN_TIME_IDS = new Set([18, 19, 20, 21, 32, 33, 34, 35, 45, 46, 47]);
-const BUILTIN_CURRENCY_IDS = new Set([5, 6, 7, 8, 37, 38, 39, 40, 41, 42, 43, 44]);
-
-function classifyNumberFormat(numFmtId: number, formatCode: string | undefined): XlsxNumberStyle {
-  if (BUILTIN_DATE_IDS.has(numFmtId)) return { kind: 'date' };
-  if (numFmtId === 22) return { kind: 'datetime' };
-  if (BUILTIN_TIME_IDS.has(numFmtId)) return { kind: 'time' };
-  if (numFmtId === 9) return { kind: 'percent', decimals: 0 };
-  if (numFmtId === 10) return { kind: 'percent', decimals: 2 };
-  if (BUILTIN_CURRENCY_IDS.has(numFmtId)) {
-    return { kind: 'currency', symbol: '$', decimals: numFmtId === 5 || numFmtId === 6 || numFmtId === 37 || numFmtId === 38 ? 0 : 2 };
-  }
-  if (!formatCode) return { kind: 'general' };
-
-  // Inspect first format section, stripping quoted literals and escapes.
-  let bracketCurrency: string | null = null;
-  const cleaned = (formatCode.split(';')[0] ?? '')
-    .replace(/"[^"]*"/g, '')
-    .replace(/\\./g, '')
-    .replace(/\[([^\]]*)\]/g, (_m, inner: string) => {
-      if (inner.startsWith('$') && inner.length > 1) {
-        const sym = inner.slice(1).split('-')[0] ?? '';
-        if (sym) bracketCurrency = sym;
-      }
-      return '';
-    });
-
-  if (cleaned.includes('%')) {
-    const decMatch = /\.(0+)/.exec(cleaned);
-    return { kind: 'percent', decimals: decMatch ? decMatch[1]!.length : 0 };
-  }
-
-  const hasDate = /[yYdD]/.test(cleaned) || (/m+/i.test(cleaned) && !/[#0]/.test(cleaned));
-  const hasTime = /[hHsS]/.test(cleaned);
-  if ((hasDate || hasTime) && !/[#]/.test(cleaned)) {
-    if (hasDate && hasTime) return { kind: 'datetime' };
-    if (hasTime) return { kind: 'time' };
-    return { kind: 'date' };
-  }
-
-  const currencySymbol = bracketCurrency ?? (/([$€£¥])/.exec(cleaned)?.[1] ?? null);
-  if (currencySymbol) {
-    const decMatch = /\.(0+)/.exec(cleaned);
-    return { kind: 'currency', symbol: currencySymbol, decimals: decMatch ? decMatch[1]!.length : 0 };
-  }
-
-  return { kind: 'general' };
-}
-
-function parseXlsxStyles(stylesXml: string): XlsxNumberStyle[] {
-  if (!stylesXml) return [];
-  const customFmts = new Map<number, string>();
-  for (const m of stylesXml.matchAll(/<numFmt\b([^>]*)\/?>/g)) {
-    const attrs = m[1] ?? '';
-    const id = Number(/\bnumFmtId="(\d+)"/.exec(attrs)?.[1] ?? NaN);
-    const code = decodeXml(/\bformatCode="([^"]*)"/.exec(attrs)?.[1] ?? '');
-    if (Number.isFinite(id) && code) customFmts.set(id, code);
-  }
-  const cellXfsBlock = /<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/.exec(stylesXml)?.[1] ?? '';
-  const styles: XlsxNumberStyle[] = [];
-  for (const m of cellXfsBlock.matchAll(/<xf\b([^>]*?)(?:\/>|>[\s\S]*?<\/xf>)/g)) {
-    const attrs = m[1] ?? '';
-    const numFmtId = Number(/\bnumFmtId="(\d+)"/.exec(attrs)?.[1] ?? 0);
-    styles.push(classifyNumberFormat(numFmtId, customFmts.get(numFmtId)));
-  }
-  return styles;
-}
-
-function formatExcelDate(serial: number, kind: 'date' | 'datetime' | 'time', date1904: boolean): string | null {
-  if (!Number.isFinite(serial)) return null;
-  const pad2 = (n: number) => String(n).padStart(2, '0');
-  if (kind === 'time') {
-    const frac = ((serial % 1) + 1) % 1;
-    const totalSec = Math.round(frac * 86_400) % 86_400;
-    const hh = Math.floor(totalSec / 3600);
-    const mm = Math.floor((totalSec % 3600) / 60);
-    const ss = totalSec % 60;
-    return `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}`;
-  }
-  // Excel 1900 epoch has the Lotus 1-2-3 leap-year bug at serial 60 (1900-02-29).
-  const epochOffset = date1904 ? 24_107 : serial >= 60 ? 25_569 : 25_568;
-  const totalSeconds = Math.round((serial - epochOffset) * 86_400);
-  const d = new Date(totalSeconds * 1000);
-  if (Number.isNaN(d.getTime())) return null;
-  const datePart = `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
-  const daySec = ((totalSeconds % 86_400) + 86_400) % 86_400;
-  if (kind === 'datetime' || daySec !== 0) {
-    const hh = Math.floor(daySec / 3600);
-    const mm = Math.floor((daySec % 3600) / 60);
-    const ss = daySec % 60;
-    return `${datePart}T${pad2(hh)}:${pad2(mm)}:${pad2(ss)}`;
-  }
-  return datePart;
-}
-
-function formatXlsxNumber(raw: string, style: XlsxNumberStyle | undefined, date1904: boolean): string {
-  if (!style || style.kind === 'general' || raw === '') return raw;
-  const num = Number(raw);
-  if (!Number.isFinite(num)) return raw;
-  if (style.kind === 'date' || style.kind === 'datetime' || style.kind === 'time') {
-    return formatExcelDate(num, style.kind, date1904) ?? raw;
-  }
-  if (style.kind === 'percent') {
-    const scaled = num * 100;
-    const formatted = style.decimals > 0 ? scaled.toFixed(style.decimals) : String(Math.round(scaled * 1e6) / 1e6);
-    return `${formatted}%`;
-  }
-  if (style.kind === 'currency') {
-    const sign = num < 0 ? '-' : '';
-    const abs = Math.abs(num);
-    const formatted = style.decimals > 0 ? abs.toFixed(style.decimals) : String(Math.round(abs));
-    return `${sign}${style.symbol}${formatted}`;
-  }
-  return raw;
-}
 
 function safeSheetFilePart(name: string, index: number, used: Set<string>): string {
   const cleaned =
@@ -880,48 +728,17 @@ function safeSheetFilePart(name: string, index: number, used: Set<string>): stri
   return candidate;
 }
 
-function parseWorksheetComments(
-  sheetFile: string,
-  files: Record<string, Uint8Array>,
-): Array<{ ref: string; author?: string | undefined; text: string }> {
-  const m = /^xl\/worksheets\/(sheet\d+\.xml)$/.exec(sheetFile);
-  if (!m) return [];
-  const relsXml = utf8(files[`xl/worksheets/_rels/${m[1]}.rels`]);
-  const commentTargets: string[] = [];
-  for (const rel of relsXml.matchAll(/<Relationship\s([^>]*?)\/?>/g)) {
-    const target = /\bTarget="([^"]*)"/.exec(rel[1] ?? '')?.[1] ?? '';
-    if (/comments\d*\.xml$|threadedComment\d*\.xml$/i.test(target)) {
-      const normalized = target.replace(/^(?:\.\.\/)+/, 'xl/').replace(/^\/?(xl\/)?/, 'xl/');
-      commentTargets.push(normalized);
-    }
-  }
-  if (commentTargets.length === 0) {
-    const num = /sheet(\d+)\.xml$/.exec(sheetFile)?.[1];
-    if (num && files[`xl/comments${num}.xml`]) commentTargets.push(`xl/comments${num}.xml`);
-  }
-
-  const out: Array<{ ref: string; author?: string | undefined; text: string }> = [];
-  for (const target of commentTargets) {
-    const xml = utf8(files[target]);
-    if (!xml) continue;
-    const authors: string[] = [];
-    for (const a of xml.matchAll(/<author\b[^>]*>([\s\S]*?)<\/author>/g)) {
-      authors.push(decodeXml(a[1] ?? '').trim());
-    }
-    for (const c of xml.matchAll(/<(?:comment|threadedComment)\b([^>]*)>([\s\S]*?)<\/(?:comment|threadedComment)>/g)) {
-      const attrs = c[1] ?? '';
-      const body = c[2] ?? '';
-      const ref = /\bref="([^"]+)"/.exec(attrs)?.[1] ?? '';
-      const authorId = /\bauthorId="(\d+)"/.exec(attrs)?.[1];
-      const author = authorId !== undefined ? authors[Number(authorId)] : undefined;
-      const text = runs(body.replace(/<rPh[\s\S]*?<\/rPh>/g, ''), 't').trim();
-      if (ref && text) out.push({ ref, ...(author ? { author } : {}), text });
-    }
-  }
-  return out;
-}
-
 async function extractXlsx(data: Uint8Array, out: OutputStream, job: ExtractJob): Promise<void> {
+  const {
+    columnIndex,
+    columnLetters,
+    parseXlsxStyles,
+    formatXlsxNumber,
+    parseSharedStrings,
+    parseWorkbookSheets,
+    parseWorksheetComments,
+  } = await loadXlsxShared();
+
   const files = await readZip(
     data,
     job,
@@ -936,39 +753,11 @@ async function extractXlsx(data: Uint8Array, out: OutputStream, job: ExtractJob)
       /^xl\/threadedComments\/threadedComment\d*\.xml$/.test(name),
   );
 
-  const shared: string[] = [];
-  for (const m of utf8(files['xl/sharedStrings.xml']).matchAll(/<si>([\s\S]*?)<\/si>/g)) {
-    // Phonetic guides (`rPh`) repeat the text in another script; skip them.
-    shared.push(runs((m[1] ?? '').replace(/<rPh[\s\S]*?<\/rPh>/g, ''), 't'));
-  }
-
-  const workbookXml = utf8(files['xl/workbook.xml']);
-  const date1904 = /<workbookPr\b[^>]*?\bdate1904="(?:1|true)"/i.test(workbookXml);
+  const shared = parseSharedStrings(utf8(files['xl/sharedStrings.xml']));
+  const { sheets: parsedSheets, date1904 } = parseWorkbookSheets(files);
   const styles = parseXlsxStyles(utf8(files['xl/styles.xml']));
+  const sheets = parsedSheets.map((s) => ({ name: s.name, file: s.file, hidden: s.hidden }));
 
-  // Sheet order, names and hidden flags come from the workbook; the file for each, from its rels.
-  const rels = new Map<string, string>();
-  for (const m of utf8(files['xl/_rels/workbook.xml.rels']).matchAll(/<Relationship\s([^>]*?)\/?>/g)) {
-    const attrs = m[1] ?? '';
-    const id = /\bId="([^"]*)"/.exec(attrs)?.[1];
-    const target = /\bTarget="([^"]*)"/.exec(attrs)?.[1];
-    if (id && target) rels.set(id, target.replace(/^\/?(xl\/)?/, 'xl/'));
-  }
-  const sheets: Array<{ name: string; file: string; hidden: boolean }> = [];
-  for (const m of workbookXml.matchAll(/<sheet\s([^>]*?)\/?>/g)) {
-    const attrs = m[1] ?? '';
-    const name = decodeXml(/\bname="([^"]*)"/.exec(attrs)?.[1] ?? `Sheet${sheets.length + 1}`);
-    const rid = /\br:id="([^"]*)"/.exec(attrs)?.[1] ?? '';
-    const state = /\bstate="([^"]*)"/.exec(attrs)?.[1] ?? '';
-    const hidden = state === 'hidden' || state === 'veryHidden';
-    const file = rels.get(rid) ?? `xl/worksheets/sheet${sheets.length + 1}.xml`;
-    sheets.push({ name, file, hidden });
-  }
-  if (sheets.length === 0) {
-    for (const name of Object.keys(files).filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort(byNumber)) {
-      sheets.push({ name: name.replace(/^.*\/|\.xml$/g, ''), file: name, hidden: false });
-    }
-  }
 
   out.totalPages = sheets.length;
   const usedSheetSuffixes = new Set<string>();
