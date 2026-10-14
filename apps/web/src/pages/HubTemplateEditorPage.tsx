@@ -126,7 +126,7 @@ export function HubTemplateEditorPage({
     // `payload` is `unknown` on the wire on purpose — its shape is decided by
     // `kind` — so it goes through the same `parseTemplatePayload` the Hub's own
     // routes use rather than being cast into a draft.
-    const spec = parseTemplatePayload(row.kind, row.payload);
+    const spec = parseTemplatePayload(row.kind, row.payload, row.name);
     if (!spec.ok) {
       setError(`This template's payload could not be read: ${spec.message}`);
       return;
@@ -331,7 +331,7 @@ export function HubTemplateEditorPage({
         setImportSuccess(null);
         return;
       }
-      const parsed = parseTemplatePayload(kind, tpl.payload);
+      const parsed = parseTemplatePayload(kind, tpl.payload, tpl.name);
       if (!parsed.ok) {
         setError(`Invalid template payload: ${parsed.message}`);
         setImportSuccess(null);
@@ -970,19 +970,26 @@ function KindFields({
         </SectionCard>
       );
 
-    case 'planner-endpoint':
+    case 'planner-provider':
       return (
         <SectionCard
-          title="Pocket Agent LLM endpoint"
+          title="Pocket Agent provider"
           icon="shield"
-          desc="Host-wide. It carries no yolo switch and no tool-iteration cap: those are not a template's to set across a fleet."
+          desc="An OpenAI-compatible Pocket Agent LLM provider and its model catalog."
         >
+          <TextRow
+            label="Provider label"
+            value={draft.name}
+            busy={busy}
+            placeholder="OpenRouter"
+            onChange={(v) => set('name', v)}
+          />
           <TextRow
             label="Base URL"
             value={draft.baseUrl}
             busy={busy}
             mono
-            placeholder="https://api.openai.com/v1"
+            placeholder="https://openrouter.ai/api/v1"
             onChange={(v) => set('baseUrl', v)}
           />
           <TextRow
@@ -996,38 +1003,12 @@ function KindFields({
             help="One per line, as `model-id` or `model-id | label`. The label defaults to the id."
             onChange={(v) => set('models', v)}
           />
-          <TextRow
-            label="Embedding base URL"
-            value={draft.embeddingBaseUrl}
+          <BoolRow
+            label="Allow unattended use"
+            checked={draft.allowUnattended}
             busy={busy}
-            mono
-            placeholder="optional"
-            help="Set this and the run asks for an embedding key, which is optional — leaving it blank keeps whatever key the host already has."
-            onChange={(v) => set('embeddingBaseUrl', v)}
-          />
-          <TextRow
-            label="Embedding model"
-            value={draft.embeddingModelId}
-            busy={busy}
-            mono
-            placeholder="optional"
-            onChange={(v) => set('embeddingModelId', v)}
-          />
-          <TextRow
-            label="Web search base URL"
-            value={draft.webSearchBaseUrl}
-            busy={busy}
-            mono
-            placeholder="optional"
-            onChange={(v) => set('webSearchBaseUrl', v)}
-          />
-          <TextRow
-            label="URL fetch base URL"
-            value={draft.urlFetchBaseUrl}
-            busy={busy}
-            mono
-            placeholder="optional"
-            onChange={(v) => set('urlFetchBaseUrl', v)}
+            help="Off by default. Carried on the provider for phase 2 unattended gating."
+            onChange={(v) => set('allowUnattended', v)}
           />
         </SectionCard>
       );

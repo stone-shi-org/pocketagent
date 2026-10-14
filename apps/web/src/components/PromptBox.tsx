@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useMemo,
   useRef,
@@ -1010,34 +1011,41 @@ export function PromptBox({
       )}
       {modelPickerVisible && (
         <div className="model-picker" role="listbox" aria-label="Models" ref={modelPickerRef}>
-          {models.map((model) => {
+          {models.map((model, idx) => {
             const isCurrent = model.value === currentModelInfo?.value;
+            const showGroupHeader = Boolean(model.group && model.group !== models[idx - 1]?.group);
             return (
-              <button
-                key={model.value}
-                type="button"
-                role="option"
-                aria-selected={isCurrent}
-                className={isCurrent ? 'active' : ''}
-                onMouseDown={(e) => {
-                  // mousedown (not click) so this fires before the document-level
-                  // pointerdown-based outside-click dismissal above resolves —
-                  // both see the same press, but picking a row this way and
-                  // being dismissed as "outside" would otherwise race.
-                  e.preventDefault();
-                  pickModel(model);
-                }}
-              >
-                <span className="model-row">
-                  <span className="model-name">{model.displayName}</span>
-                  {/* The `.active` background alone reads as "hovered" at a
-                      glance on a phone, where there is no hover state to
-                      contrast it against — a checkmark is the one indicator
-                      that survives on a static screenshot too. */}
-                  {isCurrent && <Icon name="check" size={14} />}
-                </span>
-                {model.description && <span className="model-desc">{model.description}</span>}
-              </button>
+              <Fragment key={model.value}>
+                {showGroupHeader && (
+                  <div className="model-picker-divider" role="separator">
+                    {model.group}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={isCurrent}
+                  className={isCurrent ? 'active' : ''}
+                  onMouseDown={(e) => {
+                    // mousedown (not click) so this fires before the document-level
+                    // pointerdown-based outside-click dismissal above resolves —
+                    // both see the same press, but picking a row this way and
+                    // being dismissed as "outside" would otherwise race.
+                    e.preventDefault();
+                    pickModel(model);
+                  }}
+                >
+                  <span className="model-row">
+                    <span className="model-name">{model.displayName}</span>
+                    {/* The `.active` background alone reads as "hovered" at a
+                        glance on a phone, where there is no hover state to
+                        contrast it against — a checkmark is the one indicator
+                        that survives on a static screenshot too. */}
+                    {isCurrent && <Icon name="check" size={14} />}
+                  </span>
+                  {model.description && <span className="model-desc">{model.description}</span>}
+                </button>
+              </Fragment>
             );
           })}
           {effortLevels.length > 0 && (

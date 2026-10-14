@@ -358,7 +358,13 @@ describe('planner routes over HTTP', () => {
   }) as unknown as typeof fetch;
 
   beforeEach(async () => {
-    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl);
+    t = await createTestApp(
+      { POCKETAGENT_SETTINGS_ENC_KEY: Buffer.alloc(32, 7).toString('base64') },
+      undefined,
+      undefined,
+      undefined,
+      fetchImpl,
+    );
   });
 
   afterEach(async () => {
@@ -1048,27 +1054,21 @@ describe('planner routes over HTTP', () => {
   it('an omitted apiKey on PATCH leaves the stored key untouched', async () => {
     await patch('/api/planner/settings', { apiKey: 'sk-first' });
     await patch('/api/planner/settings', { yoloEnabled: true });
-    const revealed = await post('/api/planner/settings/api-key/reveal');
-    expect(revealed.json().apiKey).toBe('sk-first');
+    expect((await get('/api/planner/settings')).json().hasApiKey).toBe(true);
+    const providers = (await get('/api/planner/providers')).json().providers;
+    expect(providers[0]?.hasApiKey).toBe(true);
   });
 
   it('an empty-string apiKey on PATCH clears it', async () => {
     await patch('/api/planner/settings', { apiKey: 'sk-first' });
     await patch('/api/planner/settings', { apiKey: '' });
     expect((await get('/api/planner/settings')).json().hasApiKey).toBe(false);
-    const revealed = await post('/api/planner/settings/api-key/reveal');
-    expect(revealed.statusCode).toBe(404);
+    const providers = (await get('/api/planner/providers')).json().providers;
+    expect(providers[0]?.hasApiKey).toBe(false);
   });
 
-  it('reveals the exact configured API key', async () => {
+  it('404s POST /api/planner/settings/api-key/reveal (PA-148: provider keys are write-only)', async () => {
     await patch('/api/planner/settings', { apiKey: 'sk-reveal-me' });
-    const res = await post('/api/planner/settings/api-key/reveal');
-    expect(res.statusCode).toBe(200);
-    expect(res.json().apiKey).toBe('sk-reveal-me');
-    expect(res.headers['cache-control']).toBe('no-store');
-  });
-
-  it('404s revealing when no key is configured', async () => {
     const res = await post('/api/planner/settings/api-key/reveal');
     expect(res.statusCode).toBe(404);
   });

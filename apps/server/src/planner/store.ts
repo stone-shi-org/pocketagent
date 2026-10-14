@@ -1,5 +1,13 @@
 import crypto from 'node:crypto';
-import type { PlannerChat, PlannerLiveProvider, PlannerMemory, PlannerMemoryTier } from '@pocketagent/protocol';
+import type { FastifyBaseLogger } from 'fastify';
+import type {
+  PlannerChat,
+  PlannerLiveProvider,
+  PlannerMemory,
+  PlannerMemoryTier,
+  PlannerProvider,
+  PlannerProviderKind,
+} from '@pocketagent/protocol';
 import {
   DEFAULT_INLINE_EXTRACT_MAX_TOKENS,
   DEFAULT_INLINE_TEXT_MAX_BYTES,
@@ -9,7 +17,17 @@ import {
   PromptImage,
 } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
-import { readSetting, writeSetting } from '../db/index.js';
+import {
+  PLANNER_PROVIDERS_KEY_MIGRATED_KEY,
+  readSetting,
+  remapLegacyPlannerModelReferences,
+  writeSetting,
+} from '../db/index.js';
+import {
+  SETTINGS_ENC_KEY_VAR,
+  decryptSecret,
+  encryptSecret,
+} from '../crypto/secret-box.js';
 import type { PlannerWorkspaceRow, PlannerWorkspaceStore } from './workspaces.js';
 
 // ---- planner_workspaces -----------------------------------------------------
@@ -280,10 +298,339 @@ export function setMcpRegistryEnabledForWorkspace(
   }
 }
 
+// ---- planner_providers (PA-148) ---------------------------------------------
+
+export const DEFAULT_PLANNER_PROVIDER_ID = 'default';
+export const DEFAULT_PLANNER_PROVIDER_LABEL = 'Default';
+
+export class PlannerProviderStoreError extends Error {
+  override readonly name = 'PlannerProviderStoreError';
+  constructor(
+    message: string,
+    readonly code: 'not_found' | 'invalid' | 'encryption_unavailable',
+    readonly statusCode: number,
+  ) {
+    super(message);
+  }
+}
+
+export interface PlannerProviderRow {
+  id: string;
+  label: string;
+  kind: PlannerProviderKind;
+  baseUrl: string;
+  secretCiphertext: string | null;
+  allowUnattended: boolean;
+  sortOrder: number;
+  createdAt: number;
+  lastTestedAt: number | null;
+  lastError: string | null;
+}
+
+interface PlannerProviderDbRow {
+  id: string;
+  label: string;
+  kind: string;
+  base_url: string;
+  secret_ciphertext: string | null;
+  allow_unattended: number;
+  sort_order: number;
+  created_at: number;
+  last_tested_at: number | null;
+  last_error: string | null;
+}
+
+function toProviderKind(_raw: string | null | undefined): PlannerProviderKind {
+  return 'openai-compatible';
+}
+
+function providerFromDbRow(row: PlannerProviderDbRow): PlannerProviderRow {
+  return {
+    id: row.id,
+    label: row.label,
+    kind: toProviderKind(row.kind),
+    baseUrl: row.base_url,
+    secretCiphertext: row.secret_ciphertext ?? null,
+    allowUnattended: row.allow_unattended === 1,
+    sortOrder: row.sort_order,
+    createdAt: row.created_at,
+    lastTestedAt: row.last_tested_at ?? null,
+    lastError: row.last_error ?? null,
+  };
+}
+
+export function decryptPlannerProviderSecret(
+  provider: PlannerProviderRow,
+  encKey: Buffer | undefined,
+): { apiKey: string | null; error: string | null } {
+  if (!provider.secretCiphertext) return { apiKey: null, error: null };
+  if (encKey === undefined) {
+    return {
+      apiKey: null,
+      error: `Set ${SETTINGS_ENC_KEY_VAR} to decrypt this provider's API key.`,
+    };
+  }
+  try {
+    return { apiKey: decryptSecret(provider.secretCiphertext, encKey), error: null };
+  } catch {
+    return {
+      apiKey: null,
+      error: `Could not decrypt this provider's API key with the configured ${SETTINGS_ENC_KEY_VAR}. Re-enter the key in Settings to repair it.`,
+    };
+  }
+}
+
+export function encryptPlannerProviderSecret(apiKey: string, encKey: Buffer | undefined): string {
+  return encryptSecret(apiKey, requirePlannerProviderEncKey(encKey));
+}
+
+export function toPlannerProviderDto(row: PlannerProviderRow, encKey?: Buffer): PlannerProvider {
+  const decryptStatus = row.secretCiphertext
+    ? decryptPlannerProviderSecret(row, encKey)
+    : { apiKey: null, error: null };
+  return {
+    id: row.id,
+    label: row.label,
+    kind: row.kind,
+    baseUrl: row.baseUrl,
+    hasApiKey: row.secretCiphertext !== null && row.secretCiphertext.length > 0,
+    keyUnreadable: decryptStatus.error !== null,
+    allowUnattended: row.allowUnattended,
+    sortOrder: row.sortOrder,
+    createdAt: row.createdAt,
+    lastTestedAt: row.lastTestedAt,
+    lastError: row.lastError ?? decryptStatus.error,
+  };
+}
+
+export function readPlannerProviders(db: Db): PlannerProviderRow[] {
+  return (
+    db.prepare('SELECT * FROM planner_providers ORDER BY sort_order, created_at').all() as PlannerProviderDbRow[]
+  ).map(providerFromDbRow);
+}
+
+export function readPlannerProvider(db: Db, id: string): PlannerProviderRow | null {
+  const row = db.prepare('SELECT * FROM planner_providers WHERE id = ?').get(id) as
+    | PlannerProviderDbRow
+    | undefined;
+  return row ? providerFromDbRow(row) : null;
+}
+
+export function readDefaultOrFirstPlannerProvider(db: Db): PlannerProviderRow | null {
+  return readPlannerProvider(db, DEFAULT_PLANNER_PROVIDER_ID) ?? readPlannerProviders(db)[0] ?? null;
+}
+
+export function nextPlannerProviderSortOrder(db: Db): number {
+  const row = db.prepare('SELECT MAX(sort_order) as maxOrder FROM planner_providers').get() as {
+    maxOrder: number | null;
+  };
+  return (row.maxOrder ?? -1) + 1;
+}
+
+export function insertPlannerProvider(
+  db: Db,
+  row: Omit<PlannerProviderRow, 'kind' | 'allowUnattended' | 'lastTestedAt' | 'lastError'> &
+    Partial<Pick<PlannerProviderRow, 'kind' | 'allowUnattended' | 'lastTestedAt' | 'lastError'>>,
+): PlannerProviderRow {
+  const full: PlannerProviderRow = {
+    id: row.id,
+    label: row.label,
+    kind: row.kind ?? 'openai-compatible',
+    baseUrl: row.baseUrl,
+    secretCiphertext: row.secretCiphertext ?? null,
+    allowUnattended: row.allowUnattended ?? false,
+    sortOrder: row.sortOrder,
+    createdAt: row.createdAt,
+    lastTestedAt: row.lastTestedAt ?? null,
+    lastError: row.lastError ?? null,
+  };
+  db.prepare(
+    `INSERT INTO planner_providers
+       (id, label, kind, base_url, secret_ciphertext, allow_unattended, sort_order, created_at, last_tested_at, last_error)
+     VALUES (@id, @label, @kind, @baseUrl, @secretCiphertext, @allowUnattended, @sortOrder, @createdAt, @lastTestedAt, @lastError)`,
+  ).run({
+    id: full.id,
+    label: full.label,
+    kind: full.kind,
+    baseUrl: full.baseUrl,
+    secretCiphertext: full.secretCiphertext,
+    allowUnattended: full.allowUnattended ? 1 : 0,
+    sortOrder: full.sortOrder,
+    createdAt: full.createdAt,
+    lastTestedAt: full.lastTestedAt,
+    lastError: full.lastError,
+  });
+  return full;
+}
+
+export function ensureDefaultPlannerProvider(db: Db, baseUrl = ''): PlannerProviderRow {
+  const existing = readDefaultOrFirstPlannerProvider(db);
+  if (existing) return existing;
+  return insertPlannerProvider(db, {
+    id: DEFAULT_PLANNER_PROVIDER_ID,
+    label: DEFAULT_PLANNER_PROVIDER_LABEL,
+    kind: 'openai-compatible',
+    baseUrl,
+    secretCiphertext: null,
+    allowUnattended: false,
+    sortOrder: 0,
+    createdAt: Date.now(),
+  });
+}
+
+export function updatePlannerProvider(
+  db: Db,
+  id: string,
+  patch: {
+    label?: string;
+    kind?: PlannerProviderKind;
+    baseUrl?: string;
+    secretCiphertext?: string | null;
+    allowUnattended?: boolean;
+    sortOrder?: number;
+    lastTestedAt?: number | null;
+    lastError?: string | null;
+  },
+): PlannerProviderRow | null {
+  const assignments: string[] = [];
+  const params: Record<string, unknown> = { id };
+  if (patch.label !== undefined) {
+    assignments.push('label = @label');
+    params.label = patch.label;
+  }
+  if (patch.kind !== undefined) {
+    assignments.push('kind = @kind');
+    params.kind = patch.kind;
+  }
+  if (patch.baseUrl !== undefined) {
+    assignments.push('base_url = @baseUrl');
+    params.baseUrl = patch.baseUrl;
+  }
+  if (patch.secretCiphertext !== undefined) {
+    assignments.push('secret_ciphertext = @secretCiphertext');
+    params.secretCiphertext = patch.secretCiphertext;
+  }
+  if (patch.allowUnattended !== undefined) {
+    assignments.push('allow_unattended = @allowUnattended');
+    params.allowUnattended = patch.allowUnattended ? 1 : 0;
+  }
+  if (patch.sortOrder !== undefined) {
+    assignments.push('sort_order = @sortOrder');
+    params.sortOrder = patch.sortOrder;
+  }
+  if (patch.lastTestedAt !== undefined) {
+    assignments.push('last_tested_at = @lastTestedAt');
+    params.lastTestedAt = patch.lastTestedAt;
+  }
+  if (patch.lastError !== undefined) {
+    assignments.push('last_error = @lastError');
+    params.lastError = patch.lastError;
+  }
+  if (assignments.length === 0) return readPlannerProvider(db, id);
+  const res = db.prepare(`UPDATE planner_providers SET ${assignments.join(', ')} WHERE id = @id`).run(params);
+  if (res.changes === 0) return null;
+  return readPlannerProvider(db, id);
+}
+
+export function recordPlannerProviderTestResult(
+  db: Db,
+  id: string,
+  result: { ok: boolean; error?: string | null; at?: number },
+): PlannerProviderRow | null {
+  return updatePlannerProvider(db, id, {
+    lastTestedAt: result.at ?? Date.now(),
+    lastError: result.ok ? null : (result.error ?? 'Connection failed.'),
+  });
+}
+
+export function deletePlannerProvider(db: Db, id: string): boolean {
+  return db.prepare('DELETE FROM planner_providers WHERE id = ?').run(id).changes > 0;
+}
+
+export function requirePlannerProviderEncKey(encKey: Buffer | undefined): Buffer {
+  if (encKey === undefined) {
+    throw new PlannerProviderStoreError(
+      `Set ${SETTINGS_ENC_KEY_VAR} to store Pocket Agent provider API keys.`,
+      'encryption_unavailable',
+      409,
+    );
+  }
+  return encKey;
+}
+
+/**
+ * PA-148: One-time migration of legacy `planner_llm_base_url` / `planner_llm_api_key`
+ * settings into the Default `planner_providers` row (`id = 'default'`), plus
+ * remapping bare `model_id` references across chats, workspaces, settings,
+ * cron jobs, and webhooks.
+ *
+ * Follows PA-28's deferral rule when `planner_llm_api_key` is non-empty and
+ * `POCKETAGENT_SETTINGS_ENC_KEY` (`encKey`) is not set: never writes plaintext
+ * into `planner_providers.secret_ciphertext`, never fails boot, and leaves
+ * `PLANNER_PROVIDERS_KEY_MIGRATED_KEY` unset so the next boot with a key
+ * finishes encrypting and clearing the legacy setting.
+ */
+export function migrateLegacyPlannerSettings(
+  db: Db,
+  encKey: Buffer | undefined,
+  logger?: FastifyBaseLogger,
+): boolean {
+  remapLegacyPlannerModelReferences(db);
+
+  if (readSetting(db, PLANNER_PROVIDERS_KEY_MIGRATED_KEY) !== null) return false;
+
+  const legacyBaseUrl = (readSetting(db, PLANNER_LLM_BASE_URL_KEY) ?? '').trim();
+  const legacyApiKey = (readSetting(db, PLANNER_LLM_API_KEY_KEY) ?? '').trim();
+  const existingDefault = readPlannerProvider(db, DEFAULT_PLANNER_PROVIDER_ID);
+
+  if (!existingDefault && legacyBaseUrl.length === 0 && legacyApiKey.length === 0) {
+    return false;
+  }
+
+  let provider = existingDefault;
+  if (!provider) {
+    provider = insertPlannerProvider(db, {
+      id: DEFAULT_PLANNER_PROVIDER_ID,
+      label: DEFAULT_PLANNER_PROVIDER_LABEL,
+      kind: 'openai-compatible',
+      baseUrl: legacyBaseUrl,
+      secretCiphertext: null,
+      allowUnattended: false,
+      sortOrder: 0,
+      createdAt: Date.now(),
+    });
+  } else if (!provider.baseUrl && legacyBaseUrl.length > 0) {
+    provider = updatePlannerProvider(db, provider.id, { baseUrl: legacyBaseUrl }) ?? provider;
+  }
+
+  if (legacyApiKey.length > 0) {
+    if (encKey === undefined) {
+      logger?.warn(
+        `${PLANNER_LLM_API_KEY_KEY} is set in settings, but ${SETTINGS_ENC_KEY_VAR} is not configured; ` +
+          'deferring API key migration into planner_providers until a key is set.',
+      );
+      return false;
+    }
+    if (!provider.secretCiphertext) {
+      updatePlannerProvider(db, provider.id, {
+        secretCiphertext: encryptSecret(legacyApiKey, encKey),
+      });
+    }
+    writeSetting(db, PLANNER_LLM_API_KEY_KEY, '');
+  }
+
+  if (legacyBaseUrl.length > 0) {
+    writeSetting(db, PLANNER_LLM_BASE_URL_KEY, '');
+  }
+  writeSetting(db, PLANNER_PROVIDERS_KEY_MIGRATED_KEY, String(Date.now()));
+  return true;
+}
+
 // ---- planner_models ---------------------------------------------------------
 
 export interface PlannerModelRow {
   id: string;
+  providerId: string;
   modelId: string;
   label: string;
   sortOrder: number;
@@ -318,6 +665,7 @@ type PriceField = keyof typeof PRICE_COLUMNS;
 /** The columns a caller may leave out when adding a row — each defaults to
     "not set". */
 type OptionalModelColumns =
+  | 'providerId'
   | 'contextWindow'
   | 'maxOutputTokens'
   | 'promptCaching'
@@ -335,6 +683,7 @@ function boolParam(value: boolean | null | undefined): number | null {
 
 interface PlannerModelDbRow {
   id: string;
+  provider_id: string;
   model_id: string;
   label: string;
   sort_order: number;
@@ -355,6 +704,7 @@ interface PlannerModelDbRow {
 function modelFromDbRow(row: PlannerModelDbRow): PlannerModelRow {
   return {
     id: row.id,
+    providerId: row.provider_id,
     modelId: row.model_id,
     label: row.label,
     sortOrder: row.sort_order,
@@ -373,25 +723,41 @@ function modelFromDbRow(row: PlannerModelDbRow): PlannerModelRow {
   };
 }
 
-export function readPlannerModels(db: Db): PlannerModelRow[] {
+export function readPlannerModels(db: Db, providerId?: string): PlannerModelRow[] {
+  if (providerId !== undefined) {
+    return (
+      db
+        .prepare('SELECT * FROM planner_models WHERE provider_id = ? ORDER BY sort_order, created_at')
+        .all(providerId) as PlannerModelDbRow[]
+    ).map(modelFromDbRow);
+  }
   return (
     db.prepare('SELECT * FROM planner_models ORDER BY sort_order, created_at').all() as PlannerModelDbRow[]
   ).map(modelFromDbRow);
 }
 
+export function readPlannerModelById(db: Db, id: string): PlannerModelRow | null {
+  const row = db.prepare('SELECT * FROM planner_models WHERE id = ?').get(id) as
+    | PlannerModelDbRow
+    | undefined;
+  return row ? modelFromDbRow(row) : null;
+}
+
 export function insertPlannerModel(
   db: Db,
   row: Omit<PlannerModelRow, OptionalModelColumns> & Partial<Pick<PlannerModelRow, OptionalModelColumns>>,
-): void {
+): PlannerModelRow {
+  const providerId = row.providerId ?? ensureDefaultPlannerProvider(db).id;
   db.prepare(
     `INSERT INTO planner_models
-       (id, model_id, label, sort_order, created_at, supports_effort, default_effort, context_window, max_output_tokens,
+       (id, provider_id, model_id, label, sort_order, created_at, supports_effort, default_effort, context_window, max_output_tokens,
         prompt_caching, price_input, price_output, price_cache_read, price_cache_write, supports_images, supports_pdf)
-     VALUES (@id, @modelId, @label, @sortOrder, @createdAt, @supportsEffort, @defaultEffort, @contextWindow, @maxOutputTokens,
+     VALUES (@id, @providerId, @modelId, @label, @sortOrder, @createdAt, @supportsEffort, @defaultEffort, @contextWindow, @maxOutputTokens,
         @promptCaching, @inputPricePerMTok, @outputPricePerMTok, @cacheReadPricePerMTok, @cacheWritePricePerMTok,
         @supportsImages, @supportsPdf)`,
   ).run({
     id: row.id,
+    providerId,
     modelId: row.modelId,
     label: row.label,
     sortOrder: row.sortOrder,
@@ -408,16 +774,87 @@ export function insertPlannerModel(
     supportsImages: boolParam(row.supportsImages),
     supportsPdf: boolParam(row.supportsPdf),
   });
+  return readPlannerModelById(db, row.id)!;
 }
 
 /** PA-121: the catalog row for a model id, if one exists — what the loop
     reads a context window from. First by sort order when an id is listed
-    twice. */
-export function readPlannerModelByModelId(db: Db, modelId: string): PlannerModelRow | null {
+    twice. Also accepts a `planner_models.id` UUID (PA-148). */
+export function readPlannerModelByModelId(
+  db: Db,
+  modelId: string,
+  providerId?: string,
+): PlannerModelRow | null {
+  const byId = readPlannerModelById(db, modelId);
+  if (byId && (providerId === undefined || byId.providerId === providerId)) return byId;
+  if (providerId !== undefined) {
+    const row = db
+      .prepare(
+        'SELECT * FROM planner_models WHERE provider_id = ? AND model_id = ? ORDER BY sort_order, created_at LIMIT 1',
+      )
+      .get(providerId, modelId) as PlannerModelDbRow | undefined;
+    return row ? modelFromDbRow(row) : null;
+  }
   const row = db
     .prepare('SELECT * FROM planner_models WHERE model_id = ? ORDER BY sort_order, created_at LIMIT 1')
     .get(modelId) as PlannerModelDbRow | undefined;
   return row ? modelFromDbRow(row) : null;
+}
+
+/**
+ * PA-148: Resolves a model reference (`planner_models.id` row UUID, or a
+ * legacy/uncatalogued bare `model_id` string) into its catalog row (if any),
+ * its owning `PlannerProviderRow` (or the default/first provider for an
+ * unmatched bare string), and the upstream `modelId` string sent to the
+ * provider API.
+ */
+export function resolvePlannerModel(
+  db: Db,
+  ref: string | null | undefined,
+): { row: PlannerModelRow | null; provider: PlannerProviderRow | null; modelId: string } {
+  const trimmed = (ref ?? '').trim();
+  if (!trimmed) {
+    return {
+      row: null,
+      provider: readDefaultOrFirstPlannerProvider(db),
+      modelId: '',
+    };
+  }
+  const byId = readPlannerModelById(db, trimmed);
+  if (byId) {
+    return {
+      row: byId,
+      provider: readPlannerProvider(db, byId.providerId),
+      modelId: byId.modelId,
+    };
+  }
+  const byModelId = readPlannerModelByModelId(db, trimmed);
+  if (byModelId) {
+    return {
+      row: byModelId,
+      provider: readPlannerProvider(db, byModelId.providerId),
+      modelId: byModelId.modelId,
+    };
+  }
+  const slashIdx = trimmed.indexOf('/');
+  if (slashIdx > 0) {
+    const candidateProviderId = trimmed.slice(0, slashIdx);
+    const candidateModelId = trimmed.slice(slashIdx + 1);
+    const provider = readPlannerProvider(db, candidateProviderId);
+    if (provider && candidateModelId.length > 0) {
+      const scopedRow = readPlannerModelByModelId(db, candidateModelId, provider.id);
+      return {
+        row: scopedRow,
+        provider,
+        modelId: scopedRow?.modelId ?? candidateModelId,
+      };
+    }
+  }
+  return {
+    row: null,
+    provider: readDefaultOrFirstPlannerProvider(db),
+    modelId: trimmed,
+  };
 }
 
 export function updatePlannerModel(
@@ -433,7 +870,7 @@ export function updatePlannerModel(
     supportsImages?: boolean | null;
     supportsPdf?: boolean | null;
   } & Partial<Record<PriceField, number | null>>,
-): boolean {
+): PlannerModelRow | null {
   const assignments: string[] = [];
   const params: Record<string, unknown> = { id };
   if (patch.label !== undefined) {
@@ -473,8 +910,10 @@ export function updatePlannerModel(
     assignments.push(`${PRICE_COLUMNS[field]} = @${field}`);
     params[field] = patch[field];
   }
-  if (assignments.length === 0) return false;
-  return db.prepare(`UPDATE planner_models SET ${assignments.join(', ')} WHERE id = @id`).run(params).changes > 0;
+  if (assignments.length === 0) return readPlannerModelById(db, id);
+  const res = db.prepare(`UPDATE planner_models SET ${assignments.join(', ')} WHERE id = @id`).run(params);
+  if (res.changes === 0) return null;
+  return readPlannerModelById(db, id);
 }
 
 export function deletePlannerModel(db: Db, id: string): boolean {
@@ -483,14 +922,12 @@ export function deletePlannerModel(db: Db, id: string): boolean {
 
 /**
  * Empties the catalog in one statement — PA-6 round 7's "delete all" button.
- * Safe to call on an already-empty table (returns 0). Nothing else needs
- * cleaning up alongside it: `planner_chats.last_model_id` and
- * `planner_workspaces.default_model_id` deliberately have no FK to this
- * table, so a chat or an agent still naming a model that is no longer
- * catalogued keeps working — the id is just a string the provider either
- * accepts or doesn't (see both columns' own doc comments).
+ * Optionally scoped to a single provider (PA-148).
  */
-export function deleteAllPlannerModels(db: Db): number {
+export function deleteAllPlannerModels(db: Db, providerId?: string): number {
+  if (providerId !== undefined) {
+    return db.prepare('DELETE FROM planner_models WHERE provider_id = ?').run(providerId).changes;
+  }
   return db.prepare('DELETE FROM planner_models').run().changes;
 }
 
@@ -692,9 +1129,14 @@ export interface PlannerSettingsSnapshot {
 }
 
 export function readPlannerSettings(db: Db): PlannerSettingsSnapshot {
+  const defaultProvider = readDefaultOrFirstPlannerProvider(db);
+  const legacyBaseUrl = readSetting(db, PLANNER_LLM_BASE_URL_KEY) || null;
+  const legacyHasKey = (readSetting(db, PLANNER_LLM_API_KEY_KEY) ?? '').length > 0;
   return {
-    baseUrl: readSetting(db, PLANNER_LLM_BASE_URL_KEY) || null,
-    hasApiKey: (readSetting(db, PLANNER_LLM_API_KEY_KEY) ?? '').length > 0,
+    baseUrl: defaultProvider ? defaultProvider.baseUrl || null : legacyBaseUrl,
+    hasApiKey: defaultProvider
+      ? (defaultProvider.secretCiphertext !== null && defaultProvider.secretCiphertext.length > 0) || legacyHasKey
+      : legacyHasKey,
     yoloEnabled: readSetting(db, PLANNER_YOLO_ENABLED_KEY) === '1',
     lastModelId: readSetting(db, PLANNER_LAST_MODEL_ID_KEY) || null,
     embeddingBaseUrl: readSetting(db, PLANNER_EMBEDDING_BASE_URL_KEY) || null,
@@ -846,11 +1288,32 @@ export function writePlannerCommandTimeoutSeconds(db: Db, n: number): void {
 }
 
 export function writePlannerBaseUrl(db: Db, baseUrl: string | null): void {
-  writeSetting(db, PLANNER_LLM_BASE_URL_KEY, baseUrl ?? '');
+  const normalized = (baseUrl ?? '').trim();
+  const existing = readDefaultOrFirstPlannerProvider(db);
+  if (existing) {
+    updatePlannerProvider(db, existing.id, { baseUrl: normalized });
+  } else if (normalized.length > 0) {
+    ensureDefaultPlannerProvider(db, normalized);
+  }
+  writeSetting(db, PLANNER_LLM_BASE_URL_KEY, '');
 }
 
-export function writePlannerApiKey(db: Db, apiKey: string | null): void {
-  writeSetting(db, PLANNER_LLM_API_KEY_KEY, apiKey ?? '');
+export function writePlannerApiKey(db: Db, apiKey: string | null, encKey?: Buffer): void {
+  const trimmed = (apiKey ?? '').trim();
+  if (trimmed.length === 0) {
+    const existing = readDefaultOrFirstPlannerProvider(db);
+    if (existing) {
+      updatePlannerProvider(db, existing.id, { secretCiphertext: null });
+    }
+    writeSetting(db, PLANNER_LLM_API_KEY_KEY, '');
+    return;
+  }
+  const key = requirePlannerProviderEncKey(encKey);
+  const provider = ensureDefaultPlannerProvider(db);
+  updatePlannerProvider(db, provider.id, {
+    secretCiphertext: encryptSecret(trimmed, key),
+  });
+  writeSetting(db, PLANNER_LLM_API_KEY_KEY, '');
 }
 
 export function writePlannerYoloEnabled(db: Db, enabled: boolean): void {
@@ -907,12 +1370,15 @@ export function writePlannerUrlFetchApiKey(db: Db, apiKey: string | null): void 
 }
 
 /**
- * The one read that carries the key. Rate-limited and logged at the route
- * (`routes/planner.ts`), mirroring `WebhookService.revealSecret` exactly.
+ * Decrypts the default/first provider's API key for internal server callers.
+ * Never exposed via an HTTP reveal route (PA-148).
  */
-export function revealPlannerApiKey(db: Db): string | null {
-  const value = readSetting(db, PLANNER_LLM_API_KEY_KEY);
-  return value && value.length > 0 ? value : null;
+export function revealPlannerApiKey(db: Db, encKey?: Buffer): string | null {
+  const provider = readDefaultOrFirstPlannerProvider(db);
+  if (provider?.secretCiphertext) {
+    return decryptPlannerProviderSecret(provider, encKey).apiKey;
+  }
+  return null;
 }
 
 /** The embedding provider's own reveal — same rate-limit/logging posture,

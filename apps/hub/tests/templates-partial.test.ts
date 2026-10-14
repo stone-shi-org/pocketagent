@@ -61,19 +61,24 @@ describe('partial application', () => {
   });
 
   it('fails the run when a non-optional step is refused', async () => {
-    // The model catalog is not optional: a planner endpoint whose models did
+    // The model catalog is not optional: a planner provider whose models did
     // not land leaves every chat on that host unable to pick one.
     const id = await createTemplate(hub, {
-      kind: 'planner-endpoint',
+      kind: 'planner-provider',
       name: 'House LLM',
       payload: {
+        label: 'House LLM',
+        kind: 'openai-compatible',
         baseUrl: 'https://llm.example.com/v1',
+        allowUnattended: false,
         models: [{ modelId: 'house-1', label: 'House 1' }],
-        embeddingBaseUrl: null,
-        embeddingModelId: null,
-        webSearchBaseUrl: null,
-        urlFetchBaseUrl: null,
       },
+    });
+    dev01.plannerProviders.push({
+      id: 'pp-existing',
+      label: 'House LLM',
+      kind: 'openai-compatible',
+      baseUrl: 'https://old.example.com/v1',
     });
     dev01.missingPaths.add('/api/planner/models');
 

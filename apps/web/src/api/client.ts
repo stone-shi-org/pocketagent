@@ -58,6 +58,10 @@ import type {
   WorkspaceEntry,
   PlannerWorkspace,
   PlannerWorkspaceListResponse,
+  PlannerProvider,
+  PlannerProviderListResponse,
+  CreatePlannerProviderRequest,
+  UpdatePlannerProviderRequest,
   PlannerModel,
   PlannerModelListResponse,
   CreatePlannerModelRequest,
@@ -77,7 +81,6 @@ import type {
   TestPlannerUrlFetchResponse,
   TestPlannerWebSearchResponse,
   UpdatePlannerSettingsRequest,
-  PlannerApiKeyRevealResponse,
   PlannerArtifactsResponse,
   DeletePlannerArtifactResponse,
   PlannerChat,
@@ -985,7 +988,41 @@ export function createApiClient(endpoint: HostEndpoint) {
         body: JSON.stringify(body),
       }),
 
-    listPlannerModels: () => request<PlannerModelListResponse>('/api/planner/models'),
+    // ---- Planner providers (PA-148) -------------------------------------------
+    //
+    // No `reveal` method, deliberately: a provider's API key is write-only,
+    // encrypted at rest with `secret-box`. Editing leaves `apiKey` blank to
+    // keep the stored key, or sets `clearApiKey: true` to wipe it.
+
+    listPlannerProviders: () =>
+      request<PlannerProviderListResponse>('/api/planner/providers'),
+
+    createPlannerProvider: (body: CreatePlannerProviderRequest) =>
+      request<PlannerProvider>('/api/planner/providers', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+
+    updatePlannerProvider: (id: string, body: UpdatePlannerProviderRequest) =>
+      request<PlannerProvider>(`/api/planner/providers/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+
+    deletePlannerProvider: (id: string) =>
+      request<void>(`/api/planner/providers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+    discoverPlannerProviderModels: (id: string) =>
+      request<DiscoverPlannerModelsResponse>(
+        `/api/planner/providers/${encodeURIComponent(id)}/models/discover`,
+      ),
+
+    listPlannerModels: (providerId?: string) =>
+      request<PlannerModelListResponse>(
+        providerId
+          ? `/api/planner/models?providerId=${encodeURIComponent(providerId)}`
+          : '/api/planner/models',
+      ),
 
     createPlannerModel: (body: CreatePlannerModelRequest) =>
       request<PlannerModel>('/api/planner/models', { method: 'POST', body: JSON.stringify(body) }),
@@ -999,7 +1036,13 @@ export function createApiClient(endpoint: HostEndpoint) {
     deletePlannerModel: (id: string) =>
       request<void>(`/api/planner/models/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
-    deleteAllPlannerModels: () => request<void>('/api/planner/models', { method: 'DELETE' }),
+    deleteAllPlannerModels: (providerId?: string) =>
+      request<void>(
+        providerId
+          ? `/api/planner/models?providerId=${encodeURIComponent(providerId)}`
+          : '/api/planner/models',
+        { method: 'DELETE' },
+      ),
 
     discoverPlannerModels: () => request<DiscoverPlannerModelsResponse>('/api/planner/models/discover'),
 
@@ -1045,12 +1088,6 @@ export function createApiClient(endpoint: HostEndpoint) {
 
     endGeminiLive: (chatId: string) =>
       request<void>(`/api/planner/chats/${encodeURIComponent(chatId)}/live/end`, { method: 'POST' }),
-
-    /** POST, not GET — same CSRF/caching reasoning as `revealWebhookSecret`. */
-    revealPlannerApiKey: () =>
-      request<PlannerApiKeyRevealResponse>('/api/planner/settings/api-key/reveal', {
-        method: 'POST',
-      }),
 
     /** The embedding provider's own key reveal — see `PlannerSettingsDto.embeddingBaseUrl`'s doc comment. */
     revealPlannerEmbeddingApiKey: () =>

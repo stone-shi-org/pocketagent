@@ -6,6 +6,7 @@ import type {
 import {
   createExportEnvelope,
   parseExportEnvelope,
+  parseTemplatePayload,
   type ExportParseResult,
 } from '@pocketagent/protocol';
 
@@ -106,7 +107,16 @@ export function exportEnvelopeToHubTemplate(
 ): HubTemplateDraft | null {
   switch (envelope.kind) {
     case 'hub-template': {
-      const data = envelope.data as { kind: HubTemplateKind; name: string; description?: string; payload: unknown };
+      const data = envelope.data as { kind: HubTemplateKind | 'planner-endpoint'; name: string; description?: string; payload: unknown };
+      if (data.kind === 'planner-endpoint') {
+        const parsed = parseTemplatePayload('planner-endpoint', data.payload, data.name || 'Default');
+        return {
+          kind: 'planner-provider',
+          name: data.name,
+          ...(data.description !== undefined ? { description: data.description } : {}),
+          payload: parsed.ok ? parsed.value.payload : data.payload,
+        };
+      }
       return {
         kind: data.kind,
         name: data.name,
@@ -137,12 +147,24 @@ export function exportEnvelopeToHubTemplate(
         },
       };
     }
-    case 'planner-endpoint': {
+    case 'planner-provider': {
+      const data = envelope.data as { label?: string };
+      const name = data?.label || envelope.name || 'Imported Pocket Agent Provider';
       return {
-        kind: 'planner-endpoint',
-        name: envelope.name || 'Imported LLM Endpoint',
-        description: 'Imported from LLM Endpoint export',
+        kind: 'planner-provider',
+        name,
+        description: 'Imported from Pocket Agent provider export',
         payload: envelope.data,
+      };
+    }
+    case 'planner-endpoint': {
+      const name = envelope.name || 'Default';
+      const parsed = parseTemplatePayload('planner-endpoint', envelope.data, name);
+      return {
+        kind: 'planner-provider',
+        name,
+        description: 'Imported from LLM Endpoint export',
+        payload: parsed.ok ? parsed.value.payload : envelope.data,
       };
     }
     case 'mcp-registry': {

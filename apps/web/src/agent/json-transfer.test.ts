@@ -107,7 +107,28 @@ describe('json-transfer', () => {
     });
   });
 
-  it('converts planner-endpoint export envelopes into Hub templates', () => {
+  it('converts planner-provider and legacy planner-endpoint export envelopes into Hub templates', () => {
+    const providerEnvelope = createExportEnvelope('planner-provider', {
+      label: 'OpenRouter',
+      kind: 'openai-compatible',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      allowUnattended: false,
+      models: [{ modelId: 'gpt-4o', label: 'GPT-4o' }],
+    }, 'OpenRouter');
+
+    expect(exportEnvelopeToHubTemplate(providerEnvelope)).toEqual({
+      kind: 'planner-provider',
+      name: 'OpenRouter',
+      description: 'Imported from Pocket Agent provider export',
+      payload: {
+        label: 'OpenRouter',
+        kind: 'openai-compatible',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        allowUnattended: false,
+        models: [{ modelId: 'gpt-4o', label: 'GPT-4o' }],
+      },
+    });
+
     const endpointEnvelope = createExportEnvelope('planner-endpoint', {
       baseUrl: 'https://llm.example.com/v1',
       models: [{ modelId: 'gpt-4o', label: 'GPT-4o' }],
@@ -119,16 +140,15 @@ describe('json-transfer', () => {
 
     const tpl = exportEnvelopeToHubTemplate(endpointEnvelope);
     expect(tpl).toEqual({
-      kind: 'planner-endpoint',
+      kind: 'planner-provider',
       name: 'Production Endpoint',
       description: 'Imported from LLM Endpoint export',
       payload: {
+        label: 'Production Endpoint',
+        kind: 'openai-compatible',
         baseUrl: 'https://llm.example.com/v1',
+        allowUnattended: false,
         models: [{ modelId: 'gpt-4o', label: 'GPT-4o' }],
-        embeddingBaseUrl: null,
-        embeddingModelId: null,
-        webSearchBaseUrl: null,
-        urlFetchBaseUrl: null,
       },
     });
   });

@@ -31,7 +31,11 @@ import type { PlannerWorkspaceRegistry } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
 import type { McpRegistryService } from './mcp/registry-service.js';
 import { SkillRegistryError, type SkillRegistryService } from './skills.js';
-import { DEFAULT_COMMAND_TIMEOUT_SECONDS } from './store.js';
+import {
+  DEFAULT_COMMAND_TIMEOUT_SECONDS,
+  readPlannerProviders,
+  toPlannerProviderDto,
+} from './store.js';
 import { imageDimensions } from './image-budget.js';
 import { applyEdits, normalizeEditsArgument } from './edit-file.js';
 import type { Db } from '../db/index.js';
@@ -4406,6 +4410,9 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
           'general.skipPermissionsEnabled cannot be changed through update_settings — a human must flip ' +
           'that switch from the Settings page.',
         customClaudeProviders: deps.customClaudeProviders.list(),
+        plannerProviders: readPlannerProviders(deps.db).map((p) =>
+          toPlannerProviderDto(p, deps.config.settingsEncKey),
+        ),
       };
       const webhooks = deps.webhooks;
       if (webhooks) result.webhooks = webhooks.list().map((row) => webhooks.toWebhook(row));

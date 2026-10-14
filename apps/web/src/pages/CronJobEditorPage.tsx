@@ -7,6 +7,7 @@ import type {
   CronSchedulePreset,
   CronWorktreeMode,
   PlannerModel,
+  PlannerProvider,
   PlannerWorkspace,
   ProjectInfo,
   WorkspaceEntry,
@@ -16,6 +17,7 @@ import { ApiError } from '../api/client.js';
 import { Icon } from '../components/Icon.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import { formatAbsolute, formatCountdown, WEEKDAY_LABELS } from '../agent/cron-format.js';
+import { buildPlannerModelSelectOptions, resolvePlannerModelSelection } from '../agent/planner-models.js';
 import { flattenProjects } from '../agent/search.js';
 import { hashForCurrentHost } from '../hooks/useHashRoute.js';
 import { SelectRowNative } from '../components/SelectRowNative.js';
@@ -71,6 +73,7 @@ export function CronJobEditorPage({
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
   const [plannerWorkspaces, setPlannerWorkspaces] = useState<PlannerWorkspace[]>([]);
   const [plannerModels, setPlannerModels] = useState<PlannerModel[]>([]);
+  const [plannerProviders, setPlannerProviders] = useState<PlannerProvider[]>([]);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [runs, setRuns] = useState<CronJobRun[]>([]);
   const [loading, setLoading] = useState(true);
@@ -119,15 +122,17 @@ export function CronJobEditorPage({
       api.listProjects().catch(() => ({ projects: [] as ProjectInfo[] })),
       api.listPlannerWorkspaces().catch(() => ({ workspaces: [] as PlannerWorkspace[] })),
       api.listPlannerModels().catch(() => ({ models: [] as PlannerModel[] })),
+      api.listPlannerProviders().catch(() => ({ providers: [] as PlannerProvider[] })),
       isNew ? Promise.resolve(null) : api.getCronJob(jobId),
     ])
-      .then(([a, w, p, pw, pm, job]) => {
+      .then(([a, w, p, pw, pm, pp, job]) => {
         if (cancelled) return;
         setAgents(a.agents);
         setWorkspaces(w.workspaces);
         setProjects(p.projects);
         setPlannerWorkspaces(pw.workspaces);
         setPlannerModels(pm.models);
+        setPlannerProviders(pp.providers);
 
         if (job) {
           hydrate(job);
@@ -694,32 +699,37 @@ export function CronJobEditorPage({
         icon="code"
         desc={isPocketAgent ? 'Select a configured Pocket Agent model.' : 'Free text — each agent has its own vocabulary.'}
       >
-        <TextRow
-          label="Model"
-          value={model}
-          busy={busy}
-          placeholder={
-            isPocketAgent
-              ? plannerModels[0]?.label ?? 'Default model'
-              : selectedAgent?.defaultModel ?? "the agent's default"
-          }
-          listId="cron-model-options"
-          onChange={setModel}
-        >
-          <datalist id="cron-model-options">
-            {isPocketAgent
-              ? plannerModels.map((m) => (
-                  <option key={m.id} value={m.modelId}>
-                    {m.label} ({m.modelId})
-                  </option>
-                ))
-              : agentModels.map((m) => (
-                  <option key={m.value} value={m.value}>
-                    {m.displayName}
-                  </option>
-                ))}
-          </datalist>
-        </TextRow>
+        {isPocketAgent ? (
+          <SelectRowNative
+            label="Model"
+            value={resolvePlannerModelSelection(plannerModels, model)}
+            options={buildPlannerModelSelectOptions(
+              plannerModels,
+              plannerProviders,
+              'Default model',
+              model,
+            )}
+            busy={busy}
+            onChange={setModel}
+          />
+        ) : (
+          <TextRow
+            label="Model"
+            value={model}
+            busy={busy}
+            placeholder={selectedAgent?.defaultModel ?? "the agent's default"}
+            listId="cron-model-options"
+            onChange={setModel}
+          >
+            <datalist id="cron-model-options">
+              {agentModels.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.displayName}
+                </option>
+              ))}
+            </datalist>
+          </TextRow>
+        )}
         {!isPocketAgent && (
           <TextRow
             label="Effort"

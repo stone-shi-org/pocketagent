@@ -8,6 +8,7 @@ import {
   CALL_MCP_TOOL_NAME,
   CreatePlannerChatRequest,
   CreatePlannerModelRequest,
+  CreatePlannerProviderRequest,
   CreatePlannerWorkspaceRequest,
   GeminiLiveTokenRequest,
   GeminiLiveToolCallsRequest,
@@ -24,6 +25,7 @@ import {
   SetPlannerSkillEnabledRequest,
   SetPlannerToolEnabledRequest,
   UpdatePlannerMemoryRequest,
+  UpdatePlannerProviderRequest,
   UpdatePlannerWorkspaceRequest,
   PlannerSendMessageRequest,
   QueuePlannerPromptRequest,
@@ -45,7 +47,6 @@ import {
   type PlannerAgentMcpRegistriesResponse,
   type PlannerAgentSkillsResponse,
   type PlannerAgentToolsResponse,
-  type PlannerApiKeyRevealResponse,
   type PlannerChatHistoryResponse,
   type PlannerChatListResponse,
   type DiscoverablePlannerSkillsResponse,
@@ -54,6 +55,8 @@ import {
   type PlannerEmbeddingApiKeyRevealResponse,
   type PlannerMemoryListResponse,
   type PlannerModelListResponse,
+  type PlannerProvider,
+  type PlannerProviderListResponse,
   type PlannerSettingsDto,
   type PlannerSkillDetailResponse,
   type PlannerSkillListResponse,
@@ -92,28 +95,37 @@ import { SpokenTextPipeline } from '../voice/spoken-text-pipeline.js';
 import { TurnTtsPump } from '../voice/turn-tts-pump.js';
 import type { Config } from '../config/index.js';
 import {
+  PlannerProviderStoreError,
   deleteAllPlannerModels,
   deletePlannerModel,
+  deletePlannerProvider,
   deletePlannerToolApproval,
+  encryptPlannerProviderSecret,
+  ensureDefaultPlannerProvider,
   insertPlannerModel,
+  insertPlannerProvider,
   nextPlannerModelSortOrder,
+  nextPlannerProviderSortOrder,
   readDisabledSkillNames,
   readDisabledToolNames,
   readGlobalDisabledSkillNames,
   readGlobalDisabledToolNames,
   readPlannerModels,
+  readPlannerProvider,
+  readPlannerProviders,
   readPlannerSettings,
   readPlannerToolApprovals,
   resolvePlannerUrlFetchApiKey,
   resolvePlannerWebSearchApiKey,
-  revealPlannerApiKey,
   revealPlannerEmbeddingApiKey,
   setMcpRegistryEnabledForWorkspace,
   setSkillEnabledForWorkspace,
   setSkillEnabledGlobally,
   setToolEnabledForWorkspace,
   setToolEnabledGlobally,
+  toPlannerProviderDto,
   updatePlannerModel,
+  updatePlannerProvider,
   writePlannerApiKey,
   writePlannerBaseUrl,
   writePlannerEmbeddingApiKey,
@@ -170,6 +182,9 @@ function mapGeminiError(reply: FastifyReply, err: unknown): FastifyReply | never
 }
 
 function mapChatError(reply: FastifyReply, err: unknown): FastifyReply | never {
+  if (err instanceof PlannerProviderStoreError) {
+    return reply.code(err.statusCode).send({ error: { code: err.code, message: err.message } });
+  }
   if (err instanceof PlannerChatError) {
     const status = err.code === 'not_found' ? 404 : err.code === 'not_configured' || err.code === 'busy' ? 409 : 400;
     return reply.code(status).send({ error: { code: err.code, message: err.message } });
@@ -553,8 +568,129 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.get('/api/planner/models', async () => {
-    const response: PlannerModelListResponse = { models: readPlannerModels(app.pocket.db) };
+  app.get('/api/planner/providers', async () => {
+    const { db, config } = app.pocket;
+    const response: PlannerProviderListResponse = {
+      providers: readPlannerProviders(db).map((p) => toPlannerProviderDto(p, config.settingsEncKey)),
+      encryptionAvailable: config.settingsEncKey !== undefined,
+    };
+    return response;
+  });
+
+  app.post('/api/planner/providers', async (request, reply) => {
+    const parsed = CreatePlannerProviderRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    const { db, config } = app.pocket;
+    try {
+      const trimmedKey = (parsed.data.apiKey ?? '').trim();
+      const secretCiphertext =
+        trimmedKey.length > 0
+          ? encryptPlannerProviderSecret(trimmedKey, config.settingsEncKey)
+          : null;
+      const row = insertPlannerProvider(db, {
+        id: crypto.randomUUID(),
+        label: parsed.data.label.trim(),
+        kind: parsed.data.kind ?? 'openai-compatible',
+        baseUrl: parsed.data.baseUrl.trim(),
+        secretCiphertext,
+        allowUnattended: parsed.data.allowUnattended ?? false,
+        sortOrder: nextPlannerProviderSortOrder(db),
+        createdAt: Date.now(),
+      });
+      auditConfigChange(request, 'planner provider created', {
+        provider: row.id,
+        label: row.label,
+        kind: row.kind,
+        baseUrl: row.baseUrl,
+        allowUnattended: row.allowUnattended,
+      });
+      const dto: PlannerProvider = toPlannerProviderDto(row, config.settingsEncKey);
+      return reply.code(201).send(dto);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  app.patch('/api/planner/providers/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = UpdatePlannerProviderRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    const { db, config } = app.pocket;
+    const existing = readPlannerProvider(db, id);
+    if (!existing) return notFound(reply, 'Provider not found.');
+    try {
+      const trimmedKey = (parsed.data.apiKey ?? '').trim();
+      // `apiKey` omitted or blank keeps the stored key (like custom Claude
+      // providers); `clearApiKey: true` clears it explicitly.
+      const secretPatch =
+        parsed.data.clearApiKey === true
+          ? { secretCiphertext: null as string | null }
+          : trimmedKey.length > 0
+            ? { secretCiphertext: encryptPlannerProviderSecret(trimmedKey, config.settingsEncKey) }
+            : {};
+      const resetError =
+        parsed.data.baseUrl !== undefined ||
+        parsed.data.clearApiKey === true ||
+        trimmedKey.length > 0
+          ? { lastError: null as string | null }
+          : {};
+      const updated = updatePlannerProvider(db, id, {
+        ...(parsed.data.label !== undefined ? { label: parsed.data.label.trim() } : {}),
+        ...(parsed.data.baseUrl !== undefined ? { baseUrl: parsed.data.baseUrl.trim() } : {}),
+        ...(parsed.data.allowUnattended !== undefined
+          ? { allowUnattended: parsed.data.allowUnattended }
+          : {}),
+        ...secretPatch,
+        ...resetError,
+      });
+      if (!updated) return notFound(reply, 'Provider not found.');
+      auditConfigChange(request, 'planner provider updated', {
+        provider: id,
+        fields: Object.keys(parsed.data),
+        ...(parsed.data.allowUnattended === undefined
+          ? {}
+          : { allowUnattended: parsed.data.allowUnattended }),
+      });
+      const dto: PlannerProvider = toPlannerProviderDto(updated, config.settingsEncKey);
+      return reply.send(dto);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  app.delete('/api/planner/providers/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const removed = deletePlannerProvider(app.pocket.db, id);
+    if (!removed) return notFound(reply, 'Provider not found.');
+    auditConfigChange(request, 'planner provider deleted', { provider: id });
+    return reply.code(204).send();
+  });
+
+  app.get('/api/planner/providers/:id/models/discover', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const provider = readPlannerProvider(app.pocket.db, id);
+    if (!provider) return notFound(reply, 'Provider not found.');
+    try {
+      const modelIds = await app.pocket.plannerChats.discoverModels(id);
+      const response: DiscoverPlannerModelsResponse = { modelIds };
+      return noStore(reply).send(response);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  app.get('/api/planner/models', async (request) => {
+    const { providerId } = (request.query ?? {}) as { providerId?: string };
+    const response: PlannerModelListResponse = {
+      models: readPlannerModels(
+        app.pocket.db,
+        providerId && providerId.length > 0 ? providerId : undefined,
+      ),
+    };
     return response;
   });
 
@@ -564,8 +700,17 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
     const { db } = app.pocket;
+    let providerId = parsed.data.providerId?.trim() || undefined;
+    if (providerId) {
+      if (!readPlannerProvider(db, providerId)) {
+        return notFound(reply, 'Provider not found.');
+      }
+    } else {
+      providerId = ensureDefaultPlannerProvider(db).id;
+    }
     const row = {
       id: crypto.randomUUID(),
+      providerId,
       modelId: parsed.data.modelId,
       label: parsed.data.label,
       supportsEffort: parsed.data.supportsEffort ?? true,
@@ -585,6 +730,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     insertPlannerModel(db, row);
     auditConfigChange(request, 'planner model added to the catalog', {
       model: row.id,
+      provider: row.providerId,
       modelId: row.modelId,
     });
     return reply.code(201).send(row);
@@ -608,11 +754,16 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
   /**
    * Empty the catalog (PA-6 round 7's "delete all"). A distinct path from
    * `DELETE /:id` below rather than a magic `:id` value, so there is no way
-   * for a stray/mistyped id to wipe every row.
+   * for a stray/mistyped id to wipe every row. Optionally scoped to a single
+   * provider (`?providerId=`).
    */
-  app.delete('/api/planner/models', async (_request, reply) => {
-    const removed = deleteAllPlannerModels(app.pocket.db);
-    app.log.info({ removed }, 'planner model catalog emptied');
+  app.delete('/api/planner/models', async (request, reply) => {
+    const { providerId } = (request.query ?? {}) as { providerId?: string };
+    const removed = deleteAllPlannerModels(
+      app.pocket.db,
+      providerId && providerId.length > 0 ? providerId : undefined,
+    );
+    app.log.info({ removed, providerId: providerId ?? null }, 'planner model catalog emptied');
     return reply.code(204).send();
   });
 
@@ -625,9 +776,12 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
 
   // A static segment ('discover'), not a param — Fastify routes it distinctly
   // from `DELETE /:id` above regardless of registration order.
-  app.get('/api/planner/models/discover', async (_request, reply) => {
+  app.get('/api/planner/models/discover', async (request, reply) => {
+    const { providerId } = (request.query ?? {}) as { providerId?: string };
     try {
-      const modelIds = await app.pocket.plannerChats.discoverModels();
+      const modelIds = await app.pocket.plannerChats.discoverModels(
+        providerId && providerId.length > 0 ? providerId : undefined,
+      );
       const response: DiscoverPlannerModelsResponse = { modelIds };
       return noStore(reply).send(response);
     } catch (err) {
@@ -640,7 +794,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const model = readPlannerModels(app.pocket.db).find((m) => m.id === id);
     if (!model) return notFound(reply, 'Model not found.');
     try {
-      const result = await app.pocket.plannerChats.testModel(model.modelId);
+      const result = await app.pocket.plannerChats.testModel(model);
       const response: TestPlannerModelResponse = result;
       return noStore(reply).send(response);
     } catch (err) {
@@ -657,13 +811,17 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
    * Partial update, same discipline as `PATCH /api/settings`: only keys
    * present in the body are touched. `apiKey` omitted leaves the stored key
    * untouched; `apiKey: ''` clears it.
+   *
+   * PA-148: `baseUrl` and `apiKey` continue to read/write the Default
+   * `planner_providers` row (`id = 'default'`, or the first provider) for
+   * backwards compatibility.
    */
   app.patch('/api/planner/settings', async (request, reply) => {
     const parsed = UpdatePlannerSettingsRequest.safeParse(request.body);
     if (!parsed.success) {
       return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
     }
-    const { db } = app.pocket;
+    const { db, config } = app.pocket;
     const {
       baseUrl,
       apiKey,
@@ -690,8 +848,14 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       attachmentInlineTextMaxBytes,
       attachmentInlineExtractMaxTokens,
     } = parsed.data;
-    if (baseUrl !== undefined) writePlannerBaseUrl(db, baseUrl);
-    if (apiKey !== undefined) writePlannerApiKey(db, apiKey.length > 0 ? apiKey : null);
+    try {
+      if (apiKey !== undefined) {
+        writePlannerApiKey(db, apiKey.length > 0 ? apiKey : null, config.settingsEncKey);
+      }
+      if (baseUrl !== undefined) writePlannerBaseUrl(db, baseUrl);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
     if (yoloEnabled !== undefined) writePlannerYoloEnabled(db, yoloEnabled);
     // PA-29: the embedding provider's own settings, same "only touch what's
     // sent" idiom as the chat-settings fields above.
@@ -743,34 +907,13 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       ...(attachmentInlineTextMaxBytes !== undefined ? { textMaxBytes: attachmentInlineTextMaxBytes } : {}),
       ...(attachmentInlineExtractMaxTokens !== undefined ? { extractMaxTokens: attachmentInlineExtractMaxTokens } : {}),
     });
-    // PA-70: the planner endpoint is the one *singleton* a Hub can provision,
-    // so this line matters more than the others — it records a change that
-    // repoints the LLM endpoint every Pocket Agent chat on this host uses.
-    // Field names only: four of them are API keys.
+    // Field names only: API keys may be among them.
     auditConfigChange(request, 'planner settings updated', {
       fields: Object.keys(parsed.data),
     });
     const dto: PlannerSettingsDto = readPlannerSettings(db);
     return reply.send(dto);
   });
-
-  /**
-   * The one response that carries the key, mirroring
-   * `POST /api/webhooks/:id/secret/reveal` exactly: rate-limited, logged, and
-   * reachable only from an explicit user action — never from a list or the
-   * plain `GET` above.
-   */
-  app.post(
-    '/api/planner/settings/api-key/reveal',
-    { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
-    async (_request, reply) => {
-      const apiKey = revealPlannerApiKey(app.pocket.db);
-      if (apiKey === null) return notFound(reply, 'No API key configured.');
-      app.log.info('planner API key revealed');
-      const response: PlannerApiKeyRevealResponse = { apiKey };
-      return noStore(reply).send(response);
-    },
-  );
 
   /** The embedding provider's own key reveal — same rate-limit/logging
       posture as the chat key's, at its own route/key. */

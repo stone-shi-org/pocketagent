@@ -47,7 +47,7 @@ export const hubTemplateRoutes: FastifyPluginAsync = async (app) => {
     // The payload is validated against its *kind* here, by the same function
     // the editor calls while the operator types — one mapping, so the editor
     // cannot let through something this route then refuses.
-    const payload = parseTemplatePayload(parsed.data.kind, parsed.data.payload);
+    const payload = parseTemplatePayload(parsed.data.kind, parsed.data.payload, parsed.data.name);
     if (!payload.ok) {
       return reply.code(400).send({ error: { code: 'bad_request', message: payload.message } });
     }
@@ -80,6 +80,7 @@ export const hubTemplateRoutes: FastifyPluginAsync = async (app) => {
       const payload = parseTemplatePayload(
         existing.row.kind as HubTemplateKind,
         parsed.data.payload,
+        parsed.data.name ?? existing.row.name,
       );
       if (!payload.ok) {
         return reply.code(400).send({ error: { code: 'bad_request', message: payload.message } });

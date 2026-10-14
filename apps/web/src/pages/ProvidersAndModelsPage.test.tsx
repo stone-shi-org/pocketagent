@@ -6,15 +6,14 @@ import {
   ProvidersAndModelsPage,
 } from './ProvidersAndModelsPage.js';
 
-describe('ProvidersAndModelsPage (PA-132)', () => {
-  it('renders LLM endpoint, Models, Embeddings, TTS / STT, and Gemini Live sections under one settings page', () => {
+describe('ProvidersAndModelsPage (PA-132, PA-148)', () => {
+  it('renders LLM providers, Embeddings, TTS / STT, and Gemini Live sections under one settings page', () => {
     const html = renderToStaticMarkup(
       <ProvidersAndModelsPage onApiError={vi.fn()} onBack={vi.fn()} />,
     );
 
     expect(html).toContain('<h2>Providers and Models</h2>');
-    expect(html).toContain('<h3>LLM endpoint</h3>');
-    expect(html).toContain('<h3>Models</h3>');
+    expect(html).toContain('<h3>Pocket Agent Providers</h3>');
     expect(html).toContain('<h3>Embeddings</h3>');
     expect(html).toContain('<h3>TTS / STT</h3>');
     expect(html).toContain('<h3>Gemini Live</h3>');

@@ -162,9 +162,7 @@ export function ExportFromHostDialog({
 
   useEffect(() => {
     if (!hostId || kind === 'mcp-registry') return;
-    if (kind === 'planner-endpoint') {
-      void loadDraft(null);
-    } else if (!exportAll && selectedItemId) {
+    if (!exportAll && selectedItemId) {
       void loadDraft(selectedItemId);
     } else {
       setCachedDraft(null);
@@ -279,7 +277,7 @@ export function ExportFromHostDialog({
     }
   };
 
-  const isSingleton = kind === 'planner-endpoint';
+  const isSingleton = false;
   const hasItems = items !== null && items.length > 0;
   const canExport =
     !busy &&

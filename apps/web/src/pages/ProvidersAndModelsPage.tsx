@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type {
-  PlannerEndpointTemplatePayload,
   PlannerModel,
+  PlannerProvider,
+  PlannerProviderTemplatePayload,
   PlannerSettingsDto,
   SettingsResponse,
   TestPlannerEmbeddingResponse,
@@ -16,6 +17,7 @@ import { Icon } from '../components/Icon.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
 import { unlockAudioContext } from '../audio/audio-context.js';
+import { exportPlannerProviderPayload } from '../agent/hub-template-export.js';
 import { exportToJsonFile } from '../agent/json-transfer.js';
 import { useJsonImport } from '../hooks/useJsonImport.js';
 
@@ -30,12 +32,14 @@ interface Props {
 }
 
 /**
- * PA-132: "Providers and Models" settings page — consolidates the Pocket Agent
- * LLM endpoint and model catalog, the self-hosted TTS/STT voice pipeline
- * settings, and Gemini Live configuration in one place.
+ * PA-132 / PA-148: "Providers and Models" settings page — consolidates the
+ * Pocket Agent LLM providers and per-provider model catalogs, embeddings,
+ * the self-hosted TTS/STT voice pipeline settings, and Gemini Live
+ * configuration in one place.
  */
 export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Element {
   const api = useHostApi();
+  const [providers, setProviders] = useState<PlannerProvider[] | null>(null);
   const [models, setModels] = useState<PlannerModel[] | null>(null);
   const [plannerSettings, setPlannerSettings] = useState<PlannerSettingsDto | null>(null);
   const [runtimeData, setRuntimeData] = useState<SettingsResponse | null>(null);
@@ -44,21 +48,15 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
   const [pendingRuntime, setPendingRuntime] = useState<Set<string>>(new Set());
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
-  // Pocket Agent LLM endpoint & models state
-  const [baseUrlInput, setBaseUrlInput] = useState('');
-  const [apiKeyInput, setApiKeyInput] = useState('');
-  const [revealedApiKey, setRevealedApiKey] = useState<string | null>(null);
-  const [newModelId, setNewModelId] = useState('');
-  const [newModelLabel, setNewModelLabel] = useState('');
-  const [newModelSupportsEffort, setNewModelSupportsEffort] = useState(true);
-  const [suggestionsOpen, setSuggestionsOpen] = useState(true);
-  const newModelLabelInputRef = useRef<HTMLInputElement | null>(null);
-  const [discovering, setDiscovering] = useState(false);
-  const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
-  const [discoveredIds, setDiscoveredIds] = useState<string[]>([]);
-  const [confirmingDeleteAllModels, setConfirmingDeleteAllModels] = useState(false);
-  const [testingAll, setTestingAll] = useState(false);
+  // Add new provider state
+  const [addingProvider, setAddingProvider] = useState(false);
+  const [newProviderLabel, setNewProviderLabel] = useState('');
+  const [newProviderBaseUrl, setNewProviderBaseUrl] = useState('');
+  const [newProviderApiKey, setNewProviderApiKey] = useState('');
+  const [confirmingDeleteProvider, setConfirmingDeleteProvider] = useState<PlannerProvider | null>(null);
+  const [confirmingDeleteAllForProvider, setConfirmingDeleteAllForProvider] = useState<PlannerProvider | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestPlannerModelResponse | 'testing'>>({});
+  const [testingProviderId, setTestingProviderId] = useState<string | null>(null);
 
   // Embeddings state (PA-29, PA-132)
   const [embeddingBaseUrlInput, setEmbeddingBaseUrlInput] = useState('');
@@ -79,14 +77,15 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
 
   const load = useCallback(async () => {
     try {
-      const [mo, se, rt] = await Promise.all([
+      const [pr, mo, se, rt] = await Promise.all([
+        api.listPlannerProviders(),
         api.listPlannerModels(),
         api.getPlannerSettings(),
         api.getSettings(),
       ]);
+      setProviders(pr.providers);
       setModels(mo.models);
       setPlannerSettings(se);
-      setBaseUrlInput(se.baseUrl ?? '');
       setEmbeddingBaseUrlInput(se.embeddingBaseUrl ?? '');
       setEmbeddingModelIdInput(se.embeddingModelId ?? '');
       setRevealedEmbeddingApiKey(null);
@@ -250,22 +249,34 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
     }
   };
 
-  const saveEndpoint = (): void => {
-    void withBusy(() => api.updatePlannerSettings({ baseUrl: baseUrlInput.trim() || null }));
-  };
-
-  const saveApiKey = (): void => {
+  const createProvider = (): void => {
+    const label = newProviderLabel.trim();
+    const baseUrl = newProviderBaseUrl.trim();
+    const apiKey = newProviderApiKey.trim();
+    if (!label || !baseUrl) {
+      setError('Provider label and base URL are required.');
+      return;
+    }
     void withBusy(async () => {
-      await api.updatePlannerSettings({ apiKey: apiKeyInput });
-      setApiKeyInput('');
-      setRevealedApiKey(null);
+      await api.createPlannerProvider({
+        label,
+        kind: 'openai-compatible',
+        baseUrl,
+        ...(apiKey.length > 0 ? { apiKey } : {}),
+      });
+      setNewProviderLabel('');
+      setNewProviderBaseUrl('');
+      setNewProviderApiKey('');
+      setAddingProvider(false);
     });
   };
 
-  const reveal = (): void => {
+  const confirmDeleteProvider = (): void => {
+    const target = confirmingDeleteProvider;
+    if (!target) return;
+    setConfirmingDeleteProvider(null);
     void withBusy(async () => {
-      const { apiKey } = await api.revealPlannerApiKey();
-      setRevealedApiKey(apiKey);
+      await api.deletePlannerProvider(target.id);
     });
   };
 
@@ -321,23 +332,6 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
     })();
   };
 
-  const addModel = (): void => {
-    const trimmedId = newModelId.trim();
-    const trimmedLabel = newModelLabel.trim() || trimmedId;
-    if (!trimmedId) return;
-    void withBusy(async () => {
-      await api.createPlannerModel({
-        modelId: trimmedId,
-        label: trimmedLabel,
-        supportsEffort: newModelSupportsEffort,
-      });
-      setNewModelId('');
-      setNewModelLabel('');
-      setNewModelSupportsEffort(true);
-      setSuggestionsOpen(false);
-    });
-  };
-
   const toggleModelEffort = (id: string, current: boolean): void => {
     void withBusy(async () => {
       await api.updatePlannerModel(id, { supportsEffort: !current });
@@ -356,37 +350,12 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
     void withBusy(() => api.deletePlannerModel(id));
   };
 
-  const discoverModels = (): void => {
-    setDiscovering(true);
-    setDiscoverMessage(null);
-    void (async () => {
-      try {
-        const { modelIds } = await api.discoverPlannerModels();
-        setDiscoveredIds(modelIds);
-        setDiscoverMessage(
-          modelIds.length > 0
-            ? `${modelIds.length} model${modelIds.length === 1 ? '' : 's'} available — start typing an id below to pick one.`
-            : 'The endpoint listed no models.',
-        );
-      } catch (err) {
-        onApiError(err);
-        setError(err instanceof ApiError ? err.message : 'Could not query models from the endpoint.');
-      } finally {
-        setDiscovering(false);
-      }
-    })();
-  };
-
-  const selectDiscoveredModel = (modelId: string): void => {
-    setNewModelId(modelId);
-    setSuggestionsOpen(false);
-    newModelLabelInputRef.current?.focus();
-  };
-
   const confirmDeleteAllModels = (): void => {
-    setConfirmingDeleteAllModels(false);
+    const target = confirmingDeleteAllForProvider;
+    setConfirmingDeleteAllForProvider(null);
+    if (!target) return;
     void withBusy(async () => {
-      await api.deleteAllPlannerModels();
+      await api.deleteAllPlannerModels(target.id);
       setTestResults({});
     });
   };
@@ -413,62 +382,72 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
     void runModelTest(id);
   };
 
-  const testAllModels = (): void => {
-    if (!models || models.length === 0) return;
-    setTestingAll(true);
-    void Promise.all(models.map((m) => runModelTest(m.id))).finally(() => setTestingAll(false));
-  };
-
-  const configuredModelIds = new Set((models ?? []).map((m) => m.modelId));
-  const modelSuggestions = computeModelSuggestions(
-    discoveredIds,
-    configuredModelIds,
-    newModelId,
-    suggestionsOpen,
-  );
-
-  const [importSuccess, setImportSuccess] = useState<string | null>(null);
-
-  const handleExportEndpoint = (): void => {
-    exportToJsonFile(
-      'planner-endpoint',
-      {
-        baseUrl: baseUrlInput,
-        models: (models ?? []).map(({ id: _id, sortOrder: _sortOrder, createdAt: _createdAt, ...model }) => model),
-        embeddingBaseUrl: plannerSettings?.embeddingBaseUrl ?? null,
-        embeddingModelId: plannerSettings?.embeddingModelId ?? null,
-        webSearchBaseUrl: plannerSettings?.webSearchBaseUrl ?? null,
-        urlFetchBaseUrl: plannerSettings?.urlFetchBaseUrl ?? null,
-      },
-      'planner-endpoint',
+  const testAllProviderModels = (providerId: string, providerModels: PlannerModel[]): void => {
+    if (providerModels.length === 0) return;
+    setTestingProviderId(providerId);
+    void Promise.all(providerModels.map((m) => runModelTest(m.id))).finally(() =>
+      setTestingProviderId(null),
     );
   };
 
-  const { trigger: triggerImportEndpoint, fileInputProps: endpointFileInputProps } =
-    useJsonImport<PlannerEndpointTemplatePayload>({
-      expectedKind: 'planner-endpoint',
+  const [importSuccess, setImportSuccess] = useState<string | null>(null);
+
+  const handleExportProvider = (provider: PlannerProvider): void => {
+    try {
+      const payload = exportPlannerProviderPayload(provider, models ?? []);
+      exportToJsonFile('planner-provider', payload, provider.label);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not export provider.');
+    }
+  };
+
+  const { trigger: triggerImportProvider, fileInputProps: providerFileInputProps } =
+    useJsonImport<PlannerProviderTemplatePayload>({
+      expectedKind: 'planner-provider',
       onSuccess: async ({ data: imported }) => {
         try {
           setError(null);
           setImportSuccess(null);
           setBusy(true);
-          await api.updatePlannerSettings({
-            baseUrl: imported.baseUrl,
-            embeddingBaseUrl: imported.embeddingBaseUrl,
-            embeddingModelId: imported.embeddingModelId,
-            webSearchBaseUrl: imported.webSearchBaseUrl,
-            urlFetchBaseUrl: imported.urlFetchBaseUrl,
-          });
-          const existingModelIds = new Set((models ?? []).map((m) => m.modelId));
+          const currentProviders = providers ?? [];
+          // Match an existing provider with the same label + baseUrl, or an
+          // unconfigured Default provider when importing "Default".
+          const existingProvider =
+            currentProviders.find(
+              (p) => p.label === imported.label && p.baseUrl === imported.baseUrl,
+            ) ??
+            (imported.label === 'Default'
+              ? currentProviders.find((p) => p.label === 'Default' && !p.baseUrl)
+              : undefined);
+          const targetProvider = existingProvider
+            ? await api.updatePlannerProvider(existingProvider.id, {
+                label: imported.label,
+                baseUrl: imported.baseUrl,
+                allowUnattended: imported.allowUnattended,
+              })
+            : await api.createPlannerProvider({
+                label: imported.label,
+                kind: imported.kind ?? 'openai-compatible',
+                baseUrl: imported.baseUrl,
+                allowUnattended: imported.allowUnattended,
+              });
+          const existingModelIds = new Set(
+            (models ?? [])
+              .filter((m) => m.providerId === targetProvider.id)
+              .map((m) => m.modelId),
+          );
           for (const m of imported.models) {
             if (!existingModelIds.has(m.modelId)) {
-              await api.createPlannerModel(m);
+              await api.createPlannerModel({
+                ...m,
+                providerId: targetProvider.id,
+              });
             }
           }
           await load();
-          setImportSuccess('LLM endpoint and model settings imported successfully.');
+          setImportSuccess(`Pocket Agent provider "${targetProvider.label}" imported successfully.`);
         } catch (err) {
-          setError(err instanceof ApiError ? err.message : 'Could not import endpoint settings.');
+          setError(err instanceof ApiError ? err.message : 'Could not import provider settings.');
         } finally {
           setBusy(false);
         }
@@ -481,33 +460,35 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
 
   const runtimeBusy = (key: string): boolean => pendingRuntime.has(key);
   const runtimeSettings = runtimeData?.settings;
+  const exportableProvider = (providers ?? []).find((p) => p.baseUrl.trim().length > 0) ?? providers?.[0];
 
   return (
     <div className="planner-page">
-      <input {...endpointFileInputProps} />
+      <input {...providerFileInputProps} />
       <div className="planner-head">
         <div>
           <h2>Providers and Models</h2>
           <p className="planner-sub">
-            Pocket Agent LLM endpoint, model catalog, embeddings, TTS/STT voice pipeline, and Gemini Live.
+            Pocket Agent LLM providers and model catalogs, embeddings, TTS/STT voice pipeline, and Gemini Live.
           </p>
         </div>
         <div className="planner-head-actions">
           <button
             type="button"
             className="planner-btn icon-only"
-            onClick={handleExportEndpoint}
-            title="Export LLM endpoint and model settings to JSON"
-            aria-label="Export LLM endpoint and model settings to JSON"
+            disabled={!exportableProvider || !exportableProvider.baseUrl}
+            onClick={() => exportableProvider && handleExportProvider(exportableProvider)}
+            title="Export Pocket Agent provider and models to JSON"
+            aria-label="Export Pocket Agent provider and models to JSON"
           >
             <Icon name="download" size={16} />
           </button>
           <button
             type="button"
             className="planner-btn icon-only"
-            onClick={triggerImportEndpoint}
-            title="Import LLM endpoint and model settings from JSON"
-            aria-label="Import LLM endpoint and model settings from JSON"
+            onClick={triggerImportProvider}
+            title="Import Pocket Agent provider and models from JSON"
+            aria-label="Import Pocket Agent provider and models from JSON"
           >
             <Icon name="upload" size={16} />
           </button>
@@ -533,277 +514,114 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
       <div className="planner-grid">
         <div className="planner-col">
           <div className="planner-section">
-            <h3>LLM endpoint</h3>
-            <div className="planner-field">
-              <label htmlFor="planner-base-url">Base URL (OpenAI-compatible)</label>
-              <input
-                id="planner-base-url"
-                type="text"
-                placeholder="https://api.openai.com/v1"
-                value={baseUrlInput}
-                onChange={(e) => setBaseUrlInput(e.target.value)}
-              />
-            </div>
-            <div className="planner-inline">
-              <button type="button" className="planner-btn" disabled={busy} onClick={saveEndpoint}>
-                Save endpoint
-              </button>
-              <span className="planner-row-meta">
-                {plannerSettings?.baseUrl ? 'Configured' : 'Not configured'}
-              </span>
-            </div>
-
-            <div className="planner-field" style={{ marginTop: 12 }}>
-              <label htmlFor="planner-api-key">API key</label>
-              <input
-                id="planner-api-key"
-                type="password"
-                placeholder={plannerSettings?.hasApiKey ? '••••••••  (leave blank to keep)' : 'sk-…'}
-                value={apiKeyInput}
-                onChange={(e) => setApiKeyInput(e.target.value)}
-              />
-            </div>
-            <div className="planner-inline">
-              <button type="button" className="planner-btn" disabled={busy} onClick={saveApiKey}>
-                Save key
-              </button>
-              <button
-                type="button"
-                className="planner-btn"
-                disabled={busy || !plannerSettings?.hasApiKey}
-                onClick={reveal}
-              >
-                Reveal
-              </button>
-              <span className="planner-row-meta">
-                {plannerSettings?.hasApiKey ? 'A key is configured' : 'No key configured'}
-              </span>
-            </div>
-            {revealedApiKey && (
-              <p className="planner-row-meta" style={{ marginTop: 6, wordBreak: 'break-all' }}>
-                {revealedApiKey}
-              </p>
-            )}
-          </div>
-
-          <div className="planner-section">
             <div className="planner-section-header">
-              <h3>Models</h3>
+              <h3>Pocket Agent Providers</h3>
               <div className="planner-section-actions">
                 <button
                   type="button"
                   className="planner-btn"
-                  disabled={discovering || !plannerSettings?.baseUrl}
-                  onClick={discoverModels}
-                  title={plannerSettings?.baseUrl ? undefined : 'Set an endpoint URL first.'}
+                  disabled={busy}
+                  onClick={() => setAddingProvider((v) => !v)}
                 >
-                  {discovering ? 'Querying…' : 'Query models'}
-                </button>
-                <button
-                  type="button"
-                  className="planner-btn"
-                  disabled={testingAll || !models || models.length === 0}
-                  onClick={testAllModels}
-                >
-                  {testingAll ? 'Testing…' : 'Test all'}
-                </button>
-                <button
-                  type="button"
-                  className="planner-btn danger"
-                  disabled={busy || !models || models.length === 0}
-                  onClick={() => setConfirmingDeleteAllModels(true)}
-                >
-                  Delete all
+                  <Icon name="plus" size={14} /> {addingProvider ? 'Cancel' : 'Add provider'}
                 </button>
               </div>
             </div>
-            {discoverMessage && <p className="planner-row-meta">{discoverMessage}</p>}
-            {models?.length === 0 && (
-              <p className="planner-row-meta">
-                No models configured yet — query the endpoint above, then pick from the suggestions as
-                you type an id below.
-              </p>
-            )}
-            {models?.map((m) => {
-              const result = testResults[m.id];
-              return (
-                <div key={m.id} className="planner-model-row">
-                  <span>
-                    <ModelLabelEditor
-                      label={m.label}
-                      modelId={m.modelId}
-                      disabled={busy}
-                      onSave={(nextLabel) => setModelLimit(m.id, { label: nextLabel })}
-                    />{' '}
-                    <span className="planner-row-meta">({m.modelId})</span>
-                    <button
-                      type="button"
-                      className={`planner-badge-btn${m.supportsEffort !== false ? ' active' : ''}`}
-                      onClick={() => toggleModelEffort(m.id, m.supportsEffort !== false)}
-                      title={
-                        m.supportsEffort !== false
-                          ? 'Reasoning effort enabled (click to disable)'
-                          : 'Reasoning effort disabled (click to enable)'
-                      }
-                    >
-                      <Icon name="brain" size={12} />
-                      <span>{m.supportsEffort !== false ? 'Effort on' : 'Effort off'}</span>
-                    </button>
-                    <ModelLimitInput
-                      label="Context"
-                      title="Context window in tokens. Empty = worked out from the model name (128k if unknown)."
-                      value={m.contextWindow ?? null}
-                      disabled={busy}
-                      onSave={(v) => setModelLimit(m.id, { contextWindow: v })}
-                    />
-                    <ModelLimitInput
-                      label="Max out"
-                      title="Output limit in tokens, sent as max_tokens. Empty = not sent."
-                      value={m.maxOutputTokens ?? null}
-                      disabled={busy}
-                      onSave={(v) => setModelLimit(m.id, { maxOutputTokens: v })}
-                    />
-                    <TriStateSelect
-                      label="Cache"
-                      title="Prompt caching: send Anthropic cache_control markers. Auto = on for Claude models only, since strict OpenAI-compatible servers reject the field. Cached token counts are shown whenever the provider reports them, whatever this says."
-                      value={m.promptCaching ?? null}
-                      disabled={busy}
-                      onSave={(v) => setModelLimit(m.id, { promptCaching: v })}
-                    />
-                    <TriStateSelect
-                      label="Images"
-                      title="Whether this model can read attached images. Auto = yes, unless it is a known text-only model. When off, each image is replaced by a short note in what the model is sent; the chat keeps the image."
-                      value={m.supportsImages ?? null}
-                      disabled={busy}
-                      onSave={(v) => setModelLimit(m.id, { supportsImages: v })}
-                    />
-                    <TriStateSelect
-                      label="PDFs"
-                      title="Whether to send an attached PDF itself (as an OpenAI file part) beside its extracted text. Off by default: most OpenAI-compatible servers reject PDF input. If the server refuses one, the turn continues with the text only."
-                      value={m.supportsPdf ?? null}
-                      disabled={busy}
-                      noAuto
-                      onSave={(v) => setModelLimit(m.id, { supportsPdf: v })}
-                    />
-                    <span
-                      className="planner-model-prices"
-                      title="USD per million tokens, used to show each turn's cost. Optional — with no input and output price a turn shows no cost. An empty cache price is charged at the input price. A cost the provider reports itself is used instead."
-                    >
-                      <PriceInput
-                        label="$ in"
-                        value={m.inputPricePerMTok ?? null}
-                        disabled={busy}
-                        onSave={(v) => setModelLimit(m.id, { inputPricePerMTok: v })}
-                      />
-                      <PriceInput
-                        label="out"
-                        value={m.outputPricePerMTok ?? null}
-                        disabled={busy}
-                        onSave={(v) => setModelLimit(m.id, { outputPricePerMTok: v })}
-                      />
-                      <PriceInput
-                        label="cache read"
-                        value={m.cacheReadPricePerMTok ?? null}
-                        disabled={busy}
-                        onSave={(v) => setModelLimit(m.id, { cacheReadPricePerMTok: v })}
-                      />
-                      <PriceInput
-                        label="cache write"
-                        value={m.cacheWritePricePerMTok ?? null}
-                        disabled={busy}
-                        onSave={(v) => setModelLimit(m.id, { cacheWritePricePerMTok: v })}
-                      />
-                      <span className="planner-row-meta">per 1M tokens</span>
-                    </span>
-                    {result === 'testing' && <span className="planner-row-meta"> — testing…</span>}
-                    {result && result !== 'testing' && (
-                      <span className={result.ok ? 'planner-test-ok' : 'planner-test-fail'}>
-                        {' '}
-                        — {result.ok ? `OK (${result.latencyMs}ms)` : 'Failed'}: {result.message}
-                      </span>
-                    )}
-                  </span>
-                  <div className="planner-row-actions">
-                    <button
-                      type="button"
-                      className="planner-btn"
-                      disabled={result === 'testing' || testingAll}
-                      onClick={() => testModel(m.id)}
-                    >
-                      Test
-                    </button>
-                    <button
-                      type="button"
-                      className="planner-btn danger"
-                      disabled={busy}
-                      onClick={() => removeModel(m.id)}
-                      aria-label={`Remove ${m.label}`}
-                    >
-                      <Icon name="trash" size={14} />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-            <div className="planner-inline" style={{ marginTop: 10 }}>
-              <input
-                type="text"
-                placeholder="Model id, e.g. gpt-4o-mini"
-                value={newModelId}
-                onChange={(e) => {
-                  setNewModelId(e.target.value);
-                  setSuggestionsOpen(true);
-                }}
-                onFocus={() => setSuggestionsOpen(true)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') addModel();
-                }}
-              />
-              <input
-                ref={newModelLabelInputRef}
-                type="text"
-                placeholder="Label, e.g. Fast"
-                value={newModelLabel}
-                onChange={(e) => setNewModelLabel(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') addModel();
-                }}
-              />
-              <label className="planner-inline-checkbox" title="Allow configuring reasoning effort for this model">
-                <input
-                  type="checkbox"
-                  checked={newModelSupportsEffort}
-                  onChange={(e) => setNewModelSupportsEffort(e.target.checked)}
-                />
-                <span>Reasoning effort</span>
-              </label>
-              <button type="button" className="planner-btn" disabled={busy} onClick={addModel}>
-                <Icon name="plus" size={14} /> Add
-              </button>
-            </div>
-            {modelSuggestions.length > 0 && (
-              <div className="planner-suggestions" role="listbox" aria-label="Matching models">
-                {modelSuggestions.map((modelId) => (
-                  <button
-                    key={modelId}
-                    type="button"
-                    role="option"
-                    aria-selected={false}
-                    className="planner-suggestion"
+            <p className="planner-row-meta" style={{ marginBottom: 10 }}>
+              Configure one or more OpenAI-compatible LLM providers (for example a local vLLM and
+              OpenRouter side by side). Each provider has its own encrypted API key and model catalog.
+            </p>
+
+            {(addingProvider || (providers !== null && providers.length === 0)) && (
+              <div className="planner-provider-add-form" style={{ marginBottom: 16 }}>
+                <h4>New provider</h4>
+                <div className="planner-field">
+                  <label htmlFor="new-provider-label">Label</label>
+                  <input
+                    id="new-provider-label"
+                    type="text"
+                    placeholder="e.g. OpenRouter, Local vLLM"
+                    value={newProviderLabel}
                     disabled={busy}
-                    onClick={() => selectDiscoveredModel(modelId)}
+                    onChange={(e) => setNewProviderLabel(e.target.value)}
+                  />
+                </div>
+                <div className="planner-field" style={{ marginTop: 8 }}>
+                  <label htmlFor="new-provider-base-url">Base URL (OpenAI-compatible)</label>
+                  <input
+                    id="new-provider-base-url"
+                    type="text"
+                    placeholder="https://openrouter.ai/api/v1"
+                    value={newProviderBaseUrl}
+                    disabled={busy}
+                    onChange={(e) => setNewProviderBaseUrl(e.target.value)}
+                  />
+                </div>
+                <div className="planner-field" style={{ marginTop: 8 }}>
+                  <label htmlFor="new-provider-api-key">API key (optional, write-only)</label>
+                  <input
+                    id="new-provider-api-key"
+                    type="password"
+                    autoComplete="off"
+                    placeholder="sk-…"
+                    value={newProviderApiKey}
+                    disabled={busy}
+                    onChange={(e) => setNewProviderApiKey(e.target.value)}
+                  />
+                </div>
+                <div className="planner-inline" style={{ marginTop: 10 }}>
+                  <button
+                    type="button"
+                    className="planner-btn"
+                    disabled={busy || !newProviderLabel.trim() || !newProviderBaseUrl.trim()}
+                    onClick={createProvider}
                   >
-                    {modelId}
+                    Create provider
                   </button>
-                ))}
+                </div>
               </div>
-            )}
-            {newModelId.trim().length > 0 && discoveredIds.length === 0 && (
-              <p className="planner-row-meta" style={{ marginTop: 6 }}>
-                Query the endpoint above to get suggestions, or type a full id and a label and press Add.
-              </p>
             )}
           </div>
+
+          {providers?.map((provider, idx) => {
+            const providerModels = (models ?? []).filter(
+              (m) => m.providerId === provider.id || (!m.providerId && idx === 0),
+            );
+            return (
+              <PlannerProviderSection
+                key={provider.id}
+                provider={provider}
+                models={providerModels}
+                busy={busy}
+                testingAll={testingProviderId === provider.id}
+                testResults={testResults}
+                onSaveProvider={(patch) =>
+                  withBusy(() => api.updatePlannerProvider(provider.id, patch))
+                }
+                onDeleteProvider={() => setConfirmingDeleteProvider(provider)}
+                onExportProvider={() => handleExportProvider(provider)}
+                onDiscoverModels={() => api.discoverPlannerProviderModels(provider.id)}
+                onAddModel={(input) =>
+                  withBusy(() =>
+                    api.createPlannerModel({
+                      providerId: provider.id,
+                      modelId: input.modelId,
+                      label: input.label,
+                      supportsEffort: input.supportsEffort,
+                    }),
+                  )
+                }
+                onToggleModelEffort={toggleModelEffort}
+                onSetModelLimit={setModelLimit}
+                onRemoveModel={removeModel}
+                onDeleteAllModels={() => setConfirmingDeleteAllForProvider(provider)}
+                onTestModel={testModel}
+                onTestAllModels={() => testAllProviderModels(provider.id, providerModels)}
+                onApiError={onApiError}
+                onError={setError}
+              />
+            );
+          })}
         </div>
 
         <div className="planner-col">
@@ -1020,16 +838,490 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
         </div>
       </div>
 
-      {confirmingDeleteAllModels && (
+      {confirmingDeleteProvider && (
         <ConfirmDialog
-          title={`Delete all ${models?.length ?? 0} models?`}
-          body="This only empties the catalog you pick from. Chats and agents keep whatever model they already had — the id is just a string the endpoint either accepts or doesn't."
+          title={`Delete provider "${confirmingDeleteProvider.label}"?`}
+          body="Deleting a provider also deletes all models attached to it."
+          confirmLabel={busy ? 'Deleting…' : 'Delete provider'}
+          busy={busy}
+          onConfirm={confirmDeleteProvider}
+          onCancel={() => setConfirmingDeleteProvider(null)}
+        />
+      )}
+
+      {confirmingDeleteAllForProvider && (
+        <ConfirmDialog
+          title={`Delete all models for "${confirmingDeleteAllForProvider.label}"?`}
+          body="This only empties this provider's model catalog. Chats and agents keep whatever model reference they already had."
           confirmLabel={busy ? 'Deleting…' : 'Delete all'}
           busy={busy}
           onConfirm={confirmDeleteAllModels}
-          onCancel={() => setConfirmingDeleteAllModels(false)}
+          onCancel={() => setConfirmingDeleteAllForProvider(null)}
         />
       )}
+    </div>
+  );
+}
+
+interface PlannerProviderSectionProps {
+  provider: PlannerProvider;
+  models: PlannerModel[];
+  busy: boolean;
+  testingAll: boolean;
+  testResults: Record<string, TestPlannerModelResponse | 'testing'>;
+  onSaveProvider: (patch: {
+    label?: string;
+    baseUrl?: string;
+    apiKey?: string;
+    clearApiKey?: boolean;
+  }) => void;
+  onDeleteProvider: () => void;
+  onExportProvider: () => void;
+  onDiscoverModels: () => Promise<{ modelIds: string[] }>;
+  onAddModel: (input: { modelId: string; label: string; supportsEffort: boolean }) => void;
+  onToggleModelEffort: (id: string, current: boolean) => void;
+  onSetModelLimit: (id: string, patch: UpdatePlannerModelRequest) => void;
+  onRemoveModel: (id: string) => void;
+  onDeleteAllModels: () => void;
+  onTestModel: (id: string) => void;
+  onTestAllModels: () => void;
+  onApiError: (error: unknown) => void;
+  onError: (message: string | null) => void;
+}
+
+function PlannerProviderSection({
+  provider,
+  models,
+  busy,
+  testingAll,
+  testResults,
+  onSaveProvider,
+  onDeleteProvider,
+  onExportProvider,
+  onDiscoverModels,
+  onAddModel,
+  onToggleModelEffort,
+  onSetModelLimit,
+  onRemoveModel,
+  onDeleteAllModels,
+  onTestModel,
+  onTestAllModels,
+  onApiError,
+  onError,
+}: PlannerProviderSectionProps): JSX.Element {
+  const [labelInput, setLabelInput] = useState(provider.label);
+  const [baseUrlInput, setBaseUrlInput] = useState(provider.baseUrl);
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [newModelId, setNewModelId] = useState('');
+  const [newModelLabel, setNewModelLabel] = useState('');
+  const [newModelSupportsEffort, setNewModelSupportsEffort] = useState(true);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(true);
+  const newModelLabelInputRef = useRef<HTMLInputElement | null>(null);
+  const [discovering, setDiscovering] = useState(false);
+  const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
+  const [discoveredIds, setDiscoveredIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    setLabelInput(provider.label);
+    setBaseUrlInput(provider.baseUrl);
+  }, [provider.label, provider.baseUrl]);
+
+  const saveProvider = (): void => {
+    const trimmedLabel = labelInput.trim();
+    const trimmedBaseUrl = baseUrlInput.trim();
+    const trimmedKey = apiKeyInput.trim();
+    if (!trimmedLabel || !trimmedBaseUrl) {
+      onError('Provider label and base URL are required.');
+      return;
+    }
+    onSaveProvider({
+      label: trimmedLabel,
+      baseUrl: trimmedBaseUrl,
+      ...(trimmedKey.length > 0 ? { apiKey: trimmedKey } : {}),
+    });
+    setApiKeyInput('');
+  };
+
+  const clearApiKey = (): void => {
+    onSaveProvider({ clearApiKey: true });
+    setApiKeyInput('');
+  };
+
+  const addModel = (): void => {
+    const trimmedId = newModelId.trim();
+    const trimmedLabel = newModelLabel.trim() || trimmedId;
+    if (!trimmedId) return;
+    onAddModel({
+      modelId: trimmedId,
+      label: trimmedLabel,
+      supportsEffort: newModelSupportsEffort,
+    });
+    setNewModelId('');
+    setNewModelLabel('');
+    setNewModelSupportsEffort(true);
+    setSuggestionsOpen(false);
+  };
+
+  const discoverModels = (): void => {
+    setDiscovering(true);
+    setDiscoverMessage(null);
+    void (async () => {
+      try {
+        const { modelIds } = await onDiscoverModels();
+        setDiscoveredIds(modelIds);
+        setDiscoverMessage(
+          modelIds.length > 0
+            ? `${modelIds.length} model${modelIds.length === 1 ? '' : 's'} available — start typing an id below to pick one.`
+            : 'The endpoint listed no models.',
+        );
+      } catch (err) {
+        onApiError(err);
+        onError(err instanceof ApiError ? err.message : 'Could not query models from the endpoint.');
+      } finally {
+        setDiscovering(false);
+      }
+    })();
+  };
+
+  const selectDiscoveredModel = (modelId: string): void => {
+    setNewModelId(modelId);
+    setSuggestionsOpen(false);
+    newModelLabelInputRef.current?.focus();
+  };
+
+  const configuredModelIds = new Set(models.map((m) => m.modelId));
+  const modelSuggestions = computeModelSuggestions(
+    discoveredIds,
+    configuredModelIds,
+    newModelId,
+    suggestionsOpen,
+  );
+
+  return (
+    <div className="planner-section" data-provider-id={provider.id}>
+      <div className="planner-section-header">
+        <h3>
+          {provider.label}{' '}
+          <span className="planner-row-meta" style={{ fontWeight: 400 }}>
+            ({provider.kind})
+          </span>
+        </h3>
+        <div className="planner-section-actions">
+          <button
+            type="button"
+            className="planner-btn icon-only"
+            disabled={busy || !provider.baseUrl}
+            onClick={onExportProvider}
+            title={`Export "${provider.label}" provider and models to JSON`}
+            aria-label={`Export "${provider.label}" provider and models to JSON`}
+          >
+            <Icon name="download" size={14} />
+          </button>
+          <button
+            type="button"
+            className="planner-btn danger"
+            disabled={busy}
+            onClick={onDeleteProvider}
+            aria-label={`Delete provider ${provider.label}`}
+          >
+            <Icon name="trash" size={14} /> Delete provider
+          </button>
+        </div>
+      </div>
+
+      {provider.keyUnreadable && (
+        <div className="error-box" role="alert" style={{ marginBottom: 10 }}>
+          The stored API key for this provider cannot be decrypted with the current{' '}
+          <code>POCKETAGENT_SETTINGS_ENC_KEY</code>. Enter a new key below and save to replace it.
+        </div>
+      )}
+      {provider.lastError && (
+        <p className="planner-test-fail" style={{ marginBottom: 8 }}>
+          Last error: {provider.lastError}
+        </p>
+      )}
+
+      <div className="planner-field">
+        <label htmlFor={`provider-label-${provider.id}`}>Label</label>
+        <input
+          id={`provider-label-${provider.id}`}
+          type="text"
+          placeholder="Default"
+          value={labelInput}
+          disabled={busy}
+          onChange={(e) => setLabelInput(e.target.value)}
+        />
+      </div>
+
+      <div className="planner-field" style={{ marginTop: 8 }}>
+        <label htmlFor={`provider-base-url-${provider.id}`}>Base URL (OpenAI-compatible)</label>
+        <input
+          id={`provider-base-url-${provider.id}`}
+          type="text"
+          placeholder="https://api.openai.com/v1"
+          value={baseUrlInput}
+          disabled={busy}
+          onChange={(e) => setBaseUrlInput(e.target.value)}
+        />
+      </div>
+
+      <div className="planner-field" style={{ marginTop: 8 }}>
+        <label htmlFor={`provider-api-key-${provider.id}`}>API key (write-only)</label>
+        <input
+          id={`provider-api-key-${provider.id}`}
+          type="password"
+          autoComplete="off"
+          placeholder={provider.hasApiKey ? '••••••••  (leave blank to keep)' : 'sk-…'}
+          value={apiKeyInput}
+          disabled={busy}
+          onChange={(e) => setApiKeyInput(e.target.value)}
+        />
+      </div>
+
+      <div className="planner-inline" style={{ marginTop: 8 }}>
+        <button type="button" className="planner-btn" disabled={busy} onClick={saveProvider}>
+          Save provider
+        </button>
+        {provider.hasApiKey && (
+          <button type="button" className="planner-btn" disabled={busy} onClick={clearApiKey}>
+            Clear key
+          </button>
+        )}
+        <span className="planner-row-meta">
+          {provider.baseUrl ? 'Endpoint configured' : 'Endpoint not configured'} ·{' '}
+          {provider.keyUnreadable
+            ? 'Key unreadable'
+            : provider.hasApiKey
+              ? 'API key set'
+              : 'No API key'}
+        </span>
+      </div>
+
+      <div style={{ marginTop: 16, borderTop: '1px solid var(--border, #2a2f3a)', paddingTop: 12 }}>
+        <div className="planner-section-header">
+          <h4>Models</h4>
+          <div className="planner-section-actions">
+            <button
+              type="button"
+              className="planner-btn"
+              disabled={discovering || !provider.baseUrl}
+              onClick={discoverModels}
+              title={provider.baseUrl ? undefined : 'Save a base URL on this provider first.'}
+            >
+              {discovering ? 'Querying…' : 'Query models'}
+            </button>
+            <button
+              type="button"
+              className="planner-btn"
+              disabled={testingAll || models.length === 0}
+              onClick={onTestAllModels}
+            >
+              {testingAll ? 'Testing…' : 'Test all'}
+            </button>
+            <button
+              type="button"
+              className="planner-btn danger"
+              disabled={busy || models.length === 0}
+              onClick={onDeleteAllModels}
+            >
+              Delete all
+            </button>
+          </div>
+        </div>
+
+        {discoverMessage && <p className="planner-row-meta">{discoverMessage}</p>}
+        {models.length === 0 && (
+          <p className="planner-row-meta">
+            No models configured for this provider yet — query the endpoint above, then pick from
+            the suggestions as you type an id below.
+          </p>
+        )}
+
+        {models.map((m) => {
+          const result = testResults[m.id];
+          return (
+            <div key={m.id} className="planner-model-row">
+              <span>
+                <ModelLabelEditor
+                  label={m.label}
+                  modelId={m.modelId}
+                  disabled={busy}
+                  onSave={(nextLabel) => onSetModelLimit(m.id, { label: nextLabel })}
+                />{' '}
+                <span className="planner-row-meta">({m.modelId})</span>
+                <button
+                  type="button"
+                  className={`planner-badge-btn${m.supportsEffort !== false ? ' active' : ''}`}
+                  onClick={() => onToggleModelEffort(m.id, m.supportsEffort !== false)}
+                  title={
+                    m.supportsEffort !== false
+                      ? 'Reasoning effort enabled (click to disable)'
+                      : 'Reasoning effort disabled (click to enable)'
+                  }
+                >
+                  <Icon name="brain" size={12} />
+                  <span>{m.supportsEffort !== false ? 'Effort on' : 'Effort off'}</span>
+                </button>
+                <ModelLimitInput
+                  label="Context"
+                  title="Context window in tokens. Empty = worked out from the model name (128k if unknown)."
+                  value={m.contextWindow ?? null}
+                  disabled={busy}
+                  onSave={(v) => onSetModelLimit(m.id, { contextWindow: v })}
+                />
+                <ModelLimitInput
+                  label="Max out"
+                  title="Output limit in tokens, sent as max_tokens. Empty = not sent."
+                  value={m.maxOutputTokens ?? null}
+                  disabled={busy}
+                  onSave={(v) => onSetModelLimit(m.id, { maxOutputTokens: v })}
+                />
+                <TriStateSelect
+                  label="Cache"
+                  title="Prompt caching: send Anthropic cache_control markers. Auto = on for Claude models only, since strict OpenAI-compatible servers reject the field. Cached token counts are shown whenever the provider reports them, whatever this says."
+                  value={m.promptCaching ?? null}
+                  disabled={busy}
+                  onSave={(v) => onSetModelLimit(m.id, { promptCaching: v })}
+                />
+                <TriStateSelect
+                  label="Images"
+                  title="Whether this model can read attached images. Auto = yes, unless it is a known text-only model. When off, each image is replaced by a short note in what the model is sent; the chat keeps the image."
+                  value={m.supportsImages ?? null}
+                  disabled={busy}
+                  onSave={(v) => onSetModelLimit(m.id, { supportsImages: v })}
+                />
+                <TriStateSelect
+                  label="PDFs"
+                  title="Whether to send an attached PDF itself (as an OpenAI file part) beside its extracted text. Off by default: most OpenAI-compatible servers reject PDF input. If the server refuses one, the turn continues with the text only."
+                  value={m.supportsPdf ?? null}
+                  disabled={busy}
+                  noAuto
+                  onSave={(v) => onSetModelLimit(m.id, { supportsPdf: v })}
+                />
+                <span
+                  className="planner-model-prices"
+                  title="USD per million tokens, used to show each turn's cost. Optional — with no input and output price a turn shows no cost. An empty cache price is charged at the input price. A cost the provider reports itself is used instead."
+                >
+                  <PriceInput
+                    label="$ in"
+                    value={m.inputPricePerMTok ?? null}
+                    disabled={busy}
+                    onSave={(v) => onSetModelLimit(m.id, { inputPricePerMTok: v })}
+                  />
+                  <PriceInput
+                    label="out"
+                    value={m.outputPricePerMTok ?? null}
+                    disabled={busy}
+                    onSave={(v) => onSetModelLimit(m.id, { outputPricePerMTok: v })}
+                  />
+                  <PriceInput
+                    label="cache read"
+                    value={m.cacheReadPricePerMTok ?? null}
+                    disabled={busy}
+                    onSave={(v) => onSetModelLimit(m.id, { cacheReadPricePerMTok: v })}
+                  />
+                  <PriceInput
+                    label="cache write"
+                    value={m.cacheWritePricePerMTok ?? null}
+                    disabled={busy}
+                    onSave={(v) => onSetModelLimit(m.id, { cacheWritePricePerMTok: v })}
+                  />
+                  <span className="planner-row-meta">per 1M tokens</span>
+                </span>
+                {result === 'testing' && <span className="planner-row-meta"> — testing…</span>}
+                {result && result !== 'testing' && (
+                  <span className={result.ok ? 'planner-test-ok' : 'planner-test-fail'}>
+                    {' '}
+                    — {result.ok ? `OK (${result.latencyMs}ms)` : 'Failed'}: {result.message}
+                  </span>
+                )}
+              </span>
+              <div className="planner-row-actions">
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={result === 'testing' || testingAll}
+                  onClick={() => onTestModel(m.id)}
+                >
+                  Test
+                </button>
+                <button
+                  type="button"
+                  className="planner-btn danger"
+                  disabled={busy}
+                  onClick={() => onRemoveModel(m.id)}
+                  aria-label={`Remove ${m.label}`}
+                >
+                  <Icon name="trash" size={14} />
+                </button>
+              </div>
+            </div>
+          );
+        })}
+
+        <div className="planner-inline" style={{ marginTop: 10 }}>
+          <input
+            type="text"
+            placeholder="Model id, e.g. gpt-4o-mini"
+            value={newModelId}
+            onChange={(e) => {
+              setNewModelId(e.target.value);
+              setSuggestionsOpen(true);
+            }}
+            onFocus={() => setSuggestionsOpen(true)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') addModel();
+            }}
+          />
+          <input
+            ref={newModelLabelInputRef}
+            type="text"
+            placeholder="Label, e.g. Fast"
+            value={newModelLabel}
+            onChange={(e) => setNewModelLabel(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') addModel();
+            }}
+          />
+          <label
+            className="planner-inline-checkbox"
+            title="Allow configuring reasoning effort for this model"
+          >
+            <input
+              type="checkbox"
+              checked={newModelSupportsEffort}
+              onChange={(e) => setNewModelSupportsEffort(e.target.checked)}
+            />
+            <span>Reasoning effort</span>
+          </label>
+          <button type="button" className="planner-btn" disabled={busy} onClick={addModel}>
+            <Icon name="plus" size={14} /> Add
+          </button>
+        </div>
+
+        {modelSuggestions.length > 0 && (
+          <div className="planner-suggestions" role="listbox" aria-label="Matching models">
+            {modelSuggestions.map((modelId) => (
+              <button
+                key={modelId}
+                type="button"
+                role="option"
+                aria-selected={false}
+                className="planner-suggestion"
+                disabled={busy}
+                onClick={() => selectDiscoveredModel(modelId)}
+              >
+                {modelId}
+              </button>
+            ))}
+          </div>
+        )}
+        {newModelId.trim().length > 0 && discoveredIds.length === 0 && (
+          <p className="planner-row-meta" style={{ marginTop: 6 }}>
+            Query the endpoint above to get suggestions, or type a full id and a label and press Add.
+          </p>
+        )}
+      </div>
     </div>
   );
 }

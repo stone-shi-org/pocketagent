@@ -37,8 +37,10 @@ import type { CronService } from '../cron/index.js';
 import type { PlannerWorkspaceRegistry, PlannerWorkspaceRow } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
 import {
+  decryptPlannerProviderSecret,
   deletePlannerChat,
   insertPlannerChat,
+  readDefaultOrFirstPlannerProvider,
   readDisabledToolNames,
   readGlobalDisabledToolNames,
   readPlannerChat,
@@ -46,18 +48,21 @@ import {
   readPlannerChats,
   readPlannerChatsByParentId,
   readPlannerLastEffort,
-  readPlannerModelByModelId,
+  readPlannerProvider,
+  recordPlannerProviderTestResult,
+  resolvePlannerModel,
   countPlannerQueuedPrompts,
   deletePlannerQueuedPrompt,
   deletePlannerQueuedPromptsForChat,
   insertPlannerQueuedPrompt,
   readChatIdsWithQueuedPrompts,
   readPlannerQueuedPrompts,
+  type PlannerModelRow,
+  type PlannerProviderRow,
   type PlannerQueuedPromptRow,
   readPlannerSettings,
   resolvePlannerUrlFetchApiKey,
   resolvePlannerWebSearchApiKey,
-  revealPlannerApiKey,
   updatePlannerChat,
   writePlannerChatMemoryFoldedTurns,
   writePlannerLastEffort,
@@ -97,6 +102,7 @@ import {
   PlannerLlmError,
   type PlannerChatMessage,
   type PlannerLlmCompletion,
+  type PlannerLlmProvider,
   type PlannerLlmRetryPolicy,
   type PlannerLlmToolCall,
   type PlannerLlmUsage,
@@ -1969,14 +1975,15 @@ export class PlannerChatService {
     const systemPromptTokens = systemPrompt.reduce((sum, s) => sum + s.tokens, 0);
     const totalTokens = systemPromptTokens + windowTokens + selectedMemoryTokens + toolsTokens;
 
-    const modelId = chat.lastModelId ?? settings.lastModelId;
-    const limits = resolveModelLimits(modelId ?? '', modelId ? readPlannerModelByModelId(this.opts.db, modelId) : null);
+    const modelRef = chat.lastModelId ?? settings.lastModelId;
+    const resolvedModel = modelRef ? resolvePlannerModel(this.opts.db, modelRef) : null;
+    const limits = resolveModelLimits(resolvedModel?.modelId ?? '', resolvedModel?.row ?? null);
     return {
       memoryEnabled,
       candidates,
       window: { inWindowMessages, foldedMessages, windowLimit, tokens: windowTokens },
       budget: {
-        modelId,
+        modelId: resolvedModel?.modelId ?? modelRef,
         contextWindow: limits.contextWindow,
         contextWindowSource: limits.source,
         compactionEnabled: settings.compactionEnabled,
@@ -2005,19 +2012,26 @@ export class PlannerChatService {
     };
   }
 
-  /** Builds a client against the one configured provider — every caller that
-      needs to talk to it (the turn loop, model discovery, the test button)
-      shares this so `llmFetch` injection and the base-url/api-key lookup
-      never drift between them. Throws `not_configured` if no endpoint is
-      set, same as `resolveModelId`. */
-  private llmClient(opts: { retry?: boolean } = {}): PlannerLlmClient {
-    const settings = readPlannerSettings(this.opts.db);
-    if (!settings.baseUrl) {
+  /** Builds a client against `provider` — every caller that needs to talk to
+      an LLM endpoint (the turn loop, compaction, subagents, model discovery,
+      the test button) shares this so `llmFetch` injection and the
+      base-url/api-key lookup never drift between them. Throws `not_configured`
+      if the provider has no endpoint set or its encrypted API key cannot be
+      decrypted. */
+  clientForProvider(
+    provider: PlannerProviderRow | null,
+    opts: { retry?: boolean } = {},
+  ): PlannerLlmProvider {
+    if (!provider || !provider.baseUrl) {
       throw new PlannerChatError('Planner LLM endpoint is not configured.', 'not_configured');
     }
+    const { apiKey, error } = decryptPlannerProviderSecret(provider, this.opts.config?.settingsEncKey);
+    if (error !== null) {
+      throw new PlannerChatError(error, 'not_configured');
+    }
     return new PlannerLlmClient({
-      baseUrl: settings.baseUrl,
-      apiKey: revealPlannerApiKey(this.opts.db),
+      baseUrl: provider.baseUrl,
+      apiKey,
       ...(this.opts.llmFetch ? { fetchImpl: this.opts.llmFetch } : {}),
       // PA-121: a turn retries a transient failure; a "Test" button must
       // report the first one, or a 503 reads as a 14-second hang.
@@ -2025,11 +2039,47 @@ export class PlannerChatService {
     });
   }
 
+  /** Resolves the provider for a model (`planner_models.id` or bare `model_id`)
+      or a provider row/id and builds its `PlannerLlmProvider` (PA-148). */
+  clientFor(
+    modelOrProvider: string | PlannerModelRow | PlannerProviderRow,
+    opts: { retry?: boolean } = {},
+  ): PlannerLlmProvider {
+    if (typeof modelOrProvider === 'string') {
+      const asProvider = readPlannerProvider(this.opts.db, modelOrProvider);
+      if (asProvider) return this.clientForProvider(asProvider, opts);
+      const resolved = resolvePlannerModel(this.opts.db, modelOrProvider);
+      return this.clientForProvider(resolved.provider, opts);
+    }
+    if ('modelId' in modelOrProvider) {
+      return this.clientForProvider(readPlannerProvider(this.opts.db, modelOrProvider.providerId), opts);
+    }
+    return this.clientForProvider(modelOrProvider, opts);
+  }
+
   /** For the settings page's "query models" button — see `listModels`'s doc
       comment. Never touches the model catalog itself; the caller decides
       what to do with the ids. */
-  async discoverModels(): Promise<string[]> {
-    return this.llmClient().listModels();
+  async discoverModels(providerId?: string): Promise<string[]> {
+    const provider =
+      providerId !== undefined
+        ? readPlannerProvider(this.opts.db, providerId)
+        : readDefaultOrFirstPlannerProvider(this.opts.db);
+    if (providerId !== undefined && !provider) {
+      throw new PlannerChatError('Provider not found.', 'not_found');
+    }
+    const client = this.clientForProvider(provider);
+    try {
+      const ids = await client.listModels();
+      if (provider) recordPlannerProviderTestResult(this.opts.db, provider.id, { ok: true });
+      return ids;
+    } catch (err) {
+      if (provider) {
+        const msg = err instanceof PlannerLlmError ? err.message : (err as Error).message;
+        recordPlannerProviderTestResult(this.opts.db, provider.id, { ok: false, error: msg });
+      }
+      throw err;
+    }
   }
 
   /**
@@ -2216,31 +2266,30 @@ export class PlannerChatService {
 
   /**
    * For the settings page's "test" / "test all" buttons: round-trips one
-   * minimal prompt through `modelId` to confirm the endpoint and model id
-   * actually work. Deliberately swallows `PlannerLlmError` into `ok: false`
-   * rather than throwing — a failed test is the expected, common outcome of
-   * clicking this button (a typo'd model id, a rate limit), not a server
-   * error, so the route can always answer 200 with a verdict.
+   * minimal prompt through `modelOrId` to confirm its provider endpoint and
+   * model id actually work. Deliberately swallows `PlannerLlmError` into
+   * `ok: false` rather than throwing — a failed test is the expected, common
+   * outcome of clicking this button (a typo'd model id, a rate limit), not a
+   * server error, so the route can always answer 200 with a verdict.
    */
-  async testModel(modelId: string): Promise<{ ok: boolean; message: string; latencyMs: number }> {
-    const client = this.llmClient({ retry: false });
-    const startedAt = Date.now();
-    try {
-      let content: string | null = null;
-      for await (const chunk of client.streamComplete(modelId, [
-        { role: 'user', content: 'Reply with exactly one word: ok' },
-      ])) {
-        if (chunk.type === 'done') content = chunk.content;
-      }
-      return {
-        ok: true,
-        message: content ? content.trim().slice(0, 200) : '(empty reply)',
-        latencyMs: Date.now() - startedAt,
-      };
-    } catch (err) {
-      const message = err instanceof PlannerLlmError ? err.message : (err as Error).message;
-      return { ok: false, message, latencyMs: Date.now() - startedAt };
+  async testModel(modelOrId: string | PlannerModelRow): Promise<{ ok: boolean; message: string; latencyMs: number }> {
+    const resolved =
+      typeof modelOrId === 'string'
+        ? resolvePlannerModel(this.opts.db, modelOrId)
+        : {
+            row: modelOrId,
+            provider: readPlannerProvider(this.opts.db, modelOrId.providerId),
+            modelId: modelOrId.modelId,
+          };
+    const client = this.clientForProvider(resolved.provider, { retry: false });
+    const result = await client.test(resolved.modelId);
+    if (resolved.provider) {
+      recordPlannerProviderTestResult(this.opts.db, resolved.provider.id, {
+        ok: result.ok,
+        error: result.ok ? null : result.message,
+      });
     }
+    return result;
   }
 
   /**
@@ -2675,12 +2724,14 @@ export class PlannerChatService {
     }
 
     const toolSpecs = toOpenAiToolSpecs(this.toolsFor(chat.workspaceId));
-    const limits = this.modelLimits(modelId);
-    const modelRow = readPlannerModelByModelId(this.opts.db, modelId);
+    const resolved = resolvePlannerModel(this.opts.db, modelId);
+    const modelRow = resolved.row;
+    const wireModelId = resolved.modelId;
+    const limits = resolveModelLimits(wireModelId, modelRow);
     let events = await this.readEvents(workspacePath, chat.id);
     // PA-122: images are budgeted before anything is estimated, so the
     // estimate counts only the images that will actually be sent.
-    const imageBudget = { supportsImages: plannerModelSupportsImages(modelId, modelRow?.supportsImages), modelId };
+    const imageBudget = { supportsImages: plannerModelSupportsImages(wireModelId, modelRow?.supportsImages), modelId: wireModelId };
     // PA-137: small attached files inlined, and PDFs as `file` parts for a
     // model marked as reading them (unless its endpoint refused one earlier
     // in this turn). One inliner per round trip, so what it had to drop to
@@ -2751,10 +2802,10 @@ export class PlannerChatService {
         ? Math.max(1024, Math.min(modelRow.maxOutputTokens, limits.contextWindow - estimatedTokens - CONTEXT_SAFETY_TOKENS))
         : undefined;
 
-    if (!settings.baseUrl) {
+    if (!resolved.provider || !resolved.provider.baseUrl) {
       // Checked before the first yield by `resolveModelId`, so only an
       // endpoint cleared in Settings mid-turn lands here — reported in-band,
-      // since `llmClient()` would throw past a stream already started.
+      // since `clientForProvider()` would throw past a stream already started.
       yield* this.emit(workspacePath, chat.id, {
         kind: 'notice',
         level: 'error',
@@ -2763,14 +2814,24 @@ export class PlannerChatService {
       yield* this.finishTurn(chat, workspacePath, modelId, '', true, stats);
       return;
     }
-    const client = this.llmClient();
+    const { error: keyError } = decryptPlannerProviderSecret(resolved.provider, this.opts.config?.settingsEncKey);
+    if (keyError !== null) {
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'notice',
+        level: 'error',
+        text: keyError,
+      });
+      yield* this.finishTurn(chat, workspacePath, modelId, '', true, stats);
+      return;
+    }
+    const client = this.clientForProvider(resolved.provider);
 
     // PA-122: Anthropic-style cache breakpoints, for a model whose caching is
     // on and whose endpoint has not refused them earlier in this turn. The
     // unmarked `messages` are kept for the estimate and the calibration, so
     // the markers never change what we think the prompt weighs.
     const cacheControl =
-      resolvePromptCaching(modelId, modelRow?.promptCaching) && !this.cacheControlRefused.has(chat.id);
+      resolvePromptCaching(wireModelId, modelRow?.promptCaching) && !this.cacheControlRefused.has(chat.id);
     const request = cacheControl
       ? applyCacheControl(messages, toolSpecs, this.stableSystemPrefix(chat, workspacePath, settings))
       : { messages, tools: toolSpecs };
@@ -2785,7 +2846,7 @@ export class PlannerChatService {
     // `PlannerTurnStats`'s doc comment for why.
     const llmStartedAt = Date.now();
     try {
-      for await (const chunk of client.streamComplete(modelId, request.messages, request.tools, signal, {
+      for await (const chunk of client.streamComplete(wireModelId, request.messages, request.tools, signal, {
         effort: chat.lastEffort,
         thinking: chat.thinkingEnabled !== false,
         idleTimeoutMs: settings.llmIdleTimeoutSeconds * 1000,
@@ -2823,7 +2884,7 @@ export class PlannerChatService {
         yield* this.finishTurn(chat, workspacePath, modelId, '', false, stats, 'interrupted');
         return;
       }
-      this.opts.logger?.warn({ err, chat: chat.id, model: modelId }, 'planner LLM call failed');
+      this.opts.logger?.warn({ err, chat: chat.id, model: wireModelId }, 'planner LLM call failed');
       const message = err instanceof PlannerLlmError ? err.message : (err as Error).message;
       const failedStats = { ...stats, elapsedMs: stats.elapsedMs + (Date.now() - llmStartedAt) };
       if (cacheControl && err instanceof PlannerLlmError && isCacheControlRejection(err)) {
@@ -2836,7 +2897,7 @@ export class PlannerChatService {
           kind: 'notice',
           level: 'warn',
           text:
-            `The LLM endpoint refused prompt-caching markers for ${modelId}, so this turn is sent without them. ` +
+            `The LLM endpoint refused prompt-caching markers for ${wireModelId}, so this turn is sent without them. ` +
             'Set "Prompt caching" to Off for this model in Settings if this keeps happening.',
         });
         yield* this.driveLoop(chat, workspacePath, modelId, iteration, failedStats, signal, loopOpts);
@@ -2853,7 +2914,7 @@ export class PlannerChatService {
           kind: 'notice',
           level: 'warn',
           text:
-            `The LLM endpoint refused a PDF sent to ${modelId}, so this turn uses the extracted text only. ` +
+            `The LLM endpoint refused a PDF sent to ${wireModelId}, so this turn uses the extracted text only. ` +
             'Turn "Reads PDFs" off for this model in Settings if this keeps happening.',
         });
         yield* this.driveLoop(chat, workspacePath, modelId, iteration, failedStats, signal, loopOpts);
@@ -2880,7 +2941,7 @@ export class PlannerChatService {
           kind: 'notice',
           level: 'error',
           text:
-            `This conversation no longer fits ${modelId}'s context window (${limits.contextWindow.toLocaleString('en-US')} tokens` +
+            `This conversation no longer fits ${wireModelId}'s context window (${limits.contextWindow.toLocaleString('en-US')} tokens` +
             `${limits.source === 'model' ? '' : ', assumed — set it on the model in Settings'}). ` +
             (settings.compactionEnabled
               ? 'Compacting it did not make it fit; try /clear, or a model with a larger context window.'
@@ -3895,14 +3956,23 @@ export class PlannerChatService {
 
   private resolveModelId(chat: PlannerChat, requested: string | undefined): string {
     const settings = readPlannerSettings(this.opts.db);
-    if (!settings.baseUrl) {
-      throw new PlannerChatError('Planner LLM endpoint is not configured.', 'not_configured');
-    }
-    const modelId = requested ?? chat.lastModelId ?? settings.lastModelId;
-    if (!modelId) {
+    const candidate = requested ?? chat.lastModelId ?? settings.lastModelId;
+    if (!candidate) {
+      const defaultProvider = readDefaultOrFirstPlannerProvider(this.opts.db);
+      if (!defaultProvider || !defaultProvider.baseUrl) {
+        throw new PlannerChatError('Planner LLM endpoint is not configured.', 'not_configured');
+      }
       throw new PlannerChatError('No model selected, and none is configured.', 'not_configured');
     }
-    return modelId;
+    const resolved = resolvePlannerModel(this.opts.db, candidate);
+    if (!resolved.provider || !resolved.provider.baseUrl) {
+      throw new PlannerChatError('Planner LLM endpoint is not configured.', 'not_configured');
+    }
+    const { error } = decryptPlannerProviderSecret(resolved.provider, this.opts.config?.settingsEncKey);
+    if (error !== null) {
+      throw new PlannerChatError(error, 'not_configured');
+    }
+    return resolved.row ? resolved.row.id : candidate;
   }
 
   private requireChat(id: string): PlannerChat {
@@ -4285,7 +4355,8 @@ export class PlannerChatService {
   /** PA-121: the context window and output limit to plan `modelId`'s
       requests against — see `resolveModelLimits`. */
   private modelLimits(modelId: string): ModelLimits {
-    return resolveModelLimits(modelId, readPlannerModelByModelId(this.opts.db, modelId));
+    const resolved = resolvePlannerModel(this.opts.db, modelId);
+    return resolveModelLimits(resolved.modelId, resolved.row);
   }
 
   /**
@@ -4448,11 +4519,13 @@ export class PlannerChatService {
         ),
       },
     ];
-    const modelRow = readPlannerModelByModelId(this.opts.db, modelId);
+    const resolved = resolvePlannerModel(this.opts.db, modelId);
+    const modelRow = resolved.row;
+    const wireModelId = resolved.modelId;
     const startedAt = Date.now();
     let completion: PlannerLlmCompletion | null = null;
     try {
-      for await (const chunk of this.llmClient().streamComplete(modelId, request, undefined, signal, {
+      for await (const chunk of this.clientForProvider(resolved.provider).streamComplete(wireModelId, request, undefined, signal, {
         effort: chat.lastEffort,
         thinking: chat.thinkingEnabled !== false,
         idleTimeoutMs: settings.llmIdleTimeoutSeconds * 1000,
@@ -4462,7 +4535,7 @@ export class PlannerChatService {
       }
     } catch (err) {
       if (signal?.aborted) return none('Interrupted.');
-      this.opts.logger?.warn({ err, chat: chat.id, model: modelId }, 'planner context compaction failed');
+      this.opts.logger?.warn({ err, chat: chat.id, model: wireModelId }, 'planner context compaction failed');
       return yield* this.compactionFailedNotice(workspacePath, chat.id, reason, tokensBefore, (err as Error).message);
     }
     const elapsedMs = Date.now() - startedAt;

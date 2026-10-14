@@ -10,6 +10,7 @@ import type {
   PlannerContextPreviewResponse,
   PlannerLiveProvider,
   PlannerModel,
+  PlannerProvider,
   PlannerToolApprovalChoice,
   PromptImage,
   QueuedPromptSummary,
@@ -27,6 +28,7 @@ import { PromptBox } from '../components/PromptBox.js';
 import { WorkspacePanel } from '../components/WorkspacePanel.js';
 import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
 import { plannerPromptHistoryKey } from '../agent/prompt-history.js';
+import { toPlannerModelInfos } from '../agent/planner-models.js';
 import { applyEvent, applyEvents, emptyTranscript, markTurnUndone, type TranscriptState } from '../agent/transcript.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { LiveListenController } from '../audio/live-listen.js';
@@ -115,14 +117,8 @@ const GEMINI_LIVE_DISCLOSURE =
 const GEMINI_LIVE_UNAVAILABLE =
   'This agent is set to use Gemini Live for live mode, but no usable Gemini API key is configured on this server, so live mode is unavailable here. Add one in Providers and Models.';
 
-function toModelInfos(models: PlannerModel[]): ModelInfo[] {
-  return models.map((m) => ({
-    value: m.modelId,
-    displayName: m.label,
-    description: '',
-    supportsEffort: m.supportsEffort !== false,
-    supportedEffortLevels: ['low', 'medium', 'high', 'xhigh'],
-  }));
+function toModelInfos(models: PlannerModel[], providers: PlannerProvider[] = []): ModelInfo[] {
+  return toPlannerModelInfos(models, providers);
 }
 
 interface EventKeyInfo {
@@ -258,6 +254,7 @@ export function PlannerChatPage({
   const api = useHostApi();
   const [chat, setChat] = useState<PlannerChat | null>(null);
   const [models, setModels] = useState<PlannerModel[]>([]);
+  const [providers, setProviders] = useState<PlannerProvider[]>([]);
   // PA-122: messages sent while the chat was busy, not yet delivered.
   const [queued, setQueued] = useState<QueuedPromptSummary[]>([]);
   const [transcript, setTranscript] = useState<TranscriptState | null>(null);
@@ -774,12 +771,14 @@ export function PlannerChatPage({
     loadingRef.current = true;
     liveEventsBuffer.current = [];
     try {
-      const [{ chats }, { models: modelList }, { events }, subagentData] = await Promise.all([
-        api.listPlannerChats(),
-        api.listPlannerModels(),
-        api.plannerChatHistory(chatId),
-        api.listPlannerChatSubagents(chatId).catch(() => ({ subagents: [], plannerChats: [] })),
-      ]);
+      const [{ chats }, { models: modelList }, { providers: providerList }, { events }, subagentData] =
+        await Promise.all([
+          api.listPlannerChats(),
+          api.listPlannerModels(),
+          api.listPlannerProviders().catch(() => ({ providers: [] as PlannerProvider[] })),
+          api.plannerChatHistory(chatId),
+          api.listPlannerChatSubagents(chatId).catch(() => ({ subagents: [], plannerChats: [] })),
+        ]);
       let found = chats.find((c) => c.id === chatId) ?? null;
       if (!found) {
         try {
@@ -791,6 +790,7 @@ export function PlannerChatPage({
       setChat(found);
       setMissing(found === null);
       setModels(modelList);
+      setProviders(providerList);
       setQueued(found?.queuedPrompts ?? []);
       seenPermanentKeys.current.clear();
       seenEphemeralKeys.current.clear();
@@ -1001,7 +1001,8 @@ export function PlannerChatPage({
   );
 
   // PA-122: warn before sending an image to a model that cannot read it.
-  const selectedModel = models.find((m) => m.modelId === chat?.lastModelId) ?? null;
+  const selectedModel =
+    models.find((m) => m.id === chat?.lastModelId || m.modelId === chat?.lastModelId) ?? null;
   const imageNote =
     selectedModel && !plannerModelSupportsImages(selectedModel.modelId, selectedModel.supportsImages)
       ? `${selectedModel.label} cannot read images — it will see a note instead. Pick a vision model to have it look.`
@@ -2138,7 +2139,7 @@ export function PlannerChatPage({
         isSpeaking={isSpeaking}
         onStopSpeaking={handleStopSpeaking}
         commands={PLANNER_SLASH_COMMANDS}
-        models={toModelInfos(models)}
+        models={toModelInfos(models, providers)}
         currentModel={chat?.lastModelId ?? null}
         onSetModel={changeModel}
         effort={chat?.lastEffort ?? null}

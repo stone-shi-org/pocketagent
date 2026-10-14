@@ -22,10 +22,14 @@ export function SelectRowNative({
   label: string;
   help?: string;
   value: string;
-  options: { value: string; label: string }[];
+  options: { value: string; label: string; group?: string }[];
   busy?: boolean;
   onChange: (value: string) => void;
 }): JSX.Element {
+  const ungrouped = options.filter((o) => !o.group);
+  const groupNames = Array.from(
+    new Set(options.map((o) => o.group).filter((g): g is string => Boolean(g))),
+  );
   return (
     <div className="settings-row">
       <div className="settings-row-main">
@@ -36,14 +40,26 @@ export function SelectRowNative({
         <div className="settings-row-control settings-select-control">
           <select
             className="settings-select"
+            aria-label={label}
             value={value}
             disabled={busy}
             onChange={(e) => onChange(e.target.value)}
           >
-            {options.map((o) => (
+            {ungrouped.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>
+            ))}
+            {groupNames.map((group) => (
+              <optgroup key={group} label={group}>
+                {options
+                  .filter((o) => o.group === group)
+                  .map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+              </optgroup>
             ))}
           </select>
         </div>

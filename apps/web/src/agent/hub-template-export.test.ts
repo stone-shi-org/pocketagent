@@ -4,7 +4,7 @@ import type {
   McpRegistrySummary,
   PlannerAgentToolInfo,
   PlannerModel,
-  PlannerSettingsDto,
+  PlannerProvider,
   PlannerSkillDetailResponse,
   PlannerSkillInfo,
   PlannerWorkspace,
@@ -13,7 +13,7 @@ import type { ApiClient } from '../api/client.js';
 import {
   exportClaudeProviderPayload,
   exportMcpRegistryPayload,
-  exportPlannerEndpointPayload,
+  exportPlannerProviderPayload,
   exportPocketAgentPayload,
   exportSkillPayload,
   fetchAllHostExportDrafts,
@@ -125,49 +125,42 @@ describe('hub-template-export payloads', () => {
     });
   });
 
-  it('exportPlannerEndpointPayload extracts endpoint urls and models', () => {
-    const settings: PlannerSettingsDto = {
-      baseUrl: 'https://api.openai.com/v1',
+  it('exportPlannerProviderPayload extracts provider fields and models', () => {
+    const provider: PlannerProvider = {
+      id: 'pp-1',
+      label: 'OpenRouter',
+      kind: 'openai-compatible',
+      baseUrl: 'https://openrouter.ai/api/v1',
       hasApiKey: true,
-      lastModelId: 'gpt-4o',
-      yoloEnabled: false,
-      embeddingBaseUrl: 'https://embeddings.example.com',
-      embeddingHasApiKey: false,
-      embeddingModelId: 'text-embed-3',
-      webSearchBaseUrl: null,
-      webSearchHasApiKey: false,
-      webSearchEnabled: false,
-      urlFetchBaseUrl: null,
-      urlFetchHasApiKey: false,
-      urlFetchEnabled: false,
-      mcpEnabled: true,
-      maxToolIterations: 30,
-      maxSubagentSpawnsPerTurn: 5,
-      meInstruction: '',
-      toolsInstruction: '',
-      commandTimeoutSeconds: 30,
-      llmIdleTimeoutSeconds: 300,
-      compactionEnabled: true,
-      compactionReserveTokens: 16384,
-      compactionKeepRecentTokens: 20000,
-      attachmentInlineTextMaxBytes: 32768,
-      attachmentInlineExtractMaxTokens: 8000,
+      keyUnreadable: false,
+      allowUnattended: false,
+      sortOrder: 0,
+      createdAt: 1000,
+      lastTestedAt: null,
+      lastError: null,
     };
     const models: PlannerModel[] = [
-      { id: 'm-1', modelId: 'gpt-4o', label: 'GPT-4o', createdAt: 1000, sortOrder: 0, supportsEffort: true },
-      { id: 'm-2', modelId: 'o1-mini', label: 'o1 Mini', createdAt: 1000, sortOrder: 1, supportsEffort: true },
+      { id: 'm-1', providerId: 'pp-1', modelId: 'gpt-4o', label: 'GPT-4o', createdAt: 1000, sortOrder: 0, supportsEffort: true },
+      { id: 'm-2', providerId: 'pp-1', modelId: 'o1-mini', label: 'o1 Mini', createdAt: 1000, sortOrder: 1, supportsEffort: true },
     ];
-    const payload = exportPlannerEndpointPayload(settings, models);
+    const payload = exportPlannerProviderPayload(provider, models);
     expect(payload).toEqual({
-      baseUrl: 'https://api.openai.com/v1',
+      label: 'OpenRouter',
+      kind: 'openai-compatible',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      allowUnattended: false,
       models: [
-        { modelId: 'gpt-4o', label: 'GPT-4o', supportsEffort: true },
-        { modelId: 'o1-mini', label: 'o1 Mini', supportsEffort: true },
+        {
+          modelId: 'gpt-4o',
+          label: 'GPT-4o',
+          supportsEffort: true,
+        },
+        {
+          modelId: 'o1-mini',
+          label: 'o1 Mini',
+          supportsEffort: true,
+        },
       ],
-      embeddingBaseUrl: 'https://embeddings.example.com',
-      embeddingModelId: 'text-embed-3',
-      webSearchBaseUrl: null,
-      urlFetchBaseUrl: null,
     });
   });
 });
@@ -216,11 +209,15 @@ describe('listHostExportableItems', () => {
     ]);
   });
 
-  it('returns singleton item for planner-endpoint', async () => {
-    const client = {} as ApiClient;
-    const items = await listHostExportableItems(client, 'planner-endpoint');
+  it('lists providers for planner-provider', async () => {
+    const client = {
+      listPlannerProviders: vi.fn().mockResolvedValue({
+        providers: [{ id: 'pp-1', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' }],
+      }),
+    } as unknown as ApiClient;
+    const items = await listHostExportableItems(client, 'planner-provider');
     expect(items).toEqual([
-      { id: 'planner-endpoint', label: 'Pocket Agent LLM Endpoint' },
+      { id: 'pp-1', label: 'OpenRouter', description: 'https://openrouter.ai/api/v1' },
     ]);
   });
 });
@@ -284,29 +281,40 @@ describe('fetchHostExportDraft', () => {
     });
   });
 
-  it('fetches and formats a planner-endpoint draft', async () => {
+  it('fetches and formats a planner-provider draft', async () => {
     const client = {
-      getPlannerSettings: vi.fn().mockResolvedValue({
-        baseUrl: 'https://llm.example.com',
-        embeddingBaseUrl: null,
-        embeddingModelId: null,
-        webSearchBaseUrl: null,
-        urlFetchBaseUrl: null,
+      listPlannerProviders: vi.fn().mockResolvedValue({
+        providers: [
+          {
+            id: 'pp-1',
+            label: 'OpenRouter',
+            kind: 'openai-compatible',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            allowUnattended: false,
+          },
+        ],
       }),
       listPlannerModels: vi.fn().mockResolvedValue({
-        models: [{ modelId: 'gpt-4o', label: 'GPT-4o' }],
+        models: [
+          { id: 'm-1', providerId: 'pp-1', modelId: 'gpt-4o', label: 'GPT-4o', supportsEffort: true },
+        ],
       }),
     } as unknown as ApiClient;
 
-    const draft = await fetchHostExportDraft(client, 'planner-endpoint', null, 'Server-1');
-    expect(draft.defaultName).toBe('Server-1 Planner Endpoint');
+    const draft = await fetchHostExportDraft(client, 'planner-provider', 'pp-1', 'Server-1');
+    expect(draft.defaultName).toBe('OpenRouter');
     expect(draft.payload).toEqual({
-      baseUrl: 'https://llm.example.com',
-      models: [{ modelId: 'gpt-4o', label: 'GPT-4o' }],
-      embeddingBaseUrl: null,
-      embeddingModelId: null,
-      webSearchBaseUrl: null,
-      urlFetchBaseUrl: null,
+      label: 'OpenRouter',
+      kind: 'openai-compatible',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      allowUnattended: false,
+      models: [
+        {
+          modelId: 'gpt-4o',
+          label: 'GPT-4o',
+          supportsEffort: true,
+        },
+      ],
     });
   });
 

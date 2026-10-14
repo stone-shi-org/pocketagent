@@ -2,7 +2,12 @@ import type { PlannerChat, PlannerMemory } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import type { PlannerWorkspaceRegistry, PlannerWorkspaceRow } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
-import { readPlannerChats, readPlannerSettings, revealPlannerApiKey } from './store.js';
+import {
+  decryptPlannerProviderSecret,
+  readPlannerChats,
+  readPlannerSettings,
+  resolvePlannerModel,
+} from './store.js';
 import { readTranscriptEvents } from './transcript.js';
 import { PlannerLlmClient, type PlannerChatMessage, type PlannerLlmCompletion } from './llm-client.js';
 
@@ -50,6 +55,7 @@ export interface MemoryConsolidationServiceOptions {
   db: Db;
   plannerWorkspaces: PlannerWorkspaceRegistry;
   memory: PlannerMemoryService;
+  encKey?: Buffer;
   logger?: { warn: (obj: unknown, msg?: string) => void };
   /** Injectable for tests, so a 24h wait is never actually waited on. */
   now?: () => number;
@@ -177,18 +183,19 @@ export class MemoryConsolidationService {
     }
 
     const settings = readPlannerSettings(this.opts.db);
-    if (!settings.baseUrl) {
+    // Same fallback order `PlannerChatService.create` uses for a new chat's
+    // model: this agent's own configured default, else the last model used
+    // anywhere. Resolved through `resolvePlannerModel` (PA-148) so each
+    // workspace consolidates against its model's own provider endpoint and key.
+    const resolved = resolvePlannerModel(this.opts.db, workspace.defaultModelId ?? settings.lastModelId);
+    if (!resolved.provider || !resolved.provider.baseUrl) {
       this.opts.logger?.warn(
         { workspaceId: workspace.id },
         'memory consolidation skipped: no planner LLM endpoint is configured',
       );
       return; // Not advancing the marker: nothing was actually processed.
     }
-    // Same fallback order `PlannerChatService.create` uses for a new chat's
-    // model: this agent's own configured default, else the last model used
-    // anywhere.
-    const modelId = workspace.defaultModelId ?? settings.lastModelId;
-    if (!modelId) {
+    if (!resolved.modelId) {
       this.opts.logger?.warn(
         { workspaceId: workspace.id },
         'memory consolidation skipped: no model is configured for this agent, and none is configured globally',
@@ -196,9 +203,18 @@ export class MemoryConsolidationService {
       return;
     }
 
+    const secret = decryptPlannerProviderSecret(resolved.provider, this.opts.encKey);
+    if (secret.error !== null) {
+      this.opts.logger?.warn(
+        { workspaceId: workspace.id, providerId: resolved.provider.id },
+        `memory consolidation skipped: ${secret.error}`,
+      );
+      return;
+    }
+
     const client = new PlannerLlmClient({
-      baseUrl: settings.baseUrl,
-      apiKey: revealPlannerApiKey(this.opts.db),
+      baseUrl: resolved.provider.baseUrl,
+      apiKey: secret.apiKey,
       ...(this.opts.llmFetch ? { fetchImpl: this.opts.llmFetch } : {}),
     });
     const messages: PlannerChatMessage[] = [
@@ -212,7 +228,7 @@ export class MemoryConsolidationService {
     // one-off round trip. `text_delta` chunks are ignored; only the final
     // `done` event carries anything this method needs.
     let completion: PlannerLlmCompletion | null = null;
-    for await (const chunk of client.streamComplete(modelId, messages)) {
+    for await (const chunk of client.streamComplete(resolved.modelId, messages)) {
       if (chunk.type === 'done') completion = chunk;
     }
     if (!completion?.content) {

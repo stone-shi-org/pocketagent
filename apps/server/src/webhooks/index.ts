@@ -1633,7 +1633,11 @@ export class WebhookService {
 
         if (pocketId) {
           const pModels = readPlannerModels(this.db);
-          availableModels = pModels.map((m) => ({ value: m.modelId, displayName: m.label }));
+          availableModels = pModels.map((m) => ({
+            value: m.id,
+            displayName: m.label,
+            resolvedModel: m.modelId,
+          }));
           defaultModel = this.opts.plannerWorkspaces.list().find((w) => w.id === pocketId)?.defaultModelId ?? null;
         } else {
           const defaults = readAgentDefaults(this.db, effectiveAgent);

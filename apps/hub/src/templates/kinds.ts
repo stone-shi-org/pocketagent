@@ -409,51 +409,57 @@ export function planFor(spec: HubTemplatePayload, secrets: FilledSecrets): Provi
       };
     }
 
-    case 'planner-endpoint': {
+    case 'planner-provider': {
       const p = spec.payload;
-      // The singleton. There is nothing to create and nothing to look up:
-      // every host already has exactly one planner endpoint, so provisioning
-      // this kind is always a replacement of host-wide configuration — which
-      // is why the ledger id is a constant and why the confirmation names what
-      // it is about to repoint.
-      //
+      const trimmedApiKey = secrets.apiKey?.trim();
       // A blank optional key is *omitted* rather than sent as an empty string:
-      // the backend reads `''` as "clear the stored key", and a template whose
-      // operator left the embedding key blank means "leave whatever is there",
-      // not "wipe it".
-      const settings: Record<string, unknown> = {
+      // the backend treats an omitted or blank `apiKey` on PATCH as "keep the
+      // stored key" (`clearApiKey: true` is required to wipe it), so a template
+      // whose operator left the key blank during an overwrite leaves the host's
+      // existing key intact.
+      const createBody: Record<string, unknown> = {
+        label: p.label,
+        kind: p.kind,
         baseUrl: p.baseUrl,
-        ...(secrets.apiKey ? { apiKey: secrets.apiKey } : {}),
-        embeddingBaseUrl: p.embeddingBaseUrl,
-        embeddingModelId: p.embeddingModelId,
-        ...(secrets.embeddingApiKey ? { embeddingApiKey: secrets.embeddingApiKey } : {}),
-        webSearchBaseUrl: p.webSearchBaseUrl,
-        ...(secrets.webSearchApiKey ? { webSearchApiKey: secrets.webSearchApiKey } : {}),
-        urlFetchBaseUrl: p.urlFetchBaseUrl,
-        ...(secrets.urlFetchApiKey ? { urlFetchApiKey: secrets.urlFetchApiKey } : {}),
+        allowUnattended: p.allowUnattended,
+        ...(trimmedApiKey ? { apiKey: trimmedApiKey } : {}),
+      };
+      const updateBody: Record<string, unknown> = {
+        label: p.label,
+        baseUrl: p.baseUrl,
+        allowUnattended: p.allowUnattended,
+        ...(trimmedApiKey ? { apiKey: trimmedApiKey } : {}),
       };
       return {
-        collectionPath: '/api/planner/settings',
-        existingIds: () => [],
+        collectionPath: '/api/planner/providers',
+        existingIds: (b) => idsFrom(b, 'providers'),
         collision: () => null,
-        createCall: null,
-        remoteIdFrom: () => 'planner-settings',
-        updateCall: () => ({ method: 'PATCH', path: '/api/planner/settings', body: settings }),
+        createCall: { method: 'POST', path: '/api/planner/providers', body: createBody },
+        remoteIdFrom: (b) => {
+          const id = (b as { id?: unknown } | null)?.id;
+          return typeof id === 'string' ? id : null;
+        },
+        updateCall: (remoteId) => ({
+          method: 'PATCH',
+          path: `/api/planner/providers/${encodeURIComponent(remoteId)}`,
+          body: updateBody,
+        }),
         updateAfterCreate: false,
-        // The model catalog is replaced wholesale, and only when the template
-        // actually carries one: `models: []` means "do not touch the catalog",
-        // because a template that only sets an endpoint should not empty the
-        // list of models an operator curated on that host. When it does carry
-        // models, delete-all-then-add is the only shape available — a model row
-        // has no PATCH, by that route's own design.
-        steps: () =>
+        // Each provider owns its own model catalog (`provider_id`), so clearing
+        // and adding models is scoped to `?providerId=<remoteId>` and attaches
+        // `providerId: remoteId` to each model creation call. `models: []`
+        // means "do not touch this provider's model catalog".
+        steps: (remoteId) =>
           p.models.length === 0
             ? []
             : [
                 {
                   label: 'clear the model catalog',
                   optional: false,
-                  call: { method: 'DELETE' as const, path: '/api/planner/models' },
+                  call: {
+                    method: 'DELETE' as const,
+                    path: `/api/planner/models?providerId=${encodeURIComponent(remoteId)}`,
+                  },
                 },
                 ...p.models.map((model) => ({
                   label: `add model ${model.modelId}`,
@@ -461,14 +467,13 @@ export function planFor(spec: HubTemplatePayload, secrets: FilledSecrets): Provi
                   call: {
                     method: 'POST' as const,
                     path: '/api/planner/models',
-                    // PA-122: every optional setting the template carries,
-                    // not just the id and label — an older backend's schema
-                    // strips a field it does not know rather than failing.
-                    body: model,
+                    // PA-122 / PA-148: every optional model setting the template
+                    // carries, tagged with this provider's remote id.
+                    body: { ...model, providerId: remoteId },
                   },
                 })),
               ],
-        singletonRemoteId: 'planner-settings',
+        singletonRemoteId: null,
       };
     }
   }
@@ -490,7 +495,7 @@ export function describeSpec(spec: HubTemplatePayload): string {
       return `Claude provider "${spec.payload.name}" (${spec.payload.baseUrl})`;
     case 'skill':
       return `skill "${spec.payload.name}" (${spec.payload.slug})`;
-    case 'planner-endpoint':
-      return `planner endpoint ${spec.payload.baseUrl}`;
+    case 'planner-provider':
+      return `Pocket Agent provider "${spec.payload.label}" (${spec.payload.baseUrl})`;
   }
 }

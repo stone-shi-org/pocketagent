@@ -174,13 +174,78 @@ export const UpdatePlannerWorkspaceRequest = z.object({
 export type UpdatePlannerWorkspaceRequest = z.infer<typeof UpdatePlannerWorkspaceRequest>;
 
 /**
- * One row of "this label maps to this model id", checked against the single
- * configured provider endpoint (`PlannerSettingsDto.baseUrl`). Multiple rows
- * are what a chat's model picker switches between — see the reporter's
- * answer to PA-6 open question 6: one provider, several configurable models.
+ * PA-148: the kind of a Pocket Agent LLM provider. Phase 1 supports
+ * `openai-compatible` only; later phases of PA-147 extend this enum with
+ * OAuth-backed provider kinds.
+ */
+export const PlannerProviderKind = z.enum(['openai-compatible']);
+export type PlannerProviderKind = z.infer<typeof PlannerProviderKind>;
+
+/**
+ * PA-148: one configured LLM provider in `planner_providers`. Each provider
+ * owns its own `planner_models` rows (`ON DELETE CASCADE`). Secrets live in
+ * `secret_ciphertext` encrypted with `POCKETAGENT_SETTINGS_ENC_KEY` and are
+ * write-only (never returned or revealed over HTTP).
+ */
+export const PlannerProvider = z.object({
+  id: z.string(),
+  label: z.string(),
+  kind: PlannerProviderKind,
+  baseUrl: z.string(),
+  hasApiKey: z.boolean(),
+  /** True when a secret ciphertext is stored on disk, but cannot be decrypted. */
+  keyUnreadable: z.boolean().default(false),
+  /** Off by default; meaningful from phase 2 (unattended cron/webhook gating). */
+  allowUnattended: z.boolean(),
+  sortOrder: z.number().int(),
+  createdAt: z.number().int(),
+  lastTestedAt: z.number().int().nullable().default(null),
+  lastError: z.string().nullable().default(null),
+});
+export type PlannerProvider = z.infer<typeof PlannerProvider>;
+
+export const PlannerProviderListResponse = z.object({
+  providers: z.array(PlannerProvider),
+  encryptionAvailable: z.boolean(),
+});
+export type PlannerProviderListResponse = z.infer<typeof PlannerProviderListResponse>;
+
+export const CreatePlannerProviderRequest = z.object({
+  label: z.string().min(1).max(128),
+  kind: PlannerProviderKind.optional().default('openai-compatible'),
+  baseUrl: z.string().min(1).max(2048),
+  /** Optional: a local OpenAI-compatible server (vLLM, Ollama) may need no key. */
+  apiKey: z.string().max(2048).optional(),
+  allowUnattended: z.boolean().optional(),
+});
+export type CreatePlannerProviderRequest = z.infer<typeof CreatePlannerProviderRequest>;
+
+export const UpdatePlannerProviderRequest = z.object({
+  label: z.string().min(1).max(128).optional(),
+  baseUrl: z.string().min(1).max(2048).optional(),
+  /** Omitted or blank keeps the stored key; pass `clearApiKey: true` to clear it. */
+  apiKey: z.string().max(2048).optional(),
+  clearApiKey: z.boolean().optional(),
+  allowUnattended: z.boolean().optional(),
+});
+export type UpdatePlannerProviderRequest = z.infer<typeof UpdatePlannerProviderRequest>;
+
+/**
+ * One row of "this label maps to this upstream model id on this provider".
+ * Multiple rows across one or more `planner_providers` are what a chat's,
+ * agent's, cron job's or webhook's model picker switches between.
+ *
+ * PA-148 wire contract: model references (`PlannerChat.lastModelId`,
+ * `PlannerWorkspace.defaultModelId`, `PlannerSettingsDto.lastModelId`,
+ * `CronJob.model` for `pocketagent`, `Webhook.model` for `pocket:*`, and MCP
+ * `create_pocket_chat.modelId`) carry `PlannerModel.id` (the row UUID). The
+ * server still resolves a bare `modelId` string by the legacy sort-order rule
+ * when no row `id` matches, so pre-PA-148 callers and unmatched strings keep
+ * working.
  */
 export const PlannerModel = z.object({
   id: z.string(),
+  providerId: z.string(),
   modelId: z.string(),
   label: z.string(),
   sortOrder: z.number().int(),
@@ -266,7 +331,7 @@ const TOKEN_LIMIT = z.number().int().min(1024).max(10_000_000).nullable();
 
 /**
  * PA-122: a model row's optional settings, shared by create, update and the
- * Hub's `planner-endpoint` template, so a field cannot be settable in one and
+ * Hub's `planner-provider` template, so a field cannot be settable in one and
  * silently dropped by another. Every one is "not set" when absent.
  */
 export const PlannerModelOptionalFields = {
@@ -287,6 +352,8 @@ export const PlannerModelListResponse = z.object({
 export type PlannerModelListResponse = z.infer<typeof PlannerModelListResponse>;
 
 export const CreatePlannerModelRequest = z.object({
+  /** Optional on `POST /api/planner/models` (defaults to the first/Default provider). */
+  providerId: z.string().min(1).max(128).optional(),
   modelId: z.string().min(1).max(200),
   label: z.string().min(1).max(128),
   supportsEffort: z.boolean().optional(),

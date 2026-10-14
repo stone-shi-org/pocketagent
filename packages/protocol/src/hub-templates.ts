@@ -1,14 +1,14 @@
 import { z } from 'zod';
 import { EffortLevel } from './agent-events.js';
-import { PlannerModelOptionalFields } from './planner.js';
+import { PlannerModelOptionalFields, PlannerProviderKind } from './planner.js';
 import { HubHostId } from './hub-registry.js';
 import { McpAuthKind, McpTransportKind } from './mcp-registry.js';
 import { CustomClaudeProviderKind } from './custom-claude-providers.js';
 
 /**
  * PA-70: the Hub's *template* API — define a Pocket Agent, an MCP registry, a
- * skill, a provider or a planner endpoint once, and instantiate it onto any
- * bound host.
+ * skill, a Claude provider or a Pocket Agent LLM provider once, and
+ * instantiate it onto any bound host.
  *
  * A third module beside `hub.ts` (PA-63's credential protocol) and
  * `hub-registry.ts` (PA-66's host registry) for the reason those two are
@@ -43,8 +43,8 @@ import { CustomClaudeProviderKind } from './custom-claude-providers.js';
  * complete list of things the Hub knows how to write to a backend — every
  * member maps onto routes that already exist there (`POST
  * /api/planner/workspaces`, `POST /api/mcp-registries`, `POST
- * /api/custom-claude-providers`, `POST /api/planner/skills/import`, `PATCH
- * /api/planner/settings`), so provisioning is the Hub being an API client
+ * /api/custom-claude-providers`, `POST /api/planner/skills/import`, `POST
+ * /api/planner/providers`), so provisioning is the Hub being an API client
  * rather than a new contract between the two services.
  *
  * Deliberately absent, each for a reason recorded on the ticket: **webhooks**
@@ -60,24 +60,33 @@ export const HubTemplateKind = z.enum([
   'mcp-registry',
   'claude-provider',
   'skill',
-  'planner-endpoint',
+  'planner-provider',
 ]);
 export type HubTemplateKind = z.infer<typeof HubTemplateKind>;
 
 /**
- * Whether instantiating this kind *adds* a resource to a host or *replaces*
- * host-wide configuration.
- *
- * Four of the five kinds are additive: a host ends up with one more Pocket
- * Agent, registry, provider or skill, and the ledger holds the id of the thing
- * that was created. `planner-endpoint` is the exception and is why this
- * distinction is a value rather than a comment — it is a singleton on the
- * receiving host (`PATCH /api/planner/settings` replaces the one endpoint every
- * Pocket Agent chat on that machine uses), so provisioning it is *never* a
- * create, always an overwrite, and the confirmation has to say so.
+ * Legacy kind name before PA-148 replaced the singleton `planner-endpoint`
+ * with the additive `planner-provider` kind. Retained so existing rows in
+ * `hub_templates` and exported JSON files still parse and map cleanly.
  */
-export function isSingletonKind(kind: HubTemplateKind): boolean {
-  return kind === 'planner-endpoint';
+export const LegacyHubTemplateKind = z.enum([
+  'pocket-agent',
+  'mcp-registry',
+  'claude-provider',
+  'skill',
+  'planner-provider',
+  'planner-endpoint',
+]);
+export type LegacyHubTemplateKind = z.infer<typeof LegacyHubTemplateKind>;
+
+/**
+ * Whether instantiating this kind *adds* a resource to a host or *replaces*
+ * host-wide configuration. Since PA-148 replaced `planner-endpoint` with the
+ * additive `planner-provider` kind, every template kind is additive and
+ * tracked by its remote id in the ledger.
+ */
+export function isSingletonKind(_kind: HubTemplateKind): boolean {
+  return false;
 }
 
 const TEMPLATE_NAME = z.string().min(1).max(128);
@@ -257,36 +266,49 @@ export const SkillTemplatePayload = z.object({
 export type SkillTemplatePayload = z.infer<typeof SkillTemplatePayload>;
 
 /**
- * The Pocket Agent LLM endpoint and its model catalog — the one singleton kind.
+ * One model inside a `planner-provider` (or legacy `planner-endpoint`) template.
+ */
+export const PlannerProviderTemplateModel = z.object({
+  modelId: MODEL_ID,
+  label: z.string().min(1).max(128),
+  supportsEffort: z.boolean().optional(),
+  defaultEffort: EffortLevel.nullable().optional(),
+  // PA-122 / PA-137: context limits, caching, PDF and prices are portable —
+  // their values mean the same thing on every host, and none is a secret.
+  ...PlannerModelOptionalFields,
+});
+export type PlannerProviderTemplateModel = z.infer<typeof PlannerProviderTemplateModel>;
+
+/**
+ * PA-148: one OpenAI-compatible Pocket Agent LLM provider and its models.
  *
- * Deliberately narrower than `UpdatePlannerSettingsRequest`. It never carries
- * `yoloEnabled`: that is `planner_yolo_enabled`, the planner approval gate's
- * own "skip everything" switch, and a template is not a way to turn an
- * approval gate off across a fleet. And it leaves out `maxToolIterations`,
- * `meInstruction` and `toolsInstruction`, which are portable and harmless but
- * belong to a "global planner settings" template nobody has asked for —
- * bundling them here would mean one confirmation covering two unrelated blast
- * radii.
+ * Replaces PA-70's singleton `planner-endpoint` kind with an additive
+ * resource: instantiating it creates a `planner_providers` row and its
+ * attached `planner_models` rows on the receiving host, and records the
+ * provider's remote id in `hub_provisionings` so re-provisioning requires
+ * explicit overwrite confirmation just like every other additive template.
+ */
+export const PlannerProviderTemplatePayload = z.object({
+  label: z.string().min(1).max(128),
+  kind: PlannerProviderKind.optional().default('openai-compatible'),
+  baseUrl: BASE_URL,
+  allowUnattended: z.boolean().optional().default(false),
+  models: z.array(PlannerProviderTemplateModel).max(50),
+});
+export type PlannerProviderTemplatePayload = z.infer<typeof PlannerProviderTemplatePayload>;
+
+/**
+ * Legacy PA-70 singleton payload. Retained so existing `planner-endpoint` rows
+ * in `hub_templates` and exported JSON files still parse and map cleanly onto a
+ * `planner-provider` named after the template.
  */
 export const PlannerEndpointTemplatePayload = z.object({
   baseUrl: BASE_URL,
-  models: z
-    .array(
-      z.object({
-        modelId: MODEL_ID,
-        label: z.string().min(1).max(128),
-        supportsEffort: z.boolean().optional(),
-        defaultEffort: EffortLevel.nullable().optional(),
-        // PA-122: context limits, caching and prices are portable — their
-        // values mean the same thing on every host, and none is a secret.
-        ...PlannerModelOptionalFields,
-      }),
-    )
-    .max(50),
-  embeddingBaseUrl: BASE_URL.nullable(),
-  embeddingModelId: MODEL_ID.nullable(),
-  webSearchBaseUrl: BASE_URL.nullable(),
-  urlFetchBaseUrl: BASE_URL.nullable(),
+  models: z.array(PlannerProviderTemplateModel).max(50),
+  embeddingBaseUrl: BASE_URL.nullable().optional().default(null),
+  embeddingModelId: MODEL_ID.nullable().optional().default(null),
+  webSearchBaseUrl: BASE_URL.nullable().optional().default(null),
+  urlFetchBaseUrl: BASE_URL.nullable().optional().default(null),
 });
 export type PlannerEndpointTemplatePayload = z.infer<typeof PlannerEndpointTemplatePayload>;
 
@@ -296,7 +318,7 @@ export type HubTemplatePayload =
   | { kind: 'mcp-registry'; payload: McpRegistryTemplatePayload }
   | { kind: 'claude-provider'; payload: ClaudeProviderTemplatePayload }
   | { kind: 'skill'; payload: SkillTemplatePayload }
-  | { kind: 'planner-endpoint'; payload: PlannerEndpointTemplatePayload };
+  | { kind: 'planner-provider'; payload: PlannerProviderTemplatePayload };
 
 /**
  * Parse a payload against its kind's schema — the single place that mapping
@@ -306,17 +328,42 @@ export type HubTemplatePayload =
  * column, and a row edited by hand (or written by an older build with a
  * different schema) must not be able to reach an outbound request to somebody
  * else's machine unvalidated.
+ *
+ * PA-148: a legacy `planner-endpoint` payload is mapped on read to a
+ * `planner-provider` named `fallbackLabel` (the template's own name, or
+ * `"Default"` if none was supplied).
  */
 export function parseTemplatePayload(
-  kind: HubTemplateKind,
+  kind: HubTemplateKind | 'planner-endpoint',
   raw: unknown,
+  fallbackLabel?: string,
 ): { ok: true; value: HubTemplatePayload } | { ok: false; message: string } {
+  if (kind === 'planner-endpoint') {
+    const parsed = PlannerEndpointTemplatePayload.safeParse(raw);
+    if (!parsed.success) {
+      return { ok: false, message: parsed.error.issues[0]?.message ?? 'Invalid template payload.' };
+    }
+    const label = fallbackLabel && fallbackLabel.trim().length > 0 ? fallbackLabel.trim() : 'Default';
+    return {
+      ok: true,
+      value: {
+        kind: 'planner-provider',
+        payload: {
+          label: label.slice(0, 128),
+          kind: 'openai-compatible',
+          baseUrl: parsed.data.baseUrl,
+          allowUnattended: false,
+          models: parsed.data.models,
+        },
+      },
+    };
+  }
   const schema = {
     'pocket-agent': PocketAgentTemplatePayload,
     'mcp-registry': McpRegistryTemplatePayload,
     'claude-provider': ClaudeProviderTemplatePayload,
     skill: SkillTemplatePayload,
-    'planner-endpoint': PlannerEndpointTemplatePayload,
+    'planner-provider': PlannerProviderTemplatePayload,
   }[kind];
   const parsed = schema.safeParse(raw);
   if (!parsed.success) {
@@ -403,41 +450,15 @@ export function secretHolesFor(spec: HubTemplatePayload): SecretHole[] {
           description: `Emitted to the ${spec.payload.name} CLI as ANTHROPIC_AUTH_TOKEN for ${spec.payload.baseUrl}. Stored encrypted on the receiving host.`,
         },
       ];
-    case 'planner-endpoint': {
-      const holes: SecretHole[] = [
+    case 'planner-provider':
+      return [
         {
           key: 'apiKey',
-          label: 'LLM API key',
-          required: true,
-          description: `The key for ${spec.payload.baseUrl}.`,
+          label: 'API key',
+          required: false,
+          description: `The API key for ${spec.payload.label} (${spec.payload.baseUrl}). Stored encrypted on the receiving host.`,
         },
       ];
-      if (spec.payload.embeddingBaseUrl !== null) {
-        holes.push({
-          key: 'embeddingApiKey',
-          label: 'Embedding API key',
-          required: false,
-          description: `The key for ${spec.payload.embeddingBaseUrl}. Leave blank to keep whatever the host already has.`,
-        });
-      }
-      if (spec.payload.webSearchBaseUrl !== null) {
-        holes.push({
-          key: 'webSearchApiKey',
-          label: 'Web search API key',
-          required: false,
-          description: `The key for ${spec.payload.webSearchBaseUrl}. Leave blank to keep whatever the host already has.`,
-        });
-      }
-      if (spec.payload.urlFetchBaseUrl !== null) {
-        holes.push({
-          key: 'urlFetchApiKey',
-          label: 'URL fetch API key',
-          required: false,
-          description: `The key for ${spec.payload.urlFetchBaseUrl}. Leave blank to keep whatever the host already has.`,
-        });
-      }
-      return holes;
-    }
   }
 }
 

@@ -1221,8 +1221,32 @@ system message is stable across a tool loop.
 cost wins. `costUsd` is **null, never 0**, when the model has no input/output price or any
 round trip of the turn reported no usage — an understated figure would read as a fact. The
 prices are an operator's numbers, not a bill, the same caveat a custom Claude provider carries
-the other way. They travel with exports and the Hub's `planner-endpoint` template, which now
+the other way. They travel with exports and the Hub's `planner-provider` template, which
 carries every optional model field (`PlannerModelOptionalFields`) instead of id and label only.
+
+**Multiple OpenAI-compatible providers (`planner_providers`, PA-148).** `planner_providers`
+(`id`, `label`, `kind` — `'openai-compatible'` in phase 1 — `base_url`, `secret_ciphertext`
+encrypted via `crypto/secret-box.ts`, `allow_unattended`, `sort_order`, `created_at`,
+`last_tested_at`, `last_error`) replaces the single `planner_llm_base_url` /
+`planner_llm_api_key` endpoint in `settings`, and `planner_models.provider_id` (`REFERENCES
+planner_providers(id) ON DELETE CASCADE`) attaches each model catalog row to its provider. On
+upgrade, existing `planner_llm_base_url` / `planner_llm_api_key` settings migrate into a
+`"Default"` provider (following PA-28's deferral rule when `POCKETAGENT_SETTINGS_ENC_KEY` is
+unset rather than writing plaintext into `planner_providers` or failing boot), and existing
+`planner_models` rows attach to it. Provider API keys are write-only (no reveal route; blank
+`apiKey` on `PATCH /api/planner/providers/:id` keeps the stored key, `clearApiKey: true` clears
+it). **Wire contract for model references:** `PlannerChat.lastModelId`,
+`PlannerWorkspace.defaultModelId`, `PlannerSettingsDto.lastModelId`, `CronJob.model` (for
+`pocketagent`), `Webhook.model` (for `pocket:*`), and MCP `create_pocket_chat.modelId` carry
+`PlannerModel.id` (the `planner_models` row UUID), with a migration mapping existing bare
+`model_id` strings to the first matching row by `sort_order`; an unmatched value stays
+resolvable by the old bare-string rule (`resolvePlannerModel`) against the default/first
+provider so nothing breaks. `PlannerLlmProvider` (`streamComplete`, `listModels`, `test`, with
+`PlannerLlmClient` as the OpenAI-compatible implementation) and `PlannerChatService.clientFor`
+route chat turns, compaction, memory consolidation, subagents, model discovery, and the model
+`Test` button to each model's own provider. `PATCH /api/planner/settings` remains a one-release
+compatibility shim for the default provider, and `PATCH /api/planner/models/:id` returns the
+updated `PlannerModel` DTO.
 
 **Images** (`image-budget.ts`, both sides). The browser downscales an attachment to at most
 2000×2000 and ~4.5 MB of base64 (`apps/web/src/agent/image-budget.ts`) rather than refusing
@@ -2318,12 +2342,14 @@ rather than a version comparison, because a backport, a dev build or `0.0.0-dev`
 a lie about which routes exist; PA-69's drift badge stays advisory. Hosts are done one at a time
 so a partial run reads in order, and one dead host fails alone.
 
-`planner-endpoint` is the only **singleton** kind and the only one that is never a create: every
-host already has one planner endpoint, and repointing it changes what every existing Pocket Agent
-chat on that machine talks to. So it requires the overwrite confirmation *even the first time*,
-it replaces the model catalog wholesale only when the template carries one (`models: []` means
-"leave the host's own list alone"), and it never carries `yoloEnabled` — a template is not a way
-to turn an approval gate off across a fleet.
+`planner-provider` (PA-148, replacing the old singleton `planner-endpoint` kind) provisions one
+OpenAI-compatible Pocket Agent provider and its models onto a host (`apiKey` as the optional
+secret hole, ledgered by the created provider's `remote_id`, overwrite confirmed before
+re-provisioning). It replaces only *that* provider's model catalog (`DELETE
+/api/planner/models?providerId=<remoteId>`) when `models` is non-empty (`models: []` leaves the
+provider's existing models alone), and never carries `yoloEnabled`. Legacy `planner-endpoint`
+rows in `hub_templates` and exported JSON files still parse and map to a `planner-provider`
+named after the template.
 
 Skills needed the one new backend route, `POST /api/planner/skills/import`: the existing `POST
 /api/planner/skills` takes a filesystem path *on the receiving host*, and no protocol type

@@ -374,6 +374,32 @@ export const DOC_WORKSPACES_DDL = `
   );
 `;
 
+/**
+ * PA-148: Pocket Agent LLM providers (`planner_providers`).
+ *
+ * Replaces the single `planner_llm_base_url`/`planner_llm_api_key` settings
+ * pair with a table of named providers, each owning its own `planner_models`
+ * rows (`ON DELETE CASCADE`). `secret_ciphertext` is encrypted at rest with
+ * `POCKETAGENT_SETTINGS_ENC_KEY` via `crypto/secret-box.ts` and is nullable for
+ * keyless local servers (vLLM, Ollama).
+ */
+export const PLANNER_PROVIDERS_DDL = `
+  CREATE TABLE IF NOT EXISTS planner_providers (
+    id                TEXT PRIMARY KEY,
+    label             TEXT NOT NULL,
+    kind              TEXT NOT NULL DEFAULT 'openai-compatible' CHECK (kind IN ('openai-compatible')),
+    base_url          TEXT NOT NULL,
+    secret_ciphertext TEXT,
+    allow_unattended  INTEGER NOT NULL DEFAULT 0,
+    sort_order        INTEGER NOT NULL DEFAULT 0,
+    created_at        INTEGER NOT NULL,
+    last_tested_at    INTEGER,
+    last_error        TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_planner_providers_sort
+    ON planner_providers (sort_order, created_at);
+`;
 
 /**
  * Exported for one test only: `cron.test.ts` builds a *genuine* historical
@@ -1638,6 +1664,10 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE planner_chats ADD COLUMN doc_workspace_id TEXT REFERENCES doc_workspaces(id) ON DELETE SET NULL;
   CREATE INDEX IF NOT EXISTS idx_planner_chats_doc_workspace ON planner_chats (doc_workspace_id);
   `,
+
+  // PA-148: Multiple Pocket Agent LLM providers (`planner_providers`) and
+  // per-provider model catalog (`planner_models.provider_id`).
+  PLANNER_PROVIDERS_DDL,
 ];
 
 /**
@@ -1663,6 +1693,14 @@ export const GLOBAL_SKIP_PERMISSIONS_KEY = 'global_skip_permissions';
  */
 export const LEGACY_CLAUDE_PROVIDERS_MIGRATED_KEY = 'legacy_claude_providers_migrated';
 
+/**
+ * PA-148: key in `settings` recording that the legacy `planner_llm_api_key`
+ * setting has been encrypted into the Default provider's `secret_ciphertext`
+ * and removed from `settings`. Deferred when `POCKETAGENT_SETTINGS_ENC_KEY` is
+ * unset, following PA-28's deferral rule.
+ */
+export const PLANNER_PROVIDERS_KEY_MIGRATED_KEY = 'planner_providers_key_migrated';
+
 export function readSetting(db: Db, key: string): string | null {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as
     | { value: string }
@@ -1675,6 +1713,134 @@ export function writeSetting(db: Db, key: string, value: string): void {
     `INSERT INTO settings (key, value) VALUES (?, ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
   ).run(key, value);
+}
+
+/**
+ * PA-148: remap bare `model_id` references across `planner_chats.last_model_id`,
+ * `planner_workspaces.default_model_id`, `settings(planner_last_model_id)`,
+ * `cron_jobs.model` (`agent = 'pocketagent'`), and `webhooks.model`
+ * (`agent LIKE 'pocket:%'`) to the matching `planner_models.id` row (first by
+ * `sort_order ASC, created_at ASC`, matching `readPlannerModelByModelId`).
+ * Values already equal to a `planner_models.id` or unmatched by any row are
+ * left unchanged.
+ */
+export function remapLegacyPlannerModelReferences(db: Db): void {
+  db.exec(`
+    UPDATE planner_chats
+       SET last_model_id = COALESCE(
+         (SELECT m.id FROM planner_models m WHERE m.id = planner_chats.last_model_id LIMIT 1),
+         (SELECT m.id FROM planner_models m WHERE m.model_id = planner_chats.last_model_id ORDER BY m.sort_order ASC, m.created_at ASC LIMIT 1),
+         last_model_id
+       )
+     WHERE last_model_id IS NOT NULL;
+
+    UPDATE planner_workspaces
+       SET default_model_id = COALESCE(
+         (SELECT m.id FROM planner_models m WHERE m.id = planner_workspaces.default_model_id LIMIT 1),
+         (SELECT m.id FROM planner_models m WHERE m.model_id = planner_workspaces.default_model_id ORDER BY m.sort_order ASC, m.created_at ASC LIMIT 1),
+         default_model_id
+       )
+     WHERE default_model_id IS NOT NULL;
+
+    UPDATE settings
+       SET value = COALESCE(
+         (SELECT m.id FROM planner_models m WHERE m.id = settings.value LIMIT 1),
+         (SELECT m.id FROM planner_models m WHERE m.model_id = settings.value ORDER BY m.sort_order ASC, m.created_at ASC LIMIT 1),
+         value
+       )
+     WHERE key = 'planner_last_model_id' AND value != '';
+
+    UPDATE cron_jobs
+       SET model = COALESCE(
+         (SELECT m.id FROM planner_models m WHERE m.id = cron_jobs.model LIMIT 1),
+         (SELECT m.id FROM planner_models m WHERE m.model_id = cron_jobs.model ORDER BY m.sort_order ASC, m.created_at ASC LIMIT 1),
+         model
+       )
+     WHERE agent = 'pocketagent' AND model IS NOT NULL;
+
+    UPDATE webhooks
+       SET model = COALESCE(
+         (SELECT m.id FROM planner_models m WHERE m.id = webhooks.model LIMIT 1),
+         (SELECT m.id FROM planner_models m WHERE m.model_id = webhooks.model ORDER BY m.sort_order ASC, m.created_at ASC LIMIT 1),
+         model
+       )
+     WHERE agent LIKE 'pocket:%' AND model IS NOT NULL;
+  `);
+}
+
+function migratePlannerProvidersSchema(db: Db): void {
+  db.exec(PLANNER_PROVIDERS_DDL);
+  const modelCols = new Set(
+    (db.prepare('PRAGMA table_info(planner_models)').all() as { name: string }[]).map(
+      (c) => c.name,
+    ),
+  );
+  if (modelCols.size === 0 || modelCols.has('provider_id')) {
+    return;
+  }
+
+  const legacyBaseUrl = (readSetting(db, 'planner_llm_base_url') ?? '').trim();
+  const legacyApiKey = readSetting(db, 'planner_llm_api_key') ?? '';
+  const modelCount = (
+    db.prepare('SELECT COUNT(*) AS cnt FROM planner_models').get() as { cnt: number }
+  ).cnt;
+
+  const tx = db.transaction(() => {
+    if (legacyBaseUrl.length > 0 || legacyApiKey.length > 0 || modelCount > 0) {
+      db.prepare(
+        `INSERT OR IGNORE INTO planner_providers (
+           id, label, kind, base_url, secret_ciphertext, allow_unattended, sort_order, created_at, last_tested_at, last_error
+         ) VALUES ('default', 'Default', 'openai-compatible', ?, NULL, 0, 0, ?, NULL, NULL)`,
+      ).run(legacyBaseUrl, Date.now());
+      if (legacyBaseUrl.length > 0) {
+        writeSetting(db, 'planner_llm_base_url', '');
+      }
+    }
+
+    db.exec(`
+      CREATE TABLE planner_models_new (
+        id                TEXT PRIMARY KEY,
+        provider_id       TEXT NOT NULL REFERENCES planner_providers (id) ON DELETE CASCADE,
+        model_id          TEXT NOT NULL,
+        label             TEXT NOT NULL,
+        sort_order        INTEGER NOT NULL DEFAULT 0,
+        created_at        INTEGER NOT NULL,
+        supports_effort   INTEGER NOT NULL DEFAULT 1,
+        default_effort    TEXT,
+        context_window    INTEGER,
+        max_output_tokens INTEGER,
+        prompt_caching    INTEGER,
+        price_input       REAL,
+        price_output      REAL,
+        price_cache_read  REAL,
+        price_cache_write REAL,
+        supports_images   INTEGER,
+        supports_pdf      INTEGER
+      );
+
+      INSERT INTO planner_models_new (
+        id, provider_id, model_id, label, sort_order, created_at,
+        supports_effort, default_effort, context_window, max_output_tokens,
+        prompt_caching, price_input, price_output, price_cache_read,
+        price_cache_write, supports_images, supports_pdf
+      )
+      SELECT
+        id, 'default', model_id, label, sort_order, created_at,
+        supports_effort, default_effort, context_window, max_output_tokens,
+        prompt_caching, price_input, price_output, price_cache_read,
+        price_cache_write, supports_images, supports_pdf
+      FROM planner_models;
+
+      DROP TABLE planner_models;
+      ALTER TABLE planner_models_new RENAME TO planner_models;
+      CREATE INDEX IF NOT EXISTS idx_planner_models_sort ON planner_models (sort_order);
+      CREATE INDEX IF NOT EXISTS idx_planner_models_provider ON planner_models (provider_id, sort_order);
+    `);
+
+    remapLegacyPlannerModelReferences(db);
+  });
+
+  tx();
 }
 
 export function readWorkspaces(db: Db): string[] {
@@ -1977,6 +2143,10 @@ export function openDatabase(databasePath: string): Db {
       db.exec(`ALTER TABLE planner_models ADD COLUMN ${column} REAL`);
     }
   }
+  // PA-148: ensure `planner_providers` exists and `planner_models` has `provider_id`
+  // with `ON DELETE CASCADE`, attaching existing models to `'default'` and
+  // remapping bare model_id references to row ids.
+  migratePlannerProvidersSchema(db);
   const customClaudeProviderColumns = new Set(
     (db.prepare('PRAGMA table_info(custom_claude_providers)').all() as { name: string }[]).map(
       (column) => column.name,

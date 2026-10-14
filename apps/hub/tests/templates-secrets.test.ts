@@ -67,32 +67,30 @@ describe('secrets never reach the Hub database', () => {
         enabled: true,
       },
     });
-    const endpoint = await createTemplate(hub, {
-      kind: 'planner-endpoint',
+    const plannerProvider = await createTemplate(hub, {
+      kind: 'planner-provider',
       name: 'House LLM',
       payload: {
+        label: 'House LLM',
+        kind: 'openai-compatible',
         baseUrl: 'https://llm.example.com/v1',
+        allowUnattended: false,
         models: [{ modelId: 'house-1', label: 'House 1' }],
-        embeddingBaseUrl: null,
-        embeddingModelId: null,
-        webSearchBaseUrl: null,
-        urlFetchBaseUrl: null,
       },
     });
 
     await instantiate(hub, provider, { hostIds: ['dev01'], secrets: { apiKey: PROVIDER_KEY } });
     await instantiate(hub, registry, { hostIds: ['dev01'], secrets: { bearerToken: MCP_TOKEN } });
-    await instantiate(hub, endpoint, {
+    await instantiate(hub, plannerProvider, {
       hostIds: ['dev01'],
       secrets: { apiKey: LLM_KEY },
-      overwrite: true,
     });
 
     // Each one really did arrive at the host — otherwise this suite would pass
     // by never sending anything.
     expect(dev01.providers[0]?.apiKey).toBe(PROVIDER_KEY);
     expect(dev01.registries[0]?.bearerToken).toBe(MCP_TOKEN);
-    expect(dev01.settings.apiKey).toBe(LLM_KEY);
+    expect(dev01.plannerProviders[0]?.apiKey).toBe(LLM_KEY);
 
     const stored = allStoredStrings(hub).join('\n');
     for (const secret of [PROVIDER_KEY, MCP_TOKEN, LLM_KEY]) {

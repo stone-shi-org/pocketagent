@@ -335,6 +335,8 @@ export const ModelInfo = z.object({
   resolvedModel: z.string().optional(),
   displayName: z.string(),
   description: z.string(),
+  /** PA-148: optional group heading (e.g. provider label for Pocket Agent models). */
+  group: z.string().optional(),
   /** Whether this model accepts an explicit effort level at all. */
   supportsEffort: z.boolean(),
   /** The effort levels this specific model accepts, when `supportsEffort` is true. */

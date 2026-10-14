@@ -574,11 +574,18 @@ describe('planner chat routes over HTTP', () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValue(fakeCompletionResponse("Here's the plan."));
-    t = await createTestApp({}, undefined, undefined, undefined, fetchImpl as unknown as typeof fetch);
+    t = await createTestApp(
+      { POCKETAGENT_SETTINGS_ENC_KEY: Buffer.alloc(32, 7).toString('base64') },
+      undefined,
+      undefined,
+      undefined,
+      fetchImpl as unknown as typeof fetch,
+    );
 
     await patch(t, '/api/planner/settings', { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-test' });
     const model = await post(t, '/api/planner/models', { modelId: 'gpt-4o-mini', label: 'Fast' });
-    const chat = (await post(t, '/api/planner/chats', { modelId: model.json().modelId })).json();
+    const modelRow = model.json();
+    const chat = (await post(t, '/api/planner/chats', { modelId: modelRow.id })).json();
 
     const { res: turn, events } = await sendMessage(t, chat.id, 'plan my week');
     expect(turn.statusCode).toBe(200);
@@ -593,16 +600,17 @@ describe('planner chat routes over HTTP', () => {
     expect(history).toEqual(dropTextDeltas(events));
 
     const chats = (await get(t, '/api/planner/chats')).json().chats;
-    expect(chats[0].lastModelId).toBe('gpt-4o-mini');
+    expect(chats[0].lastModelId).toBe(modelRow.id);
     expect(chats[0].lastActivityAt).toBeGreaterThan(0);
 
     const settings = (await get(t, '/api/planner/settings')).json();
-    expect(settings.lastModelId).toBe('gpt-4o-mini');
+    expect(settings.lastModelId).toBe(modelRow.id);
 
-    // The LLM was called with the running history including the just-sent
-    // user message — not an empty or stale list.
-    const sentMessages = JSON.parse(fetchImpl.mock.calls[0]![1].body as string).messages;
-    expect(withoutBaseSystem(sentMessages)).toEqual([{ role: 'user', content: 'plan my week' }]);
+    // The LLM was called with the upstream model_id string and the running
+    // history including the just-sent user message.
+    const sentBody = JSON.parse(fetchImpl.mock.calls[0]![1].body as string);
+    expect(sentBody.model).toBe('gpt-4o-mini');
+    expect(withoutBaseSystem(sentBody.messages)).toEqual([{ role: 'user', content: 'plan my week' }]);
   });
 
   it('clears chat history via DELETE /api/planner/chats/:id/history', async () => {

@@ -42,8 +42,16 @@ export interface FakeBackend {
   workspaces: FakeWorkspace[];
   registries: { id: string; name: string; url: string; bearerToken?: string; headerValue?: string }[];
   providers: { id: string; name: string; baseUrl: string; apiKey?: string; allowUnattended?: boolean }[];
+  plannerProviders: {
+    id: string;
+    label: string;
+    kind: string;
+    baseUrl: string;
+    apiKey?: string;
+    allowUnattended?: boolean;
+  }[];
   skills: FakeSkill[];
-  models: { id: string; modelId: string; label: string }[];
+  models: { id: string; providerId?: string; modelId: string; label: string }[];
   settings: Record<string, unknown>;
   /** Tool names this build knows about; anything else is a 400, as the real
       route's catalog check produces. */
@@ -68,6 +76,7 @@ export async function startFakeBackend(): Promise<FakeBackend> {
     workspaces: [],
     registries: [],
     providers: [],
+    plannerProviders: [],
     skills: [],
     models: [],
     settings: { baseUrl: null, hasApiKey: false },
@@ -89,7 +98,9 @@ export async function startFakeBackend(): Promise<FakeBackend> {
         body = null;
       }
       const method = request.method ?? 'GET';
-      const path = (request.url ?? '/').split('?')[0] ?? '/';
+      const rawUrl = request.url ?? '/';
+      const path = rawUrl.split('?')[0] ?? '/';
+      const query = new URLSearchParams(rawUrl.split('?')[1] ?? '');
       state.requests.push({ method, path, body });
 
       const send = (status: number, payload: unknown): void => {
@@ -226,6 +237,30 @@ export async function startFakeBackend(): Promise<FakeBackend> {
         return;
       }
 
+      // ---- Planner providers + model catalog (PA-148) ----------------------
+      if (path === '/api/planner/providers' && method === 'GET') {
+        send(200, { providers: state.plannerProviders, encryptionAvailable: true });
+        return;
+      }
+      if (path === '/api/planner/providers' && method === 'POST') {
+        const created = {
+          id: `pp-${nextId++}`,
+          kind: 'openai-compatible',
+          ...(body as Record<string, unknown>),
+        } as (typeof state.plannerProviders)[number];
+        state.plannerProviders.push(created);
+        send(201, created);
+        return;
+      }
+      const plannerProvOne = /^\/api\/planner\/providers\/([^/]+)$/.exec(path);
+      if (plannerProvOne && method === 'PATCH') {
+        const provider = state.plannerProviders.find((p) => p.id === decodeURIComponent(plannerProvOne[1]!));
+        if (!provider) return notFound();
+        Object.assign(provider, body as Record<string, unknown>);
+        send(200, provider);
+        return;
+      }
+
       // ---- Planner endpoint + model catalog --------------------------------
       if (path === '/api/planner/settings' && method === 'GET') {
         send(200, state.settings);
@@ -237,18 +272,32 @@ export async function startFakeBackend(): Promise<FakeBackend> {
         return;
       }
       if (path === '/api/planner/models' && method === 'GET') {
-        send(200, { models: state.models });
+        const filterProviderId = query.get('providerId');
+        const models = filterProviderId
+          ? state.models.filter((m) => m.providerId === filterProviderId)
+          : state.models;
+        send(200, { models });
         return;
       }
       if (path === '/api/planner/models' && method === 'DELETE') {
-        state.models.length = 0;
+        const filterProviderId = query.get('providerId');
+        if (filterProviderId) {
+          state.models = state.models.filter((m) => m.providerId !== filterProviderId);
+        } else {
+          state.models.length = 0;
+        }
         response.writeHead(204);
         response.end();
         return;
       }
       if (path === '/api/planner/models' && method === 'POST') {
-        const input = body as { modelId: string; label: string };
-        const created = { id: `m-${nextId++}`, modelId: input.modelId, label: input.label };
+        const input = body as { providerId?: string; modelId: string; label: string };
+        const created = {
+          id: `m-${nextId++}`,
+          providerId: input.providerId,
+          modelId: input.modelId,
+          label: input.label,
+        };
         state.models.push(created);
         send(201, created);
         return;

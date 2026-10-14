@@ -119,7 +119,11 @@ export class TemplateStore {
   resolve(id: string): ResolvedTemplate | null {
     const row = this.rowFor(id);
     if (row === null) return null;
-    const parsed = parseTemplatePayload(row.kind as HubTemplateKind, safeJson(row.payload_json));
+    const parsed = parseTemplatePayload(
+      row.kind as HubTemplateKind,
+      safeJson(row.payload_json),
+      row.name,
+    );
     if (!parsed.ok) return null;
     return { row, spec: parsed.value };
   }
@@ -139,7 +143,8 @@ export class TemplateStore {
     this.db
       .prepare(
         `UPDATE hub_templates
-            SET name = COALESCE(?, name),
+            SET kind = COALESCE(?, kind),
+                name = COALESCE(?, name),
                 description = COALESCE(?, description),
                 payload_json = COALESCE(?, payload_json),
                 revision = revision + 1,
@@ -147,6 +152,7 @@ export class TemplateStore {
           WHERE id = ?`,
       )
       .run(
+        patch.spec ? patch.spec.kind : null,
         patch.name ?? null,
         patch.description ?? null,
         patch.spec ? JSON.stringify(patch.spec.payload) : null,
@@ -222,7 +228,9 @@ export class TemplateStore {
     const { row, spec } = resolved;
     return {
       id: row.id,
-      kind: row.kind as HubTemplateKind,
+      // PA-148: `spec.kind` normalizes legacy `planner-endpoint` rows stored
+      // in `hub_templates` to `planner-provider` on the wire.
+      kind: spec.kind,
       name: row.name,
       description: row.description,
       revision: row.revision,
@@ -262,7 +270,11 @@ export class TemplateStore {
     let unreadable = 0;
     for (const row of rows) {
       if (isSystemTemplateId(row.id)) continue;
-      const parsed = parseTemplatePayload(row.kind as HubTemplateKind, safeJson(row.payload_json));
+      const parsed = parseTemplatePayload(
+        row.kind as HubTemplateKind,
+        safeJson(row.payload_json),
+        row.name,
+      );
       if (!parsed.ok) {
         unreadable += 1;
         continue;

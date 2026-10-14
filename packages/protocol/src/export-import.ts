@@ -5,8 +5,10 @@ import { UpdateSettingsRequest } from './http.js';
 import {
   ClaudeProviderTemplatePayload,
   HubTemplateKind,
+  LegacyHubTemplateKind,
   McpRegistryTemplatePayload,
   PlannerEndpointTemplatePayload,
+  PlannerProviderTemplatePayload,
   SkillTemplatePayload,
   parseTemplatePayload,
 } from './hub-templates.js';
@@ -23,6 +25,7 @@ export const POCKETAGENT_EXPORT_FORMAT = 'pocketagent-export';
 export const PocketAgentExportKind = z.enum([
   'server-settings',
   'pocket-agent',
+  'planner-provider',
   'planner-endpoint',
   'cron-job',
   'webhook',
@@ -103,6 +106,13 @@ export const HubTemplateExportData = z.object({
 });
 export type HubTemplateExportData = z.infer<typeof HubTemplateExportData>;
 
+const LegacyHubTemplateExportData = z.object({
+  kind: LegacyHubTemplateKind,
+  name: z.string().min(1).max(128),
+  description: z.string().max(2000).optional(),
+  payload: z.unknown(),
+});
+
 /** Create a standard export envelope. */
 export function createExportEnvelope<T>(
   kind: PocketAgentExportKind,
@@ -154,7 +164,9 @@ export function parseExportEnvelope<T = unknown>(
   }
 
   const actualKind = kindParsed.data;
-  if (expectedKind && actualKind !== expectedKind) {
+  const compatibleLegacyPlanner =
+    expectedKind === 'planner-provider' && actualKind === 'planner-endpoint';
+  if (expectedKind && actualKind !== expectedKind && !compatibleLegacyPlanner) {
     return {
       ok: false,
       error: `Cannot import: this file contains a "${actualKind}" export, but this page expects a "${expectedKind}" export.`,
@@ -199,6 +211,20 @@ function validateExportPayload(
       }
       return { ok: true, data: parsed.data };
     }
+    case 'planner-provider': {
+      if (Array.isArray(data)) {
+        const parsed = z.array(PlannerProviderTemplatePayload).safeParse(data);
+        if (!parsed.success) {
+          return { ok: false, error: `Invalid planner provider data in array: ${parsed.error.issues[0]?.message ?? 'validation error'}` };
+        }
+        return { ok: true, data: parsed.data };
+      }
+      const parsed = PlannerProviderTemplatePayload.safeParse(data);
+      if (!parsed.success) {
+        return { ok: false, error: `Invalid planner provider data: ${parsed.error.issues[0]?.message ?? 'validation error'}` };
+      }
+      return { ok: true, data: parsed.data };
+    }
     case 'planner-endpoint': {
       const parsed = PlannerEndpointTemplatePayload.safeParse(data);
       if (!parsed.success) {
@@ -228,15 +254,25 @@ function validateExportPayload(
       return { ok: true, data: parsed.data };
     }
     case 'hub-template': {
-      const parsed = HubTemplateExportData.safeParse(data);
+      const parsed = LegacyHubTemplateExportData.safeParse(data);
       if (!parsed.success) {
         return { ok: false, error: `Invalid hub template data: ${parsed.error.issues[0]?.message ?? 'validation error'}` };
       }
-      const payloadCheck = parseTemplatePayload(parsed.data.kind, parsed.data.payload);
+      const payloadCheck = parseTemplatePayload(
+        parsed.data.kind,
+        parsed.data.payload,
+        parsed.data.name,
+      );
       if (!payloadCheck.ok) {
         return { ok: false, error: `Invalid hub template payload: ${payloadCheck.message}` };
       }
-      return { ok: true, data: parsed.data };
+      const normalized: HubTemplateExportData = {
+        kind: payloadCheck.value.kind,
+        name: parsed.data.name,
+        ...(parsed.data.description !== undefined ? { description: parsed.data.description } : {}),
+        payload: payloadCheck.value.payload,
+      };
+      return { ok: true, data: normalized };
     }
     case 'mcp-registry': {
       if (Array.isArray(data)) {

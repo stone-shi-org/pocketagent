@@ -4,6 +4,8 @@ import type {
   BambooWebhookFilter,
   CronWorktreeMode,
   JiraWebhookFilter,
+  PlannerModel,
+  PlannerProvider,
   PlannerWorkspace,
   ProjectInfo,
   Webhook,
@@ -34,6 +36,7 @@ import { Icon, type IconName } from '../components/Icon.js';
 import { SecretReveal } from '../components/SecretReveal.js';
 import { SelectRowNative } from '../components/SelectRowNative.js';
 import { formatRelative, WebhookStatusIcon } from '../components/StatusBadge.js';
+import { buildPlannerModelSelectOptions, resolvePlannerModelSelection } from '../agent/planner-models.js';
 import { flattenProjects } from '../agent/search.js';
 import { NumberRow, SectionCard, TextRow } from './SettingsPage.js';
 import { useHostApi } from '../hosts/HostContext.js';
@@ -138,6 +141,8 @@ export function WebhookEditorPage({
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   /** PA-10: Pocket Agents, selectable in the same Agent dropdown as coding agents. */
   const [pocketAgents, setPocketAgents] = useState<PlannerWorkspace[]>([]);
+  const [plannerModels, setPlannerModels] = useState<PlannerModel[]>([]);
+  const [plannerProviders, setPlannerProviders] = useState<PlannerProvider[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
@@ -261,11 +266,15 @@ export function WebhookEditorPage({
       // editable with no Pocket Agents available, the dropdown just has one
       // fewer group.
       api.listPlannerWorkspaces().catch(() => ({ workspaces: [] as PlannerWorkspace[] })),
+      api.listPlannerModels().catch(() => ({ models: [] as PlannerModel[] })),
+      api.listPlannerProviders().catch(() => ({ providers: [] as PlannerProvider[] })),
     ])
-      .then(([a, w, p, hook, pocket]) => {
+      .then(([a, w, p, hook, pocket, pm, pp]) => {
         if (cancelled) return;
         setAgents(a.agents);
         setPocketAgents(pocket.workspaces);
+        setPlannerModels(pm.models);
+        setPlannerProviders(pp.providers);
         setWorkspaces(w.workspaces);
         setProjects(p.projects);
 
@@ -2124,28 +2133,39 @@ export function WebhookEditorPage({
             }
             onChange={setAgent}
           />
-          <TextRow
-            label="Model"
-            value={model}
-            busy={busy}
-            placeholder={
-              isPocketAgent
-                ? (selectedPocketAgent?.defaultModelId ?? "this Pocket Agent's default model")
-                : (selectedAgent?.defaultModel ?? "the agent's default")
-            }
-            listId="webhook-model-options"
-            onChange={setModel}
-          >
-            {/* `id` is document-global and `cron-model-options` may be mounted in
-                the same document on desktop. */}
-            <datalist id="webhook-model-options">
-              {agentModels.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.displayName}
-                </option>
-              ))}
-            </datalist>
-          </TextRow>
+          {isPocketAgent ? (
+            <SelectRowNative
+              label="Model"
+              value={resolvePlannerModelSelection(plannerModels, model)}
+              options={buildPlannerModelSelectOptions(
+                plannerModels,
+                plannerProviders,
+                "This Pocket Agent's default model",
+                model,
+              )}
+              busy={busy}
+              onChange={setModel}
+            />
+          ) : (
+            <TextRow
+              label="Model"
+              value={model}
+              busy={busy}
+              placeholder={selectedAgent?.defaultModel ?? "the agent's default"}
+              listId="webhook-model-options"
+              onChange={setModel}
+            >
+              {/* `id` is document-global and `cron-model-options` may be mounted in
+                  the same document on desktop. */}
+              <datalist id="webhook-model-options">
+                {agentModels.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.displayName}
+                  </option>
+                ))}
+              </datalist>
+            </TextRow>
+          )}
           {!isPocketAgent && (
             <TextRow
               label="Effort"

@@ -42,7 +42,16 @@ describe('hub-attributed configuration changes', () => {
         callback();
       },
     });
-    t = await createTestApp({}, undefined, undefined, undefined, undefined, undefined, undefined, sink);
+    t = await createTestApp(
+      { POCKETAGENT_SETTINGS_ENC_KEY: Buffer.alloc(32, 7).toString('base64') },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      sink,
+    );
   });
 
   afterEach(() => t.cleanup());
@@ -116,6 +125,15 @@ describe('hub-attributed configuration changes', () => {
     });
     await t.app.inject({
       method: 'POST',
+      url: '/api/planner/providers',
+      headers,
+      payload: {
+        label: 'House LLM',
+        baseUrl: 'https://llm.example.com/v1',
+      },
+    });
+    await t.app.inject({
+      method: 'POST',
       url: '/api/planner/models',
       headers,
       payload: { modelId: 'house-1', label: 'House 1' },
@@ -140,6 +158,7 @@ describe('hub-attributed configuration changes', () => {
 
     const messages = warnings.map((w) => w.message);
     expect(messages).toContain('mcp registry created; this host may now connect to it');
+    expect(messages).toContain('planner provider created');
     expect(messages).toContain('planner model added to the catalog');
     expect(messages).toContain('planner settings updated');
     expect(messages).toContain('global skill imported from content');
@@ -147,6 +166,7 @@ describe('hub-attributed configuration changes', () => {
     // silently rot if a sixth route were added without a line.
     for (const message of [
       'mcp registry created; this host may now connect to it',
+      'planner provider created',
       'planner settings updated',
       'global skill imported from content',
     ]) {
@@ -162,6 +182,16 @@ describe('hub-attributed configuration changes', () => {
       headers: { authorization: `Bearer ${token}` },
       payload: { baseUrl: 'https://llm.example.com/v1', apiKey: 'sk-must-not-be-logged' },
     });
+    await t.app.inject({
+      method: 'POST',
+      url: '/api/planner/providers',
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        label: 'Secret Provider',
+        baseUrl: 'https://llm.example.com/v1',
+        apiKey: 'sk-provider-secret-not-logged',
+      },
+    });
 
     const line = warnings.find((w) => w.message === 'planner settings updated')!;
     // Field *names* only. An audit line must not be one step away from
@@ -170,5 +200,6 @@ describe('hub-attributed configuration changes', () => {
     // purpose is to carry credentials to five kinds of resource.
     expect(line.fields.fields).toEqual(['baseUrl', 'apiKey']);
     expect(JSON.stringify(warnings)).not.toContain('sk-must-not-be-logged');
+    expect(JSON.stringify(warnings)).not.toContain('sk-provider-secret-not-logged');
   });
 });

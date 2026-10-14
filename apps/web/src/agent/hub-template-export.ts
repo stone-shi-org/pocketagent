@@ -7,9 +7,10 @@ import {
   type McpRegistrySummary,
   type McpRegistryTemplatePayload,
   type PlannerAgentToolInfo,
-  type PlannerEndpointTemplatePayload,
   type PlannerModel,
-  type PlannerSettingsDto,
+  type PlannerProvider,
+  type PlannerProviderTemplateModel,
+  type PlannerProviderTemplatePayload,
   type PlannerWorkspace,
   type PocketAgentTemplatePayload,
   type SkillTemplatePayload,
@@ -77,25 +78,44 @@ export function exportSkillPayload(
   };
 }
 
-export function exportPlannerEndpointPayload(
-  settings: PlannerSettingsDto,
-  models: PlannerModel[],
-): PlannerEndpointTemplatePayload {
-  if (!settings.baseUrl) {
-    throw new Error('Host has no planner LLM endpoint baseUrl configured.');
-  }
+export function exportPlannerModelToTemplate(m: PlannerModel): PlannerProviderTemplateModel {
   return {
-    baseUrl: settings.baseUrl,
-    models: models.map((m) => ({
-      modelId: m.modelId,
-      label: m.label,
-      ...(m.supportsEffort !== undefined ? { supportsEffort: m.supportsEffort } : {}),
-      ...(m.defaultEffort !== undefined ? { defaultEffort: m.defaultEffort } : {}),
-    })),
-    embeddingBaseUrl: settings.embeddingBaseUrl ?? null,
-    embeddingModelId: settings.embeddingModelId ?? null,
-    webSearchBaseUrl: settings.webSearchBaseUrl ?? null,
-    urlFetchBaseUrl: settings.urlFetchBaseUrl ?? null,
+    modelId: m.modelId,
+    label: m.label,
+    ...(m.supportsEffort !== undefined ? { supportsEffort: m.supportsEffort } : {}),
+    ...(m.defaultEffort !== undefined ? { defaultEffort: m.defaultEffort } : {}),
+    ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
+    ...(m.maxOutputTokens !== undefined ? { maxOutputTokens: m.maxOutputTokens } : {}),
+    ...(m.promptCaching !== undefined ? { promptCaching: m.promptCaching } : {}),
+    ...(m.inputPricePerMTok !== undefined ? { inputPricePerMTok: m.inputPricePerMTok } : {}),
+    ...(m.outputPricePerMTok !== undefined ? { outputPricePerMTok: m.outputPricePerMTok } : {}),
+    ...(m.cacheReadPricePerMTok !== undefined
+      ? { cacheReadPricePerMTok: m.cacheReadPricePerMTok }
+      : {}),
+    ...(m.cacheWritePricePerMTok !== undefined
+      ? { cacheWritePricePerMTok: m.cacheWritePricePerMTok }
+      : {}),
+    ...(m.supportsImages !== undefined ? { supportsImages: m.supportsImages } : {}),
+    ...(m.supportsPdf !== undefined ? { supportsPdf: m.supportsPdf } : {}),
+  };
+}
+
+export function exportPlannerProviderPayload(
+  provider: Pick<PlannerProvider, 'id' | 'label' | 'kind' | 'baseUrl' | 'allowUnattended'>,
+  models: PlannerModel[],
+): PlannerProviderTemplatePayload {
+  if (!provider.baseUrl) {
+    throw new Error(`Provider "${provider.label}" has no baseUrl configured.`);
+  }
+  const providerModels = models.filter(
+    (m) => m.providerId === undefined || m.providerId === provider.id,
+  );
+  return {
+    label: provider.label,
+    kind: provider.kind,
+    baseUrl: provider.baseUrl,
+    allowUnattended: provider.allowUnattended,
+    models: providerModels.map(exportPlannerModelToTemplate),
   };
 }
 
@@ -147,14 +167,15 @@ export async function listHostExportableItems(
         description: s.description,
       }));
     }
-    case 'planner-endpoint': {
-      // Singleton: always exactly one endpoint per host.
-      return [
-        {
-          id: 'planner-endpoint',
-          label: 'Pocket Agent LLM Endpoint',
-        },
-      ];
+    case 'planner-provider': {
+      const res = await client.listPlannerProviders();
+      return (res.providers ?? [])
+        .filter((p) => p.baseUrl.trim().length > 0)
+        .map((p) => ({
+          id: p.id,
+          label: p.label,
+          description: p.baseUrl,
+        }));
     }
   }
 }
@@ -238,14 +259,21 @@ export async function fetchHostExportDraft(
         payload: parsed.value.payload,
       };
     }
-    case 'planner-endpoint': {
-      const settings = await client.getPlannerSettings();
-      const modelsRes = await client.listPlannerModels();
-      const payload = exportPlannerEndpointPayload(settings, modelsRes.models ?? []);
-      const parsed = parseTemplatePayload(kind, payload);
+    case 'planner-provider': {
+      const providersRes = await client.listPlannerProviders();
+      const list = providersRes.providers ?? [];
+      const provider = itemId
+        ? list.find((p) => p.id === itemId || p.label === itemId)
+        : list[0];
+      if (!provider) {
+        throw new Error(`Pocket Agent provider not found: ${itemId ?? 'default'}`);
+      }
+      const modelsRes = await client.listPlannerModels(provider.id);
+      const payload = exportPlannerProviderPayload(provider, modelsRes.models ?? []);
+      const parsed = parseTemplatePayload(kind, payload, provider.label);
       if (!parsed.ok) throw new Error(parsed.message);
       return {
-        defaultName: `${hostLabel} Planner Endpoint`,
+        defaultName: provider.label,
         defaultDescription: `Exported from ${hostLabel}`,
         payload: parsed.value.payload,
       };
@@ -264,12 +292,7 @@ export async function fetchAllHostExportDrafts(
   const items = await listHostExportableItems(client, kind);
   const drafts: HostExportDraft[] = [];
   for (const item of items) {
-    const draft = await fetchHostExportDraft(
-      client,
-      kind,
-      kind === 'planner-endpoint' ? null : item.id,
-      hostLabel,
-    );
+    const draft = await fetchHostExportDraft(client, kind, item.id, hostLabel);
     drafts.push(draft);
   }
   return drafts;

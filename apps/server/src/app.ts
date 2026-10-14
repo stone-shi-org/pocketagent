@@ -83,7 +83,12 @@ import { TelegramPollerService } from './telegram/poller.js';
 import { websocketRoutes } from './ws/index.js';
 import { WebhookService } from './webhooks/index.js';
 import { PlannerWorkspaceRegistry } from './planner/workspaces.js';
-import { createPlannerWorkspaceStore, readPlannerSettings, revealPlannerEmbeddingApiKey } from './planner/store.js';
+import {
+  createPlannerWorkspaceStore,
+  migrateLegacyPlannerSettings,
+  readPlannerSettings,
+  revealPlannerEmbeddingApiKey,
+} from './planner/store.js';
 import { PlannerChatService } from './planner/chats.js';
 import { DocWorkspaceService } from './doc-workspaces/index.js';
 import type { HealthResponse, QueuedRunSummary } from '@pocketagent/protocol';
@@ -404,6 +409,10 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // `process.env` exactly once, ever — deliberately not through `Config`, since
   // they are no longer configuration. See the method's own doc comment.
   customClaudeProviders.migrateLegacyEnvProviders(options.legacyProviderEnv ?? process.env);
+  // PA-148: migrates `planner_llm_base_url` / `planner_llm_api_key` into the
+  // `default` row in `planner_providers`, deferring the key encryption if
+  // `POCKETAGENT_SETTINGS_ENC_KEY` is not yet set (PA-28 deferral rule).
+  migrateLegacyPlannerSettings(db, config.settingsEncKey, app.log);
 
   const backend = createBackend({
     id: config.backend,
@@ -687,6 +696,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     db,
     plannerWorkspaces,
     memory: plannerMemory,
+    encKey: config.settingsEncKey,
     logger: app.log,
     ...(options.plannerLlmFetch ? { llmFetch: options.plannerLlmFetch } : {}),
   });

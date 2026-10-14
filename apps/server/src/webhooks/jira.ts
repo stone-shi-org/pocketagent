@@ -491,7 +491,10 @@ export function resolveModelOverride(
       // 1. If defaultModel matches, prefer it
       if (defaultModel) {
         const defMatch = matches.find(
-          (m) => m.value.toLowerCase() === defaultModel.toLowerCase(),
+          (m) =>
+            m.value.toLowerCase() === defaultModel.toLowerCase() ||
+            (m.resolvedModel !== undefined &&
+              m.resolvedModel.toLowerCase() === defaultModel.toLowerCase()),
         );
         if (defMatch) return defMatch.value;
       }

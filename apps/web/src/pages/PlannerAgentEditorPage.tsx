@@ -7,6 +7,7 @@ import {
   type PlannerMemory,
   type PlannerMemoryTier,
   type PlannerModel,
+  type PlannerProvider,
   type PlannerLiveProvider,
   type PlannerWorkspace,
   type PocketAgentExportData,
@@ -19,6 +20,7 @@ import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js'
 import { SkillExportDialog } from '../components/SkillExportDialog.js';
 import { formatRelative } from '../components/StatusBadge.js';
 import { useHostApi } from '../hosts/HostContext.js';
+import { groupPlannerModelsByProvider, resolvePlannerModelSelection } from '../agent/planner-models.js';
 import { getToolShortDescription, groupToolsByCategory } from '../agent/planner-tools-metadata.js';
 import { exportToJsonFile } from '../agent/json-transfer.js';
 import { useJsonImport } from '../hooks/useJsonImport.js';
@@ -51,6 +53,7 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
   const api = useHostApi();
   const [agent, setAgent] = useState<PlannerWorkspace | null>(null);
   const [models, setModels] = useState<PlannerModel[]>([]);
+  const [providers, setProviders] = useState<PlannerProvider[]>([]);
   const [tools, setTools] = useState<PlannerAgentToolInfo[] | null>(null);
   const [skills, setSkills] = useState<PlannerAgentSkillInfo[] | null>(null);
   const [exportingSkill, setExportingSkill] = useState<PlannerAgentSkillInfo | null>(null);
@@ -74,19 +77,27 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
 
   const load = useCallback(async () => {
     try {
-      const [{ workspaces }, { models: modelList }, agentTools, agentSkills, agentMcpRegistries] =
-        await Promise.all([
-          api.listPlannerWorkspaces(),
-          api.listPlannerModels(),
-          api.listPlannerAgentTools(agentId),
-          api.listPlannerAgentSkills(agentId),
-          api.listPlannerAgentMcpRegistries(agentId),
-        ]);
+      const [
+        { workspaces },
+        { models: modelList },
+        { providers: providerList },
+        agentTools,
+        agentSkills,
+        agentMcpRegistries,
+      ] = await Promise.all([
+        api.listPlannerWorkspaces(),
+        api.listPlannerModels(),
+        api.listPlannerProviders().catch(() => ({ providers: [] as PlannerProvider[] })),
+        api.listPlannerAgentTools(agentId),
+        api.listPlannerAgentSkills(agentId),
+        api.listPlannerAgentMcpRegistries(agentId),
+      ]);
       const found = workspaces.find((w) => w.id === agentId) ?? null;
       setAgent(found);
       setNameInput(found?.name ?? '');
       setIdentityInput(found?.identityPrompt ?? '');
       setModels(modelList);
+      setProviders(providerList);
       setTools(agentTools.tools);
       setSkills(agentSkills.skills);
       setMcpRegistries(agentMcpRegistries.registries);
@@ -471,17 +482,29 @@ export function PlannerAgentEditorPage({ agentId, onApiError, onDone, onBack }: 
           picked.
         </p>
         <select
-          value={agent.defaultModelId ?? ''}
+          value={resolvePlannerModelSelection(models, agent.defaultModelId)}
           disabled={busy}
           onChange={(e) => setDefaultModel(e.target.value)}
           aria-label="Default model"
         >
           <option value="">Use global last-used model</option>
-          {models.map((m) => (
-            <option key={m.id} value={m.modelId}>
-              {m.label}
-            </option>
-          ))}
+          {groupPlannerModelsByProvider(models, providers).map((group) =>
+            group.provider ? (
+              <optgroup key={group.provider.id} label={group.providerLabel}>
+                {group.models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {group.providerLabel} · {m.label} ({m.modelId})
+                  </option>
+                ))}
+              </optgroup>
+            ) : (
+              group.models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label} ({m.modelId})
+                </option>
+              ))
+            ),
+          )}
         </select>
       </div>
 

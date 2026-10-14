@@ -247,6 +247,24 @@ export interface PlannerLlmClientOptions {
   retry?: Partial<PlannerLlmRetryPolicy>;
 }
 
+/**
+ * PA-148: the contract every Pocket Agent LLM provider implementation
+ * (`openai-compatible` in phase 1, OAuth providers in later phases) satisfies.
+ * Emits the existing `text_delta` / `thinking_delta` / `retry` / `done`
+ * stream events and throws `PlannerLlmError` on failure.
+ */
+export interface PlannerLlmProvider {
+  listModels(): Promise<string[]>;
+  streamComplete(
+    model: string,
+    messages: PlannerChatMessage[],
+    tools?: unknown[],
+    signal?: AbortSignal,
+    options?: PlannerLlmStreamOptions,
+  ): AsyncGenerator<PlannerLlmStreamEvent>;
+  test(model: string): Promise<{ ok: boolean; message: string; latencyMs: number }>;
+}
+
 /** PA-29: bounds `embed()`'s round trip. Unlike `streamComplete` (which may
     legitimately run for as long as a model takes to generate a reply),
     `embed()` can sit on `PlannerChatService`'s hot path — every turn's
@@ -288,7 +306,7 @@ const EMBEDDING_TIMEOUT_MS = 5_000;
  * choice `sessions/opencode-server.ts` already made for outbound HTTP in this
  * codebase.
  */
-export class PlannerLlmClient {
+export class PlannerLlmClient implements PlannerLlmProvider {
   constructor(private readonly opts: PlannerLlmClientOptions) {}
 
   /**
@@ -335,6 +353,31 @@ export class PlannerLlmClient {
     return data
       .map((entry) => (entry && typeof entry === 'object' ? String((entry as { id?: unknown }).id ?? '') : ''))
       .filter((id) => id.length > 0);
+  }
+
+  /**
+   * Round-trips one minimal prompt through `model` to confirm the provider
+   * endpoint and model id actually work. Swallows `PlannerLlmError` into
+   * `ok: false` so the caller can return a structured verdict.
+   */
+  async test(model: string): Promise<{ ok: boolean; message: string; latencyMs: number }> {
+    const startedAt = Date.now();
+    try {
+      let content: string | null = null;
+      for await (const chunk of this.streamComplete(model, [
+        { role: 'user', content: 'Reply with exactly one word: ok' },
+      ])) {
+        if (chunk.type === 'done') content = chunk.content;
+      }
+      return {
+        ok: true,
+        message: content ? content.trim().slice(0, 200) : '(empty reply)',
+        latencyMs: Date.now() - startedAt,
+      };
+    } catch (err) {
+      const message = err instanceof PlannerLlmError ? err.message : (err as Error).message;
+      return { ok: false, message, latencyMs: Date.now() - startedAt };
+    }
   }
 
   /**

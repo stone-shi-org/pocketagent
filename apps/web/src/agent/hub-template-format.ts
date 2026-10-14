@@ -7,6 +7,7 @@ import {
   type HubTemplatePayload,
   type McpAuthKind,
   type McpTransportKind,
+  type PlannerProviderTemplateModel,
   type ProvisioningOutcome,
   type SingleMcpRegistryTemplatePayload,
 } from '@pocketagent/protocol';
@@ -69,11 +70,11 @@ export const TEMPLATE_KINDS: readonly TemplateKindInfo[] = [
       'A skill template carries one SKILL.md and nothing else. A skill directory can hold auxiliary files, and those are not copied.',
   },
   {
-    kind: 'planner-endpoint',
-    label: 'Pocket Agent LLM endpoint',
-    blurb: 'The host-wide Pocket Agent endpoint and its model catalog. Replaces whatever the host already has.',
+    kind: 'planner-provider',
+    label: 'Pocket Agent provider',
+    blurb: 'An OpenAI-compatible Pocket Agent LLM provider and its model catalog. The API key is asked for per host.',
     disclosure:
-      'This replaces host-wide settings: every existing Pocket Agent chat on the host starts talking to this endpoint instead of its current one. It is never an add, so it always needs the overwrite confirmation — including the first time.',
+      'A provider routes Pocket Agent prompts and tool outputs to this endpoint.',
   },
 ];
 
@@ -136,19 +137,16 @@ export interface TemplateDraft {
   enabled: boolean;
   providerKind: CustomClaudeProviderKind;
   baseUrl: string;
-  /** One model per line; for `planner-endpoint`, `id | label`. */
+  /** One model per line; for `planner-provider`, `id | label`. */
   models: string;
   defaultModel: string;
   smallModel: string;
   allowUnattended: boolean;
   slug: string;
   body: string;
-  embeddingBaseUrl: string;
-  embeddingModelId: string;
-  webSearchBaseUrl: string;
-  urlFetchBaseUrl: string;
   isBundle?: boolean;
   mcpRegistries?: SingleMcpRegistryTemplatePayload[];
+  plannerModels?: PlannerProviderTemplateModel[];
 }
 
 const EMPTY_DRAFT: TemplateDraft = {
@@ -172,10 +170,6 @@ const EMPTY_DRAFT: TemplateDraft = {
   allowUnattended: false,
   slug: '',
   body: '',
-  embeddingBaseUrl: '',
-  embeddingModelId: '',
-  webSearchBaseUrl: '',
-  urlFetchBaseUrl: '',
 };
 
 function lines(text: string): string[] {
@@ -254,17 +248,16 @@ export function draftFrom(spec: HubTemplatePayload): TemplateDraft {
         description: spec.payload.description,
         body: spec.payload.body,
       };
-    case 'planner-endpoint':
+    case 'planner-provider':
       return {
         ...draft,
+        name: spec.payload.label,
         baseUrl: spec.payload.baseUrl,
+        allowUnattended: spec.payload.allowUnattended,
         models: spec.payload.models
           .map((model) => (model.label === model.modelId ? model.modelId : `${model.modelId} | ${model.label}`))
           .join('\n'),
-        embeddingBaseUrl: spec.payload.embeddingBaseUrl ?? '',
-        embeddingModelId: spec.payload.embeddingModelId ?? '',
-        webSearchBaseUrl: spec.payload.webSearchBaseUrl ?? '',
-        urlFetchBaseUrl: spec.payload.urlFetchBaseUrl ?? '',
+        plannerModels: spec.payload.models,
       };
   }
 }
@@ -317,21 +310,26 @@ export function payloadFrom(kind: HubTemplateKind, draft: TemplateDraft): unknow
         // Not trimmed: a SKILL.md body's leading whitespace is content.
         body: draft.body,
       };
-    case 'planner-endpoint':
+    case 'planner-provider': {
+      const existingByModelId = new Map(
+        (draft.plannerModels ?? []).map((m) => [m.modelId, m]),
+      );
       return {
+        label: draft.name.trim(),
+        kind: 'openai-compatible' as const,
         baseUrl: draft.baseUrl.trim(),
+        allowUnattended: draft.allowUnattended,
         models: lines(draft.models).map((line) => {
           const [modelId, label] = line.split('|');
           const id = (modelId ?? '').trim();
-          // A bare model id is the common case, so the label defaults to it
-          // rather than being a second thing to type for every model.
-          return { modelId: id, label: (label ?? '').trim() === '' ? id : (label ?? '').trim() };
+          const resolvedLabel = (label ?? '').trim() === '' ? id : (label ?? '').trim();
+          const prev = existingByModelId.get(id);
+          return prev
+            ? { ...prev, modelId: id, label: resolvedLabel }
+            : { modelId: id, label: resolvedLabel };
         }),
-        embeddingBaseUrl: orNull(draft.embeddingBaseUrl),
-        embeddingModelId: orNull(draft.embeddingModelId),
-        webSearchBaseUrl: orNull(draft.webSearchBaseUrl),
-        urlFetchBaseUrl: orNull(draft.urlFetchBaseUrl),
       };
+    }
   }
 }
 
@@ -347,7 +345,7 @@ export function validateDraft(
   kind: HubTemplateKind,
   draft: TemplateDraft,
 ): { ok: true; value: HubTemplatePayload } | { ok: false; message: string } {
-  return parseTemplatePayload(kind, payloadFrom(kind, draft));
+  return parseTemplatePayload(kind, payloadFrom(kind, draft), draft.name.trim() || undefined);
 }
 
 /**

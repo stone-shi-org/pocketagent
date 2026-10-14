@@ -247,26 +247,45 @@ export class FleetService {
     }
     if (!settings.ok) throw new FleetError(`${label} answered ${settings.status} reading its Pocket Agent settings.`, 'coordinator_failed', 502);
     const body = settings.body as { baseUrl?: unknown; mcpEnabled?: unknown } | null;
+    const providers = await rest({ method: 'GET', path: '/api/planner/providers' });
     const models = await rest({ method: 'GET', path: '/api/planner/models' });
-    const modelCount = Array.isArray((models.body as { models?: unknown } | null)?.models)
-      ? ((models.body as { models: unknown[] }).models.length)
-      : 0;
-    if (typeof body?.baseUrl !== 'string' || body.baseUrl.length === 0 || modelCount === 0) {
+    const modelList = Array.isArray((models.body as { models?: unknown } | null)?.models)
+      ? ((models.body as { models: { providerId?: unknown }[] }).models)
+      : [];
+    let hasConfiguredProvider = false;
+    let usableModelCount = 0;
+    if (providers.ok && Array.isArray((providers.body as { providers?: unknown } | null)?.providers)) {
+      const providerList = (providers.body as { providers: { id?: unknown; baseUrl?: unknown }[] }).providers;
+      const configuredProviderIds = new Set(
+        providerList
+          .filter((p) => typeof p.id === 'string' && typeof p.baseUrl === 'string' && p.baseUrl.trim().length > 0)
+          .map((p) => p.id as string),
+      );
+      hasConfiguredProvider = configuredProviderIds.size > 0;
+      usableModelCount = modelList.filter(
+        (m) => typeof m.providerId === 'string' && configuredProviderIds.has(m.providerId),
+      ).length;
+    } else {
+      // Fallback for a pre-PA-148 backend that has no `/api/planner/providers`.
+      hasConfiguredProvider = typeof body?.baseUrl === 'string' && body.baseUrl.trim().length > 0;
+      usableModelCount = hasConfiguredProvider ? modelList.length : 0;
+    }
+    if (!hasConfiguredProvider || usableModelCount === 0) {
       throw new FleetError(
-        `${label} has no Pocket Agent LLM endpoint${typeof body?.baseUrl === 'string' && body.baseUrl ? ' model' : ''} configured, ` +
+        `${label} has no Pocket Agent LLM provider${hasConfiguredProvider ? ' model' : ''} configured, ` +
           `so the Fleet agent could not answer. Set one up in ${label}'s Settings → Providers and Models, then enable again.`,
         'coordinator_no_llm',
         409,
       );
     }
-    if (body.mcpEnabled === false) {
+    if (body?.mcpEnabled === false) {
       throw new FleetError(
         `MCP is switched off for Pocket Agents on ${label}, so the Fleet agent could not reach the Hub. Turn it on in ${label}'s Settings first.`,
         'coordinator_mcp_off',
         409,
       );
     }
-    steps.push({ label: `check ${label} can run a Pocket Agent`, ok: true, message: `${modelCount} model(s) configured` });
+    steps.push({ label: `check ${label} can run a Pocket Agent`, ok: true, message: `${usableModelCount} model(s) configured` });
 
     // 2. A dispatch token on every bound host — the coordinator included,
     //    since the Fleet agent may well dispatch to its own machine.
