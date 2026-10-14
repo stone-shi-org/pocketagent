@@ -170,6 +170,18 @@ export const PermissionResolvedEvent = z.object({
   message: z.string().nullable(),
 });
 
+/** PA-143: Summary of a workspace file changed during a Pocket Agent turn. */
+export const DocTurnChangedFile = z.object({
+  workspaceId: z.string(),
+  relPath: z.string(),
+  summary: z.string(),
+  tombstone: z.boolean().optional(),
+  fromRelPath: z.string().nullable().optional(),
+  versionId: z.string().optional(),
+  action: z.enum(['created', 'modified', 'moved', 'deleted']).optional(),
+});
+export type DocTurnChangedFile = z.infer<typeof DocTurnChangedFile>;
+
 /** End of an agent turn: the session is idle and awaiting the next prompt. */
 export const TurnCompleteEvent = z.object({
   kind: z.literal('turn_complete'),
@@ -202,6 +214,12 @@ export const TurnCompleteEvent = z.object({
    * Optional follow-up question suggestions generated at turn completion.
    */
   suggestions: z.array(z.string()).optional(),
+  /** PA-143: Turn id (matching the initiating `user_prompt.id`) for per-turn undo. */
+  turnId: z.string().optional(),
+  /** PA-143: Workspace files changed during this turn, for "Changed N files · Undo this turn". */
+  changedFiles: z.array(DocTurnChangedFile).optional(),
+  /** PA-143: Whether this turn's workspace changes have been undone. */
+  undone: z.boolean().optional(),
 });
 
 /** Anything worth surfacing that is not part of the conversation proper. */

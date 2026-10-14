@@ -223,6 +223,10 @@ export class TelegramBridge {
     const text = (parts.map((p) => p.text ?? p.caption ?? '').find((t) => t.trim().length > 0) ?? '').trim();
     const hasMedia = parts.some((p) => p.document !== undefined || (p.photo?.length ?? 0) > 0);
     const command = hasMedia ? null : interceptSlashCommand(text);
+    if (command === 'undo') {
+      await this.runUndoCommand(telegramChatId, link.plannerChatId, client);
+      return;
+    }
     if (command) {
       const reply = await this.runSlashCommand(command, link.plannerChatId, link.workspaceId, text);
       // Plain text: these replies are ours, not the model's, and carry no
@@ -416,9 +420,62 @@ export class TelegramBridge {
     query: TelegramCallbackQuery,
     client: TelegramClient,
   ): Promise<void> {
-    const parsed = parseApprovalCallbackData(query.data);
     const telegramChatId = query.message ? String(query.message.chat.id) : null;
-    if (!parsed || !telegramChatId) {
+    if (!telegramChatId) {
+      await client.answerCallbackQuery(query.id, 'This button is no longer valid.');
+      return;
+    }
+
+    const parsedUndo = parseUndoCallbackData(query.data);
+    if (parsedUndo) {
+      const link = this.deps.links.get(botId, telegramChatId);
+      if (!link?.plannerChatId) {
+        await client.answerCallbackQuery(query.id, 'No conversation found for this pairing.');
+        return;
+      }
+      if (parsedUndo.action === 'cancel') {
+        await client.answerCallbackQuery(query.id, 'Undo cancelled.');
+        await sendPlainText(client, telegramChatId, 'Undo cancelled.');
+        return;
+      }
+      await client.answerCallbackQuery(query.id);
+      try {
+        const res = await this.deps.plannerChats.undoTurn(link.plannerChatId, parsedUndo.turnId, {
+          force: parsedUndo.action === 'force',
+        });
+        if (!res.ok && res.skippedConflicts.length > 0) {
+          const conflictLines = res.skippedConflicts.map(
+            (c) => `- ${c.relPath} (changed since turn by ${c.currentActor})`,
+          );
+          await client.sendMessage(
+            telegramChatId,
+            `Some files changed since that turn:\n${conflictLines.join('\n')}\n\nOverwrite them anyway?`,
+            {
+              replyMarkup: {
+                inline_keyboard: [
+                  [
+                    { text: 'Overwrite anyway', callback_data: undoCallbackData(parsedUndo.turnId, 'force') },
+                    { text: 'Cancel', callback_data: undoCallbackData(parsedUndo.turnId, 'cancel') },
+                  ],
+                ],
+              },
+            },
+          );
+          return;
+        }
+        const restoredMsg =
+          res.restoredPaths.length > 0
+            ? `Undone (${res.restoredPaths.length} file${res.restoredPaths.length === 1 ? '' : 's'} restored: ${res.restoredPaths.join(', ')}).`
+            : 'Nothing left to undo for that turn.';
+        await sendPlainText(client, telegramChatId, restoredMsg);
+      } catch (err) {
+        await sendPlainText(client, telegramChatId, `Could not undo turn: ${(err as Error).message}`);
+      }
+      return;
+    }
+
+    const parsed = parseApprovalCallbackData(query.data);
+    if (!parsed) {
       await client.answerCallbackQuery(query.id, 'This button is no longer valid.');
       return;
     }
@@ -593,6 +650,38 @@ export class TelegramBridge {
     void workspaceId; // kept for a future per-workspace formatting hook; unused today
     return lines.join('\n');
   }
+
+  private async runUndoCommand(
+    telegramChatId: string,
+    plannerChatId: string | null,
+    client: TelegramClient,
+  ): Promise<void> {
+    if (!plannerChatId) {
+      await sendPlainText(client, telegramChatId, 'There is no conversation to undo yet.');
+      return;
+    }
+    const last = await this.deps.plannerChats.findLastUndoableTurn(plannerChatId);
+    if (!last) {
+      await sendPlainText(client, telegramChatId, 'Nothing to undo — no recent turn changed any workspace files.');
+      return;
+    }
+    const fileLines = last.changedFiles.map(
+      (f) => `- ${f.relPath}${f.summary ? ` (${f.summary})` : ''}`,
+    );
+    const msg =
+      `Undo the last turn's changes (${last.changedFiles.length} file${last.changedFiles.length === 1 ? '' : 's'})?\n` +
+      fileLines.join('\n');
+    await client.sendMessage(telegramChatId, msg, {
+      replyMarkup: {
+        inline_keyboard: [
+          [
+            { text: 'Undo turn', callback_data: undoCallbackData(last.turnId, 'confirm') },
+            { text: 'Cancel', callback_data: undoCallbackData(last.turnId, 'cancel') },
+          ],
+        ],
+      },
+    });
+  }
 }
 
 /** `<approvalId>:<choice>` — well under Telegram's 64-byte `callback_data`
@@ -600,6 +689,34 @@ export class TelegramBridge {
     appears in either part so a plain split is exact. */
 function approvalCallbackData(approvalId: string, choice: PlannerToolApprovalChoice): string {
   return `${approvalId}:${choice}`;
+}
+
+type UndoCallbackAction = 'confirm' | 'force' | 'cancel';
+const VALID_UNDO_ACTIONS: ReadonlySet<string> = new Set(['confirm', 'force', 'cancel']);
+
+function undoCallbackData(turnId: string, action: UndoCallbackAction): string {
+  return `undo:${turnId}:${action}`;
+}
+
+function parseUndoCallbackData(
+  data: string | undefined,
+): { turnId: string; action: UndoCallbackAction } | null {
+  if (!data) return null;
+  if (data.startsWith('undo:')) {
+    const parts = data.split(':');
+    if (parts.length !== 3) return null;
+    const [, turnId, action] = parts;
+    if (!turnId || !action || !VALID_UNDO_ACTIONS.has(action)) return null;
+    return { turnId, action: action as UndoCallbackAction };
+  }
+  if (data.startsWith('tg_undo:')) {
+    const parts = data.split(':');
+    if (parts.length !== 4) return null;
+    const [, , turnId, action] = parts;
+    if (!turnId || !action || !VALID_UNDO_ACTIONS.has(action)) return null;
+    return { turnId, action: action as UndoCallbackAction };
+  }
+  return null;
 }
 
 /**

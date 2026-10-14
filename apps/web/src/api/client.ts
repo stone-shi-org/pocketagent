@@ -142,6 +142,14 @@ import type {
   DocFileMkdirRequest,
   DocFileRenameRequest,
   DocFilePreviewResponse,
+  DocFileVersionsResponse,
+  DocVersionCompareResponse,
+  DocRestoreVersionRequest,
+  DocRestoreVersionResponse,
+  DocTrashListResponse,
+  DocTrashRestoreRequest,
+  UndoTurnRequest,
+  UndoTurnResponse,
 } from '@pocketagent/protocol';
 import { DEFAULT_HOST, hostUrl, type HostEndpoint } from './host.js';
 
@@ -1404,10 +1412,67 @@ export function createApiClient(endpoint: HostEndpoint) {
         },
       ),
 
-    deleteDocWorkspaceFile: (id: string, filePath: string) =>
+    deleteDocWorkspaceFile: (id: string, filePath: string, baseVersion?: string) =>
       request<{ ok: true; path: string }>(
-        `/api/doc-workspaces/${encodeURIComponent(id)}/files?path=${encodeURIComponent(filePath)}`,
+        `/api/doc-workspaces/${encodeURIComponent(id)}/files?path=${encodeURIComponent(filePath)}${baseVersion ? `&baseVersion=${encodeURIComponent(baseVersion)}` : ''}`,
         { method: 'DELETE' },
+      ),
+
+    listDocFileVersions: (id: string, filePath: string) =>
+      request<DocFileVersionsResponse>(
+        `/api/doc-workspaces/${encodeURIComponent(id)}/files/versions?path=${encodeURIComponent(filePath)}`,
+      ),
+
+    docFileVersionDownloadUrl: (
+      id: string,
+      versionId: string,
+      opts?: { inline?: boolean; target?: 'version' | 'previous' },
+    ) => {
+      const qs = new URLSearchParams();
+      if (opts?.inline) qs.set('inline', '1');
+      if (opts?.target) qs.set('target', opts.target);
+      const q = qs.toString();
+      return hostUrl(
+        endpoint,
+        `/api/doc-workspaces/${encodeURIComponent(id)}/versions/${encodeURIComponent(versionId)}/download${q ? `?${q}` : ''}`,
+      );
+    },
+
+    compareDocFileVersions: (id: string, beforeVersionId: string, afterVersionId: string) =>
+      request<DocVersionCompareResponse>(
+        `/api/doc-workspaces/${encodeURIComponent(id)}/versions/compare?before=${encodeURIComponent(beforeVersionId)}&after=${encodeURIComponent(afterVersionId)}`,
+      ),
+
+    restoreDocFileVersion: (id: string, versionId: string, body?: DocRestoreVersionRequest) =>
+      request<DocRestoreVersionResponse>(
+        `/api/doc-workspaces/${encodeURIComponent(id)}/versions/${encodeURIComponent(versionId)}/restore`,
+        {
+          method: 'POST',
+          body: JSON.stringify(body ?? {}),
+        },
+      ),
+
+    listDocWorkspaceTrash: (id: string) =>
+      request<DocTrashListResponse>(
+        `/api/doc-workspaces/${encodeURIComponent(id)}/trash`,
+      ),
+
+    restoreDocWorkspaceTrash: (id: string, versionId: string, body?: DocTrashRestoreRequest) =>
+      request<DocRestoreVersionResponse>(
+        `/api/doc-workspaces/${encodeURIComponent(id)}/trash/${encodeURIComponent(versionId)}/restore`,
+        {
+          method: 'POST',
+          body: JSON.stringify(body ?? {}),
+        },
+      ),
+
+    undoPlannerTurn: (chatId: string, turnId: string, body?: UndoTurnRequest) =>
+      request<UndoTurnResponse>(
+        `/api/planner/chats/${encodeURIComponent(chatId)}/turns/${encodeURIComponent(turnId)}/undo`,
+        {
+          method: 'POST',
+          body: JSON.stringify(body ?? {}),
+        },
       ),
 
     previewDocWorkspaceFile: (id: string, filePath: string) =>

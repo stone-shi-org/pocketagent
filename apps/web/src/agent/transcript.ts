@@ -6,6 +6,7 @@ import {
 } from '@pocketagent/protocol';
 import type {
   AgentEvent,
+  DocTurnChangedFile,
   EffortLevel,
   ModelInfo,
   PermissionRequestEvent,
@@ -122,6 +123,12 @@ export interface TurnItem {
   completedAt: number | null;
   /** Follow-up suggestions generated at turn completion. */
   suggestions?: string[];
+  /** PA-143: turn identifier when the turn mutated document workspace files. */
+  turnId?: string;
+  /** PA-143: workspace files modified during this turn. */
+  changedFiles?: DocTurnChangedFile[];
+  /** PA-143: whether this turn's workspace file changes have been undone. */
+  undone?: boolean;
 }
 
 /**
@@ -410,6 +417,11 @@ export function applyEvent(state: TranscriptState, event: AgentEvent): Transcrip
             cacheReadTokens: event.cacheReadTokens ?? null,
             completedAt: event.completedAt ?? null,
             suggestions: event.suggestions,
+            ...(event.turnId ? { turnId: event.turnId } : {}),
+            ...(event.changedFiles && event.changedFiles.length > 0
+              ? { changedFiles: event.changedFiles }
+              : {}),
+            ...(event.undone ? { undone: event.undone } : {}),
           },
         ],
       };
@@ -561,6 +573,15 @@ export function resolveCurrentModel(models: ModelInfo[], model: string | null): 
 
 export function applyEvents(state: TranscriptState, events: AgentEvent[]): TranscriptState {
   return events.reduce(applyEvent, state);
+}
+
+export function markTurnUndone(state: TranscriptState, turnId: string): TranscriptState {
+  return {
+    ...state,
+    items: state.items.map((item) =>
+      item.type === 'turn' && item.turnId === turnId ? { ...item, undone: true } : item,
+    ),
+  };
 }
 
 /**

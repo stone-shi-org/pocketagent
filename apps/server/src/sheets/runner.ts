@@ -47,6 +47,11 @@ export interface SheetRunnerLimits {
   /** Optional override for the `soffice` / `libreoffice` binary path (or `null` to force unavailable). */
   sofficeBin?: string | null;
   libreOfficeBin?: string | null;
+  /**
+   * Allow in-place edits (`outputPath === path`) or overwriting an existing
+   * `outputPath` when backed by Document Workspace version history (PA-143).
+   */
+  allowOverwrite?: boolean;
 }
 
 /**
@@ -505,17 +510,19 @@ export async function previewSheetEdit(
 ): Promise<SheetWorkerResponse> {
   try {
     assertZipMagic(absPath);
-    if (path.resolve(absPath) === path.resolve(outputAbsPath)) {
-      return {
-        ok: false,
-        error: 'outputPath must be a new file path; sheet_edit never overwrites the original workbook.',
-      };
-    }
-    if (fs.existsSync(outputAbsPath)) {
-      return {
-        ok: false,
-        error: `Refusing to overwrite existing file at outputPath: ${outputAbsPath}`,
-      };
+    if (!limits.allowOverwrite) {
+      if (path.resolve(absPath) === path.resolve(outputAbsPath)) {
+        return {
+          ok: false,
+          error: 'outputPath must be a new file path; sheet_edit never overwrites the original workbook.',
+        };
+      }
+      if (fs.existsSync(outputAbsPath)) {
+        return {
+          ok: false,
+          error: `Refusing to overwrite existing file at outputPath: ${outputAbsPath}`,
+        };
+      }
     }
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -543,17 +550,19 @@ export async function executeSheetEdit(
 ): Promise<SheetWorkerResponse> {
   try {
     assertZipMagic(absPath);
-    if (path.resolve(absPath) === path.resolve(outputAbsPath)) {
-      return {
-        ok: false,
-        error: 'outputPath must be a new file path; sheet_edit never overwrites the original workbook.',
-      };
-    }
-    if (fs.existsSync(outputAbsPath)) {
-      return {
-        ok: false,
-        error: `Refusing to overwrite existing file at outputPath: ${displayOutputPath}`,
-      };
+    if (!limits.allowOverwrite) {
+      if (path.resolve(absPath) === path.resolve(outputAbsPath)) {
+        return {
+          ok: false,
+          error: 'outputPath must be a new file path; sheet_edit never overwrites the original workbook.',
+        };
+      }
+      if (fs.existsSync(outputAbsPath)) {
+        return {
+          ok: false,
+          error: `Refusing to overwrite existing file at outputPath: ${displayOutputPath}`,
+        };
+      }
     }
     await fsp.mkdir(path.dirname(outputAbsPath), { recursive: true });
   } catch (err) {
@@ -562,12 +571,16 @@ export async function executeSheetEdit(
 
   const maxUnzippedBytes = limits.maxUnzippedBytes ?? SHEET_MAX_UNZIPPED_BYTES;
   const maxRssBytes = (limits.maxRssMb ?? SHEET_WORKER_MAX_RSS_MB) * 1024 * 1024;
+  const stageToTemp = Boolean(limits.allowOverwrite && fs.existsSync(outputAbsPath));
+  const stagedOutputPath = stageToTemp
+    ? `${outputAbsPath}.stage.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`
+    : outputAbsPath;
 
   const applyRes = await invokeSheetWorker(
     {
       op: 'sheet_edit_apply',
       filePath: absPath,
-      outputPath: outputAbsPath,
+      outputPath: stagedOutputPath,
       edits,
       maxUnzippedBytes,
       maxRssBytes,
@@ -576,12 +589,15 @@ export async function executeSheetEdit(
   );
 
   if (!applyRes.ok) {
+    if (stageToTemp) {
+      await fsp.rm(stagedOutputPath, { force: true }).catch(() => {});
+    }
     return applyRes;
   }
 
   // If LibreOffice is available on the host, recalculate a scratch copy of the
   // newly written output workbook and back-patch cached `<v>` values into it.
-  const recalc = await recalculateWorkbookWithLibreOffice(outputAbsPath, limits);
+  const recalc = await recalculateWorkbookWithLibreOffice(stagedOutputPath, limits);
   let downstreamChanges: SheetDownstreamChange[] = [];
   let newErrors: SheetErrorCell[] = [];
   let recalculated = false;
@@ -597,7 +613,7 @@ export async function executeSheetEdit(
         {
           op: 'sheet_edit_backpatch',
           originalPath: absPath,
-          patchedPath: outputAbsPath,
+          patchedPath: stagedOutputPath,
           recalculatedPath: tmpRecalcPath,
           directlyEditedCells: applyRes.directlyEditedCells ?? [],
           maxUnzippedBytes,
@@ -615,6 +631,10 @@ export async function executeSheetEdit(
         await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
       }
     }
+  }
+
+  if (stageToTemp) {
+    await fsp.rename(stagedOutputPath, outputAbsPath);
   }
 
   const diff: SheetDiffPayload = applyRes.diff ?? { before: '', after: '', lines: [] };

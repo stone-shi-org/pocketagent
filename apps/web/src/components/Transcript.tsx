@@ -55,6 +55,8 @@ export function Transcript({
   history,
   starterPrompts,
   onSelectPrompt,
+  onUndoTurn,
+  undoingTurnId,
 }: {
   state: TranscriptState;
   /** Messages from the conversation being resumed, shown above this session. */
@@ -63,6 +65,10 @@ export function Transcript({
   starterPrompts?: string[];
   /** Called when a starter prompt chip or follow-up suggestion is picked. */
   onSelectPrompt?: (prompt: string) => void;
+  /** PA-143: called when the user clicks "Undo this turn" on a turn that changed workspace files. */
+  onUndoTurn?: (turnId: string) => void;
+  /** PA-143: turnId currently being undone. */
+  undoingTurnId?: string | null;
 }): JSX.Element {
   const endRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -193,6 +199,8 @@ export function Transcript({
             setHeaderRef={setHeaderRef(turnIdx)}
             onHeightChange={recompute}
             onSelectPrompt={onSelectPrompt}
+            onUndoTurn={onUndoTurn}
+            undoingTurnId={undoingTurnId}
             busy={state.busy}
           />
         );
@@ -216,6 +224,8 @@ export function Transcript({
             setHeaderRef={setHeaderRef(turnIdx)}
             onHeightChange={recompute}
             onSelectPrompt={onSelectPrompt}
+            onUndoTurn={onUndoTurn}
+            undoingTurnId={undoingTurnId}
             busy={state.busy}
           />
         );
@@ -321,6 +331,8 @@ function TurnPanel({
   setHeaderRef,
   onHeightChange,
   onSelectPrompt,
+  onUndoTurn,
+  undoingTurnId,
   busy,
 }: {
   turn: TurnNode;
@@ -330,6 +342,8 @@ function TurnPanel({
   setHeaderRef: ((el: HTMLDivElement | null) => void) | undefined;
   onHeightChange?: () => void;
   onSelectPrompt?: (prompt: string) => void;
+  onUndoTurn?: (turnId: string) => void;
+  undoingTurnId?: string | null;
   busy?: boolean;
 }): JSX.Element {
   const [expanded, setExpanded] = useState(false);
@@ -408,7 +422,14 @@ function TurnPanel({
       {turn.prompt?.files && turn.prompt.files.length > 0 && <SentFileChips files={turn.prompt.files} />}
       <div className="turn-body">
         {turn.leaves.map((leaf) => (
-          <Item key={leaf.key} item={leaf} onSelectPrompt={onSelectPrompt} busy={busy} />
+          <Item
+            key={leaf.key}
+            item={leaf}
+            onSelectPrompt={onSelectPrompt}
+            onUndoTurn={onUndoTurn}
+            undoingTurnId={undoingTurnId}
+            busy={busy}
+          />
         ))}
       </div>
     </>
@@ -418,10 +439,14 @@ function TurnPanel({
 function Item({
   item,
   onSelectPrompt,
+  onUndoTurn,
+  undoingTurnId,
   busy,
 }: {
   item: TranscriptItem;
   onSelectPrompt?: (prompt: string) => void;
+  onUndoTurn?: (turnId: string) => void;
+  undoingTurnId?: string | null;
   busy?: boolean;
 }): JSX.Element | null {
   switch (item.type) {
@@ -441,7 +466,15 @@ function Item({
     case 'compaction':
       return <CompactionDivider item={item} />;
     case 'turn':
-      return <TurnFooter item={item} onSelectPrompt={onSelectPrompt} busy={busy} />;
+      return (
+        <TurnFooter
+          item={item}
+          onSelectPrompt={onSelectPrompt}
+          onUndoTurn={onUndoTurn}
+          undoingTurnId={undoingTurnId}
+          busy={busy}
+        />
+      );
     default:
       return null;
   }
@@ -584,12 +617,17 @@ function Working(): JSX.Element {
 function TurnFooter({
   item,
   onSelectPrompt,
+  onUndoTurn,
+  undoingTurnId,
   busy,
 }: {
   item: Extract<TranscriptItem, { type: 'turn' }>;
   onSelectPrompt?: (prompt: string) => void;
+  onUndoTurn?: (turnId: string) => void;
+  undoingTurnId?: string | null;
   busy?: boolean;
 }): JSX.Element {
+  const [filesOpen, setFilesOpen] = useState(false);
   const bits: string[] = [];
   if (item.durationMs !== null) bits.push(`${(item.durationMs / 1000).toFixed(1)}s`);
   if (item.inputTokens !== null || item.outputTokens !== null) {
@@ -613,9 +651,57 @@ function TurnFooter({
   if (item.completedAt !== null) bits.push(new Date(item.completedAt).toLocaleTimeString());
 
   const hasChips = Boolean(item.suggestions && item.suggestions.length > 0 && onSelectPrompt);
+  const changedFiles = item.changedFiles;
+  const hasChangedFiles = Boolean(changedFiles && changedFiles.length > 0);
+  const isUndoing = Boolean(item.turnId && undoingTurnId === item.turnId);
 
   return (
     <div className="turn-footer-wrap">
+      {hasChangedFiles && changedFiles && (
+        <div className="turn-changed-files-box">
+          <div className="turn-changed-files-chip">
+            <button
+              type="button"
+              className="turn-changed-files-toggle"
+              onClick={() => setFilesOpen((v) => !v)}
+              aria-expanded={filesOpen}
+            >
+              <Icon name="file" size={13} />
+              <span>
+                Changed {changedFiles.length} file{changedFiles.length === 1 ? '' : 's'}
+              </span>
+              <span className="chev">{filesOpen ? '▾' : '▸'}</span>
+            </button>
+            {item.undone ? (
+              <span className="turn-undone-badge">Undone</span>
+            ) : (
+              onUndoTurn &&
+              item.turnId && (
+                <button
+                  type="button"
+                  className="turn-undo-btn"
+                  disabled={Boolean(busy) || isUndoing}
+                  onClick={() => onUndoTurn(item.turnId!)}
+                  title="Restore every workspace file touched by this turn to its state before the turn"
+                >
+                  <Icon name="rotate" size={12} />
+                  <span>{isUndoing ? 'Undoing…' : 'Undo this turn'}</span>
+                </button>
+              )
+            )}
+          </div>
+          {filesOpen && (
+            <ul className="turn-changed-files-list">
+              {changedFiles.map((f) => (
+                <li key={`${f.workspaceId}:${f.relPath}:${f.versionId}`}>
+                  <code>{f.relPath}</code>
+                  {f.summary ? <span className="turn-changed-file-summary"> — {f.summary}</span> : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       {bits.length === 0 ? <div className="turn-sep" /> : <div className="turn-footer">{bits.join(' · ')}</div>}
       {hasChips && (
         <FollowUpChips

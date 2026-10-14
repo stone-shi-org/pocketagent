@@ -16,6 +16,7 @@ import type {
   SessionInfo,
   SlashCommandInfo,
   PlannerArtifact,
+  UndoTurnConflict,
 } from '@pocketagent/protocol';
 import { plannerModelSupportsImages } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
@@ -26,7 +27,7 @@ import { PromptBox } from '../components/PromptBox.js';
 import { WorkspacePanel } from '../components/WorkspacePanel.js';
 import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
 import { plannerPromptHistoryKey } from '../agent/prompt-history.js';
-import { applyEvent, applyEvents, emptyTranscript, type TranscriptState } from '../agent/transcript.js';
+import { applyEvent, applyEvents, emptyTranscript, markTurnUndone, type TranscriptState } from '../agent/transcript.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { LiveListenController } from '../audio/live-listen.js';
 import { TtsPlaybackQueue } from '../audio/playback.js';
@@ -589,6 +590,35 @@ export function PlannerChatPage({
       items: [...(prev?.items ?? []), { text: `@${relPath}`, seq }],
     }));
   }, []);
+
+  const [undoingTurnId, setUndoingTurnId] = useState<string | null>(null);
+  const [pendingUndoConflict, setPendingUndoConflict] = useState<{
+    turnId: string;
+    conflicts: UndoTurnConflict[];
+  } | null>(null);
+
+  const handleUndoTurn = useCallback(
+    async (turnId: string, confirm = false) => {
+      setUndoingTurnId(turnId);
+      setError(null);
+      try {
+        const res = await api.undoPlannerTurn(chatId, turnId, confirm ? { confirm: true } : {});
+        await refreshDocWorkspaceFiles();
+        if (!res.ok && res.skippedConflicts.length > 0 && !confirm) {
+          setPendingUndoConflict({ turnId, conflicts: res.skippedConflicts });
+          return;
+        }
+        setPendingUndoConflict(null);
+        setTranscript((prev) => (prev ? markTurnUndone(prev, turnId) : prev));
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not undo turn.');
+      } finally {
+        setUndoingTurnId(null);
+      }
+    },
+    [api, chatId, onApiError, refreshDocWorkspaceFiles],
+  );
 
   const workspaceFilePaths = useMemo(
     () => docWorkspaceEntries.filter((e) => !e.isDir).map((e) => e.path),
@@ -1675,6 +1705,18 @@ export function PlannerChatPage({
         </div>
       )}
 
+      {attachedDocWorkspace?.autoApproveEdits === true &&
+        attachedDocWorkspace.versionStoreAvailable !== false && (
+          // PA-143 disclosure: the seventh documented override of the approval rule.
+          // Rendered persistently in every attached chat on every visit, not once.
+          <div className="warn-callout" role="status">
+            Auto-approve edits is enabled for workspace <strong>{attachedDocWorkspace.name}</strong>.
+            File writes, edits, moves, and deletes inside this workspace run without asking
+            (previous versions are saved automatically); commands and paths outside this
+            workspace still require approval.
+          </div>
+        )}
+
       {geminiLive && (
         <div className="planner-gemini-strip" role="status" aria-live="polite">
           <div className="planner-gemini-strip-state">
@@ -1803,6 +1845,8 @@ export function PlannerChatPage({
             state={transcript}
             starterPrompts={PLANNER_STARTER_PROMPTS}
             onSelectPrompt={(text) => void handleSend(text)}
+            onUndoTurn={(turnId) => void handleUndoTurn(turnId, false)}
+            undoingTurnId={undoingTurnId}
           />
         </AttachmentHrefContext.Provider>
       )}
@@ -2214,6 +2258,20 @@ export function PlannerChatPage({
           busy={deletingArtifact}
           onConfirm={() => void handleCleanAllArtifacts()}
           onCancel={() => setConfirmCleanAll(false)}
+        />
+      )}
+
+      {pendingUndoConflict && (
+        <ConfirmDialog
+          title="Files changed since this turn"
+          body={`The following file(s) were modified after this turn and were skipped:\n${pendingUndoConflict.conflicts
+            .map((c) => `• ${c.reason}`)
+            .join('\n')}\n\nOverwrite them with their pre-turn versions anyway?`}
+          confirmLabel={undoingTurnId ? 'Overwriting…' : 'Overwrite anyway'}
+          danger={true}
+          busy={Boolean(undoingTurnId)}
+          onConfirm={() => void handleUndoTurn(pendingUndoConflict.turnId, true)}
+          onCancel={() => setPendingUndoConflict(null)}
         />
       )}
     </div>

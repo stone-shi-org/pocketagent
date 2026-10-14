@@ -169,11 +169,13 @@ describe('PLANNER_TOOLS catalog', () => {
       [
         'bash',
         'call_mcp_tool',
+        'delete_file',
         'delete_worktree',
         'edit_file',
         'exec_command',
         'memory_save',
         'mkdir',
+        'rename_file',
         'rmdir',
         'send_instruction',
         'send_telegram_message',

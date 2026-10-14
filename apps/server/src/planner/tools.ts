@@ -259,6 +259,9 @@ export interface PlannerToolDeps {
   spawnDepth: number;
   /** PA-75: the calling planner chat id, for subagent provenance. */
   plannerChatId?: string | null;
+  /** PA-143: the calling planner turn id and tool_use id, for document workspace version provenance and Undo this turn. */
+  plannerTurnId?: string | null;
+  plannerToolUseId?: string | null;
   /**
    * PA-74: Configurable cap on how many subagents may be spawned during a
    * single turn. Falls back to `MAX_SUBAGENT_SPAWNS_PER_TURN` if unset.
@@ -764,6 +767,9 @@ function isWithinAttachedDocWorkspace(deps: PlannerToolDeps, real: string): bool
 }
 
 function isWithinTrustedRoot(deps: PlannerToolDeps, real: string): boolean {
+  if (deps.docWorkspaces?.isInternalStorePath(real)) {
+    return false;
+  }
   return (
     deps.workspaces.getRoots().some((root) => isContained(root, real)) ||
     deps.plannerWorkspaces.contains(real) ||
@@ -879,7 +885,11 @@ async function resolveCreatablePath(deps: PlannerToolDeps, requested: string): P
     throw new Error(`${requested} is outside every project workspace and every planner workspace.`);
   }
   const suffix = path.relative(probe, absolute);
-  return suffix ? path.join(real, suffix) : real;
+  const finalTarget = suffix ? path.join(real, suffix) : real;
+  if (!isWithinTrustedRoot(deps, finalTarget)) {
+    throw new Error(`${requested} is outside every project workspace and every planner workspace.`);
+  }
+  return finalTarget;
 }
 
 /** The result of one `postJsonToIntegration` call — exported alongside it so
@@ -986,9 +996,11 @@ export function normalizeSheetEditsArgument(args: Record<string, unknown>): Shee
 }
 
 /**
- * PA-140: Validates a `sheet_edit` call against the source workbook and target
- * `outputPath` before pausing for human approval, returning either the computed
- * cell-level diff (`{ before, after, lines }`) or an actionable refusal error.
+ * PA-140 / PA-143: Validates a `sheet_edit` call against the source workbook
+ * and target `outputPath` before pausing for human approval, returning either
+ * the computed cell-level diff (`{ before, after, lines }`) or an actionable
+ * refusal error. In a document workspace, `outputPath` may be omitted or equal
+ * `path` (in-place edit backed by version history).
  */
 export async function prepareSheetEditApproval(
   deps: PlannerToolDeps,
@@ -998,9 +1010,9 @@ export async function prepareSheetEditApproval(
   | { ok: false; error: string }
 > {
   const requestedPath = String(args.path ?? '').trim();
-  const requestedOutputPath = String(args.outputPath ?? '').trim();
-  if (!requestedPath || !requestedOutputPath) {
-    return { ok: false, error: 'sheet_edit requires both "path" and "outputPath".' };
+  const rawOutputPath = typeof args.outputPath === 'string' ? args.outputPath.trim() : '';
+  if (!requestedPath) {
+    return { ok: false, error: 'sheet_edit requires a "path" argument.' };
   }
   const edits = normalizeSheetEditsArgument(args);
   if (!edits) {
@@ -1010,11 +1022,38 @@ export async function prepareSheetEditApproval(
   let targetOutputPath: string;
   try {
     realPath = await resolveExistingPathWithin(deps, requestedPath);
+    const inDocWs = Boolean(
+      deps.docWorkspaces && deps.docWorkspaces.findContainingWorkspace(realPath, deps.docWorkspaceId),
+    );
+    const requestedOutputPath = rawOutputPath || (inDocWs ? requestedPath : '');
+    if (!requestedOutputPath) {
+      return { ok: false, error: 'sheet_edit requires both "path" and "outputPath".' };
+    }
     targetOutputPath = await resolveCreatablePath(deps, requestedOutputPath);
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
-  const res = await previewSheetEdit(realPath, targetOutputPath, edits, deps.sheetLimits);
+
+  const targetInDocWs = Boolean(
+    deps.docWorkspaces &&
+      deps.docWorkspaces.findContainingWorkspaceForTarget(targetOutputPath, deps.docWorkspaceId),
+  );
+  if (targetInDocWs && deps.docWorkspaces) {
+    try {
+      await deps.docWorkspaces.checkBaseVersionAndSnapshot(realPath, {
+        chatId: deps.plannerChatId ?? undefined,
+        baseVersion: typeof args.baseVersion === 'string' ? args.baseVersion : undefined,
+        restrictedWorkspaceId: deps.docWorkspaceId,
+      });
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  const res = await previewSheetEdit(realPath, targetOutputPath, edits, {
+    ...deps.sheetLimits,
+    ...(targetInDocWs ? { allowOverwrite: true } : {}),
+  });
   if (!res.ok) {
     return { ok: false, error: res.error };
   }
@@ -1142,6 +1181,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
           {
             offset: typeof args.offset === 'number' ? args.offset : undefined,
             limit: typeof args.limit === 'number' ? args.limit : undefined,
+            chatId: deps.plannerChatId ?? undefined,
           },
           deps.docWorkspaceId,
         );
@@ -1159,10 +1199,24 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       if (looksBinary(buffer)) {
         return { content: `${requested} looks like a binary file, which this tool does not read.`, isError: true };
       }
-      return readFileSlice(buffer.toString('utf8'), {
+      const slice = readFileSlice(buffer.toString('utf8'), {
         offset: typeof args.offset === 'number' ? args.offset : undefined,
         limit: typeof args.limit === 'number' ? args.limit : undefined,
       });
+      if (!slice.isError && deps.docWorkspaces) {
+        const tracked = await deps.docWorkspaces.trackFileReadForTool(
+          real,
+          deps.plannerChatId ?? undefined,
+          deps.docWorkspaceId,
+        );
+        if (tracked) {
+          return {
+            ...slice,
+            content: `[File: ${tracked.relPath} | version=${tracked.sha256}]\n${slice.content}`,
+          };
+        }
+      }
+      return slice;
     },
   },
   {
@@ -2007,12 +2061,17 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     name: 'write_file',
     description:
       'Write (create or overwrite) a text file. The parent directory must already exist, inside an ' +
-      'added project workspace or a planner workspace.',
+      'added project workspace, a document workspace, or a planner workspace. When overwriting an existing ' +
+      'file in a document workspace, pass baseVersion from your last read of the file.',
     parameters: {
       type: 'object',
       properties: {
         path: { type: 'string' },
         content: { type: 'string' },
+        baseVersion: {
+          type: 'string',
+          description: 'Optional sha256 version hash from your last read of this file (optimistic concurrency check).',
+        },
       },
       required: ['path', 'content'],
       additionalProperties: false,
@@ -2021,6 +2080,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     async execute(deps, args) {
       const requested = String(args.path ?? '');
       const content = String(args.content ?? '');
+      const baseVersion = typeof args.baseVersion === 'string' ? args.baseVersion.trim() : undefined;
       if (content.length > MAX_FILE_WRITE_CHARS) {
         return {
           content: `Refusing: ${content.length} characters is over this tool's ${MAX_FILE_WRITE_CHARS}-character limit. Use edit_file to change part of a file.`,
@@ -2043,15 +2103,28 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       try {
         const existing = await fs.stat(target).catch(() => null);
         if (existing?.isDirectory()) return { content: `${requested} is a directory, not a file.`, isError: true };
+        const snapshot = deps.docWorkspaces
+          ? await deps.docWorkspaces.checkBaseVersionAndSnapshot(target, {
+              chatId: deps.plannerChatId,
+              baseVersion,
+              restrictedWorkspaceId: deps.docWorkspaceId,
+            })
+          : null;
         await fs.writeFile(target, content, 'utf8');
-        if (deps.docWorkspaces) {
-          const match = deps.docWorkspaces.findContainingWorkspace(target, deps.docWorkspaceId);
-          if (match && match.relPath) {
-            await deps.docWorkspaces.ensureFileFresh(match.workspace.id, match.relPath);
-          }
+        if (snapshot && deps.docWorkspaces) {
+          const rec = await deps.docWorkspaces.recordMutationAfterWrite(snapshot, target, {
+            actor: deps.plannerChatId ? `agent:${deps.plannerChatId}` : 'user',
+            chatId: deps.plannerChatId,
+            turnId: deps.plannerTurnId,
+            toolUseId: deps.plannerToolUseId,
+          });
+          return `Wrote ${content.length} characters to ${requested} (version=${rec.sha256}).`;
         }
         return `Wrote ${content.length} characters to ${requested}.`;
       } catch (err) {
+        if (err instanceof Error && err.name === 'DocWorkspaceConflictError') {
+          return { content: err.message, isError: true };
+        }
         return { content: `Could not write ${requested}: ${(err as Error).message}`, isError: true };
       }
     },
@@ -2063,11 +2136,15 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       'file. Each edit replaces one oldText with its newText. Every oldText must appear exactly once in the ' +
       'file as it is now (include enough surrounding lines to make it unique), edits must not overlap, and ' +
       'all of them are matched against the file before any is applied. Read the file first and copy oldText ' +
-      'from it. The path must be inside an added project workspace or a planner workspace.',
+      'from it. The path must be inside an added project workspace, a document workspace, or a planner workspace.',
     parameters: {
       type: 'object',
       properties: {
         path: { type: 'string' },
+        baseVersion: {
+          type: 'string',
+          description: 'Optional sha256 version hash from your last read of this file (optimistic concurrency check).',
+        },
         edits: {
           type: 'array',
           description: 'One or more replacements to make in the file.',
@@ -2090,10 +2167,14 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       // `edits` as a JSON string, as one object, or `oldText`/`newText` at
       // the top level — all seen from real models (pi's edit-tool shims).
       const edits = normalizeEditsArgument(args);
-      return edits ? { path: args.path, edits } : args;
+      if (!edits) return args;
+      const out: Record<string, unknown> = { path: args.path, edits };
+      if (typeof args.baseVersion === 'string') out.baseVersion = args.baseVersion;
+      return out;
     },
     async execute(deps, args) {
       const requested = String(args.path ?? '');
+      const baseVersion = typeof args.baseVersion === 'string' ? args.baseVersion.trim() : undefined;
       const edits = normalizeEditsArgument(args);
       if (!edits) return { content: 'No edits provided: pass edits as a list of {oldText, newText}.', isError: true };
       let real: string;
@@ -2107,17 +2188,33 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       if (stat.size > MAX_READ_FILE_TOTAL_BYTES) {
         return { content: `${requested} is too large to edit with this tool (${stat.size} bytes).`, isError: true };
       }
+      let snapshot: Awaited<ReturnType<NonNullable<typeof deps.docWorkspaces>['checkBaseVersionAndSnapshot']>> = null;
+      if (deps.docWorkspaces) {
+        try {
+          snapshot = await deps.docWorkspaces.checkBaseVersionAndSnapshot(real, {
+            chatId: deps.plannerChatId,
+            baseVersion,
+            restrictedWorkspaceId: deps.docWorkspaceId,
+          });
+        } catch (err) {
+          return { content: (err as Error).message, isError: true };
+        }
+      }
       const buffer = await fs.readFile(real);
       if (looksBinary(buffer)) return { content: `${requested} looks like a binary file.`, isError: true };
-      const outcome = applyEdits(buffer.toString('utf8'), edits, requested);
+      const beforeText = buffer.toString('utf8');
+      const outcome = applyEdits(beforeText, edits, requested);
       if (!outcome.ok) return { content: outcome.message, isError: true };
       try {
         await fs.writeFile(real, outcome.content, 'utf8');
-        if (deps.docWorkspaces) {
-          const match = deps.docWorkspaces.findContainingWorkspace(real, deps.docWorkspaceId);
-          if (match && match.relPath) {
-            await deps.docWorkspaces.ensureFileFresh(match.workspace.id, match.relPath);
-          }
+        if (snapshot && deps.docWorkspaces) {
+          const rec = await deps.docWorkspaces.recordMutationAfterWrite(snapshot, real, {
+            actor: deps.plannerChatId ? `agent:${deps.plannerChatId}` : 'user',
+            chatId: deps.plannerChatId,
+            turnId: deps.plannerTurnId,
+            toolUseId: deps.plannerToolUseId,
+          });
+          return `Replaced ${outcome.replaced} block${outcome.replaced === 1 ? '' : 's'} in ${requested} (first change at line ${outcome.firstChangedLine}, version=${rec.sha256}).`;
         }
       } catch (err) {
         return { content: `Could not write ${requested}: ${(err as Error).message}`, isError: true };
@@ -2153,6 +2250,16 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       }
       const res = await executeSheetInfo(real, deps.sheetLimits);
       if (!res.ok) return { content: res.error, isError: true };
+      if (deps.docWorkspaces) {
+        const tracked = await deps.docWorkspaces.trackFileReadForTool(
+          real,
+          deps.plannerChatId ?? undefined,
+          deps.docWorkspaceId,
+        );
+        if (tracked) {
+          return `[Workbook: ${tracked.relPath} | version=${tracked.sha256}]\n${res.text}`;
+        }
+      }
       return res.text;
     },
   },
@@ -2213,6 +2320,16 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       }
       const res = await executeSheetRead(real, sheet, range, include, deps.sheetLimits);
       if (!res.ok) return { content: res.error, isError: true };
+      if (deps.docWorkspaces) {
+        const tracked = await deps.docWorkspaces.trackFileReadForTool(
+          real,
+          deps.plannerChatId ?? undefined,
+          deps.docWorkspaceId,
+        );
+        if (tracked) {
+          return `[Workbook: ${tracked.relPath} | version=${tracked.sha256}]\n${res.text}`;
+        }
+      }
       return res.text;
     },
   },
@@ -2291,18 +2408,24 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
   {
     name: 'sheet_edit',
     description:
-      'Patch an Excel workbook (.xlsx or .xlsm) in place at the XML byte level and write the result to a new ' +
-      'outputPath (never overwriting the original file), preserving charts, pivot tables, macros (vbaProject.bin), ' +
-      'and all untouched zip entries and XML bytes unchanged. Supports cell edits ({ sheet, cell, value | formula | clear, numFmt? }), ' +
-      'appending rows below a table ({ op: "append_table_rows", table, rows }), and adding a worksheet ({ op: "add_sheet", sheet }). ' +
-      'Row/column insert/delete and edits inside array formulas/spill ranges are refused.',
+      'Patch an Excel workbook (.xlsx or .xlsm) at the XML byte level, preserving charts, pivot tables, macros ' +
+      '(vbaProject.bin), and all untouched zip entries and XML bytes unchanged. Inside a document workspace, ' +
+      'outputPath may be omitted or set equal to path to edit in place (the previous version is saved automatically). ' +
+      'Outside a document workspace, outputPath must be a new path that does not already exist. Supports cell edits ' +
+      '({ sheet, cell, value | formula | clear, numFmt? }), appending rows below a table ({ op: "append_table_rows", table, rows }), ' +
+      'and adding a worksheet ({ op: "add_sheet", sheet }). Row/column insert/delete and edits inside array formulas/spill ranges are refused.',
     parameters: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Path to the source .xlsx or .xlsm workbook.' },
         outputPath: {
           type: 'string',
-          description: 'New destination path for the patched workbook (must not already exist).',
+          description:
+            'Destination path for the patched workbook. Optional inside a document workspace (defaults to path for in-place edit).',
+        },
+        baseVersion: {
+          type: 'string',
+          description: 'Optional sha256 version hash from your last read of this workbook (optimistic concurrency check).',
         },
         edits: {
           type: 'array',
@@ -2339,7 +2462,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
           },
         },
       },
-      required: ['path', 'outputPath', 'edits'],
+      required: ['path', 'edits'],
       additionalProperties: false,
     },
     readOnly: false,
@@ -2350,9 +2473,10 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     },
     async execute(deps, args) {
       const requestedPath = String(args.path ?? '').trim();
-      const requestedOutputPath = String(args.outputPath ?? '').trim();
-      if (!requestedPath || !requestedOutputPath) {
-        return { content: 'sheet_edit requires both "path" and "outputPath".', isError: true };
+      const rawOutputPath = typeof args.outputPath === 'string' && args.outputPath.trim() ? args.outputPath.trim() : '';
+      const baseVersion = typeof args.baseVersion === 'string' ? args.baseVersion.trim() : undefined;
+      if (!requestedPath) {
+        return { content: 'sheet_edit requires a "path" argument.', isError: true };
       }
       const edits = normalizeSheetEditsArgument(args);
       if (!edits) {
@@ -2362,25 +2486,185 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       let targetOutputPath: string;
       try {
         realPath = await resolveExistingPathWithin(deps, requestedPath);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+      const sourceMatch = deps.docWorkspaces?.findContainingWorkspace(realPath, deps.docWorkspaceId) ?? null;
+      const requestedOutputPath = rawOutputPath || (sourceMatch ? requestedPath : '');
+      if (!requestedOutputPath) {
+        return { content: 'sheet_edit requires both "path" and "outputPath".', isError: true };
+      }
+      try {
         targetOutputPath = await resolveCreatablePath(deps, requestedOutputPath);
       } catch (err) {
         return { content: (err as Error).message, isError: true };
       }
+      const targetMatch =
+        deps.docWorkspaces?.findContainingWorkspaceForTarget(targetOutputPath, deps.docWorkspaceId) ?? null;
+
+      // Optimistic concurrency check on the source workbook (when in a document workspace)
+      // and on the target workbook if overwriting an existing file.
+      let targetSnapshot: Awaited<ReturnType<NonNullable<typeof deps.docWorkspaces>['checkBaseVersionAndSnapshot']>> = null;
+      try {
+        if (sourceMatch && deps.docWorkspaces) {
+          const srcSnap = await deps.docWorkspaces.checkBaseVersionAndSnapshot(realPath, {
+            chatId: deps.plannerChatId,
+            baseVersion,
+            restrictedWorkspaceId: deps.docWorkspaceId,
+          });
+          if (targetOutputPath === realPath) {
+            targetSnapshot = srcSnap;
+          }
+        }
+        if (targetMatch && deps.docWorkspaces && targetOutputPath !== realPath) {
+          targetSnapshot = await deps.docWorkspaces.checkBaseVersionAndSnapshot(targetOutputPath, {
+            chatId: deps.plannerChatId,
+            restrictedWorkspaceId: deps.docWorkspaceId,
+          });
+        }
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+
+      const allowOverwrite = Boolean(targetMatch && targetMatch.relPath);
       const res = await executeSheetEdit(
         realPath,
         targetOutputPath,
         requestedOutputPath,
         edits,
-        deps.sheetLimits,
+        { ...deps.sheetLimits, allowOverwrite },
       );
       if (!res.ok) return { content: res.error, isError: true };
-      if (deps.docWorkspaces) {
-        const match = deps.docWorkspaces.findContainingWorkspace(targetOutputPath, deps.docWorkspaceId);
-        if (match && match.relPath) {
-          await deps.docWorkspaces.ensureFileFresh(match.workspace.id, match.relPath);
-        }
+      if (targetSnapshot && deps.docWorkspaces) {
+        const rec = await deps.docWorkspaces.recordMutationAfterWrite(targetSnapshot, targetOutputPath, {
+          actor: deps.plannerChatId ? `agent:${deps.plannerChatId}` : 'user',
+          chatId: deps.plannerChatId,
+          turnId: deps.plannerTurnId,
+          toolUseId: deps.plannerToolUseId,
+        });
+        return `${res.text}\nVersion: ${rec.sha256}`;
       }
       return res.text;
+    },
+  },
+  {
+    name: 'rename_file',
+    description:
+      'Rename or move a file or directory inside a workspace. Inside a document workspace, records a move ' +
+      'version in the file history and verifies baseVersion when moving a file.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Existing file or directory path to rename or move.' },
+        newPath: { type: 'string', description: 'New destination path inside the same workspace.' },
+        baseVersion: {
+          type: 'string',
+          description: 'Optional sha256 version hash from your last read of this file (optimistic concurrency check).',
+        },
+      },
+      required: ['path', 'newPath'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const requested = String(args.path ?? '').trim();
+      const requestedNew = String(args.newPath ?? '').trim();
+      const baseVersion = typeof args.baseVersion === 'string' ? args.baseVersion.trim() : undefined;
+      if (!requested || !requestedNew) {
+        return { content: 'rename_file requires both "path" and "newPath".', isError: true };
+      }
+      let realSource: string;
+      let targetDest: string;
+      try {
+        realSource = await resolveExistingPathWithin(deps, requested);
+        targetDest = await resolveCreatablePath(deps, requestedNew);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+      const srcMatch = deps.docWorkspaces?.findContainingWorkspace(realSource, deps.docWorkspaceId) ?? null;
+      const dstMatch = deps.docWorkspaces?.findContainingWorkspaceForTarget(targetDest, deps.docWorkspaceId) ?? null;
+      if (srcMatch || dstMatch) {
+        if (!srcMatch || !dstMatch || srcMatch.workspace.id !== dstMatch.workspace.id || !srcMatch.relPath || !dstMatch.relPath) {
+          return { content: 'Cannot rename or move across document workspace boundaries.', isError: true };
+        }
+        try {
+          const actor = deps.plannerChatId ? `agent:${deps.plannerChatId}` : 'user';
+          await deps.docWorkspaces!.rename(srcMatch.workspace.id, srcMatch.relPath, dstMatch.relPath, {
+            actor,
+            turnId: deps.plannerTurnId,
+            toolUseId: deps.plannerToolUseId,
+            chatId: deps.plannerChatId,
+            baseVersion,
+          });
+          return `Renamed ${requested} to ${requestedNew}.`;
+        } catch (err) {
+          return { content: (err as Error).message, isError: true };
+        }
+      }
+      try {
+        await fs.rename(realSource, targetDest);
+        return `Renamed ${requested} to ${requestedNew}.`;
+      } catch (err) {
+        return { content: `Could not rename ${requested}: ${(err as Error).message}`, isError: true };
+      }
+    },
+  },
+  {
+    name: 'delete_file',
+    description:
+      'Delete a file inside a workspace. Inside a document workspace, moves the file to the workspace trash ' +
+      '(recording a restorable tombstone version) and verifies baseVersion.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path to the file to delete.' },
+        baseVersion: {
+          type: 'string',
+          description: 'Optional sha256 version hash from your last read of this file (optimistic concurrency check).',
+        },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    async execute(deps, args) {
+      const requested = String(args.path ?? '').trim();
+      const baseVersion = typeof args.baseVersion === 'string' ? args.baseVersion.trim() : undefined;
+      if (!requested) {
+        return { content: 'delete_file requires a "path" argument.', isError: true };
+      }
+      let real: string;
+      try {
+        real = await resolveExistingPathWithin(deps, requested);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+      const stat = await fs.stat(real);
+      if (stat.isDirectory()) {
+        return { content: `${requested} is a directory; use rmdir instead.`, isError: true };
+      }
+      const match = deps.docWorkspaces?.findContainingWorkspace(real, deps.docWorkspaceId) ?? null;
+      if (match && match.relPath && deps.docWorkspaces) {
+        try {
+          const actor = deps.plannerChatId ? `agent:${deps.plannerChatId}` : 'user';
+          await deps.docWorkspaces.deleteFile(match.workspace.id, match.relPath, {
+            actor,
+            turnId: deps.plannerTurnId,
+            toolUseId: deps.plannerToolUseId,
+            chatId: deps.plannerChatId,
+            baseVersion,
+          });
+          return `Moved ${requested} to workspace trash (restorable from history).`;
+        } catch (err) {
+          return { content: (err as Error).message, isError: true };
+        }
+      }
+      try {
+        await fs.unlink(real);
+        return `Deleted ${requested}.`;
+      } catch (err) {
+        return { content: `Could not delete ${requested}: ${(err as Error).message}`, isError: true };
+      }
     },
   },
   {
@@ -2468,6 +2752,17 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       if (!stat.isDirectory()) return `${requested} is not a directory.`;
       try {
         if (recursive) {
+          const match = deps.docWorkspaces?.findContainingWorkspace(real, deps.docWorkspaceId) ?? null;
+          if (match && match.relPath && deps.docWorkspaces) {
+            const actor = deps.plannerChatId ? `agent:${deps.plannerChatId}` : 'user';
+            await deps.docWorkspaces.deleteFile(match.workspace.id, match.relPath, {
+              actor,
+              turnId: deps.plannerTurnId,
+              toolUseId: deps.plannerToolUseId,
+              chatId: deps.plannerChatId,
+            });
+            return `Removed ${requested} (files moved to workspace trash).`;
+          }
           await fs.rm(real, { recursive: true, force: false });
         } else {
           await fs.rmdir(real);

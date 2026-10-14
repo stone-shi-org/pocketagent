@@ -653,6 +653,8 @@ export const PlannerChat = z.object({
   docWorkspaceId: z.string().nullable().optional(),
   /** PA-142: Attached document workspace name (joined from doc_workspaces). */
   docWorkspaceName: z.string().nullable().optional(),
+  /** PA-143: Whether the attached document workspace has per-workspace auto-approve enabled. */
+  docWorkspaceAutoApproveEdits: z.boolean().optional(),
 });
 export type PlannerChat = z.infer<typeof PlannerChat>;
 
@@ -1227,7 +1229,7 @@ export const DeletePlannerArtifactResponse = z.object({
 });
 export type DeletePlannerArtifactResponse = z.infer<typeof DeletePlannerArtifactResponse>;
 
-// ---- PA-142: Document Workspaces (Phase 1) ---------------------------------
+// ---- PA-142 / PA-143: Document Workspaces ----------------------------------
 
 export const DocWorkspace = z.object({
   id: z.string(),
@@ -1238,6 +1240,7 @@ export const DocWorkspace = z.object({
   autoApproveEdits: z.boolean(),
   inboxDir: z.string(),
   hasBrief: z.boolean().optional(),
+  versionStoreAvailable: z.boolean().optional(),
 });
 export type DocWorkspace = z.infer<typeof DocWorkspace>;
 
@@ -1299,6 +1302,8 @@ export const DocFileEntry = z.object({
   pages: z.number().int().nullable(),
   totalPages: z.number().int().nullable(),
   truncated: z.boolean(),
+  sha256: z.string().nullable().optional(),
+  versionCount: z.number().int().nonnegative().optional(),
 });
 export type DocFileEntry = z.infer<typeof DocFileEntry>;
 
@@ -1327,6 +1332,7 @@ export type DocFileMkdirRequest = z.infer<typeof DocFileMkdirRequest>;
 export const DocFileRenameRequest = z.object({
   fromPath: z.string().trim().min(1).max(1024),
   toPath: z.string().trim().min(1).max(1024),
+  baseVersion: z.string().optional(),
 });
 export type DocFileRenameRequest = z.infer<typeof DocFileRenameRequest>;
 
@@ -1357,5 +1363,133 @@ export const DocFilePreviewResponse = z.object({
 });
 export type DocFilePreviewResponse = z.infer<typeof DocFilePreviewResponse>;
 
+// ---- PA-143: Document Workspace Versions, Trash & Turn Undo ----------------
 
+export const DocFileVersion = z.object({
+  id: z.string(),
+  workspaceId: z.string(),
+  relPath: z.string(),
+  fromRelPath: z.string().nullable(),
+  sha256: z.string(),
+  prevSha256: z.string().nullable(),
+  size: z.number().int().nonnegative(),
+  prevSize: z.number().int().nonnegative().nullable(),
+  createdAt: z.number().int(),
+  actor: z.string(),
+  chatId: z.string().nullable(),
+  chatTitle: z.string().nullable().optional(),
+  turnId: z.string().nullable(),
+  toolUseId: z.string().nullable(),
+  tombstone: z.boolean(),
+  summary: z.string(),
+});
+export type DocFileVersion = z.infer<typeof DocFileVersion>;
 
+export const DocFileVersionsResponse = z.object({
+  relPath: z.string(),
+  currentSha256: z.string().nullable().optional(),
+  versions: z.array(DocFileVersion),
+});
+export type DocFileVersionsResponse = z.infer<typeof DocFileVersionsResponse>;
+
+export const DocVersionCellChange = z.object({
+  sheet: z.string(),
+  cell: z.string(),
+  before: z.string(),
+  after: z.string(),
+});
+export type DocVersionCellChange = z.infer<typeof DocVersionCellChange>;
+
+export const DocVersionDiffLine = z.object({
+  type: z.enum(['context', 'add', 'del']),
+  text: z.string(),
+  oldLine: z.number().int().nullable().optional(),
+  newLine: z.number().int().nullable().optional(),
+});
+export type DocVersionDiffLine = z.infer<typeof DocVersionDiffLine>;
+
+export const DocVersionCompareResponse = z.object({
+  relPath: z.string(),
+  kind: DocFileKind,
+  fromVersionId: z.string().nullable(),
+  toVersionId: z.string(),
+  fromSha256: z.string().nullable(),
+  toSha256: z.string(),
+  summary: z.string(),
+  /** Cell-level changes when comparing two xlsx versions. */
+  cellChanges: z.array(DocVersionCellChange).optional(),
+  addedSheets: z.array(z.string()).optional(),
+  removedSheets: z.array(z.string()).optional(),
+  /** Line-level diff when comparing text, docx (derived text), or pdf (derived text). */
+  diffLines: z.array(DocVersionDiffLine).optional(),
+});
+export type DocVersionCompareResponse = z.infer<typeof DocVersionCompareResponse>;
+
+export const DocRestoreVersionRequest = z.object({
+  /**
+   * Optional explicit restore target:
+   * - `'version'`: restore `version.sha256`
+   * - `'previous'`: restore `version.prevSha256` (the content immediately before that change)
+   * When omitted, restores `version.sha256` unless the file on disk already matches
+   * `version.sha256` and `version.prevSha256` exists, in which case it reverts to `prevSha256`.
+   */
+  target: z.enum(['version', 'previous']).optional(),
+});
+export type DocRestoreVersionRequest = z.infer<typeof DocRestoreVersionRequest>;
+
+export const DocRestoreVersionResponse = z.object({
+  ok: z.literal(true),
+  relPath: z.string(),
+  version: DocFileVersion,
+});
+export type DocRestoreVersionResponse = z.infer<typeof DocRestoreVersionResponse>;
+
+export const DocTrashEntry = z.object({
+  relPath: z.string(),
+  name: z.string(),
+  size: z.number().int().nonnegative(),
+  deletedAt: z.number().int(),
+  actor: z.string(),
+  chatId: z.string().nullable(),
+  chatTitle: z.string().nullable().optional(),
+  versionId: z.string(),
+  sha256: z.string(),
+  summary: z.string(),
+});
+export type DocTrashEntry = z.infer<typeof DocTrashEntry>;
+
+export const DocTrashListResponse = z.object({
+  entries: z.array(DocTrashEntry),
+});
+export type DocTrashListResponse = z.infer<typeof DocTrashListResponse>;
+
+export const DocTrashRestoreRequest = z.object({
+  path: z.string().trim().min(1).max(1024).optional(),
+  versionId: z.string().optional(),
+  overwrite: z.boolean().optional(),
+});
+export type DocTrashRestoreRequest = z.infer<typeof DocTrashRestoreRequest>;
+
+export const UndoTurnConflict = z.object({
+  relPath: z.string(),
+  currentActor: z.string(),
+  changedAt: z.number().int(),
+  reason: z.string(),
+});
+export type UndoTurnConflict = z.infer<typeof UndoTurnConflict>;
+
+export const UndoTurnRequest = z.object({
+  /** When true, also restores files that were modified after this turn by someone else. */
+  confirm: z.boolean().optional(),
+  force: z.boolean().optional(),
+});
+export type UndoTurnRequest = z.infer<typeof UndoTurnRequest>;
+
+export const UndoTurnResponse = z.object({
+  ok: z.boolean(),
+  turnId: z.string(),
+  restoredPaths: z.array(z.string()),
+  skippedConflicts: z.array(UndoTurnConflict),
+  versions: z.array(DocFileVersion),
+});
+export type UndoTurnResponse = z.infer<typeof UndoTurnResponse>;

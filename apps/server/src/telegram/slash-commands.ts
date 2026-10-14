@@ -18,7 +18,7 @@
  * business holding.
  */
 
-export type TelegramSlashCommand = 'clear' | 'context' | 'mcp' | 'compact';
+export type TelegramSlashCommand = 'clear' | 'context' | 'mcp' | 'compact' | 'undo';
 
 /** Aliases mirror `PLANNER_SLASH_COMMANDS` in `PlannerChatPage.tsx` exactly —
     `/reset` is a synonym for `/clear` there, and stays one here so the two
@@ -30,6 +30,8 @@ const COMMAND_ALIASES: Record<string, TelegramSlashCommand> = {
   mcp: 'mcp',
   // PA-121: summarize the chat's history now, as in the web chat.
   compact: 'compact',
+  // PA-143: undo the last turn that modified document workspace files.
+  undo: 'undo',
 };
 
 /**

@@ -255,13 +255,15 @@ export const TELEGRAM_DDL = `
 `;
 
 /**
- * PA-142: Document workspaces (`doc_workspaces`) and derived text store metadata (`doc_files`).
+ * PA-142 / PA-143: Document workspaces (`doc_workspaces`), derived text store metadata
+ * (`doc_files`), and content-addressed file version history (`doc_file_versions`).
  *
  * Deliberately separate from `planner_workspaces`, which represents a Pocket Agent's
  * own identity and scratch/skills directory. Any agent or chat can attach to any
  * document workspace (`planner_chats.doc_workspace_id`). Derived text is stored
- * under `<dataDir>/doc-workspaces/<id>/derived/<sha256>/` and tracked in `doc_files`
- * so nothing is ever written into the user's host folder.
+ * under `<dataDir>/doc-workspaces/<id>/derived/<sha256>/` and version blobs under
+ * `<dataDir>/doc-workspaces/<id>/versions/<sha256>` so nothing is ever written
+ * into the user's host folder and planner file tools cannot delete their own undo history.
  */
 export const DOC_WORKSPACES_DDL = `
   CREATE TABLE IF NOT EXISTS doc_workspaces (
@@ -295,6 +297,31 @@ export const DOC_WORKSPACES_DDL = `
   );
 
   CREATE INDEX IF NOT EXISTS idx_doc_files_sha256 ON doc_files (workspace_id, sha256);
+
+  CREATE TABLE IF NOT EXISTS doc_file_versions (
+    id                 TEXT PRIMARY KEY,
+    workspace_id       TEXT NOT NULL REFERENCES doc_workspaces (id) ON DELETE CASCADE,
+    rel_path           TEXT NOT NULL,
+    from_rel_path      TEXT,
+    sha256             TEXT NOT NULL,
+    prev_sha256        TEXT,
+    size               INTEGER NOT NULL,
+    prev_size          INTEGER,
+    created_at         INTEGER NOT NULL,
+    actor              TEXT NOT NULL,
+    chat_id            TEXT,
+    turn_id            TEXT,
+    tool_use_id        TEXT,
+    tombstone          INTEGER NOT NULL DEFAULT 0,
+    summary            TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_doc_file_versions_ws_path
+    ON doc_file_versions (workspace_id, rel_path, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_doc_file_versions_turn
+    ON doc_file_versions (turn_id, created_at ASC);
+  CREATE INDEX IF NOT EXISTS idx_doc_file_versions_ws_created
+    ON doc_file_versions (workspace_id, created_at DESC);
 `;
 
 

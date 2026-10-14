@@ -561,6 +561,14 @@ export function PocketAgentsSection({
                       <Icon name="folder" className="folder" />
                     </span>
                     <span className="project-label">{docWs.name}</span>
+                    {docWs.autoApproveEdits && (
+                      <span
+                        className="doc-auto-approve-badge"
+                        title="Edits to files inside this workspace run without asking"
+                      >
+                        Auto-approve edits
+                      </span>
+                    )}
                     <Icon
                       name="chevron-down"
                       className={`project-caret${isCollapsed ? ' closed' : ''}`}
@@ -622,6 +630,12 @@ export function PocketAgentsSection({
                       <button
                         type="button"
                         role="menuitem"
+                        disabled={!docWs.autoApproveEdits && docWs.versionStoreAvailable === false}
+                        title={
+                          docWs.versionStoreAvailable === false
+                            ? 'Version store is unavailable; auto-approve edits requires automatic versions'
+                            : undefined
+                        }
                         onClick={() => toggleDocWorkspaceAutoApprove(docWs)}
                       >
                         {docWs.autoApproveEdits

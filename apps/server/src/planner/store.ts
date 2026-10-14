@@ -950,6 +950,7 @@ interface PlannerChatDbRow {
   workspace_name: string;
   doc_workspace_id?: string | null;
   doc_workspace_name?: string | null;
+  doc_workspace_auto_approve_edits?: number | null;
   title: string | null;
   last_model_id: string | null;
   created_at: number;
@@ -968,6 +969,9 @@ function chatFromDbRow(row: PlannerChatDbRow): PlannerChat {
     workspaceName: row.workspace_name,
     docWorkspaceId: row.doc_workspace_id ?? null,
     docWorkspaceName: row.doc_workspace_name ?? null,
+    ...(row.doc_workspace_id
+      ? { docWorkspaceAutoApproveEdits: row.doc_workspace_auto_approve_edits === 1 }
+      : {}),
     title: row.title,
     lastModelId: row.last_model_id,
     createdAt: row.created_at,
@@ -982,7 +986,7 @@ function chatFromDbRow(row: PlannerChatDbRow): PlannerChat {
 }
 
 const SELECT_PLANNER_CHAT_SQL = `
-  SELECT c.*, dw.name AS doc_workspace_name
+  SELECT c.*, dw.name AS doc_workspace_name, dw.auto_approve_edits AS doc_workspace_auto_approve_edits
     FROM planner_chats c
     LEFT JOIN doc_workspaces dw ON dw.id = c.doc_workspace_id
 `;

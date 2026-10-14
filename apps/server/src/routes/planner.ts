@@ -68,10 +68,13 @@ import {
   type TestPlannerModelResponse,
   type TestPlannerUrlFetchResponse,
   type TestPlannerWebSearchResponse,
+  UndoTurnRequest,
+  type UndoTurnResponse,
   LIMITS,
   type PromptAttachment,
 } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
+import { DocWorkspaceNotFoundError, DocWorkspaceValidationError } from '../doc-workspaces/index.js';
 import { PlannerWorkspaceError } from '../planner/workspaces.js';
 import { PlannerChatError } from '../planner/chats.js';
 import { GEMINI_LIVE_WS_URL, GeminiLiveError } from '../planner/gemini-live.js';
@@ -1641,6 +1644,31 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       const response: CompactPlannerChatResponse = result;
       return noStore(reply).send(response);
     } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  // PA-143: Undo all workspace file mutations from a single turn.
+  app.post('/api/planner/chats/:id/turns/:turnId/undo', async (request, reply) => {
+    const { id, turnId } = request.params as { id: string; turnId: string };
+    const parsed = UndoTurnRequest.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    try {
+      const response: UndoTurnResponse = await app.pocket.plannerChats.undoTurn(
+        id,
+        turnId,
+        parsed.data,
+      );
+      return noStore(reply).send(response);
+    } catch (err) {
+      if (err instanceof DocWorkspaceNotFoundError) {
+        return notFound(reply, err.message);
+      }
+      if (err instanceof DocWorkspaceValidationError) {
+        return badRequest(reply, err.message);
+      }
       return mapChatError(reply, err);
     }
   });

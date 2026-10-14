@@ -2957,6 +2957,24 @@ These are load-bearing. Several were bugs first.
   the pairing row in Settings — an operator who deliberately wants one paired id to run
   unattended sets it there, and it reuses the *fifth* override's own field/mechanism
   (`PlannerChat.skipToolApprovalsEnabled`) rather than inventing a second one.
+- **`doc_workspaces.auto_approve_edits` is the seventh override of the approval rule, and it is
+  scoped to file mutations inside one document workspace and gated on its version store** (PA-143).
+  Off by default (`0` in `doc_workspaces`, `false` in `CreateDocWorkspaceRequest`), it pre-approves
+  only workspace-contained file mutations (`write_file`, `edit_file`, `mkdir`, `rename_file`,
+  `delete_file`, `sheet_edit`) in a chat attached to that workspace, and ** only while the
+  workspace's version store is available** (`isVersionStoreAvailable` — enabling the toggle while
+  `<dataDir>/doc-workspaces/<id>/versions/` is unavailable is refused with 400, and `gateToolCall`
+  re-checks both the column and version-store health live on every tool call so turning it off or
+  losing the store tightens immediately with no restart). Every auto-approved mutation still runs
+  optimistic concurrency (`baseVersion`), stores pre- and post-change content-addressed blobs, and
+  records a `doc_file_versions` row so the turn's `"Undo this turn"` chip and History restore can
+  revert it. Like `plannerYoloEnabled` and `skipToolApprovalsEnabled`, it short-circuits before the
+  remembered-decision table and **never writes a `planner_tool_approvals` row**; it never covers
+  `bash`/`exec_command`, `send_instruction`, `send_telegram_message`, Fleet dispatch, MCP tools,
+  settings tools, or any path that resolves outside the attached document workspace (`mkdir` must
+  have every path inside the workspace); and it is disclosed persistently in the workspace header,
+  the Workspace panel, and on `PlannerChat.docWorkspaceAutoApproveEdits`. Asserted in
+  `apps/server/tests/doc-workspaces.test.ts`.
 - **One agent per working tree, and occupancy is derived rather than leased.** `RunQueue`
   (`runs/queue.ts`) keys on `treeRootOf` — the working tree, so a cwd below a tree root rolls up
   to it, and a run in `<project>` deliberately does **not** conflict with one in
@@ -3335,6 +3353,30 @@ These are load-bearing. Several were bugs first.
   isolated `-env:UserInstallation=file://…` profile and `sheet_edit` back-patches only `<v>` caches
   into the patched XML. Asserted in `apps/server/tests/sheet-tools.test.ts` and
   `apps/web/src/agent/diff.test.ts`.
+- **A document workspace keeps its derived index and content-addressed version store inside
+  `<dataDir>/doc-workspaces/<id>/`, unreachable by file tools, and every mutating path records
+  exactly one version with optimistic concurrency** (PA-142, PA-143). Derived sidecars
+  (`derived/<sha256>/`) and version blobs (`versions/<sha256>`) live under `POCKETAGENT_DATA_DIR` so
+  a user's folder is never polluted with `.pocketagent` metadata, and `DocWorkspaceService.isInternalStorePath`
+  blocks `isWithinTrustedRoot` (`planner/tools.ts`) from trusting `<dataDir>/doc-workspaces` even if
+  an operator points a workspace at a parent directory — an agent's file tools cannot read, overwrite
+  or delete their own undo history (`bash` remains gated separately). Before any mutation to a
+  workspace file (`write_file`, `edit_file`, `sheet_edit`, panel upload replacing an existing file,
+  rename/move, or delete-to-trash), the pre-change content is snapshotted into `versions/<sha256>`
+  and a single `doc_file_versions` row is recorded (an external edit detected by `ensureFileFresh`
+  is recorded as `actor = 'external'` before the new change, and internal writes pass
+  `suppressExternalVersion: true` so one mutation never double-records). `read_file`, `sheet_read`
+  and `sheet_info` return `version=<sha256>` and record per-chat last-read versions
+  (`doc_chat_file_reads`); mutating tools accept `baseVersion` (falling back to the chat's last-read
+  version when omitted) and refuse stale writes with `"<relPath> changed since you read it (changed
+  by: <actor>, <HH:MM>); re-read it first"`. Deleting a file writes a tombstone version
+  (`tombstone = 1`, `sha256 = prev_sha256`) restorable from the Workspace panel's Trash view;
+  `undoTurn` (`POST /api/planner/chats/:id/turns/:turnId/undo` and Telegram `/undo`) restores every
+  file a turn touched to its pre-turn state as new undoable version rows while skipping files modified
+  after the turn unless `confirm: true`; and `pruneVersions` keeps all versions for 30 days, thins
+  older non-latest versions to 1/day/file, enforces a 512 MB per-workspace blob budget, and never
+  prunes a version referenced by a chat's latest undoable turn. Asserted in
+  `apps/server/tests/doc-workspaces.test.ts`.
 - **The browser never supplies an executable or argv.** Adoption and resume both take their
   `cwd` from the server-validated target. **PA-68 extends this to installing one**, which is the
   sharpest case yet: `POST /api/agents/install` takes an id out of a closed set plus an *action*

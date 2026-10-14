@@ -9604,3 +9604,270 @@ a.file-chip-link:hover .file-chip-name { text-decoration: underline; }
   color: var(--text-dim);
 }
 
+/* ---- PA-143: Document Workspaces Phase 2 (Versions, History, Trash, Undo) ---- */
+
+.doc-auto-approve-badge {
+  margin-left: 6px;
+  padding: 1px 7px;
+  font-size: 10.5px;
+  font-weight: 550;
+  border-radius: 999px;
+  border: 1px solid rgba(234, 179, 8, 0.45);
+  background: rgba(234, 179, 8, 0.14);
+  color: var(--warn, #eab308);
+  white-space: nowrap;
+}
+
+.doc-version-count-badge {
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.doc-workspace-history {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.doc-version-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.doc-version-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-elev);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.doc-version-item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.doc-version-item-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12.5px;
+}
+
+.doc-version-num,
+.doc-version-path {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.doc-version-actor {
+  padding: 1px 6px;
+  font-size: 11px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--text);
+}
+
+.doc-version-time {
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.doc-version-summary {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.doc-version-item-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.doc-version-compare-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  font-size: 12px;
+}
+
+.doc-version-compare-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-dim);
+}
+
+.doc-version-compare-label select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 11.5px;
+}
+
+.doc-version-diff-box {
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+
+.doc-version-diff-header {
+  padding: 8px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.doc-version-diff-empty {
+  padding: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.doc-version-cell-diff-table th {
+  text-align: left;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-weight: 600;
+}
+
+.diff-cell-before {
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.diff-cell-after {
+  background: rgba(34, 197, 94, 0.12);
+}
+
+.doc-version-line-diff {
+  margin: 0;
+  padding: 8px 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.45;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.doc-diff-line {
+  display: flex;
+  padding: 1px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.doc-diff-line.diff-add {
+  background: rgba(34, 197, 94, 0.14);
+}
+
+.doc-diff-line.diff-del {
+  background: rgba(239, 68, 68, 0.14);
+}
+
+.doc-diff-sign {
+  width: 16px;
+  flex: none;
+  user-select: none;
+  color: var(--text-dim);
+}
+
+.turn-changed-files-box {
+  margin-top: 8px;
+  margin-bottom: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.turn-changed-files-chip {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.turn-changed-files-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.turn-undo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.turn-undo-btn:hover:not(:disabled) {
+  border-color: var(--accent, #3b82f6);
+}
+
+.turn-undo-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.turn-undone-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.turn-changed-files-list {
+  margin: 0;
+  padding: 6px 12px 6px 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.turn-changed-file-summary {
+  color: var(--text-dim);
+}
+
+
