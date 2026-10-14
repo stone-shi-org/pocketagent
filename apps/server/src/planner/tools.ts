@@ -1250,11 +1250,145 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     },
   },
   {
+    name: 'search_documents',
+    description:
+      'Hybrid ranked document search (FTS5 BM25 keyword + semantic embeddings) across a document workspace. ' +
+      'Returns located snippets (e.g. `contract.pdf p.12`, `§3.2 Pricing`, `slide 7`, `Summary!A1:F40`) together ' +
+      'with each file\'s `version` hash so a follow-up `read_file` or edit (`write_file`, `edit_file`, `sheet_edit`) ' +
+      'can pass `baseVersion`. Use `search_documents` for natural-language queries, keyword-ranked relevance, or ' +
+      'semantic/conceptual search across PDF, docx, pptx, xlsx, and Markdown/text documents; use `grep_files` ' +
+      'instead for exact string or regular expression line matching, or `sheet_find` for exact spreadsheet cell/formula lookup.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Natural-language or keyword search query.',
+        },
+        path: {
+          type: 'string',
+          description: 'Optional relative file or directory path within the workspace (or absolute path inside a workspace) to scope the search.',
+        },
+        kind: {
+          type: 'string',
+          enum: ['pdf', 'docx', 'xlsx', 'pptx', 'text'],
+          description: 'Optional document kind filter.',
+        },
+        limit: {
+          type: 'integer',
+          description: 'Maximum number of ranked chunks to return (default 10, max 50).',
+        },
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    async execute(deps, args) {
+      if (!deps.docWorkspaces) {
+        return { content: 'Document workspaces are not available on this server.', isError: true };
+      }
+      const query = String(args.query ?? '').trim();
+      if (!query) {
+        return { content: 'A non-empty search query is required.', isError: true };
+      }
+
+      const rawPath = typeof args.path === 'string' ? args.path.trim() : '';
+      let workspaceId: string | null = deps.docWorkspaceId ?? null;
+      let relPathFilter: string | undefined;
+
+      if (workspaceId) {
+        const ws = deps.docWorkspaces.get(workspaceId);
+        if (!ws) {
+          return { content: `Attached document workspace not found: ${workspaceId}`, isError: true };
+        }
+        if (rawPath) {
+          if (path.isAbsolute(rawPath)) {
+            const match = deps.docWorkspaces.findContainingWorkspace(rawPath, workspaceId);
+            if (!match) {
+              return { content: `Path "${rawPath}" is outside the attached document workspace "${ws.name}".`, isError: true };
+            }
+            relPathFilter = match.relPath || undefined;
+          } else {
+            try {
+              const resolved = deps.docWorkspaces.resolveExistingPath(workspaceId, rawPath);
+              relPathFilter = resolved.relPath || undefined;
+            } catch (err) {
+              return { content: (err as Error).message, isError: true };
+            }
+          }
+        }
+      } else if (rawPath) {
+        try {
+          const real = await resolveExistingPathWithin(deps, rawPath);
+          const match = deps.docWorkspaces.findContainingWorkspace(real);
+          if (!match) {
+            return {
+              content: `Path "${rawPath}" is not inside a registered document workspace. Use grep_files for non-document project directories.`,
+              isError: true,
+            };
+          }
+          workspaceId = match.workspace.id;
+          relPathFilter = match.relPath || undefined;
+        } catch (err) {
+          return { content: (err as Error).message, isError: true };
+        }
+      } else if (deps.workspacePath) {
+        const match = deps.docWorkspaces.findContainingWorkspace(deps.workspacePath);
+        if (match) {
+          workspaceId = match.workspace.id;
+          relPathFilter = match.relPath || undefined;
+        }
+      }
+
+      if (!workspaceId) {
+        const all = deps.docWorkspaces.list();
+        if (all.length === 1) {
+          workspaceId = all[0]!.id;
+        } else {
+          return {
+            content:
+              'No document workspace is attached to this chat. Attach a document workspace in the chat header or pass a `path` inside a registered document workspace (or use `grep_files` for exact regex search).',
+            isError: true,
+          };
+        }
+      }
+
+      const rawKind = typeof args.kind === 'string' ? args.kind.trim() : undefined;
+      const validKinds = new Set(['pdf', 'docx', 'xlsx', 'pptx', 'text']);
+      if (rawKind !== undefined && !validKinds.has(rawKind)) {
+        return {
+          content: `Invalid kind "${rawKind}". Expected one of: pdf, docx, xlsx, pptx, text.`,
+          isError: true,
+        };
+      }
+
+      const limit =
+        typeof args.limit === 'number' && Number.isFinite(args.limit)
+          ? Math.max(1, Math.min(50, Math.floor(args.limit)))
+          : 10;
+
+      try {
+        const res = await deps.docWorkspaces.searchDocuments(workspaceId, {
+          query,
+          path: relPathFilter,
+          kind: rawKind as 'pdf' | 'docx' | 'xlsx' | 'pptx' | 'text' | undefined,
+          limit,
+          chatId: deps.plannerChatId ?? undefined,
+        });
+        return deps.docWorkspaces.formatSearchDocumentsForTool(res);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+    },
+  },
+  {
     name: 'grep_files',
     description:
-      'Search file contents for a pattern under a directory. Uses ripgrep when it is installed (regex syntax, ' +
-      'skips files listed in .gitignore and binary files), otherwise grep -r. In a document workspace, also ' +
-      'searches derived text of PDF, docx, xlsx, and pptx files with page/slide/sheet locations.',
+      'Exact or regex pattern search over file lines under a directory. Uses ripgrep when it is installed (regex ' +
+      'or literal syntax, skips files listed in .gitignore and binary files), otherwise grep -r. In a document ' +
+      'workspace, also searches derived text of PDF, docx, xlsx, and pptx files with page/slide/sheet locations. ' +
+      'Use `grep_files` for exact string, identifier, or regular expression matches; use `search_documents` instead ' +
+      'for natural-language, keyword-ranked (BM25), or semantic/conceptual search across workspace documents.',
     parameters: {
       type: 'object',
       properties: {
@@ -3925,6 +4059,7 @@ export const PARALLEL_SAFE_TOOLS: ReadonlySet<string> = new Set([
   'sheet_find',
   'sheet_check',
   'list_dir',
+  'search_documents',
   'grep_files',
   'find_files',
   'get_current_time',

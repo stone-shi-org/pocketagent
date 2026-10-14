@@ -2603,7 +2603,7 @@ must be in the service's `environment:` (`docker/compose.hub.yaml` wires it as
 
 Each backend describes what it can do in a single `HostCapabilities` card (`packages/protocol/src/capabilities.ts`, `capabilitiesVersion: 1`), exposed at `GET /api/capabilities` (authenticated) and as the `get_capabilities` MCP tool (`scope: 'read'`, calling the route through `InternalApiClient` so both surfaces return the exact same shape).
 
-- **Measured facts, computed with zero subprocesses.** `routes/capabilities.ts` (`buildHostCapabilities`) reads `platform`, `arch` and `os.release()`; catalog agents (`INSTALLABLE_AGENT_IDS`) with their `AgentSetupState` derived via `deriveSetupState` from filesystem `available` plus the cached `agent_defaults.last_auth_*` columns (never spawning an auth probe on read); notable executables from the closed `NOTABLE_EXECUTABLES` list (`xcodebuild`, `swift`, `xcrun`, `playwright-cli`, `docker`, `git`, `node`, `python3`, `cargo`, `go`) resolved through `resolveExecutable` / `executableSearchDirs`, with `DARWIN_ONLY_EXECUTABLES` (`xcodebuild`, `xcrun`) skipped on non-`darwin` hosts; project folders (`path`, `label`, and `gitRemote` parsed directly from `<folder>/.git/config` or a linked worktree's `gitdir:` `.git` file without spawning `git`); and Pocket Agents (`id`, `name`, `identityPrompt`, effective `enabledTools` from `PlannerChatService.enabledToolNamesFor`, and `skillNames` from `PlannerSkillService.listAvailableSkills`).
+- **Measured facts, computed with zero subprocesses.** `routes/capabilities.ts` (`buildHostCapabilities`) reads `platform`, `arch` and `os.release()`; catalog agents (`INSTALLABLE_AGENT_IDS`) with their `AgentSetupState` derived via `deriveSetupState` from filesystem `available` plus the cached `agent_defaults.last_auth_*` columns (never spawning an auth probe on read); notable executables from the closed `NOTABLE_EXECUTABLES` list (`xcodebuild`, `swift`, `xcrun`, `playwright-cli`, `docker`, `git`, `node`, `python3`, `cargo`, `go`, `libreoffice`) resolved through `resolveExecutable` / `executableSearchDirs`, with `DARWIN_ONLY_EXECUTABLES` (`xcodebuild`, `xcrun`) skipped on non-`darwin` hosts; project folders (`path`, `label`, and `gitRemote` parsed directly from `<folder>/.git/config` or a linked worktree's `gitdir:` `.git` file without spawning `git`); Pocket Agents (`id`, `name`, `identityPrompt`, effective `enabledTools` from `PlannerChatService.enabledToolNamesFor`, and `skillNames` from `PlannerSkillService.listAvailableSkills`); and `hasWorkspaceIndex: boolean` (`docWorkspaces.hasAnyWorkspaceIndex()`, reporting only whether a document workspace index exists on the host, never workspace names, paths, or contents — PA-144).
 - **Operator-declared fields.** `hostDescription` (free text, up to 500 chars) and `hostTags` (up to 20 lowercase slugs matching `^[a-z0-9][a-z0-9._:-]{0,31}$`) live in `settings` (`host_description`, `host_tags` JSON), are editable in Settings (`PATCH /api/settings` and `update_settings`), and are audited through `auditConfigChange` like other runtime settings.
 - **Hub polling, caching, and fallback.** `HealthPollService.tick()` (`apps/hub/src/registry/health.ts`) probes `GET /api/capabilities` alongside `/health` for bound online hosts using their `pah_` credential (`probeBackendCapabilities`, also called immediately on bind) and caches the `HubHostCapabilities` union in memory on `HostRegistry` (`recordCapabilities` / `capabilitiesFor`, surfaced on `HubHostEntry.capabilities`) with `fetchedAt`. An older backend without the route answers 404, which is cached as `{ status: 'unavailable', fetchedAt }` and shown on `HubPage` as `"Capabilities unavailable (upgrade host)"` rather than as an error — feature detection by probing, never by version comparison, the same rule PA-70 uses.
 
@@ -3353,30 +3353,52 @@ These are load-bearing. Several were bugs first.
   isolated `-env:UserInstallation=file://…` profile and `sheet_edit` back-patches only `<v>` caches
   into the patched XML. Asserted in `apps/server/tests/sheet-tools.test.ts` and
   `apps/web/src/agent/diff.test.ts`.
-- **A document workspace keeps its derived index and content-addressed version store inside
-  `<dataDir>/doc-workspaces/<id>/`, unreachable by file tools, and every mutating path records
-  exactly one version with optimistic concurrency** (PA-142, PA-143). Derived sidecars
-  (`derived/<sha256>/`) and version blobs (`versions/<sha256>`) live under `POCKETAGENT_DATA_DIR` so
-  a user's folder is never polluted with `.pocketagent` metadata, and `DocWorkspaceService.isInternalStorePath`
-  blocks `isWithinTrustedRoot` (`planner/tools.ts`) from trusting `<dataDir>/doc-workspaces` even if
-  an operator points a workspace at a parent directory — an agent's file tools cannot read, overwrite
-  or delete their own undo history (`bash` remains gated separately). Before any mutation to a
-  workspace file (`write_file`, `edit_file`, `sheet_edit`, panel upload replacing an existing file,
-  rename/move, or delete-to-trash), the pre-change content is snapshotted into `versions/<sha256>`
-  and a single `doc_file_versions` row is recorded (an external edit detected by `ensureFileFresh`
-  is recorded as `actor = 'external'` before the new change, and internal writes pass
-  `suppressExternalVersion: true` so one mutation never double-records). `read_file`, `sheet_read`
-  and `sheet_info` return `version=<sha256>` and record per-chat last-read versions
-  (`doc_chat_file_reads`); mutating tools accept `baseVersion` (falling back to the chat's last-read
-  version when omitted) and refuse stale writes with `"<relPath> changed since you read it (changed
-  by: <actor>, <HH:MM>); re-read it first"`. Deleting a file writes a tombstone version
-  (`tombstone = 1`, `sha256 = prev_sha256`) restorable from the Workspace panel's Trash view;
-  `undoTurn` (`POST /api/planner/chats/:id/turns/:turnId/undo` and Telegram `/undo`) restores every
-  file a turn touched to its pre-turn state as new undoable version rows while skipping files modified
-  after the turn unless `confirm: true`; and `pruneVersions` keeps all versions for 30 days, thins
-  older non-latest versions to 1/day/file, enforces a 512 MB per-workspace blob budget, and never
-  prunes a version referenced by a chat's latest undoable turn. Asserted in
-  `apps/server/tests/doc-workspaces.test.ts`.
+- **A document workspace keeps its derived index, structural search chunks, and content-addressed
+  version store inside `<dataDir>/doc-workspaces/<id>/`, unreachable by file tools, and every
+  mutating path records exactly one version with optimistic concurrency** (PA-142, PA-143, PA-144).
+  Derived sidecars (`derived/<sha256>/`) and version blobs (`versions/<sha256>`) live under
+  `POCKETAGENT_DATA_DIR` so a user's folder is never polluted with `.pocketagent` metadata, and
+  `DocWorkspaceService.isInternalStorePath` blocks `isWithinTrustedRoot` (`planner/tools.ts`) from
+  trusting `<dataDir>/doc-workspaces` even if an operator points a workspace at a parent directory —
+  an agent's file tools cannot read, overwrite or delete their own undo history (`bash` remains gated
+  separately). Before any mutation to a workspace file (`write_file`, `edit_file`, `sheet_edit`, panel
+  upload replacing an existing file, rename/move, or delete-to-trash), the pre-change content is
+  snapshotted into `versions/<sha256>` and a single `doc_file_versions` row is recorded (an external
+  edit detected by `ensureFileFresh` is recorded as `actor = 'external'` before the new change, and
+  internal writes pass `suppressExternalVersion: true` so one mutation never double-records).
+  `read_file`, `sheet_read`, `sheet_info` and `search_documents` return `version=<sha256>` and record
+  per-chat last-read versions (`doc_chat_file_reads`); mutating tools accept `baseVersion` (falling
+  back to the chat's last-read version when omitted) and refuse stale writes with `"<relPath> changed
+  since you read it (changed by: <actor>, <HH:MM>); re-read it first"`. Deleting a file writes a
+  tombstone version (`tombstone = 1`, `sha256 = prev_sha256`) restorable from the Workspace panel's
+  Trash view; `undoTurn` (`POST /api/planner/chats/:id/turns/:turnId/undo` and Telegram `/undo`)
+  restores every file a turn touched to its pre-turn state as new undoable version rows while skipping
+  files modified after the turn unless `confirm: true`; and `pruneVersions` keeps all versions for 30
+  days, thins older non-latest versions to 1/day/file, enforces a 512 MB per-workspace blob budget,
+  and never prunes a version referenced by a chat's latest undoable turn.
+  **Phase 3 (`doc-workspaces/chunker.ts`, PA-144)** splits derived text into structural chunks stored
+  in `doc_chunks` + external-content FTS5 `doc_chunks_fts` (PDF by page `p.12` with long pages split;
+  DOCX by heading section `§3.2 Pricing`; PPTX by slide `slide 7` including speaker notes; Markdown/text
+  by heading or ~800 tokens; `.xlsx` one chunk per sheet `Summary!A1:F40` holding header row, sample
+  rows, used range, defined names, and table names/columns while leaving exact cell/formula lookups to
+  `sheet_find`) and content-addressed `doc_chunk_embeddings` keyed by `(sha256, ordinal,
+  embedding_model)`. Per-workspace indexing is controlled by `doc_workspaces.index_enabled` (`0` =
+  `'off'`, `1` = `'keyword'` default for new workspaces, `2` = `'embeddings'`); nothing is sent to the
+  global embedding endpoint (`embeddingBaseUrl` / `embeddingModelId`) unless `indexMode ===
+  'embeddings'`, and enabling embeddings in the Workspace panel displays a disclosure naming the
+  endpoint and model. Unchanged files (`sha256` match) are never re-chunked or re-embedded, renames
+  reuse chunks and embeddings by `sha256`, editing a file re-indexes only that file, and changing
+  `embeddingModelId` re-embeds in the background while never comparing vectors across models.
+  `search_documents(query, path?, kind?, limit?)` (`readOnly: true`, in `PARALLEL_SAFE_TOOLS`, distinct
+  from exact/regex `grep_files` as pinned in `planner-tools.test.ts`) reuses PA-29's hybrid ranking
+  (`buildFtsMatchQuery` + `normalizeBm25` + `cosineSimilarity` + `PlannerLlmClient.embed()`), degrades
+  to keyword-only when the embedding endpoint is slow or unreachable without blocking turns or uploads,
+  sanitizes location labels (`sanitizeLocationLabel`) so locations never carry raw document text, and
+  fences snippets in `sanitizeUntrustedText` (`<<<FILE search_documents <nonce>>>>`). On `stone-dev01`,
+  hybrid search (FTS5 `bm25` + 384-dim brute-force cosine over `Float32Array` BLOB views with deferred
+  `content` lookup) over 5,000 chunks completes in **~44 ms** (well under the 300 ms budget, so
+  `sqlite-vec` is not needed). Asserted in `apps/server/tests/doc-workspaces.test.ts` and
+  `apps/server/tests/planner-tools.test.ts`.
 - **The browser never supplies an executable or argv.** Adoption and resume both take their
   `cwd` from the server-validated target. **PA-68 extends this to installing one**, which is the
   sharpest case yet: `POST /api/agents/install` takes an id out of a closed set plus an *action*

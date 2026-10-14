@@ -9870,4 +9870,209 @@ a.file-chip-link:hover .file-chip-name { text-decoration: underline; }
   color: var(--text-dim);
 }
 
+/* ---- PA-144: Document Workspaces Phase 3 (Document Search & Index Controls) ---- */
+
+.doc-workspace-index-mode-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.doc-workspace-index-mode-label select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 11.5px;
+}
+
+.doc-workspace-index-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  font-size: 11.5px;
+}
+
+.doc-workspace-index-endpoint {
+  color: var(--text-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.doc-workspace-index-status {
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.doc-workspace-index-status.ok {
+  color: var(--ok, #22c55e);
+}
+
+.doc-workspace-index-status.warn {
+  color: var(--warn, #eab308);
+}
+
+.doc-workspace-index-status.info {
+  color: var(--text-dim);
+}
+
+.doc-workspace-index-status.muted {
+  color: var(--text-dim);
+}
+
+.doc-workspace-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.doc-workspace-search-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 12.5px;
+}
+
+.doc-workspace-search-results {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.doc-search-status-header {
+  padding: 8px 12px 0;
+}
+
+.doc-search-status-banner {
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.doc-search-status-banner.warn {
+  border-color: rgba(234, 179, 8, 0.45);
+  background: rgba(234, 179, 8, 0.1);
+  color: var(--warn, #eab308);
+}
+
+.doc-search-status-banner.ok {
+  border-color: rgba(34, 197, 94, 0.35);
+  color: var(--text);
+}
+
+.doc-search-status-banner.info {
+  color: var(--text-dim);
+}
+
+.doc-search-results-list {
+  list-style: none;
+  margin: 0;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.doc-search-hit-item {
+  list-style: none;
+}
+
+.doc-search-hit-btn {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: var(--bg-elev);
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.doc-search-hit-btn:hover {
+  border-color: var(--accent, #3b82f6);
+}
+
+.doc-search-hit-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.doc-search-hit-path {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.doc-search-hit-location {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: rgba(59, 130, 246, 0.14);
+  border: 1px solid rgba(59, 130, 246, 0.38);
+  color: var(--accent, #3b82f6);
+}
+
+.doc-search-hit-match {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.doc-search-hit-snippet {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.doc-preview-location-badge {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: rgba(59, 130, 246, 0.14);
+  border: 1px solid rgba(59, 130, 246, 0.38);
+  color: var(--accent, #3b82f6);
+}
+
+.doc-preview-located-heading {
+  background: rgba(59, 130, 246, 0.16);
+  border-left: 3px solid var(--accent, #3b82f6);
+  padding-left: 6px;
+  border-radius: 3px;
+}
+
+
 

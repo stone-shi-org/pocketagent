@@ -4,6 +4,7 @@ import type { Readable } from 'node:stream';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import {
   CreateDocWorkspaceRequest,
+  DocFileKind,
   DocFileMkdirRequest,
   DocFileRenameRequest,
   DocRestoreVersionRequest,
@@ -13,6 +14,7 @@ import {
   type DocFilePreviewResponse,
   type DocWorkspaceFilesResponse,
   type DocWorkspaceListResponse,
+  type DocWorkspaceSearchResponse,
 } from '@pocketagent/protocol';
 import {
   DocVersionConflictError,
@@ -160,6 +162,33 @@ export const docWorkspaceRoutes: FastifyPluginAsync = async (app) => {
     const { id } = request.params as { id: string };
     try {
       const response: DocWorkspaceFilesResponse = app.pocket.docWorkspaces.listFiles(id);
+      return noStore(reply).send(response);
+    } catch (err) {
+      return mapDocWorkspaceError(reply, err);
+    }
+  });
+
+  app.get('/api/doc-workspaces/:id/search', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const query = request.query as { q?: string; query?: string; path?: string; kind?: string; limit?: string };
+    const q = (query.q ?? query.query ?? '').trim();
+    let parsedKind: DocFileKind | undefined;
+    if (query.kind) {
+      const k = DocFileKind.safeParse(query.kind);
+      if (!k.success) {
+        return badRequest(reply, 'Invalid kind filter.');
+      }
+      parsedKind = k.data;
+    }
+    const rawLimit = query.limit !== undefined ? Number(query.limit) : undefined;
+    const limit = rawLimit !== undefined && Number.isFinite(rawLimit) ? rawLimit : undefined;
+    try {
+      const response: DocWorkspaceSearchResponse = await app.pocket.docWorkspaces.searchDocuments(id, {
+        query: q,
+        path: query.path,
+        kind: parsedKind,
+        limit,
+      });
       return noStore(reply).send(response);
     } catch (err) {
       return mapDocWorkspaceError(reply, err);

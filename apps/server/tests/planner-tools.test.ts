@@ -8,6 +8,7 @@ import type { AgentEvent } from '@pocketagent/protocol';
 import {
   MAX_SUBAGENT_SPAWN_DEPTH,
   MAX_SUBAGENT_SPAWNS_PER_TURN,
+  PARALLEL_SAFE_TOOLS,
   PLANNER_TOOLS,
   TOOL_INTEGRATION_DISABLED,
   findPlannerTool,
@@ -81,6 +82,9 @@ function depsFor(
       | 'webhooks'
       | 'cron'
       | 'telegramBots'
+      | 'docWorkspaces'
+      | 'docWorkspaceId'
+      | 'plannerChatId'
     >
   >,
 ): PlannerToolDeps {
@@ -99,10 +103,12 @@ function depsFor(
     telegramBots,
     webhooks,
     cron,
+    docWorkspaces,
   } = t.context;
   return {
     workspaces,
     plannerWorkspaces,
+    docWorkspaces,
     sessions,
     worktrees,
     historyDeps: { sessions, conversations, agyTranscripts, piTranscripts },
@@ -156,6 +162,7 @@ describe('PLANNER_TOOLS catalog', () => {
         'read_file',
         'read_session_output',
         'read_settings',
+        'search_documents',
         'sheet_check',
         'sheet_find',
         'sheet_info',
@@ -2322,3 +2329,90 @@ describe('stop_subagent', () => {
     expect(stoppedId).toBe('chat-123');
   });
 });
+
+// ---- PA-144: search_documents vs grep_files ---------------------------------
+
+describe('search_documents vs grep_files (PA-144)', () => {
+  let t: TestApp;
+  let tmpDir: string | null = null;
+
+  afterEach(async () => {
+    if (t) await t.cleanup();
+    if (tmpDir) {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+      tmpDir = null;
+    }
+  });
+
+  it('pins search_documents as readOnly and parallel-safe, and clearly distinguishes it from grep_files and sheet_find in both descriptions', () => {
+    const searchDocs = findPlannerTool('search_documents')!;
+    const grepFiles = findPlannerTool('grep_files')!;
+
+    expect(searchDocs).toBeDefined();
+    expect(searchDocs.readOnly).toBe(true);
+    expect(PARALLEL_SAFE_TOOLS.has('search_documents')).toBe(true);
+
+    // search_documents description must name hybrid FTS5 + semantic embeddings,
+    // located snippets (p.12, §3.2, slide 7, Summary!A1:F40), version (baseVersion),
+    // and direct exact/regex matches to grep_files and exact cell/formula lookups to sheet_find.
+    expect(searchDocs.description).toMatch(/FTS5/i);
+    expect(searchDocs.description).toMatch(/semantic|embedding/i);
+    expect(searchDocs.description).toMatch(/p\.12/);
+    expect(searchDocs.description).toMatch(/baseVersion|version/i);
+    expect(searchDocs.description).toMatch(/grep_files/);
+    expect(searchDocs.description).toMatch(/sheet_find/);
+
+    // grep_files description must direct conceptual/natural-language/semantic document
+    // searches across PDFs, Word docs, slide decks, spreadsheets, or notes to search_documents.
+    expect(grepFiles.description).toMatch(/exact|regex/i);
+    expect(grepFiles.description).toMatch(/search_documents/);
+  });
+
+  it('returns located snippets wrapped in the nonce fence with version hash and records last-read version for baseVersion checks', async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pa-144-tools-'));
+    const wsDir = path.join(tmpDir, 'docs');
+    await fs.mkdir(wsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(wsDir, 'policy.md'),
+      [
+        '# 1 Overview',
+        'General company policy.',
+        '',
+        '## 2.4 Data Retention',
+        'Customer audit logs are retained for 365 days before archival.',
+      ].join('\n'),
+      'utf8',
+    );
+
+    t = await createTestApp();
+    const docWs = t.context.docWorkspaces.create({
+      name: 'Policy Docs',
+      path: wsDir,
+      indexMode: 'keyword',
+    });
+
+    const searchTool = findPlannerTool('search_documents')!;
+    const deps = depsFor(t, null, {
+      docWorkspaceId: docWs.id,
+      plannerChatId: 'chat-pa144-tool',
+    });
+
+    const out = await runText(searchTool, deps, {
+      query: 'audit logs retained 365 days',
+    });
+    expect(out).toContain('[search_documents query="audit logs retained 365 days" | mode=keyword');
+    expect(out).toContain('<<<FILE search_documents ');
+    expect(out).toContain('policy.md §2.4 Data Retention');
+    expect(out).toMatch(/version=[0-9a-f]{64}/);
+
+    // Calling without an attached or registered document workspace returns a clear instructional error.
+    t.context.docWorkspaces.delete(docWs.id);
+    const noWsDeps = depsFor(t, null, { docWorkspaceId: null });
+    const noWsRes = await searchTool.execute(noWsDeps, { query: 'audit logs' });
+    expect(typeof noWsRes === 'object' && noWsRes.isError).toBe(true);
+    expect(typeof noWsRes === 'object' ? noWsRes.content : noWsRes).toMatch(
+      /No document workspace is attached to this chat/i,
+    );
+  });
+});
+

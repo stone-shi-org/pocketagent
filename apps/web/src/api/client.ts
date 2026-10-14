@@ -148,6 +148,8 @@ import type {
   DocRestoreVersionResponse,
   DocTrashListResponse,
   DocTrashRestoreRequest,
+  DocFileKind,
+  DocWorkspaceSearchResponse,
   UndoTurnRequest,
   UndoTurnResponse,
 } from '@pocketagent/protocol';
@@ -1479,6 +1481,20 @@ export function createApiClient(endpoint: HostEndpoint) {
       request<DocFilePreviewResponse>(
         `/api/doc-workspaces/${encodeURIComponent(id)}/files/preview?path=${encodeURIComponent(filePath)}`,
       ),
+
+    searchDocWorkspace: (
+      id: string,
+      params: { q: string; path?: string; kind?: DocFileKind; limit?: number },
+    ) => {
+      const qs = new URLSearchParams();
+      qs.set('q', params.q);
+      if (params.path) qs.set('path', params.path);
+      if (params.kind) qs.set('kind', params.kind);
+      if (params.limit !== undefined) qs.set('limit', String(params.limit));
+      return request<DocWorkspaceSearchResponse>(
+        `/api/doc-workspaces/${encodeURIComponent(id)}/search?${qs.toString()}`,
+      );
+    },
 
     createDocWorkspaceBrief: (id: string, content?: string) =>
       request<{ path: string; content: string; created: boolean }>(

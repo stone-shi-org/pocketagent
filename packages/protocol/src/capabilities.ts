@@ -97,5 +97,7 @@ export const HostCapabilities = z.object({
   executables: z.array(NotableExecutable),
   projects: z.array(HostCapabilityProject),
   pocketAgents: z.array(HostCapabilityPocketAgent),
+  /** PA-144: Whether at least one document workspace index exists on this host (contents are never reported). */
+  hasWorkspaceIndex: z.boolean().optional(),
 });
 export type HostCapabilities = z.infer<typeof HostCapabilities>;

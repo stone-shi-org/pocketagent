@@ -1229,7 +1229,32 @@ export const DeletePlannerArtifactResponse = z.object({
 });
 export type DeletePlannerArtifactResponse = z.infer<typeof DeletePlannerArtifactResponse>;
 
-// ---- PA-142 / PA-143: Document Workspaces ----------------------------------
+// ---- PA-142 / PA-143 / PA-144: Document Workspaces -------------------------
+
+/**
+ * PA-144: Per-workspace document index mode (`doc_workspaces.index_enabled`):
+ * - `'off'` (0): indexing disabled; no FTS5 chunks or embeddings stored.
+ * - `'keyword'` (1, default for new workspaces): FTS5 keyword index only; nothing sent to the embedding endpoint.
+ * - `'embeddings'` (2): FTS5 keyword index plus background batched embeddings via the global planner embedding endpoint.
+ */
+export const DocWorkspaceIndexMode = z.enum(['off', 'keyword', 'embeddings']);
+export type DocWorkspaceIndexMode = z.infer<typeof DocWorkspaceIndexMode>;
+
+export const DocWorkspaceIndexState = z.enum(['disabled', 'idle', 'indexing', 'degraded']);
+export type DocWorkspaceIndexState = z.infer<typeof DocWorkspaceIndexState>;
+
+export const DocWorkspaceIndexStatus = z.object({
+  mode: DocWorkspaceIndexMode,
+  state: DocWorkspaceIndexState,
+  chunkCount: z.number().int().nonnegative(),
+  embeddedCount: z.number().int().nonnegative(),
+  pendingEmbeddings: z.number().int().nonnegative(),
+  embeddingConfigured: z.boolean(),
+  embeddingBaseUrl: z.string(),
+  embeddingModelId: z.string(),
+  degradedError: z.string().nullable(),
+});
+export type DocWorkspaceIndexStatus = z.infer<typeof DocWorkspaceIndexStatus>;
 
 export const DocWorkspace = z.object({
   id: z.string(),
@@ -1237,6 +1262,8 @@ export const DocWorkspace = z.object({
   path: z.string(),
   createdAt: z.number().int(),
   indexEnabled: z.boolean(),
+  indexMode: DocWorkspaceIndexMode.optional(),
+  indexStatus: DocWorkspaceIndexStatus.optional(),
   autoApproveEdits: z.boolean(),
   inboxDir: z.string(),
   hasBrief: z.boolean().optional(),
@@ -1254,6 +1281,7 @@ export const CreateDocWorkspaceRequest = z.object({
   path: z.string().trim().min(1).max(2048),
   createPath: z.boolean().optional(),
   indexEnabled: z.boolean().optional(),
+  indexMode: DocWorkspaceIndexMode.optional(),
   autoApproveEdits: z.boolean().optional(),
   inboxDir: z.string().trim().min(1).max(120).optional(),
 });
@@ -1264,6 +1292,7 @@ export const UpdateDocWorkspaceRequest = z.object({
   path: z.string().trim().min(1).max(2048).optional(),
   createPath: z.boolean().optional(),
   indexEnabled: z.boolean().optional(),
+  indexMode: DocWorkspaceIndexMode.optional(),
   autoApproveEdits: z.boolean().optional(),
   inboxDir: z.string().trim().min(1).max(120).optional(),
 });
@@ -1493,3 +1522,33 @@ export const UndoTurnResponse = z.object({
   versions: z.array(DocFileVersion),
 });
 export type UndoTurnResponse = z.infer<typeof UndoTurnResponse>;
+
+// ---- PA-144: Document Search (FTS5 + Embeddings) ---------------------------
+
+export const DocSearchMatchType = z.enum(['hybrid', 'keyword', 'semantic']);
+export type DocSearchMatchType = z.infer<typeof DocSearchMatchType>;
+
+export const DocSearchResultHit = z.object({
+  path: z.string(),
+  kind: DocFileKind,
+  version: z.string(),
+  ordinal: z.number().int().nonnegative(),
+  location: z.string(),
+  snippet: z.string(),
+  score: z.number(),
+  matchType: DocSearchMatchType,
+});
+export type DocSearchResultHit = z.infer<typeof DocSearchResultHit>;
+
+export const DocWorkspaceSearchMode = z.enum(['hybrid', 'keyword', 'degraded', 'disabled']);
+export type DocWorkspaceSearchMode = z.infer<typeof DocWorkspaceSearchMode>;
+
+export const DocWorkspaceSearchResponse = z.object({
+  query: z.string(),
+  mode: DocWorkspaceSearchMode,
+  degradedReason: z.string().nullable(),
+  hits: z.array(DocSearchResultHit),
+  indexStatus: DocWorkspaceIndexStatus.optional(),
+});
+export type DocWorkspaceSearchResponse = z.infer<typeof DocWorkspaceSearchResponse>;
+

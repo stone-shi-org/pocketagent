@@ -75,7 +75,7 @@ export function score(memory: { importance: number; lastAccessedAt: number }, no
     cheaper than a thrown error over a coding mistake this deep in a ranking
     formula) or for either vector being all-zero (a `0`-norm vector has no
     direction to compare). */
-function cosineSimilarity(a: readonly number[], b: readonly number[]): number {
+export function cosineSimilarity(a: ArrayLike<number>, b: ArrayLike<number>): number {
   if (a.length !== b.length || a.length === 0) return 0;
   let dot = 0;
   let normA = 0;
@@ -87,6 +87,15 @@ function cosineSimilarity(a: readonly number[], b: readonly number[]): number {
   }
   if (normA === 0 || normB === 0) return 0;
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+/**
+ * Squashes SQLite FTS5's negative `bm25()` rank into `(0, 1)` via
+ * `(-bm25) / (1 + abs(-bm25))` so it can be blended 50/50 with cosine similarity.
+ */
+export function normalizeBm25(bm25: number): number {
+  const textual = -bm25;
+  return textual / (1 + Math.abs(textual));
 }
 
 export interface PlannerMemoryScoredResult {

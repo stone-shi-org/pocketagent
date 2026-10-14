@@ -5,10 +5,14 @@ import type {
   DocFileExtractStatus,
   DocFilePreviewResponse,
   DocFileVersion,
+  DocSearchResultHit,
   DocTrashEntry,
   DocVersionCompareResponse,
   DocWorkspace,
   DocWorkspaceExtractionProgress,
+  DocWorkspaceIndexMode,
+  DocWorkspaceIndexStatus,
+  DocWorkspaceSearchResponse,
 } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { useHostApi } from '../hosts/HostContext.js';
@@ -126,6 +130,21 @@ function statusBadgeLabel(status: DocFileExtractStatus): string | null {
   }
 }
 
+export function parsePdfPageFromLocation(location: string | null): number | null {
+  if (!location) return null;
+  const match = /^p\.(\d+)\b/i.exec(location.trim());
+  if (!match) return null;
+  const page = Number.parseInt(match[1]!, 10);
+  return Number.isFinite(page) && page >= 1 ? page : null;
+}
+
+export function parseSheetNameFromLocation(location: string | null): string | null {
+  if (!location) return null;
+  const bang = location.indexOf('!');
+  if (bang > 0) return location.slice(0, bang).trim();
+  return null;
+}
+
 export function WorkspacePanel({
   workspace,
   entries,
@@ -151,11 +170,21 @@ export function WorkspacePanel({
 
   // Preview state
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [previewLocation, setPreviewLocation] = useState<string | null>(null);
   const [previewData, setPreviewData] = useState<DocFilePreviewResponse | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [activeSheetIdx, setActiveSheetIdx] = useState(0);
   const [showDerivedText, setShowDerivedText] = useState(false);
+  const previewHtmlRef = useRef<HTMLDivElement>(null);
+
+  // Search & index state (PA-144)
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResponse, setSearchResponse] = useState<DocWorkspaceSearchResponse | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [pendingEmbeddingsDisclosure, setPendingEmbeddingsDisclosure] = useState(false);
+  const [indexStatusOverride, setIndexStatusOverride] = useState<DocWorkspaceIndexStatus | null>(null);
 
   // History state (PA-143)
   const [historyPath, setHistoryPath] = useState<string | null>(null);
@@ -183,6 +212,15 @@ export function WorkspacePanel({
     [entries],
   );
   const versionStoreAvailable = workspace.versionStoreAvailable !== false;
+  const effectiveIndexStatus = indexStatusOverride ?? workspace.indexStatus ?? null;
+  const currentIndexMode: DocWorkspaceIndexMode =
+    effectiveIndexStatus?.mode ??
+    workspace.indexMode ??
+    (workspace.indexEnabled === false ? 'off' : 'keyword');
+
+  useEffect(() => {
+    setIndexStatusOverride(null);
+  }, [workspace.indexStatus, workspace.indexMode, workspace.indexEnabled]);
 
   // Set webkitdirectory attribute imperatively so TypeScript JSX types stay clean.
   useEffect(() => {
@@ -192,6 +230,29 @@ export function WorkspacePanel({
       el.setAttribute('directory', '');
     }
   }, []);
+
+  // Scroll/highlight located heading when opening a DOCX or Markdown preview from search.
+  useEffect(() => {
+    const container = previewHtmlRef.current;
+    if (!container || !previewLocation || !previewLocation.startsWith('§')) return;
+    const rawHeading = previewLocation.slice(1).trim();
+    const strippedHeading = rawHeading.replace(/^\d+(?:\.\d+)*\s+/, '').trim().toLowerCase();
+    const headings = Array.from(container.querySelectorAll('h1, h2, h3, h4, h5, h6'));
+    for (const h of headings) {
+      h.classList.remove('doc-preview-located-heading');
+    }
+    const target = headings.find((h) => {
+      const text = (h.textContent ?? '').trim().toLowerCase();
+      return (
+        text === rawHeading.toLowerCase() ||
+        (strippedHeading.length > 0 && text.includes(strippedHeading))
+      );
+    });
+    if (target) {
+      target.classList.add('doc-preview-located-heading');
+      target.scrollIntoView?.({ block: 'start' });
+    }
+  }, [previewData, previewLocation, showDerivedText]);
 
   const toggleDir = (relPath: string): void => {
     setCollapsedDirs((prev) => {
@@ -203,10 +264,11 @@ export function WorkspacePanel({
   };
 
   const openPreview = useCallback(
-    async (relPath: string) => {
+    async (relPath: string, location?: string) => {
       setHistoryPath(null);
       setTrashOpen(false);
       setPreviewPath(relPath);
+      setPreviewLocation(location ?? null);
       setPreviewLoading(true);
       setPreviewError(null);
       setActiveSheetIdx(0);
@@ -214,6 +276,15 @@ export function WorkspacePanel({
       try {
         const res = await api.previewDocWorkspaceFile(workspace.id, relPath);
         setPreviewData(res);
+        if (location && res.previewKind === 'xlsx_grid' && res.sheets && res.sheets.length > 0) {
+          const sheetName = parseSheetNameFromLocation(location);
+          if (sheetName) {
+            const idx = res.sheets.findIndex(
+              (s) => s.name === sheetName || s.name.toLowerCase() === sheetName.toLowerCase(),
+            );
+            if (idx >= 0) setActiveSheetIdx(idx);
+          }
+        }
       } catch (err) {
         setPreviewData(null);
         setPreviewError(err instanceof ApiError ? err.message : String(err));
@@ -460,6 +531,58 @@ export function WorkspacePanel({
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : 'Could not update workspace setting.');
     }
+  };
+
+  const applyIndexMode = async (nextMode: DocWorkspaceIndexMode): Promise<void> => {
+    setActionError(null);
+    setBusyAction(true);
+    try {
+      const updated = await api.updateDocWorkspace(workspace.id, { indexMode: nextMode });
+      if (updated.indexStatus) {
+        setIndexStatusOverride(updated.indexStatus);
+      }
+      onWorkspaceUpdated?.(updated);
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Could not update index mode.');
+    } finally {
+      setBusyAction(false);
+      setPendingEmbeddingsDisclosure(false);
+    }
+  };
+
+  const handleIndexModeChange = (nextMode: DocWorkspaceIndexMode): void => {
+    if (nextMode === currentIndexMode) return;
+    if (nextMode === 'embeddings') {
+      setPendingEmbeddingsDisclosure(true);
+      return;
+    }
+    void applyIndexMode(nextMode);
+  };
+
+  const handleSearch = async (e?: React.FormEvent): Promise<void> => {
+    e?.preventDefault();
+    const q = searchQuery.trim();
+    if (!q) return;
+    setPreviewPath(null);
+    setHistoryPath(null);
+    setTrashOpen(false);
+    setSearchLoading(true);
+    setSearchError(null);
+    try {
+      const res = await api.searchDocWorkspace(workspace.id, { q });
+      setSearchResponse(res);
+      setIndexStatusOverride(res.indexStatus ?? null);
+    } catch (err) {
+      setSearchError(err instanceof ApiError ? err.message : 'Search failed.');
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
+  const clearSearch = (): void => {
+    setSearchQuery('');
+    setSearchResponse(null);
+    setSearchError(null);
   };
 
   const downloadFile = (relPath: string, fileName: string): void => {
@@ -804,8 +927,89 @@ export function WorkspacePanel({
             >
               {workspace.autoApproveEdits ? 'Auto-approve edits: ON' : 'Auto-approve edits: OFF'}
             </button>
+            <label className="doc-workspace-index-mode-label">
+              <span>Search index:</span>
+              <select
+                aria-label="Search index mode"
+                value={currentIndexMode}
+                disabled={busyAction}
+                onChange={(e) => handleIndexModeChange(e.target.value as DocWorkspaceIndexMode)}
+              >
+                <option value="off">Off</option>
+                <option value="keyword">Keyword only</option>
+                <option value="embeddings">Keyword + Embeddings</option>
+              </select>
+            </label>
           </div>
+          {effectiveIndexStatus && (
+            <div className="doc-workspace-index-meta" data-testid="doc-workspace-index-meta">
+              <span className="doc-workspace-index-endpoint">
+                {effectiveIndexStatus.embeddingConfigured
+                  ? `Embeddings: ${effectiveIndexStatus.embeddingModelId} (${effectiveIndexStatus.embeddingBaseUrl})`
+                  : 'Embeddings: endpoint not configured (Settings → Provider & Model)'}
+              </span>
+              {effectiveIndexStatus.state === 'degraded' || effectiveIndexStatus.degradedError ? (
+                <span className="doc-workspace-index-status warn" role="status">
+                  Keyword search only — {effectiveIndexStatus.degradedError ?? 'embedding endpoint unavailable'}
+                </span>
+              ) : currentIndexMode === 'keyword' ? (
+                <span className="doc-workspace-index-status info">
+                  Keyword search only (embeddings off for this workspace)
+                </span>
+              ) : currentIndexMode === 'off' ? (
+                <span className="doc-workspace-index-status muted">
+                  Document search index is off
+                </span>
+              ) : effectiveIndexStatus.state === 'indexing' || effectiveIndexStatus.pendingEmbeddings > 0 ? (
+                <span className="doc-workspace-index-status info" role="status">
+                  Indexing embeddings ({effectiveIndexStatus.embeddedCount}/{effectiveIndexStatus.chunkCount} chunks)…
+                </span>
+              ) : effectiveIndexStatus.embeddingConfigured ? (
+                <span className="doc-workspace-index-status ok">
+                  Hybrid index ({effectiveIndexStatus.embeddedCount}/{effectiveIndexStatus.chunkCount} chunks)
+                </span>
+              ) : (
+                <span className="doc-workspace-index-status warn" role="status">
+                  Keyword search only — configure an embedding endpoint in Settings to enable vectors
+                </span>
+              )}
+            </div>
+          )}
         </div>
+
+        <form className="doc-workspace-search-bar" onSubmit={(e) => void handleSearch(e)}>
+          <Icon name="search" size={14} />
+          <input
+            type="search"
+            className="doc-workspace-search-input"
+            placeholder={
+              currentIndexMode === 'off'
+                ? 'Enable search index to search documents…'
+                : 'Search documents…'
+            }
+            aria-label="Search workspace documents"
+            value={searchQuery}
+            disabled={currentIndexMode === 'off'}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+          <button
+            type="submit"
+            className="planner-btn small"
+            disabled={searchLoading || currentIndexMode === 'off' || !searchQuery.trim()}
+          >
+            {searchLoading ? 'Searching…' : 'Search'}
+          </button>
+          {(searchResponse !== null || searchQuery.length > 0) && (
+            <button
+              type="button"
+              className="planner-btn small"
+              onClick={clearSearch}
+              aria-label="Clear workspace search"
+            >
+              Clear
+            </button>
+          )}
+        </form>
 
         {!versionStoreAvailable && (
           <div className="planner-artifacts-error" role="alert">
@@ -850,9 +1054,9 @@ export function WorkspacePanel({
           </form>
         )}
 
-        {(error || actionError) && (
+        {(error || actionError || searchError) && (
           <div className="planner-artifacts-error" role="alert">
-            {actionError ?? error}
+            {actionError ?? searchError ?? error}
           </div>
         )}
 
@@ -1173,15 +1377,21 @@ export function WorkspacePanel({
                 className="planner-btn small"
                 onClick={() => {
                   setPreviewPath(null);
+                  setPreviewLocation(null);
                   setPreviewData(null);
                   setPreviewError(null);
                 }}
               >
                 <Icon name="chevron-left" size={13} />
-                <span>Files</span>
+                <span>{searchResponse !== null ? 'Search' : 'Files'}</span>
               </button>
               <span className="doc-workspace-preview-title" title={previewPath}>
                 {previewPath}
+                {previewLocation && (
+                  <span className="doc-preview-location-badge" title={`Located at ${previewLocation}`}>
+                    {previewLocation}
+                  </span>
+                )}
               </span>
               <div className="doc-workspace-preview-actions">
                 {previewData?.text &&
@@ -1232,13 +1442,21 @@ export function WorkspacePanel({
               ) : !previewData ? null : showDerivedText && previewData.text ? (
                 <pre className="doc-workspace-preview-text">{previewData.text}</pre>
               ) : previewData.previewKind === 'pdf' ? (
-                <iframe
-                  className="doc-workspace-pdf-frame"
-                  src={api.docWorkspaceFileDownloadUrl(workspace.id, previewData.path, true)}
-                  title={`Preview ${previewData.path}`}
-                />
+                (() => {
+                  const basePdfUrl = api.docWorkspaceFileDownloadUrl(workspace.id, previewData.path, true);
+                  const pdfPage = parsePdfPageFromLocation(previewLocation);
+                  const pdfSrc = pdfPage !== null ? `${basePdfUrl}#page=${pdfPage}` : basePdfUrl;
+                  return (
+                    <iframe
+                      className="doc-workspace-pdf-frame"
+                      src={pdfSrc}
+                      title={`Preview ${previewData.path}`}
+                    />
+                  );
+                })()
               ) : previewData.previewKind === 'docx_html' ? (
                 <div
+                  ref={previewHtmlRef}
                   className="doc-workspace-docx-html markdown-body"
                   dangerouslySetInnerHTML={{
                     __html: sanitizeDocxHtml(previewData.html ?? ''),
@@ -1289,6 +1507,7 @@ export function WorkspacePanel({
                 </div>
               ) : previewData.previewKind === 'markdown' ? (
                 <div
+                  ref={previewHtmlRef}
                   className="doc-workspace-markdown markdown-body"
                   dangerouslySetInnerHTML={{
                     __html: renderMarkdown(previewData.text ?? ''),
@@ -1307,6 +1526,59 @@ export function WorkspacePanel({
                 </div>
               )}
             </div>
+          </div>
+        ) : searchResponse !== null ? (
+          <div className="doc-workspace-search-results" data-testid="doc-workspace-search-results">
+            <div className="doc-search-status-header">
+              {searchResponse.mode === 'degraded' ? (
+                <div className="doc-search-status-banner warn" role="status">
+                  Keyword search only — {searchResponse.degradedReason ?? 'embedding endpoint is unavailable.'}
+                </div>
+              ) : searchResponse.mode === 'keyword' ? (
+                <div className="doc-search-status-banner info" role="status">
+                  Keyword search only — {searchResponse.degradedReason ?? 'embeddings are off for this workspace.'}
+                </div>
+              ) : searchResponse.mode === 'disabled' ? (
+                <div className="doc-search-status-banner warn" role="status">
+                  {searchResponse.degradedReason ?? 'Search index is turned off for this workspace.'}
+                </div>
+              ) : (
+                <div className="doc-search-status-banner ok" role="status">
+                  Hybrid search (FTS5 + embeddings) · {searchResponse.hits.length} result
+                  {searchResponse.hits.length === 1 ? '' : 's'}
+                </div>
+              )}
+            </div>
+            {searchResponse.hits.length === 0 ? (
+              <div className="planner-artifacts-empty">
+                <Icon name="search" size={28} />
+                <p className="planner-artifacts-empty-title">No matching chunks</p>
+                <p className="planner-artifacts-empty-desc">
+                  No document sections matched &ldquo;{searchResponse.query}&rdquo;.
+                </p>
+              </div>
+            ) : (
+              <ul className="doc-search-results-list">
+                {searchResponse.hits.map((hit: DocSearchResultHit) => (
+                  <li key={`${hit.path}:${hit.ordinal}`} className="doc-search-hit-item">
+                    <button
+                      type="button"
+                      className="doc-search-hit-btn"
+                      onClick={() => void openPreview(hit.path, hit.location)}
+                    >
+                      <div className="doc-search-hit-head">
+                        <span className="doc-search-hit-path">{hit.path}</span>
+                        <span className="doc-search-hit-location">{hit.location}</span>
+                        <span className={`doc-search-hit-match match-${hit.matchType}`}>
+                          {hit.matchType}
+                        </span>
+                      </div>
+                      <p className="doc-search-hit-snippet">{hit.snippet}</p>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         ) : loading && entries.length === 0 ? (
           <div className="planner-artifacts-loading">Loading workspace files…</div>
@@ -1345,6 +1617,22 @@ export function WorkspacePanel({
           >
             {tree.map((node) => renderNode(node, 0))}
           </ul>
+        )}
+
+        {pendingEmbeddingsDisclosure && (
+          <ConfirmDialog
+            title={`Turn on document embeddings for ${workspace.name}?`}
+            body={
+              `Turning on embeddings sends extracted document text from this workspace to the configured embedding endpoint ` +
+              `(${effectiveIndexStatus?.embeddingBaseUrl || 'configured in Settings → Provider & Model'}, ` +
+              `model: ${effectiveIndexStatus?.embeddingModelId || 'not configured'}) ` +
+              `to build semantic search vectors. Keep "Keyword only" if document text should stay strictly local to SQLite FTS5.`
+            }
+            confirmLabel={busyAction ? 'Enabling…' : 'Enable embeddings'}
+            busy={busyAction}
+            onConfirm={() => void applyIndexMode('embeddings')}
+            onCancel={() => setPendingEmbeddingsDisclosure(false)}
+          />
         )}
 
         {deletingEntry && (

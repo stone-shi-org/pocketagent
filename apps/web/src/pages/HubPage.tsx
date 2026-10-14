@@ -528,6 +528,12 @@ function HostCard({
                 <dd>{card.pocketAgents.map((pa) => pa.name).join(', ')}</dd>
               </>
             )}
+            {card.hasWorkspaceIndex !== undefined && (
+              <>
+                <dt>Workspace index</dt>
+                <dd>{card.hasWorkspaceIndex ? 'Available' : 'None'}</dd>
+              </>
+            )}
           </dl>
         </div>
       )}

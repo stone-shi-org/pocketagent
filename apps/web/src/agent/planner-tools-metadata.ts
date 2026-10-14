@@ -71,8 +71,20 @@ export const TOOL_METADATA: Record<string, ToolMeta> = {
     shortDescription: 'Search for files matching name or glob pattern',
     category: 'Files & Workspaces',
   },
+  search_documents: {
+    shortDescription: 'Hybrid keyword + semantic search over workspace documents with located snippets',
+    category: 'Files & Workspaces',
+  },
   grep_files: {
-    shortDescription: 'Search file contents using regular expressions',
+    shortDescription: 'Search file contents using exact strings or regular expressions',
+    category: 'Files & Workspaces',
+  },
+  rename_file: {
+    shortDescription: 'Rename or move files and directories in a workspace',
+    category: 'Files & Workspaces',
+  },
+  delete_file: {
+    shortDescription: 'Delete a file in a workspace',
     category: 'Files & Workspaces',
   },
   mkdir: {

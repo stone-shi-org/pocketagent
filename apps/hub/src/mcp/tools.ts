@@ -273,6 +273,7 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
       return {
         host: target.hostId,
         label: target.row.label,
+        capabilitiesVersion: typeof caps?.capabilitiesVersion === 'number' ? caps.capabilitiesVersion : 1,
         platform: caps?.platform ?? host.platform ?? null,
         arch: caps?.arch ?? host.arch ?? null,
         osVersion: caps?.osVersion ?? null,
@@ -280,6 +281,8 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
         description: caps?.description ?? '',
         tags: Array.isArray(caps?.tags) ? caps.tags : [],
         executables: Array.isArray(caps?.executables) ? caps.executables : [],
+        agents: Array.isArray(caps?.agents) ? caps.agents : [],
+        hasWorkspaceIndex: typeof caps?.hasWorkspaceIndex === 'boolean' ? caps.hasWorkspaceIndex : false,
         runningSessions: host.runningSessions ?? null,
         codingAgents: ((agents.agents as Record<string, unknown>[] | undefined) ?? []).map((a) => ({
           id: a.id,

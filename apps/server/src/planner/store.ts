@@ -1444,7 +1444,7 @@ export function searchPlannerMemoriesFts(
  * `null` for that case and the caller treats it as "no results" instead of
  * letting the query throw.
  */
-function buildFtsMatchQuery(text: string): string | null {
+export function buildFtsMatchQuery(text: string): string | null {
   const tokens = text
     .split(/\s+/)
     .map((token) => token.replace(/[^a-zA-Z0-9]/g, ''))

@@ -16,6 +16,8 @@ import {
   type DocFileVersion,
   type DocFileVersionsResponse,
   type DocRestoreVersionResponse,
+  type DocSearchMatchType,
+  type DocSearchResultHit,
   type DocTrashEntry,
   type DocTrashListResponse,
   type DocTurnChangedFile,
@@ -23,6 +25,10 @@ import {
   type DocWorkspace,
   type DocWorkspaceExtractionProgress,
   type DocWorkspaceFilesResponse,
+  type DocWorkspaceIndexMode,
+  type DocWorkspaceIndexStatus,
+  type DocWorkspaceSearchMode,
+  type DocWorkspaceSearchResponse,
   type ExtractedAttachmentFile,
   type PromptAttachment,
   type UndoTurnConflict,
@@ -37,7 +43,16 @@ import {
   readHead,
 } from '../attachments/extract.js';
 import type { ExtractKind, ExtractTruncatedReason, ExtractWorkerMessage } from '../attachments/extract-worker.js';
+import { PlannerLlmClient } from '../planner/llm-client.js';
+import { cosineSimilarity, normalizeBm25 } from '../planner/memory.js';
+import {
+  buildFtsMatchQuery,
+  encodeEmbedding,
+  readPlannerSettings,
+  revealPlannerEmbeddingApiKey,
+} from '../planner/store.js';
 import { isContained } from '../workspaces/index.js';
+import { buildDocumentChunks, sanitizeLocationLabel, type DocChunkDraft } from './chunker.js';
 import { computeLineDiff, computeXlsxDiff } from './diff.js';
 
 /**
@@ -220,13 +235,32 @@ interface DerivedMetaFile {
   derivedFiles: ExtractedAttachmentFile[];
 }
 
-function rowToWorkspace(row: DocWorkspaceRow, versionStoreAvailable = true): DocWorkspace {
+export function indexModeFromInt(val: number): DocWorkspaceIndexMode {
+  if (val <= 0) return 'off';
+  if (val >= 2) return 'embeddings';
+  return 'keyword';
+}
+
+export function indexModeToInt(mode: DocWorkspaceIndexMode): number {
+  if (mode === 'off') return 0;
+  if (mode === 'embeddings') return 2;
+  return 1;
+}
+
+function rowToWorkspace(
+  row: DocWorkspaceRow,
+  versionStoreAvailable = true,
+  indexStatus?: DocWorkspaceIndexStatus,
+): DocWorkspace {
+  const indexMode = indexModeFromInt(row.index_enabled);
   return {
     id: row.id,
     name: row.name,
     path: row.path,
     createdAt: row.created_at,
-    indexEnabled: row.index_enabled === 1,
+    indexEnabled: indexMode !== 'off',
+    indexMode,
+    ...(indexStatus ? { indexStatus } : {}),
     autoApproveEdits: row.auto_approve_edits === 1,
     inboxDir: row.inbox_dir || 'inbox',
     versionStoreAvailable,
@@ -527,7 +561,14 @@ export interface DocWorkspaceServiceOptions {
   retentionDays?: number;
   /** Per-workspace version blob budget in bytes (default 512 MB). */
   versionBudgetBytes?: number;
+  /** Optional custom fetch implementation for embedding requests (injected in tests). */
+  llmFetch?: typeof fetch;
+  /** Per-batch embedding timeout in milliseconds (default 15_000). */
+  embeddingTimeoutMs?: number;
 }
+
+const EMBEDDING_BATCH_SIZE = 16;
+const DEFAULT_EMBEDDING_TIMEOUT_MS = 15_000;
 
 export class DocWorkspaceService {
   private readonly db: Database.Database;
@@ -538,12 +579,16 @@ export class DocWorkspaceService {
   private readonly enableWatchers: boolean;
   private readonly retentionDays: number;
   private readonly versionBudgetBytes: number;
+  private readonly llmFetch?: typeof fetch;
+  private readonly embeddingTimeoutMs: number;
 
   private readonly watchers = new Map<string, fs.FSWatcher>();
   private readonly watchTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly inFlightExtractions = new Map<string, Promise<DocFileRow | null>>();
   private readonly activeScans = new Map<string, Promise<void>>();
   private readonly scanProgress = new Map<string, { total: number; completed: number; extracting: number }>();
+  private readonly activeEmbeddingJobs = new Map<string, Promise<void>>();
+  private readonly embeddingErrors = new Map<string, string>();
   private readonly versionStoreOverrides = new Map<string, boolean>();
   /** Tracks `(chatId:workspaceId:relPath) -> sha256` last read or written by each chat for optimistic concurrency. */
   private readonly chatReadVersions = new Map<string, string>();
@@ -573,6 +618,8 @@ export class DocWorkspaceService {
     this.enableWatchers = opts.enableWatchers ?? true;
     this.retentionDays = opts.retentionDays ?? DEFAULT_VERSION_RETENTION_DAYS;
     this.versionBudgetBytes = opts.versionBudgetBytes ?? DEFAULT_VERSION_BUDGET_BYTES;
+    this.llmFetch = opts.llmFetch;
+    this.embeddingTimeoutMs = opts.embeddingTimeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS;
 
     if (this.enableWatchers) {
       for (const ws of this.list()) {
@@ -615,20 +662,36 @@ export class DocWorkspaceService {
     const rows = this.db
       .prepare('SELECT id, name, path, created_at, index_enabled, auto_approve_edits, inbox_dir FROM doc_workspaces ORDER BY created_at ASC, name ASC')
       .all() as DocWorkspaceRow[];
-    return rows.map((r) => rowToWorkspace(r, this.isVersionStoreAvailable(r.id)));
+    return rows.map((r) =>
+      rowToWorkspace(r, this.isVersionStoreAvailable(r.id), this.getIndexStatus(r.id, indexModeFromInt(r.index_enabled))),
+    );
   }
 
   get(id: string): DocWorkspace | null {
     const row = this.db
       .prepare('SELECT id, name, path, created_at, index_enabled, auto_approve_edits, inbox_dir FROM doc_workspaces WHERE id = ?')
       .get(id) as DocWorkspaceRow | undefined;
-    return row ? rowToWorkspace(row, this.isVersionStoreAvailable(row.id)) : null;
+    return row
+      ? rowToWorkspace(row, this.isVersionStoreAvailable(row.id), this.getIndexStatus(row.id, indexModeFromInt(row.index_enabled)))
+      : null;
   }
 
   require(id: string): DocWorkspace {
     const ws = this.get(id);
     if (!ws) throw new DocWorkspaceNotFoundError(id);
     return ws;
+  }
+
+  /**
+   * PA-144: Reports whether at least one document workspace has indexing enabled
+   * on this host (for the Hub capability card; workspace paths/names/contents are
+   * never reported).
+   */
+  hasAnyWorkspaceIndex(): boolean {
+    const row = this.db
+      .prepare('SELECT 1 FROM doc_workspaces WHERE index_enabled > 0 LIMIT 1')
+      .get() as { 1: number } | undefined;
+    return Boolean(row);
   }
 
   /**
@@ -734,7 +797,15 @@ export class DocWorkspaceService {
     const inboxDir = normalizeInboxDir(input.inboxDir);
     const id = `dws_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const createdAt = Date.now();
-    const indexEnabled = input.indexEnabled ?? true;
+    // PA-144: New workspaces default to keyword-only (`1`).
+    const indexMode: DocWorkspaceIndexMode =
+      input.indexMode !== undefined
+        ? input.indexMode
+        : input.indexEnabled === false
+          ? 'off'
+          : 'keyword';
+    const indexEnabledInt = indexModeToInt(indexMode);
+    const indexEnabled = indexMode !== 'off';
     const autoApproveEdits = input.autoApproveEdits ?? false;
 
     if (autoApproveEdits && !this.isVersionStoreAvailable(id)) {
@@ -746,11 +817,11 @@ export class DocWorkspaceService {
         `INSERT INTO doc_workspaces (id, name, path, created_at, index_enabled, auto_approve_edits, inbox_dir)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, name, realPath, createdAt, indexEnabled ? 1 : 0, autoApproveEdits ? 1 : 0, inboxDir);
+      .run(id, name, realPath, createdAt, indexEnabledInt, autoApproveEdits ? 1 : 0, inboxDir);
 
     this.seedBaselineFiles(id, realPath);
 
-    (log ?? this.logger)?.warn({ id, name, path: realPath, created }, 'document workspace created');
+    (log ?? this.logger)?.warn({ id, name, path: realPath, created, indexMode }, 'document workspace created');
 
     if (this.enableWatchers) {
       this.startWatcher(id, realPath);
@@ -763,6 +834,8 @@ export class DocWorkspaceService {
       path: realPath,
       createdAt,
       indexEnabled,
+      indexMode,
+      indexStatus: this.getIndexStatus(id, indexMode),
       autoApproveEdits,
       inboxDir,
       versionStoreAvailable: this.isVersionStoreAvailable(id),
@@ -783,7 +856,17 @@ export class DocWorkspaceService {
       nextPath = realPath;
       (log ?? this.logger)?.warn({ id, name, path: realPath, created }, 'document workspace path updated');
     }
-    const indexEnabled = patch.indexEnabled !== undefined ? patch.indexEnabled : existing.indexEnabled;
+
+    const prevMode: DocWorkspaceIndexMode = existing.indexMode ?? (existing.indexEnabled ? 'keyword' : 'off');
+    let nextMode: DocWorkspaceIndexMode = prevMode;
+    if (patch.indexMode !== undefined) {
+      nextMode = patch.indexMode;
+    } else if (patch.indexEnabled !== undefined) {
+      nextMode = patch.indexEnabled ? (prevMode === 'embeddings' ? 'embeddings' : 'keyword') : 'off';
+    }
+    const indexEnabledInt = indexModeToInt(nextMode);
+    const indexEnabled = nextMode !== 'off';
+
     const autoApproveEdits =
       patch.autoApproveEdits !== undefined ? patch.autoApproveEdits : existing.autoApproveEdits;
     const inboxDir = patch.inboxDir !== undefined ? normalizeInboxDir(patch.inboxDir) : existing.inboxDir;
@@ -798,9 +881,22 @@ export class DocWorkspaceService {
          SET name = ?, path = ?, index_enabled = ?, auto_approve_edits = ?, inbox_dir = ?
          WHERE id = ?`,
       )
-      .run(name, nextPath, indexEnabled ? 1 : 0, autoApproveEdits ? 1 : 0, inboxDir, id);
+      .run(name, nextPath, indexEnabledInt, autoApproveEdits ? 1 : 0, inboxDir, id);
+
+    if (nextMode === 'off') {
+      this.db.prepare('DELETE FROM doc_chunks WHERE workspace_id = ?').run(id);
+      this.embeddingErrors.delete(id);
+    } else if (nextMode !== prevMode) {
+      this.embeddingErrors.delete(id);
+      if (prevMode === 'off') {
+        void this.scheduleScan(id);
+      } else if (nextMode === 'embeddings') {
+        void this.scheduleEmbeddingPass(id);
+      }
+    }
 
     if (nextPath !== existing.path) {
+      this.db.prepare('DELETE FROM doc_chunks WHERE workspace_id = ?').run(id);
       this.seedBaselineFiles(id, nextPath);
       if (this.enableWatchers) {
         this.startWatcher(id, nextPath);
@@ -813,6 +909,8 @@ export class DocWorkspaceService {
       name,
       path: nextPath,
       indexEnabled,
+      indexMode: nextMode,
+      indexStatus: this.getIndexStatus(id, nextMode),
       autoApproveEdits,
       inboxDir,
       versionStoreAvailable: this.isVersionStoreAvailable(id),
@@ -822,6 +920,7 @@ export class DocWorkspaceService {
   delete(id: string): void {
     this.require(id);
     this.stopWatcher(id);
+    this.embeddingErrors.delete(id);
     this.db.prepare('DELETE FROM doc_workspaces WHERE id = ?').run(id);
     const wsDerivedDir = path.join(this.derivedRootDir, id);
     try {
@@ -1233,6 +1332,16 @@ export class DocWorkspaceService {
           });
           recordedMove = true;
         }
+        // Reuse existing chunks for `keepRelPath` if not yet populated, then prune old path.
+        const targetHasChunks = this.db
+          .prepare('SELECT 1 FROM doc_chunks WHERE workspace_id = ? AND rel_path = ? LIMIT 1')
+          .get(workspaceId, keepRelPath);
+        if (!targetHasChunks) {
+          this.db
+            .prepare('UPDATE doc_chunks SET rel_path = ? WHERE workspace_id = ? AND rel_path = ? AND sha256 = ?')
+            .run(keepRelPath, workspaceId, r.rel_path, sha256);
+        }
+        this.db.prepare('DELETE FROM doc_chunks WHERE workspace_id = ? AND rel_path = ?').run(workspaceId, r.rel_path);
         this.db.prepare('DELETE FROM doc_files WHERE workspace_id = ? AND rel_path = ?').run(workspaceId, r.rel_path);
       }
     }
@@ -1304,6 +1413,7 @@ export class DocWorkspaceService {
     try {
       stat = fs.lstatSync(absPath);
     } catch {
+      this.db.prepare('DELETE FROM doc_chunks WHERE workspace_id = ? AND rel_path = ?').run(workspaceId, relPath);
       this.db.prepare('DELETE FROM doc_files WHERE workspace_id = ? AND rel_path = ?').run(workspaceId, relPath);
       return null;
     }
@@ -1332,9 +1442,11 @@ export class DocWorkspaceService {
           return null;
         }
         if (precomputedSha256 === existing.sha256) {
+          await this.syncFileChunks(workspaceId, absPath, existing);
           return existing;
         }
       } else {
+        await this.syncFileChunks(workspaceId, absPath, existing);
         return existing;
       }
     }
@@ -1372,6 +1484,7 @@ export class DocWorkspaceService {
       };
       this.upsertDocFileRow(row);
       this.pruneMovedRowsWithSameHash(workspaceId, realRoot, sha256, relPath, !suppressExternalVersion && !existing);
+      await this.syncFileChunks(workspaceId, absPath, row);
       await this.finalizeFreshFileVersion(workspaceId, relPath, absPath, existing, row, suppressExternalVersion);
       return row;
     }
@@ -1399,6 +1512,7 @@ export class DocWorkspaceService {
       };
       this.upsertDocFileRow(row);
       this.pruneMovedRowsWithSameHash(workspaceId, realRoot, sha256, relPath, !suppressExternalVersion && !existing);
+      await this.syncFileChunks(workspaceId, absPath, row);
       await this.finalizeFreshFileVersion(workspaceId, relPath, absPath, existing, row, suppressExternalVersion);
       return row;
     }
@@ -1416,6 +1530,7 @@ export class DocWorkspaceService {
     }
     const finalRow = await promise;
     if (finalRow) {
+      await this.syncFileChunks(workspaceId, absPath, finalRow);
       await this.finalizeFreshFileVersion(workspaceId, relPath, absPath, existing, finalRow, suppressExternalVersion);
     }
     return finalRow;
@@ -1719,6 +1834,15 @@ export class DocWorkspaceService {
       .prepare('SELECT * FROM doc_files WHERE workspace_id = ?')
       .all(workspaceId) as DocFileRow[];
     const rowByPath = new Map(existingRows.map((r) => [r.rel_path, r]));
+    const indexedChunkPaths = ws.indexEnabled
+      ? new Set(
+          (
+            this.db
+              .prepare('SELECT DISTINCT rel_path FROM doc_chunks WHERE workspace_id = ?')
+              .all(workspaceId) as Array<{ rel_path: string }>
+          ).map((r) => r.rel_path),
+        )
+      : new Set<string>();
 
     for (const item of walked) {
       if (item.isDir) continue;
@@ -1731,9 +1855,19 @@ export class DocWorkspaceService {
         (row.extract_status === 'none' ||
           row.extract_status === 'scanned' ||
           row.extract_status === 'failed' ||
-          (row.extract_status === 'extracted' && fs.existsSync(this.derivedMainPath(workspaceId, row.sha256))));
+          (row.extract_status === 'extracted' &&
+            (indexedChunkPaths.has(item.relPath) ||
+              fs.existsSync(this.derivedMainPath(workspaceId, row.sha256)))));
       if (!unchanged) {
         staleFiles.push(item.relPath);
+      } else if (
+        ws.indexEnabled &&
+        row &&
+        !indexedChunkPaths.has(item.relPath) &&
+        row.size > 0 &&
+        (row.kind === 'text' || row.extract_status === 'extracted')
+      ) {
+        await this.syncFileChunks(workspaceId, item.absPath, row);
       }
     }
 
@@ -1779,10 +1913,18 @@ export class DocWorkspaceService {
             });
           }
           this.db
+            .prepare('DELETE FROM doc_chunks WHERE workspace_id = ? AND rel_path = ?')
+            .run(workspaceId, oldRow.rel_path);
+          this.db
             .prepare('DELETE FROM doc_files WHERE workspace_id = ? AND rel_path = ?')
             .run(workspaceId, oldRow.rel_path);
         }
       }
+    }
+
+    const latestWs = this.get(workspaceId);
+    if (latestWs && latestWs.indexMode === 'embeddings') {
+      void this.scheduleEmbeddingPass(workspaceId);
     }
   }
 
@@ -2441,6 +2583,9 @@ export class DocWorkspaceService {
       this.db
         .prepare('UPDATE doc_files SET rel_path = ?, updated_at = ? WHERE workspace_id = ? AND rel_path = ?')
         .run(to.relPath, now, workspaceId, from.relPath);
+      this.db
+        .prepare('UPDATE doc_chunks SET rel_path = ? WHERE workspace_id = ? AND rel_path = ?')
+        .run(to.relPath, workspaceId, from.relPath);
       this.insertVersionRow({
         workspaceId,
         relPath: to.relPath,
@@ -2474,12 +2619,15 @@ export class DocWorkspaceService {
     fs.mkdirSync(path.dirname(to.absPath), { recursive: true });
     fs.renameSync(from.absPath, to.absPath);
 
-    // Preserve doc_files entries across renames without re-extracting.
+    // Preserve doc_files and doc_chunks entries across renames without re-extracting or re-embedding.
     const now = Date.now();
     const updateTx = this.db.transaction(() => {
       this.db
         .prepare('UPDATE doc_files SET rel_path = ?, updated_at = ? WHERE workspace_id = ? AND rel_path = ?')
         .run(to.relPath, now, workspaceId, from.relPath);
+      this.db
+        .prepare('UPDATE doc_chunks SET rel_path = ? WHERE workspace_id = ? AND rel_path = ?')
+        .run(to.relPath, workspaceId, from.relPath);
       const prefix = `${from.relPath}/`;
       const childRows = this.db
         .prepare('SELECT rel_path FROM doc_files WHERE workspace_id = ? AND rel_path LIKE ?')
@@ -2489,6 +2637,9 @@ export class DocWorkspaceService {
         this.db
           .prepare('UPDATE doc_files SET rel_path = ?, updated_at = ? WHERE workspace_id = ? AND rel_path = ?')
           .run(nextRel, now, workspaceId, child.rel_path);
+        this.db
+          .prepare('UPDATE doc_chunks SET rel_path = ? WHERE workspace_id = ? AND rel_path = ?')
+          .run(nextRel, workspaceId, child.rel_path);
       }
       for (const cb of childBlobs) {
         this.insertVersionRow({
@@ -2542,6 +2693,7 @@ export class DocWorkspaceService {
       }
       const blob = this.storeBlobFromFile(workspaceId, absPath);
       fs.rmSync(absPath, { force: true });
+      this.db.prepare('DELETE FROM doc_chunks WHERE workspace_id = ? AND rel_path = ?').run(workspaceId, relPath);
       this.db.prepare('DELETE FROM doc_files WHERE workspace_id = ? AND rel_path = ?').run(workspaceId, relPath);
       this.insertVersionRow({
         workspaceId,
@@ -2568,6 +2720,9 @@ export class DocWorkspaceService {
       snapshots.push({ childRel, sha256: blob.sha256, size: blob.size });
     }
     fs.rmSync(absPath, { recursive: true, force: true });
+    this.db
+      .prepare('DELETE FROM doc_chunks WHERE workspace_id = ? AND (rel_path = ? OR rel_path LIKE ?)')
+      .run(workspaceId, relPath, `${relPath}/%`);
     this.db
       .prepare('DELETE FROM doc_files WHERE workspace_id = ? AND (rel_path = ? OR rel_path LIKE ?)')
       .run(workspaceId, relPath, `${relPath}/%`);
@@ -3891,6 +4046,7 @@ export class DocWorkspaceService {
         if (fs.existsSync(finalAbsPath) && fs.lstatSync(finalAbsPath).isFile()) {
           const blob = this.storeBlobFromFile(workspaceId, finalAbsPath);
           fs.rmSync(finalAbsPath, { force: true });
+          this.db.prepare('DELETE FROM doc_chunks WHERE workspace_id = ? AND rel_path = ?').run(workspaceId, finalRelPath);
           this.db.prepare('DELETE FROM doc_files WHERE workspace_id = ? AND rel_path = ?').run(workspaceId, finalRelPath);
           const v = this.insertVersionRow({
             workspaceId,
@@ -3926,6 +4082,7 @@ export class DocWorkspaceService {
 
       if (initialRelPath !== finalRelPath && fs.existsSync(finalAbsPath)) {
         fs.rmSync(finalAbsPath, { force: true });
+        this.db.prepare('DELETE FROM doc_chunks WHERE workspace_id = ? AND rel_path = ?').run(workspaceId, finalRelPath);
         this.db.prepare('DELETE FROM doc_files WHERE workspace_id = ? AND rel_path = ?').run(workspaceId, finalRelPath);
       }
 
@@ -4107,4 +4264,865 @@ export class DocWorkspaceService {
 
     return { prunedVersions, prunedBlobs };
   }
+
+  // ---- Phase 3: Document Search (FTS5 + Embeddings) -------------------------
+
+  private resolveEmbeddingClient(): {
+    client: PlannerLlmClient;
+    baseUrl: string;
+    modelId: string;
+  } | null {
+    const settings = readPlannerSettings(this.db);
+    if (!settings.embeddingBaseUrl || !settings.embeddingModelId) {
+      return null;
+    }
+    const baseFetch = this.llmFetch;
+    const timeoutMs = this.embeddingTimeoutMs;
+    const wrappedFetch: typeof fetch | undefined = baseFetch
+      ? async (input, init) => {
+          let timer: ReturnType<typeof setTimeout> | null = null;
+          try {
+            return await Promise.race([
+              baseFetch(input, init),
+              new Promise<Response>((_, reject) => {
+                timer = setTimeout(
+                  () => reject(new Error(`Embedding request timed out after ${timeoutMs}ms`)),
+                  timeoutMs,
+                );
+                timer.unref?.();
+              }),
+            ]);
+          } finally {
+            if (timer) clearTimeout(timer);
+          }
+        }
+      : undefined;
+
+    return {
+      client: new PlannerLlmClient({
+        baseUrl: settings.embeddingBaseUrl,
+        apiKey: revealPlannerEmbeddingApiKey(this.db),
+        ...(wrappedFetch ? { fetchImpl: wrappedFetch } : {}),
+      }),
+      baseUrl: settings.embeddingBaseUrl,
+      modelId: settings.embeddingModelId,
+    };
+  }
+
+  getIndexStatus(workspaceId: string, modeOverride?: DocWorkspaceIndexMode): DocWorkspaceIndexStatus {
+    const mode: DocWorkspaceIndexMode =
+      modeOverride ??
+      (() => {
+        const r = this.db
+          .prepare('SELECT index_enabled FROM doc_workspaces WHERE id = ?')
+          .get(workspaceId) as { index_enabled: number } | undefined;
+        return r ? indexModeFromInt(r.index_enabled) : 'off';
+      })();
+
+    const settings = readPlannerSettings(this.db);
+    const embeddingBaseUrl = settings.embeddingBaseUrl ?? '';
+    const embeddingModelId = settings.embeddingModelId ?? '';
+    const embeddingConfigured = Boolean(embeddingBaseUrl && embeddingModelId);
+
+    const totalRow = this.db
+      .prepare('SELECT COUNT(*) AS cnt FROM doc_chunks WHERE workspace_id = ?')
+      .get(workspaceId) as { cnt: number };
+    const chunkCount = totalRow?.cnt ?? 0;
+
+    let embeddedCount = 0;
+    if (mode === 'embeddings' && embeddingConfigured && embeddingModelId) {
+      const embRow = this.db
+        .prepare(
+          `SELECT COUNT(*) AS cnt
+           FROM doc_chunks c
+           INNER JOIN doc_chunk_embeddings e
+             ON e.sha256 = c.sha256 AND e.ordinal = c.ordinal AND e.embedding_model = ?
+           WHERE c.workspace_id = ?`,
+        )
+        .get(embeddingModelId, workspaceId) as { cnt: number };
+      embeddedCount = embRow?.cnt ?? 0;
+    }
+
+    const pendingEmbeddings =
+      mode === 'embeddings' && embeddingConfigured ? Math.max(0, chunkCount - embeddedCount) : 0;
+
+    if (mode === 'off') {
+      return {
+        mode: 'off',
+        state: 'disabled',
+        chunkCount: 0,
+        embeddedCount: 0,
+        pendingEmbeddings: 0,
+        embeddingConfigured,
+        embeddingBaseUrl,
+        embeddingModelId,
+        degradedError: null,
+      };
+    }
+
+    if (mode === 'keyword') {
+      return {
+        mode: 'keyword',
+        state: this.activeScans.has(workspaceId) ? 'indexing' : 'idle',
+        chunkCount,
+        embeddedCount: 0,
+        pendingEmbeddings: 0,
+        embeddingConfigured,
+        embeddingBaseUrl,
+        embeddingModelId,
+        degradedError: null,
+      };
+    }
+
+    // mode === 'embeddings'
+    if (!embeddingConfigured) {
+      return {
+        mode: 'embeddings',
+        state: 'degraded',
+        chunkCount,
+        embeddedCount: 0,
+        pendingEmbeddings: 0,
+        embeddingConfigured: false,
+        embeddingBaseUrl,
+        embeddingModelId,
+        degradedError:
+          'No embedding provider is configured in Settings → Provider and Model. Using keyword search only.',
+      };
+    }
+
+    const lastError = this.embeddingErrors.get(workspaceId);
+    if (lastError) {
+      return {
+        mode: 'embeddings',
+        state: 'degraded',
+        chunkCount,
+        embeddedCount,
+        pendingEmbeddings,
+        embeddingConfigured: true,
+        embeddingBaseUrl,
+        embeddingModelId,
+        degradedError: `Embedding endpoint unavailable (${lastError}). Using keyword search only.`,
+      };
+    }
+
+    const isIndexing =
+      this.activeScans.has(workspaceId) || this.activeEmbeddingJobs.has(workspaceId) || pendingEmbeddings > 0;
+    return {
+      mode: 'embeddings',
+      state: isIndexing ? 'indexing' : 'idle',
+      chunkCount,
+      embeddedCount,
+      pendingEmbeddings,
+      embeddingConfigured: true,
+      embeddingBaseUrl,
+      embeddingModelId,
+      degradedError: null,
+    };
+  }
+
+  /**
+   * Synchronizes `doc_chunks` (and FTS5 via triggers) for a single file row in
+   * `workspaceId`. Unchanged files (`sha256` matches `doc_chunks.sha256`) are a
+   * no-op; renamed or duplicate files reuse chunks by `sha256`.
+   */
+  private async syncFileChunks(workspaceId: string, absPath: string, row: DocFileRow): Promise<void> {
+    const wsRow = this.db
+      .prepare('SELECT index_enabled FROM doc_workspaces WHERE id = ?')
+      .get(workspaceId) as { index_enabled: number } | undefined;
+    if (!wsRow || wsRow.index_enabled <= 0) {
+      this.db.prepare('DELETE FROM doc_chunks WHERE workspace_id = ? AND rel_path = ?').run(workspaceId, row.rel_path);
+      return;
+    }
+
+    const isIndexable =
+      row.size > 0 &&
+      (row.kind === 'text' ||
+        ((row.kind === 'pdf' || row.kind === 'docx' || row.kind === 'pptx' || row.kind === 'xlsx') &&
+          row.extract_status === 'extracted'));
+    if (!isIndexable) {
+      this.db.prepare('DELETE FROM doc_chunks WHERE workspace_id = ? AND rel_path = ?').run(workspaceId, row.rel_path);
+      return;
+    }
+
+    const existingChunk = this.db
+      .prepare('SELECT sha256 FROM doc_chunks WHERE workspace_id = ? AND rel_path = ? LIMIT 1')
+      .get(workspaceId, row.rel_path) as { sha256: string } | undefined;
+    if (existingChunk?.sha256 === row.sha256) {
+      if (wsRow.index_enabled >= 2) {
+        void this.scheduleEmbeddingPass(workspaceId);
+      }
+      return;
+    }
+
+    // Reuse existing chunks by sha256 when a file is renamed or duplicated.
+    let chunks: DocChunkDraft[] = this.db
+      .prepare(
+        `SELECT ordinal, location, content
+         FROM doc_chunks
+         WHERE sha256 = ?
+         GROUP BY ordinal
+         ORDER BY ordinal ASC`,
+      )
+      .all(row.sha256) as DocChunkDraft[];
+
+    if (chunks.length === 0) {
+      let derivedText = '';
+      if (row.kind === 'text') {
+        if (row.size <= MAX_PREVIEW_TEXT_BYTES * 4) {
+          try {
+            derivedText = fs.readFileSync(absPath, 'utf8');
+          } catch {
+            derivedText = '';
+          }
+        }
+      } else {
+        try {
+          derivedText = fs.readFileSync(this.derivedMainPath(workspaceId, row.sha256), 'utf8');
+        } catch {
+          derivedText = '';
+        }
+      }
+      chunks = await buildDocumentChunks({
+        kind: row.kind,
+        relPath: row.rel_path,
+        absPath,
+        derivedText,
+      });
+    }
+
+    const now = Date.now();
+    const writeTx = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM doc_chunks WHERE workspace_id = ? AND rel_path = ?').run(workspaceId, row.rel_path);
+      const stmt = this.db.prepare(
+        `INSERT INTO doc_chunks (
+           workspace_id, rel_path, kind, sha256, ordinal, location, content, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const ch of chunks) {
+        stmt.run(
+          workspaceId,
+          row.rel_path,
+          row.kind,
+          row.sha256,
+          ch.ordinal,
+          sanitizeLocationLabel(ch.location, `chunk ${ch.ordinal + 1}`),
+          ch.content,
+          now,
+        );
+      }
+    });
+    writeTx();
+
+    if (wsRow.index_enabled >= 2 && chunks.length > 0) {
+      void this.scheduleEmbeddingPass(workspaceId);
+    }
+  }
+
+  /**
+   * Schedules a bounded, batched background pass to embed any unembedded chunks
+   * in `workspaceId` under the current global `embeddingModelId`.
+   * Never sends anything to the embedding endpoint when the workspace is in
+   * `'off'` (`0`) or `'keyword'` (`1`) mode.
+   */
+  scheduleEmbeddingPass(workspaceId: string): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    const existing = this.activeEmbeddingJobs.get(workspaceId);
+    if (existing) return existing;
+
+    const job = this.runEmbeddingLoop(workspaceId).finally(() => {
+      this.activeEmbeddingJobs.delete(workspaceId);
+    });
+    this.activeEmbeddingJobs.set(workspaceId, job);
+    return job;
+  }
+
+  private async runEmbeddingLoop(workspaceId: string): Promise<void> {
+    while (!this.closed) {
+      const wsRow = this.db
+        .prepare('SELECT index_enabled FROM doc_workspaces WHERE id = ?')
+        .get(workspaceId) as { index_enabled: number } | undefined;
+      // Strict guard: never contact the embedding endpoint for 'off' (0) or 'keyword' (1) workspaces.
+      if (!wsRow || wsRow.index_enabled < 2) {
+        break;
+      }
+
+      const embedCfg = this.resolveEmbeddingClient();
+      if (!embedCfg) {
+        break;
+      }
+
+      const pending = this.db
+        .prepare(
+          `SELECT c.sha256, c.ordinal, c.location, c.content
+           FROM doc_chunks c
+           LEFT JOIN doc_chunk_embeddings e
+             ON e.sha256 = c.sha256 AND e.ordinal = c.ordinal AND e.embedding_model = ?
+           WHERE c.workspace_id = ? AND e.sha256 IS NULL
+           GROUP BY c.sha256, c.ordinal
+           ORDER BY MIN(c.rel_path) ASC, c.ordinal ASC
+           LIMIT ?`,
+        )
+        .all(embedCfg.modelId, workspaceId, EMBEDDING_BATCH_SIZE) as Array<{
+        sha256: string;
+        ordinal: number;
+        location: string;
+        content: string;
+      }>;
+
+      if (pending.length === 0) {
+        this.embeddingErrors.delete(workspaceId);
+        break;
+      }
+
+      const inputs = pending.map((p) => (p.location ? `${p.location}\n${p.content}` : p.content));
+      let vectors: number[][];
+      try {
+        const res = await embedCfg.client.embed(embedCfg.modelId, inputs);
+        vectors = res.embeddings;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.embeddingErrors.set(workspaceId, msg);
+        this.logger?.warn(
+          { workspaceId, err: msg },
+          'document workspace embedding batch failed; degrading to keyword search',
+        );
+        break;
+      }
+
+      const currentWs = this.db
+        .prepare('SELECT index_enabled FROM doc_workspaces WHERE id = ?')
+        .get(workspaceId) as { index_enabled: number } | undefined;
+      if (!currentWs || currentWs.index_enabled < 2) {
+        break;
+      }
+
+      const now = Date.now();
+      const saveTx = this.db.transaction(() => {
+        const stmt = this.db.prepare(
+          `INSERT INTO doc_chunk_embeddings (sha256, ordinal, embedding_model, embedding, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(sha256, ordinal, embedding_model) DO UPDATE SET
+             embedding = excluded.embedding,
+             updated_at = excluded.updated_at`,
+        );
+        for (let i = 0; i < pending.length; i++) {
+          const item = pending[i]!;
+          const vec = vectors[i];
+          if (!vec || vec.length === 0) continue;
+          stmt.run(item.sha256, item.ordinal, embedCfg.modelId, encodeEmbedding(vec), now);
+        }
+      });
+      saveTx();
+      this.embeddingErrors.delete(workspaceId);
+    }
+  }
+
+  /**
+   * Called when the global embedding settings (`embeddingBaseUrl`,
+   * `embeddingApiKey`, `embeddingModelId`) are updated in Settings so workspaces
+   * with `indexMode === 'embeddings'` re-embed in the background under the new
+   * model without mixing models.
+   */
+  onEmbeddingSettingsChanged(): void {
+    this.embeddingErrors.clear();
+    const rows = this.db
+      .prepare('SELECT id FROM doc_workspaces WHERE index_enabled >= 2')
+      .all() as Array<{ id: string }>;
+    for (const r of rows) {
+      void this.scheduleEmbeddingPass(r.id);
+    }
+  }
+
+  /**
+   * Waits for any in-flight scan and background embedding pass for `workspaceId`
+   * to complete (useful in tests and after configuration changes).
+   */
+  async waitForIndexing(workspaceId: string): Promise<void> {
+    await this.syncWorkspaceIndexForSearch(workspaceId);
+    const activeScan = this.activeScans.get(workspaceId);
+    if (activeScan) {
+      await activeScan;
+    }
+    const ws = this.get(workspaceId);
+    if (ws && ws.indexMode === 'embeddings') {
+      await this.scheduleEmbeddingPass(workspaceId);
+    }
+  }
+
+  /**
+   * Ensures all current files on disk in `workspaceId` have up-to-date chunks in
+   * `doc_chunks` before a search runs, re-indexing only files whose content hash
+   * changed or whose chunks are not yet in `doc_chunks`.
+   */
+  private async syncWorkspaceIndexForSearch(workspaceId: string): Promise<void> {
+    const ws = this.get(workspaceId);
+    if (!ws || !ws.indexEnabled) return;
+    let realRoot: string;
+    try {
+      realRoot = fs.realpathSync(ws.path);
+    } catch {
+      return;
+    }
+
+    const walked = this.walkWorkspaceTree(realRoot);
+    const fileItems = walked.filter((item) => !item.isDir);
+    const dbRows = this.db
+      .prepare('SELECT * FROM doc_files WHERE workspace_id = ?')
+      .all(workspaceId) as DocFileRow[];
+    const rowByPath = new Map(dbRows.map((r) => [r.rel_path, r]));
+
+    const chunkShas = this.db
+      .prepare('SELECT rel_path, sha256 FROM doc_chunks WHERE workspace_id = ? GROUP BY rel_path')
+      .all(workspaceId) as Array<{ rel_path: string; sha256: string }>;
+    const chunkShaByPath = new Map(chunkShas.map((r) => [r.rel_path, r.sha256]));
+
+    const seenPaths = new Set<string>();
+    const checkSubMs = fileItems.length <= 32;
+    const now = Date.now();
+
+    for (const item of fileItems) {
+      seenPaths.add(item.relPath);
+      const row = rowByPath.get(item.relPath);
+      if (!row || row.size !== item.size || row.mtime_ms !== item.mtimeMs) {
+        await this.ensureFileFresh(workspaceId, item.relPath);
+        continue;
+      }
+      if (row.extract_status === 'extracting' || row.extract_status === 'changed') {
+        await this.ensureFileFresh(workspaceId, item.relPath);
+        continue;
+      }
+      const hasChunksForSha = chunkShaByPath.get(item.relPath) === row.sha256;
+      if (
+        !hasChunksForSha &&
+        row.extract_status === 'extracted' &&
+        !fs.existsSync(this.derivedMainPath(workspaceId, row.sha256))
+      ) {
+        await this.ensureFileFresh(workspaceId, item.relPath);
+        continue;
+      }
+      if (checkSubMs && Math.abs(now - item.mtimeMs) < 5_000 && item.size <= 16 * 1024 * 1024) {
+        try {
+          const diskSha = computeFileSha256(item.absPath);
+          if (diskSha !== row.sha256) {
+            await this.ensureFileFresh(workspaceId, item.relPath);
+            continue;
+          }
+        } catch {
+          continue;
+        }
+      }
+      const isIndexable =
+        row.size > 0 &&
+        (row.kind === 'text' ||
+          ((row.kind === 'pdf' || row.kind === 'docx' || row.kind === 'pptx' || row.kind === 'xlsx') &&
+            row.extract_status === 'extracted'));
+      if (isIndexable && !hasChunksForSha) {
+        await this.syncFileChunks(workspaceId, item.absPath, row);
+      }
+    }
+
+    for (const oldRow of dbRows) {
+      if (!seenPaths.has(oldRow.rel_path)) {
+        const stillInDb = this.getDocFileRow(workspaceId, oldRow.rel_path);
+        if (stillInDb) {
+          this.db
+            .prepare('DELETE FROM doc_chunks WHERE workspace_id = ? AND rel_path = ?')
+            .run(workspaceId, oldRow.rel_path);
+          this.db
+            .prepare('DELETE FROM doc_files WHERE workspace_id = ? AND rel_path = ?')
+            .run(workspaceId, oldRow.rel_path);
+        }
+      }
+    }
+  }
+
+  /**
+   * Hybrid document search (`search_documents` tool & Workspace Panel search box):
+   * combines FTS5 `bm25` keyword ranking with PA-29 cosine similarity over chunk
+   * embeddings from the current global `embeddingModelId`.
+   *
+   * Degrades gracefully to keyword-only when embeddings are disabled, unconfigured,
+   * or when the embedding endpoint is slow or unreachable.
+   */
+  async searchDocuments(
+    workspaceId: string,
+    opts: {
+      query: string;
+      path?: string | undefined;
+      kind?: DocFileKind | undefined;
+      limit?: number | undefined;
+      chatId?: string | undefined;
+    },
+  ): Promise<DocWorkspaceSearchResponse> {
+    const workspace = this.require(workspaceId);
+    const query = opts.query.trim();
+    const limit = Math.max(1, Math.min(50, Math.floor(opts.limit ?? 10)));
+    const mode = workspace.indexMode ?? (workspace.indexEnabled ? 'keyword' : 'off');
+
+    if (mode === 'off') {
+      const indexStatus = this.getIndexStatus(workspaceId, 'off');
+      return {
+        query,
+        mode: 'disabled',
+        degradedReason: 'Document index is disabled for this workspace.',
+        indexStatus,
+        hits: [],
+      };
+    }
+
+    await this.syncWorkspaceIndexForSearch(workspaceId);
+
+    const pathFilter = opts.path?.trim() ? normalizeWorkspaceRelPath(opts.path) : '';
+    const kindFilter = opts.kind;
+
+    // If embeddings are enabled and there is a small pending batch, give background
+    // embedding a short bounded window so newly added/edited files or model changes
+    // in interactive use & tests are embedded without blocking if the endpoint is slow.
+    if (mode === 'embeddings' && !this.embeddingErrors.has(workspaceId)) {
+      const statusBefore = this.getIndexStatus(workspaceId, mode);
+      if (statusBefore.embeddingConfigured && statusBefore.pendingEmbeddings > 0 && statusBefore.pendingEmbeddings <= 64) {
+        const waitMs = Math.min(this.embeddingTimeoutMs, 1_500);
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        try {
+          await Promise.race([
+            this.scheduleEmbeddingPass(workspaceId),
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, waitMs);
+              timer.unref?.();
+            }),
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      } else if (statusBefore.embeddingConfigured && statusBefore.pendingEmbeddings > 64) {
+        void this.scheduleEmbeddingPass(workspaceId);
+      }
+    }
+
+    if (!query) {
+      const indexStatus = this.getIndexStatus(workspaceId, mode);
+      return {
+        query,
+        mode: mode === 'embeddings' ? (indexStatus.degradedError ? 'degraded' : 'hybrid') : 'keyword',
+        degradedReason:
+          mode === 'embeddings'
+            ? indexStatus.degradedError
+            : 'Embeddings are turned off for this workspace (keyword search only).',
+        indexStatus,
+        hits: [],
+      };
+    }
+
+    // 1. FTS5 keyword search (`bm25`).
+    interface FtsRow {
+      id: number;
+      rel_path: string;
+      kind: DocFileKind;
+      sha256: string;
+      ordinal: number;
+      location: string;
+      content: string;
+      rank: number;
+    }
+
+    const ftsById = new Map<number, { row: FtsRow; bm25Score: number }>();
+    const ftsQuery = buildFtsMatchQuery(query);
+    if (ftsQuery) {
+      const whereClauses = ['doc_chunks_fts MATCH ?', 'c.workspace_id = ?'];
+      const params: Array<string | number> = [ftsQuery, workspaceId];
+      if (pathFilter) {
+        whereClauses.push('(c.rel_path = ? OR c.rel_path LIKE ?)');
+        params.push(pathFilter, `${pathFilter}/%`);
+      }
+      if (kindFilter) {
+        whereClauses.push('c.kind = ?');
+        params.push(kindFilter);
+      }
+      params.push(Math.max(limit * 5, 50));
+
+      try {
+        const ftsRows = this.db
+          .prepare(
+            `SELECT
+               c.id,
+               c.rel_path,
+               c.kind,
+               c.sha256,
+               c.ordinal,
+               c.location,
+               c.content,
+               bm25(doc_chunks_fts) AS rank
+             FROM doc_chunks_fts
+             JOIN doc_chunks c ON c.id = doc_chunks_fts.rowid
+             WHERE ${whereClauses.join(' AND ')}
+             ORDER BY rank ASC
+             LIMIT ?`,
+          )
+          .all(...params) as FtsRow[];
+
+        for (const r of ftsRows) {
+          ftsById.set(r.id, {
+            row: r,
+            bm25Score: normalizeBm25(r.rank),
+          });
+        }
+      } catch {
+        // Ignore FTS syntax edge cases and fall through to semantic or empty results.
+      }
+    }
+
+    // 2. Semantic cosine search (only when workspace indexMode === 'embeddings').
+    let searchMode: DocWorkspaceSearchMode = 'keyword';
+    let queryVector: number[] | null = null;
+    const embedCfg = mode === 'embeddings' ? this.resolveEmbeddingClient() : null;
+
+    if (mode === 'embeddings') {
+      if (!embedCfg) {
+        searchMode = 'degraded';
+      } else {
+        try {
+          const embRes = await embedCfg.client.embed(embedCfg.modelId, [query]);
+          queryVector = embRes.embeddings[0] ?? null;
+          if (queryVector && queryVector.length > 0) {
+            searchMode = 'hybrid';
+            this.embeddingErrors.delete(workspaceId);
+          } else {
+            searchMode = 'degraded';
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.embeddingErrors.set(workspaceId, msg);
+          this.logger?.warn(
+            { workspaceId, err: msg },
+            'document search query embedding failed; degrading to keyword search',
+          );
+          searchMode = 'degraded';
+        }
+      }
+    }
+
+    interface ScoredCandidate {
+      id: number;
+      rel_path: string;
+      kind: DocFileKind;
+      sha256: string;
+      ordinal: number;
+      location: string;
+      content?: string;
+      score: number;
+      matchType: DocSearchMatchType;
+    }
+
+    const candidates = new Map<number, ScoredCandidate>();
+    for (const [id, { row, bm25Score }] of ftsById.entries()) {
+      candidates.set(id, {
+        id,
+        rel_path: row.rel_path,
+        kind: row.kind,
+        sha256: row.sha256,
+        ordinal: row.ordinal,
+        location: row.location,
+        content: row.content,
+        score: queryVector ? 0.5 * bm25Score : bm25Score,
+        matchType: 'keyword',
+      });
+    }
+
+    if (queryVector && embedCfg) {
+      const vecWhere = ['c.workspace_id = ?'];
+      const vecParams: Array<string | number> = [embedCfg.modelId, workspaceId];
+      if (pathFilter) {
+        vecWhere.push('(c.rel_path = ? OR c.rel_path LIKE ?)');
+        vecParams.push(pathFilter, `${pathFilter}/%`);
+      }
+      if (kindFilter) {
+        vecWhere.push('c.kind = ?');
+        vecParams.push(kindFilter);
+      }
+
+      // Select metadata + embedding BLOB without `c.content` so scanning 5,000+ chunks stays well under 300ms.
+      const vecRows = this.db
+        .prepare(
+          `SELECT
+             c.id,
+             c.rel_path,
+             c.kind,
+             c.sha256,
+             c.ordinal,
+             c.location,
+             e.embedding
+           FROM doc_chunks c
+           INNER JOIN doc_chunk_embeddings e
+             ON e.sha256 = c.sha256 AND e.ordinal = c.ordinal AND e.embedding_model = ?
+           WHERE ${vecWhere.join(' AND ')}`,
+        )
+        .all(...vecParams) as Array<{
+        id: number;
+        rel_path: string;
+        kind: DocFileKind;
+        sha256: string;
+        ordinal: number;
+        location: string;
+        embedding: Buffer;
+      }>;
+
+      for (const vr of vecRows) {
+        const buf = vr.embedding;
+        if (!buf || buf.byteLength < 4) continue;
+        // Ensure 4-byte alignment for Float32Array view; copy only if unaligned.
+        const floatView =
+          buf.byteOffset % 4 === 0
+            ? new Float32Array(buf.buffer, buf.byteOffset, Math.floor(buf.byteLength / 4))
+            : new Float32Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+        const cosine = cosineSimilarity(queryVector, floatView);
+
+        const existingFts = ftsById.get(vr.id);
+        if (existingFts) {
+          // PA-29 hybrid score: 50% normalized BM25 + 50% cosine similarity.
+          const blended = 0.5 * existingFts.bm25Score + 0.5 * Math.max(0, cosine);
+          candidates.set(vr.id, {
+            id: vr.id,
+            rel_path: vr.rel_path,
+            kind: vr.kind,
+            sha256: vr.sha256,
+            ordinal: vr.ordinal,
+            location: vr.location,
+            content: existingFts.row.content,
+            score: blended,
+            matchType: 'hybrid',
+          });
+        } else if (cosine > 0.15) {
+          candidates.set(vr.id, {
+            id: vr.id,
+            rel_path: vr.rel_path,
+            kind: vr.kind,
+            sha256: vr.sha256,
+            ordinal: vr.ordinal,
+            location: vr.location,
+            score: 0.5 * cosine,
+            matchType: 'semantic',
+          });
+        }
+      }
+    }
+
+    const sorted = [...candidates.values()]
+      .sort((a, b) => b.score - a.score || a.rel_path.localeCompare(b.rel_path) || a.ordinal - b.ordinal)
+      .slice(0, limit);
+
+    // Fetch `content` only for the top winning semantic candidates that weren't in `ftsById`.
+    const missingContentIds = sorted.filter((c) => c.content === undefined).map((c) => c.id);
+    if (missingContentIds.length > 0) {
+      const placeholders = missingContentIds.map(() => '?').join(',');
+      const contentRows = this.db
+        .prepare(`SELECT id, content FROM doc_chunks WHERE id IN (${placeholders})`)
+        .all(...missingContentIds) as Array<{ id: number; content: string }>;
+      const contentById = new Map(contentRows.map((r) => [r.id, r.content]));
+      for (const item of sorted) {
+        if (item.content === undefined) {
+          item.content = contentById.get(item.id) ?? '';
+        }
+      }
+    }
+
+    const hits: DocSearchResultHit[] = sorted.map((c) => {
+      const safeLocation = sanitizeLocationLabel(c.location, `chunk ${c.ordinal + 1}`);
+      const snippet = buildSearchSnippet(c.content ?? '', query);
+      if (opts.chatId) {
+        this.recordChatFileRead(opts.chatId, workspaceId, c.rel_path, c.sha256);
+      }
+      return {
+        path: c.rel_path,
+        kind: c.kind,
+        location: safeLocation,
+        snippet,
+        score: Number(c.score.toFixed(4)),
+        matchType: c.matchType,
+        version: c.sha256,
+        ordinal: c.ordinal,
+      };
+    });
+
+    const finalIndexStatus = this.getIndexStatus(workspaceId, mode);
+    return {
+      query,
+      mode: searchMode,
+      degradedReason:
+        searchMode === 'degraded'
+          ? finalIndexStatus.degradedError
+          : searchMode === 'keyword'
+            ? 'Embeddings are turned off for this workspace (keyword search only).'
+            : null,
+      indexStatus: finalIndexStatus,
+      hits,
+    };
+  }
+
+  /**
+   * Formats a `DocWorkspaceSearchResponse` for the `search_documents` planner
+   * tool, fencing untrusted document snippets inside the existing nonce fence
+   * (`<<<FILE …>>>` + `sanitizeUntrustedText`) and reporting each hit's
+   * location and `version` (`baseVersion`) hash.
+   */
+  formatSearchDocumentsForTool(res: DocWorkspaceSearchResponse): string {
+    if (res.mode === 'disabled') {
+      return (
+        `Document index is turned off for this workspace (mode=off). ` +
+        `Enable indexing in the Workspace panel or use grep_files for exact regex/literal matches.`
+      );
+    }
+
+    const statusNote =
+      res.mode === 'degraded' && res.degradedReason ? ` | degraded: ${res.degradedReason}` : '';
+    const header =
+      `[search_documents query=${JSON.stringify(res.query)} | mode=${res.mode}${statusNote} | hits=${res.hits.length}]`;
+
+    if (res.hits.length === 0) {
+      return `${header}\nNo matching document chunks found.`;
+    }
+
+    const lines = res.hits.map((h, idx) => {
+      const locPart = h.location ? ` ${h.location}` : '';
+      return (
+        `${idx + 1}. ${h.path}${locPart} [kind=${h.kind} | match=${h.matchType} | score=${h.score} | version=${h.version}]: ` +
+        `"${sanitizeUntrustedText(h.snippet)}"`
+      );
+    });
+    const fenced = wrapUntrustedFileFence(
+      'search_documents',
+      lines.join('\n'),
+      `search:${res.query}`,
+    );
+    return `${header}\n${fenced}`;
+  }
 }
+
+function buildSearchSnippet(rawContent: string, query: string, maxChars = 220): string {
+  const cleaned = rawContent
+    .replace(/^---\s+(?:Page|Slide)\s+\d+\s+---$/gm, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  if (cleaned.length <= maxChars) {
+    return sanitizeUntrustedText(cleaned);
+  }
+  const tokens = (query.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []).filter((t) => t.length >= 2);
+  const lower = cleaned.toLowerCase();
+  let matchIdx = -1;
+  for (const tok of tokens) {
+    const idx = lower.indexOf(tok);
+    if (idx !== -1 && (matchIdx === -1 || idx < matchIdx)) {
+      matchIdx = idx;
+    }
+  }
+  if (matchIdx === -1) {
+    return sanitizeUntrustedText(`${cleaned.slice(0, maxChars).trim()}…`);
+  }
+  const start = Math.max(0, matchIdx - 60);
+  const end = Math.min(cleaned.length, start + maxChars);
+  const slice = cleaned.slice(start, end).trim();
+  const prefix = start > 0 ? '…' : '';
+  const suffix = end < cleaned.length ? '…' : '';
+  return sanitizeUntrustedText(`${prefix}${slice}${suffix}`);
+}
+

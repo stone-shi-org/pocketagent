@@ -101,6 +101,8 @@ export async function buildHostCapabilities(
     skills: pocket.skills.listKnownSkills(ws.id).map((s) => s.name),
   }));
 
+  const hasWorkspaceIndex = pocket.docWorkspaces ? pocket.docWorkspaces.hasAnyWorkspaceIndex() : false;
+
   return {
     capabilitiesVersion: CAPABILITIES_VERSION,
     platform,
@@ -112,6 +114,7 @@ export async function buildHostCapabilities(
     executables,
     projects,
     pocketAgents,
+    hasWorkspaceIndex,
   };
 }
 

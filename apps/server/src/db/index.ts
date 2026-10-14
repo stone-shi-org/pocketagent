@@ -322,6 +322,56 @@ export const DOC_WORKSPACES_DDL = `
     ON doc_file_versions (turn_id, created_at ASC);
   CREATE INDEX IF NOT EXISTS idx_doc_file_versions_ws_created
     ON doc_file_versions (workspace_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS doc_chunks (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id       TEXT NOT NULL REFERENCES doc_workspaces (id) ON DELETE CASCADE,
+    rel_path           TEXT NOT NULL,
+    kind               TEXT NOT NULL,
+    sha256             TEXT NOT NULL,
+    ordinal            INTEGER NOT NULL,
+    location           TEXT NOT NULL,
+    content            TEXT NOT NULL,
+    updated_at         INTEGER NOT NULL,
+    UNIQUE (workspace_id, rel_path, ordinal)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_doc_chunks_ws_path
+    ON doc_chunks (workspace_id, rel_path);
+  CREATE INDEX IF NOT EXISTS idx_doc_chunks_ws_sha256
+    ON doc_chunks (workspace_id, sha256, ordinal);
+
+  CREATE VIRTUAL TABLE IF NOT EXISTS doc_chunks_fts USING fts5(
+    content,
+    location,
+    rel_path,
+    content='doc_chunks',
+    content_rowid='id'
+  );
+
+  CREATE TRIGGER IF NOT EXISTS doc_chunks_ai AFTER INSERT ON doc_chunks BEGIN
+    INSERT INTO doc_chunks_fts (rowid, content, location, rel_path)
+    VALUES (new.id, new.content, new.location, new.rel_path);
+  END;
+  CREATE TRIGGER IF NOT EXISTS doc_chunks_ad AFTER DELETE ON doc_chunks BEGIN
+    INSERT INTO doc_chunks_fts (doc_chunks_fts, rowid, content, location, rel_path)
+    VALUES ('delete', old.id, old.content, old.location, old.rel_path);
+  END;
+  CREATE TRIGGER IF NOT EXISTS doc_chunks_au AFTER UPDATE ON doc_chunks BEGIN
+    INSERT INTO doc_chunks_fts (doc_chunks_fts, rowid, content, location, rel_path)
+    VALUES ('delete', old.id, old.content, old.location, old.rel_path);
+    INSERT INTO doc_chunks_fts (rowid, content, location, rel_path)
+    VALUES (new.id, new.content, new.location, new.rel_path);
+  END;
+
+  CREATE TABLE IF NOT EXISTS doc_chunk_embeddings (
+    sha256             TEXT NOT NULL,
+    ordinal            INTEGER NOT NULL,
+    embedding_model    TEXT NOT NULL,
+    embedding          BLOB NOT NULL,
+    updated_at         INTEGER NOT NULL,
+    PRIMARY KEY (sha256, ordinal, embedding_model)
+  );
 `;
 
 

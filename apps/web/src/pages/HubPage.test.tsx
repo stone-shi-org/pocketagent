@@ -110,6 +110,7 @@ describe('HubPage capability cards (PA-133)', () => {
               skills: ['testflight'],
             },
           ],
+          hasWorkspaceIndex: true,
         },
       },
     });
@@ -135,6 +136,8 @@ describe('HubPage capability cards (PA-133)', () => {
     expect(html).toContain('swift');
     expect(html).toContain('ios-app');
     expect(html).toContain('iOS Release Manager');
+    expect(html).toContain('Workspace index');
+    expect(html).toContain('Available');
   });
 
   it('shows "Capabilities unavailable (upgrade host)" rather than an error when an older host answers 404', () => {

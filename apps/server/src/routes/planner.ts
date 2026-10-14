@@ -700,6 +700,13 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       writePlannerEmbeddingApiKey(db, embeddingApiKey.length > 0 ? embeddingApiKey : null);
     }
     if (embeddingModelId !== undefined) writePlannerEmbeddingModelId(db, embeddingModelId);
+    if (
+      embeddingBaseUrl !== undefined ||
+      embeddingApiKey !== undefined ||
+      embeddingModelId !== undefined
+    ) {
+      app.pocket.docWorkspaces.onEmbeddingSettingsChanged();
+    }
     // PA-31: the web_search/url_fetch tool providers, same idiom again.
     if (webSearchEnabled !== undefined) writePlannerWebSearchEnabled(db, webSearchEnabled);
     if (webSearchBaseUrl !== undefined) writePlannerWebSearchBaseUrl(db, webSearchBaseUrl);

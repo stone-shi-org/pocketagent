@@ -558,6 +558,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     derivedRootDir: docWorkspacesRoot,
     logger: app.log,
     enableWatchers: options.enableDocWorkspaceWatchers ?? true,
+    ...(options.plannerLlmFetch ? { llmFetch: options.plannerLlmFetch } : {}),
   });
 
   const plannerChats = new PlannerChatService({

@@ -352,4 +352,53 @@ describe('PA-133: Host capability cards', () => {
       expect(NOTABLE_EXECUTABLES).toContain(exe);
     }
   });
+
+  it('reports hasWorkspaceIndex boolean on HostCapabilities without exposing workspace names, paths, or contents (PA-144)', async () => {
+    t = await createTestApp();
+
+    // Initially no document workspaces exist -> hasWorkspaceIndex is false
+    const initialRes = await t.app.inject({
+      method: 'GET',
+      url: '/api/capabilities',
+      headers: authHeaders(t.cookie),
+    });
+    expect(initialRes.statusCode).toBe(200);
+    const initialCard = HostCapabilities.parse(initialRes.json());
+    expect(initialCard.hasWorkspaceIndex).toBe(false);
+
+    // Create a workspace with indexMode: 'off' -> still false
+    const secretWsDir = path.join(tempDir!, 'confidential-mna-deal-room');
+    fs.mkdirSync(secretWsDir, { recursive: true });
+    fs.writeFileSync(path.join(secretWsDir, 'secret-term-sheet.md'), 'Project Aurora acquisition price $450M');
+
+    const ws = t.context.docWorkspaces.create({
+      name: 'Confidential M&A Deal Room',
+      path: secretWsDir,
+      indexMode: 'off',
+    });
+
+    const offRes = await t.app.inject({
+      method: 'GET',
+      url: '/api/capabilities',
+      headers: authHeaders(t.cookie),
+    });
+    const offCard = HostCapabilities.parse(offRes.json());
+    expect(offCard.hasWorkspaceIndex).toBe(false);
+
+    // Enable keyword index -> hasWorkspaceIndex becomes true, and card never leaks workspace name, path, or contents
+    t.context.docWorkspaces.update(ws.id, { indexMode: 'keyword' });
+    const onRes = await t.app.inject({
+      method: 'GET',
+      url: '/api/capabilities',
+      headers: authHeaders(t.cookie),
+    });
+    const onCard = HostCapabilities.parse(onRes.json());
+    expect(onCard.hasWorkspaceIndex).toBe(true);
+    const serialized = JSON.stringify(onCard);
+    expect(serialized).not.toContain('Confidential M&A Deal Room');
+    expect(serialized).not.toContain('confidential-mna-deal-room');
+    expect(serialized).not.toContain('secret-term-sheet');
+    expect(serialized).not.toContain('Project Aurora');
+  });
 });
+
