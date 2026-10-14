@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import type { PlannerChat, PlannerWorkspace } from '@pocketagent/protocol';
+import type { DocWorkspace, PlannerChat, PlannerWorkspace } from '@pocketagent/protocol';
 import { Icon } from './Icon.js';
 import { codeServerLink } from './ProjectList.js';
+import { PlannerDirectoryPicker } from './PlannerDirectoryPicker.js';
 import { useHostApi, useHostEndpoint } from '../hosts/HostContext.js';
 import {
   loadPocketAgentsTreeState,
@@ -13,6 +14,8 @@ interface Props {
   /** `null` while the first load is still in flight — see `usePlannerChats`. */
   workspaces: PlannerWorkspace[] | null;
   chats: PlannerChat[];
+  /** PA-142: host-folder document workspaces on this host. */
+  docWorkspaces?: DocWorkspace[];
   /** Re-fetches both lists — called after every mutation this section makes
       (create/delete a chat), same "write then refresh" shape the section's
       own former `load` used before the poll was lifted into `usePlannerChats`
@@ -40,14 +43,14 @@ interface Props {
  * as much "what was I doing" content as a project's, and deserve the same
  * home-screen presence, not a menu item.
  *
- * Read/navigate only — adding, renaming, or removing an agent lives on the
- * settings page (`PlannerPage`, reachable from the same overflow menu this
- * section's rows replace the sole purpose of), the same split "Projects"
- * itself draws between browsing chats here and managing folders elsewhere.
+ * PA-142: Also renders the "Workspaces" group inside the Pocket Agents section,
+ * listing host-folder document workspaces with their attached chats nested
+ * underneath so the three-category rule holds across both layouts.
  */
 export function PocketAgentsSection({
   workspaces,
   chats,
+  docWorkspaces = [],
   refresh,
   onOpenChat,
   onCloseChat,
@@ -64,6 +67,8 @@ export function PocketAgentsSection({
   // Which workspace's "..." menu is open, keyed by workspace id — same
   // one-at-a-time, keyed-by-owner pattern `ProjectList`'s `menuFor` uses.
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [pickingDocWorkspaceDir, setPickingDocWorkspaceDir] = useState(false);
+  const [renamingDocWorkspace, setRenamingDocWorkspace] = useState<{ id: string; name: string } | null>(null);
 
   // Sync collapsed state when switching host if this instance is reused
   useEffect(() => {
@@ -135,6 +140,82 @@ export function PocketAgentsSection({
           next.delete(workspaceId);
           return next;
         });
+      }
+    })();
+  };
+
+  const newDocWorkspaceChat = (docWorkspaceId: string): void => {
+    const defaultAgentId = workspaces?.[0]?.id;
+    setBusy((prev) => new Set(prev).add(docWorkspaceId));
+    void (async () => {
+      try {
+        const chat = await api.createPlannerChat({
+          ...(defaultAgentId ? { workspaceId: defaultAgentId } : {}),
+          docWorkspaceId,
+        });
+        onOpenChat(chat.id);
+        await refresh();
+      } catch (err) {
+        onApiError(err);
+      } finally {
+        setBusy((prev) => {
+          const next = new Set(prev);
+          next.delete(docWorkspaceId);
+          return next;
+        });
+      }
+    })();
+  };
+
+  const createDocWorkspaceFromPath = (pickedPath: string, opts?: { create?: boolean }): void => {
+    setPickingDocWorkspaceDir(false);
+    void (async () => {
+      try {
+        await api.createDocWorkspace({
+          path: pickedPath,
+          ...(opts?.create ? { createPath: true } : {}),
+        });
+        await refresh();
+      } catch (err) {
+        onApiError(err);
+      }
+    })();
+  };
+
+  const saveDocWorkspaceRename = (id: string, name: string): void => {
+    const trimmed = name.trim();
+    setRenamingDocWorkspace(null);
+    if (!trimmed) return;
+    void (async () => {
+      try {
+        await api.updateDocWorkspace(id, { name: trimmed });
+        await refresh();
+      } catch (err) {
+        onApiError(err);
+      }
+    })();
+  };
+
+  const toggleDocWorkspaceAutoApprove = (docWs: DocWorkspace): void => {
+    setMenuFor(null);
+    void (async () => {
+      try {
+        await api.updateDocWorkspace(docWs.id, { autoApproveEdits: !docWs.autoApproveEdits });
+        await refresh();
+      } catch (err) {
+        onApiError(err);
+      }
+    })();
+  };
+
+  const removeDocWorkspace = (docWorkspaceId: string): void => {
+    setMenuFor(null);
+    void (async () => {
+      try {
+        await api.deleteDocWorkspace(docWorkspaceId);
+        await refresh();
+      } catch (err) {
+        onApiError(err);
       }
     })();
   };
@@ -231,6 +312,11 @@ export function PocketAgentsSection({
                       </span>
                     )}
                     {chat.title ?? 'Untitled chat'}
+                    {chat.docWorkspaceName && (
+                      <span className="chat-doc-ws-badge" title={`Attached workspace: ${chat.docWorkspaceName}`}>
+                        {chat.docWorkspaceName}
+                      </span>
+                    )}
                   </span>
                 </button>
                 <button
@@ -409,6 +495,195 @@ export function PocketAgentsSection({
           </div>
         );
       })}
+
+      {/* PA-142: "Workspaces" group inside the Pocket Agents section */}
+      <div className="doc-workspaces-group">
+        <div className="doc-workspaces-group-head">
+          <span className="doc-workspaces-group-title">Workspaces</span>
+          <button
+            type="button"
+            className="round-btn plain"
+            onClick={() => setPickingDocWorkspaceDir(true)}
+            aria-label="Add document workspace"
+            title="Add document workspace folder"
+          >
+            <Icon name="plus" size={16} />
+          </button>
+        </div>
+
+        {docWorkspaces.map((docWs) => {
+          const collapseKey = `docws:${docWs.id}`;
+          const isCollapsed = collapsed.has(collapseKey);
+          const attachedChats = chats.filter((c) => c.docWorkspaceId === docWs.id && !c.parentChatId);
+          const codeServerHref =
+            codeServerBaseUrl && docWs.path ? codeServerLink(codeServerBaseUrl, docWs.path) : null;
+
+          return (
+            <div key={docWs.id} className="doc-workspace-block">
+              <div className="project-head">
+                {renamingDocWorkspace?.id === docWs.id ? (
+                  <form
+                    className="doc-ws-rename-form"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      saveDocWorkspaceRename(docWs.id, renamingDocWorkspace.name);
+                    }}
+                  >
+                    <input
+                      type="text"
+                      value={renamingDocWorkspace.name}
+                      onChange={(e) =>
+                        setRenamingDocWorkspace({ id: docWs.id, name: e.target.value })
+                      }
+                      aria-label="Workspace name"
+                      autoFocus
+                    />
+                    <button type="submit" className="planner-btn">
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      className="planner-btn"
+                      onClick={() => setRenamingDocWorkspace(null)}
+                    >
+                      Cancel
+                    </button>
+                  </form>
+                ) : (
+                  <button
+                    type="button"
+                    className="project-name"
+                    onClick={() => toggle(collapseKey)}
+                    aria-expanded={!isCollapsed}
+                    title={docWs.path}
+                  >
+                    <span className="project-icon">
+                      <Icon name="folder" className="folder" />
+                    </span>
+                    <span className="project-label">{docWs.name}</span>
+                    <Icon
+                      name="chevron-down"
+                      className={`project-caret${isCollapsed ? ' closed' : ''}`}
+                    />
+                    {isCollapsed && (
+                      <span className="project-count">{attachedChats.length}</span>
+                    )}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="round-btn plain"
+                  disabled={busy.has(docWs.id)}
+                  onClick={() => newDocWorkspaceChat(docWs.id)}
+                  aria-label={`New chat in ${docWs.name}`}
+                  title={`New chat in ${docWs.name}`}
+                >
+                  <Icon name="compose" size={19} />
+                </button>
+                {codeServerHref && (
+                  <a
+                    className="round-btn plain"
+                    href={codeServerHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={`Open ${docWs.name} in code-server`}
+                    title={`Open ${docWs.name} in code-server`}
+                  >
+                    <Icon name="code" size={19} />
+                  </a>
+                )}
+                <button
+                  type="button"
+                  className="round-btn plain"
+                  onClick={() => setMenuFor(menuFor === collapseKey ? null : collapseKey)}
+                  aria-label={`Options for ${docWs.name}`}
+                  aria-expanded={menuFor === collapseKey}
+                >
+                  <Icon name="ellipsis" size={18} />
+                </button>
+                {menuFor === collapseKey && (
+                  <>
+                    <div
+                      className="menu-backdrop"
+                      onClick={() => setMenuFor(null)}
+                      role="presentation"
+                    />
+                    <div className="menu project-menu" role="menu">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setMenuFor(null);
+                          setRenamingDocWorkspace({ id: docWs.id, name: docWs.name });
+                        }}
+                      >
+                        Rename workspace
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => toggleDocWorkspaceAutoApprove(docWs)}
+                      >
+                        {docWs.autoApproveEdits
+                          ? 'Require approval for workspace edits'
+                          : 'Auto-approve workspace edits'}
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => removeDocWorkspace(docWs.id)}
+                      >
+                        Remove workspace
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {!isCollapsed && attachedChats.length === 0 && (
+                <div className="project-empty">No attached chats yet</div>
+              )}
+              {!isCollapsed &&
+                attachedChats.map((chat) => (
+                  <div key={chat.id} className="planner-chat-group">
+                    <div className="chat-line master-chat-line">
+                      <button
+                        type="button"
+                        className={`chat-row${activeChatId === chat.id ? ' active' : ''}`}
+                        onClick={() => onOpenChat(chat.id)}
+                        title={`${chat.title ?? 'Untitled chat'} (${chat.workspaceName})`}
+                      >
+                        <span className="chat-title">
+                          {chat.title ?? 'Untitled chat'}
+                          <span className="chat-doc-ws-badge" title={`Agent: ${chat.workspaceName}`}>
+                            {chat.workspaceName}
+                          </span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className="chat-remove"
+                        onClick={() => removeChat(chat.id)}
+                        aria-label={`Delete ${chat.title ?? 'Untitled chat'}`}
+                        title="Delete chat"
+                      >
+                        <Icon name="close" size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          );
+        })}
+      </div>
+
+      {pickingDocWorkspaceDir && (
+        <PlannerDirectoryPicker
+          onClose={() => setPickingDocWorkspaceDir(false)}
+          onPick={createDocWorkspaceFromPath}
+          onApiError={onApiError}
+        />
+      )}
     </div>
   );
 }

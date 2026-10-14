@@ -34,6 +34,7 @@ import type { AdminService } from './admin/index.js';
 import type { VoiceTtsService } from './voice/tts-service.js';
 import type { AttachmentStaging } from './attachments/index.js';
 import type { AttachmentRetentionService } from './attachments/retention.js';
+import type { DocWorkspaceService } from './doc-workspaces/index.js';
 
 export interface PocketContext {
   config: Config;
@@ -60,6 +61,8 @@ export interface PocketContext {
   plannerWorkspaces: PlannerWorkspaceRegistry;
   /** Where a new planner workspace's directory is created on disk. */
   plannerWorkspacesRoot: string;
+  /** PA-142: host-folder document workspaces and derived text store. */
+  docWorkspaces: DocWorkspaceService;
   /** PA-6 phase 2: planner chat CRUD and the turn loop. */
   plannerChats: PlannerChatService;
   /** PA-29: the memory system — see `planner/memory.ts`'s doc comment. */

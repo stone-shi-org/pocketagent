@@ -1,6 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AgentEvent,
+  DocFileEntry,
+  DocWorkspace,
+  DocWorkspaceExtractionProgress,
   EffortLevel,
   ModelInfo,
   PlannerChat,
@@ -20,6 +23,8 @@ import { Icon } from '../components/Icon.js';
 import { ConfirmDialog } from '../components/ConfirmDialog.js';
 import { Transcript } from '../components/Transcript.js';
 import { PromptBox } from '../components/PromptBox.js';
+import { WorkspacePanel } from '../components/WorkspacePanel.js';
+import { PlannerDirectoryPicker } from '../components/PlannerDirectoryPicker.js';
 import { plannerPromptHistoryKey } from '../agent/prompt-history.js';
 import { applyEvent, applyEvents, emptyTranscript, type TranscriptState } from '../agent/transcript.js';
 import { useHostApi } from '../hosts/HostContext.js';
@@ -454,6 +459,142 @@ export function PlannerChatPage({
     }
   }, [chatId]);
 
+  const [docWorkspaces, setDocWorkspaces] = useState<DocWorkspace[]>([]);
+  const [docWorkspaceEntries, setDocWorkspaceEntries] = useState<DocFileEntry[]>([]);
+  const [docWorkspaceProgress, setDocWorkspaceProgress] = useState<DocWorkspaceExtractionProgress>({
+    total: 0,
+    completed: 0,
+    extracting: 0,
+    failed: 0,
+    scanned: 0,
+  });
+  const [docWorkspaceLoading, setDocWorkspaceLoading] = useState(false);
+  const [docWorkspaceError, setDocWorkspaceError] = useState<string | null>(null);
+  const [workspacePanelOpen, setWorkspacePanelOpen] = useState(false);
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
+  const workspaceMenuRef = useRef<HTMLDivElement>(null);
+
+  const attachedDocWorkspaceId = chat?.docWorkspaceId ?? null;
+  const attachedDocWorkspace = useMemo(
+    () =>
+      attachedDocWorkspaceId
+        ? docWorkspaces.find((w) => w.id === attachedDocWorkspaceId) ?? null
+        : null,
+    [docWorkspaces, attachedDocWorkspaceId],
+  );
+
+  const refreshDocWorkspaces = useCallback(async () => {
+    try {
+      const res = await api.listDocWorkspaces();
+      setDocWorkspaces(res.workspaces);
+    } catch {
+      // ignore
+    }
+  }, [api]);
+
+  const refreshDocWorkspaceFiles = useCallback(async () => {
+    if (!attachedDocWorkspaceId) {
+      setDocWorkspaceEntries([]);
+      setDocWorkspaceProgress({ total: 0, completed: 0, extracting: 0, failed: 0, scanned: 0 });
+      return;
+    }
+    setDocWorkspaceLoading(true);
+    setDocWorkspaceError(null);
+    try {
+      const res = await api.listDocWorkspaceFiles(attachedDocWorkspaceId);
+      setDocWorkspaceEntries(res.entries);
+      setDocWorkspaceProgress(res.progress);
+      setDocWorkspaces((prev) => {
+        const exists = prev.some((w) => w.id === res.workspace.id);
+        return exists ? prev.map((w) => (w.id === res.workspace.id ? res.workspace : w)) : [...prev, res.workspace];
+      });
+    } catch (err) {
+      setDocWorkspaceError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDocWorkspaceLoading(false);
+    }
+  }, [api, attachedDocWorkspaceId]);
+
+  useEffect(() => {
+    void refreshDocWorkspaces();
+  }, [refreshDocWorkspaces]);
+
+  useEffect(() => {
+    void refreshDocWorkspaceFiles();
+  }, [refreshDocWorkspaceFiles]);
+
+  // Poll while background document extraction is active
+  useEffect(() => {
+    if (!attachedDocWorkspaceId || docWorkspaceProgress.extracting === 0) return;
+    const timer = setInterval(() => {
+      void refreshDocWorkspaceFiles();
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [attachedDocWorkspaceId, docWorkspaceProgress.extracting, refreshDocWorkspaceFiles]);
+
+  useEffect(() => {
+    if (!workspaceMenuOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (!workspaceMenuRef.current?.contains(e.target as Node)) setWorkspaceMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [workspaceMenuOpen]);
+
+  const handleAttachWorkspace = useCallback(
+    async (nextWorkspaceId: string | null) => {
+      setWorkspaceMenuOpen(false);
+      try {
+        const updated = await api.updatePlannerChat(chatId, { docWorkspaceId: nextWorkspaceId });
+        setChat(updated);
+        if (nextWorkspaceId) {
+          setArtifactsOpen(false);
+          setWorkspacePanelOpen(true);
+        } else {
+          setWorkspacePanelOpen(false);
+        }
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not update chat workspace.');
+      }
+    },
+    [api, chatId, onApiError],
+  );
+
+  const handleCreateAndAttachWorkspace = useCallback(
+    async (pickedPath: string, opts?: { create?: boolean }) => {
+      setWorkspacePickerOpen(false);
+      try {
+        const created = await api.createDocWorkspace({
+          path: pickedPath,
+          ...(opts?.create ? { createPath: true } : {}),
+        });
+        setDocWorkspaces((prev) => [...prev, created]);
+        const updated = await api.updatePlannerChat(chatId, { docWorkspaceId: created.id });
+        setChat(updated);
+        setArtifactsOpen(false);
+        setWorkspacePanelOpen(true);
+      } catch (err) {
+        onApiError(err);
+        setError(err instanceof ApiError ? err.message : 'Could not create document workspace.');
+      }
+    },
+    [api, chatId, onApiError],
+  );
+
+  const handleUseInChat = useCallback((relPath: string) => {
+    const seq = ++reviewSeqRef.current;
+    setReviewText((prev) => ({
+      items: [...(prev?.items ?? []), { text: `@${relPath}`, seq }],
+    }));
+  }, []);
+
+  const workspaceFilePaths = useMemo(
+    () => docWorkspaceEntries.filter((e) => !e.isDir).map((e) => e.path),
+    [docWorkspaceEntries],
+  );
+
   const refreshArtifacts = useCallback(async () => {
     setArtifactsLoading(true);
     setArtifactsError(null);
@@ -488,7 +629,17 @@ export function PlannerChatPage({
   }, [api, chatId]);
 
   const toggleArtifacts = useCallback(() => {
-    setArtifactsOpen((prev) => !prev);
+    setArtifactsOpen((prev) => {
+      if (!prev) setWorkspacePanelOpen(false);
+      return !prev;
+    });
+  }, []);
+
+  const toggleWorkspacePanel = useCallback(() => {
+    setWorkspacePanelOpen((prev) => {
+      if (!prev) setArtifactsOpen(false);
+      return !prev;
+    });
   }, []);
 
   const handleOpenArtifact = useCallback(
@@ -745,6 +896,7 @@ export function PlannerChatPage({
         setChat((prev) => (prev ? { ...prev, busy: false } : null));
         void refreshSubagents();
         void refreshArtifacts();
+        void refreshDocWorkspaceFiles();
         void (async () => {
           try {
             const { chats } = await api.listPlannerChats();
@@ -756,7 +908,7 @@ export function PlannerChatPage({
         })();
       }
     },
-    [chatId, refreshSubagents, refreshArtifacts, isEventSeen, markEventSeen],
+    [chatId, refreshSubagents, refreshArtifacts, refreshDocWorkspaceFiles, isEventSeen, markEventSeen],
   );
 
   useEffect(() => {
@@ -783,14 +935,19 @@ export function PlannerChatPage({
     (file: File, signal: AbortSignal) => api.uploadAttachment(file, signal),
     [api],
   );
-  /** An upload lands under the workspace's `artifacts/`, so the artifact route
-      serves it; the name it wants is the path below `artifacts/`. */
+  /** An upload lands under the workspace's `artifacts/`, or in the attached
+      document workspace's inbox directory. */
   const attachmentHref = useCallback(
-    (relPath: string): string | null =>
-      relPath.startsWith('artifacts/')
-        ? api.plannerChatArtifactFileUrl(chatId, relPath.slice('artifacts/'.length), true)
-        : null,
-    [api, chatId],
+    (relPath: string): string | null => {
+      if (relPath.startsWith('artifacts/')) {
+        return api.plannerChatArtifactFileUrl(chatId, relPath.slice('artifacts/'.length), true);
+      }
+      if (attachedDocWorkspaceId) {
+        return api.docWorkspaceFileDownloadUrl(attachedDocWorkspaceId, relPath, false);
+      }
+      return null;
+    },
+    [api, chatId, attachedDocWorkspaceId],
   );
 
   // PA-122: warn before sending an image to a model that cannot read it.
@@ -1344,6 +1501,79 @@ export function PlannerChatPage({
             <button type="button" className="planner-btn" onClick={startEditingTitle} aria-label="Rename chat">
               <Icon name="edit" size={14} />
             </button>
+            <div className="doc-workspace-header-control" ref={workspaceMenuRef}>
+              {attachedDocWorkspace ? (
+                <button
+                  type="button"
+                  className={`planner-btn planner-artifacts-toggle${workspacePanelOpen ? ' active' : ''}`}
+                  onClick={toggleWorkspacePanel}
+                  aria-label={workspacePanelOpen ? 'Close workspace panel' : 'Open workspace panel'}
+                  title={`Workspace: ${attachedDocWorkspace.name} (${attachedDocWorkspace.path})`}
+                >
+                  <Icon name="folder" size={14} />
+                  <span>{attachedDocWorkspace.name}</span>
+                  {workspaceFilePaths.length > 0 && (
+                    <span className="planner-artifacts-count">{workspaceFilePaths.length}</span>
+                  )}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className={`planner-btn${workspaceMenuOpen ? ' active' : ''}`}
+                onClick={() => {
+                  void refreshDocWorkspaces();
+                  setWorkspaceMenuOpen((v) => !v);
+                }}
+                aria-label={attachedDocWorkspace ? 'Switch or detach workspace' : 'Attach workspace'}
+                title={attachedDocWorkspace ? 'Switch or detach workspace' : 'Attach a document workspace folder'}
+              >
+                <Icon name="folder" size={14} />
+                {!attachedDocWorkspace && <span>Workspace</span>}
+                <Icon name="chevron-down" size={12} />
+              </button>
+              {workspaceMenuOpen && (
+                <div className="model-picker doc-workspace-menu" role="menu" aria-label="Document workspaces">
+                  {docWorkspaces.map((dw) => {
+                    const isCurrent = dw.id === attachedDocWorkspaceId;
+                    return (
+                      <button
+                        key={dw.id}
+                        type="button"
+                        role="menuitem"
+                        className={isCurrent ? 'active' : ''}
+                        onClick={() => void handleAttachWorkspace(dw.id)}
+                      >
+                        <span className="model-row">
+                          <span className="model-name">{dw.name}</span>
+                          {isCurrent && <Icon name="check" size={14} />}
+                        </span>
+                        <span className="model-desc">{dw.path}</span>
+                      </button>
+                    );
+                  })}
+                  <div className="model-picker-divider" role="separator" />
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setWorkspaceMenuOpen(false);
+                      setWorkspacePickerOpen(true);
+                    }}
+                  >
+                    <span className="model-name">+ New workspace folder…</span>
+                  </button>
+                  {attachedDocWorkspaceId && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => void handleAttachWorkspace(null)}
+                    >
+                      <span className="model-name">Detach workspace</span>
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
             <button
               type="button"
               className={`planner-btn planner-artifacts-toggle${artifactsOpen ? ' active' : ''}`}
@@ -1790,6 +2020,7 @@ export function PlannerChatPage({
         supportsImageAttachment={true}
         attachmentNote={imageNote}
         onUploadFile={uploadFile}
+        workspaceFiles={workspaceFilePaths}
         supportsVoiceInput={voiceEnabled}
         onTranscribeVoice={
           voiceEnabled
@@ -1820,6 +2051,22 @@ export function PlannerChatPage({
         onInterrupt={handleInterrupt}
       />
         </div>
+
+        {workspacePanelOpen && attachedDocWorkspace && (
+          <WorkspacePanel
+            workspace={attachedDocWorkspace}
+            entries={docWorkspaceEntries}
+            progress={docWorkspaceProgress}
+            loading={docWorkspaceLoading}
+            error={docWorkspaceError}
+            onRefresh={() => void refreshDocWorkspaceFiles()}
+            onClose={() => setWorkspacePanelOpen(false)}
+            onUseInChat={handleUseInChat}
+            onWorkspaceUpdated={(updated) => {
+              setDocWorkspaces((prev) => prev.map((w) => (w.id === updated.id ? updated : w)));
+            }}
+          />
+        )}
 
         {artifactsOpen && (
           <>
@@ -1937,6 +2184,14 @@ export function PlannerChatPage({
         </>
       )}
     </div>
+
+      {workspacePickerOpen && (
+        <PlannerDirectoryPicker
+          onPick={(selectedPath, opts) => void handleCreateAndAttachWorkspace(selectedPath, opts)}
+          onClose={() => setWorkspacePickerOpen(false)}
+          onApiError={onApiError}
+        />
+      )}
 
       {pendingDeleteArtifact && (
         <ConfirmDialog

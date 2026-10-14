@@ -948,6 +948,8 @@ interface PlannerChatDbRow {
   id: string;
   workspace_id: string | null;
   workspace_name: string;
+  doc_workspace_id?: string | null;
+  doc_workspace_name?: string | null;
   title: string | null;
   last_model_id: string | null;
   created_at: number;
@@ -964,6 +966,8 @@ function chatFromDbRow(row: PlannerChatDbRow): PlannerChat {
     id: row.id,
     workspaceId: row.workspace_id,
     workspaceName: row.workspace_name,
+    docWorkspaceId: row.doc_workspace_id ?? null,
+    docWorkspaceName: row.doc_workspace_name ?? null,
     title: row.title,
     lastModelId: row.last_model_id,
     createdAt: row.created_at,
@@ -977,26 +981,32 @@ function chatFromDbRow(row: PlannerChatDbRow): PlannerChat {
   };
 }
 
+const SELECT_PLANNER_CHAT_SQL = `
+  SELECT c.*, dw.name AS doc_workspace_name
+    FROM planner_chats c
+    LEFT JOIN doc_workspaces dw ON dw.id = c.doc_workspace_id
+`;
+
 export function readPlannerChats(db: Db, workspaceId?: string): PlannerChat[] {
   const rows = (
     workspaceId
       ? db
-          .prepare('SELECT * FROM planner_chats WHERE workspace_id = ? ORDER BY last_activity_at DESC')
+          .prepare(`${SELECT_PLANNER_CHAT_SQL} WHERE c.workspace_id = ? ORDER BY c.last_activity_at DESC`)
           .all(workspaceId)
-      : db.prepare('SELECT * FROM planner_chats ORDER BY last_activity_at DESC').all()
+      : db.prepare(`${SELECT_PLANNER_CHAT_SQL} ORDER BY c.last_activity_at DESC`).all()
   ) as PlannerChatDbRow[];
   return rows.map(chatFromDbRow);
 }
 
 export function readPlannerChatsByParentId(db: Db, parentChatId: string): PlannerChat[] {
   const rows = db
-    .prepare('SELECT * FROM planner_chats WHERE parent_chat_id = ? ORDER BY last_activity_at DESC')
+    .prepare(`${SELECT_PLANNER_CHAT_SQL} WHERE c.parent_chat_id = ? ORDER BY c.last_activity_at DESC`)
     .all(parentChatId) as PlannerChatDbRow[];
   return rows.map(chatFromDbRow);
 }
 
 export function readPlannerChat(db: Db, id: string): PlannerChat | null {
-  const row = db.prepare('SELECT * FROM planner_chats WHERE id = ?').get(id) as
+  const row = db.prepare(`${SELECT_PLANNER_CHAT_SQL} WHERE c.id = ?`).get(id) as
     | PlannerChatDbRow
     | undefined;
   return row ? chatFromDbRow(row) : null;
@@ -1005,12 +1015,13 @@ export function readPlannerChat(db: Db, id: string): PlannerChat | null {
 export function insertPlannerChat(db: Db, chat: PlannerChat): void {
   db.prepare(
     `INSERT INTO planner_chats
-       (id, workspace_id, workspace_name, title, last_model_id, created_at, last_activity_at,
+       (id, workspace_id, workspace_name, doc_workspace_id, title, last_model_id, created_at, last_activity_at,
         skip_tool_approvals, parent_chat_id, cron_job_id, last_effort, thinking_enabled)
-     VALUES (@id, @workspaceId, @workspaceName, @title, @lastModelId, @createdAt, @lastActivityAt,
+     VALUES (@id, @workspaceId, @workspaceName, @docWorkspaceId, @title, @lastModelId, @createdAt, @lastActivityAt,
         @skipToolApprovals, @parentChatId, @cronJobId, @lastEffort, @thinkingEnabled)`,
   ).run({
     ...chat,
+    docWorkspaceId: chat.docWorkspaceId ?? null,
     skipToolApprovals: chat.skipToolApprovalsEnabled ? 1 : 0,
     parentChatId: chat.parentChatId ?? null,
     cronJobId: chat.cronJobId ?? null,
@@ -1023,7 +1034,12 @@ export function insertPlannerChat(db: Db, chat: PlannerChat): void {
 export function updatePlannerChat(
   db: Db,
   id: string,
-  patch: Partial<Pick<PlannerChat, 'title' | 'lastModelId' | 'lastActivityAt' | 'lastEffort' | 'thinkingEnabled'>>,
+  patch: Partial<
+    Pick<
+      PlannerChat,
+      'title' | 'lastModelId' | 'lastActivityAt' | 'lastEffort' | 'thinkingEnabled' | 'docWorkspaceId'
+    >
+  >,
 ): void {
   const assignments: string[] = [];
   const params: Record<string, unknown> = { id };
@@ -1046,6 +1062,10 @@ export function updatePlannerChat(
   if ('thinkingEnabled' in patch) {
     assignments.push('thinking_enabled = @thinkingEnabled');
     params.thinkingEnabled = patch.thinkingEnabled ? 1 : 0;
+  }
+  if ('docWorkspaceId' in patch) {
+    assignments.push('doc_workspace_id = @docWorkspaceId');
+    params.docWorkspaceId = patch.docWorkspaceId ?? null;
   }
   if (assignments.length === 0) return;
   db.prepare(`UPDATE planner_chats SET ${assignments.join(', ')} WHERE id = @id`).run(params);

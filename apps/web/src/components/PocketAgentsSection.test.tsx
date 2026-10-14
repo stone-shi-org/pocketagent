@@ -209,4 +209,48 @@ describe('PocketAgentsSection (PA-106)', () => {
     expect(htmlWithCodeServer).toContain('aria-label="Open Agent Alpha in code-server"');
     expect(htmlWithCodeServer).toContain('href="https://code.example.com/?folder=%2Fpath%2Falpha"');
   });
+
+  it('renders document workspaces group with attached chats nested underneath (PA-142)', () => {
+    const html = renderToStaticMarkup(
+      <PocketAgentsSection
+        workspaces={workspaces}
+        docWorkspaces={[
+          {
+            id: 'dw-1',
+            name: 'Legal Matter',
+            path: '/data/matter',
+            createdAt: 1000,
+            indexEnabled: true,
+            autoApproveEdits: false,
+            inboxDir: 'inbox',
+          },
+        ]}
+        chats={[
+          {
+            id: 'chat-doc-1',
+            workspaceId: 'ws-1',
+            workspaceName: 'Agent Alpha',
+            docWorkspaceId: 'dw-1',
+            docWorkspaceName: 'Legal Matter',
+            title: 'Review Clause 4',
+            lastModelId: null,
+            createdAt: 1000,
+            lastActivityAt: 1000,
+            skipToolApprovalsEnabled: false,
+            busy: false,
+            thinkingEnabled: true,
+          },
+        ]}
+        refresh={async () => {}}
+        onOpenChat={() => {}}
+        onApiError={() => {}}
+      />,
+    );
+
+    expect(html).toContain('Workspaces');
+    expect(html).toContain('Legal Matter');
+    expect(html).toContain('Review Clause 4');
+    expect(html).toContain('aria-label="New chat in Legal Matter"');
+  });
 });
+

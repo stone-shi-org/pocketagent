@@ -649,6 +649,10 @@ export const PlannerChat = z.object({
   /** PA-122: messages sent while the chat was busy, not yet delivered,
       oldest first. */
   queuedPrompts: z.array(QueuedPromptSummary).optional(),
+  /** PA-142: Attached document workspace id, or null when unattached. */
+  docWorkspaceId: z.string().nullable().optional(),
+  /** PA-142: Attached document workspace name (joined from doc_workspaces). */
+  docWorkspaceName: z.string().nullable().optional(),
 });
 export type PlannerChat = z.infer<typeof PlannerChat>;
 
@@ -670,6 +674,7 @@ export type DeleteAllPlannerChatsResponse = z.infer<typeof DeleteAllPlannerChats
 /** Omitted `workspaceId` defaults to the default planner workspace. */
 export const CreatePlannerChatRequest = z.object({
   workspaceId: z.string().optional(),
+  docWorkspaceId: z.string().nullable().optional(),
   title: z.string().max(200).optional(),
   modelId: z.string().max(200).optional(),
   parentChatId: z.string().nullable().optional(),
@@ -683,6 +688,7 @@ export const UpdatePlannerChatRequest = z.object({
   modelId: z.string().max(200).optional(),
   effort: EffortLevel.nullable().optional(),
   thinking: z.boolean().optional(),
+  docWorkspaceId: z.string().nullable().optional(),
 });
 export type UpdatePlannerChatRequest = z.infer<typeof UpdatePlannerChatRequest>;
 
@@ -1220,4 +1226,136 @@ export const DeletePlannerArtifactResponse = z.object({
   count: z.number().int().nonnegative().optional(),
 });
 export type DeletePlannerArtifactResponse = z.infer<typeof DeletePlannerArtifactResponse>;
+
+// ---- PA-142: Document Workspaces (Phase 1) ---------------------------------
+
+export const DocWorkspace = z.object({
+  id: z.string(),
+  name: z.string(),
+  path: z.string(),
+  createdAt: z.number().int(),
+  indexEnabled: z.boolean(),
+  autoApproveEdits: z.boolean(),
+  inboxDir: z.string(),
+  hasBrief: z.boolean().optional(),
+});
+export type DocWorkspace = z.infer<typeof DocWorkspace>;
+
+export const DocWorkspaceListResponse = z.object({
+  workspaces: z.array(DocWorkspace),
+});
+export type DocWorkspaceListResponse = z.infer<typeof DocWorkspaceListResponse>;
+
+export const CreateDocWorkspaceRequest = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  path: z.string().trim().min(1).max(2048),
+  createPath: z.boolean().optional(),
+  indexEnabled: z.boolean().optional(),
+  autoApproveEdits: z.boolean().optional(),
+  inboxDir: z.string().trim().min(1).max(120).optional(),
+});
+export type CreateDocWorkspaceRequest = z.infer<typeof CreateDocWorkspaceRequest>;
+
+export const UpdateDocWorkspaceRequest = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  path: z.string().trim().min(1).max(2048).optional(),
+  createPath: z.boolean().optional(),
+  indexEnabled: z.boolean().optional(),
+  autoApproveEdits: z.boolean().optional(),
+  inboxDir: z.string().trim().min(1).max(120).optional(),
+});
+export type UpdateDocWorkspaceRequest = z.infer<typeof UpdateDocWorkspaceRequest>;
+
+export const DocFileExtractStatus = z.enum([
+  'extracted',
+  'extracting',
+  'failed',
+  'scanned',
+  'changed',
+  'none',
+]);
+export type DocFileExtractStatus = z.infer<typeof DocFileExtractStatus>;
+
+export const DocFileKind = z.enum([
+  'pdf',
+  'docx',
+  'xlsx',
+  'pptx',
+  'text',
+  'other',
+]);
+export type DocFileKind = z.infer<typeof DocFileKind>;
+
+export const DocFileEntry = z.object({
+  path: z.string(),
+  name: z.string(),
+  isDir: z.boolean(),
+  size: z.number().int().nonnegative(),
+  mtimeMs: z.number(),
+  kind: DocFileKind,
+  extractStatus: DocFileExtractStatus,
+  extractError: z.string().nullable(),
+  extractedChars: z.number().int().nullable(),
+  pages: z.number().int().nullable(),
+  totalPages: z.number().int().nullable(),
+  truncated: z.boolean(),
+});
+export type DocFileEntry = z.infer<typeof DocFileEntry>;
+
+export const DocWorkspaceExtractionProgress = z.object({
+  total: z.number().int().nonnegative(),
+  completed: z.number().int().nonnegative(),
+  extracting: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  scanned: z.number().int().nonnegative(),
+});
+export type DocWorkspaceExtractionProgress = z.infer<typeof DocWorkspaceExtractionProgress>;
+
+export const DocWorkspaceFilesResponse = z.object({
+  workspace: DocWorkspace,
+  entries: z.array(DocFileEntry),
+  hasBrief: z.boolean(),
+  progress: DocWorkspaceExtractionProgress,
+});
+export type DocWorkspaceFilesResponse = z.infer<typeof DocWorkspaceFilesResponse>;
+
+export const DocFileMkdirRequest = z.object({
+  path: z.string().trim().min(1).max(1024),
+});
+export type DocFileMkdirRequest = z.infer<typeof DocFileMkdirRequest>;
+
+export const DocFileRenameRequest = z.object({
+  fromPath: z.string().trim().min(1).max(1024),
+  toPath: z.string().trim().min(1).max(1024),
+});
+export type DocFileRenameRequest = z.infer<typeof DocFileRenameRequest>;
+
+export const DocFilePreviewSheet = z.object({
+  name: z.string(),
+  rows: z.array(z.array(z.string())),
+  totalRows: z.number().int().nonnegative(),
+  totalCols: z.number().int().nonnegative(),
+});
+export type DocFilePreviewSheet = z.infer<typeof DocFilePreviewSheet>;
+
+export const DocFilePreviewResponse = z.object({
+  path: z.string(),
+  name: z.string(),
+  size: z.number().int().nonnegative(),
+  mtimeMs: z.number(),
+  kind: DocFileKind,
+  extractStatus: DocFileExtractStatus,
+  extractError: z.string().nullable(),
+  previewKind: z.enum(['pdf', 'docx_html', 'xlsx_grid', 'markdown', 'text', 'unsupported']),
+  /** Mammoth HTML for docx preview (to be sanitized with DOMPurify on the client). */
+  html: z.string().optional(),
+  /** Plain text or markdown content for text / md / pdf / pptx preview. */
+  text: z.string().optional(),
+  /** Read-only grid rows for xlsx preview (first rows of each sheet). */
+  sheets: z.array(DocFilePreviewSheet).optional(),
+  truncated: z.boolean(),
+});
+export type DocFilePreviewResponse = z.infer<typeof DocFilePreviewResponse>;
+
+
 

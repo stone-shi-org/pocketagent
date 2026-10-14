@@ -6,6 +6,7 @@ import {
   stripSpokenSummaryInstruction,
   type AgentEvent,
   type ContextCompactionEvent,
+  type DocWorkspace,
   type GeminiLiveSeedTurn,
   type GeminiLiveToolCall,
   type GeminiLiveToolCallResult,
@@ -24,6 +25,7 @@ import type { Db } from '../db/index.js';
 import { readMcpOwnedWork } from '../db/index.js';
 import type { Config } from '../config/index.js';
 import { isContained, type WorkspaceRegistry } from '../workspaces/index.js';
+import type { DocWorkspaceService } from '../doc-workspaces/index.js';
 import type { SessionManager } from '../sessions/manager.js';
 import type { SessionHistoryDeps } from '../sessions/history.js';
 import type { WorktreeService } from '../git/worktree.js';
@@ -228,11 +230,22 @@ const MISSING_TOOL_RESULT_MESSAGE =
 export function basePlannerSystemPrompt(
   workspacePath: string,
   host: { playwrightCli?: boolean; libreoffice?: boolean } = {},
+  docWorkspace?: DocWorkspace | null,
 ): string {
   return [
     "You are a Pocket Agent: an assistant running inside PocketAgent on the user's own machine, with " +
       'tools to read and change files, run commands, and start or instruct coding-agent sessions. ' +
       `Your own workspace directory is ${workspacePath}.`,
+    ...(docWorkspace
+      ? [
+          `- Attached document workspace: "${docWorkspace.name}" at ${docWorkspace.path}. Your file tools ` +
+            '(read_file, list_dir, grep_files, find_files, write_file, edit_file, mkdir, rmdir, and sheet_* tools) ' +
+            `accept relative paths inside this document workspace as well as absolute paths inside ${docWorkspace.path} ` +
+            `or your own workspace (${workspacePath}). PDF, Word (.docx), Excel (.xlsx), and PowerPoint (.pptx) files ` +
+            'in the document workspace have pre-extracted text: read_file pages through their derived text with location ' +
+            'markers, and grep_files searches across them.',
+        ]
+      : []),
     "- Store files you are asked to create, implementation plans in Markdown, exported documents, or generated " +
       "assets in the 'artifacts' subfolder inside your workspace directory (create it with mkdir if it does not " +
       "exist). Writing or creating files in the 'artifacts' subfolder does not require user confirmation. If a file " +
@@ -382,6 +395,8 @@ export interface PlannerChatServiceOptions {
   customClaudeProviders: CustomClaudeProviderStore;
   workspaces: WorkspaceRegistry;
   plannerWorkspaces: PlannerWorkspaceRegistry;
+  /** PA-142: Document workspaces registry and derived text store. */
+  docWorkspaces?: DocWorkspaceService;
   sessions: SessionManager;
   worktrees: WorktreeService;
   historyDeps: SessionHistoryDeps;
@@ -1199,12 +1214,20 @@ export class PlannerChatService {
    */
   async landAttachments(chatId: string, staging: AttachmentStaging, staged: StagedAttachment[]): Promise<PromptAttachment[]> {
     if (staged.length === 0) return [];
+    let chat: PlannerChat;
     let workspacePath: string;
     try {
-      workspacePath = this.workspacePathFor(this.requireChat(chatId));
+      chat = this.requireChat(chatId);
+      workspacePath = this.workspacePathFor(chat);
     } catch (err) {
       staging.release(staged);
       throw err;
+    }
+    const docWs = chat.docWorkspaceId ? this.opts.docWorkspaces?.get(chat.docWorkspaceId) : null;
+    if (docWs && this.opts.docWorkspaces) {
+      const target = { root: docWs.path, dir: docWs.inboxDir || 'inbox' };
+      const landed = landStagedAttachments(staging, target, staged);
+      return this.opts.docWorkspaces.enrichWorkspaceAttachments(docWs.id, landed);
     }
     const target = plannerLandingTarget(workspacePath);
     const landed = landStagedAttachments(staging, target, staged);
@@ -1224,19 +1247,25 @@ export class PlannerChatService {
   /**
    * PA-137: deletes files this chat landed (and their sidecars) — a message
    * refused after its files landed, or a queued one cancelled. Only ever
-   * under the workspace's `artifacts/uploads/`; see `removeLandedAttachments`.
+   * under the workspace's `artifacts/uploads/` (or attached document workspace
+   * inbox); see `removeLandedAttachments`.
    */
   removeAttachments(chatId: string, attachments: readonly PromptAttachment[]): number {
     if (attachments.length === 0) return 0;
     const chat = this.get(chatId);
     if (!chat) return 0;
-    let workspacePath: string;
-    try {
-      workspacePath = this.workspacePathFor(chat);
-    } catch {
-      return 0;
+    let removed = 0;
+    const docWs = chat.docWorkspaceId ? this.opts.docWorkspaces?.get(chat.docWorkspaceId) : null;
+    if (docWs) {
+      removed += removeLandedAttachments(docWs.path, attachments, [docWs.inboxDir || 'inbox']);
     }
-    return removeLandedAttachments(workspacePath, attachments);
+    try {
+      const workspacePath = this.workspacePathFor(chat);
+      removed += removeLandedAttachments(workspacePath, attachments);
+    } catch {
+      // Ignore missing planner workspace.
+    }
+    return removed;
   }
 
   /**
@@ -1514,6 +1543,7 @@ export class PlannerChatService {
 
   create(input: {
     workspaceId?: string;
+    docWorkspaceId?: string | null;
     title?: string;
     modelId?: string;
     /**
@@ -1542,11 +1572,20 @@ export class PlannerChatService {
     if (!workspace) {
       throw new PlannerChatError('Planner workspace not found.', 'not_found');
     }
+    let docWorkspace: DocWorkspace | null = null;
+    if (input.docWorkspaceId) {
+      docWorkspace = this.opts.docWorkspaces?.get(input.docWorkspaceId) ?? null;
+      if (!docWorkspace) {
+        throw new PlannerChatError('Document workspace not found.', 'not_found');
+      }
+    }
     const now = Date.now();
     const chat: PlannerChat = {
       id: crypto.randomUUID(),
       workspaceId: workspace.id,
       workspaceName: workspace.name,
+      docWorkspaceId: docWorkspace?.id ?? null,
+      docWorkspaceName: docWorkspace?.name ?? null,
       title: input.title ?? null,
       // An explicit request wins, then this agent's own configured default
       // (PA-6 round 4), then the last model used anywhere.
@@ -1586,6 +1625,18 @@ export class PlannerChatService {
   setThinking(id: string, thinkingEnabled: boolean): PlannerChat {
     this.requireChat(id);
     updatePlannerChat(this.opts.db, id, { thinkingEnabled });
+    return this.requireChat(id);
+  }
+
+  setDocWorkspace(id: string, docWorkspaceId: string | null): PlannerChat {
+    this.requireChat(id);
+    if (docWorkspaceId !== null) {
+      const docWs = this.opts.docWorkspaces?.get(docWorkspaceId) ?? null;
+      if (!docWs) {
+        throw new PlannerChatError('Document workspace not found.', 'not_found');
+      }
+    }
+    updatePlannerChat(this.opts.db, id, { docWorkspaceId });
     return this.requireChat(id);
   }
 
@@ -1799,7 +1850,9 @@ export class PlannerChatService {
     // `tools` JSON-schema param) but is exactly the kind of "what's in
     // context" a human asking this question wants to see.
     const workspace = chat.workspaceId ? this.opts.plannerWorkspaces.get(chat.workspaceId) : undefined;
-    const base = basePlannerSystemPrompt(workspacePath, hostBrowserTools());
+    const docWorkspace = chat.docWorkspaceId ? this.opts.docWorkspaces?.get(chat.docWorkspaceId) ?? null : null;
+    const brief = docWorkspace ? this.opts.docWorkspaces?.readBriefForPrompt(docWorkspace.id) ?? null : null;
+    const base = basePlannerSystemPrompt(workspacePath, hostBrowserTools(), docWorkspace);
     const systemPrompt: PlannerSystemPromptSection[] = [
       // PA-121: sent first on every turn — see `basePlannerSystemPrompt`.
       { id: 'base', label: 'Pocket Agent basics', text: base, tokens: estimateTokens(base) },
@@ -1809,6 +1862,16 @@ export class PlannerChatService {
         text: s.text,
         tokens: estimateTokens(s.text),
       })),
+      ...(brief && docWorkspace
+        ? [
+            {
+              id: 'workspaceBrief',
+              label: `Workspace brief (${docWorkspace.name} / WORKSPACE.md)`,
+              text: brief.content,
+              tokens: estimateTokens(brief.content),
+            },
+          ]
+        : []),
     ];
     const enabledTools = this.toolsFor(chat.workspaceId);
     if (enabledTools.length > 0) {
@@ -2507,8 +2570,16 @@ export class PlannerChatService {
     // model marked as reading them (unless its endpoint refused one earlier
     // in this turn). One inliner per round trip, so what it had to drop to
     // fit stays dropped across the rebuilds below.
+    const docWs = chat.docWorkspaceId ? this.opts.docWorkspaces?.get(chat.docWorkspaceId) ?? null : null;
     const inliner = new AttachmentInliner({
       root: workspacePath,
+      docWorkspaceRoot: docWs?.path ?? null,
+      ...(docWs && this.opts.docWorkspaces
+        ? {
+            readExtractedText: (relPath: string, maxBytes: number) =>
+              this.opts.docWorkspaces!.readDerivedTextForInliner(docWs.id, relPath, maxBytes),
+          }
+        : {}),
       caps: inlineCaps(settings),
       supportsPdf: modelRow?.supportsPdf === true && !this.pdfPartsRefused.has(chat.id),
     });
@@ -3044,11 +3115,46 @@ export class PlannerChatService {
    * and generated outputs without interrupting the user.
    */
   private isArtifactsOperation(chat: PlannerChat, toolName: string, args: Record<string, unknown>): boolean {
-    if (toolName !== 'mkdir' && toolName !== 'write_file' && toolName !== 'edit_file') {
+    if (
+      toolName !== 'mkdir' &&
+      toolName !== 'rmdir' &&
+      toolName !== 'write_file' &&
+      toolName !== 'edit_file' &&
+      toolName !== 'sheet_edit'
+    ) {
       return false;
     }
     const requestedPath = typeof args.path === 'string' ? args.path.trim() : '';
     if (!requestedPath) return false;
+
+    const docWs = chat.docWorkspaceId ? this.opts.docWorkspaces?.get(chat.docWorkspaceId) ?? null : null;
+    if (docWs && docWs.autoApproveEdits) {
+      const resolveInDocWs = (p: string): string =>
+        path.isAbsolute(p) ? path.resolve(p) : path.resolve(docWs.path, p);
+      if (toolName === 'sheet_edit') {
+        const outRaw = typeof args.outputPath === 'string' && args.outputPath.trim() ? args.outputPath.trim() : requestedPath;
+        const resolvedIn = resolveInDocWs(requestedPath);
+        const resolvedOut = resolveInDocWs(outRaw);
+        if (
+          isContained(docWs.path, resolvedIn) &&
+          isContained(docWs.path, resolvedOut) &&
+          resolvedOut !== docWs.path
+        ) {
+          return true;
+        }
+      } else {
+        const resolvedTarget = resolveInDocWs(requestedPath);
+        if (toolName === 'mkdir') {
+          if (isContained(docWs.path, resolvedTarget)) return true;
+        } else if (isContained(docWs.path, resolvedTarget) && resolvedTarget !== docWs.path) {
+          return true;
+        }
+      }
+    }
+
+    if (toolName !== 'mkdir' && toolName !== 'write_file' && toolName !== 'edit_file') {
+      return false;
+    }
     let workspacePath: string;
     try {
       workspacePath = this.workspacePathFor(chat);
@@ -3190,9 +3296,14 @@ export class PlannerChatService {
     }
 
     const workspace = chat.workspaceId ? this.opts.plannerWorkspaces.get(chat.workspaceId) : undefined;
+    const docWorkspace = chat.docWorkspaceId ? this.opts.docWorkspaces?.get(chat.docWorkspaceId) ?? null : null;
+    const brief = docWorkspace ? this.opts.docWorkspaces?.readBriefForPrompt(docWorkspace.id) ?? null : null;
     const parts: string[] = [LIVE_MODE_SYSTEM_INSTRUCTION];
     const persona = buildPersonaSystemMessage(workspace ?? null, settings);
     if (persona) parts.push(persona);
+    if (brief && docWorkspace) {
+      parts.push(`Workspace brief (${docWorkspace.name} / WORKSPACE.md):\n${brief.content}`);
+    }
     if (this.memoryEnabledFor(chat.workspaceId) && chat.workspaceId) {
       const results = await this.opts.memory.search(chat.workspaceId, lastUserPromptText(events), {
         limit: MEMORY_INJECT_TOP_K,
@@ -3387,9 +3498,13 @@ export class PlannerChatService {
     // `readPlannerSettings` above — a provider toggled or rekeyed in
     // Settings must take effect on the very next tool call.
     const settings = readPlannerSettings(this.opts.db);
+    const docWs = chat.docWorkspaceId ? this.opts.docWorkspaces?.get(chat.docWorkspaceId) ?? null : null;
     return {
       workspaces: this.opts.workspaces,
       plannerWorkspaces: this.opts.plannerWorkspaces,
+      ...(this.opts.docWorkspaces ? { docWorkspaces: this.opts.docWorkspaces } : {}),
+      docWorkspaceId: docWs?.id ?? null,
+      docWorkspacePath: docWs?.path ?? null,
       sessions: this.opts.sessions,
       worktrees: this.opts.worktrees,
       historyDeps: this.opts.historyDeps,
@@ -3960,10 +4075,13 @@ export class PlannerChatService {
    */
   /** PA-122: the part of `buildTurnContext`'s system message that does not
       change between turns — the same builder with no memories, so the two
-      cannot disagree about where the stable part ends. */
+      cannot disagree about where the stable part ends. Includes the attached
+      document workspace's `WORKSPACE.md` brief (PA-142). */
   private stableSystemPrefix(chat: PlannerChat, workspacePath: string, settings: PlannerSettingsSnapshot): string {
     const workspace = chat.workspaceId ? this.opts.plannerWorkspaces.get(chat.workspaceId) : undefined;
-    return buildSystemMessage(workspace ?? null, settings, [], workspacePath);
+    const docWorkspace = chat.docWorkspaceId ? this.opts.docWorkspaces?.get(chat.docWorkspaceId) ?? null : null;
+    const brief = docWorkspace ? this.opts.docWorkspaces?.readBriefForPrompt(docWorkspace.id)?.content ?? null : null;
+    return buildSystemMessage(workspace ?? null, settings, [], workspacePath, docWorkspace, brief);
   }
 
   /** Appends `TOOL_LIMIT_SUMMARY_PROMPT` for the final round at the
@@ -4007,7 +4125,15 @@ export class PlannerChatService {
       }
     }
     const workspace = chat.workspaceId ? this.opts.plannerWorkspaces.get(chat.workspaceId) : undefined;
-    return [{ role: 'system', content: buildSystemMessage(workspace ?? null, settings, memories, workspacePath) }, ...history];
+    const docWorkspace = chat.docWorkspaceId ? this.opts.docWorkspaces?.get(chat.docWorkspaceId) ?? null : null;
+    const brief = docWorkspace ? this.opts.docWorkspaces?.readBriefForPrompt(docWorkspace.id)?.content ?? null : null;
+    return [
+      {
+        role: 'system',
+        content: buildSystemMessage(workspace ?? null, settings, memories, workspacePath, docWorkspace, brief),
+      },
+      ...history,
+    ];
   }
 
   /**
@@ -4648,10 +4774,15 @@ function buildSystemMessage(
   settings: Pick<PlannerSettingsSnapshot, 'meInstruction' | 'toolsInstruction'>,
   memories: readonly PlannerMemory[],
   workspacePath: string,
+  docWorkspace?: DocWorkspace | null,
+  workspaceBrief?: string | null,
 ): string {
-  const parts = [basePlannerSystemPrompt(workspacePath, hostBrowserTools())];
+  const parts = [basePlannerSystemPrompt(workspacePath, hostBrowserTools(), docWorkspace)];
   const persona = buildPersonaSystemMessage(workspace, settings);
   if (persona) parts.push(persona);
+  if (workspaceBrief && docWorkspace) {
+    parts.push(`Workspace brief (${docWorkspace.name} / WORKSPACE.md):\n${workspaceBrief}`);
+  }
   if (memories.length > 0) parts.push(buildMemorySystemMessage(memories));
   return parts.join('\n\n');
 }

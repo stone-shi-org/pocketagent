@@ -201,6 +201,10 @@ const PDF_CACHE_MAX_ENTRIES = 4;
 export interface AttachmentInlinerOptions {
   /** The planner workspace the paths are relative to. */
   root: string;
+  /** Optional attached document workspace root (PA-142). */
+  docWorkspaceRoot?: string | null;
+  /** Optional reader for derived text stored outside the workspace folder (PA-142). */
+  readExtractedText?: (relPath: string, maxBytes: number) => { text: string } | { error: string } | null;
   caps?: InlineCaps;
   /** Send PDFs as `file` parts too (the model row's `supportsPdf`). */
   supportsPdf?: boolean;
@@ -214,6 +218,7 @@ export interface AttachmentInlinerOptions {
 export class AttachmentInliner {
   private readonly caps: InlineCaps;
   private readonly realRoot: string | null;
+  private readonly realDocWorkspaceRoot: string | null;
   private readonly dropped = new Set<string>();
   private rendered: RenderedBlock[] = [];
 
@@ -223,6 +228,15 @@ export class AttachmentInliner {
       this.realRoot = fs.realpathSync(opts.root);
     } catch {
       this.realRoot = null;
+    }
+    if (opts.docWorkspaceRoot) {
+      try {
+        this.realDocWorkspaceRoot = fs.realpathSync(opts.docWorkspaceRoot);
+      } catch {
+        this.realDocWorkspaceRoot = null;
+      }
+    } else {
+      this.realDocWorkspaceRoot = null;
     }
   }
 
@@ -276,7 +290,12 @@ export class AttachmentInliner {
         statuses.push({ state: 'dropped' });
         return;
       }
-      const read = this.readText(source.relPath, source.kind === 'text' ? this.caps.textMaxBytes : this.caps.extractMaxTokens * 4 * 4);
+      const maxBytes = source.kind === 'text' ? this.caps.textMaxBytes : this.caps.extractMaxTokens * 4 * 4;
+      const derivedRead =
+        source.kind === 'extract' && this.opts.readExtractedText
+          ? this.opts.readExtractedText(source.relPath, maxBytes)
+          : null;
+      const read = derivedRead ?? this.readText(source.relPath, maxBytes);
       if ('error' in read) {
         statuses.push({ state: 'unreadable', reason: read.error });
         return;
@@ -369,16 +388,19 @@ export class AttachmentInliner {
   }
 
   private resolve(relPath: string): string | null {
-    if (!this.realRoot) return null;
-    const joined = path.resolve(this.realRoot, ...relPath.split('/'));
-    let real: string;
-    try {
-      real = fs.realpathSync(joined);
-    } catch {
-      return null;
+    for (const root of [this.realRoot, this.realDocWorkspaceRoot]) {
+      if (!root) continue;
+      const joined = path.resolve(root, ...relPath.split('/'));
+      let real: string;
+      try {
+        real = fs.realpathSync(joined);
+      } catch {
+        continue;
+      }
+      // The file itself is opened `O_NOFOLLOW`; this catches a symlinked directory on the way.
+      if (isContained(root, real) && real === joined) return real;
     }
-    // The file itself is opened `O_NOFOLLOW`; this catches a symlinked directory on the way.
-    return isContained(this.realRoot, real) && real === joined ? real : null;
+    return null;
   }
 }
 

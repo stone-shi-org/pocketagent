@@ -70,6 +70,7 @@ import { voiceRoutes } from './routes/voice.js';
 import { worktreeRoutes } from './routes/worktrees.js';
 import { webhookRoutes } from './routes/webhooks.js';
 import { plannerRoutes } from './routes/planner.js';
+import { docWorkspaceRoutes } from './routes/doc-workspaces.js';
 import { mcpRegistryRoutes } from './routes/mcp-registries.js';
 import { telegramRoutes } from './routes/telegram.js';
 import { capabilitiesRoutes } from './routes/capabilities.js';
@@ -84,6 +85,7 @@ import { WebhookService } from './webhooks/index.js';
 import { PlannerWorkspaceRegistry } from './planner/workspaces.js';
 import { createPlannerWorkspaceStore, readPlannerSettings, revealPlannerEmbeddingApiKey } from './planner/store.js';
 import { PlannerChatService } from './planner/chats.js';
+import { DocWorkspaceService } from './doc-workspaces/index.js';
 import type { HealthResponse, QueuedRunSummary } from '@pocketagent/protocol';
 import { PlannerMemoryService, type PlannerMemoryEmbedConfig } from './planner/memory.js';
 import { SkillRegistryService, resolvePlannerSkillsRoot, seedDefaultSkills } from './planner/skills.js';
@@ -96,7 +98,7 @@ import { AttachmentStaging } from './attachments/index.js';
 import { AttachmentRetentionService } from './attachments/retention.js';
 import { attachmentRoutes } from './routes/attachments.js';
 import { VERSION, VERSION_WARNING } from './version.js';
-import { APP_CSP, ARTIFACT_CSP } from './security-headers.js';
+import { APP_CSP, ARTIFACT_CSP, PDF_PREVIEW_CSP } from './security-headers.js';
 
 /**
  * Re-exported so `server.ts` and every existing importer keep their one import
@@ -198,6 +200,10 @@ export interface BuildAppOptions {
   /** PA-136: same reasoning again — uploads stage under `<dataDir>/attachment-staging`
       by default, which for a test is the real checkout's data directory. */
   attachmentStagingDir?: string;
+  /** PA-142: isolated directory for derived document text in tests. */
+  docWorkspacesRoot?: string;
+  /** PA-142: disable background fs.watch/sweep in tests unless requested. */
+  enableDocWorkspaceWatchers?: boolean;
   /** PA-137: tests drive the retention sweep by hand. */
   disableAttachmentRetention?: boolean;
   /** PA-137: tests shorten the Telegram album window. */
@@ -541,6 +547,19 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     ...(options.geminiFetch ? { fetchImpl: options.geminiFetch } : {}),
   });
 
+  const docWorkspacesRoot =
+    options.docWorkspacesRoot ??
+    (options.plannerWorkspacesRoot
+      ? path.join(path.dirname(options.plannerWorkspacesRoot), 'doc-workspaces')
+      : path.join(config.dataDir, 'doc-workspaces'));
+  const docWorkspaces = new DocWorkspaceService({
+    db,
+    dataDir: config.dataDir,
+    derivedRootDir: docWorkspacesRoot,
+    logger: app.log,
+    enableWatchers: options.enableDocWorkspaceWatchers ?? true,
+  });
+
   const plannerChats = new PlannerChatService({
     db,
     // PA-56: `read_settings`/`update_settings`/`update_custom_claude_provider`
@@ -552,6 +571,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     customClaudeProviders,
     workspaces,
     plannerWorkspaces,
+    docWorkspaces,
     sessions,
     worktrees,
     historyDeps: { sessions, conversations, agyTranscripts, piTranscripts },
@@ -773,6 +793,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     workspaces,
     plannerWorkspaces,
     plannerWorkspacesRoot,
+    docWorkspaces,
     plannerChats,
     plannerMemory,
     mcpRegistry,
@@ -870,12 +891,16 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // ---- Security headers -----------------------------------------------------
   app.addHook('onSend', async (_request, reply, payload) => {
     reply.header('X-Content-Type-Options', 'nosniff');
-    reply.header('X-Frame-Options', 'DENY');
+    if (reply.getHeader('X-Frame-Options') !== 'SAMEORIGIN') {
+      reply.header('X-Frame-Options', 'DENY');
+    }
     reply.header('Referrer-Policy', 'no-referrer');
-    // An inline artifact carries its own sandboxed policy (`ARTIFACT_CSP`);
+    // An inline artifact carries its own sandboxed policy (`ARTIFACT_CSP`),
+    // and an inline workspace PDF preview carries `PDF_PREVIEW_CSP`;
     // anything else gets the app's. Matched on the exact value, so no route
     // can loosen the app policy by setting a header of its own.
-    if (reply.getHeader('Content-Security-Policy') !== ARTIFACT_CSP) {
+    const existingCsp = reply.getHeader('Content-Security-Policy');
+    if (existingCsp !== ARTIFACT_CSP && existingCsp !== PDF_PREVIEW_CSP) {
       reply.header('Content-Security-Policy', APP_CSP);
     }
     return payload;
@@ -1024,6 +1049,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   await app.register(customClaudeProviderRoutes);
   await app.register(webhookRoutes);
   await app.register(plannerRoutes);
+  await app.register(docWorkspaceRoutes);
   await app.register(mcpRegistryRoutes);
   await app.register(telegramRoutes);
   await app.register(settingsRoutes);
@@ -1087,6 +1113,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   });
 
   app.addHook('onClose', async () => {
+    docWorkspaces.close();
     usage.stop();
     attachmentStaging.stop();
     attachmentRetention.stop();

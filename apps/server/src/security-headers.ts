@@ -51,3 +51,18 @@ export const ARTIFACT_CSP = [
   "base-uri 'none'",
   "form-action 'none'",
 ].join('; ');
+
+/**
+ * PA-142: Inline PDF preview in the Workspace panel's native `<iframe>`.
+ * Allows framing by `'self'` only while keeping scripts, network, and forms shut.
+ */
+export const PDF_PREVIEW_CSP = [
+  "default-src 'none'",
+  "style-src 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "object-src 'self' blob:",
+  "frame-ancestors 'self'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join('; ');
+

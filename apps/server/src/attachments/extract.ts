@@ -141,7 +141,7 @@ export function isUtf8Text(bytes: Buffer, partial = false): boolean {
   }
 }
 
-function readHead(absPath: string, bytes = TEXT_SNIFF_BYTES): Buffer {
+export function readHead(absPath: string, bytes = TEXT_SNIFF_BYTES): Buffer {
   const fd = fs.openSync(absPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const buf = Buffer.alloc(bytes);

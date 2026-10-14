@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   PROTOCOL_VERSION,
   negotiateProtocol,
+  type DocWorkspace,
   type HostInfo,
   type PlannerChat,
   type PlannerWorkspace,
@@ -57,6 +58,7 @@ export interface HostSlice {
   error: string | null;
   plannerWorkspaces: PlannerWorkspace[] | null;
   plannerChats: PlannerChat[];
+  docWorkspaces: DocWorkspace[];
 }
 
 const EMPTY_SLICE: HostSlice = {
@@ -67,6 +69,7 @@ const EMPTY_SLICE: HostSlice = {
   error: null,
   plannerWorkspaces: null,
   plannerChats: [],
+  docWorkspaces: [],
 };
 
 export interface UseHostFleetOptions {
@@ -145,6 +148,7 @@ export function useHostFleet({
             error: null,
             plannerWorkspaces: planner.workspaces,
             plannerChats: planner.chats,
+            docWorkspaces: planner.docWorkspaces,
           },
         }));
       } catch (err) {
@@ -265,6 +269,7 @@ export function useHostFleet({
       out[hostId] = {
         workspaces: slice.plannerWorkspaces,
         chats: slice.plannerChats,
+        docWorkspaces: slice.docWorkspaces,
         refresh: () => refreshHost(hostId),
       };
     }
@@ -300,7 +305,7 @@ export function useHostFleet({
 
   const plannerFor = useCallback(
     (hostId: string): PlannerChatsState =>
-      planners[hostId] ?? { workspaces: null, chats: [], refresh: () => Promise.resolve() },
+      planners[hostId] ?? { workspaces: null, chats: [], docWorkspaces: [], refresh: () => Promise.resolve() },
     [planners],
   );
 

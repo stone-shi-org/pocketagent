@@ -921,6 +921,7 @@ export function DesktopShell({
                   <PocketAgentsSection
                     workspaces={planner.workspaces}
                     chats={planner.chats}
+                    docWorkspaces={planner.docWorkspaces}
                     refresh={planner.refresh}
                     // PA-36: a Pocket Agent chat row has no click/double-click
                     // distinction of its own today (unlike `ProjectList`'s chat

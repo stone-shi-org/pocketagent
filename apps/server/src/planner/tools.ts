@@ -64,6 +64,7 @@ import {
   type SheetRunnerLimits,
 } from '../sheets/runner.js';
 import type { SheetCellEditInput, SheetDiffPayload } from '../sheets/sheet-worker.js';
+import { isIgnoredEntryName, type DocWorkspaceService } from '../doc-workspaces/index.js';
 
 /**
  * PA-6: the planner's tool catalog.
@@ -275,6 +276,10 @@ export interface PlannerToolDeps {
   telegram: PlannerTelegramDeps;
   /** PA-140: optional resource/binary overrides for spreadsheet tool workers in tests. */
   sheetLimits?: SheetRunnerLimits;
+  /** PA-142: document workspaces service and the calling chat's attached document workspace. */
+  docWorkspaces?: DocWorkspaceService;
+  docWorkspaceId?: string | null;
+  docWorkspacePath?: string | null;
 }
 
 /** See `PlannerToolDeps.telegram`'s own doc comment. */
@@ -748,28 +753,75 @@ async function sessionLastResultSummary(deps: PlannerToolDeps, sessionId: string
   return lastMessageSummary(events);
 }
 
+function isWithinAttachedDocWorkspace(deps: PlannerToolDeps, real: string): boolean {
+  if (deps.docWorkspacePath) {
+    if (isContained(deps.docWorkspacePath, real)) return true;
+  }
+  if (deps.docWorkspaces && deps.docWorkspaceId) {
+    return deps.docWorkspaces.findContainingWorkspace(real, deps.docWorkspaceId) !== null;
+  }
+  return false;
+}
+
 function isWithinTrustedRoot(deps: PlannerToolDeps, real: string): boolean {
-  return deps.workspaces.getRoots().some((root) => isContained(root, real)) || deps.plannerWorkspaces.contains(real);
+  return (
+    deps.workspaces.getRoots().some((root) => isContained(root, real)) ||
+    deps.plannerWorkspaces.contains(real) ||
+    isWithinAttachedDocWorkspace(deps, real)
+  );
+}
+
+function isPlannerIdentityRelativePath(requested: string): boolean {
+  const norm = requested.trim().replace(/\\/g, '/').replace(/^\.\//, '');
+  return (
+    norm === 'IDENTITY.md' ||
+    norm === 'MEMORY.md' ||
+    norm === 'skills' ||
+    norm.startsWith('skills/') ||
+    norm === 'artifacts' ||
+    norm.startsWith('artifacts/')
+  );
+}
+
+function resolveRelativeBaseForWrite(deps: PlannerToolDeps, requested: string): string {
+  if (deps.docWorkspacePath && !isPlannerIdentityRelativePath(requested)) {
+    return deps.docWorkspacePath;
+  }
+  return deps.workspacePath ?? process.cwd();
 }
 
 /**
  * Resolves a path that must already exist against either boundary this
- * server already trusts: an added project workspace (`WorkspaceRegistry`) or
- * a planner workspace (`PlannerWorkspaceRegistry`). Realpath first, then
- * check containment with the shared `isContained` primitive — never a
- * string-prefix check, and deliberately **not**
- * `WorkspaceRegistry.resolveWorkspacePath`, which requires its target to be a
- * *directory* (it exists to validate a session's cwd); a file needs the same
- * containment check applied to something `resolveWorkspacePath` would itself
- * reject.
+ * server already trusts: an added project workspace (`WorkspaceRegistry`),
+ * a planner workspace (`PlannerWorkspaceRegistry`), or the calling chat's
+ * attached document workspace (`DocWorkspaceService`, PA-142). Realpath first,
+ * then check containment with the shared `isContained` primitive.
  */
 async function resolveExistingPathWithin(deps: PlannerToolDeps, requested: string): Promise<string> {
-  const base = deps.workspacePath ?? process.cwd();
-  const absolute = path.isAbsolute(requested) ? path.resolve(requested) : path.resolve(base, requested);
-  let real: string;
-  try {
-    real = await fs.realpath(absolute);
-  } catch {
+  const plannerBase = deps.workspacePath ?? process.cwd();
+  const candidates: string[] = [];
+  if (path.isAbsolute(requested)) {
+    candidates.push(path.resolve(requested));
+  } else if (deps.docWorkspacePath) {
+    if (isPlannerIdentityRelativePath(requested)) {
+      candidates.push(path.resolve(plannerBase, requested), path.resolve(deps.docWorkspacePath, requested));
+    } else {
+      candidates.push(path.resolve(deps.docWorkspacePath, requested), path.resolve(plannerBase, requested));
+    }
+  } else {
+    candidates.push(path.resolve(plannerBase, requested));
+  }
+
+  let real: string | null = null;
+  for (const candidate of candidates) {
+    try {
+      real = await fs.realpath(candidate);
+      break;
+    } catch {
+      // Try next candidate base.
+    }
+  }
+  if (real === null) {
     throw new Error(`Cannot resolve path: ${requested}`);
   }
   if (!isWithinTrustedRoot(deps, real)) {
@@ -780,14 +832,15 @@ async function resolveExistingPathWithin(deps: PlannerToolDeps, requested: strin
 
 /**
  * PA-95: Resolves a cwd for shell command execution (`bash`/`exec_command`).
- * When omitted or empty, defaults to the chat's active workspace (`deps.workspacePath`),
- * the calling workspace (`deps.workspaceId`), the default planner workspace, or the first
- * project workspace root. When provided, enforces the containment check via
- * `resolveExistingPathWithin`.
+ * When omitted or empty, defaults to the chat's attached document workspace (`deps.docWorkspacePath`),
+ * active planner workspace (`deps.workspacePath`), the calling workspace (`deps.workspaceId`),
+ * the default planner workspace, or the first project workspace root. When provided, enforces
+ * the containment check via `resolveExistingPathWithin`.
  */
 async function resolveExecutionCwd(deps: PlannerToolDeps, requestedCwd?: string): Promise<string> {
   const trimmed = requestedCwd ? String(requestedCwd).trim() : '';
   if (!trimmed) {
+    if (deps.docWorkspacePath) return deps.docWorkspacePath;
     if (deps.workspacePath) return deps.workspacePath;
     if (deps.workspaceId) {
       const ws = deps.plannerWorkspaces.get(deps.workspaceId);
@@ -806,13 +859,10 @@ async function resolveExecutionCwd(deps: PlannerToolDeps, requestedCwd?: string)
  * Resolves a path that may not exist yet (for a file/directory about to be
  * created), by walking up to the nearest ancestor that *does* exist,
  * containment-checking that ancestor's realpath, and rebuilding the full
- * target from it. The rebuilt suffix cannot itself be a symlink — none of it
- * exists yet — so checking only the existing ancestor is sound, the same
- * reasoning `WorktreeService.create()` relies on for a freshly-minted
- * worktree path.
+ * target from it.
  */
 async function resolveCreatablePath(deps: PlannerToolDeps, requested: string): Promise<string> {
-  const base = deps.workspacePath ?? process.cwd();
+  const base = resolveRelativeBaseForWrite(deps, requested);
   const absolute = path.isAbsolute(requested) ? path.resolve(requested) : path.resolve(base, requested);
   let probe = absolute;
   let real: string | null = null;
@@ -1083,6 +1133,20 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       }
       const imageType = sniffImageType(head.subarray(0, headBytes));
       if (imageType) return readImageFile(requested, real, stat.size, imageType);
+      // PA-142: When reading a supported document (PDF, docx, xlsx, pptx) inside a
+      // document workspace, serve its derived text (checked for freshness on access)
+      // paged like a text file, with location markers and sheet_read guidance.
+      if (deps.docWorkspaces) {
+        const docResult = await deps.docWorkspaces.readDocumentForTool(
+          real,
+          {
+            offset: typeof args.offset === 'number' ? args.offset : undefined,
+            limit: typeof args.limit === 'number' ? args.limit : undefined,
+          },
+          deps.docWorkspaceId,
+        );
+        if (docResult !== null) return docResult;
+      }
       if (stat.size > MAX_READ_FILE_TOTAL_BYTES) {
         return {
           content:
@@ -1135,8 +1199,8 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     name: 'grep_files',
     description:
       'Search file contents for a pattern under a directory. Uses ripgrep when it is installed (regex syntax, ' +
-      'skips files listed in .gitignore and binary files), otherwise grep -r. The directory must be inside an ' +
-      'added project workspace or a planner workspace.',
+      'skips files listed in .gitignore and binary files), otherwise grep -r. In a document workspace, also ' +
+      'searches derived text of PDF, docx, xlsx, and pptx files with page/slide/sheet locations.',
     parameters: {
       type: 'object',
       properties: {
@@ -1211,10 +1275,49 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       if (result.code !== null && result.code > 1) {
         return `${name} failed: ${truncate(result.stderr || result.stdout, 500)}`;
       }
-      const lines = result.stdout.split('\n').filter((l) => l.length > 0);
-      if (lines.length === 0) return 'No matches found.';
       const rawLimit = typeof args.maxResults === 'number' ? Math.round(args.maxResults) : 100;
       const limit = Math.min(MAX_SEARCH_RESULTS, Math.max(1, rawLimit));
+      let lines = result.stdout.split('\n').filter((l) => l.length > 0);
+
+      // PA-142: When searching inside a document workspace, filter out ignored lock/swap
+      // files and also search the derived text of PDF, docx, xlsx, and pptx documents.
+      if (deps.docWorkspaces && deps.docWorkspaces.findContainingWorkspace(real, deps.docWorkspaceId)) {
+        lines = lines.filter((line) => {
+          const colonIdx = line.indexOf(':');
+          if (colonIdx <= 0) return true;
+          const filePart = line.slice(0, colonIdx).replace(/^\.\//, '');
+          const parts = filePart.split('/');
+          return !parts.some((p) => isIgnoredEntryName(p));
+        });
+        try {
+          const flags = args.caseInsensitive === true ? 'i' : '';
+          const escaped =
+            args.literal === true ? pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : pattern;
+          const searchRegex = new RegExp(escaped, flags);
+          const globMatcher = glob
+            ? (() => {
+                const globSource = glob
+                  .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+                  .replace(/\*/g, '.*')
+                  .replace(/\?/g, '.');
+                const re = new RegExp(`^${globSource}$`, 'i');
+                return (fileName: string) => re.test(fileName);
+              })()
+            : null;
+          const derivedHits = await deps.docWorkspaces.grepDerivedFiles(
+            real,
+            searchRegex,
+            globMatcher,
+            MAX_SEARCH_RESULTS,
+            deps.docWorkspaceId,
+          );
+          lines.push(...derivedHits);
+        } catch {
+          // Invalid regex in derived search is already reported or ignored.
+        }
+      }
+
+      if (lines.length === 0) return 'No matches found.';
       let cutLines = false;
       const shown = lines.slice(0, limit).map((l) => {
         if (l.length <= MAX_GREP_LINE_CHARS) return l;
@@ -1275,10 +1378,19 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       const name = fd ? 'fd' : 'find';
       if (result.timedOut) return `${name} timed out after ${SEARCH_TIMEOUT_MS / 1000}s. Narrow path or pattern.`;
       if (result.code !== 0) return `${name} failed: ${truncate(result.stderr || result.stdout, 500)}`;
+      const inDocWorkspace = Boolean(
+        deps.docWorkspaces && deps.docWorkspaces.findContainingWorkspace(real, deps.docWorkspaceId),
+      );
       const lines = result.stdout
         .split('\n')
         .filter((l) => l.length > 0)
-        .map((l) => path.join(real, l.replace(/^\.\//, '').replace(/^\.$/, '')));
+        .map((l) => path.join(real, l.replace(/^\.\//, '').replace(/^\.$/, '')))
+        .filter((fullPath) => {
+          if (!inDocWorkspace || !deps.docWorkspaces) return true;
+          const relParts = path.relative(real, fullPath).split(path.sep).filter(Boolean);
+          if (relParts.some((p) => isIgnoredEntryName(p))) return false;
+          return !deps.docWorkspaces.isIgnoredInWorkspace(fullPath, deps.docWorkspaceId);
+        });
       if (lines.length === 0) return 'No files found.';
       const rawLimit = typeof args.maxResults === 'number' ? Math.round(args.maxResults) : 200;
       const limit = Math.min(MAX_SEARCH_RESULTS, Math.max(1, rawLimit));
@@ -1313,7 +1425,17 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       }
       const stat = await fs.stat(real);
       if (!stat.isDirectory()) return { content: `${requested} is not a directory.`, isError: true };
-      const entries = await fs.readdir(real, { withFileTypes: true });
+      const rawEntries = await fs.readdir(real, { withFileTypes: true });
+      const inDocWorkspace = Boolean(
+        deps.docWorkspaces && deps.docWorkspaces.findContainingWorkspace(real, deps.docWorkspaceId),
+      );
+      const entries = inDocWorkspace
+        ? rawEntries.filter(
+            (e) =>
+              !isIgnoredEntryName(e.name) &&
+              !deps.docWorkspaces?.isIgnoredInWorkspace(path.join(real, e.name), deps.docWorkspaceId),
+          )
+        : rawEntries;
       if (entries.length === 0) return '(empty directory)';
       const names = entries
         .map((e) => (e.isDirectory() ? `${e.name}/` : e.isSymbolicLink() ? `${e.name}@` : e.name))
@@ -1905,7 +2027,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
           isError: true,
         };
       }
-      const base = deps.workspacePath ?? process.cwd();
+      const base = resolveRelativeBaseForWrite(deps, requested);
       const absolute = path.isAbsolute(requested) ? path.resolve(requested) : path.resolve(base, requested);
       const parent = path.dirname(absolute);
       let realParent: string;
@@ -1922,6 +2044,12 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         const existing = await fs.stat(target).catch(() => null);
         if (existing?.isDirectory()) return { content: `${requested} is a directory, not a file.`, isError: true };
         await fs.writeFile(target, content, 'utf8');
+        if (deps.docWorkspaces) {
+          const match = deps.docWorkspaces.findContainingWorkspace(target, deps.docWorkspaceId);
+          if (match && match.relPath) {
+            await deps.docWorkspaces.ensureFileFresh(match.workspace.id, match.relPath);
+          }
+        }
         return `Wrote ${content.length} characters to ${requested}.`;
       } catch (err) {
         return { content: `Could not write ${requested}: ${(err as Error).message}`, isError: true };
@@ -1985,6 +2113,12 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       if (!outcome.ok) return { content: outcome.message, isError: true };
       try {
         await fs.writeFile(real, outcome.content, 'utf8');
+        if (deps.docWorkspaces) {
+          const match = deps.docWorkspaces.findContainingWorkspace(real, deps.docWorkspaceId);
+          if (match && match.relPath) {
+            await deps.docWorkspaces.ensureFileFresh(match.workspace.id, match.relPath);
+          }
+        }
       } catch (err) {
         return { content: `Could not write ${requested}: ${(err as Error).message}`, isError: true };
       }
@@ -2240,6 +2374,12 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         deps.sheetLimits,
       );
       if (!res.ok) return { content: res.error, isError: true };
+      if (deps.docWorkspaces) {
+        const match = deps.docWorkspaces.findContainingWorkspace(targetOutputPath, deps.docWorkspaceId);
+        if (match && match.relPath) {
+          await deps.docWorkspaces.ensureFileFresh(match.workspace.id, match.relPath);
+        }
+      }
       return res.text;
     },
   },

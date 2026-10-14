@@ -1,4 +1,4 @@
-import type { PlannerChat, PlannerWorkspace } from '@pocketagent/protocol';
+import type { DocWorkspace, PlannerChat, PlannerWorkspace } from '@pocketagent/protocol';
 import type { ApiClient } from '../api/client.js';
 
 /**
@@ -20,6 +20,8 @@ export interface PlannerChatsState {
   /** `null` while the first load for this host is still in flight. */
   workspaces: PlannerWorkspace[] | null;
   chats: PlannerChat[];
+  /** PA-142: host-folder document workspaces on this host. */
+  docWorkspaces: DocWorkspace[];
   /** Re-fetches both lists — called after every mutation the section makes. */
   refresh: () => Promise<void>;
 }
@@ -27,12 +29,21 @@ export interface PlannerChatsState {
 export interface PlannerChatsData {
   workspaces: PlannerWorkspace[];
   chats: PlannerChat[];
+  docWorkspaces: DocWorkspace[];
 }
 
 export async function fetchPlannerChats(client: ApiClient): Promise<PlannerChatsData> {
-  const [workspaces, chats] = await Promise.all([
+  const [workspaces, chats, docWorkspaces] = await Promise.all([
     client.listPlannerWorkspaces(),
     client.listPlannerChats(),
+    typeof client.listDocWorkspaces === 'function'
+      ? client.listDocWorkspaces().catch(() => ({ workspaces: [] }))
+      : Promise.resolve({ workspaces: [] }),
   ]);
-  return { workspaces: workspaces.workspaces, chats: chats.chats };
+  return {
+    workspaces: workspaces.workspaces,
+    chats: chats.chats,
+    docWorkspaces: docWorkspaces.workspaces,
+  };
 }
+

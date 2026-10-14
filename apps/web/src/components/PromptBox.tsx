@@ -261,6 +261,11 @@ interface Props {
    * When provided, previous commands are loaded from and saved to localStorage.
    */
   historyKey?: string;
+  /**
+   * PA-142: relative file paths in the attached document workspace for `@path`
+   * mention autocomplete in the composer.
+   */
+  workspaceFiles?: readonly string[];
   /** @internal Test-only initial voice recording state (PA-138). */
   initialVoiceRecording?: boolean;
   /** @internal Test-only initial voice RMS level (PA-138). */
@@ -298,6 +303,35 @@ export function filterSlashCommands(
       (c) => c.name.toLowerCase().startsWith(needle) || c.aliases.some((a) => a.toLowerCase().startsWith(needle)),
     )
     .slice(0, max);
+}
+
+const MENTION_TRIGGER = /(?:^|\s)@([^\s@]*)$/;
+
+/** PA-142: trailing `@<fragment>` in the composer, or `null` when not mentioning a file. */
+export function mentionFragment(text: string): string | null {
+  return MENTION_TRIGGER.exec(text)?.[1] ?? null;
+}
+
+/** PA-142: matches workspace file paths against `@<fragment>`. */
+export function filterWorkspaceFiles(
+  files: readonly string[],
+  fragment: string,
+  max = MAX_PICKER_RESULTS,
+): string[] {
+  const needle = fragment.toLowerCase();
+  if (!needle) return files.slice(0, max);
+  const starts: string[] = [];
+  const contains: string[] = [];
+  for (const file of files) {
+    const lower = file.toLowerCase();
+    const base = lower.slice(lower.lastIndexOf('/') + 1);
+    if (lower.startsWith(needle) || base.startsWith(needle)) {
+      starts.push(file);
+    } else if (lower.includes(needle)) {
+      contains.push(file);
+    }
+  }
+  return [...starts, ...contains].slice(0, max);
 }
 
 /**
@@ -338,6 +372,7 @@ export function PromptBox({
   queueWhileBusy = false,
   onInterrupt,
   historyKey,
+  workspaceFiles = [],
   initialVoiceRecording = false,
   initialVoiceLevel = 0,
   initialTranscribing = false,
@@ -509,11 +544,19 @@ export function PromptBox({
   );
   const pickerOpen = !dismissed && filtered.length > 0;
 
+  const mFrag = mentionFragment(text);
+  const filteredMentions = useMemo(
+    () => (mFrag === null || workspaceFiles.length === 0 ? [] : filterWorkspaceFiles(workspaceFiles, mFrag)),
+    [workspaceFiles, mFrag],
+  );
+  const mentionOpen = !dismissed && !pickerOpen && filteredMentions.length > 0;
+  const activePickerLen = pickerOpen ? filtered.length : mentionOpen ? filteredMentions.length : 0;
+
   // Re-clamp rather than reset to 0 on every keystroke — arrow-key selection
   // survives the list narrowing as long as the index is still in range.
   useEffect(() => {
-    setSelected((prev) => Math.min(prev, Math.max(filtered.length - 1, 0)));
-  }, [filtered.length]);
+    setSelected((prev) => Math.min(prev, Math.max(activePickerLen - 1, 0)));
+  }, [activePickerLen]);
 
   // `block: 'nearest'` scrolls the minimum amount needed to bring the row
   // fully into `.slash-picker`'s own scroll area — never yanks the whole
@@ -792,6 +835,12 @@ export function PromptBox({
     ref.current?.focus();
   }
 
+  function pickMention(filePath: string): void {
+    setText((prev) => prev.replace(/(^|\s)@[^\s@]*$/, `$1@${filePath} `));
+    setDismissed(false);
+    ref.current?.focus();
+  }
+
   function pickModel(model: ModelInfo): void {
     onSetModel?.(model.value);
     setModelPickerOpen(false);
@@ -813,7 +862,7 @@ export function PromptBox({
   const effortLevels = currentModelInfo?.supportsEffort ? currentModelInfo.supportedEffortLevels : [];
   // The slash picker is text-triggered and spans the full width; showing both
   // at once would overlap it, so a `/` in progress wins.
-  const modelPickerVisible = modelPickerOpen && !pickerOpen && models.length > 0;
+  const modelPickerVisible = modelPickerOpen && !pickerOpen && !mentionOpen && models.length > 0;
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
     // Guard against IME composition: Enter/Tab during IME conversion must not
@@ -837,6 +886,28 @@ export function PromptBox({
         event.preventDefault();
         const chosen = filtered[selected] ?? filtered[0];
         if (chosen) pick(chosen);
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setDismissed(true);
+        return;
+      }
+    } else if (mentionOpen) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setSelected((i) => (i + 1) % filteredMentions.length);
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setSelected((i) => (i - 1 + filteredMentions.length) % filteredMentions.length);
+        return;
+      }
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        event.preventDefault();
+        const chosen = filteredMentions[selected] ?? filteredMentions[0];
+        if (chosen) pickMention(chosen);
         return;
       }
       if (event.key === 'Escape') {
@@ -1033,7 +1104,29 @@ export function PromptBox({
           ))}
         </div>
       )}
-      {!pickerOpen && !isVoiceRecording && (hasAttachment || attachError || voiceError || liveListenError) && (
+      {mentionOpen && (
+        <div className="slash-picker mention-picker" role="listbox" aria-label="Workspace files">
+          {filteredMentions.map((filePath, index) => (
+            <button
+              key={filePath}
+              ref={(el) => {
+                itemRefs.current[index] = el;
+              }}
+              type="button"
+              role="option"
+              aria-selected={index === selected}
+              className={index === selected ? 'active' : ''}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                pickMention(filePath);
+              }}
+            >
+              <span className="cmd-name">@{filePath}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {!pickerOpen && !mentionOpen && !isVoiceRecording && (hasAttachment || attachError || voiceError || liveListenError) && (
         // One stack above the bar, so file chips and an image preview (or an
         // error) sit one above the other instead of on top of each other.
         <div className="attach-stack">

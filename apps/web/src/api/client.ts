@@ -133,6 +133,15 @@ import type {
   VoiceTestTtsRequest,
   VoiceTestTtsResponse,
   VoiceModelListResponse,
+  DocWorkspace,
+  DocWorkspaceListResponse,
+  CreateDocWorkspaceRequest,
+  UpdateDocWorkspaceRequest,
+  DocFileEntry,
+  DocWorkspaceFilesResponse,
+  DocFileMkdirRequest,
+  DocFileRenameRequest,
+  DocFilePreviewResponse,
 } from '@pocketagent/protocol';
 import { DEFAULT_HOST, hostUrl, type HostEndpoint } from './host.js';
 
@@ -1350,6 +1359,96 @@ export function createApiClient(endpoint: HostEndpoint) {
       hostUrl(
         endpoint,
         `/api/planner/chats/${encodeURIComponent(chatId)}/artifacts/file?name=${encodeURIComponent(name)}${download ? '&download=1' : ''}`,
+      ),
+
+    // ---- Document Workspaces (PA-142) ---------------------------------------
+
+    listDocWorkspaces: () =>
+      request<DocWorkspaceListResponse>('/api/doc-workspaces'),
+
+    getDocWorkspace: (id: string) =>
+      request<DocWorkspace>(`/api/doc-workspaces/${encodeURIComponent(id)}`),
+
+    createDocWorkspace: (body: CreateDocWorkspaceRequest) =>
+      request<DocWorkspace>('/api/doc-workspaces', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+
+    updateDocWorkspace: (id: string, patch: UpdateDocWorkspaceRequest) =>
+      request<DocWorkspace>(`/api/doc-workspaces/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+
+    deleteDocWorkspace: (id: string) =>
+      request<void>(`/api/doc-workspaces/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      }),
+
+    listDocWorkspaceFiles: (id: string) =>
+      request<DocWorkspaceFilesResponse>(`/api/doc-workspaces/${encodeURIComponent(id)}/files`),
+
+    mkdirDocWorkspaceFile: (id: string, body: DocFileMkdirRequest) =>
+      request<{ ok: true; path: string }>(`/api/doc-workspaces/${encodeURIComponent(id)}/files/mkdir`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+
+    renameDocWorkspaceFile: (id: string, body: DocFileRenameRequest) =>
+      request<{ ok: true; fromPath: string; toPath: string }>(
+        `/api/doc-workspaces/${encodeURIComponent(id)}/files/rename`,
+        {
+          method: 'POST',
+          body: JSON.stringify(body),
+        },
+      ),
+
+    deleteDocWorkspaceFile: (id: string, filePath: string) =>
+      request<{ ok: true; path: string }>(
+        `/api/doc-workspaces/${encodeURIComponent(id)}/files?path=${encodeURIComponent(filePath)}`,
+        { method: 'DELETE' },
+      ),
+
+    previewDocWorkspaceFile: (id: string, filePath: string) =>
+      request<DocFilePreviewResponse>(
+        `/api/doc-workspaces/${encodeURIComponent(id)}/files/preview?path=${encodeURIComponent(filePath)}`,
+      ),
+
+    createDocWorkspaceBrief: (id: string, content?: string) =>
+      request<{ path: string; content: string; created: boolean }>(
+        `/api/doc-workspaces/${encodeURIComponent(id)}/brief`,
+        {
+          method: 'POST',
+          body: JSON.stringify(content !== undefined ? { content } : {}),
+        },
+      ),
+
+    uploadDocWorkspaceFile: (id: string, file: File, opts?: { dir?: string; name?: string; signal?: AbortSignal }) => {
+      const qs = new URLSearchParams();
+      if (opts?.dir) qs.set('dir', opts.dir);
+      qs.set('name', opts?.name || file.name || 'file');
+      return request<DocFileEntry>(
+        `/api/doc-workspaces/${encodeURIComponent(id)}/files/upload?${qs.toString()}`,
+        {
+          method: 'POST',
+          body: file,
+          headers: { 'content-type': file.type || 'application/octet-stream' },
+          ...(opts?.signal ? { signal: opts.signal } : {}),
+        },
+      );
+    },
+
+    docWorkspaceFileDownloadUrl: (id: string, filePath: string, inline = false) =>
+      hostUrl(
+        endpoint,
+        `/api/doc-workspaces/${encodeURIComponent(id)}/files/download?path=${encodeURIComponent(filePath)}${inline ? '&inline=1' : ''}`,
+      ),
+
+    docWorkspaceZipUrl: (id: string, dirPath = '') =>
+      hostUrl(
+        endpoint,
+        `/api/doc-workspaces/${encodeURIComponent(id)}/files/zip${dirPath ? `?path=${encodeURIComponent(dirPath)}` : ''}`,
       ),
   };
 }

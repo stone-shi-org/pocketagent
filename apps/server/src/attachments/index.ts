@@ -600,14 +600,20 @@ export function landStagedAttachments(
  * (or an agent that edited one) can never point this at anything outside the
  * landing directories. Returns how many files went.
  */
-export function removeLandedAttachments(root: string, attachments: readonly PromptAttachment[]): number {
+export function removeLandedAttachments(
+  root: string,
+  attachments: readonly PromptAttachment[],
+  extraDirs: readonly string[] = [],
+): number {
   let realRoot: string;
   try {
     realRoot = fs.realpathSync(root);
   } catch {
     return 0;
   }
-  const allowed = [SESSION_ATTACHMENTS_DIR, PLANNER_UPLOADS_DIR].map((dir) => path.join(realRoot, ...dir.split('/')));
+  const allowed = [SESSION_ATTACHMENTS_DIR, PLANNER_UPLOADS_DIR, ...extraDirs].map((dir) =>
+    path.join(realRoot, ...dir.split('/').filter(Boolean)),
+  );
   let removed = 0;
   for (const attachment of attachments) {
     const rels = new Set<string>();

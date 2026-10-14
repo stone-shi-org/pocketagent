@@ -246,6 +246,7 @@ export function ProjectsPage({
                 <PocketAgentsSection
                   workspaces={planner.workspaces}
                   chats={planner.chats}
+                  docWorkspaces={planner.docWorkspaces}
                   refresh={planner.refresh}
                   onOpenChat={(chatId) => onOpenPlannerChat(hostId, chatId)}
                   onApiError={onApiError}

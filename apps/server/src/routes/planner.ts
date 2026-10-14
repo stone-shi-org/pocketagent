@@ -1407,6 +1407,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       if (parsed.data.modelId !== undefined) chat = plannerChats.setModel(id, parsed.data.modelId);
       if (parsed.data.effort !== undefined) chat = plannerChats.setEffort(id, parsed.data.effort);
       if (parsed.data.thinking !== undefined) chat = plannerChats.setThinking(id, parsed.data.thinking);
+      if (parsed.data.docWorkspaceId !== undefined) chat = plannerChats.setDocWorkspace(id, parsed.data.docWorkspaceId);
       return reply.send(chat);
     } catch (err) {
       return mapChatError(reply, err);

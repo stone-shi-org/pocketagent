@@ -255,6 +255,50 @@ export const TELEGRAM_DDL = `
 `;
 
 /**
+ * PA-142: Document workspaces (`doc_workspaces`) and derived text store metadata (`doc_files`).
+ *
+ * Deliberately separate from `planner_workspaces`, which represents a Pocket Agent's
+ * own identity and scratch/skills directory. Any agent or chat can attach to any
+ * document workspace (`planner_chats.doc_workspace_id`). Derived text is stored
+ * under `<dataDir>/doc-workspaces/<id>/derived/<sha256>/` and tracked in `doc_files`
+ * so nothing is ever written into the user's host folder.
+ */
+export const DOC_WORKSPACES_DDL = `
+  CREATE TABLE IF NOT EXISTS doc_workspaces (
+    id                 TEXT PRIMARY KEY,
+    name               TEXT NOT NULL,
+    path               TEXT NOT NULL UNIQUE,
+    created_at         INTEGER NOT NULL,
+    index_enabled      INTEGER NOT NULL DEFAULT 1,
+    auto_approve_edits INTEGER NOT NULL DEFAULT 0,
+    inbox_dir          TEXT NOT NULL DEFAULT 'inbox'
+  );
+
+  CREATE TABLE IF NOT EXISTS doc_files (
+    workspace_id       TEXT NOT NULL REFERENCES doc_workspaces (id) ON DELETE CASCADE,
+    rel_path           TEXT NOT NULL,
+    size               INTEGER NOT NULL,
+    mtime_ms           REAL NOT NULL,
+    sha256             TEXT NOT NULL,
+    kind               TEXT NOT NULL,
+    extract_status     TEXT NOT NULL,
+    extract_error      TEXT,
+    extracted_chars    INTEGER NOT NULL DEFAULT 0,
+    pages              INTEGER,
+    total_pages        INTEGER,
+    truncated          INTEGER NOT NULL DEFAULT 0,
+    truncated_reason   TEXT,
+    stopped_at         TEXT,
+    derived_paths_json TEXT NOT NULL DEFAULT '[]',
+    updated_at         INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, rel_path)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_doc_files_sha256 ON doc_files (workspace_id, sha256);
+`;
+
+
+/**
  * Exported for one test only: `cron.test.ts` builds a *genuine* historical
  * database by replaying a prefix of this array, rather than by fully migrating
  * and then rewriting `schema_version`. Rewinding a fully-migrated database
@@ -1509,6 +1553,14 @@ export const MIGRATIONS: readonly string[] = [
     last_landed_at  INTEGER NOT NULL
   );
   `,
+
+  // PA-142: Document workspaces (`doc_workspaces`), derived text store metadata
+  // (`doc_files`), and attached workspace link on `planner_chats`.
+  `
+  ${DOC_WORKSPACES_DDL}
+  ALTER TABLE planner_chats ADD COLUMN doc_workspace_id TEXT REFERENCES doc_workspaces(id) ON DELETE SET NULL;
+  CREATE INDEX IF NOT EXISTS idx_planner_chats_doc_workspace ON planner_chats (doc_workspace_id);
+  `,
 ];
 
 /**
@@ -1878,6 +1930,14 @@ export function openDatabase(databasePath: string): Db {
   );
   if (plannerQueueColumns.size > 0 && !plannerQueueColumns.has('attachments_json')) {
     db.exec('ALTER TABLE planner_prompt_queue ADD COLUMN attachments_json TEXT');
+  }
+  // PA-142, same positional-migration hazard: ensure `doc_workspaces`, `doc_files`,
+  // and `planner_chats.doc_workspace_id` exist even if a sibling branch's migration
+  // advanced the checkpoint count.
+  db.exec(DOC_WORKSPACES_DDL);
+  if (plannerChatColumns.size > 0 && !plannerChatColumns.has('doc_workspace_id')) {
+    db.exec('ALTER TABLE planner_chats ADD COLUMN doc_workspace_id TEXT REFERENCES doc_workspaces(id) ON DELETE SET NULL');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_planner_chats_doc_workspace ON planner_chats (doc_workspace_id)');
   }
   db.prepare('UPDATE schema_version SET version = ?').run(current);
 
