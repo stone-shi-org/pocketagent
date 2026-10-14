@@ -15,6 +15,7 @@ import {
   type DocFilePreviewSheet,
   type DocFileVersion,
   type DocFileVersionsResponse,
+  type DocRedlineBlock,
   type DocRestoreVersionResponse,
   type DocSearchMatchType,
   type DocSearchResultHit,
@@ -43,6 +44,7 @@ import {
   readHead,
 } from '../attachments/extract.js';
 import type { ExtractKind, ExtractTruncatedReason, ExtractWorkerMessage } from '../attachments/extract-worker.js';
+import { computeDocxVersionRedline, extractDocxRedline } from '../docs/docx-engine.js';
 import { PlannerLlmClient } from '../planner/llm-client.js';
 import { cosineSimilarity, normalizeBm25 } from '../planner/memory.js';
 import {
@@ -116,7 +118,7 @@ function fenceNonce(seed: string): string {
   return crypto.createHmac('sha256', FENCE_KEY).update(seed).digest('hex').slice(0, 16);
 }
 
-function wrapUntrustedFileFence(label: string, rawText: string, seed: string): string {
+export function wrapUntrustedFileFence(label: string, rawText: string, seed: string): string {
   const nonce = fenceNonce(seed);
   const clean = sanitizeUntrustedText(rawText)
     .split(nonce)
@@ -2924,6 +2926,8 @@ export class DocWorkspaceService {
 
     if (kind === 'docx') {
       let html = '';
+      let redlineBlocks: DocRedlineBlock[] | undefined;
+      let trackedChangesCount = 0;
       if (size <= MAX_PREVIEW_DOCX_BYTES) {
         try {
           const mammoth = (await import('mammoth')).default;
@@ -2931,6 +2935,15 @@ export class DocWorkspaceService {
           html = result.value;
         } catch {
           html = '';
+        }
+        try {
+          const extracted = await extractDocxRedline(fs.readFileSync(absPath));
+          if ((extracted.trackedChangesCount > 0 || extracted.commentsCount > 0) && extracted.blocks.length > 0) {
+            redlineBlocks = extracted.blocks;
+            trackedChangesCount = extracted.trackedChangesCount;
+          }
+        } catch {
+          // Ignore redline extraction errors on corrupt docx.
         }
       }
       let derivedText = '';
@@ -2949,8 +2962,9 @@ export class DocWorkspaceService {
         kind,
         extractStatus,
         extractError,
-        previewKind: html ? 'docx_html' : 'text',
+        previewKind: html || redlineBlocks ? 'docx_html' : 'text',
         ...(html ? { html } : {}),
+        ...(redlineBlocks ? { redlineBlocks, trackedChangesCount } : {}),
         text: derivedText,
         truncated: row ? row.truncated === 1 : false,
       };
@@ -3187,7 +3201,14 @@ export class DocWorkspaceService {
       try {
         const beforeText = await this.readOrExtractDerivedTextForBlob(workspaceId, prevSha256, kind);
         const afterText = await this.readOrExtractDerivedTextForBlob(workspaceId, nextSha256, kind);
-        return computeLineDiff(beforeText, afterText, 'in derived text').summary;
+        const lineSummary = computeLineDiff(beforeText, afterText, 'in derived text').summary;
+        if (kind === 'docx' && lineSummary === 'No text changes' && fs.existsSync(nextBlobPath)) {
+          const beforeBytes = fs.existsSync(prevBlobPath) ? fs.readFileSync(prevBlobPath) : null;
+          const afterBytes = fs.readFileSync(nextBlobPath);
+          const blocks = await computeDocxVersionRedline(beforeBytes, afterBytes);
+          if (blocks.length > 0) return `${blocks.length} paragraph(s) with tracked changes or comments`;
+        }
+        return lineSummary;
       } catch {
         return `Updated ${relPath}`;
       }
@@ -3303,7 +3324,7 @@ export class DocWorkspaceService {
 
   /**
    * Optimistic concurrency & pre-mutation snapshot hook called before any tool
-   * mutates a file (`write_file`, `edit_file`, `sheet_edit`).
+   * mutates a file (`write_file`, `edit_file`, `sheet_edit`, `doc_edit`, `create_sheet`, `create_doc`, `export_pdf`).
    *
    * Returns `null` if `absPath` is outside any registered document workspace.
    * When `absPath` is inside a document workspace:
@@ -3318,6 +3339,7 @@ export class DocWorkspaceService {
       chatId?: string | null | undefined;
       baseVersion?: string | undefined;
       restrictedWorkspaceId?: string | null | undefined;
+      requireBaseVersion?: boolean | undefined;
     },
   ): Promise<{
     workspaceId: string;
@@ -3366,11 +3388,20 @@ export class DocWorkspaceService {
       }
     } else if (opts?.chatId) {
       const lastRead = this.getChatLastReadVersion(opts.chatId, workspace.id, relPath);
-      if (!lastRead || !this.doesVersionMatch(currentSha256, lastRead)) {
+      if (!lastRead) {
+        throw new DocWorkspaceConflictError(
+          `${path.basename(relPath)} requires baseVersion (or a prior read in this chat) before editing; re-read it first`,
+        );
+      }
+      if (!this.doesVersionMatch(currentSha256, lastRead)) {
         throw new DocWorkspaceConflictError(
           this.formatStaleConflictMessage(workspace.id, relPath, Math.floor(stat.mtimeMs)),
         );
       }
+    } else if (opts?.requireBaseVersion) {
+      throw new DocWorkspaceConflictError(
+        `${path.basename(relPath)} requires baseVersion (or a prior read in this chat) before editing; re-read it first`,
+      );
     }
 
     return {
@@ -3566,6 +3597,23 @@ export class DocWorkspaceService {
         : null;
       const afterText = await this.readOrExtractDerivedTextForBlob(workspaceId, afterSha256, kind);
       const textDiff = computeLineDiff(beforeText, afterText, 'in derived text');
+      let redlineBlocks: DocRedlineBlock[] | undefined;
+      let summary = textDiff.summary;
+      if (kind === 'docx' && fs.existsSync(afterBlobPath)) {
+        try {
+          const beforeBytes = beforeBlobPath && fs.existsSync(beforeBlobPath) ? fs.readFileSync(beforeBlobPath) : null;
+          const afterBytes = fs.readFileSync(afterBlobPath);
+          const blocks = await computeDocxVersionRedline(beforeBytes, afterBytes);
+          if (blocks.length > 0) {
+            redlineBlocks = blocks;
+            if (summary === 'No text changes') {
+              summary = `${blocks.length} paragraph(s) with tracked changes or comments`;
+            }
+          }
+        } catch {
+          // Ignore docx redline errors.
+        }
+      }
       return {
         relPath: toVer.relPath,
         kind,
@@ -3573,8 +3621,9 @@ export class DocWorkspaceService {
         toVersionId: toVer.id,
         fromSha256: beforeSha256,
         toSha256: afterSha256,
-        summary: textDiff.summary,
+        summary,
         diffLines: textDiff.diffLines,
+        ...(redlineBlocks ? { redlineBlocks } : {}),
       };
     }
 

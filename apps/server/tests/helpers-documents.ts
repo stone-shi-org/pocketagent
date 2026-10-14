@@ -128,26 +128,6 @@ const CONTENT_TYPES = (overrides: string) =>
   `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
   `<Default Extension="xml" ContentType="application/xml"/>${overrides}</Types>`;
 
-export function makeDocx(paragraphs: string[]): Buffer {
-  const body = paragraphs.map((p) => `<w:p><w:r><w:t xml:space="preserve">${xmlEscape(p)}</w:t></w:r></w:p>`).join('');
-  return Buffer.from(
-    zipSync({
-      '[Content_Types].xml': strToU8(
-        CONTENT_TYPES(
-          '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>',
-        ),
-      ),
-      '_rels/.rels': strToU8(
-        `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
-          `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
-      ),
-      'word/document.xml': strToU8(
-        `<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`,
-      ),
-    }),
-  );
-}
-
 export interface RichDocxOptions {
   heading?: string;
   table?: string[][];
@@ -160,13 +140,23 @@ export interface RichDocxOptions {
   link?: { text: string; url: string };
 }
 
-/** PA-139: a docx with headings, a table, a footnote, header/footer, comments, and tracked changes. */
-export function makeRichDocx(opts: RichDocxOptions): Buffer {
+export function makeDocx(
+  paragraphs: Array<string | { text: string; heading?: string }>,
+  opts: RichDocxOptions = {},
+): Buffer {
   const parts: string[] = [];
   if (opts.heading) {
     parts.push(
       `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>${xmlEscape(opts.heading)}</w:t></w:r></w:p>`,
     );
+  }
+  for (const p of paragraphs) {
+    if (typeof p === 'string') {
+      parts.push(`<w:p><w:r><w:t xml:space="preserve">${xmlEscape(p)}</w:t></w:r></w:p>`);
+    } else {
+      const pPr = p.heading ? `<w:pPr><w:pStyle w:val="${xmlEscape(p.heading)}"/></w:pPr>` : '';
+      parts.push(`<w:p>${pPr}<w:r><w:t xml:space="preserve">${xmlEscape(p.text)}</w:t></w:r></w:p>`);
+    }
   }
   if (opts.link) {
     parts.push(
@@ -261,6 +251,11 @@ export function makeRichDocx(opts: RichDocxOptions): Buffer {
     `<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${parts.join('')}</w:body></w:document>`,
   );
   return Buffer.from(zipSync(files));
+}
+
+/** PA-139: a docx with headings, a table, a footnote, header/footer, comments, and tracked changes. */
+export function makeRichDocx(opts: RichDocxOptions): Buffer {
+  return makeDocx([], opts);
 }
 
 function excelColLetters(colZeroBased: number): string {

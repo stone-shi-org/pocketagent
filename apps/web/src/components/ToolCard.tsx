@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ToolItem } from '../agent/transcript.js';
-import { collapseContext, diffFromToolInput, diffLines, diffStat } from '../agent/diff.js';
+import {
+  collapseContext,
+  diffFromToolInput,
+  diffLines,
+  diffStat,
+  lockWarningFromToolInput,
+  redlineFromToolInput,
+} from '../agent/diff.js';
 import { renderMarkdown } from '../agent/markdown.js';
 import { planFromToolInput } from '../agent/plan.js';
 import { todosFromToolInput, type TodoItem } from '../agent/todo.js';
@@ -12,6 +19,7 @@ import {
   toolState,
 } from '../agent/tool-text.js';
 import { CopyButton } from './CopyButton.js';
+import { DocRedlineView } from './DocRedlineView.js';
 
 /**
  * Past this, a running tool call gets flagged as long-running rather than just
@@ -25,9 +33,11 @@ export function ToolCard({ item }: { item: ToolItem }): JSX.Element {
   const [open, setOpen] = useState(false);
   const plan = planFromToolInput(item.name, item.input);
   const todos = plan ? null : todosFromToolInput(item.name, item.input);
+  const redline = plan || todos ? null : redlineFromToolInput(item.name, item.input);
   const diff = plan || todos ? null : diffFromToolInput(item.name, item.input);
   const lines = diff ? diffLines(diff.before, diff.after) : null;
   const stat = lines ? diffStat(lines) : null;
+  const lockWarning = lockWarningFromToolInput(item.input);
 
   const state = toolState(item);
 
@@ -95,10 +105,13 @@ export function ToolCard({ item }: { item: ToolItem }): JSX.Element {
 
       {open && (
         <div className="tool-body">
+          {lockWarning && <div className="notice inline warn">{lockWarning}</div>}
           {plan ? (
             <div className="tool-plan answer" dangerouslySetInnerHTML={{ __html: renderMarkdown(plan) }} />
           ) : todos ? (
             <TodoListView todos={todos} />
+          ) : redline ? (
+            <DocRedlineView blocks={redline} />
           ) : lines ? (
             <DiffView lines={lines} />
           ) : (

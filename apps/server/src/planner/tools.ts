@@ -55,16 +55,36 @@ import { CustomClaudeProviderError } from '../agents/custom-providers-store.js';
 import type { TelegramBotStore } from '../telegram/bots-store.js';
 import { TelegramBotError } from '../telegram/bots-store.js';
 import {
+  detectOfficeLockFile,
   executeSheetCheck,
   executeSheetEdit,
   executeSheetFind,
   executeSheetInfo,
   executeSheetRead,
   previewSheetEdit,
+  resolveLibreOfficeExecutable,
   type SheetRunnerLimits,
 } from '../sheets/runner.js';
 import type { SheetCellEditInput, SheetDiffPayload } from '../sheets/sheet-worker.js';
-import { isIgnoredEntryName, type DocWorkspaceService } from '../doc-workspaces/index.js';
+import {
+  isIgnoredEntryName,
+  wrapUntrustedFileFence,
+  type DocWorkspaceService,
+} from '../doc-workspaces/index.js';
+import {
+  formatDocReadText,
+  previewAndApplyDocxEdits,
+  readDocxStructure,
+  type DocxEditInput,
+  type DocxEditMode,
+  type DocxRedlineBlock,
+} from '../docs/docx-engine.js';
+import {
+  buildXlsxFromSheetsSpec,
+  createDocxFromMarkdown,
+  exportDocumentToPdf,
+  type CreateSheetWorksheetInput,
+} from '../docs/artifacts.js';
 
 /**
  * PA-6: the planner's tool catalog.
@@ -958,7 +978,7 @@ export async function postJsonToIntegration(
 }
 
 export function normalizeSheetEditsArgument(args: Record<string, unknown>): SheetCellEditInput[] | null {
-  let raw: unknown = args.edits;
+  let raw: unknown = args.edits ?? args.operations;
   if (typeof raw === 'string') {
     try {
       raw = JSON.parse(raw);
@@ -989,24 +1009,104 @@ export function normalizeSheetEditsArgument(args: Record<string, unknown>): Shee
       return null;
     }
   }
+  const topSheet = typeof args.sheet === 'string' ? args.sheet : undefined;
+  const edits = (raw as unknown[])
+    .filter((e): e is Record<string, unknown> => Boolean(e && typeof e === 'object'))
+    .map((e) => {
+      const copy: Record<string, unknown> = { ...e };
+      if (topSheet && !copy.sheet) copy.sheet = topSheet;
+      if (copy.op === 'set_value') copy.op = 'set_cell';
+      return copy as unknown as SheetCellEditInput;
+    });
+  return edits.length > 0 ? edits : null;
+}
+
+function resolveAgentDisplayName(deps: PlannerToolDeps): string {
+  if (deps.workspaceId) {
+    const ws = deps.plannerWorkspaces.get(deps.workspaceId);
+    if (ws?.name) return ws.name;
+  }
+  const def = deps.plannerWorkspaces.getDefault();
+  return def?.name ?? 'Default';
+}
+
+export function normalizeDocEditsArgument(args: Record<string, unknown>): DocxEditInput[] | null {
+  let raw: unknown = args.edits;
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    raw = [raw];
+  }
+  if (!Array.isArray(raw)) return null;
   const edits = (raw as unknown[]).filter(
-    (e): e is SheetCellEditInput => Boolean(e && typeof e === 'object'),
+    (e): e is DocxEditInput => Boolean(e && typeof e === 'object'),
   );
   return edits.length > 0 ? edits : null;
 }
 
+export function normalizeCreateSheetsArgument(args: Record<string, unknown>): CreateSheetWorksheetInput[] | null {
+  let raw: unknown = args.sheets;
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    raw = [raw];
+  }
+  if (!Array.isArray(raw)) return null;
+  const sheets = (raw as unknown[]).filter(
+    (s): s is CreateSheetWorksheetInput => Boolean(s && typeof s === 'object'),
+  );
+  return sheets.length > 0 ? sheets : null;
+}
+
+async function resolveArtifactOutputTarget(
+  deps: PlannerToolDeps,
+  requestedRaw: string | undefined,
+  defaultFileName?: string,
+): Promise<{ targetAbs: string; displayPath: string }> {
+  let requested = (requestedRaw ?? '').trim();
+  if (!requested && defaultFileName) {
+    requested = defaultFileName;
+  }
+  if (!requested) {
+    throw new Error('A target output path is required.');
+  }
+  if (!path.isAbsolute(requested) && deps.docWorkspacePath) {
+    const clean = requested.replace(/\\/g, '/').replace(/^\.\//, '');
+    if (!clean.includes('/')) {
+      requested = `outputs/${clean}`;
+    }
+  }
+  const targetAbs = await resolveCreatablePath(deps, requested);
+  const match = deps.docWorkspaces?.findContainingWorkspaceForTarget(targetAbs, deps.docWorkspaceId) ?? null;
+  return {
+    targetAbs,
+    displayPath: match?.relPath || requested,
+  };
+}
+
 /**
- * PA-140 / PA-143: Validates a `sheet_edit` call against the source workbook
+ * PA-140 / PA-143 / PA-145: Validates a `sheet_edit` call against the source workbook
  * and target `outputPath` before pausing for human approval, returning either
- * the computed cell-level diff (`{ before, after, lines }`) or an actionable
- * refusal error. In a document workspace, `outputPath` may be omitted or equal
- * `path` (in-place edit backed by version history).
+ * the computed cell-level diff (`{ before, after, lines }`), any Office lock warning,
+ * or an actionable refusal error. In a document workspace, `outputPath` defaults
+ * to `path` (in-place edit backed by version history) and requires `baseVersion`
+ * (or a prior read in this chat).
  */
 export async function prepareSheetEditApproval(
   deps: PlannerToolDeps,
   args: Record<string, unknown>,
 ): Promise<
-  | { ok: true; diff: SheetDiffPayload }
+  | { ok: true; diff: SheetDiffPayload; lockWarning?: string }
   | { ok: false; error: string }
 > {
   const requestedPath = String(args.path ?? '').trim();
@@ -1029,7 +1129,7 @@ export async function prepareSheetEditApproval(
     if (!requestedOutputPath) {
       return { ok: false, error: 'sheet_edit requires both "path" and "outputPath".' };
     }
-    targetOutputPath = await resolveCreatablePath(deps, requestedOutputPath);
+    targetOutputPath = !rawOutputPath && inDocWs ? realPath : await resolveCreatablePath(deps, requestedOutputPath);
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -1044,6 +1144,7 @@ export async function prepareSheetEditApproval(
         chatId: deps.plannerChatId ?? undefined,
         baseVersion: typeof args.baseVersion === 'string' ? args.baseVersion : undefined,
         restrictedWorkspaceId: deps.docWorkspaceId,
+        requireBaseVersion: true,
       });
     } catch (err) {
       return { ok: false, error: (err as Error).message };
@@ -1057,9 +1158,240 @@ export async function prepareSheetEditApproval(
   if (!res.ok) {
     return { ok: false, error: res.error };
   }
+  const lockInfo = detectOfficeLockFile(realPath);
   return {
     ok: true,
     diff: res.diff ?? { before: '', after: '', lines: [] },
+    ...(lockInfo ? { lockWarning: lockInfo.message } : {}),
+  };
+}
+
+/**
+ * PA-145: Validates a `doc_edit` call against the source `.docx` and computes
+ * both a redline block preview (`redlineBlocks`) and line diff (`diff`) plus
+ * any Office lock warning (`~$doc.docx`) before pausing for human approval.
+ */
+export async function prepareDocEditApproval(
+  deps: PlannerToolDeps,
+  args: Record<string, unknown>,
+): Promise<
+  | {
+      ok: true;
+      diff: SheetDiffPayload;
+      redlineBlocks: DocxRedlineBlock[];
+      summary: string;
+      lockWarning?: string;
+    }
+  | { ok: false; error: string }
+> {
+  const requestedPath = String(args.path ?? '').trim();
+  const rawOutputPath = typeof args.outputPath === 'string' ? args.outputPath.trim() : '';
+  if (!requestedPath) {
+    return { ok: false, error: 'doc_edit requires a "path" argument.' };
+  }
+  const edits = normalizeDocEditsArgument(args);
+  if (!edits) {
+    return { ok: false, error: 'doc_edit requires a non-empty "edits" array.' };
+  }
+  const rawMode = typeof args.mode === 'string' ? args.mode.trim().toLowerCase() : 'tracked';
+  if (rawMode !== 'tracked' && rawMode !== 'direct') {
+    return { ok: false, error: 'doc_edit "mode" must be "tracked" or "direct".' };
+  }
+  const mode: DocxEditMode = rawMode;
+
+  let realPath: string;
+  let targetOutputPath: string;
+  try {
+    realPath = await resolveExistingPathWithin(deps, requestedPath);
+    targetOutputPath = rawOutputPath ? await resolveCreatablePath(deps, rawOutputPath) : realPath;
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+
+  const sourceInDocWs = Boolean(
+    deps.docWorkspaces && deps.docWorkspaces.findContainingWorkspace(realPath, deps.docWorkspaceId),
+  );
+  const targetInDocWs = Boolean(
+    deps.docWorkspaces &&
+      deps.docWorkspaces.findContainingWorkspaceForTarget(targetOutputPath, deps.docWorkspaceId),
+  );
+  if (!targetInDocWs && targetOutputPath !== realPath) {
+    const exists = await fs.stat(targetOutputPath).catch(() => null);
+    if (exists) {
+      return {
+        ok: false,
+        error: `Output file "${rawOutputPath}" already exists; refusing to overwrite outside a document workspace.`,
+      };
+    }
+  }
+  if (sourceInDocWs && deps.docWorkspaces) {
+    try {
+      await deps.docWorkspaces.checkBaseVersionAndSnapshot(realPath, {
+        chatId: deps.plannerChatId ?? undefined,
+        baseVersion: typeof args.baseVersion === 'string' ? args.baseVersion : undefined,
+        restrictedWorkspaceId: deps.docWorkspaceId,
+        requireBaseVersion: true,
+      });
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  let rawBytes: Buffer;
+  try {
+    rawBytes = await fs.readFile(realPath);
+  } catch (err) {
+    return { ok: false, error: `Could not read ${requestedPath}: ${(err as Error).message}` };
+  }
+
+  const author = `Pocket Agent (${resolveAgentDisplayName(deps)})`;
+  const preview = await previewAndApplyDocxEdits(rawBytes, edits, { mode, author });
+  if (!preview.ok) {
+    return { ok: false, error: preview.error };
+  }
+
+  const lockInfo = detectOfficeLockFile(realPath);
+  return {
+    ok: true,
+    diff: preview.diff,
+    redlineBlocks: preview.redlineBlocks,
+    summary: preview.summary,
+    ...(lockInfo ? { lockWarning: lockInfo.message } : {}),
+  };
+}
+
+/**
+ * PA-145: Validates `create_sheet`, `create_doc`, or `export_pdf` before
+ * pausing for approval, checking exclusive creation / `overwrite` + `baseVersion`
+ * and building a preview diff for the approval card.
+ */
+export async function prepareArtifactCreateApproval(
+  deps: PlannerToolDeps,
+  toolName: 'create_sheet' | 'create_doc' | 'export_pdf',
+  args: Record<string, unknown>,
+): Promise<
+  | { ok: true; diff: SheetDiffPayload }
+  | { ok: false; error: string }
+> {
+  const overwrite = args.overwrite === true;
+  const baseVersion = typeof args.baseVersion === 'string' ? args.baseVersion.trim() : undefined;
+
+  let defaultOutName: string | undefined;
+  let realSource: string | undefined;
+  if (toolName === 'export_pdf') {
+    const sourceRaw = String(args.source ?? '').trim();
+    if (!sourceRaw) return { ok: false, error: 'export_pdf requires a "source" argument.' };
+    try {
+      realSource = await resolveExistingPathWithin(deps, sourceRaw);
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+    const ext = path.extname(realSource).toLowerCase();
+    if (ext !== '.docx' && ext !== '.xlsx' && ext !== '.xlsm' && ext !== '.pptx') {
+      return {
+        ok: false,
+        error: `export_pdf supports .docx, .xlsx, or .pptx sources (got "${ext || 'unknown'}").`,
+      };
+    }
+    const stem = path.basename(realSource, path.extname(realSource));
+    defaultOutName = `${stem}.pdf`;
+  }
+
+  const rawTarget =
+    toolName === 'export_pdf'
+      ? typeof args.output === 'string'
+        ? args.output
+        : undefined
+      : typeof args.path === 'string'
+        ? args.path
+        : undefined;
+
+  let targetAbs: string;
+  let displayPath: string;
+  try {
+    ({ targetAbs, displayPath } = await resolveArtifactOutputTarget(deps, rawTarget, defaultOutName));
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+
+  const existing = await fs.stat(targetAbs).catch(() => null);
+  if (existing?.isDirectory()) {
+    return { ok: false, error: `${displayPath} is a directory, not a file.` };
+  }
+  const inDocWs = Boolean(
+    deps.docWorkspaces && deps.docWorkspaces.findContainingWorkspaceForTarget(targetAbs, deps.docWorkspaceId),
+  );
+  if (existing) {
+    if (!overwrite) {
+      return {
+        ok: false,
+        error: `Refusing: "${displayPath}" already exists. Pass overwrite: true with baseVersion to replace it, or choose a new path.`,
+      };
+    }
+    if (inDocWs && !baseVersion) {
+      return {
+        ok: false,
+        error: `Refusing: overwriting existing workspace file "${displayPath}" requires baseVersion.`,
+      };
+    }
+    if (inDocWs && deps.docWorkspaces) {
+      try {
+        await deps.docWorkspaces.checkBaseVersionAndSnapshot(targetAbs, {
+          chatId: deps.plannerChatId ?? undefined,
+          baseVersion,
+          restrictedWorkspaceId: deps.docWorkspaceId,
+          requireBaseVersion: true,
+        });
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+  }
+
+  if (toolName === 'create_sheet') {
+    const sheets = normalizeCreateSheetsArgument(args);
+    if (!sheets) {
+      return { ok: false, error: 'create_sheet requires a non-empty "sheets" array.' };
+    }
+    const lines: string[] = [` Target: ${displayPath}`];
+    for (const s of sheets) {
+      const rowCount = Array.isArray(s.rows) ? s.rows.length : 0;
+      const formulaCount = s.formulas && typeof s.formulas === 'object' ? Object.keys(s.formulas).length : 0;
+      lines.push(
+        `+Sheet "${s.name || 'Sheet1'}": ${rowCount} row(s)${formulaCount > 0 ? `, ${formulaCount} formula(s)` : ''}`,
+      );
+    }
+    return { ok: true, diff: { before: '', after: '', lines } };
+  }
+
+  if (toolName === 'create_doc') {
+    const markdown = typeof args.markdown === 'string' ? args.markdown : '';
+    if (!markdown.trim()) {
+      return { ok: false, error: 'create_doc requires non-empty "markdown" content.' };
+    }
+    if (typeof args.template === 'string' && args.template.trim()) {
+      try {
+        await resolveExistingPathWithin(deps, args.template.trim());
+      } catch (err) {
+        return { ok: false, error: `Invalid template path: ${(err as Error).message}` };
+      }
+    }
+    const mdLines = markdown.replace(/\r\n/g, '\n').split('\n').slice(0, 60);
+    const lines: string[] = [
+      ` Target: ${displayPath}${typeof args.template === 'string' && args.template.trim() ? ` (template: ${args.template.trim()})` : ''}`,
+      ...mdLines.map((text) => `+${text}`),
+    ];
+    return { ok: true, diff: { before: '', after: '', lines } };
+  }
+
+  // export_pdf
+  return {
+    ok: true,
+    diff: {
+      before: '',
+      after: '',
+      lines: [`+Export PDF: ${String(args.source ?? '').trim()} -> ${displayPath}`],
+    },
   };
 }
 
@@ -2374,7 +2706,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     },
     readOnly: true,
     async execute(deps, args) {
-      const requested = String(args.path ?? '').trim();
+      const requested = String(args.path ?? args.filePath ?? '').trim();
       if (!requested) return { content: 'sheet_info requires a "path" argument.', isError: true };
       let real: string;
       try {
@@ -2437,7 +2769,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
       return args;
     },
     async execute(deps, args) {
-      const requested = String(args.path ?? '').trim();
+      const requested = String(args.path ?? args.filePath ?? '').trim();
       const sheet = String(args.sheet ?? '').trim();
       const range = typeof args.range === 'string' ? args.range.trim() : undefined;
       const include = Array.isArray(args.include)
@@ -2489,7 +2821,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     },
     readOnly: true,
     async execute(deps, args) {
-      const requested = String(args.path ?? '').trim();
+      const requested = String(args.path ?? args.filePath ?? '').trim();
       const query = String(args.query ?? '').trim();
       const rawScope = typeof args.scope === 'string' ? args.scope.trim().toLowerCase() : 'both';
       const scope: 'values' | 'formulas' | 'both' =
@@ -2526,7 +2858,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     },
     readOnly: true,
     async execute(deps, args) {
-      const requested = String(args.path ?? '').trim();
+      const requested = String(args.path ?? args.filePath ?? '').trim();
       if (!requested) return { content: 'sheet_check requires a "path" argument.', isError: true };
       let real: string;
       try {
@@ -2602,11 +2934,11 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
     readOnly: false,
     prepareArguments(args) {
       const edits = normalizeSheetEditsArgument(args);
-      const { _diff: _ignored, ...rest } = args;
+      const { _diff: _ignored, _lockWarning: _ignoredLock, ...rest } = args;
       return edits ? { ...rest, edits } : rest;
     },
     async execute(deps, args) {
-      const requestedPath = String(args.path ?? '').trim();
+      const requestedPath = String(args.path ?? args.filePath ?? '').trim();
       const rawOutputPath = typeof args.outputPath === 'string' && args.outputPath.trim() ? args.outputPath.trim() : '';
       const baseVersion = typeof args.baseVersion === 'string' ? args.baseVersion.trim() : undefined;
       if (!requestedPath) {
@@ -2629,12 +2961,15 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         return { content: 'sheet_edit requires both "path" and "outputPath".', isError: true };
       }
       try {
-        targetOutputPath = await resolveCreatablePath(deps, requestedOutputPath);
+        targetOutputPath = !rawOutputPath && sourceMatch ? realPath : await resolveCreatablePath(deps, requestedOutputPath);
       } catch (err) {
         return { content: (err as Error).message, isError: true };
       }
       const targetMatch =
         deps.docWorkspaces?.findContainingWorkspaceForTarget(targetOutputPath, deps.docWorkspaceId) ?? null;
+
+      // Check for Office lock files (~$book.xlsx) before writing — warn in the result without refusing.
+      const lockInfo = detectOfficeLockFile(realPath);
 
       // Optimistic concurrency check on the source workbook (when in a document workspace)
       // and on the target workbook if overwriting an existing file.
@@ -2645,6 +2980,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
             chatId: deps.plannerChatId,
             baseVersion,
             restrictedWorkspaceId: deps.docWorkspaceId,
+            requireBaseVersion: true,
           });
           if (targetOutputPath === realPath) {
             targetSnapshot = srcSnap;
@@ -2653,7 +2989,9 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         if (targetMatch && deps.docWorkspaces && targetOutputPath !== realPath) {
           targetSnapshot = await deps.docWorkspaces.checkBaseVersionAndSnapshot(targetOutputPath, {
             chatId: deps.plannerChatId,
+            baseVersion,
             restrictedWorkspaceId: deps.docWorkspaceId,
+            requireBaseVersion: true,
           });
         }
       } catch (err) {
@@ -2669,6 +3007,7 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
         { ...deps.sheetLimits, allowOverwrite },
       );
       if (!res.ok) return { content: res.error, isError: true };
+      const lockPrefix = lockInfo ? `[${lockInfo.message}]\n` : '';
       if (targetSnapshot && deps.docWorkspaces) {
         const rec = await deps.docWorkspaces.recordMutationAfterWrite(targetSnapshot, targetOutputPath, {
           actor: deps.plannerChatId ? `agent:${deps.plannerChatId}` : 'user',
@@ -2676,9 +3015,662 @@ export const PLANNER_TOOLS: readonly PlannerToolDefinition[] = [
           turnId: deps.plannerTurnId,
           toolUseId: deps.plannerToolUseId,
         });
-        return `${res.text}\nVersion: ${rec.sha256}`;
+        return `${lockPrefix}${res.text}\nVersion: ${rec.sha256}`;
       }
-      return res.text;
+      return `${lockPrefix}${res.text}`;
+    },
+  },
+  // ---- PA-145: Word documents (doc_read / doc_edit) & Artifact Creation -----
+  {
+    name: 'doc_read',
+    description:
+      'Read the structured contents of a Word document (.docx) without modifying it: returns paragraphs with ' +
+      'stable IDs (p1, p2, ...), headings, tables (t1, rows, and cells t1.r1.c1), comments, and existing tracked ' +
+      'changes (insertions and deletions with author and date). Optionally pass section to filter to a specific ' +
+      'heading title or paragraph/table ID.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path to the .docx document inside a workspace.' },
+        section: {
+          type: 'string',
+          description: 'Optional heading title substring or paragraph/table ID (e.g. "p3", "t1") to filter to.',
+        },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    async execute(deps, args) {
+      const requested = String(args.path ?? '').trim();
+      const section = typeof args.section === 'string' && args.section.trim() ? args.section.trim() : undefined;
+      if (!requested) return { content: 'doc_read requires a "path" argument.', isError: true };
+      let real: string;
+      try {
+        real = await resolveExistingPathWithin(deps, requested);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+      let rawBytes: Buffer;
+      try {
+        rawBytes = await fs.readFile(real);
+      } catch (err) {
+        return { content: `Could not read ${requested}: ${(err as Error).message}`, isError: true };
+      }
+      let struct: Awaited<ReturnType<typeof readDocxStructure>>;
+      try {
+        struct = await readDocxStructure(rawBytes, section ? { section } : undefined);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+      const formatted = formatDocReadText(struct, section);
+      if (deps.docWorkspaces) {
+        const tracked = await deps.docWorkspaces.trackFileReadForTool(
+          real,
+          deps.plannerChatId ?? undefined,
+          deps.docWorkspaceId,
+        );
+        if (tracked) {
+          const fenced = wrapUntrustedFileFence(
+            tracked.relPath,
+            formatted,
+            `${tracked.workspaceId}:${tracked.relPath}:${tracked.sha256}`,
+          );
+          return `[Word Document: ${tracked.relPath} | version=${tracked.sha256}]\n${fenced}`;
+        }
+      }
+      return wrapUntrustedFileFence(path.basename(real), formatted, real);
+    },
+  },
+  {
+    name: 'doc_edit',
+    description:
+      'Edit a Word document (.docx) in place at the XML byte level, keeping run formatting (styles) and all ' +
+      'untouched zip entries (headers, footers, images, styles, theme) byte-identical. By default (mode: "tracked"), ' +
+      'writes real Word tracked changes (w:ins / w:del authored "Pocket Agent (<agent name>)") and comments (w:comment) ' +
+      'so a reviewer can accept or reject each change in Word. Pass mode: "direct" to apply changes without tracking. ' +
+      'Requires baseVersion (from doc_read or read_file) when editing a workspace document.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path to the .docx document.' },
+        outputPath: {
+          type: 'string',
+          description: 'Optional destination path (defaults to path for in-place editing).',
+        },
+        mode: {
+          type: 'string',
+          enum: ['tracked', 'direct'],
+          description: 'Editing mode: "tracked" (default, writes Word tracked changes) or "direct" (applies directly).',
+        },
+        baseVersion: {
+          type: 'string',
+          description: 'sha256 version hash from your last read of this document (optimistic concurrency check).',
+        },
+        edits: {
+          type: 'array',
+          description: 'List of paragraph, anchor, table cell, or comment edits to apply.',
+          items: {
+            type: 'object',
+            properties: {
+              op: {
+                type: 'string',
+                enum: ['replace', 'insert_after', 'insert_before', 'delete', 'set_table_cell', 'add_comment'],
+                description: 'Edit operation (inferred automatically when omitted).',
+              },
+              paragraphId: { type: 'string', description: 'Target paragraph ID from doc_read (e.g. "p2").' },
+              anchor: { type: 'string', description: 'Exact text anchor to match inside the paragraph or document.' },
+              oldText: { type: 'string', description: 'Exact text to replace or delete.' },
+              newText: { type: 'string', description: 'Replacement or inserted text.' },
+              text: { type: 'string', description: 'Text to insert, set in a table cell, or attach to a comment.' },
+              table: { type: 'string', description: 'Table ID such as "t1" (for set_table_cell).' },
+              row: { type: 'integer', description: '1-based row index in the table (for set_table_cell).' },
+              col: { type: 'integer', description: '1-based column index in the table (for set_table_cell).' },
+              cell: { type: 'string', description: 'Shorthand cell ID such as "t1.r2.c3".' },
+              comment: { type: 'string', description: 'Comment text to add as a Word annotation (w:comment).' },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['path', 'edits'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    prepareArguments(args) {
+      const edits = normalizeDocEditsArgument(args);
+      const { _diff: _ignoredDiff, _redline: _ignoredRedline, _lockWarning: _ignoredLock, ...rest } = args;
+      return edits ? { ...rest, edits } : rest;
+    },
+    async execute(deps, args) {
+      const requestedPath = String(args.path ?? '').trim();
+      const rawOutputPath = typeof args.outputPath === 'string' && args.outputPath.trim() ? args.outputPath.trim() : '';
+      const baseVersion = typeof args.baseVersion === 'string' ? args.baseVersion.trim() : undefined;
+      if (!requestedPath) {
+        return { content: 'doc_edit requires a "path" argument.', isError: true };
+      }
+      const edits = normalizeDocEditsArgument(args);
+      if (!edits) {
+        return { content: 'doc_edit requires a non-empty "edits" array.', isError: true };
+      }
+      const rawMode = typeof args.mode === 'string' ? args.mode.trim().toLowerCase() : 'tracked';
+      if (rawMode !== 'tracked' && rawMode !== 'direct') {
+        return { content: 'doc_edit "mode" must be "tracked" or "direct".', isError: true };
+      }
+      const mode: DocxEditMode = rawMode;
+
+      let realPath: string;
+      let targetOutputPath: string;
+      try {
+        realPath = await resolveExistingPathWithin(deps, requestedPath);
+        targetOutputPath = rawOutputPath ? await resolveCreatablePath(deps, rawOutputPath) : realPath;
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+
+      const sourceMatch = deps.docWorkspaces?.findContainingWorkspace(realPath, deps.docWorkspaceId) ?? null;
+      const targetMatch =
+        deps.docWorkspaces?.findContainingWorkspaceForTarget(targetOutputPath, deps.docWorkspaceId) ?? null;
+
+      if (!targetMatch && targetOutputPath !== realPath) {
+        const exists = await fs.stat(targetOutputPath).catch(() => null);
+        if (exists) {
+          return {
+            content: `Output file "${rawOutputPath}" already exists; refusing to overwrite outside a document workspace.`,
+            isError: true,
+          };
+        }
+      }
+
+      const lockInfo = detectOfficeLockFile(realPath);
+
+      let targetSnapshot: Awaited<ReturnType<NonNullable<typeof deps.docWorkspaces>['checkBaseVersionAndSnapshot']>> = null;
+      try {
+        if (sourceMatch && deps.docWorkspaces) {
+          const srcSnap = await deps.docWorkspaces.checkBaseVersionAndSnapshot(realPath, {
+            chatId: deps.plannerChatId,
+            baseVersion,
+            restrictedWorkspaceId: deps.docWorkspaceId,
+            requireBaseVersion: true,
+          });
+          if (targetOutputPath === realPath) {
+            targetSnapshot = srcSnap;
+          }
+        }
+        if (targetMatch && deps.docWorkspaces && targetOutputPath !== realPath) {
+          targetSnapshot = await deps.docWorkspaces.checkBaseVersionAndSnapshot(targetOutputPath, {
+            chatId: deps.plannerChatId,
+            baseVersion,
+            restrictedWorkspaceId: deps.docWorkspaceId,
+            requireBaseVersion: true,
+          });
+        }
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+
+      let rawBytes: Buffer;
+      try {
+        rawBytes = await fs.readFile(realPath);
+      } catch (err) {
+        return { content: `Could not read ${requestedPath}: ${(err as Error).message}`, isError: true };
+      }
+
+      const author = `Pocket Agent (${resolveAgentDisplayName(deps)})`;
+      const outcome = await previewAndApplyDocxEdits(rawBytes, edits, { mode, author });
+      if (!outcome.ok) {
+        return { content: outcome.error, isError: true };
+      }
+      if (!outcome.patchedZipBytes) {
+        return { content: 'Internal error: docx patch produced no output bytes.', isError: true };
+      }
+
+      try {
+        await fs.mkdir(path.dirname(targetOutputPath), { recursive: true });
+        const tmpPath = `${targetOutputPath}.tmp.${process.pid}.${Date.now()}`;
+        await fs.writeFile(tmpPath, Buffer.from(outcome.patchedZipBytes));
+        await fs.rename(tmpPath, targetOutputPath);
+      } catch (err) {
+        return { content: `Could not write ${targetOutputPath}: ${(err as Error).message}`, isError: true };
+      }
+
+      const lockPrefix = lockInfo ? `[${lockInfo.message}]\n` : '';
+      const modeLabel = mode === 'tracked' ? `tracked changes (author: "${author}")` : 'direct mode';
+      if (targetSnapshot && deps.docWorkspaces) {
+        const rec = await deps.docWorkspaces.recordMutationAfterWrite(targetSnapshot, targetOutputPath, {
+          actor: deps.plannerChatId ? `agent:${deps.plannerChatId}` : 'user',
+          chatId: deps.plannerChatId,
+          turnId: deps.plannerTurnId,
+          toolUseId: deps.plannerToolUseId,
+        });
+        return `${lockPrefix}Applied ${outcome.appliedCount} edit(s) to ${targetMatch?.relPath ?? requestedPath} in ${modeLabel} (${outcome.summary}).\nVersion: ${rec.sha256}`;
+      }
+      return `${lockPrefix}Applied ${outcome.appliedCount} edit(s) to ${rawOutputPath || requestedPath} in ${modeLabel} (${outcome.summary}).`;
+    },
+  },
+  {
+    name: 'create_sheet',
+    description:
+      'Create a new Excel workbook (.xlsx) from structured worksheet definitions ({ name, rows, formulas?, numFmts?, columnWidths? }), ' +
+      'then recalculate and check formulas with LibreOffice when available. Bare filenames default to outputs/ in a document workspace. ' +
+      'Creates files exclusively (refuses if the target already exists, unless overwrite: true is passed with baseVersion).',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Output path for the new .xlsx file (bare filenames default to outputs/<name> in a document workspace).',
+        },
+        sheets: {
+          type: 'array',
+          description: 'Worksheets to create in the workbook.',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'Worksheet name.' },
+              rows: {
+                type: 'array',
+                description: '2D array of cell values (strings matching "=..." are written as formulas).',
+                items: { type: 'array', items: { type: ['string', 'number', 'boolean', 'null'] } },
+              },
+              formulas: {
+                type: 'object',
+                description: 'Optional map of A1 cell ref -> formula string (e.g. { "B10": "=SUM(B2:B9)" }).',
+                additionalProperties: { type: 'string' },
+              },
+              numFmts: {
+                type: 'object',
+                description: 'Optional map of A1 cell ref or column letter -> Excel number format (e.g. { "B": "$#,##0.00" }).',
+                additionalProperties: { type: 'string' },
+              },
+              columnWidths: {
+                type: ['array', 'object'],
+                description: 'Optional array of column widths or map of column letter/1-based index -> width.',
+              },
+            },
+            required: ['name'],
+            additionalProperties: false,
+          },
+        },
+        overwrite: {
+          type: 'boolean',
+          description: 'Set true (along with baseVersion) to replace an existing file at path.',
+        },
+        baseVersion: {
+          type: 'string',
+          description: 'Required when overwrite: true on an existing workspace file.',
+        },
+      },
+      required: ['path', 'sheets'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    prepareArguments(args) {
+      const sheets = normalizeCreateSheetsArgument(args);
+      const { _diff: _ignored, ...rest } = args;
+      return sheets ? { ...rest, sheets } : rest;
+    },
+    async execute(deps, args) {
+      const sheets = normalizeCreateSheetsArgument(args);
+      if (!sheets) {
+        return { content: 'create_sheet requires a non-empty "sheets" array.', isError: true };
+      }
+      const overwrite = args.overwrite === true;
+      const baseVersion = typeof args.baseVersion === 'string' ? args.baseVersion.trim() : undefined;
+
+      let targetAbs: string;
+      let displayPath: string;
+      try {
+        ({ targetAbs, displayPath } = await resolveArtifactOutputTarget(
+          deps,
+          typeof args.path === 'string' ? args.path : undefined,
+        ));
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+
+      const existing = await fs.stat(targetAbs).catch(() => null);
+      if (existing?.isDirectory()) {
+        return { content: `${displayPath} is a directory, not a file.`, isError: true };
+      }
+      const targetMatch =
+        deps.docWorkspaces?.findContainingWorkspaceForTarget(targetAbs, deps.docWorkspaceId) ?? null;
+
+      if (existing && !overwrite) {
+        return {
+          content: `Refusing: "${displayPath}" already exists. Pass overwrite: true with baseVersion to replace it, or choose a new path.`,
+          isError: true,
+        };
+      }
+      if (existing && overwrite && targetMatch && !baseVersion) {
+        return {
+          content: `Refusing: overwriting existing workspace file "${displayPath}" requires baseVersion.`,
+          isError: true,
+        };
+      }
+
+      let snapshot: Awaited<ReturnType<NonNullable<typeof deps.docWorkspaces>['checkBaseVersionAndSnapshot']>> = null;
+      if (targetMatch && deps.docWorkspaces) {
+        try {
+          snapshot = await deps.docWorkspaces.checkBaseVersionAndSnapshot(targetAbs, {
+            chatId: deps.plannerChatId,
+            baseVersion,
+            restrictedWorkspaceId: deps.docWorkspaceId,
+            requireBaseVersion: Boolean(existing),
+          });
+        } catch (err) {
+          return { content: (err as Error).message, isError: true };
+        }
+      }
+
+      let xlsxResult: Awaited<ReturnType<typeof buildXlsxFromSheetsSpec>>;
+      try {
+        xlsxResult = await buildXlsxFromSheetsSpec(sheets);
+      } catch (err) {
+        return { content: `Could not build workbook: ${(err as Error).message}`, isError: true };
+      }
+
+      const finalBytes = xlsxResult.buffer;
+      let checkNote = 'LibreOffice not installed (skipped formula recalculation and sheet_check).';
+      const binOverride = deps.sheetLimits?.sofficeBin !== undefined ? deps.sheetLimits.sofficeBin : deps.sheetLimits?.libreOfficeBin;
+      const sofficeBin = resolveLibreOfficeExecutable(binOverride);
+
+      try {
+        await fs.mkdir(path.dirname(targetAbs), { recursive: true });
+        if (existing && overwrite) {
+          const tmp = `${targetAbs}.tmp.${process.pid}.${Date.now()}`;
+          await fs.writeFile(tmp, finalBytes);
+          await fs.rename(tmp, targetAbs);
+        } else {
+          await fs.writeFile(targetAbs, finalBytes, { flag: 'wx' });
+        }
+      } catch (err) {
+        return { content: `Could not write ${displayPath}: ${(err as Error).message}`, isError: true };
+      }
+
+      if (sofficeBin) {
+        const checkRes = await executeSheetCheck(targetAbs, deps.sheetLimits);
+        if (checkRes.ok) {
+          checkNote = checkRes.text;
+        }
+      }
+
+      if (snapshot && deps.docWorkspaces) {
+        const rec = await deps.docWorkspaces.recordMutationAfterWrite(snapshot, targetAbs, {
+          actor: deps.plannerChatId ? `agent:${deps.plannerChatId}` : 'user',
+          chatId: deps.plannerChatId,
+          turnId: deps.plannerTurnId,
+          toolUseId: deps.plannerToolUseId,
+        });
+        return `Created workbook ${displayPath} (${xlsxResult.sheetCount} sheet(s), ${xlsxResult.cellCount} cell(s), ${xlsxResult.formulaCount} formula(s)).\n${checkNote}\nVersion: ${rec.sha256}`;
+      }
+      return `Created workbook ${displayPath} (${xlsxResult.sheetCount} sheet(s), ${xlsxResult.cellCount} cell(s), ${xlsxResult.formulaCount} formula(s)).\n${checkNote}`;
+    },
+  },
+  {
+    name: 'create_doc',
+    description:
+      'Create a new Word document (.docx) from Markdown (supporting headings, bullet/numbered lists, tables, code blocks, ' +
+      'inline bold/italic/code/strikethrough, and hyperlinks). Optionally pass template (a .docx in the workspace) to reuse ' +
+      'its styles, theme, and page setup. Bare filenames default to outputs/ in a document workspace. Creates files ' +
+      'exclusively unless overwrite: true is passed with baseVersion.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Output path for the new .docx file (bare filenames default to outputs/<name> in a document workspace).',
+        },
+        markdown: {
+          type: 'string',
+          description: 'Markdown content to convert into the Word document.',
+        },
+        template: {
+          type: 'string',
+          description: 'Optional path to a .docx template in the workspace whose styles and theme should be reused.',
+        },
+        overwrite: {
+          type: 'boolean',
+          description: 'Set true (along with baseVersion) to replace an existing file at path.',
+        },
+        baseVersion: {
+          type: 'string',
+          description: 'Required when overwrite: true on an existing workspace file.',
+        },
+      },
+      required: ['path', 'markdown'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    prepareArguments(args) {
+      const { _diff: _ignored, ...rest } = args;
+      return rest;
+    },
+    async execute(deps, args) {
+      const markdown = typeof args.markdown === 'string' ? args.markdown : '';
+      if (!markdown.trim()) {
+        return { content: 'create_doc requires non-empty "markdown" content.', isError: true };
+      }
+      const overwrite = args.overwrite === true;
+      const baseVersion = typeof args.baseVersion === 'string' ? args.baseVersion.trim() : undefined;
+      const templateRaw = typeof args.template === 'string' && args.template.trim() ? args.template.trim() : undefined;
+
+      let targetAbs: string;
+      let displayPath: string;
+      try {
+        ({ targetAbs, displayPath } = await resolveArtifactOutputTarget(
+          deps,
+          typeof args.path === 'string' ? args.path : undefined,
+        ));
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+
+      let templateBytes: Uint8Array | undefined;
+      if (templateRaw) {
+        try {
+          const realTemplate = await resolveExistingPathWithin(deps, templateRaw);
+          templateBytes = await fs.readFile(realTemplate);
+        } catch (err) {
+          return { content: `Could not read template "${templateRaw}": ${(err as Error).message}`, isError: true };
+        }
+      }
+
+      const existing = await fs.stat(targetAbs).catch(() => null);
+      if (existing?.isDirectory()) {
+        return { content: `${displayPath} is a directory, not a file.`, isError: true };
+      }
+      const targetMatch =
+        deps.docWorkspaces?.findContainingWorkspaceForTarget(targetAbs, deps.docWorkspaceId) ?? null;
+
+      if (existing && !overwrite) {
+        return {
+          content: `Refusing: "${displayPath}" already exists. Pass overwrite: true with baseVersion to replace it, or choose a new path.`,
+          isError: true,
+        };
+      }
+      if (existing && overwrite && targetMatch && !baseVersion) {
+        return {
+          content: `Refusing: overwriting existing workspace file "${displayPath}" requires baseVersion.`,
+          isError: true,
+        };
+      }
+
+      let snapshot: Awaited<ReturnType<NonNullable<typeof deps.docWorkspaces>['checkBaseVersionAndSnapshot']>> = null;
+      if (targetMatch && deps.docWorkspaces) {
+        try {
+          snapshot = await deps.docWorkspaces.checkBaseVersionAndSnapshot(targetAbs, {
+            chatId: deps.plannerChatId,
+            baseVersion,
+            restrictedWorkspaceId: deps.docWorkspaceId,
+            requireBaseVersion: Boolean(existing),
+          });
+        } catch (err) {
+          return { content: (err as Error).message, isError: true };
+        }
+      }
+
+      let docResult: Awaited<ReturnType<typeof createDocxFromMarkdown>>;
+      try {
+        docResult = await createDocxFromMarkdown({
+          markdown,
+          templateBytes,
+          title: path.basename(targetAbs, path.extname(targetAbs)),
+          author: `Pocket Agent (${resolveAgentDisplayName(deps)})`,
+        });
+      } catch (err) {
+        return { content: `Could not build .docx from markdown: ${(err as Error).message}`, isError: true };
+      }
+
+      try {
+        await fs.mkdir(path.dirname(targetAbs), { recursive: true });
+        if (existing && overwrite) {
+          const tmp = `${targetAbs}.tmp.${process.pid}.${Date.now()}`;
+          await fs.writeFile(tmp, Buffer.from(docResult.zipBytes));
+          await fs.rename(tmp, targetAbs);
+        } else {
+          await fs.writeFile(targetAbs, Buffer.from(docResult.zipBytes), { flag: 'wx' });
+        }
+      } catch (err) {
+        return { content: `Could not write ${displayPath}: ${(err as Error).message}`, isError: true };
+      }
+
+      const details = `${docResult.paragraphCount} paragraph(s), ${docResult.headingCount} heading(s), ${docResult.tableCount} table(s)${docResult.reusedTemplateStyles ? `, reused styles from ${templateRaw}` : ''}`;
+      if (snapshot && deps.docWorkspaces) {
+        const rec = await deps.docWorkspaces.recordMutationAfterWrite(snapshot, targetAbs, {
+          actor: deps.plannerChatId ? `agent:${deps.plannerChatId}` : 'user',
+          chatId: deps.plannerChatId,
+          turnId: deps.plannerTurnId,
+          toolUseId: deps.plannerToolUseId,
+        });
+        return `Created Word document ${displayPath} (${details}).\nVersion: ${rec.sha256}`;
+      }
+      return `Created Word document ${displayPath} (${details}).`;
+    },
+  },
+  {
+    name: 'export_pdf',
+    description:
+      'Export a .docx, .xlsx, or .pptx document to PDF using headless LibreOffice (argv-only, isolated per-job profile, ' +
+      'and timeout). Output defaults to outputs/<stem>.pdf in a document workspace. Creates files exclusively unless ' +
+      'overwrite: true is passed with baseVersion.',
+    parameters: {
+      type: 'object',
+      properties: {
+        source: {
+          type: 'string',
+          description: 'Path to the source .docx, .xlsx, or .pptx document.',
+        },
+        output: {
+          type: 'string',
+          description: 'Optional destination PDF path (defaults to outputs/<source-stem>.pdf in a document workspace).',
+        },
+        overwrite: {
+          type: 'boolean',
+          description: 'Set true (along with baseVersion) to replace an existing PDF at output.',
+        },
+        baseVersion: {
+          type: 'string',
+          description: 'Required when overwrite: true on an existing workspace PDF.',
+        },
+      },
+      required: ['source'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    prepareArguments(args) {
+      const { _diff: _ignored, ...rest } = args;
+      return rest;
+    },
+    async execute(deps, args) {
+      const sourceRaw = String(args.source ?? '').trim();
+      if (!sourceRaw) {
+        return { content: 'export_pdf requires a "source" argument.', isError: true };
+      }
+      const overwrite = args.overwrite === true;
+      const baseVersion = typeof args.baseVersion === 'string' ? args.baseVersion.trim() : undefined;
+
+      let realSource: string;
+      try {
+        realSource = await resolveExistingPathWithin(deps, sourceRaw);
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+
+      const ext = path.extname(realSource).toLowerCase();
+      if (ext !== '.docx' && ext !== '.xlsx' && ext !== '.xlsm' && ext !== '.pptx') {
+        return {
+          content: `export_pdf supports .docx, .xlsx, or .pptx sources (got "${ext || 'unknown'}").`,
+          isError: true,
+        };
+      }
+
+      const stem = path.basename(realSource, path.extname(realSource));
+      let targetAbs: string;
+      let displayPath: string;
+      try {
+        ({ targetAbs, displayPath } = await resolveArtifactOutputTarget(
+          deps,
+          typeof args.output === 'string' ? args.output : undefined,
+          `${stem}.pdf`,
+        ));
+      } catch (err) {
+        return { content: (err as Error).message, isError: true };
+      }
+
+      const existing = await fs.stat(targetAbs).catch(() => null);
+      if (existing?.isDirectory()) {
+        return { content: `${displayPath} is a directory, not a file.`, isError: true };
+      }
+      const targetMatch =
+        deps.docWorkspaces?.findContainingWorkspaceForTarget(targetAbs, deps.docWorkspaceId) ?? null;
+
+      if (existing && !overwrite) {
+        return {
+          content: `Refusing: "${displayPath}" already exists. Pass overwrite: true with baseVersion to replace it, or choose a new path.`,
+          isError: true,
+        };
+      }
+      if (existing && overwrite && targetMatch && !baseVersion) {
+        return {
+          content: `Refusing: overwriting existing workspace file "${displayPath}" requires baseVersion.`,
+          isError: true,
+        };
+      }
+
+      let snapshot: Awaited<ReturnType<NonNullable<typeof deps.docWorkspaces>['checkBaseVersionAndSnapshot']>> = null;
+      if (targetMatch && deps.docWorkspaces) {
+        try {
+          snapshot = await deps.docWorkspaces.checkBaseVersionAndSnapshot(targetAbs, {
+            chatId: deps.plannerChatId,
+            baseVersion,
+            restrictedWorkspaceId: deps.docWorkspaceId,
+            requireBaseVersion: Boolean(existing),
+          });
+        } catch (err) {
+          return { content: (err as Error).message, isError: true };
+        }
+      }
+
+      await fs.mkdir(path.dirname(targetAbs), { recursive: true });
+      const exported = await exportDocumentToPdf(realSource, targetAbs, {
+        libreOfficeBin: deps.sheetLimits?.libreOfficeBin,
+        timeoutMs: deps.sheetLimits?.libreOfficeTimeoutMs,
+      });
+      if (!exported.ok) {
+        return { content: exported.error, isError: true };
+      }
+
+      if (snapshot && deps.docWorkspaces) {
+        const rec = await deps.docWorkspaces.recordMutationAfterWrite(snapshot, targetAbs, {
+          actor: deps.plannerChatId ? `agent:${deps.plannerChatId}` : 'user',
+          chatId: deps.plannerChatId,
+          turnId: deps.plannerTurnId,
+          toolUseId: deps.plannerToolUseId,
+        });
+        return `Exported ${sourceRaw} to PDF at ${displayPath} (${exported.size} bytes).\nVersion: ${rec.sha256}`;
+      }
+      return `Exported ${sourceRaw} to PDF at ${displayPath} (${exported.size} bytes).`;
     },
   },
   {
@@ -4054,6 +5046,7 @@ async function findExecutableOnPath(names: readonly string[]): Promise<string | 
  */
 export const PARALLEL_SAFE_TOOLS: ReadonlySet<string> = new Set([
   'read_file',
+  'doc_read',
   'sheet_info',
   'sheet_read',
   'sheet_find',

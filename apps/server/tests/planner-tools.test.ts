@@ -147,6 +147,7 @@ describe('PLANNER_TOOLS catalog', () => {
     expect(readOnlyNames).toEqual(
       [
         'check_back_in',
+        'doc_read',
         'find_files',
         'get_current_time',
         'get_subagent_status',
@@ -176,10 +177,14 @@ describe('PLANNER_TOOLS catalog', () => {
       [
         'bash',
         'call_mcp_tool',
+        'create_doc',
+        'create_sheet',
         'delete_file',
         'delete_worktree',
+        'doc_edit',
         'edit_file',
         'exec_command',
+        'export_pdf',
         'memory_save',
         'mkdir',
         'rename_file',

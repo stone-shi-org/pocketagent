@@ -60,7 +60,46 @@ export interface SheetRunnerLimits {
  */
 export function resolveLibreOfficeExecutable(override?: string | null): string | null {
   if (override !== undefined) return override;
+  const envBin = process.env.POCKETAGENT_SOFFICE_BIN?.trim();
+  if (envBin) {
+    return resolveExecutable(envBin) ?? (fs.existsSync(envBin) ? envBin : null);
+  }
   return resolveExecutable('soffice') ?? resolveExecutable('libreoffice');
+}
+
+/**
+ * PA-145: Checks whether an Office or LibreOffice lock file (`~$book.xlsx`,
+ * `~$doc.docx`, `.~lock.book.xlsx#`) exists alongside `absPath`.
+ * Lock files indicate the document may be open in Excel/Word/LibreOffice on
+ * this or a synced machine; callers warn in the approval card and tool result
+ * without refusing (since lock files from crash/sync can be stale).
+ */
+export function detectOfficeLockFile(absPath: string): { lockFile: string; lockFileName: string; message: string } | null {
+  const dir = path.dirname(absPath);
+  const base = path.basename(absPath);
+  const ext = path.extname(base);
+  const stem = base.slice(0, base.length - ext.length);
+  const candidates = new Set<string>([`~$${base}`, `.~lock.${base}#`]);
+  if (stem.length >= 7) {
+    candidates.add(`~$${stem.slice(1)}${ext}`);
+  }
+  if (stem.length >= 8) {
+    candidates.add(`~$${stem.slice(2)}${ext}`);
+  }
+  for (const lockName of candidates) {
+    try {
+      if (fs.existsSync(path.join(dir, lockName))) {
+        return {
+          lockFile: lockName,
+          lockFileName: lockName,
+          message: `Warning: Office lock file "${lockName}" exists alongside ${base} — the file may be open in Excel/Word on this or a synced machine.`,
+        };
+      }
+    } catch {
+      // Ignore lock file probe errors.
+    }
+  }
+  return null;
 }
 
 function workerScript(): { path: string; typescript: boolean } {

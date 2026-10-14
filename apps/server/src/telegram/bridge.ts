@@ -721,14 +721,22 @@ function parseUndoCallbackData(
 
 /**
  * Formats the `<pre>` body of a Telegram approval prompt.
- * PA-140: for `sheet_edit`, formats cell-level diff lines
- * (`Summary!B7: =SUM(B2:B6) → =SUM(B2:B8)`) instead of raw JSON.
+ * PA-140 / PA-145: for `sheet_edit`, `doc_edit`, and artifact creation tools,
+ * formats `_diff` lines (and `_lockWarning` if present) instead of raw JSON.
  */
 export function formatApprovalInput(
   event: Pick<PermissionRequestEvent, 'toolName' | 'input' | 'filePath'>,
   maxChars = APPROVAL_INPUT_MAX,
 ): string {
-  if (event.toolName === 'sheet_edit') {
+  const lockWarning =
+    typeof event.input._lockWarning === 'string' && event.input._lockWarning ? event.input._lockWarning : null;
+  if (
+    event.toolName === 'sheet_edit' ||
+    event.toolName === 'doc_edit' ||
+    event.toolName === 'create_sheet' ||
+    event.toolName === 'create_doc' ||
+    event.toolName === 'export_pdf'
+  ) {
     const rawDiff = event.input._diff;
     if (
       rawDiff &&
@@ -741,6 +749,7 @@ export function formatApprovalInput(
       const count = Math.max(beforeLines.length, afterLines.length);
       const lines: string[] = [];
       if (event.filePath) lines.push(event.filePath);
+      if (lockWarning) lines.push(`⚠️ ${lockWarning}`);
       for (let i = 0; i < count; i++) {
         const b = beforeLines[i] ?? '';
         const a = afterLines[i] ?? '';
@@ -764,10 +773,10 @@ export function formatApprovalInput(
       }
     }
   }
-  const cleanInput =
-    '_diff' in event.input
-      ? Object.fromEntries(Object.entries(event.input).filter(([k]) => k !== '_diff'))
-      : event.input;
+  const hasSynthetic = Object.keys(event.input).some((k) => k.startsWith('_'));
+  const cleanInput = hasSynthetic
+    ? Object.fromEntries(Object.entries(event.input).filter(([k]) => !k.startsWith('_')))
+    : event.input;
   return Object.keys(cleanInput).length > 0 ? truncate(JSON.stringify(cleanInput, null, 2), maxChars) : '';
 }
 

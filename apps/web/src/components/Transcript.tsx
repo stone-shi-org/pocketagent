@@ -57,6 +57,7 @@ export function Transcript({
   onSelectPrompt,
   onUndoTurn,
   undoingTurnId,
+  onOpenChangedFileCompare,
 }: {
   state: TranscriptState;
   /** Messages from the conversation being resumed, shown above this session. */
@@ -69,6 +70,8 @@ export function Transcript({
   onUndoTurn?: (turnId: string) => void;
   /** PA-143: turnId currently being undone. */
   undoingTurnId?: string | null;
+  /** PA-145: called when the user clicks a changed file to open its compare view in the workspace panel. */
+  onOpenChangedFileCompare?: (file: { workspaceId?: string; relPath: string; versionId?: string }) => void;
 }): JSX.Element {
   const endRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -201,6 +204,7 @@ export function Transcript({
             onSelectPrompt={onSelectPrompt}
             onUndoTurn={onUndoTurn}
             undoingTurnId={undoingTurnId}
+            onOpenChangedFileCompare={onOpenChangedFileCompare}
             busy={state.busy}
           />
         );
@@ -226,6 +230,7 @@ export function Transcript({
             onSelectPrompt={onSelectPrompt}
             onUndoTurn={onUndoTurn}
             undoingTurnId={undoingTurnId}
+            onOpenChangedFileCompare={onOpenChangedFileCompare}
             busy={state.busy}
           />
         );
@@ -333,6 +338,7 @@ function TurnPanel({
   onSelectPrompt,
   onUndoTurn,
   undoingTurnId,
+  onOpenChangedFileCompare,
   busy,
 }: {
   turn: TurnNode;
@@ -344,6 +350,7 @@ function TurnPanel({
   onSelectPrompt?: (prompt: string) => void;
   onUndoTurn?: (turnId: string) => void;
   undoingTurnId?: string | null;
+  onOpenChangedFileCompare?: (file: { workspaceId?: string; relPath: string; versionId?: string }) => void;
   busy?: boolean;
 }): JSX.Element {
   const [expanded, setExpanded] = useState(false);
@@ -428,6 +435,7 @@ function TurnPanel({
             onSelectPrompt={onSelectPrompt}
             onUndoTurn={onUndoTurn}
             undoingTurnId={undoingTurnId}
+            onOpenChangedFileCompare={onOpenChangedFileCompare}
             busy={busy}
           />
         ))}
@@ -441,12 +449,14 @@ function Item({
   onSelectPrompt,
   onUndoTurn,
   undoingTurnId,
+  onOpenChangedFileCompare,
   busy,
 }: {
   item: TranscriptItem;
   onSelectPrompt?: (prompt: string) => void;
   onUndoTurn?: (turnId: string) => void;
   undoingTurnId?: string | null;
+  onOpenChangedFileCompare?: (file: { workspaceId?: string; relPath: string; versionId?: string }) => void;
   busy?: boolean;
 }): JSX.Element | null {
   switch (item.type) {
@@ -472,6 +482,7 @@ function Item({
           onSelectPrompt={onSelectPrompt}
           onUndoTurn={onUndoTurn}
           undoingTurnId={undoingTurnId}
+          onOpenChangedFileCompare={onOpenChangedFileCompare}
           busy={busy}
         />
       );
@@ -619,15 +630,17 @@ function TurnFooter({
   onSelectPrompt,
   onUndoTurn,
   undoingTurnId,
+  onOpenChangedFileCompare,
   busy,
 }: {
   item: Extract<TranscriptItem, { type: 'turn' }>;
   onSelectPrompt?: (prompt: string) => void;
   onUndoTurn?: (turnId: string) => void;
   undoingTurnId?: string | null;
+  onOpenChangedFileCompare?: (file: { workspaceId?: string; relPath: string; versionId?: string }) => void;
   busy?: boolean;
 }): JSX.Element {
-  const [filesOpen, setFilesOpen] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(true);
   const bits: string[] = [];
   if (item.durationMs !== null) bits.push(`${(item.durationMs / 1000).toFixed(1)}s`);
   if (item.inputTokens !== null || item.outputTokens !== null) {
@@ -694,8 +707,22 @@ function TurnFooter({
             <ul className="turn-changed-files-list">
               {changedFiles.map((f) => (
                 <li key={`${f.workspaceId}:${f.relPath}:${f.versionId}`}>
-                  <code>{f.relPath}</code>
-                  {f.summary ? <span className="turn-changed-file-summary"> — {f.summary}</span> : null}
+                  {onOpenChangedFileCompare ? (
+                    <button
+                      type="button"
+                      className="turn-changed-file-link"
+                      onClick={() => onOpenChangedFileCompare(f)}
+                      title={`Compare changes for ${f.relPath} in workspace panel`}
+                    >
+                      <code>{f.relPath}</code>
+                      {f.summary ? <span className="turn-changed-file-summary"> — {f.summary}</span> : null}
+                    </button>
+                  ) : (
+                    <>
+                      <code>{f.relPath}</code>
+                      {f.summary ? <span className="turn-changed-file-summary"> — {f.summary}</span> : null}
+                    </>
+                  )}
                 </li>
               ))}
             </ul>

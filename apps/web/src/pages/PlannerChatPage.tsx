@@ -39,6 +39,8 @@ import { MIC_CHANGE_EVENT } from '../audio/devices.js';
 import { GeminiLiveController, type GeminiLiveState } from '../audio/gemini-live.js';
 import { getGeminiLivePref, setGeminiLivePref } from '../agent/voice-prefs.js';
 import { AttachmentHrefContext } from '../components/FileChips.js';
+import { DocRedlineView } from '../components/DocRedlineView.js';
+import { diffFromToolInput, diffLines, lockWarningFromToolInput, redlineFromToolInput } from '../agent/diff.js';
 
 
 
@@ -590,6 +592,24 @@ export function PlannerChatPage({
       items: [...(prev?.items ?? []), { text: `@${relPath}`, seq }],
     }));
   }, []);
+
+  const [workspaceCompareTarget, setWorkspaceCompareTarget] = useState<{
+    relPath: string;
+    versionId?: string;
+    seq: number;
+  } | null>(null);
+  const compareTargetSeqRef = useRef(0);
+  const handleOpenChangedFileCompare = useCallback(
+    (file: { workspaceId?: string; relPath: string; versionId?: string } | string, versionId?: string) => {
+      const rPath = typeof file === 'string' ? file : file.relPath;
+      const vId = typeof file === 'string' ? versionId : file.versionId;
+      setArtifactsOpen(false);
+      setWorkspacePanelOpen(true);
+      const seq = ++compareTargetSeqRef.current;
+      setWorkspaceCompareTarget({ relPath: rPath, versionId: vId, seq });
+    },
+    [],
+  );
 
   const [undoingTurnId, setUndoingTurnId] = useState<string | null>(null);
   const [pendingUndoConflict, setPendingUndoConflict] = useState<{
@@ -1847,44 +1867,79 @@ export function PlannerChatPage({
             onSelectPrompt={(text) => void handleSend(text)}
             onUndoTurn={(turnId) => void handleUndoTurn(turnId, false)}
             undoingTurnId={undoingTurnId}
+            onOpenChangedFileCompare={attachedDocWorkspace ? handleOpenChangedFileCompare : undefined}
           />
         </AttachmentHrefContext.Provider>
       )}
 
-      {pending && (
-        <div className="planner-approval-card" role="alertdialog" aria-label="Tool approval">
-          <p className="planner-approval-title">
-            This agent wants to run <code>{pending.displayName ?? pending.toolName}</code>
-          </p>
-          <pre className="planner-approval-args">{JSON.stringify(pending.input, null, 2)}</pre>
-          <div className="planner-approval-actions">
-            <button type="button" className="planner-btn" disabled={sending} onClick={() => decide('allow_once')}>
-              Allow once
-            </button>
-            {/* PA-134: a target-scoped tool (a Hub dispatch) may be remembered
-                for this agent and that host only, never globally; the server
-                refuses the same choices this hides. Absent means both. */}
-            {(pending.rememberScopes ?? ['workspace', 'global']).includes('workspace') && (
-              <button
-                type="button"
-                className="planner-btn"
-                disabled={sending}
-                onClick={() => decide('allow_workspace')}
-              >
-                {pending.rememberScopes ? 'Allow for this agent and target' : 'Allow for this workspace'}
-              </button>
+      {pending && (() => {
+        const approvalRedline = redlineFromToolInput(pending.toolName, pending.input);
+        const approvalDiff = diffFromToolInput(pending.toolName, pending.input);
+        const diffLinesList = approvalDiff ? diffLines(approvalDiff.before, approvalDiff.after) : null;
+        const approvalWarning = pending.reason ?? lockWarningFromToolInput(pending.input);
+        const cleanInput =
+          pending.input && typeof pending.input === 'object' && !Array.isArray(pending.input)
+            ? Object.fromEntries(
+                Object.entries(pending.input as Record<string, unknown>).filter(([k]) => !k.startsWith('_')),
+              )
+            : pending.input;
+        return (
+          <div className="planner-approval-card" role="alertdialog" aria-label="Tool approval">
+            <p className="planner-approval-title">
+              This agent wants to run <code>{pending.displayName ?? pending.toolName}</code>
+              {pending.filePath ? (
+                <>
+                  {' '}on <code>{pending.filePath}</code>
+                </>
+              ) : null}
+            </p>
+            {approvalWarning && (
+              <div className="planner-approval-warning" role="status">
+                {approvalWarning}
+              </div>
             )}
-            {(pending.rememberScopes ?? ['workspace', 'global']).includes('global') && (
-              <button type="button" className="planner-btn" disabled={sending} onClick={() => decide('allow_global')}>
-                Allow globally
+            {approvalRedline && approvalRedline.length > 0 ? (
+              <DocRedlineView blocks={approvalRedline} />
+            ) : diffLinesList && diffLinesList.length > 0 ? (
+              <div className="approval-diff diff">
+                {diffLinesList.map((l, idx) => (
+                  <div key={idx} className={`diff-line ${l.op}`}>
+                    <span className="gutter">{l.op === 'add' ? '+' : l.op === 'remove' ? '−' : ' '}</span>
+                    <span className="code">{l.text || ' '}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            <pre className="planner-approval-args">{JSON.stringify(cleanInput, null, 2)}</pre>
+            <div className="planner-approval-actions">
+              <button type="button" className="planner-btn" disabled={sending} onClick={() => decide('allow_once')}>
+                Allow once
               </button>
-            )}
-            <button type="button" className="planner-btn danger" disabled={sending} onClick={() => decide('deny')}>
-              Deny
-            </button>
+              {/* PA-134: a target-scoped tool (a Hub dispatch) may be remembered
+                  for this agent and that host only, never globally; the server
+                  refuses the same choices this hides. Absent means both. */}
+              {(pending.rememberScopes ?? ['workspace', 'global']).includes('workspace') && (
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={sending}
+                  onClick={() => decide('allow_workspace')}
+                >
+                  {pending.rememberScopes ? 'Allow for this agent and target' : 'Allow for this workspace'}
+                </button>
+              )}
+              {(pending.rememberScopes ?? ['workspace', 'global']).includes('global') && (
+                <button type="button" className="planner-btn" disabled={sending} onClick={() => decide('allow_global')}>
+                  Allow globally
+                </button>
+              )}
+              <button type="button" className="planner-btn danger" disabled={sending} onClick={() => decide('deny')}>
+                Deny
+              </button>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {previewOpen && (
         <div className="planner-context-preview">
@@ -2109,6 +2164,7 @@ export function PlannerChatPage({
             onWorkspaceUpdated={(updated) => {
               setDocWorkspaces((prev) => prev.map((w) => (w.id === updated.id ? updated : w)));
             }}
+            compareTarget={workspaceCompareTarget}
           />
         )}
 

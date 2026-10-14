@@ -64,7 +64,27 @@ export const TOOL_METADATA: Record<string, ToolMeta> = {
     category: 'Files & Workspaces',
   },
   sheet_edit: {
-    shortDescription: 'Patch .xlsx/.xlsm cells, tables, or sheets in place into a new file',
+    shortDescription: 'Patch .xlsx/.xlsm cells, tables, or sheets in place or into a new file',
+    category: 'Files & Workspaces',
+  },
+  doc_read: {
+    shortDescription: 'Read .docx paragraphs, headings, tables, comments, and tracked changes',
+    category: 'Files & Workspaces',
+  },
+  doc_edit: {
+    shortDescription: 'Edit .docx in place with Word tracked changes, direct edits, or comments',
+    category: 'Files & Workspaces',
+  },
+  create_sheet: {
+    shortDescription: 'Create a new .xlsx workbook with sheets, formulas, and number formats',
+    category: 'Files & Workspaces',
+  },
+  create_doc: {
+    shortDescription: 'Create a new .docx document from Markdown and an optional .docx template',
+    category: 'Files & Workspaces',
+  },
+  export_pdf: {
+    shortDescription: 'Export a .docx, .xlsx, or .pptx document to PDF via headless LibreOffice',
     category: 'Files & Workspaces',
   },
   find_files: {

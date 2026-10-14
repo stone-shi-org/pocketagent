@@ -6,6 +6,8 @@
  * nothing at that size.
  */
 
+import type { DocRedlineBlock, DocRedlineSegment } from '@pocketagent/protocol';
+
 export type DiffOp = 'context' | 'add' | 'remove';
 
 export interface DiffLine {
@@ -137,16 +139,16 @@ export function diffFromToolInput(
     const after = str(input.content);
     if (after !== null) return { before: '', after };
   }
-  // PA-140: `sheet_edit` carries a worker-computed `_diff` (`{ before, after }`)
-  // with cell-level before/after lines; fall back to formatting `input.edits`
-  // if `_diff` is absent.
+  // PA-140 / PA-145: `sheet_edit`, `doc_edit`, `create_sheet`, `create_doc`, and
+  // `export_pdf` carry a server-computed `_diff` (`{ before, after }`); fall back
+  // to formatting `input` client-side if `_diff` is absent.
+  const rawDiff = input._diff;
+  if (rawDiff && typeof rawDiff === 'object') {
+    const before = str((rawDiff as { before?: unknown }).before);
+    const after = str((rawDiff as { after?: unknown }).after);
+    if (before !== null && after !== null) return { before, after };
+  }
   if (name === 'sheet_edit') {
-    const rawDiff = input._diff;
-    if (rawDiff && typeof rawDiff === 'object') {
-      const before = str((rawDiff as { before?: unknown }).before);
-      const after = str((rawDiff as { after?: unknown }).after);
-      if (before !== null && after !== null) return { before, after };
-    }
     if (Array.isArray(input.edits)) {
       const beforeLines: string[] = [];
       const afterLines: string[] = [];
@@ -182,9 +184,139 @@ export function diffFromToolInput(
       }
     }
   }
+  if (name === 'doc_edit' && Array.isArray(input.edits)) {
+    const beforeLines: string[] = [];
+    const afterLines: string[] = [];
+    for (const raw of input.edits as unknown[]) {
+      if (!raw || typeof raw !== 'object') continue;
+      const edit = raw as Record<string, unknown>;
+      const loc = typeof edit.paragraphId === 'string' ? `[${edit.paragraphId}] ` : '';
+      if (edit.op === 'replace_text') {
+        beforeLines.push(`${loc}${str(edit.target) ?? ''}`);
+        afterLines.push(`${loc}${str(edit.replacement) ?? ''}`);
+      } else if (edit.op === 'insert_text') {
+        beforeLines.push(`${loc}${str(edit.anchor) ?? ''}`);
+        afterLines.push(`${loc}${str(edit.text) ?? ''}`);
+      } else if (edit.op === 'delete_text') {
+        beforeLines.push(`${loc}${str(edit.target) ?? ''}`);
+        afterLines.push(`${loc}(deleted)`);
+      } else if (edit.op === 'set_table_cell') {
+        const ref = `[table ${String(edit.tableIndex ?? 0)} r${String(edit.row ?? 0)}c${String(edit.col ?? 0)}]`;
+        beforeLines.push(`${ref}: (current)`);
+        afterLines.push(`${ref}: ${str(edit.text) ?? ''}`);
+      } else if (edit.op === 'add_comment') {
+        beforeLines.push(`${loc}${str(edit.target) ?? ''}`);
+        afterLines.push(`${loc}[Comment: ${str(edit.comment) ?? ''}]`);
+      }
+    }
+    if (afterLines.length > 0) {
+      return { before: beforeLines.join('\n'), after: afterLines.join('\n') };
+    }
+  }
+  if (name === 'create_doc') {
+    const md = str(input.markdown);
+    if (md !== null) return { before: '', after: md };
+  }
+  if (name === 'create_sheet' && Array.isArray(input.sheets)) {
+    const lines: string[] = [];
+    for (const raw of input.sheets as unknown[]) {
+      if (!raw || typeof raw !== 'object') continue;
+      const s = raw as Record<string, unknown>;
+      const rowCount = Array.isArray(s.rows) ? s.rows.length : 0;
+      lines.push(`Sheet "${str(s.name) ?? 'Sheet'}": ${rowCount} row(s)`);
+    }
+    if (lines.length > 0) return { before: '', after: lines.join('\n') };
+  }
+  if (name === 'export_pdf') {
+    const src = str(input.source);
+    if (src !== null) {
+      const out = str(input.output) ?? '(PDF)';
+      return { before: '', after: `Export ${src} → ${out}` };
+    }
+  }
   if (name === 'NotebookEdit') {
     const after = str(input.new_source);
     if (after !== null) return { before: str(input.old_source) ?? '', after };
   }
   return null;
 }
+
+/**
+ * PA-145: Extract redline blocks (`deleted` struck, `inserted` underlined,
+ * `comment` badged) from a `doc_edit` call's input. Uses the server-computed
+ * `_redline` when available, falling back to synthesizing redline blocks from
+ * `input.edits`.
+ */
+export function redlineFromToolInput(
+  name: string,
+  input: Record<string, unknown>,
+): DocRedlineBlock[] | null {
+  if (name !== 'doc_edit') return null;
+  if (Array.isArray(input._redline) && input._redline.length > 0) {
+    return input._redline as DocRedlineBlock[];
+  }
+  if (!Array.isArray(input.edits) || input.edits.length === 0) return null;
+  const blocks: DocRedlineBlock[] = [];
+  let idx = 0;
+  for (const raw of input.edits as unknown[]) {
+    idx++;
+    if (!raw || typeof raw !== 'object') continue;
+    const edit = raw as Record<string, unknown>;
+    const location =
+      typeof edit.paragraphId === 'string' && edit.paragraphId
+        ? edit.paragraphId
+        : edit.op === 'set_table_cell'
+          ? `table ${String(edit.tableIndex ?? 0)} r${String(edit.row ?? 0)}c${String(edit.col ?? 0)}`
+          : null;
+    const segments: DocRedlineSegment[] = [];
+    if (edit.op === 'replace_text') {
+      if (typeof edit.target === 'string' && edit.target) {
+        segments.push({ type: 'del', text: edit.target });
+      }
+      if (typeof edit.replacement === 'string' && edit.replacement) {
+        segments.push({ type: 'ins', text: edit.replacement });
+      }
+    } else if (edit.op === 'insert_text') {
+      if (typeof edit.anchor === 'string' && edit.anchor) {
+        segments.push({ type: 'text', text: edit.anchor });
+      }
+      if (typeof edit.text === 'string' && edit.text) {
+        segments.push({ type: 'ins', text: edit.text });
+      }
+    } else if (edit.op === 'delete_text') {
+      if (typeof edit.target === 'string' && edit.target) {
+        segments.push({ type: 'del', text: edit.target });
+      }
+    } else if (edit.op === 'set_table_cell') {
+      if (typeof edit.text === 'string') {
+        segments.push({ type: 'ins', text: edit.text });
+      }
+    } else if (edit.op === 'add_comment') {
+      if (typeof edit.target === 'string' && edit.target) {
+        segments.push({ type: 'text', text: edit.target });
+      }
+      if (typeof edit.comment === 'string' && edit.comment) {
+        segments.push({ type: 'comment', text: edit.comment });
+      }
+    }
+    if (segments.length > 0) {
+      blocks.push({
+        id: typeof edit.paragraphId === 'string' && edit.paragraphId ? edit.paragraphId : `edit-${idx}`,
+        ...(location ? { location } : {}),
+        segments,
+      });
+    }
+  }
+  return blocks.length > 0 ? blocks : null;
+}
+
+/**
+ * PA-145: Extract an Office lock warning (`~$book.xlsx` / `~$doc.docx`) from
+ * a tool call's input when present.
+ */
+export function lockWarningFromToolInput(input: Record<string, unknown>): string | null {
+  return typeof input._lockWarning === 'string' && input._lockWarning.trim()
+    ? input._lockWarning.trim()
+    : null;
+}
+

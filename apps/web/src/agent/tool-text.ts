@@ -35,7 +35,7 @@ export function stateLabel(state: ToolState): string {
 
 /** Show the interesting arguments, not a wall of JSON. */
 export function formatToolInput(input: Record<string, unknown>): string {
-  const entries = Object.entries(input).filter(([k, v]) => k !== '_diff' && v !== undefined && v !== null);
+  const entries = Object.entries(input).filter(([k, v]) => !k.startsWith('_') && v !== undefined && v !== null);
   if (entries.length === 0) return '(no arguments)';
   return entries
     .map(([k, v]) => {

@@ -18,6 +18,7 @@ import { ApiError } from '../api/client.js';
 import { useHostApi } from '../hosts/HostContext.js';
 import { renderMarkdown } from '../agent/markdown.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
+import { DocRedlineView } from './DocRedlineView.js';
 import { Icon } from './Icon.js';
 
 interface Props {
@@ -30,6 +31,8 @@ interface Props {
   onClose: () => void;
   onUseInChat: (relPath: string) => void;
   onWorkspaceUpdated?: (workspace: DocWorkspace) => void;
+  /** PA-145: Opens the panel directly to a file's compare view when triggered from a turn's Changed files chip. */
+  compareTarget?: { relPath: string; versionId?: string; seq: number } | null;
 }
 
 interface TreeNode {
@@ -155,6 +158,7 @@ export function WorkspacePanel({
   onClose,
   onUseInChat,
   onWorkspaceUpdated,
+  compareTarget,
 }: Props): JSX.Element {
   const api = useHostApi();
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(() => new Set());
@@ -295,9 +299,27 @@ export function WorkspacePanel({
     [api, workspace.id],
   );
 
+  const handleCompareVersions = useCallback(
+    async (beforeId: string, afterId: string): Promise<void> => {
+      if (!beforeId || !afterId) return;
+      setCompareLoading(true);
+      setHistoryError(null);
+      try {
+        const res = await api.compareDocFileVersions(workspace.id, beforeId, afterId);
+        setCompareResult(res);
+      } catch (err) {
+        setHistoryError(err instanceof ApiError ? err.message : 'Could not compare versions.');
+      } finally {
+        setCompareLoading(false);
+      }
+    },
+    [api, workspace.id],
+  );
+
   const openHistory = useCallback(
-    async (relPath: string) => {
+    async (relPath: string, autoCompareVersionId?: string) => {
       setTrashOpen(false);
+      setPreviewPath(null);
       setHistoryPath(relPath);
       setHistoryLoading(true);
       setHistoryError(null);
@@ -306,15 +328,27 @@ export function WorkspacePanel({
         const res = await api.listDocFileVersions(workspace.id, relPath);
         setVersions(res.versions);
         setCurrentFileSha256(res.currentSha256 ?? null);
-        if (res.versions.length >= 2) {
-          setCompareAfterId(res.versions[0]!.id);
-          setCompareBeforeId(res.versions[1]!.id);
+        let beforeId = '';
+        let afterId = '';
+        if (autoCompareVersionId && res.versions.length > 0) {
+          const idx = res.versions.findIndex((v) => v.id === autoCompareVersionId);
+          const targetIdx = idx >= 0 ? idx : 0;
+          afterId = res.versions[targetIdx]!.id;
+          beforeId =
+            targetIdx + 1 < res.versions.length
+              ? res.versions[targetIdx + 1]!.id
+              : res.versions[targetIdx]!.id;
+        } else if (res.versions.length >= 2) {
+          afterId = res.versions[0]!.id;
+          beforeId = res.versions[1]!.id;
         } else if (res.versions.length === 1) {
-          setCompareAfterId(res.versions[0]!.id);
-          setCompareBeforeId(res.versions[0]!.id);
-        } else {
-          setCompareAfterId('');
-          setCompareBeforeId('');
+          afterId = res.versions[0]!.id;
+          beforeId = res.versions[0]!.id;
+        }
+        setCompareAfterId(afterId);
+        setCompareBeforeId(beforeId);
+        if (autoCompareVersionId && beforeId && afterId) {
+          void handleCompareVersions(beforeId, afterId);
         }
       } catch (err) {
         setVersions([]);
@@ -323,8 +357,13 @@ export function WorkspacePanel({
         setHistoryLoading(false);
       }
     },
-    [api, workspace.id],
+    [api, workspace.id, handleCompareVersions],
   );
+
+  useEffect(() => {
+    if (!compareTarget) return;
+    void openHistory(compareTarget.relPath, compareTarget.versionId ?? 'latest');
+  }, [compareTarget, openHistory]);
 
   const openTrash = useCallback(async () => {
     setPreviewPath(null);
@@ -342,20 +381,6 @@ export function WorkspacePanel({
       setTrashLoading(false);
     }
   }, [api, workspace.id]);
-
-  const handleCompareVersions = async (beforeId: string, afterId: string): Promise<void> => {
-    if (!beforeId || !afterId) return;
-    setCompareLoading(true);
-    setHistoryError(null);
-    try {
-      const res = await api.compareDocFileVersions(workspace.id, beforeId, afterId);
-      setCompareResult(res);
-    } catch (err) {
-      setHistoryError(err instanceof ApiError ? err.message : 'Could not compare versions.');
-    } finally {
-      setCompareLoading(false);
-    }
-  };
 
   const handleRestoreVersion = async (
     versionId: string,
@@ -1189,7 +1214,7 @@ export function WorkspacePanel({
                 </div>
               ) : (
                 <>
-                  {versions.length >= 2 && (
+                  {versions.length >= 1 && (
                     <div className="doc-version-compare-bar">
                       <label className="doc-version-compare-label">
                         <span>Before:</span>
@@ -1271,6 +1296,8 @@ export function WorkspacePanel({
                             </table>
                           </div>
                         )
+                      ) : compareResult.redlineBlocks && compareResult.redlineBlocks.length > 0 ? (
+                        <DocRedlineView blocks={compareResult.redlineBlocks} />
                       ) : compareResult.diffLines && compareResult.diffLines.length > 0 ? (
                         <pre className="doc-version-line-diff">
                           {compareResult.diffLines.map((line, idx) => (
@@ -1330,13 +1357,13 @@ export function WorkspacePanel({
                                 Restore before
                               </button>
                             )}
-                            {idx + 1 < versions.length && (
+                            {(idx + 1 < versions.length || Boolean(v.prevSha256)) && (
                               <button
                                 type="button"
                                 className="planner-btn small"
                                 disabled={compareLoading}
                                 onClick={() => {
-                                  const prevVer = versions[idx + 1]!;
+                                  const prevVer = versions[idx + 1] ?? v;
                                   setCompareBeforeId(prevVer.id);
                                   setCompareAfterId(v.id);
                                   void handleCompareVersions(prevVer.id, v.id);
@@ -1455,13 +1482,28 @@ export function WorkspacePanel({
                   );
                 })()
               ) : previewData.previewKind === 'docx_html' ? (
-                <div
-                  ref={previewHtmlRef}
-                  className="doc-workspace-docx-html markdown-body"
-                  dangerouslySetInnerHTML={{
-                    __html: sanitizeDocxHtml(previewData.html ?? ''),
-                  }}
-                />
+                <div className="doc-workspace-docx-preview-wrap">
+                  {previewData.redlineBlocks && previewData.redlineBlocks.length > 0 && (
+                    <div className="doc-workspace-docx-redline">
+                      <div className="doc-workspace-docx-redline-header">
+                        <strong>Tracked changes redline</strong>
+                        {typeof previewData.trackedChangesCount === 'number' && previewData.trackedChangesCount > 0 && (
+                          <span className="doc-status-badge status-pending">
+                            {previewData.trackedChangesCount} tracked change{previewData.trackedChangesCount === 1 ? '' : 's'}
+                          </span>
+                        )}
+                      </div>
+                      <DocRedlineView blocks={previewData.redlineBlocks} />
+                    </div>
+                  )}
+                  <div
+                    ref={previewHtmlRef}
+                    className="doc-workspace-docx-html markdown-body"
+                    dangerouslySetInnerHTML={{
+                      __html: sanitizeDocxHtml(previewData.html ?? ''),
+                    }}
+                  />
+                </div>
               ) : previewData.previewKind === 'xlsx_grid' ? (
                 <div className="doc-workspace-xlsx">
                   {previewData.sheets && previewData.sheets.length > 0 ? (

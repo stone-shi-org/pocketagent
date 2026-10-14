@@ -5,9 +5,16 @@ import type {
   PermissionDecision,
   PermissionRequestEvent,
 } from '@pocketagent/protocol';
-import { collapseContext, diffFromToolInput, diffLines } from '../agent/diff.js';
+import {
+  collapseContext,
+  diffFromToolInput,
+  diffLines,
+  lockWarningFromToolInput,
+  redlineFromToolInput,
+} from '../agent/diff.js';
 import { renderMarkdown } from '../agent/markdown.js';
 import { planFromToolInput } from '../agent/plan.js';
+import { DocRedlineView } from './DocRedlineView.js';
 import { Icon } from './Icon.js';
 
 interface Props {
@@ -87,8 +94,10 @@ export function ApprovalSheet({ request, queued, onDecide, disabled }: Props): J
   const plan = isQuestion ? null : planFromToolInput(request.toolName, request.input);
   const badge = isQuestion ? 'Question' : plan ? 'Plan ready' : 'Approval needed';
 
+  const redline = isQuestion || plan ? null : redlineFromToolInput(request.toolName, request.input);
   const diff = isQuestion || plan ? null : diffFromToolInput(request.toolName, request.input);
   const lines = diff ? collapseContext(diffLines(diff.before, diff.after), 2) : null;
+  const effectiveReason = request.reason ?? lockWarningFromToolInput(request.input);
 
   const dragStyle = offset ? { transform: `translate(${offset.x}px, ${offset.y}px)` } : undefined;
 
@@ -135,7 +144,7 @@ export function ApprovalSheet({ request, queued, onDecide, disabled }: Props): J
 
         {!isQuestion && <h2 className="approval-title">{request.title}</h2>}
         {!isQuestion && request.filePath && <div className="approval-path">{request.filePath}</div>}
-        {!isQuestion && request.reason && <div className="approval-reason">{request.reason}</div>}
+        {!isQuestion && effectiveReason && <div className="approval-reason">{effectiveReason}</div>}
 
         {plan && (
           <div
@@ -144,7 +153,11 @@ export function ApprovalSheet({ request, queued, onDecide, disabled }: Props): J
           />
         )}
 
-        {!isQuestion && !plan && lines && (
+        {!isQuestion && !plan && redline && (
+          <DocRedlineView blocks={redline} className="approval-diff" />
+        )}
+
+        {!isQuestion && !plan && !redline && lines && (
           <div className="approval-diff diff">
             {lines.map((line, index) =>
               line === null ? (
@@ -163,7 +176,7 @@ export function ApprovalSheet({ request, queued, onDecide, disabled }: Props): J
           </div>
         )}
 
-        {!isQuestion && !plan && !lines && (
+        {!isQuestion && !plan && !redline && !lines && (
           <pre className="approval-input">{JSON.stringify(request.input, null, 2).slice(0, 1200)}</pre>
         )}
 

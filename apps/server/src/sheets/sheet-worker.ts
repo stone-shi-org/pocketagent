@@ -446,13 +446,14 @@ export function applyXmlSplices(xml: string, splices: XmlSplice[]): string {
   return out;
 }
 
-function getAttr(attrs: string, name: string): string | undefined {
+export function getAttr(attrs: string, name: string): string | undefined {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp(`(?:^|\\s)${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`);
   const m = re.exec(attrs);
   if (!m) return undefined;
   return m[1] ?? m[2];
 }
+export { getAttr as parseAttr };
 
 /**
  * Produces a splice that updates/adds/removes attributes on `span`'s opening

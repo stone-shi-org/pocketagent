@@ -1373,6 +1373,23 @@ export const DocFilePreviewSheet = z.object({
 });
 export type DocFilePreviewSheet = z.infer<typeof DocFilePreviewSheet>;
 
+export const DocRedlineSegment = z.object({
+  type: z.enum(['text', 'ins', 'del', 'comment']),
+  text: z.string(),
+  author: z.string().optional(),
+  date: z.string().optional(),
+  commentId: z.string().optional(),
+});
+export type DocRedlineSegment = z.infer<typeof DocRedlineSegment>;
+
+export const DocRedlineBlock = z.object({
+  id: z.string(),
+  location: z.string().optional(),
+  headingLevel: z.number().int().min(1).max(6).nullable().optional(),
+  segments: z.array(DocRedlineSegment),
+});
+export type DocRedlineBlock = z.infer<typeof DocRedlineBlock>;
+
 export const DocFilePreviewResponse = z.object({
   path: z.string(),
   name: z.string(),
@@ -1388,6 +1405,9 @@ export const DocFilePreviewResponse = z.object({
   text: z.string().optional(),
   /** Read-only grid rows for xlsx preview (first rows of each sheet). */
   sheets: z.array(DocFilePreviewSheet).optional(),
+  /** PA-145: Redline blocks when previewing a docx with tracked changes or comments. */
+  redlineBlocks: z.array(DocRedlineBlock).optional(),
+  trackedChangesCount: z.number().int().nonnegative().optional(),
   truncated: z.boolean(),
 });
 export type DocFilePreviewResponse = z.infer<typeof DocFilePreviewResponse>;
@@ -1451,6 +1471,8 @@ export const DocVersionCompareResponse = z.object({
   removedSheets: z.array(z.string()).optional(),
   /** Line-level diff when comparing text, docx (derived text), or pdf (derived text). */
   diffLines: z.array(DocVersionDiffLine).optional(),
+  /** PA-145: Word redline blocks when comparing docx versions. */
+  redlineBlocks: z.array(DocRedlineBlock).optional(),
 });
 export type DocVersionCompareResponse = z.infer<typeof DocVersionCompareResponse>;
 
