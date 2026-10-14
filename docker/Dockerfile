@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-#
 # PocketAgent backend image (PA-64).
 #
 # Build through `docker/build.sh`, never `docker build` directly: the agent CLI
