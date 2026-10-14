@@ -10,7 +10,7 @@ import type { WorkspaceRegistry } from '../workspaces/index.js';
 import { WorkspaceError } from '../workspaces/index.js';
 import type { PlannerWorkspaceRegistry } from '../planner/workspaces.js';
 import type { AgentRegistry } from '../agents/registry.js';
-import { resolveWorkspaceCwdOrReply, structuredAgentProblem } from './shared.js';
+import { auditConfigChange, resolveWorkspaceCwdOrReply, structuredAgentProblem } from './shared.js';
 
 /** Default page size for a run list. Enough to fill a phone screen several times. */
 const DEFAULT_RUN_LIMIT = 50;
@@ -236,6 +236,10 @@ export const cronRoutes: FastifyPluginAsync = async (app) => {
           'That schedule has no future run. Check the day and month you picked.',
         );
       }
+      auditConfigChange(request, 'cron job updated', {
+        jobId: request.params.id,
+        fields: Object.keys(result.patch),
+      });
       return reply.send(cron.toJob(row));
     } catch (err) {
       return mapError(reply, err);

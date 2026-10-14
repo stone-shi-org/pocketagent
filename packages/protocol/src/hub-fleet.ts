@@ -31,6 +31,17 @@ export const HUB_MCP_TOKEN_PREFIX_LENGTH = HUB_MCP_TOKEN_SCHEME_PREFIX.length + 
  */
 export const HUB_FLEET_BACKEND_SCOPES: readonly McpScope[] = ['read', 'sessions', 'planner'];
 
+/**
+ * PA-135: Scopes of the separate `pam_` token the Hub mints on every bound
+ * host for Tier 2 config changes. Held alongside the dispatch token and used
+ * only by Tier 2 mutating tools so the PA-134 dispatch token never carries
+ * `admin`.
+ */
+export const HUB_FLEET_ADMIN_SCOPES: readonly McpScope[] = ['admin'];
+
+/** Label given to the separate per-host Tier 2 admin token on each backend. */
+export const HUB_FLEET_BACKEND_ADMIN_TOKEN_LABEL = 'Hub fleet admin';
+
 /** Display name of the Pocket Agent the Hub provisions on the coordinator. */
 export const FLEET_AGENT_NAME = 'Fleet agent';
 
@@ -50,6 +61,19 @@ export const HUB_FLEET_TOOL_NAMES = [
   'dispatch_coding_task',
   'wait',
   'list_pending_approvals',
+  // PA-135 Tier 1: read-only fleet views (approval-exempt)
+  'fleet_versions',
+  'fleet_drain_state',
+  'fleet_agent_status',
+  'fleet_health',
+  'fleet_attention',
+  'fleet_usage',
+  // PA-135 Tier 2: config changes (gated, audited, admin-scoped token)
+  'update_webhook',
+  'update_cron_job',
+  'update_custom_claude_provider',
+  'update_planner_settings',
+  'provision_template',
 ] as const;
 export type HubFleetToolName = (typeof HUB_FLEET_TOOL_NAMES)[number];
 
@@ -72,6 +96,9 @@ export const HubFleetHostToken = z.object({
   state: HubFleetTokenState,
   /** First characters of the `pam_` token, for matching against the backend's own list. */
   tokenPrefix: z.string().nullable(),
+  /** PA-135: state of the separate `admin`-scoped `pam_` token for Tier 2 config changes. */
+  adminState: HubFleetTokenState.optional(),
+  adminTokenPrefix: z.string().nullable().optional(),
 });
 export type HubFleetHostToken = z.infer<typeof HubFleetHostToken>;
 

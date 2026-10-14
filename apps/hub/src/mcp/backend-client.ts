@@ -35,11 +35,19 @@ export const BACKEND_TOOL_ALLOWLIST = new Set([
   'list_pocket_agents',
   'list_projects',
   'list_pending_approvals',
+  'get_drain_state',
+  'get_attention_snapshot',
+  'get_usage',
   'start_session',
   'wait_for_turn',
   'create_pocket_chat',
   'send_pocket_message',
   'wait_for_pocket_turn',
+  'update_webhook',
+  'update_cron_job',
+  'update_custom_claude_provider',
+  'update_planner_settings',
+  'provision_request',
 ]);
 
 const CONNECT_TIMEOUT_MS = 15_000;

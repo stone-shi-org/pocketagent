@@ -169,8 +169,18 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
 
   const mcpTokens = new HubMcpTokenStore(db);
   const backendMcp = new BackendMcpClient(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {});
+  const fleetRef: { current?: FleetService } = {};
   const mcpServer = new HubMcpServer({
-    deps: { registry, client: backendMcp, limiter: new DispatchLimiter() },
+    deps: {
+      registry,
+      client: backendMcp,
+      limiter: new DispatchLimiter(),
+      latestRelease: config.latestRelease,
+      pushRelay,
+      templates,
+      ensureAdminToken: (host) => fleetRef.current!.ensureAdminToken(host),
+      log: app.log,
+    },
     version: HUB_VERSION,
     resolve: (id) => mcpTokens.resolve(id),
     log: app.log,
@@ -186,6 +196,7 @@ export async function buildHubApp(options: BuildHubOptions): Promise<BuiltHub> {
     fetchImpl,
     log: app.log,
   });
+  fleetRef.current = fleet;
 
   const context: HubContext = {
     config,

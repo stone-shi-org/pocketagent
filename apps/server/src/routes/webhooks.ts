@@ -276,7 +276,12 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
       const existing = webhooks.get(request.params.id);
       const result = await resolveWebhookUpdatePatch({ workspaces, agents, plannerWorkspaces }, existing, parsed.data);
       if (!result.ok) return badRequest(reply, result.error, result.code);
-      return reply.send(webhooks.toWebhook(webhooks.update(request.params.id, result.patch)));
+      const updated = webhooks.update(request.params.id, result.patch);
+      auditConfigChange(request, 'webhook updated', {
+        webhookId: request.params.id,
+        fields: Object.keys(result.patch),
+      });
+      return reply.send(webhooks.toWebhook(updated));
     } catch (err) {
       return mapError(reply, err);
     }

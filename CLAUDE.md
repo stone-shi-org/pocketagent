@@ -2686,6 +2686,16 @@ carries `platform`/`arch` alongside PA-133's full `HostCapabilities` card (`get_
 backend, with a fallback to `get_host_info`/`list_projects`/`list_pocket_agents` when talking to an
 older backend without `get_capabilities`).
 
+### Fleet administration in three tiers (PA-135)
+
+Beyond task dispatch (PA-134), fleet administration is split across three tiers that follow the
+existing invariants without widening the dispatch token or exposing agent install or server restart
+to an agent:
+
+- **Tier 1: Read-only fleet views (`read` scope, approval-exempt).** Six Hub `/mcp` tools (`fleet_versions`, `fleet_drain_state`, `fleet_agent_status`, `fleet_health`, `fleet_attention`, `fleet_usage`) fan out across registered hosts (`hosts?: string[]`, defaulting to all bound hosts) using the existing PA-134 per-host `read`-scoped dispatch token and return `{ hosts: [...], errors: [...] }` so one dead or token-less host never fails the call. `fleet_versions` calls `hostVersionStatus` from `packages/protocol/src/version-drift.ts` directly against `latestRelease` (never a second copy of semver comparison). `fleet_drain_state` calls `get_drain_state` (`GET /api/admin/drain-state`, `scope: 'read'`). `fleet_agent_status` reads `list_agents` (`setupState`, `installedVersion`, `latestVersion`, `hasUpdate`, `resolvedPath`, `officialInstall`, `otherCopies`). `fleet_health` reports live reachability, PA-73 push relay status, and credential state (`hubBind`, `dispatchToken`, `adminToken`). `fleet_attention` calls `get_attention_snapshot` (`scope: 'read'`) and returns pending approvals, failed/throttled webhook deliveries, stalled working-tree queues, and failed cron runs, each with a Hub-origin deep link (`/#/h/<hostId>/...`) and untrusted strings fenced via `fenceHostText`.
+- **Tier 2: Gated, audited config changes (separate `admin`-scoped token).** Five Hub `/mcp` tools (`update_webhook`, `update_cron_job`, `update_custom_claude_provider`, `update_planner_settings`, `provision_template`) expose only the backend's existing validated routes (`PATCH /api/webhooks/:id`, `PATCH /api/cron/jobs/:id`, `PATCH /api/custom-claude-providers/:id`, `PATCH /api/planner/settings`, and the PA-70 `Provisioner` over an MCP-backed `ProvisionTransport` calling `provision_request`). Every Tier 2 tool is mutating (`readOnlyHint: false`) and carries `_meta[MCP_APPROVAL_SCOPE_ARG_META_KEY] = 'host'` (or `'hosts'` for `provision_template`, which `PlannerChatService.effectiveMcpToolIdentity` expands into one per-host subject per entry so a batch approval must be granted for every target host in `hosts[]`, with per-host `rememberScopes: ['workspace']` only). Tier 2 never widens the PA-134 dispatch token (`HUB_FLEET_BACKEND_SCOPES` stays `['read', 'sessions', 'planner']`); instead, `FleetService.ensureAdminToken` lazily mints and verifies a separate `pam_` token with `HUB_FLEET_ADMIN_SCOPES = ['admin']` (`label: "Hub fleet admin"`), stored in `hub_hosts.mcp_admin_*` (migration #4) and revoked alongside the dispatch token on unbind/disable. Each backend route writes an `auditConfigChange` line at `warn` naming `mcp:Hub fleet admin`. Forbidden fields (`skipPermissionsEnabled`, `skipPermissions`, `yoloEnabled`, and any secret field such as `apiKey`, `botToken`, `secret`, `token`, `embeddingApiKey`, `webSearchApiKey`, `urlFetchApiKey`, `bearerToken`, `headerValue`) and creating or deleting webhooks/cron jobs are refused outright at both the Hub and backend MCP layers.
+- **Tier 3: Human-only maintenance actions on `HubPage` (no MCP tool).** Per PA-68/104 and PA-69, server restart and coding-agent installation/update remain unreachable from any agent (`apps/hub/tests/fleet-mcp-tools.test.ts` greps the Hub `/mcp` catalog to assert no restart, install, agent-update, skip-permissions, `yoloEnabled`, `force`, or secret tool or field exists). Instead, `FleetMaintenanceSection` on `HubPage` provides two operator buttons: **"Restart drained hosts"** (calls `POST /api/admin/restart` with `{ force: false }` per selected host, displays any `409 drain_blocked` blockers with deep links, and requires a separate, explicit per-host confirmation before sending `force: true`) and **"Update [agent] on hosts…"** (calls `POST /api/agents/install` with `{ id, action: 'update' }` sequentially one host at a time, streaming each host's install log).
+
 ### Version drift and drain-then-exit restart (PA-69)
 
 The safe shape of "the frontend can upgrade the backend": **the frontend detects and reports,
@@ -3182,6 +3192,21 @@ These are load-bearing. Several were bugs first.
   there, by a person, from a push deep link. Asserted in
   `apps/server/tests/planner-mcp-host-approval.test.ts` (including the prompt-injection case) and
   end to end by `pnpm demo:fleet`.
+- **Fleet administration is split into read-only views, gated config mutations on a separate
+  `admin`-scoped token, and human-only restart/install UI buttons** (PA-135). Tier 1 tools
+  (`fleet_versions`, `fleet_drain_state`, `fleet_agent_status`, `fleet_health`, `fleet_attention`,
+  `fleet_usage`) use the `read` scope on the PA-134 dispatch token and return per-host results with
+  errors kept separate so a dead host never fails the call. Tier 2 config tools (`update_webhook`,
+  `update_cron_job`, `update_custom_claude_provider`, `update_planner_settings`,
+  `provision_template`) never widen the dispatch token (`HUB_FLEET_BACKEND_SCOPES` stays without
+  `admin`); they use a separate per-host `pam_` token with `HUB_FLEET_ADMIN_SCOPES = ['admin']`
+  (`hub_hosts.mcp_admin_*`), require coordinator approval per host (or per host in `hosts[]`), hit
+  only existing validated backend routes that emit `warn` `auditConfigChange` lines naming
+  `mcp:Hub fleet admin`, and refuse `skipPermissions*`, `yoloEnabled`, secrets, and webhook/cron
+  creation or deletion. Tier 3 actions (**"Restart drained hosts"** and **"Update [agent] on
+  hosts…"**) live only on `HubPage` (`FleetMaintenanceSection.tsx`) and never in the `/mcp` catalog
+  (asserted by catalog grep in `apps/hub/tests/fleet-mcp-tools.test.ts` and UI tests in
+  `apps/web/src/pages/HubPage.test.tsx`).
 - **An MCP client can see an approval and can never answer one** (PA-118). `/mcp` exposes no
   tool that resolves a permission, and no tool input carries `skipPermissions`, `force`, a
   decision, an executable or an argv — asserted by grepping `MCP_TOOLS` in

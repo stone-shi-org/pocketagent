@@ -23,6 +23,10 @@ export interface HubHostRow {
   mcp_credential_prefix: string | null;
   /** The backend's own id for that token, so it can be revoked there. */
   mcp_client_id: string | null;
+  /** PA-135: separate `pam_` token with `admin` scope for Tier 2 config changes, or NULL. */
+  mcp_admin_credential_enc: string | null;
+  mcp_admin_credential_prefix: string | null;
+  mcp_admin_client_id: string | null;
 }
 
 /** PA-134: a Hub-issued `phm_` MCP token. Only its digest is stored. */
@@ -225,6 +229,13 @@ export const HUB_MIGRATIONS: readonly string[] = [
     registry_remote_id     TEXT,
     updated_at             INTEGER NOT NULL
   );
+  `,
+  // 4 — PA-135. Separate admin-scoped pam_ token per host for Tier 2 config
+  // changes, so the PA-134 dispatch token stays without admin.
+  `
+  ALTER TABLE hub_hosts ADD COLUMN mcp_admin_credential_enc TEXT;
+  ALTER TABLE hub_hosts ADD COLUMN mcp_admin_credential_prefix TEXT;
+  ALTER TABLE hub_hosts ADD COLUMN mcp_admin_client_id TEXT;
   `,
 ];
 

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type { AddressInfo } from 'node:net';
+import { Writable } from 'node:stream';
 import { vi } from 'vitest';
 import { Client as LegacyClient } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport as LegacyTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -26,6 +27,7 @@ export interface FleetBackend {
   app: TestApp;
   url: string;
   llm: LlmScript;
+  logs: string[];
 }
 
 export interface Fleet {
@@ -83,14 +85,24 @@ export async function startFleet(ids: string[], opts: { llm?: boolean } = {}): P
   const backends: FleetBackend[] = [];
   for (const id of ids) {
     const llm = vi.fn(async () => llmText('ok'));
+    const logs: string[] = [];
+    const loggerStream = new Writable({
+      write(chunk, _enc, cb) {
+        logs.push(String(chunk));
+        cb();
+      },
+    });
     // An encryption key, because a bearer-auth MCP registry (the
     // coordinator's route to the Hub) is refused on a backend without one.
     const app = await createTestApp(
-      { POCKETAGENT_SETTINGS_ENC_KEY: crypto.randomBytes(32).toString('base64') },
+      { LOG_LEVEL: 'info', POCKETAGENT_SETTINGS_ENC_KEY: crypto.randomBytes(32).toString('base64') },
       undefined,
       undefined,
       undefined,
       llm as unknown as typeof fetch,
+      undefined,
+      undefined,
+      loggerStream,
     );
     await app.app.listen({ host: '127.0.0.1', port: 0 });
     const url = `http://127.0.0.1:${(app.app.server.address() as AddressInfo).port}`;
@@ -98,7 +110,7 @@ export async function startFleet(ids: string[], opts: { llm?: boolean } = {}): P
     await hubRequest(hub, 'POST', '/api/hub/hosts', { id, label: id, baseUrl: url });
     const bound = await hubRequest(hub, 'POST', `/api/hub/hosts/${id}/bind`, { token: TEST_TOKEN, label: 'test hub' });
     if (bound.status !== 200) throw new Error(`bind ${id} failed: ${bound.status} ${JSON.stringify(bound.body)}`);
-    backends.push({ id, app, url, llm });
+    backends.push({ id, app, url, llm, logs });
   }
   return {
     hub,

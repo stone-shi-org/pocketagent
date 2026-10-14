@@ -136,14 +136,18 @@ function sessionView(info: SessionInfo, deps: McpToolDeps): Record<string, unkno
 }
 
 function agentView(agent: AgentInfo): Record<string, unknown> {
-  // Deliberately not `resolvedPath`/`otherCopies`: a caller asking "which
-  // agents can I use" needs ids and readiness, not this machine's filesystem.
   return {
     id: agent.id,
     displayName: agent.displayName,
     description: agent.description,
     available: agent.available,
     setupState: agent.setupState,
+    installedVersion: agent.installedVersion,
+    latestVersion: agent.latestVersion,
+    hasUpdate: agent.hasUpdate,
+    resolvedPath: agent.resolvedPath,
+    officialInstall: agent.officialInstall,
+    otherCopies: agent.otherCopies,
     transports: agent.transports,
     structured: agent.transports.includes('structured'),
     defaultModel: agent.defaultModel,
@@ -566,6 +570,92 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
       return { cwd, status, diff: truncate(diff, max) };
     },
   },
+  {
+    name: 'get_drain_state',
+    scope: 'read',
+    title: 'Drain state (who is mid-turn)',
+    description:
+      'Read-only drain snapshot (GET /api/admin/drain-state): whether supervisor restart is supported and every ' +
+      'live session or Pocket Agent chat currently mid-turn or waiting on an approval.',
+    input: {},
+    readOnly: true,
+    async handler(deps, ctx) {
+      return deps.api.call(ctx.principal, 'GET', '/api/admin/drain-state');
+    },
+  },
+  {
+    name: 'get_attention_snapshot',
+    scope: 'read',
+    title: 'Attention snapshot',
+    description:
+      'Read-only snapshot of items needing operator attention on this host: pending approvals (coding sessions ' +
+      'and Pocket Agent chats), failed or throttled webhook deliveries, queued work waiting on a working tree, ' +
+      'and failed scheduled-job runs.',
+    input: {},
+    readOnly: true,
+    async handler(deps) {
+      const pendingApprovals: Record<string, unknown>[] = [];
+      for (const info of deps.pocket.sessions.list(500)) {
+        const live = deps.pocket.sessions.get(info.id);
+        if (!live || live.transport !== 'structured') continue;
+        for (const p of (live as StructuredLikeSession).pendingPermissions()) {
+          pendingApprovals.push({
+            kind: 'session',
+            sessionId: info.id,
+            sessionTitle: info.title,
+            cwd: info.cwd,
+            toolName: p.toolName,
+            title: p.title,
+            filePath: p.filePath ?? null,
+          });
+        }
+      }
+      for (const turn of deps.pocket.plannerChats.inFlightTurns()) {
+        if (turn.reason !== 'awaiting_approval') continue;
+        const chat = deps.pocket.plannerChats.get(turn.chatId);
+        pendingApprovals.push({
+          kind: 'pocket_chat',
+          chatId: turn.chatId,
+          workspaceId: chat?.workspaceId ?? null,
+          title: turn.title,
+          workspaceName: turn.workspaceName,
+        });
+      }
+
+      const webhookDeliveries = deps.pocket.webhooks
+        .deliveries({ limit: 50 })
+        .map((row) => deps.pocket.webhooks.toDelivery(row))
+        .filter((d) => d.status === 'failed' || d.status === 'throttled');
+
+      const queuedByTree = new Map<string, Record<string, unknown>[]>();
+      for (const source of [deps.pocket.webhooks.queuedByTree(), deps.pocket.promptQueue.queuedByTree()]) {
+        for (const [tree, items] of source) {
+          const list = queuedByTree.get(tree) ?? [];
+          for (const item of items) {
+            list.push({ ...item, tree });
+          }
+          queuedByTree.set(tree, list);
+        }
+      }
+      const queued: Record<string, unknown>[] = [];
+      for (const [, list] of queuedByTree) {
+        list.sort((a, b) => Number(a.position ?? 0) - Number(b.position ?? 0));
+        queued.push(...list);
+      }
+
+      const failedCronRuns = deps.pocket.cron
+        .runs({ limit: 50 })
+        .map((row) => deps.pocket.cron.toRun(row))
+        .filter((r) => r.status === 'failed');
+
+      return {
+        pendingApprovals,
+        webhookDeliveries,
+        queued,
+        failedCronRuns,
+      };
+    },
+  },
 
   // ---- attachments (PA-137) -------------------------------------------------
   {
@@ -881,7 +971,186 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
       return deps.api.call(ctx.principal, 'POST', '/api/projects/clear-finished', { cwd: String(args.cwd) });
     },
   },
+  {
+    name: 'update_webhook',
+    scope: 'admin',
+    title: 'Update an inbound webhook',
+    description:
+      'Update an existing inbound webhook (PATCH /api/webhooks/:id) — e.g. enabled, name, slug, config, cwd, agent, ' +
+      'model, effort, promptTemplate, conversationMode, overlapPolicy, directoryPolicy, or maxConcurrent. ' +
+      'Never accepts secrets or skip-permissions flags, and cannot create or delete a webhook.',
+    input: {
+      id: z.string().min(1).max(200).describe('The webhook id from list_webhooks.'),
+      patch: z.record(z.string(), z.unknown()).describe('Partial webhook patch.'),
+    },
+    readOnly: false,
+    async handler(deps, ctx, args) {
+      const id = String(args.id ?? '').trim();
+      if (!id) throw new Error('No webhook id provided.');
+      const rawPatch =
+        args.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)
+          ? (args.patch as Record<string, unknown>)
+          : {};
+      rejectForbiddenConfigKeys(rawPatch, 'update_webhook');
+      return deps.api.call(ctx.principal, 'PATCH', `/api/webhooks/${encodeURIComponent(id)}`, rawPatch);
+    },
+  },
+  {
+    name: 'update_cron_job',
+    scope: 'admin',
+    title: 'Update a scheduled job',
+    description:
+      'Update an existing scheduled job (PATCH /api/cron/jobs/:id) — e.g. enabled, name, preset, cronExpr, timeZone, ' +
+      'cwd, agent, worktreeMode, model, effort, prompt, overlapPolicy, or retentionDays. ' +
+      'Never accepts secrets or skip-permissions flags, and cannot create or delete a scheduled job.',
+    input: {
+      id: z.string().min(1).max(200).describe('The scheduled job id from list_cron_jobs.'),
+      patch: z.record(z.string(), z.unknown()).describe('Partial scheduled-job patch.'),
+    },
+    readOnly: false,
+    async handler(deps, ctx, args) {
+      const id = String(args.id ?? '').trim();
+      if (!id) throw new Error('No scheduled job id provided.');
+      const rawPatch =
+        args.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)
+          ? (args.patch as Record<string, unknown>)
+          : {};
+      rejectForbiddenConfigKeys(rawPatch, 'update_cron_job');
+      return deps.api.call(ctx.principal, 'PATCH', `/api/cron/jobs/${encodeURIComponent(id)}`, rawPatch);
+    },
+  },
+  {
+    name: 'update_custom_claude_provider',
+    scope: 'admin',
+    title: 'Update a custom Claude provider',
+    description:
+      'Update an existing custom Claude provider (PATCH /api/custom-claude-providers/:id) — name, providerKind, ' +
+      'baseUrl, models, defaultModel, smallModel, or allowUnattended. Never accepts apiKey.',
+    input: {
+      id: z.string().min(1).max(200).describe('The provider id.'),
+      patch: z.record(z.string(), z.unknown()).describe('Partial custom Claude provider patch (no apiKey).'),
+    },
+    readOnly: false,
+    async handler(deps, ctx, args) {
+      const id = String(args.id ?? '').trim();
+      if (!id) throw new Error('No custom Claude provider id provided.');
+      const rawPatch =
+        args.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)
+          ? (args.patch as Record<string, unknown>)
+          : {};
+      rejectForbiddenConfigKeys(rawPatch, 'update_custom_claude_provider');
+      return deps.api.call(ctx.principal, 'PATCH', `/api/custom-claude-providers/${encodeURIComponent(id)}`, rawPatch);
+    },
+  },
+  {
+    name: 'update_planner_settings',
+    scope: 'admin',
+    title: 'Update Pocket Agent planner settings',
+    description:
+      'Update Pocket Agent planner settings (PATCH /api/planner/settings) — e.g. baseUrl, embeddingBaseUrl, ' +
+      'embeddingModelId, webSearchEnabled, urlFetchEnabled, mcpEnabled, meInstruction, toolsInstruction, or compaction ' +
+      'settings. Never accepts API keys or yolo/skip-permissions flags.',
+    input: {
+      patch: z.record(z.string(), z.unknown()).describe('Partial planner settings patch (no API keys or approval bypass flags).'),
+    },
+    readOnly: false,
+    async handler(deps, ctx, args) {
+      const rawPatch =
+        args.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)
+          ? (args.patch as Record<string, unknown>)
+          : {};
+      rejectForbiddenConfigKeys(rawPatch, 'update_planner_settings');
+      return deps.api.call(ctx.principal, 'PATCH', '/api/planner/settings', rawPatch);
+    },
+  },
+  {
+    name: 'provision_request',
+    scope: 'admin',
+    title: 'Execute a template-provisioning route step',
+    description:
+      'Internal admin-scoped step used by the Hub template provisioner (PA-70 / PA-135) to run an allowlisted ' +
+      'template provisioning call against this backend’s existing routes with MCP principal attribution.',
+    input: {
+      method: z.enum(['GET', 'POST', 'PATCH', 'DELETE']),
+      path: z.string().min(1).max(1024),
+      body: z.record(z.string(), z.unknown()).optional(),
+    },
+    readOnly: false,
+    async handler(deps, ctx, args) {
+      const method = args.method as 'GET' | 'POST' | 'PATCH' | 'DELETE';
+      const reqPath = String(args.path ?? '');
+      if (!isAllowedProvisionRoute(method, reqPath)) {
+        throw new Error(`Refusing: ${method} ${reqPath} is not an allowlisted template provisioning route.`);
+      }
+      const body =
+        args.body && typeof args.body === 'object' && !Array.isArray(args.body)
+          ? (args.body as Record<string, unknown>)
+          : undefined;
+      if (body !== undefined) {
+        rejectForbiddenConfigKeys(body, 'provision_template');
+      }
+      return deps.api.request(ctx.principal, method, reqPath, body);
+    },
+  },
 ];
+
+const FORBIDDEN_APPROVAL_KEYS = new Set([
+  'skipPermissions',
+  'skipPermissionsEnabled',
+  'yoloEnabled',
+  'skipToolApprovals',
+  'skipToolApprovalsEnabled',
+]);
+
+const FORBIDDEN_SECRET_KEYS = new Set([
+  'apiKey',
+  'botToken',
+  'secret',
+  'token',
+  'embeddingApiKey',
+  'webSearchApiKey',
+  'urlFetchApiKey',
+  'bearerToken',
+  'headerValue',
+]);
+
+export function rejectForbiddenConfigKeys(rawPatch: Record<string, unknown>, toolName: string): void {
+  for (const key of Object.keys(rawPatch)) {
+    if (FORBIDDEN_APPROVAL_KEYS.has(key)) {
+      throw new Error(
+        `Refusing: ${key} cannot be changed through ${toolName}. A human must flip that switch from the Settings page.`,
+      );
+    }
+    if (FORBIDDEN_SECRET_KEYS.has(key)) {
+      throw new Error(
+        `Refusing: ${key} is a secret field and cannot be set, changed or read through ${toolName}. Re-enter it from the Settings page.`,
+      );
+    }
+  }
+}
+
+const PROVISION_ROUTE_PATTERNS: readonly { method: 'GET' | 'POST' | 'PATCH' | 'DELETE'; pattern: RegExp }[] = [
+  { method: 'GET', pattern: /^\/api\/planner\/workspaces$/ },
+  { method: 'POST', pattern: /^\/api\/planner\/workspaces$/ },
+  { method: 'PATCH', pattern: /^\/api\/planner\/workspaces\/[^/]+$/ },
+  { method: 'POST', pattern: /^\/api\/planner\/workspaces\/[^/]+\/tools$/ },
+  { method: 'GET', pattern: /^\/api\/mcp-registries$/ },
+  { method: 'POST', pattern: /^\/api\/mcp-registries$/ },
+  { method: 'PATCH', pattern: /^\/api\/mcp-registries\/[^/]+$/ },
+  { method: 'GET', pattern: /^\/api\/custom-claude-providers$/ },
+  { method: 'POST', pattern: /^\/api\/custom-claude-providers$/ },
+  { method: 'PATCH', pattern: /^\/api\/custom-claude-providers\/[^/]+$/ },
+  { method: 'GET', pattern: /^\/api\/planner\/skills$/ },
+  { method: 'POST', pattern: /^\/api\/planner\/skills\/import$/ },
+  { method: 'GET', pattern: /^\/api\/planner\/settings$/ },
+  { method: 'PATCH', pattern: /^\/api\/planner\/settings$/ },
+  { method: 'DELETE', pattern: /^\/api\/planner\/models$/ },
+  { method: 'POST', pattern: /^\/api\/planner\/models$/ },
+];
+
+function isAllowedProvisionRoute(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', reqPath: string): boolean {
+  return PROVISION_ROUTE_PATTERNS.some((entry) => entry.method === method && entry.pattern.test(reqPath));
+}
 
 function startInput(args: Record<string, unknown>): StartSessionInput {
   return {

@@ -535,6 +535,8 @@ type ToolGateDecision =
  */
 interface McpToolIdentity {
   name: string;
+  /** PA-135: per-target subjects when `approvalScopeArg` points at a `string[]` (e.g. `hosts`). */
+  names?: readonly string[];
   displayName: string;
   readOnly: boolean;
   /**
@@ -2127,24 +2129,43 @@ export class PlannerChatService {
     const readOnly = enabled && resolved ? resolved.tool.readOnlyHint === true : false;
     const scopeArg = resolved?.tool.approvalScopeArg ?? null;
     if (resolved && scopeArg !== null) {
-      // PA-134: a target-scoped tool (the Hub's `dispatch_*`, scoped by
-      // `host`). The subject carries the target the *call itself* names, so a
-      // decision remembered for host A is simply a different row from host B
-      // — which is the whole prompt-injection defence: text from host A
-      // telling the model to dispatch to host B still stops for a human.
+      // PA-134 / PA-135: a target-scoped tool (the Hub's `dispatch_*` and
+      // Tier 2 config tools scoped by `host` or `hosts`). The subject carries
+      // the target the *call itself* names, so a decision remembered for host
+      // A is simply a different row from host B — which is the whole
+      // prompt-injection defence: text from host A telling the model to act on
+      // host B still stops for a human.
       const inner = args.arguments && typeof args.arguments === 'object' ? (args.arguments as Record<string, unknown>) : {};
       const target = inner[scopeArg];
       const display = `"${resolved.tool.name}" on "${resolved.registryName}"`;
-      if (typeof target !== 'string' || target.trim() === '' || target.length > 200) {
-        // Nothing to scope to, so nothing may be remembered: allow once only.
-        return { name: requested, displayName: display, readOnly, rememberScopes: [] };
+      if (typeof target === 'string' && target.trim() !== '' && target.length <= 200) {
+        const t = target.trim();
+        const subject = `${requested}@${scopeArg}:${t}`;
+        return {
+          name: subject,
+          names: [subject],
+          displayName: `${display} for ${scopeArg} "${t}"`,
+          readOnly,
+          rememberScopes: ['workspace'],
+        };
       }
-      return {
-        name: `${requested}@${scopeArg}:${target.trim()}`,
-        displayName: `${display} for ${scopeArg} "${target.trim()}"`,
-        readOnly,
-        rememberScopes: ['workspace'],
-      };
+      if (
+        Array.isArray(target) &&
+        target.length > 0 &&
+        target.every((item): item is string => typeof item === 'string' && item.trim() !== '' && item.length <= 200)
+      ) {
+        const targets = [...new Set(target.map((item) => item.trim()))].sort();
+        const names = targets.map((t) => `${requested}@${scopeArg}:${t}`);
+        return {
+          name: `${requested}@${scopeArg}:${targets.join(',')}`,
+          names,
+          displayName: `${display} for ${scopeArg} [${targets.join(', ')}]`,
+          readOnly,
+          rememberScopes: ['workspace'],
+        };
+      }
+      // Nothing to scope to, so nothing may be remembered: allow once only.
+      return { name: requested, displayName: display, readOnly, rememberScopes: [] };
     }
     return {
       name: requested,
@@ -2473,10 +2494,15 @@ export class PlannerChatService {
     // "remember" persists against the underlying MCP tool, never the
     // wrapper's own name.
     const mcpIdentity = this.effectiveMcpToolIdentity(workspaceId, call);
-    const gateName = mcpIdentity?.name ?? call.function.name;
+    const gateNames =
+      mcpIdentity?.names && mcpIdentity.names.length > 0
+        ? mcpIdentity.names
+        : [mcpIdentity?.name ?? call.function.name];
 
     if (choice !== 'allow_once') {
-      rememberDecisionIfAsked(this.opts.db, choice, gateName, workspaceId);
+      for (const subject of gateNames) {
+        rememberDecisionIfAsked(this.opts.db, choice, subject, workspaceId);
+      }
     }
 
     if (choice === 'deny' || !tool) {
@@ -3192,14 +3218,22 @@ export class PlannerChatService {
     // and it waits for a human like any unremembered call. Yolo, the
     // operator's own standing switch, still applies.
     const targetScoped = mcpIdentity?.rememberScopes !== undefined;
-    const decision = resolveApprovalStatus(
-      this.opts.db,
-      gateName,
-      chat.workspaceId,
-      chat.skipToolApprovalsEnabled && !targetScoped,
-    );
-    if (decision === null) return { kind: 'needs_approval', tool, mcpIdentity };
-    if (decision === 'deny') return { kind: 'denied' };
+    const subjects =
+      mcpIdentity?.names && mcpIdentity.names.length > 0
+        ? mcpIdentity.names
+        : [gateName];
+    let anyNeedsApproval = false;
+    for (const subject of subjects) {
+      const decision = resolveApprovalStatus(
+        this.opts.db,
+        subject,
+        chat.workspaceId,
+        chat.skipToolApprovalsEnabled && !targetScoped,
+      );
+      if (decision === 'deny') return { kind: 'denied' };
+      if (decision === null) anyNeedsApproval = true;
+    }
+    if (anyNeedsApproval) return { kind: 'needs_approval', tool, mcpIdentity };
     return { kind: 'run', tool };
   }
 
@@ -4836,9 +4870,15 @@ export function eventsToLlmMessages(
         else messages.push({ role: 'assistant', content: event.text });
         break;
       case 'tool_use': {
-        const hasSynthetic = Object.keys(event.input).some((k) => k.startsWith('_'));
+        const hasSynthetic = Object.keys(event.input).some(
+          (k) => k.startsWith('_') && k !== '_invalidArguments',
+        );
         const cleanInput = hasSynthetic
-          ? Object.fromEntries(Object.entries(event.input).filter(([k]) => !k.startsWith('_')))
+          ? Object.fromEntries(
+              Object.entries(event.input).filter(
+                ([k]) => !k.startsWith('_') || k === '_invalidArguments',
+              ),
+            )
           : event.input;
         (pendingCalls ??= []).push({
           id: event.id,

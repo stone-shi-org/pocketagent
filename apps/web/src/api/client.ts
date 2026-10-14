@@ -160,6 +160,7 @@ export class ApiError extends Error {
     message: string,
     readonly status: number,
     readonly code: string,
+    readonly blockers?: DrainStateResponse['blockers'],
   ) {
     super(message);
     this.name = 'ApiError';
@@ -193,11 +194,16 @@ async function requestAt<T>(
   }
 
   if (!response.ok) {
-    const err = (body as { error?: { code?: string; message?: string } }).error;
+    const parsed = body as {
+      error?: { code?: string; message?: string };
+      blockers?: DrainStateResponse['blockers'];
+    };
+    const err = parsed.error;
     throw new ApiError(
       err?.message ?? `Request failed (${response.status}).`,
       response.status,
       err?.code ?? 'unknown',
+      Array.isArray(parsed.blockers) ? parsed.blockers : undefined,
     );
   }
 

@@ -225,6 +225,41 @@ export class HostRegistry {
       .run(id);
   }
 
+  // ---- PA-135: separate admin-scoped token for Tier 2 config changes -------
+
+  mcpAdminCredentialFor(row: HubHostRow): string | null {
+    if (row.mcp_admin_credential_enc === null || row.mcp_admin_credential_enc === undefined) return null;
+    try {
+      return decryptSecret(row.mcp_admin_credential_enc, this.encKey);
+    } catch {
+      return null;
+    }
+  }
+
+  mcpAdminTokenState(row: HubHostRow): HubFleetTokenState {
+    if (row.mcp_admin_credential_enc !== null && row.mcp_admin_credential_enc !== undefined) {
+      return this.mcpAdminCredentialFor(row) === null ? 'unreadable' : 'ok';
+    }
+    return this.credentialFor(row) === null ? 'unbound' : 'missing';
+  }
+
+  /** Store a freshly minted, already-verified admin-scoped token. */
+  setMcpAdminCredential(id: string, minted: { id: string; token: string }): void {
+    this.db
+      .prepare(
+        `UPDATE hub_hosts SET mcp_admin_credential_enc = ?, mcp_admin_credential_prefix = ?, mcp_admin_client_id = ? WHERE id = ?`,
+      )
+      .run(encryptSecret(minted.token, this.encKey), minted.token.slice(0, MCP_TOKEN_PREFIX_LENGTH), minted.id, id);
+  }
+
+  clearMcpAdminCredential(id: string): void {
+    this.db
+      .prepare(
+        `UPDATE hub_hosts SET mcp_admin_credential_enc = NULL, mcp_admin_credential_prefix = NULL, mcp_admin_client_id = NULL WHERE id = ?`,
+      )
+      .run(id);
+  }
+
   remove(id: string): boolean {
     const row = this.getRow(id);
     if (row === null) return false;

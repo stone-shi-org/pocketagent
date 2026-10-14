@@ -1,33 +1,41 @@
+import type { FastifyBaseLogger } from 'fastify';
 import {
   MAX_MCP_CALL_DEPTH,
   MCP_APPROVAL_SCOPE_ARG_META_KEY,
   PROTOCOL_VERSION,
   describeIncompatibility,
+  describeVersionDrift,
+  detectVersionDrift,
+  hostVersionStatus,
+  latestKnownVersion,
   negotiateProtocol,
+  secretHolesFor,
   type HubFleetToolName,
+  type ProtocolRange,
 } from '@pocketagent/protocol';
 import type { HubHostRow } from '../db.js';
+import type { PushNotificationRelay } from '../push/relay.js';
 import type { HostRegistry } from '../registry/store.js';
+import { Provisioner } from '../templates/provisioner.js';
+import { isSystemTemplateId, type TemplateStore } from '../templates/store.js';
 import { BackendMcpError, type BackendMcpClient, type BackendTarget } from './backend-client.js';
-import { FENCE_NOTICE, fenceApproval, fenceTurnResult } from './fence.js';
+import { FENCE_NOTICE, fenceApproval, fenceHostText, fenceTurnResult } from './fence.js';
 import type { HubMcpPrincipal } from './tokens.js';
 
 /**
- * PA-134: the Hub `/mcp` catalog — the Fleet agent's tools.
+ * PA-134 / PA-135: the Hub `/mcp` catalog — the Fleet agent's tools.
  *
- * Six tools, every one a thin composition of calls the target host's own `/mcp`
+ * Every tool is a thin composition of calls the target host's own `/mcp`
  * already serves (see `backend-client.ts`). What is absent is as deliberate as
  * what is present, and `fleet-mcp-tools.test.ts` pins it: no tool answers an
  * approval, no input carries a decision, `skipPermissions`, `force`, an
- * executable or an argv, and nothing reaches agent install, restart, settings
- * or `/api/hooks/*` — a backend token without `admin` could not anyway, and
- * the Hub calls a fixed allowlist of backend tools by name.
+ * executable or an argv, and nothing reaches agent install, restart, secrets
+ * or `/api/hooks/*`.
  *
- * The two `dispatch_*` tools are the mutating ones. They are marked
- * `readOnlyHint: false` and carry `MCP_APPROVAL_SCOPE_ARG_META_KEY = "host"`,
- * which is what makes the coordinator's approval gate stop for a human on
- * every dispatch to a host it has not been told it may use, and refuse to
- * remember a dispatch decision fleet-wide.
+ * Mutating tools (`dispatch_*` and Tier 2 config tools) are marked
+ * `readOnlyHint: false` and carry `MCP_APPROVAL_SCOPE_ARG_META_KEY` (`"host"`
+ * or `"hosts"`), which makes the coordinator's approval gate stop for a human
+ * per target host and refuse to remember a decision fleet-wide.
  */
 
 /** Hub-wide ceiling on dispatch/wait calls in flight to backends at once. */
@@ -50,6 +58,11 @@ export interface FleetToolDeps {
   readonly registry: HostRegistry;
   readonly client: BackendMcpClient;
   readonly limiter: DispatchLimiter;
+  readonly latestRelease?: string | null;
+  readonly pushRelay?: PushNotificationRelay;
+  readonly templates?: TemplateStore;
+  readonly ensureAdminToken?: (host: HubHostRow) => Promise<string>;
+  readonly log?: FastifyBaseLogger;
 }
 
 type JsonSchema = Record<string, unknown>;
@@ -111,9 +124,23 @@ const hostArg = {
   description: 'A host id from list_hosts.',
 } as const;
 
-const SCOPED_BY_HOST = { [MCP_APPROVAL_SCOPE_ARG_META_KEY]: 'host' };
+const optionalHostsSchema: JsonSchema = {
+  type: 'object',
+  properties: {
+    hosts: {
+      type: 'array',
+      items: hostArg,
+      maxItems: 50,
+      description: 'Optional subset of host ids from list_hosts; omit for every enabled host.',
+    },
+  },
+  additionalProperties: false,
+};
 
-/** A host that may be dispatched to, or an error naming why not. */
+const SCOPED_BY_HOST = { [MCP_APPROVAL_SCOPE_ARG_META_KEY]: 'host' };
+const SCOPED_BY_HOSTS = { [MCP_APPROVAL_SCOPE_ARG_META_KEY]: 'hosts' };
+
+/** A host that may be dispatched to (or read via Tier 1), or an error naming why not. */
 function targetFor(deps: FleetToolDeps, hostId: unknown): BackendTarget & { row: HubHostRow } {
   if (typeof hostId !== 'string' || hostId.length === 0) throw new Error('Name a host id from list_hosts.');
   const row = deps.registry.getRow(hostId);
@@ -124,6 +151,127 @@ function targetFor(deps: FleetToolDeps, hostId: unknown): BackendTarget & { row:
   const token = deps.registry.mcpCredentialFor(row);
   if (token === null) throw new Error(`${row.label} cannot be dispatched to: ${tokenProblem('unreadable')}`);
   return { hostId: row.id, baseUrl: row.base_url, token, row };
+}
+
+/**
+ * PA-135: obtain the separate `admin`-scoped `pam_` token for Tier 2 config
+ * changes on `hostId`. Never falls back to the PA-134 dispatch token.
+ */
+async function adminTargetFor(deps: FleetToolDeps, hostId: unknown): Promise<BackendTarget & { row: HubHostRow }> {
+  if (typeof hostId !== 'string' || hostId.length === 0) throw new Error('Name a host id from list_hosts.');
+  const row = deps.registry.getRow(hostId);
+  if (row === null) throw new Error(`No host "${hostId}". Call list_hosts.`);
+  if (row.enabled !== 1) throw new Error(`${row.label} is disabled on the Hub.`);
+  if (deps.registry.mcpAdminTokenState(row) === 'ok') {
+    const existing = deps.registry.mcpAdminCredentialFor(row);
+    if (existing !== null) {
+      return { hostId: row.id, baseUrl: row.base_url, token: existing, row };
+    }
+  }
+  if (!deps.ensureAdminToken) {
+    throw new Error(`${row.label} has no admin token for Tier 2 config changes.`);
+  }
+  const token = await deps.ensureAdminToken(row);
+  const refreshed = deps.registry.getRow(row.id) ?? row;
+  return { hostId: refreshed.id, baseUrl: refreshed.base_url, token, row: refreshed };
+}
+
+function selectRows(deps: FleetToolDeps, rawHosts: unknown): {
+  rows: HubHostRow[];
+  initialErrors: { host: string; label: string; error: string }[];
+} {
+  if (Array.isArray(rawHosts) && rawHosts.length > 0) {
+    const rows: HubHostRow[] = [];
+    const initialErrors: { host: string; label: string; error: string }[] = [];
+    const seen = new Set<string>();
+    for (const item of rawHosts) {
+      const id = String(item ?? '').trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const row = deps.registry.getRow(id);
+      if (!row) {
+        initialErrors.push({ host: id, label: id, error: `No host "${id}".` });
+      } else if (row.enabled !== 1) {
+        initialErrors.push({ host: row.id, label: row.label, error: `${row.label} is disabled on the Hub.` });
+      } else {
+        rows.push(row);
+      }
+    }
+    return { rows, initialErrors };
+  }
+  return {
+    rows: deps.registry.listRows().filter((row) => row.enabled === 1),
+    initialErrors: [],
+  };
+}
+
+async function fanOutRead<T extends Record<string, unknown>>(
+  deps: FleetToolDeps,
+  ctx: FleetToolContext,
+  rawHosts: unknown,
+  perHost: (row: HubHostRow, target: BackendTarget) => Promise<T>,
+): Promise<{
+  hosts: (T & { host: string; label: string })[];
+  errors: { host: string; label: string; error: string }[];
+}> {
+  const { rows, initialErrors } = selectRows(deps, rawHosts);
+  const hosts: (T & { host: string; label: string })[] = [];
+  const errors: { host: string; label: string; error: string }[] = [...initialErrors];
+  await Promise.all(
+    rows.map(async (row) => {
+      let target: BackendTarget;
+      try {
+        target = targetFor(deps, row.id);
+      } catch (err) {
+        errors.push({ host: row.id, label: row.label, error: errorText(err) });
+        return;
+      }
+      try {
+        const data = await withTimeout(perHost(row, target), FAN_OUT_TIMEOUT_MS, row.label);
+        hosts.push({ host: row.id, label: row.label, ...data });
+      } catch (err) {
+        errors.push({ host: row.id, label: row.label, error: errorText(err) });
+      }
+    }),
+  );
+  hosts.sort((a, b) => a.host.localeCompare(b.host));
+  errors.sort((a, b) => a.host.localeCompare(b.host));
+  return { hosts, errors };
+}
+
+const FORBIDDEN_APPROVAL_KEYS = new Set([
+  'skipPermissions',
+  'skipPermissionsEnabled',
+  'yoloEnabled',
+  'skipToolApprovals',
+  'skipToolApprovalsEnabled',
+]);
+
+const FORBIDDEN_SECRET_KEYS = new Set([
+  'apiKey',
+  'botToken',
+  'secret',
+  'token',
+  'embeddingApiKey',
+  'webSearchApiKey',
+  'urlFetchApiKey',
+  'bearerToken',
+  'headerValue',
+]);
+
+function rejectForbiddenPatchKeys(patch: Record<string, unknown>, toolName: string): void {
+  for (const key of Object.keys(patch)) {
+    if (FORBIDDEN_APPROVAL_KEYS.has(key)) {
+      throw new Error(
+        `Refusing: ${key} cannot be changed through ${toolName}. A human must flip that switch from the Settings page.`,
+      );
+    }
+    if (FORBIDDEN_SECRET_KEYS.has(key)) {
+      throw new Error(
+        `Refusing: ${key} is a secret field and cannot be set, changed or read through ${toolName}. Re-enter it from the Settings page.`,
+      );
+    }
+  }
 }
 
 function tokenProblem(state: string): string {
@@ -507,6 +655,654 @@ export const FLEET_TOOLS: readonly FleetToolDefinition[] = [
         unavailable,
         note: 'A human answers each of these in PocketAgent, on that host. Nothing here can.',
         notice: FENCE_NOTICE,
+      };
+    },
+  },
+
+  // ---- Tier 1: read-only fleet views (PA-135) ------------------------------
+  {
+    name: 'fleet_versions',
+    title: 'Fleet versions and protocol drift',
+    description:
+      'Read-only version and protocol summary across hosts: each host’s version, protocol range, compatibility with ' +
+      'this Hub, and the semver drift verdict from hostVersionStatus against the Hub’s configured latestRelease.',
+    inputSchema: optionalHostsSchema,
+    readOnly: true,
+    async handler(deps, ctx, args) {
+      const { hosts: rawHosts, errors } = await fanOutRead(deps, ctx, args.hosts, async (row, target) => {
+        const info = await deps.client.call(target, 'get_host_info', {}, {
+          depth: ctx.depth,
+          signal: ctx.signal,
+          timeoutMs: FAN_OUT_TIMEOUT_MS,
+        });
+        const hostObj = (info.host ?? {}) as { version?: unknown; protocol?: unknown };
+        const health = deps.registry.healthFor(row.id);
+        const version =
+          typeof hostObj.version === 'string' && hostObj.version.length > 0
+            ? hostObj.version
+            : health.version;
+        const rawRange = (hostObj.protocol ?? health.protocol) as ProtocolRange | null | undefined;
+        const protocolRange: ProtocolRange | null =
+          rawRange && typeof rawRange.min === 'number' && typeof rawRange.max === 'number'
+            ? { min: rawRange.min, max: rawRange.max }
+            : null;
+        const verdict = negotiateProtocol(PROTOCOL_VERSION, protocolRange);
+        return {
+          version,
+          protocol: protocolRange,
+          verdict,
+          protocolCompatible: verdict.compatible,
+          protocolProblem: describeIncompatibility(row.label, verdict),
+          mcpProtocol: info.protocol ?? null,
+        };
+      });
+      const latestRelease =
+        deps.latestRelease ?? latestKnownVersion(rawHosts.map((h) => h.version as string | null));
+      const hosts = rawHosts.map(({ verdict, ...rest }) => {
+        const drift = detectVersionDrift(rest.version as string | null, latestRelease);
+        return {
+          ...rest,
+          drift,
+          versionStatus: hostVersionStatus(verdict, drift),
+          driftMessage: describeVersionDrift(rest.label, drift),
+        };
+      });
+      return {
+        latestRelease,
+        hosts,
+        errors,
+      };
+    },
+  },
+  {
+    name: 'fleet_drain_state',
+    title: 'Fleet drain state (who is mid-turn)',
+    description:
+      'Read-only drain state across hosts (GET /api/admin/drain-state per host): whether each host has any coding ' +
+      'session or Pocket Agent chat currently mid-turn or waiting on an approval, plus deep links to any blockers.',
+    inputSchema: optionalHostsSchema,
+    readOnly: true,
+    async handler(deps, ctx, args) {
+      const { hosts, errors } = await fanOutRead(deps, ctx, args.hosts, async (row, target) => {
+        const state = await deps.client.call(target, 'get_drain_state', {}, {
+          depth: ctx.depth,
+          signal: ctx.signal,
+          timeoutMs: FAN_OUT_TIMEOUT_MS,
+        });
+        const rawBlockers = Array.isArray(state.blockers) ? (state.blockers as Record<string, unknown>[]) : [];
+        const blockers = rawBlockers.map((b) => {
+          const kind = typeof b.kind === 'string' ? b.kind : 'session';
+          const id = typeof b.id === 'string' ? b.id : '';
+          const title = typeof b.title === 'string' && b.title.length > 0 ? fenceHostText(row.id, b.title) : id;
+          return {
+            ...b,
+            title,
+            deepLink:
+              kind === 'session' && id
+                ? deepLinkSession(row.id, id)
+                : (kind === 'planner_chat' || kind === 'planner') && id
+                  ? deepLinkChat(row.id, id)
+                  : `/#/h/${encodeURIComponent(row.id)}/`,
+          };
+        });
+        return {
+          restartSupported: Boolean(state.restartSupported),
+          drained: blockers.length === 0,
+          blockers,
+          hubDeepLink: '/#/hub',
+        };
+      });
+      return {
+        hosts,
+        errors,
+        hubDeepLink: '/#/hub',
+        notice: FENCE_NOTICE,
+      };
+    },
+  },
+  {
+    name: 'fleet_agent_status',
+    title: 'Fleet coding-agent status',
+    description:
+      'Read-only coding-agent status across hosts: catalog agents with their setupState, officialInstall state, ' +
+      'otherCopies on PATH, and the update-available hint (hasUpdate, installedVersion, latestVersion).',
+    inputSchema: optionalHostsSchema,
+    readOnly: true,
+    async handler(deps, ctx, args) {
+      const { hosts, errors } = await fanOutRead(deps, ctx, args.hosts, async (_row, target) => {
+        const res = await deps.client.call(target, 'list_agents', {}, {
+          depth: ctx.depth,
+          signal: ctx.signal,
+          timeoutMs: FAN_OUT_TIMEOUT_MS,
+        });
+        const list = Array.isArray(res.agents) ? (res.agents as Record<string, unknown>[]) : [];
+        return {
+          agents: list.map((a) => ({
+            id: a.id,
+            displayName: a.displayName,
+            available: a.available,
+            setupState: a.setupState,
+            structured: a.structured,
+            installedVersion: a.installedVersion ?? null,
+            latestVersion: a.latestVersion ?? null,
+            hasUpdate: a.hasUpdate ?? false,
+            resolvedPath: a.resolvedPath ?? null,
+            officialInstall: a.officialInstall ?? null,
+            otherCopies: Array.isArray(a.otherCopies) ? a.otherCopies : [],
+          })),
+          hubDeepLink: '/#/hub',
+        };
+      });
+      return {
+        hosts,
+        errors,
+        hubDeepLink: '/#/hub',
+      };
+    },
+  },
+  {
+    name: 'fleet_health',
+    title: 'Fleet reachability, push relay, and credential state',
+    description:
+      'Read-only health summary across hosts: live reachability, Web Push notification relay status, and Hub / MCP ' +
+      'credential state per host.',
+    inputSchema: optionalHostsSchema,
+    readOnly: true,
+    async handler(deps, ctx, args) {
+      const { rows, initialErrors } = selectRows(deps, args.hosts);
+      const pushStatuses = deps.pushRelay?.getStatus() ?? {};
+      const hosts: Record<string, unknown>[] = [];
+      const errors: { host: string; label: string; error: string }[] = [...initialErrors];
+      await Promise.all(
+        rows.map(async (row) => {
+          const health = deps.registry.healthFor(row.id);
+          const bound = deps.registry.credentialFor(row) !== null;
+          const hubBindState = row.credential_enc === null ? 'unbound' : bound ? 'ok' : 'unreadable';
+          const dispatchTokenState = deps.registry.mcpTokenState(row);
+          const adminTokenState = deps.registry.mcpAdminTokenState(row);
+          const pushRelay = pushStatuses[row.id] ?? { ok: false, status: 'disconnected' };
+          let reachable = false;
+          let probeError: string | null = null;
+          try {
+            const target = targetFor(deps, row.id);
+            await withTimeout(
+              deps.client.call(target, 'get_host_info', {}, {
+                depth: ctx.depth,
+                signal: ctx.signal,
+                timeoutMs: FAN_OUT_TIMEOUT_MS,
+              }),
+              FAN_OUT_TIMEOUT_MS,
+              row.label,
+            );
+            reachable = true;
+          } catch (err) {
+            probeError = errorText(err);
+            errors.push({ host: row.id, label: row.label, error: probeError });
+          }
+          const credentialState = {
+            bound,
+            hubBind: hubBindState,
+            dispatchToken: dispatchTokenState,
+            adminToken: adminTokenState,
+          };
+          hosts.push({
+            host: row.id,
+            label: row.label,
+            reachable,
+            pollerOnline: health.lastCheckedAt === null ? null : health.online,
+            lastCheckedAt: health.lastCheckedAt,
+            pushRelay,
+            credentialState,
+            credentials: credentialState,
+            ...(probeError ? { error: probeError } : {}),
+          });
+        }),
+      );
+      hosts.sort((a, b) => String(a.host).localeCompare(String(b.host)));
+      errors.sort((a, b) => a.host.localeCompare(b.host));
+      return { hosts, errors };
+    },
+  },
+  {
+    name: 'fleet_attention',
+    title: 'Fleet items needing human attention',
+    description:
+      'Read-only attention view across hosts: pending approvals, failed or throttled webhook deliveries, stalled ' +
+      'working-tree queues, and failed scheduled-job runs, each with a deep link on this Hub.',
+    inputSchema: optionalHostsSchema,
+    readOnly: true,
+    async handler(deps, ctx, args) {
+      const items: Record<string, unknown>[] = [];
+      const { hosts, errors } = await fanOutRead(deps, ctx, args.hosts, async (row, target) => {
+        const snap = await deps.client.call(target, 'get_attention_snapshot', {}, {
+          depth: ctx.depth,
+          signal: ctx.signal,
+          timeoutMs: FAN_OUT_TIMEOUT_MS,
+        });
+        const pendingApprovals = ((snap.pendingApprovals as Record<string, unknown>[] | undefined) ?? []).map((item) => {
+          const sessionId = typeof item.sessionId === 'string' ? item.sessionId : null;
+          const chatId = typeof item.chatId === 'string' ? item.chatId : null;
+          const deepLink = sessionId
+            ? deepLinkSession(row.id, sessionId)
+            : chatId
+              ? deepLinkChat(row.id, chatId)
+              : `/#/h/${encodeURIComponent(row.id)}/`;
+          const entry = {
+            category: 'pending_approval',
+            host: row.id,
+            ...(fenceApproval(row.id, item) as Record<string, unknown>),
+            deepLink,
+          };
+          items.push(entry);
+          return entry;
+        });
+
+        const webhookDeliveries = ((snap.webhookDeliveries as Record<string, unknown>[] | undefined) ?? []).map((item) => {
+          const sessionId = typeof item.sessionId === 'string' ? item.sessionId : null;
+          const chatId = typeof item.plannerChatId === 'string' ? item.plannerChatId : null;
+          const webhookId = typeof item.webhookId === 'string' ? item.webhookId : null;
+          const deepLink = sessionId
+            ? deepLinkSession(row.id, sessionId)
+            : chatId
+              ? deepLinkChat(row.id, chatId)
+              : webhookId
+                ? `/#/h/${encodeURIComponent(row.id)}/webhooks/${encodeURIComponent(webhookId)}`
+                : `/#/h/${encodeURIComponent(row.id)}/`;
+          const entry = {
+            category: 'webhook_delivery',
+            host: row.id,
+            id: item.id,
+            webhookId,
+            webhookName: typeof item.webhookName === 'string' ? fenceHostText(row.id, item.webhookName) : null,
+            status: item.status,
+            issueKey: item.issueKey ?? null,
+            reason: typeof item.reason === 'string' ? fenceHostText(row.id, item.reason) : null,
+            receivedAt: item.receivedAt ?? null,
+            deepLink,
+          };
+          items.push(entry);
+          return entry;
+        });
+
+        const stalledQueues = ((snap.queued as Record<string, unknown>[] | undefined) ?? []).map((item) => {
+          const sessionId = typeof item.sessionId === 'string' ? item.sessionId : null;
+          const webhookId = typeof item.webhookId === 'string' ? item.webhookId : null;
+          const deepLink = sessionId
+            ? deepLinkSession(row.id, sessionId)
+            : webhookId
+              ? `/#/h/${encodeURIComponent(row.id)}/webhooks/${encodeURIComponent(webhookId)}`
+              : `/#/h/${encodeURIComponent(row.id)}/`;
+          const entry = {
+            category: 'stalled_queue',
+            host: row.id,
+            id: item.id,
+            kind: item.kind,
+            tree: item.tree ?? null,
+            title: typeof item.title === 'string' ? fenceHostText(row.id, item.title) : null,
+            position: item.position ?? null,
+            queuedAt: item.queuedAt ?? null,
+            deepLink,
+          };
+          items.push(entry);
+          return entry;
+        });
+
+        const failedCronRuns = ((snap.failedCronRuns as Record<string, unknown>[] | undefined) ?? []).map((item) => {
+          const sessionId = typeof item.sessionId === 'string' ? item.sessionId : null;
+          const jobId = typeof item.jobId === 'string' ? item.jobId : null;
+          const deepLink = sessionId
+            ? deepLinkSession(row.id, sessionId)
+            : jobId
+              ? `/#/h/${encodeURIComponent(row.id)}/cron/${encodeURIComponent(jobId)}`
+              : `/#/h/${encodeURIComponent(row.id)}/`;
+          const entry = {
+            category: 'failed_cron_run',
+            host: row.id,
+            id: item.id,
+            jobId,
+            jobName: typeof item.jobName === 'string' ? fenceHostText(row.id, item.jobName) : null,
+            status: item.status,
+            error: typeof item.error === 'string' ? fenceHostText(row.id, item.error) : null,
+            startedAt: item.startedAt ?? null,
+            finishedAt: item.finishedAt ?? null,
+            deepLink,
+          };
+          items.push(entry);
+          return entry;
+        });
+
+        return {
+          pendingApprovals,
+          webhookDeliveries,
+          stalledQueues,
+          failedCronRuns,
+        };
+      });
+      items.sort((a, b) => String(a.host).localeCompare(String(b.host)));
+      return {
+        hosts,
+        items,
+        errors,
+        notice: FENCE_NOTICE,
+      };
+    },
+  },
+  {
+    name: 'fleet_usage',
+    title: 'Fleet rate-limit and usage windows',
+    description:
+      'Read-only provider usage and rate-limit windows across hosts, to decide which host has headroom for new work.',
+    inputSchema: optionalHostsSchema,
+    readOnly: true,
+    async handler(deps, ctx, args) {
+      return fanOutRead(deps, ctx, args.hosts, async (_row, target) => {
+        const res = await deps.client.call(target, 'get_usage', {}, {
+          depth: ctx.depth,
+          signal: ctx.signal,
+          timeoutMs: FAN_OUT_TIMEOUT_MS,
+        });
+        return { usage: Array.isArray(res.usage) ? res.usage : [] };
+      });
+    },
+  },
+
+  // ---- Tier 2: gated, audited config changes (PA-135) -----------------------
+  {
+    name: 'update_webhook',
+    title: 'Update an inbound webhook on a host',
+    description:
+      'Modify or enable/disable an existing inbound webhook on a host (PATCH /api/webhooks/:id) using the host’s ' +
+      'admin-scoped token. Requires coordinator approval per host.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        host: hostArg,
+        id: { type: 'string', minLength: 1, maxLength: 200, description: 'Webhook id on that host.' },
+        enabled: { type: 'boolean', description: 'Optional shorthand to enable or disable the webhook.' },
+        patch: {
+          type: 'object',
+          description:
+            'Partial webhook fields (such as enabled, name, slug, config, cwd, agent, model, effort, promptTemplate, conversationMode, overlapPolicy, directoryPolicy, or maxConcurrent).',
+          additionalProperties: true,
+        },
+      },
+      required: ['host', 'id'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    meta: SCOPED_BY_HOST,
+    targetOf: (args) => (typeof args.host === 'string' ? args.host : null),
+    async handler(deps, ctx, args) {
+      const rawPatch =
+        args.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)
+          ? { ...(args.patch as Record<string, unknown>) }
+          : {};
+      if (typeof args.enabled === 'boolean') {
+        rawPatch.enabled = args.enabled;
+      }
+      rejectForbiddenPatchKeys(rawPatch, 'update_webhook');
+      if (Object.keys(rawPatch).length === 0) {
+        throw new Error('Provide at least one field in patch (or enabled) to update the webhook.');
+      }
+      const target = await adminTargetFor(deps, args.host);
+      const webhook = await deps.client.call(
+        target,
+        'update_webhook',
+        { id: String(args.id), patch: rawPatch },
+        { depth: ctx.depth, signal: ctx.signal, timeoutMs: 20_000 },
+      );
+      return { host: target.hostId, webhook };
+    },
+  },
+  {
+    name: 'update_cron_job',
+    title: 'Update a scheduled job on a host',
+    description:
+      'Modify or enable/disable an existing scheduled job on a host (PATCH /api/cron/jobs/:id) using the host’s ' +
+      'admin-scoped token. Requires coordinator approval per host.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        host: hostArg,
+        id: { type: 'string', minLength: 1, maxLength: 200, description: 'Scheduled job id on that host.' },
+        enabled: { type: 'boolean', description: 'Optional shorthand to enable or disable the scheduled job.' },
+        patch: {
+          type: 'object',
+          description:
+            'Partial scheduled-job fields (such as enabled, name, preset, cronExpr, timeZone, cwd, agent, worktreeMode, model, effort, prompt, overlapPolicy, or retentionDays).',
+          additionalProperties: true,
+        },
+      },
+      required: ['host', 'id'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    meta: SCOPED_BY_HOST,
+    targetOf: (args) => (typeof args.host === 'string' ? args.host : null),
+    async handler(deps, ctx, args) {
+      const rawPatch =
+        args.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)
+          ? { ...(args.patch as Record<string, unknown>) }
+          : {};
+      if (typeof args.enabled === 'boolean') {
+        rawPatch.enabled = args.enabled;
+      }
+      rejectForbiddenPatchKeys(rawPatch, 'update_cron_job');
+      if (Object.keys(rawPatch).length === 0) {
+        throw new Error('Provide at least one field in patch (or enabled) to update the scheduled job.');
+      }
+      const target = await adminTargetFor(deps, args.host);
+      const job = await deps.client.call(
+        target,
+        'update_cron_job',
+        { id: String(args.id), patch: rawPatch },
+        { depth: ctx.depth, signal: ctx.signal, timeoutMs: 20_000 },
+      );
+      return { host: target.hostId, job };
+    },
+  },
+  {
+    name: 'update_custom_claude_provider',
+    title: 'Update a custom Claude provider on a host',
+    description:
+      'Modify an existing custom Claude provider on a host (PATCH /api/custom-claude-providers/:id) using the ' +
+      'host’s admin-scoped token. Requires coordinator approval per host.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        host: hostArg,
+        id: { type: 'string', minLength: 1, maxLength: 200, description: 'Provider id on that host.' },
+        patch: {
+          type: 'object',
+          description: 'Partial provider fields (name, providerKind, baseUrl, models, defaultModel, smallModel, allowUnattended).',
+          additionalProperties: true,
+        },
+      },
+      required: ['host', 'id', 'patch'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    meta: SCOPED_BY_HOST,
+    targetOf: (args) => (typeof args.host === 'string' ? args.host : null),
+    async handler(deps, ctx, args) {
+      const rawPatch =
+        args.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)
+          ? (args.patch as Record<string, unknown>)
+          : {};
+      rejectForbiddenPatchKeys(rawPatch, 'update_custom_claude_provider');
+      const target = await adminTargetFor(deps, args.host);
+      const provider = await deps.client.call(
+        target,
+        'update_custom_claude_provider',
+        { id: String(args.id), patch: rawPatch },
+        { depth: ctx.depth, signal: ctx.signal, timeoutMs: 20_000 },
+      );
+      return { host: target.hostId, provider };
+    },
+  },
+  {
+    name: 'update_planner_settings',
+    title: 'Update Pocket Agent planner settings on a host',
+    description:
+      'Modify Pocket Agent planner settings on a host (PATCH /api/planner/settings) using the host’s admin-scoped ' +
+      'token. Requires coordinator approval per host.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        host: hostArg,
+        patch: {
+          type: 'object',
+          description:
+            'Partial planner settings fields (baseUrl, embeddingBaseUrl, embeddingModelId, webSearchEnabled, urlFetchEnabled, mcpEnabled, meInstruction, toolsInstruction, or compaction settings).',
+          additionalProperties: true,
+        },
+      },
+      required: ['host', 'patch'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    meta: SCOPED_BY_HOST,
+    targetOf: (args) => (typeof args.host === 'string' ? args.host : null),
+    async handler(deps, ctx, args) {
+      const rawPatch =
+        args.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)
+          ? (args.patch as Record<string, unknown>)
+          : {};
+      rejectForbiddenPatchKeys(rawPatch, 'update_planner_settings');
+      const target = await adminTargetFor(deps, args.host);
+      const settings = await deps.client.call(
+        target,
+        'update_planner_settings',
+        { patch: rawPatch },
+        { depth: ctx.depth, signal: ctx.signal, timeoutMs: 20_000 },
+      );
+      return { host: target.hostId, settings };
+    },
+  },
+  {
+    name: 'provision_template',
+    title: 'Provision a Hub template onto hosts',
+    description:
+      'Provision a Hub configuration template onto one or more hosts using the PA-70 provisioner and each host’s ' +
+      'admin-scoped token. Requires coordinator approval per host.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        templateId: { type: 'string', minLength: 1, maxLength: 200, description: 'Template id on this Hub.' },
+        hosts: {
+          type: 'array',
+          items: hostArg,
+          minItems: 1,
+          maxItems: 50,
+          description: 'Host ids to provision the template onto.',
+        },
+        overwrite: {
+          type: 'boolean',
+          description: 'Whether to replace an existing resource previously provisioned from this template. Default false.',
+        },
+      },
+      required: ['templateId', 'hosts'],
+      additionalProperties: false,
+    },
+    readOnly: false,
+    meta: SCOPED_BY_HOSTS,
+    targetOf: (args) => (Array.isArray(args.hosts) ? args.hosts.map(String).join(',') : null),
+    async handler(deps, ctx, args) {
+      if (!deps.templates) {
+        throw new Error('Template store is not available on this Hub.');
+      }
+      const templateId = String(args.templateId ?? '').trim();
+      if (!templateId) throw new Error('Name a templateId.');
+      if (isSystemTemplateId(templateId)) {
+        throw new Error(`Template "${templateId}" is a Hub system template and cannot be provisioned directly.`);
+      }
+      const template = deps.templates.resolve(templateId);
+      if (!template) throw new Error(`No template "${templateId}" on this Hub.`);
+      const requiredHoles = secretHolesFor(template.spec).filter((h) => h.required);
+      if (requiredHoles.length > 0) {
+        throw new Error(
+          `Refusing: template "${template.row.name}" requires secret fields (${requiredHoles.map((h) => h.key).join(', ')}), which cannot be set or provisioned through an agent tool. Provision it from the Hub page (#/hub) instead.`,
+        );
+      }
+      const rawHosts = Array.isArray(args.hosts) ? args.hosts.map((h) => String(h).trim()).filter(Boolean) : [];
+      if (rawHosts.length === 0) throw new Error('Name at least one host in hosts.');
+      const overwrite = args.overwrite === true;
+
+      const byBaseUrl = new Map<string, HubHostRow>();
+      for (const hostId of rawHosts) {
+        const row = deps.registry.getRow(hostId);
+        if (row) {
+          byBaseUrl.set(row.base_url.replace(/\/$/, ''), row);
+        }
+      }
+
+      const mcpAdminFetch: typeof fetch = async (input, init) => {
+        const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        let matchedRow: HubHostRow | null = null;
+        let reqPath = '/';
+        for (const [base, row] of byBaseUrl.entries()) {
+          if (urlStr === base || urlStr.startsWith(`${base}/`)) {
+            matchedRow = row;
+            reqPath = urlStr.slice(base.length) || '/';
+            break;
+          }
+        }
+        if (!matchedRow) {
+          throw new Error(`No host matched URL ${urlStr}`);
+        }
+        const adminTarget = await adminTargetFor(deps, matchedRow.id);
+        const method = (init?.method ?? 'GET').toUpperCase() as 'GET' | 'POST' | 'PATCH' | 'DELETE';
+        let parsedBody: Record<string, unknown> | undefined;
+        if (typeof init?.body === 'string' && init.body.length > 0) {
+          parsedBody = JSON.parse(init.body) as Record<string, unknown>;
+        }
+        const res = await deps.client.call(
+          adminTarget,
+          'provision_request',
+          {
+            method,
+            path: reqPath,
+            ...(parsedBody !== undefined ? { body: parsedBody } : {}),
+          },
+          { depth: ctx.depth, signal: ctx.signal, timeoutMs: 20_000 },
+        );
+        const status = typeof res.status === 'number' ? res.status : 200;
+        const bodyText = res.body !== undefined && res.body !== null ? JSON.stringify(res.body) : '';
+        return new Response(status === 204 ? null : bodyText, {
+          status,
+          headers: status === 204 ? {} : { 'content-type': 'application/json' },
+        });
+      };
+
+      const noopLog = {
+        info: () => undefined,
+        warn: () => undefined,
+        error: () => undefined,
+        debug: () => undefined,
+        fatal: () => undefined,
+        trace: () => undefined,
+        silent: () => undefined,
+        child: () => noopLog,
+        level: 'info',
+      } as unknown as FastifyBaseLogger;
+
+      const adminProvisioner = new Provisioner({
+        registry: deps.registry,
+        store: deps.templates,
+        fetchImpl: mcpAdminFetch,
+        log: deps.log ?? noopLog,
+      });
+
+      const results = await adminProvisioner.instantiate({
+        template,
+        hostIds: rawHosts,
+        secrets: {},
+        overwrite,
+      });
+      return {
+        templateId: template.row.id,
+        templateName: template.row.name,
+        results,
       };
     },
   },
