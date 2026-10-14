@@ -1,5 +1,6 @@
 import type { AgentAdapter } from './types.js';
 import { resolveExecutable } from './registry.js';
+import { normalizeAgyModelList } from '../sessions/normalize.js';
 
 /**
  * Google's Antigravity CLI (`agy`), driven only over the `structured`
@@ -40,6 +41,37 @@ export function createAgyAdapter(bin: string): AgentAdapter {
     },
 
     bin,
+
+    /**
+     * `agy` has no `auth` or `login status` subcommand, so this reuses
+     * `agy models` (PA-146). Checked against the real CLI:
+     *   - signed in: exits 0 after printing `<id>\t<label>` model lines
+     *     (`auto\tGemini Pro Next`, …)
+     *   - signed out (empty `$HOME`): exits 1 in ~0.4s with
+     *     `Error: Please sign in to view available models. Launch the CLI without arguments to sign in.`
+     *
+     * Unlike `claude auth status`, `agy models` makes a network call when
+     * signed in (and creates `~/.gemini` if missing), so a network error,
+     * timeout, or exit-0 output with no model lines must map to `unknown`
+     * with the CLI's own words — never to `signed-out` and never to `ready`.
+     */
+    authProbe: {
+      args: ['models'],
+      interpret({ stdout, stderr, code, timedOut }) {
+        if (timedOut) return { state: 'unknown', detail: 'agy models did not respond in time.' };
+        const text = `${stdout}\n${stderr}`.trim();
+        if (/\bplease\s+sign\s+in\b/i.test(text)) {
+          return { state: 'signed-out', detail: 'Not signed in. Run `agy` in a shell session on this host.' };
+        }
+        if (code === 0 && normalizeAgyModelList(stdout).length > 0) {
+          return { state: 'ready', detail: 'Signed in' };
+        }
+        return {
+          state: 'unknown',
+          detail: text === '' ? 'agy models printed nothing.' : text.slice(0, 200),
+        };
+      },
+    },
 
     isAvailable() {
       return resolveExecutable(bin) !== null;

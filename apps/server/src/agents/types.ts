@@ -145,10 +145,10 @@ export interface AgentAdapter {
    * output — is a pure function a unit test can drive with recorded output
    * instead of a real credentialed CLI.
    *
-   * Undefined is the honest answer for several of these: `agy` has no
-   * auth/login/status subcommand at all, and `opencode auth list` emits
-   * ANSI-decorated box drawing with no JSON option. Those report `unknown`
-   * rather than a guess — see `AgentSetupState`.
+   * Undefined is the honest answer when a CLI cannot be asked cheaply and
+   * non-interactively: `pi` has no auth/login/status subcommand at all, and
+   * `opencode auth list` emits ANSI-decorated box drawing with no JSON option.
+   * Those report `unknown` rather than a guess — see `AgentSetupState`.
    */
   authProbe?: AgentAuthProbe;
 }

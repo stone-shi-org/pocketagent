@@ -9,10 +9,11 @@ import { resolveExecutable } from './registry.js';
 import type { AgentRegistry } from './registry.js';
 
 /**
- * Generous for a local, read-only status call. `claude auth status` answers in
- * ~0.2s and `codex login status` in ~0.1s; anything near this budget means the
- * CLI is doing something it was not supposed to (a network round trip, or
- * waiting on a TTY), and `unknown` is the right answer for that.
+ * Generous for a read-only status call. `claude auth status` answers in ~0.2s,
+ * `codex login status` in ~0.1s, and `agy models` in ~0.4s when signed out (or
+ * after one model-list fetch when signed in, PA-146); anything hitting this
+ * budget means the CLI is wedged on a network call or waiting on a TTY, and
+ * `unknown` is the right answer for that.
  */
 const AUTH_PROBE_TIMEOUT_MS = 10_000;
 

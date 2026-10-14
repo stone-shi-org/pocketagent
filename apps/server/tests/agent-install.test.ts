@@ -24,6 +24,7 @@ import {
   setAgentInstallPrefixSource,
   wrapLoginShellCommand,
 } from '../src/agents/registry.js';
+import { createAgyAdapter } from '../src/agents/agy.js';
 import { createClaudeAdapter } from '../src/agents/claude.js';
 import { createCodexAdapter } from '../src/agents/codex.js';
 import { authHeaders, createTestApp, makeConfig, makeWorkspace, TEST_TOKEN, type TestApp } from './helpers.js';
@@ -583,6 +584,7 @@ describe('setup state derivation', () => {
 });
 
 describe('auth probe interpretation', () => {
+  const agy = createAgyAdapter('agy');
   const claude = createClaudeAdapter('claude');
   const codex = createCodexAdapter('codex');
 
@@ -636,12 +638,60 @@ describe('auth probe interpretation', () => {
     expect(codex.authProbe?.interpret({ stdout: 'huh?', stderr: '', code: 0, timedOut: false })?.state).toBe('unknown');
   });
 
+  /**
+   * PA-146: `agy` has no `auth`/`login` subcommand, so its probe runs
+   * `agy models` (argv `['models']`, no shell). Tested with the recorded
+   * signed-in and signed-out outputs from the real CLI, plus network/format
+   * failures that must degrade to `unknown` rather than `signed-out` or `ready`.
+   */
+  it('interprets agy models for signed-in, signed-out, and unrecognised/network-error output (PA-146)', () => {
+    expect(agy.authProbe?.args).toEqual(['models']);
+
+    const ready = agy.authProbe?.interpret({
+      stdout: 'Fetching available models...\nauto\tGemini Pro Next\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n',
+      stderr: '',
+      code: 0,
+      timedOut: false,
+    });
+    expect(ready).toEqual({ state: 'ready', detail: 'Signed in' });
+
+    const signedOutStderr = agy.authProbe?.interpret({
+      stdout: '',
+      stderr: 'Error: Please sign in to view available models. Launch the CLI without arguments to sign in.',
+      code: 1,
+      timedOut: false,
+    });
+    expect(signedOutStderr?.state).toBe('signed-out');
+    expect(signedOutStderr?.detail).toContain('Run `agy`');
+
+    const signedOutStdout = agy.authProbe?.interpret({
+      stdout: 'Error: Please sign in to view available models. Launch the CLI without arguments to sign in.',
+      stderr: '',
+      code: 1,
+      timedOut: false,
+    });
+    expect(signedOutStdout?.state).toBe('signed-out');
+
+    // Network failure, empty output, non-zero exit with model-like line, or
+    // exit 0 with no model lines must all map to `unknown` with a detail.
+    for (const sample of [
+      { stdout: '', stderr: 'Error: fetch failed: ECONNREFUSED', code: 1, timedOut: false },
+      { stdout: 'Fetching available models...\n', stderr: '', code: 0, timedOut: false },
+      { stdout: 'unexpected format with no tab', stderr: '', code: 0, timedOut: false },
+      { stdout: 'auto\tGemini Pro Next\n', stderr: 'partial error', code: 1, timedOut: false },
+      { stdout: '', stderr: '', code: 0, timedOut: false },
+      { stdout: '', stderr: '', code: null, timedOut: true },
+    ]) {
+      const res = agy.authProbe?.interpret(sample);
+      expect(res?.state, JSON.stringify(sample)).toBe('unknown');
+      expect(res?.detail && res.detail.length > 0, JSON.stringify(sample)).toBe(true);
+    }
+  });
+
   /** The agents that genuinely cannot be asked declare no probe at all. */
   it('declares no probe for agents with no non-interactive way to answer', async () => {
-    const { createAgyAdapter } = await import('../src/agents/agy.js');
     const { createOpencodeAdapter } = await import('../src/agents/opencode.js');
     const { createPiAdapter } = await import('../src/agents/pi.js');
-    expect(createAgyAdapter('agy').authProbe).toBeUndefined();
     expect(createOpencodeAdapter('opencode').authProbe).toBeUndefined();
     expect(createPiAdapter('pi').authProbe).toBeUndefined();
   });
@@ -1235,6 +1285,51 @@ describe('agent setup state over HTTP', () => {
     } finally {
       await app.close();
       ws.cleanup();
+    }
+  });
+
+  it('reports ready for a signed-in agy and signed-out for a signed-out one after Refresh (PA-146)', async () => {
+    const host = fakeHost();
+    vi.stubGlobal('fetch', async () => new Response('{}', { status: 404 }));
+    try {
+      const agyBin = path.join(host.home, '.local/bin/agy');
+      mkdirSync(path.dirname(agyBin), { recursive: true });
+
+      // Signed-in agy: `agy models` exits 0 with a tab-separated model line.
+      writeFileSync(
+        agyBin,
+        '#!/bin/sh\nif [ "$1" = "models" ]; then\n  printf "Fetching available models...\\nauto\\tGemini Pro Next\\n"\n  exit 0\nfi\necho "1.2.2"\n',
+        { mode: 0o755 },
+      );
+
+      let res = await t.app.inject({
+        method: 'POST',
+        url: '/api/agents/refresh',
+        headers: authHeaders(t.cookie),
+      });
+      expect(res.statusCode).toBe(200);
+      let agyRow = (res.json().agents as AgentInfo[]).find((a) => a.id === 'agy');
+      expect(agyRow?.setupState).toBe('ready');
+
+      // Signed-out agy: `agy models` exits 1 with the "Please sign in" message.
+      writeFileSync(
+        agyBin,
+        '#!/bin/sh\nif [ "$1" = "models" ]; then\n  echo "Error: Please sign in to view available models. Launch the CLI without arguments to sign in." >&2\n  exit 1\nfi\necho "1.2.2"\n',
+        { mode: 0o755 },
+      );
+
+      res = await t.app.inject({
+        method: 'POST',
+        url: '/api/agents/refresh',
+        headers: authHeaders(t.cookie),
+      });
+      expect(res.statusCode).toBe(200);
+      agyRow = (res.json().agents as AgentInfo[]).find((a) => a.id === 'agy');
+      expect(agyRow?.setupState).toBe('signed-out');
+      expect(agyRow?.setupDetail).toContain('Run `agy`');
+    } finally {
+      vi.unstubAllGlobals();
+      host.restore();
     }
   });
 });

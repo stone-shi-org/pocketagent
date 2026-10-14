@@ -186,16 +186,19 @@ export type AgentBinaryCopy = z.infer<typeof AgentBinaryCopy>;
  * been told the wrong thing.
  *
  * `unknown` is the fourth, and it is a real answer rather than a gap. Only
- * some of these CLIs can be asked about their login state non-interactively
- * and cheaply: `claude auth status` answers JSON, `codex login status` answers
- * a line of text, and `agy` has no such subcommand at all. Reporting `ready`
- * for an agent nobody probed would recreate exactly the failure above, and
- * reporting `signed-out` would nag an operator who is authenticated through an
- * environment variable — which is a real third path (`ANTHROPIC_API_KEY`, and
- * opencode reads `HF_TOKEN`), so the absence of a credential file proves
- * nothing either. `unknown` is rendered as a neutral state with its reason,
- * never as a green tick, the same way a host whose protocol version has not
- * been observed yet is `unknown` rather than assumed compatible.
+ * some of these CLIs can be asked about their login state non-interactively:
+ * `claude auth status` answers JSON, `codex login status` answers a line of
+ * text, and `agy models` lists models when signed in and errors with
+ * "Please sign in" when signed out (PA-146), while `pi` has no such subcommand
+ * at all and `opencode auth list` only prints a decorated table. Reporting
+ * `ready` for an agent nobody probed (or whose network call failed) would
+ * recreate the failure above, and reporting `signed-out` would nag an operator
+ * who is authenticated through an environment variable — which is a real third
+ * path (`ANTHROPIC_API_KEY`, and opencode reads `HF_TOKEN`), so the absence of
+ * a credential file proves nothing either. `unknown` is rendered as a neutral
+ * state with its reason, never as a green tick, the same way a host whose
+ * protocol version has not been observed yet is `unknown` rather than assumed
+ * compatible.
  */
 export const AgentSetupState = z.enum(['not-installed', 'signed-out', 'ready', 'unknown']);
 export type AgentSetupState = z.infer<typeof AgentSetupState>;
