@@ -658,7 +658,7 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                         id="new-provider-setup-token"
                         type="password"
                         autoComplete="off"
-                        placeholder="sk-ant-oat… (validated live before saving, or leave blank to use OAuth after creating)"
+                        placeholder="Paste token from claude setup-token (validated live before saving, or leave blank to use OAuth)"
                         value={newProviderSetupToken}
                         disabled={busy}
                         onChange={(e) => setNewProviderSetupToken(e.target.value)}
@@ -1548,14 +1548,14 @@ function PlannerProviderSection({
               placeholder={
                 provider.hasApiKey
                   ? '••••••••  (leave blank to keep current credential)'
-                  : 'sk-ant-oat…'
+                  : 'Paste token from claude setup-token…'
               }
               value={setupTokenInput}
               disabled={busy}
               onChange={(e) => setSetupTokenInput(e.target.value)}
             />
             <span className="planner-row-meta">
-              Paste a token from <code>claude setup-token</code> (prefix <code>sk-ant-oat</code>, ~1 year,
+              Paste a token from <code>claude setup-token</code> (~1 year,
               inference-only, no refresh token — never conflicts with the <code>claude</code> CLI&apos;s own
               login). Validated with one live request before saving.
             </span>

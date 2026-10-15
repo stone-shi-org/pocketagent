@@ -17,7 +17,7 @@ import { decryptPlannerProviderSecret } from '../src/planner/store.js';
 import { authHeaders, createTestApp, type TestApp } from './helpers.js';
 
 const ENC_KEY = Buffer.alloc(32, 0x33).toString('base64');
-const VALID_SETUP_TOKEN = 'sk-ant-oat01-valid-setup-token-1234567890abcdef';
+const VALID_SETUP_TOKEN = '0AGYJ4iGDaIp-valid-setup-token-5XmSud9Hg';
 
 function fakeAnthropicSseResponse(events: Array<{ event: string; data: unknown }>): Response {
   const body = events
@@ -508,14 +508,23 @@ describe('PA-149: Claude subscription provider (setup-token / OAuth, Anthropic M
       fetchImpl as unknown as typeof fetch,
     );
 
-    // 1. Rejects malformed setup-token prefix without hitting network.
-    const badPrefix = await post(t, '/api/planner/providers', {
+    // 1. Rejects API key or raw OAuth code#state without hitting network.
+    const badApiKey = await post(t, '/api/planner/providers', {
       label: 'Claude Subscription',
       kind: 'claude-oauth',
       setupToken: 'sk-ant-api03-not-an-oat-token',
     });
-    expect(badPrefix.statusCode).toBe(400);
-    expect(badPrefix.json().error.message).toMatch(/sk-ant-oat/i);
+    expect(badApiKey.statusCode).toBe(400);
+    expect(badApiKey.json().error.message).toMatch(/API key/i);
+    expect(calls).toHaveLength(0);
+
+    const badCode = await post(t, '/api/planner/providers', {
+      label: 'Claude Subscription',
+      kind: 'claude-oauth',
+      setupToken: 'somecode123#somestate456',
+    });
+    expect(badCode.statusCode).toBe(400);
+    expect(badCode.json().error.message).toMatch(/OAuth authorization code/i);
     expect(calls).toHaveLength(0);
 
     // 2. Rejects setup-token when live validation fails (401).
@@ -530,12 +539,12 @@ describe('PA-149: Claude subscription provider (setup-token / OAuth, Anthropic M
     expect(calls).toHaveLength(1);
     expect(calls[0]?.body?.max_tokens).toBe(1);
 
-    // 3. Succeeds when live validation passes; stores secret-box ciphertext and populates metadata.
+    // 3. Succeeds when live validation passes; unwraps export lines, stores secret-box ciphertext and populates metadata.
     failValidation = false;
     const createdRes = await post(t, '/api/planner/providers', {
       label: 'Claude Subscription',
       kind: 'claude-oauth',
-      setupToken: VALID_SETUP_TOKEN,
+      setupToken: `export CLAUDE_CODE_OAUTH_TOKEN="${VALID_SETUP_TOKEN}"`,
     });
     expect(createdRes.statusCode).toBe(201);
     const provider = createdRes.json();

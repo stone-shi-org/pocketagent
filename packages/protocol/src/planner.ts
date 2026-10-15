@@ -267,7 +267,7 @@ export const CreatePlannerProviderRequest = z
     baseUrl: z.string().max(2048).optional(),
     /** Optional: a local OpenAI-compatible server (vLLM, Ollama) may need no key. */
     apiKey: z.string().max(2048).optional(),
-    /** PA-149: optional `claude setup-token` (`sk-ant-oat...`) for `claude-oauth` providers. */
+    /** PA-149: optional long-lived token from `claude setup-token` for `claude-oauth` providers. */
     setupToken: z.string().max(2048).optional(),
     /** PA-150 / PA-151: credential mode for `codex-oauth` or `antigravity-oauth` providers. */
     authMode: z.enum(['device-code', 'cli-readonly', 'cli-import', 'oauth']).optional(),
@@ -290,7 +290,7 @@ export const UpdatePlannerProviderRequest = z.object({
   baseUrl: z.string().min(1).max(2048).optional(),
   /** Omitted or blank keeps the stored key; pass `clearApiKey: true` to clear it. */
   apiKey: z.string().max(2048).optional(),
-  /** PA-149: paste a new `claude setup-token` (`sk-ant-oat...`) on a `claude-oauth` provider. */
+  /** PA-149: paste a new long-lived token from `claude setup-token` on a `claude-oauth` provider. */
   setupToken: z.string().max(2048).optional(),
   /** PA-150 / PA-151: switch credential mode on `codex-oauth` or `antigravity-oauth` providers. */
   authMode: z.enum(['device-code', 'cli-readonly', 'cli-import', 'oauth']).optional(),

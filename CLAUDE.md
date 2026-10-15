@@ -1254,9 +1254,9 @@ MIT). It calls Anthropic's Messages API (`POST /v1/messages?beta=true`) directly
 operator's Claude subscription credential rather than spawning the `claude` CLI, and **never
 reads or writes `~/.claude/.credentials.json`** (which the CLI owns and whose refresh rotation
 would sign one side out). Two credential modes live inside `planner_providers.secret_ciphertext`
-(AES-256-GCM via `secret-box`, never returned or logged): (1) a `claude setup-token` (`sk-ant-oat`
-prefix, inference-only, validated with a live `max_tokens: 1` request before saving, no refresh
-token); or (2) a copy-paste PKCE S256 OAuth sign-in (`POST /api/planner/providers/:id/oauth/authorize`
+(AES-256-GCM via `secret-box`, never returned or logged): (1) a `claude setup-token` (typically
+starting with `0AGY...` or `sk-ant-oat...`, inference-only, validated with a live `max_tokens: 1`
+request before saving, no refresh token); or (2) a copy-paste PKCE S256 OAuth sign-in (`POST /api/planner/providers/:id/oauth/authorize`
 and `.../oauth/exchange`, client ID `9d1c250a-e61b-44d9-88ed-5944d1962f5e`, scopes
 `user:profile user:inference user:sessions:claude_code`, redirect
 `https://platform.claude.com/oauth/code/callback`) with per-provider serialized refresh token
