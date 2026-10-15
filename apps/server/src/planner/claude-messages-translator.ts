@@ -20,16 +20,30 @@
  * copies or substantial portions of the Software.
  */
 
+import type { PlannerProviderKind } from '@pocketagent/protocol';
+import {
+  DEEPSEEK_PROVIDER_DEFAULTS,
+  OPENCODE_GO_PROVIDER_DEFAULTS,
+} from '@pocketagent/protocol';
 import type {
   PlannerCacheControl,
   PlannerChatMessage,
+  PlannerLlmProvider,
+  PlannerLlmRetryPolicy,
   PlannerLlmStreamEvent,
   PlannerLlmStreamOptions,
   PlannerLlmToolCall,
   PlannerLlmUsage,
   PlannerUserContentPart,
 } from './llm-client.js';
-import { parseUsage, streamError } from './llm-client.js';
+import {
+  DEFAULT_LLM_RETRY_POLICY,
+  PlannerLlmError,
+  abortableSleep,
+  httpError,
+  parseUsage,
+  streamError,
+} from './llm-client.js';
 
 export const DEFAULT_CLAUDE_CODE_VERSION = '2.1.280';
 export const ANTHROPIC_API_VERSION = '2023-06-01';
@@ -428,16 +442,26 @@ export function buildAnthropicMessagesRequest(opts: {
   tools?: readonly unknown[];
   streamOptions?: PlannerLlmStreamOptions;
   clientVersion?: string;
+  /**
+   * PA-154: `true` (default) prepends Claude Code billing/identity system blocks
+   * and OAuth beta flags for `claude-oauth` subscription providers. `false`
+   * omits them for general Anthropic API / DeepSeek / OpenCode endpoints.
+   */
+  includeClaudeCodeIdentity?: boolean;
 }): TranslatedAnthropicRequest {
   const clientVersion = opts.clientVersion ?? DEFAULT_CLAUDE_CODE_VERSION;
+  const includeIdentity = opts.includeClaudeCodeIdentity ?? true;
 
-  // 1. Top-level system blocks: prepend the two required Claude Code blocks
-  //    (with no `cache_control` on those two blocks), followed by Pocket Agent's
-  //    own system blocks (preserving any `cache_control` breakpoints).
-  const systemBlocks: AnthropicTextBlock[] = [
-    buildClaudeCodeBillingHeaderBlock(clientVersion),
-    { type: 'text', text: CLAUDE_CODE_SYSTEM_IDENTITY },
-  ];
+  // 1. Top-level system blocks: for `claude-oauth`, prepend the two required
+  //    Claude Code blocks (with no `cache_control` on those two blocks), followed
+  //    by Pocket Agent's own system blocks. For general Anthropic API endpoints,
+  //    send only Pocket Agent's own system blocks.
+  const systemBlocks: AnthropicTextBlock[] = includeIdentity
+    ? [
+        buildClaudeCodeBillingHeaderBlock(clientVersion),
+        { type: 'text', text: CLAUDE_CODE_SYSTEM_IDENTITY },
+      ]
+    : [];
 
   const rawConversation: AnthropicMessage[] = [];
   let hasPdfDocument = false;
@@ -558,13 +582,18 @@ export function buildAnthropicMessagesRequest(opts: {
     }
   }
 
-  const betas = [
-    'claude-code-20250219',
-    'oauth-2025-04-20',
-    'interleaved-thinking-2025-05-14',
-    'fine-grained-tool-streaming-2025-05-14',
-    'prompt-caching-scope-2026-01-05',
-  ];
+  const betas = includeIdentity
+    ? [
+        'claude-code-20250219',
+        'oauth-2025-04-20',
+        'interleaved-thinking-2025-05-14',
+        'fine-grained-tool-streaming-2025-05-14',
+        'prompt-caching-scope-2026-01-05',
+      ]
+    : [
+        'interleaved-thinking-2025-05-14',
+        'fine-grained-tool-streaming-2025-05-14',
+      ];
   if (usesEffortBeta) {
     betas.push('effort-2025-11-24');
   }
@@ -575,7 +604,7 @@ export function buildAnthropicMessagesRequest(opts: {
   const body: Record<string, unknown> = {
     model: opts.model,
     max_tokens: maxTokens,
-    system: systemBlocks,
+    ...(systemBlocks.length > 0 ? { system: systemBlocks } : {}),
     messages: anthropicMessages,
     stream: true,
     ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}),
@@ -763,3 +792,331 @@ export class AnthropicMessagesSseParser {
     };
   }
 }
+
+/**
+ * PA-154: On OpenCode Zen (`opencode-zen`) and OpenCode Go (`opencode-go`),
+ * Claude models and MiniMax / Qwen3.7 / Qwen3.8 models are served via the
+ * Anthropic Messages endpoint (`/v1/messages`) rather than `/v1/chat/completions`.
+ */
+export function isOpencodeAnthropicOnlyModel(model: string): boolean {
+  const bare = model.trim().toLowerCase().replace(/^.*\//, '');
+  return /^claude-/.test(bare) || /^minimax-/.test(bare) || /^qwen3\.[78]/.test(bare);
+}
+
+export interface AnthropicApiPlannerProviderOptions {
+  baseUrl: string;
+  anthropicBaseUrl?: string;
+  apiKey: string | null;
+  providerKind?: PlannerProviderKind;
+  fetchImpl?: typeof fetch;
+  retry?: Partial<PlannerLlmRetryPolicy>;
+}
+
+/**
+ * PA-154: General Anthropic Messages API (`/v1/messages`) provider for API-key
+ * endpoints (`https://api.anthropic.com`, DeepSeek `/anthropic`, OpenCode Zen/Go,
+ * OmniRoute, LiteLLM, etc.). Reuses the Anthropic Messages request translator
+ * and SSE parser without injecting Claude Code OAuth identity blocks.
+ */
+export class AnthropicApiPlannerProvider implements PlannerLlmProvider {
+  constructor(private readonly opts: AnthropicApiPlannerProviderOptions) {}
+
+  private messagesUrl(): string {
+    let base = (this.opts.anthropicBaseUrl ?? this.opts.baseUrl).trim().replace(/\/+$/, '');
+    if (base.endsWith('/v1/messages')) {
+      return base;
+    }
+    if (base.endsWith('/v1')) {
+      base = base.slice(0, -'/v1'.length);
+    }
+    if (this.opts.providerKind === 'deepseek' && !base.endsWith('/anthropic')) {
+      base = `${base || 'https://api.deepseek.com'}/anthropic`;
+    }
+    return `${base}/v1/messages`;
+  }
+
+  private modelsCandidateUrls(): string[] {
+    const raw = this.opts.baseUrl.trim().replace(/\/+$/, '');
+    if (!raw) return [];
+    if (raw.endsWith('/v1')) {
+      return [`${raw}/models`, `${raw.slice(0, -'/v1'.length)}/models`];
+    }
+    return [`${raw}/v1/models`, `${raw}/models`];
+  }
+
+  private authHeaders(chatId?: string): Record<string, string> {
+    const headers: Record<string, string> = {
+      'anthropic-version': ANTHROPIC_API_VERSION,
+      'user-agent': 'pocketagent/1.0',
+    };
+    if (this.opts.apiKey) {
+      headers['x-api-key'] = this.opts.apiKey;
+      headers.authorization = `Bearer ${this.opts.apiKey}`;
+    }
+    if (
+      chatId &&
+      (this.opts.providerKind === 'opencode-zen' || this.opts.providerKind === 'opencode-go')
+    ) {
+      headers['x-opencode-session'] = chatId;
+    }
+    return headers;
+  }
+
+  async listModels(): Promise<string[]> {
+    const fetchImpl = this.opts.fetchImpl ?? fetch;
+    const urls = this.modelsCandidateUrls();
+    let lastError: Error | null = null;
+
+    for (const url of urls) {
+      try {
+        const res = await fetchImpl(url, {
+          method: 'GET',
+          headers: this.authHeaders(),
+        });
+        if (!res.ok) {
+          const body = await res.text().catch(() => '');
+          lastError = new PlannerLlmError(
+            `Anthropic LLM endpoint returned ${res.status}: ${body.slice(0, 500)}`,
+            res.status,
+          );
+          continue;
+        }
+        const parsed = (await res.json()) as { data?: unknown };
+        if (Array.isArray(parsed?.data)) {
+          const ids = parsed.data
+            .map((entry) =>
+              entry && typeof entry === 'object' ? String((entry as { id?: unknown }).id ?? '') : '',
+            )
+            .filter((id) => id.length > 0);
+          if (ids.length > 0) return ids;
+        }
+      } catch (err) {
+        lastError =
+          err instanceof PlannerLlmError
+            ? err
+            : new PlannerLlmError(
+                `Could not reach the Anthropic LLM endpoint: ${(err as Error).message}`,
+              );
+      }
+    }
+
+    if (this.opts.providerKind === 'opencode-go') {
+      return OPENCODE_GO_PROVIDER_DEFAULTS.models.map((m) => m.id);
+    }
+    if (this.opts.providerKind === 'deepseek') {
+      return DEEPSEEK_PROVIDER_DEFAULTS.models.map((m) => m.id);
+    }
+    throw (
+      lastError ??
+      new PlannerLlmError("Anthropic LLM endpoint's /models response returned no models.")
+    );
+  }
+
+  async test(model: string): Promise<{ ok: boolean; message: string; latencyMs: number }> {
+    const startedAt = Date.now();
+    try {
+      let content: string | null = null;
+      for await (const chunk of this.streamComplete(
+        model,
+        [{ role: 'user', content: 'Reply with exactly one word: ok' }],
+        undefined,
+        undefined,
+        { maxTokens: 64, thinking: false },
+      )) {
+        if (chunk.type === 'done') content = chunk.content;
+      }
+      return {
+        ok: true,
+        message: content ? content.trim().slice(0, 200) : '(empty reply)',
+        latencyMs: Date.now() - startedAt,
+      };
+    } catch (err) {
+      const message = err instanceof PlannerLlmError ? err.message : (err as Error).message;
+      return { ok: false, message, latencyMs: Date.now() - startedAt };
+    }
+  }
+
+  async *streamComplete(
+    model: string,
+    messages: PlannerChatMessage[],
+    tools?: unknown[],
+    signal?: AbortSignal,
+    options?: PlannerLlmStreamOptions,
+  ): AsyncGenerator<PlannerLlmStreamEvent> {
+    const policy = { ...DEFAULT_LLM_RETRY_POLICY, ...this.opts.retry };
+    for (let attempt = 0; ; attempt++) {
+      let streamedAnything = false;
+      try {
+        for await (const event of this.streamOnce(model, messages, tools, signal, options)) {
+          if (event.type !== 'done') streamedAnything = true;
+          yield event;
+        }
+        return;
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        const error =
+          err instanceof PlannerLlmError ? err : new PlannerLlmError((err as Error).message);
+        if (streamedAnything || !error.retryable || attempt >= policy.maxRetries) throw error;
+        let delayMs: number;
+        if (error.retryAfterMs !== null) {
+          if (error.retryAfterMs > policy.maxDelayMs) throw error;
+          delayMs = error.retryAfterMs;
+        } else {
+          delayMs =
+            Math.min(policy.baseDelayMs * 2 ** attempt, policy.maxDelayMs) *
+            (1 - Math.random() * 0.25);
+        }
+        delayMs = Math.round(delayMs);
+        yield {
+          type: 'retry',
+          attempt: attempt + 1,
+          maxRetries: policy.maxRetries,
+          delayMs,
+          reason: error.message,
+        };
+        await abortableSleep(delayMs, signal);
+      }
+    }
+  }
+
+  private async *streamOnce(
+    model: string,
+    messages: PlannerChatMessage[],
+    tools: unknown[] | undefined,
+    externalSignal: AbortSignal | undefined,
+    options: PlannerLlmStreamOptions | undefined,
+  ): AsyncGenerator<PlannerLlmStreamEvent> {
+    const fetchImpl = this.opts.fetchImpl ?? fetch;
+    const url = this.messagesUrl();
+
+    const controller = new AbortController();
+    const onExternalAbort = (): void => controller.abort();
+    if (externalSignal?.aborted) controller.abort();
+    else externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
+
+    const idleMs = options?.idleTimeoutMs ?? 0;
+    let idledOut = false;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const armIdle = (): void => {
+      if (idleMs <= 0) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        idledOut = true;
+        controller.abort();
+      }, idleMs);
+    };
+    const idleError = (): PlannerLlmError =>
+      new PlannerLlmError(
+        `The Anthropic LLM endpoint sent nothing for ${Math.round(idleMs / 1000)}s.`,
+        undefined,
+        { retryable: true },
+      );
+
+    const signal = controller.signal;
+    try {
+      armIdle();
+      const translated = buildAnthropicMessagesRequest({
+        model,
+        messages,
+        tools,
+        streamOptions: options,
+        includeClaudeCodeIdentity: false,
+      });
+
+      let res: Response;
+      try {
+        res = await fetchImpl(url, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'text/event-stream',
+            ...this.authHeaders(options?.chatId),
+            ...(translated.betas.length > 0
+              ? { 'anthropic-beta': translated.betas.join(',') }
+              : {}),
+          },
+          body: JSON.stringify(translated.body),
+          signal,
+        });
+      } catch (err) {
+        const idle = idledOut ? idleError() : null;
+        if (idle) throw idle;
+        throw new PlannerLlmError(
+          `Could not reach the Anthropic LLM endpoint: ${(err as Error).message}`,
+          undefined,
+          { retryable: !signal.aborted },
+        );
+      }
+      armIdle();
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw httpError('Anthropic LLM endpoint', res.status, body, res.headers);
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) {
+        throw new PlannerLlmError('Anthropic LLM endpoint returned no readable stream body.');
+      }
+
+      const decoder = new TextDecoder();
+      const parser = new AnthropicMessagesSseParser();
+      let buffer = '';
+
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          armIdle();
+          buffer += decoder.decode(value, { stream: true });
+          let boundary = buffer.indexOf('\n');
+          while (boundary >= 0) {
+            const line = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 1);
+            for (const event of parser.feedLine(line)) {
+              yield event;
+            }
+            boundary = buffer.indexOf('\n');
+          }
+        }
+        if (buffer.length > 0) {
+          for (const event of parser.feedLine(buffer)) {
+            yield event;
+          }
+        }
+      } catch (err) {
+        if (err instanceof PlannerLlmError) throw err;
+        const idle = idledOut ? idleError() : null;
+        if (idle) throw idle;
+        throw new PlannerLlmError(
+          `Lost connection to the Anthropic LLM endpoint: ${(err as Error).message}`,
+          undefined,
+          { retryable: !signal.aborted },
+        );
+      }
+
+      if (!parser.hasSeenChunk) {
+        throw new PlannerLlmError('Anthropic LLM endpoint returned an empty stream.', undefined, {
+          retryable: true,
+        });
+      }
+
+      const finalEvent = parser.finish();
+      if (
+        finalEvent.content === null &&
+        finalEvent.toolCalls.length === 0 &&
+        finalEvent.reasoning === null
+      ) {
+        throw new PlannerLlmError(
+          'Anthropic LLM response had no message content or tool calls.',
+        );
+      }
+
+      yield finalEvent;
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      externalSignal?.removeEventListener('abort', onExternalAbort);
+    }
+  }
+}
+

@@ -3,11 +3,17 @@ import {
   ANTIGRAVITY_OAUTH_PROVIDER_DISCLOSURE,
   CLAUDE_OAUTH_PROVIDER_DISCLOSURE,
   CODEX_OAUTH_PROVIDER_DISCLOSURE,
+  DEEPSEEK_PROVIDER_DEFAULTS,
+  OPENCODE_GO_PROVIDER_DEFAULTS,
+  OPENCODE_ZEN_PROVIDER_DEFAULTS,
+  defaultEndpointsForProviderKind,
+  isApiKeyProviderKind,
   type ClaudeOAuthAuthorizeResponse,
   type ClaudeProviderUsageResponse,
   type CodexDeviceCodeStartResponse,
   type PlannerModel,
   type PlannerProvider,
+  type PlannerProviderEndpoint,
   type PlannerProviderKind,
   type PlannerProviderTemplatePayload,
   type PlannerSettingsDto,
@@ -76,6 +82,9 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
   const [newProviderLabel, setNewProviderLabel] = useState('');
   const [newProviderBaseUrl, setNewProviderBaseUrl] = useState('');
   const [newProviderApiKey, setNewProviderApiKey] = useState('');
+  const [newProviderEndpoints, setNewProviderEndpoints] = useState<PlannerProviderEndpoint[]>([
+    'openai',
+  ]);
   const [newProviderSetupToken, setNewProviderSetupToken] = useState('');
   const [newProviderCodexAuthMode, setNewProviderCodexAuthMode] = useState<'device-code' | 'cli-readonly'>('device-code');
   const [newProviderAntigravityAuthMode, setNewProviderAntigravityAuthMode] = useState<'cli-import' | 'oauth'>('cli-import');
@@ -286,7 +295,7 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
       return;
     }
     if (newProviderKind === 'openai-compatible' && !baseUrl) {
-      setError('Base URL is required for OpenAI-compatible providers.');
+      setError('Base URL is required for API endpoint providers.');
       return;
     }
     void withBusy(async () => {
@@ -314,14 +323,18 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
       } else {
         await api.createPlannerProvider({
           label,
-          kind: 'openai-compatible',
-          baseUrl,
+          kind: newProviderKind,
+          ...(baseUrl.length > 0 ? { baseUrl } : {}),
           ...(apiKey.length > 0 ? { apiKey } : {}),
+          endpoints: newProviderEndpoints.length > 0
+            ? newProviderEndpoints
+            : defaultEndpointsForProviderKind(newProviderKind),
         });
       }
       setNewProviderLabel('');
       setNewProviderBaseUrl('');
       setNewProviderApiKey('');
+      setNewProviderEndpoints(['openai']);
       setNewProviderSetupToken('');
       setNewProviderCodexAuthMode('device-code');
       setNewProviderAntigravityAuthMode(hasLocalAgyAuth ? 'cli-import' : 'oauth');
@@ -476,12 +489,14 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                 label: imported.label,
                 baseUrl: imported.baseUrl,
                 allowUnattended: imported.allowUnattended,
+                ...(imported.endpoints !== undefined ? { endpoints: imported.endpoints } : {}),
               })
             : await api.createPlannerProvider({
                 label: imported.label,
                 kind: imported.kind ?? 'openai-compatible',
                 baseUrl: imported.baseUrl,
                 allowUnattended: imported.allowUnattended,
+                ...(imported.endpoints !== undefined ? { endpoints: imported.endpoints } : {}),
               });
           const existingModelIds = new Set(
             (models ?? [])
@@ -513,7 +528,7 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
   const runtimeBusy = (key: string): boolean => pendingRuntime.has(key);
   const runtimeSettings = runtimeData?.settings;
   const exportableProvider = (providers ?? []).find(
-    (p) => p.kind === 'openai-compatible' && p.baseUrl.trim().length > 0,
+    (p) => isApiKeyProviderKind(p.kind) && p.baseUrl.trim().length > 0,
   );
 
   return (
@@ -601,7 +616,23 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                     onChange={(e) => {
                       const nextKind = e.target.value as PlannerProviderKind;
                       setNewProviderKind(nextKind);
-                      if (nextKind === 'claude-oauth' && !newProviderLabel.trim()) {
+                      setNewProviderEndpoints(defaultEndpointsForProviderKind(nextKind));
+                      if (nextKind === 'deepseek') {
+                        if (!newProviderLabel.trim()) {
+                          setNewProviderLabel('DeepSeek');
+                        }
+                        setNewProviderBaseUrl(DEEPSEEK_PROVIDER_DEFAULTS.baseUrl);
+                      } else if (nextKind === 'opencode-zen') {
+                        if (!newProviderLabel.trim()) {
+                          setNewProviderLabel('OpenCode Zen');
+                        }
+                        setNewProviderBaseUrl(OPENCODE_ZEN_PROVIDER_DEFAULTS.baseUrl);
+                      } else if (nextKind === 'opencode-go') {
+                        if (!newProviderLabel.trim()) {
+                          setNewProviderLabel('OpenCode Go');
+                        }
+                        setNewProviderBaseUrl(OPENCODE_GO_PROVIDER_DEFAULTS.baseUrl);
+                      } else if (nextKind === 'claude-oauth' && !newProviderLabel.trim()) {
                         setNewProviderLabel('Claude Subscription');
                       } else if (nextKind === 'codex-oauth' && !newProviderLabel.trim()) {
                         setNewProviderLabel('Codex Subscription');
@@ -613,7 +644,10 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                       }
                     }}
                   >
-                    <option value="openai-compatible">OpenAI-compatible endpoint</option>
+                    <option value="openai-compatible">API endpoint (OpenAI / Anthropic compatible)</option>
+                    <option value="deepseek">DeepSeek (OpenAI + Anthropic)</option>
+                    <option value="opencode-zen">OpenCode Zen (OpenAI + Anthropic)</option>
+                    <option value="opencode-go">OpenCode Go (OpenAI + Anthropic)</option>
                     <option value="claude-oauth">Claude subscription (setup-token / OAuth)</option>
                     <option value="codex-oauth">Codex (ChatGPT) subscription (device-code / ~/.codex/auth.json)</option>
                     <option value="antigravity-oauth">Antigravity (Google) subscription (signed-in agy CLI / Google OAuth)</option>
@@ -625,13 +659,19 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                     id="new-provider-label"
                     type="text"
                     placeholder={
-                      newProviderKind === 'claude-oauth'
-                        ? 'e.g. Claude Subscription'
-                        : newProviderKind === 'codex-oauth'
-                          ? 'e.g. Codex Subscription'
-                          : newProviderKind === 'antigravity-oauth'
-                            ? 'e.g. Antigravity Subscription'
-                            : 'e.g. OpenRouter, Local vLLM'
+                      newProviderKind === 'deepseek'
+                        ? 'e.g. DeepSeek'
+                        : newProviderKind === 'opencode-zen'
+                          ? 'e.g. OpenCode Zen'
+                          : newProviderKind === 'opencode-go'
+                            ? 'e.g. OpenCode Go'
+                            : newProviderKind === 'claude-oauth'
+                              ? 'e.g. Claude Subscription'
+                              : newProviderKind === 'codex-oauth'
+                                ? 'e.g. Codex Subscription'
+                                : newProviderKind === 'antigravity-oauth'
+                                  ? 'e.g. Antigravity Subscription'
+                                  : 'e.g. OpenRouter, OmniRoute, Anthropic API, Local vLLM'
                     }
                     value={newProviderLabel}
                     disabled={busy}
@@ -727,15 +767,71 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                 ) : (
                   <>
                     <div className="planner-field" style={{ marginTop: 8 }}>
-                      <label htmlFor="new-provider-base-url">Base URL (OpenAI-compatible)</label>
+                      <label htmlFor="new-provider-base-url">Base URL</label>
                       <input
                         id="new-provider-base-url"
                         type="text"
-                        placeholder="https://openrouter.ai/api/v1"
+                        placeholder={
+                          newProviderKind === 'deepseek'
+                            ? DEEPSEEK_PROVIDER_DEFAULTS.baseUrl
+                            : newProviderKind === 'opencode-zen'
+                              ? OPENCODE_ZEN_PROVIDER_DEFAULTS.baseUrl
+                              : newProviderKind === 'opencode-go'
+                                ? OPENCODE_GO_PROVIDER_DEFAULTS.baseUrl
+                                : newProviderEndpoints.includes('anthropic') &&
+                                    !newProviderEndpoints.includes('openai')
+                                  ? 'https://api.anthropic.com'
+                                  : 'https://openrouter.ai/api/v1'
+                        }
                         value={newProviderBaseUrl}
                         disabled={busy}
                         onChange={(e) => setNewProviderBaseUrl(e.target.value)}
                       />
+                    </div>
+                    <div className="planner-field" style={{ marginTop: 8 }}>
+                      <label>Endpoints</label>
+                      <div className="planner-inline" style={{ gap: 16, flexWrap: 'wrap' }}>
+                        <label className="planner-inline-checkbox">
+                          <input
+                            type="checkbox"
+                            checked={newProviderEndpoints.includes('openai')}
+                            disabled={busy}
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+                              setNewProviderEndpoints((prev) => {
+                                if (checked) {
+                                  return prev.includes('openai') ? prev : ['openai', ...prev];
+                                }
+                                const next = prev.filter((ep) => ep !== 'openai');
+                                return next.length > 0 ? next : prev;
+                              });
+                            }}
+                          />
+                          <span>OpenAI (<code>/v1/chat/completions</code>)</span>
+                        </label>
+                        <label className="planner-inline-checkbox">
+                          <input
+                            type="checkbox"
+                            checked={newProviderEndpoints.includes('anthropic')}
+                            disabled={busy}
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+                              setNewProviderEndpoints((prev) => {
+                                if (checked) {
+                                  return prev.includes('anthropic') ? prev : [...prev, 'anthropic'];
+                                }
+                                const next = prev.filter((ep) => ep !== 'anthropic');
+                                return next.length > 0 ? next : prev;
+                              });
+                            }}
+                          />
+                          <span>Anthropic (<code>/v1/messages</code>)</span>
+                        </label>
+                      </div>
+                      <span className="planner-row-meta">
+                        Pocket Agent uses OpenAI unless only Anthropic is checked. Providers with Anthropic
+                        checked are also selectable in Custom Claude.
+                      </span>
                     </div>
                     <div className="planner-field" style={{ marginTop: 8 }}>
                       <label htmlFor="new-provider-api-key">API key (optional, write-only)</label>
@@ -1065,6 +1161,7 @@ export interface PlannerProviderSectionProps {
     label?: string;
     baseUrl?: string;
     apiKey?: string;
+    endpoints?: PlannerProviderEndpoint[];
     setupToken?: string;
     authMode?: 'device-code' | 'cli-readonly' | 'cli-import' | 'oauth';
     clearApiKey?: boolean;
@@ -1116,6 +1213,11 @@ export function PlannerProviderSection({
   const [modelsExpanded, setModelsExpanded] = useState(initialModelsExpanded);
   const [labelInput, setLabelInput] = useState(provider.label);
   const [baseUrlInput, setBaseUrlInput] = useState(provider.baseUrl);
+  const [endpointsInput, setEndpointsInput] = useState<PlannerProviderEndpoint[]>(
+    provider.endpoints?.length
+      ? provider.endpoints
+      : defaultEndpointsForProviderKind(provider.kind),
+  );
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [setupTokenInput, setSetupTokenInput] = useState('');
   const [oauthAuthorize, setOauthAuthorize] = useState<ClaudeOAuthAuthorizeResponse | null>(null);
@@ -1142,14 +1244,23 @@ export function PlannerProviderSection({
   const newModelLabelInputRef = useRef<HTMLInputElement | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
-  const [discoveredIds, setDiscoveredIds] = useState<string[]>(
-    isAntigravityOAuth ? [...ANTIGRAVITY_SUGGESTED_MODELS] : [],
-  );
+  const [discoveredIds, setDiscoveredIds] = useState<string[]>(() => {
+    if (isAntigravityOAuth) return [...ANTIGRAVITY_SUGGESTED_MODELS];
+    if (provider.kind === 'deepseek') return [...DEEPSEEK_PROVIDER_DEFAULTS.defaultModels];
+    if (provider.kind === 'opencode-zen') return [...OPENCODE_ZEN_PROVIDER_DEFAULTS.defaultModels];
+    if (provider.kind === 'opencode-go') return [...OPENCODE_GO_PROVIDER_DEFAULTS.defaultModels];
+    return [];
+  });
 
   useEffect(() => {
     setLabelInput(provider.label);
     setBaseUrlInput(provider.baseUrl);
-  }, [provider.label, provider.baseUrl]);
+    setEndpointsInput(
+      provider.endpoints?.length
+        ? provider.endpoints
+        : defaultEndpointsForProviderKind(provider.kind),
+    );
+  }, [provider.label, provider.baseUrl, provider.endpoints, provider.kind]);
 
   useEffect(() => {
     return () => {
@@ -1185,10 +1296,24 @@ export function PlannerProviderSection({
       label: trimmedLabel,
       ...(trimmedBaseUrl.length > 0 ? { baseUrl: trimmedBaseUrl } : {}),
       ...(!isSubscriptionOAuth && trimmedKey.length > 0 ? { apiKey: trimmedKey } : {}),
+      ...(!isSubscriptionOAuth && endpointsInput.length > 0 ? { endpoints: endpointsInput } : {}),
       ...(isClaudeOAuth && trimmedSetupToken.length > 0 ? { setupToken: trimmedSetupToken } : {}),
     });
     setApiKeyInput('');
     setSetupTokenInput('');
+  };
+
+  const toggleEndpoint = (endpoint: PlannerProviderEndpoint, checked: boolean): void => {
+    const next: PlannerProviderEndpoint[] = checked
+      ? endpointsInput.includes(endpoint)
+        ? endpointsInput
+        : endpoint === 'openai'
+          ? ['openai', ...endpointsInput]
+          : [...endpointsInput, 'anthropic']
+      : endpointsInput.filter((ep) => ep !== endpoint);
+    if (next.length === 0) return;
+    setEndpointsInput(next);
+    onSaveProvider({ endpoints: next });
   };
 
   const clearApiKey = (): void => {
@@ -2011,15 +2136,53 @@ export function PlannerProviderSection({
       ) : (
         <>
           <div className="planner-field" style={{ marginTop: 8 }}>
-            <label htmlFor={`provider-base-url-${provider.id}`}>Base URL (OpenAI-compatible)</label>
+            <label htmlFor={`provider-base-url-${provider.id}`}>Base URL</label>
             <input
               id={`provider-base-url-${provider.id}`}
               type="text"
-              placeholder="https://api.openai.com/v1"
+              placeholder={
+                provider.kind === 'deepseek'
+                  ? DEEPSEEK_PROVIDER_DEFAULTS.baseUrl
+                  : provider.kind === 'opencode-zen'
+                    ? OPENCODE_ZEN_PROVIDER_DEFAULTS.baseUrl
+                    : provider.kind === 'opencode-go'
+                      ? OPENCODE_GO_PROVIDER_DEFAULTS.baseUrl
+                      : endpointsInput.includes('anthropic') && !endpointsInput.includes('openai')
+                        ? 'https://api.anthropic.com'
+                        : 'https://api.openai.com/v1'
+              }
               value={baseUrlInput}
               disabled={busy}
               onChange={(e) => setBaseUrlInput(e.target.value)}
             />
+          </div>
+
+          <div className="planner-field" style={{ marginTop: 8 }}>
+            <label>Endpoints</label>
+            <div className="planner-inline" style={{ gap: 16, flexWrap: 'wrap' }}>
+              <label className="planner-inline-checkbox">
+                <input
+                  type="checkbox"
+                  checked={endpointsInput.includes('openai')}
+                  disabled={busy}
+                  onChange={(e) => toggleEndpoint('openai', e.target.checked)}
+                />
+                <span>OpenAI (<code>/v1/chat/completions</code>)</span>
+              </label>
+              <label className="planner-inline-checkbox">
+                <input
+                  type="checkbox"
+                  checked={endpointsInput.includes('anthropic')}
+                  disabled={busy}
+                  onChange={(e) => toggleEndpoint('anthropic', e.target.checked)}
+                />
+                <span>Anthropic (<code>/v1/messages</code>)</span>
+              </label>
+            </div>
+            <span className="planner-row-meta">
+              Pocket Agent uses OpenAI unless only Anthropic is checked. Providers with Anthropic
+              checked are also selectable in Custom Claude.
+            </span>
           </div>
 
           <div className="planner-field" style={{ marginTop: 8 }}>

@@ -7,6 +7,7 @@ import type {
   PlannerMemoryTier,
   PlannerProvider,
   PlannerProviderAuthMode,
+  PlannerProviderEndpoint,
   PlannerProviderKind,
 } from '@pocketagent/protocol';
 import {
@@ -19,6 +20,8 @@ import {
   MAX_INLINE_TEXT_MAX_BYTES,
   PromptAttachment,
   PromptImage,
+  defaultEndpointsForProviderKind,
+  isApiKeyProviderKind,
 } from '@pocketagent/protocol';
 import type { Db } from '../db/index.js';
 import {
@@ -364,6 +367,7 @@ export interface PlannerProviderRow {
   label: string;
   kind: PlannerProviderKind;
   baseUrl: string;
+  endpoints: PlannerProviderEndpoint[];
   secretCiphertext: string | null;
   allowUnattended: boolean;
   sortOrder: number;
@@ -377,6 +381,7 @@ interface PlannerProviderDbRow {
   label: string;
   kind: string;
   base_url: string;
+  endpoints_json?: string | null;
   secret_ciphertext: string | null;
   allow_unattended: number;
   sort_order: number;
@@ -386,18 +391,75 @@ interface PlannerProviderDbRow {
 }
 
 function toProviderKind(raw: string | null | undefined): PlannerProviderKind {
+  if (raw === 'deepseek') return 'deepseek';
+  if (raw === 'opencode-zen') return 'opencode-zen';
+  if (raw === 'opencode-go') return 'opencode-go';
   if (raw === 'claude-oauth') return 'claude-oauth';
   if (raw === 'codex-oauth') return 'codex-oauth';
   if (raw === 'antigravity-oauth') return 'antigravity-oauth';
   return 'openai-compatible';
 }
 
+function parseProviderEndpoints(
+  rawJson: string | null | undefined,
+  kind: PlannerProviderKind,
+): PlannerProviderEndpoint[] {
+  if (rawJson) {
+    try {
+      const parsed = JSON.parse(rawJson);
+      if (Array.isArray(parsed)) {
+        const valid = parsed.filter(
+          (item): item is PlannerProviderEndpoint => item === 'openai' || item === 'anthropic',
+        );
+        if (valid.length > 0) {
+          return Array.from(new Set(valid));
+        }
+      }
+    } catch {
+      // Fall through to defaults for kind
+    }
+  }
+  return defaultEndpointsForProviderKind(kind);
+}
+
+/**
+ * PA-154: Resolves the Anthropic Messages API base URL (`ANTHROPIC_BASE_URL` /
+ * `<base>/v1/messages`) for a provider.
+ * - `deepseek`: `https://api.deepseek.com` -> `https://api.deepseek.com/anthropic`
+ * - `opencode-zen`: `https://opencode.ai/zen/v1` -> `https://opencode.ai/zen`
+ * - `opencode-go`: `https://opencode.ai/zen/go/v1` -> `https://opencode.ai/zen/go`
+ * - `openai-compatible`: strips trailing `/v1` or `/v1/messages` if present so
+ *   both `AnthropicApiPlannerProvider` (which appends `/v1/messages`) and Claude
+ *   Code (`ANTHROPIC_BASE_URL`, which appends `/v1/messages`) work whether the
+ *   operator entered `https://api.anthropic.com`, `https://host/v1`, or `https://host`.
+ */
+export function resolveAnthropicBaseUrlForProvider(provider: {
+  kind: PlannerProviderKind;
+  baseUrl: string;
+}): string {
+  let url = provider.baseUrl.trim().replace(/\/+$/, '');
+  if (url.endsWith('/v1/messages')) {
+    url = url.slice(0, -'/v1/messages'.length);
+  } else if (url.endsWith('/v1')) {
+    url = url.slice(0, -'/v1'.length);
+  }
+  if (provider.kind === 'deepseek') {
+    if (!url.endsWith('/anthropic')) {
+      url = `${url || 'https://api.deepseek.com'}/anthropic`;
+    }
+    return url;
+  }
+  return url;
+}
+
 function providerFromDbRow(row: PlannerProviderDbRow): PlannerProviderRow {
+  const kind = toProviderKind(row.kind);
   return {
     id: row.id,
     label: row.label,
-    kind: toProviderKind(row.kind),
+    kind,
     baseUrl: row.base_url,
+    endpoints: parseProviderEndpoints(row.endpoints_json, kind),
     secretCiphertext: row.secret_ciphertext ?? null,
     allowUnattended: row.allow_unattended === 1,
     sortOrder: row.sort_order,
@@ -687,6 +749,7 @@ export function toPlannerProviderDto(row: PlannerProviderRow, encKey?: Buffer): 
       label: row.label,
       kind: row.kind,
       baseUrl: row.baseUrl,
+      endpoints: row.endpoints,
       hasApiKey: row.secretCiphertext !== null && row.secretCiphertext.length > 0,
       keyUnreadable: error !== null,
       allowUnattended: row.allowUnattended,
@@ -713,6 +776,7 @@ export function toPlannerProviderDto(row: PlannerProviderRow, encKey?: Buffer): 
         label: row.label,
         kind: row.kind,
         baseUrl: row.baseUrl,
+        endpoints: row.endpoints,
         hasApiKey: Boolean(cli.accessToken && !cli.expired),
         keyUnreadable: false,
         allowUnattended: row.allowUnattended,
@@ -735,6 +799,7 @@ export function toPlannerProviderDto(row: PlannerProviderRow, encKey?: Buffer): 
       label: row.label,
       kind: row.kind,
       baseUrl: row.baseUrl,
+      endpoints: row.endpoints,
       hasApiKey: Boolean(credentials?.accessToken),
       keyUnreadable: error !== null,
       allowUnattended: row.allowUnattended,
@@ -761,6 +826,7 @@ export function toPlannerProviderDto(row: PlannerProviderRow, encKey?: Buffer): 
       label: row.label,
       kind: row.kind,
       baseUrl: row.baseUrl,
+      endpoints: row.endpoints,
       hasApiKey: Boolean(credentials?.accessToken || credentials?.refreshToken),
       keyUnreadable: error !== null,
       allowUnattended: row.allowUnattended,
@@ -786,6 +852,7 @@ export function toPlannerProviderDto(row: PlannerProviderRow, encKey?: Buffer): 
     label: row.label,
     kind: row.kind,
     baseUrl: row.baseUrl,
+    endpoints: row.endpoints,
     hasApiKey: row.secretCiphertext !== null && row.secretCiphertext.length > 0,
     keyUnreadable: decryptStatus.error !== null,
     allowUnattended: row.allowUnattended,
@@ -830,14 +897,28 @@ export function nextPlannerProviderSortOrder(db: Db): number {
 
 export function insertPlannerProvider(
   db: Db,
-  row: Omit<PlannerProviderRow, 'kind' | 'allowUnattended' | 'lastTestedAt' | 'lastError'> &
-    Partial<Pick<PlannerProviderRow, 'kind' | 'allowUnattended' | 'lastTestedAt' | 'lastError'>>,
+  row: Omit<
+    PlannerProviderRow,
+    'kind' | 'endpoints' | 'allowUnattended' | 'lastTestedAt' | 'lastError'
+  > &
+    Partial<
+      Pick<
+        PlannerProviderRow,
+        'kind' | 'endpoints' | 'allowUnattended' | 'lastTestedAt' | 'lastError'
+      >
+    >,
 ): PlannerProviderRow {
+  const kind = row.kind ?? 'openai-compatible';
+  const endpoints =
+    row.endpoints && row.endpoints.length > 0
+      ? Array.from(new Set(row.endpoints))
+      : defaultEndpointsForProviderKind(kind);
   const full: PlannerProviderRow = {
     id: row.id,
     label: row.label,
-    kind: row.kind ?? 'openai-compatible',
+    kind,
     baseUrl: row.baseUrl,
+    endpoints,
     secretCiphertext: row.secretCiphertext ?? null,
     allowUnattended: row.allowUnattended ?? false,
     sortOrder: row.sortOrder,
@@ -847,13 +928,14 @@ export function insertPlannerProvider(
   };
   db.prepare(
     `INSERT INTO planner_providers
-       (id, label, kind, base_url, secret_ciphertext, allow_unattended, sort_order, created_at, last_tested_at, last_error)
-     VALUES (@id, @label, @kind, @baseUrl, @secretCiphertext, @allowUnattended, @sortOrder, @createdAt, @lastTestedAt, @lastError)`,
+       (id, label, kind, base_url, endpoints_json, secret_ciphertext, allow_unattended, sort_order, created_at, last_tested_at, last_error)
+     VALUES (@id, @label, @kind, @baseUrl, @endpointsJson, @secretCiphertext, @allowUnattended, @sortOrder, @createdAt, @lastTestedAt, @lastError)`,
   ).run({
     id: full.id,
     label: full.label,
     kind: full.kind,
     baseUrl: full.baseUrl,
+    endpointsJson: JSON.stringify(full.endpoints),
     secretCiphertext: full.secretCiphertext,
     allowUnattended: full.allowUnattended ? 1 : 0,
     sortOrder: full.sortOrder,
@@ -886,6 +968,7 @@ export function updatePlannerProvider(
     label?: string;
     kind?: PlannerProviderKind;
     baseUrl?: string;
+    endpoints?: PlannerProviderEndpoint[];
     secretCiphertext?: string | null;
     allowUnattended?: boolean;
     sortOrder?: number;
@@ -906,6 +989,10 @@ export function updatePlannerProvider(
   if (patch.baseUrl !== undefined) {
     assignments.push('base_url = @baseUrl');
     params.baseUrl = patch.baseUrl;
+  }
+  if (patch.endpoints !== undefined) {
+    assignments.push('endpoints_json = @endpointsJson');
+    params.endpointsJson = JSON.stringify(Array.from(new Set(patch.endpoints)));
   }
   if (patch.secretCiphertext !== undefined) {
     assignments.push('secret_ciphertext = @secretCiphertext');
@@ -1281,7 +1368,7 @@ export function unattendedPlannerModelProblem(
   const resolved = resolvePlannerModel(db, candidate);
   if (
     resolved.provider &&
-    resolved.provider.kind !== 'openai-compatible' &&
+    !isApiKeyProviderKind(resolved.provider.kind) &&
     !resolved.provider.allowUnattended
   ) {
     return (

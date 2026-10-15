@@ -184,11 +184,132 @@ export type UpdatePlannerWorkspaceRequest = z.infer<typeof UpdatePlannerWorkspac
  */
 export const PlannerProviderKind = z.enum([
   'openai-compatible',
+  'deepseek',
+  'opencode-zen',
+  'opencode-go',
   'claude-oauth',
   'codex-oauth',
   'antigravity-oauth',
 ]);
 export type PlannerProviderKind = z.infer<typeof PlannerProviderKind>;
+
+/**
+ * PA-154: wire-protocol endpoints supported by a provider.
+ * - `openai`: OpenAI-compatible Chat Completions (`/v1/chat/completions`)
+ * - `anthropic`: Anthropic Messages API (`/v1/messages`)
+ */
+export const PlannerProviderEndpoint = z.enum(['openai', 'anthropic']);
+export type PlannerProviderEndpoint = z.infer<typeof PlannerProviderEndpoint>;
+
+/**
+ * PA-154: whether a provider kind authenticates via an API key (or no key for
+ * local servers) rather than a subscription OAuth / CLI token.
+ */
+export function isApiKeyProviderKind(
+  kind: PlannerProviderKind | string | null | undefined,
+): kind is 'openai-compatible' | 'deepseek' | 'opencode-zen' | 'opencode-go' {
+  return (
+    kind === 'openai-compatible' ||
+    kind === 'deepseek' ||
+    kind === 'opencode-zen' ||
+    kind === 'opencode-go'
+  );
+}
+
+/**
+ * PA-154: default enabled wire-protocol endpoints for each provider kind.
+ * - `deepseek`, `opencode-zen`, `opencode-go`: support both OpenAI Chat Completions
+ *   and Anthropic Messages API out of the box.
+ * - `claude-oauth`: Anthropic Messages API only.
+ * - `openai-compatible` and other subscription kinds: default to `['openai']`.
+ */
+export function defaultEndpointsForProviderKind(
+  kind: PlannerProviderKind,
+): PlannerProviderEndpoint[] {
+  if (kind === 'deepseek' || kind === 'opencode-zen' || kind === 'opencode-go') {
+    return ['openai', 'anthropic'];
+  }
+  if (kind === 'claude-oauth') {
+    return ['anthropic'];
+  }
+  return ['openai'];
+}
+
+export const DEEPSEEK_PROVIDER_DEFAULTS = {
+  label: 'DeepSeek',
+  baseUrl: 'https://api.deepseek.com',
+  anthropicBaseUrl: 'https://api.deepseek.com/anthropic',
+  endpoints: ['openai', 'anthropic'] as const,
+  defaultModels: ['deepseek-v4-pro', 'deepseek-v4-flash'] as const,
+  models: [
+    { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+    { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+  ] as const,
+} as const;
+
+export const OPENCODE_ZEN_PROVIDER_DEFAULTS = {
+  label: 'OpenCode Zen',
+  baseUrl: 'https://opencode.ai/zen/v1',
+  anthropicBaseUrl: 'https://opencode.ai/zen',
+  endpoints: ['openai', 'anthropic'] as const,
+  defaultModels: [
+    'claude-sonnet-4-6',
+    'claude-opus-4-6',
+    'claude-haiku-4-5',
+    'gpt-5.4',
+    'gpt-5.4-mini',
+    'gemini-3.1-pro',
+    'gemini-3-flash',
+    'glm-5.1',
+    'kimi-k2.5',
+    'minimax-m2.7',
+    'qwen3-coder',
+    'big-pickle',
+  ] as const,
+  models: [
+    { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+    { id: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
+    { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+    { id: 'gpt-5.4', label: 'GPT-5.4' },
+    { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
+    { id: 'gemini-3.1-pro', label: 'Gemini 3.1 Pro' },
+    { id: 'gemini-3-flash', label: 'Gemini 3 Flash' },
+    { id: 'glm-5.1', label: 'GLM-5.1' },
+    { id: 'kimi-k2.5', label: 'Kimi K2.5' },
+    { id: 'minimax-m2.7', label: 'MiniMax M2.7' },
+    { id: 'qwen3-coder', label: 'Qwen3 Coder 480B' },
+    { id: 'big-pickle', label: 'Big Pickle (Free)' },
+  ] as const,
+} as const;
+
+export const OPENCODE_GO_PROVIDER_DEFAULTS = {
+  label: 'OpenCode Go',
+  baseUrl: 'https://opencode.ai/zen/go/v1',
+  anthropicBaseUrl: 'https://opencode.ai/zen/go',
+  endpoints: ['openai', 'anthropic'] as const,
+  defaultModels: [
+    'glm-5.1',
+    'glm-5',
+    'kimi-k2.5',
+    'mimo-v2-pro',
+    'mimo-v2-omni',
+    'minimax-m2.7',
+    'minimax-m2.5',
+    'qwen3.5-plus',
+    'qwen3.6-plus',
+  ] as const,
+  models: [
+    { id: 'glm-5.1', label: 'GLM-5.1' },
+    { id: 'glm-5', label: 'GLM-5' },
+    { id: 'kimi-k2.5', label: 'Kimi K2.5' },
+    { id: 'mimo-v2-pro', label: 'MiMo-V2-Pro' },
+    { id: 'mimo-v2-omni', label: 'MiMo-V2-Omni' },
+    { id: 'minimax-m2.7', label: 'MiniMax M2.7' },
+    { id: 'minimax-m2.5', label: 'MiniMax M2.5' },
+    { id: 'qwen3.5-plus', label: 'Qwen3.5 Plus' },
+    { id: 'qwen3.6-plus', label: 'Qwen3.6 Plus' },
+  ] as const,
+} as const;
 
 export const PlannerProviderAuthMode = z.enum([
   'setup-token',
@@ -221,7 +342,7 @@ export const ANTIGRAVITY_OAUTH_PROVIDER_DISCLOSURE =
   "This chat uses an Antigravity (Google) subscription OAuth credential directly against Google's Code Assist API, not a Google Cloud / Gemini API key. Using a consumer or enterprise Code Assist token outside the official Antigravity client may violate Google's Terms of Service or your organization's seat policy and carries account risk. Usage counts against your Antigravity model quota rather than per-token billing.";
 
 /**
- * PA-148 / PA-149 / PA-150 / PA-151: one configured LLM provider in `planner_providers`.
+ * PA-148 / PA-149 / PA-150 / PA-151 / PA-154: one configured LLM provider in `planner_providers`.
  * Each provider owns its own `planner_models` rows (`ON DELETE CASCADE`). Secrets
  * live in `secret_ciphertext` encrypted with `POCKETAGENT_SETTINGS_ENC_KEY` and
  * are write-only (never returned or revealed over HTTP).
@@ -231,6 +352,8 @@ export const PlannerProvider = z.object({
   label: z.string(),
   kind: PlannerProviderKind,
   baseUrl: z.string(),
+  /** PA-154: enabled wire protocols (`openai`, `anthropic`). */
+  endpoints: z.array(PlannerProviderEndpoint).min(1).optional(),
   hasApiKey: z.boolean(),
   /** True when a secret ciphertext is stored on disk, but cannot be decrypted. */
   keyUnreadable: z.boolean().default(false),
@@ -265,6 +388,8 @@ export const CreatePlannerProviderRequest = z
     label: z.string().min(1).max(128),
     kind: PlannerProviderKind.optional().default('openai-compatible'),
     baseUrl: z.string().max(2048).optional(),
+    /** PA-154: enabled wire protocols (`openai`, `anthropic`). Defaults per `kind`. */
+    endpoints: z.array(PlannerProviderEndpoint).min(1).optional(),
     /** Optional: a local OpenAI-compatible server (vLLM, Ollama) may need no key. */
     apiKey: z.string().max(2048).optional(),
     /** PA-149: optional long-lived token from `claude setup-token` for `claude-oauth` providers. */
@@ -288,6 +413,8 @@ export type CreatePlannerProviderRequest = z.infer<typeof CreatePlannerProviderR
 export const UpdatePlannerProviderRequest = z.object({
   label: z.string().min(1).max(128).optional(),
   baseUrl: z.string().min(1).max(2048).optional(),
+  /** PA-154: update enabled wire protocols (`openai`, `anthropic`). */
+  endpoints: z.array(PlannerProviderEndpoint).min(1).optional(),
   /** Omitted or blank keeps the stored key; pass `clearApiKey: true` to clear it. */
   apiKey: z.string().max(2048).optional(),
   /** PA-149: paste a new long-lived token from `claude setup-token` on a `claude-oauth` provider. */

@@ -1,4 +1,5 @@
 import {
+  isApiKeyProviderKind,
   parseTemplatePayload,
   type ClaudeProviderTemplatePayload,
   type CustomClaudeProviderSummary,
@@ -101,10 +102,12 @@ export function exportPlannerModelToTemplate(m: PlannerModel): PlannerProviderTe
 }
 
 export function exportPlannerProviderPayload(
-  provider: Pick<PlannerProvider, 'id' | 'label' | 'kind' | 'baseUrl' | 'allowUnattended'>,
+  provider: Pick<PlannerProvider, 'id' | 'label' | 'kind' | 'baseUrl' | 'allowUnattended'> & {
+    endpoints?: PlannerProvider['endpoints'];
+  },
   models: PlannerModel[],
 ): PlannerProviderTemplatePayload {
-  if (provider.kind !== 'openai-compatible') {
+  if (!isApiKeyProviderKind(provider.kind)) {
     throw new Error(
       `Provider "${provider.label}" is a subscription provider (${provider.kind}) and cannot be exported as a Hub template.`,
     );
@@ -117,9 +120,10 @@ export function exportPlannerProviderPayload(
   );
   return {
     label: provider.label,
-    kind: 'openai-compatible',
+    kind: provider.kind,
     baseUrl: provider.baseUrl,
     allowUnattended: provider.allowUnattended,
+    ...(provider.endpoints !== undefined ? { endpoints: provider.endpoints } : {}),
     models: providerModels.map(exportPlannerModelToTemplate),
   };
 }
@@ -176,7 +180,8 @@ export async function listHostExportableItems(
       const res = await client.listPlannerProviders();
       return (res.providers ?? [])
         .filter(
-          (p) => (p.kind ?? 'openai-compatible') === 'openai-compatible' && p.baseUrl.trim().length > 0,
+          (p) =>
+            isApiKeyProviderKind(p.kind ?? 'openai-compatible') && p.baseUrl.trim().length > 0,
         )
         .map((p) => ({
           id: p.id,

@@ -3,9 +3,13 @@ import type { FastifyBaseLogger } from 'fastify';
 import {
   CUSTOM_PROVIDER_LABEL_PREFIX,
   DEEPSEEK_DEFAULTS,
+  DEEPSEEK_PROVIDER_DEFAULTS,
+  OPENCODE_GO_PROVIDER_DEFAULTS,
+  OPENCODE_ZEN_PROVIDER_DEFAULTS,
   POCKET_AGENT_LABEL_PREFIX,
   customClaudeProviderId,
   customProviderLabelSlug,
+  isApiKeyProviderKind,
   isCustomClaudeProviderId,
   type CreateCustomClaudeProviderRequest,
   type CustomClaudeProviderKind,
@@ -23,6 +27,11 @@ import {
   decryptSecret,
   encryptSecret,
 } from '../crypto/secret-box.js';
+import {
+  readPlannerModels,
+  readPlannerProvider,
+  resolveAnthropicBaseUrlForProvider,
+} from '../planner/store.js';
 import type { AgentRegistry } from './registry.js';
 
 export class CustomClaudeProviderError extends Error {
@@ -40,6 +49,7 @@ export class CustomClaudeProviderError extends Error {
 interface Row {
   id: string;
   name: string;
+  provider_id?: string | null;
   provider_kind: string;
   base_url: string;
   api_key_ciphertext: string;
@@ -62,22 +72,12 @@ export interface CustomClaudeProviderStoreOptions {
 }
 
 /**
- * PA-28: owns `custom_claude_providers` and keeps `AgentRegistry` in step with
- * it.
+ * PA-28 / PA-154: owns `custom_claude_providers` and keeps `AgentRegistry` in
+ * step with it.
  *
- * The `PlannerWorkspaceRegistry` pattern (`planner/workspaces.ts`) applied to
- * the agent roster: rows are the truth, they are read once at construction and
- * pushed into the registry, and every later mutation writes the row *and*
- * re-registers the adapter inside the same synchronous call. That is what makes
- * a provider usable in the request immediately after the one that created it,
- * with no polling and no cache-invalidation window — which is the whole ask of
- * the ticket ("no longer using environment variable to determine").
- *
- * The API key exists in plaintext in exactly three places: the create/update
- * request body, the decrypted value held on the adapter closure, and the
- * `ANTHROPIC_AUTH_TOKEN` handed to a child process. It is never logged, never
- * returned by a route, and never stored unencrypted — see `crypto/secret-box.ts`
- * for what that does and does not buy.
+ * Since PA-154, a Custom Claude variant can reference an Anthropic-enabled
+ * provider in `planner_providers` via `provider_id`, automatically inheriting
+ * its Anthropic base URL, encrypted API key, and model catalog.
  */
 export class CustomClaudeProviderStore {
   private readonly db: Db;
@@ -109,9 +109,30 @@ export class CustomClaudeProviderStore {
   create(req: CreateCustomClaudeProviderRequest): CustomClaudeProviderSummary {
     const key = this.requireKey();
     this.assertNameNotReserved(req.name);
-    const models = normalizeModels(req.models);
-    const baseUrl = normalizeBaseUrl(req.baseUrl);
-    const defaultModel = req.defaultModel.trim();
+
+    let providerId: string | null = null;
+    let providerKind: CustomClaudeProviderKind = req.providerKind ?? 'claude-compatible';
+    let baseUrl: string;
+    let apiKeyCiphertext: string;
+    let models: string[];
+
+    if (req.providerId) {
+      const linked = this.resolveLinkedProvider(req.providerId, req.models);
+      providerId = linked.providerId;
+      providerKind = linked.providerKind;
+      baseUrl = linked.baseUrl;
+      apiKeyCiphertext =
+        req.apiKey && req.apiKey.trim().length > 0
+          ? encryptSecret(req.apiKey, key)
+          : linked.apiKeyCiphertext;
+      models = linked.models;
+    } else {
+      models = normalizeModels(req.models ?? []);
+      baseUrl = normalizeBaseUrl(req.baseUrl ?? '');
+      apiKeyCiphertext = encryptSecret(req.apiKey ?? '', key);
+    }
+
+    const defaultModel = (req.defaultModel ?? models[0] ?? '').trim();
     assertModelKnown(defaultModel, models, 'Default model');
     const smallModel = req.smallModel?.trim() || null;
     if (smallModel) assertModelKnown(smallModel, models, 'Small model');
@@ -121,9 +142,10 @@ export class CustomClaudeProviderStore {
     const row: Row = {
       id,
       name: req.name.trim(),
-      provider_kind: req.providerKind,
+      provider_id: providerId,
+      provider_kind: providerKind,
       base_url: baseUrl,
-      api_key_ciphertext: encryptSecret(req.apiKey, key),
+      api_key_ciphertext: apiKeyCiphertext,
       models_json: JSON.stringify(models),
       default_model: defaultModel,
       small_model: smallModel,
@@ -137,7 +159,12 @@ export class CustomClaudeProviderStore {
     this.logger.info(
       // Never the key, and never the ciphertext either — an audit line should
       // not be a place a credential can be recovered from with one more step.
-      { provider: row.id, baseUrl: row.base_url, allowUnattended: row.allow_unattended === 1 },
+      {
+        provider: row.id,
+        plannerProviderId: row.provider_id ?? null,
+        baseUrl: row.base_url,
+        allowUnattended: row.allow_unattended === 1,
+      },
       'custom Claude provider created',
     );
     return toSummary(row);
@@ -158,22 +185,51 @@ export class CustomClaudeProviderStore {
     // a row migrated from `.env` by an earlier boot that did have one.
     const key = rekeying ? this.requireKey() : undefined;
 
-    const models = req.models === undefined ? parseModels(existing.models_json) : normalizeModels(req.models);
-    const defaultModel = (req.defaultModel ?? existing.default_model).trim();
+    const effectiveProviderId =
+      req.providerId !== undefined ? req.providerId : (existing.provider_id ?? null);
+
+    let providerKind = req.providerKind ?? existing.provider_kind;
+    let baseUrl = req.baseUrl === undefined ? existing.base_url : normalizeBaseUrl(req.baseUrl);
+    let apiKeyCiphertext =
+      key !== undefined && req.apiKey !== undefined
+        ? encryptSecret(req.apiKey, key)
+        : existing.api_key_ciphertext;
+    let models: string[];
+
+    if (effectiveProviderId) {
+      const linked = this.resolveLinkedProvider(effectiveProviderId, req.models);
+      providerKind = linked.providerKind;
+      baseUrl = linked.baseUrl;
+      if (!rekeying && linked.apiKeyCiphertext) {
+        apiKeyCiphertext = linked.apiKeyCiphertext;
+      }
+      models = linked.models;
+    } else {
+      models =
+        req.models === undefined ? parseModels(existing.models_json) : normalizeModels(req.models);
+    }
+
+    const defaultModel = (
+      req.defaultModel ??
+      (models.includes(existing.default_model) ? existing.default_model : models[0]) ??
+      existing.default_model
+    ).trim();
     assertModelKnown(defaultModel, models, 'Default model');
     const smallModel =
-      req.smallModel === undefined ? existing.small_model : req.smallModel?.trim() || null;
+      req.smallModel === undefined
+        ? existing.small_model && models.includes(existing.small_model)
+          ? existing.small_model
+          : null
+        : req.smallModel?.trim() || null;
     if (smallModel) assertModelKnown(smallModel, models, 'Small model');
 
     const row: Row = {
       ...existing,
       name: req.name === undefined ? existing.name : req.name.trim(),
-      provider_kind: req.providerKind ?? existing.provider_kind,
-      base_url: req.baseUrl === undefined ? existing.base_url : normalizeBaseUrl(req.baseUrl),
-      api_key_ciphertext:
-        key !== undefined && req.apiKey !== undefined
-          ? encryptSecret(req.apiKey, key)
-          : existing.api_key_ciphertext,
+      provider_id: effectiveProviderId,
+      provider_kind: providerKind,
+      base_url: baseUrl,
+      api_key_ciphertext: apiKeyCiphertext,
       models_json: JSON.stringify(models),
       default_model: defaultModel,
       small_model: smallModel,
@@ -186,13 +242,14 @@ export class CustomClaudeProviderStore {
     this.db
       .prepare(
         `UPDATE custom_claude_providers
-            SET name = ?, provider_kind = ?, base_url = ?, api_key_ciphertext = ?,
+            SET name = ?, provider_id = ?, provider_kind = ?, base_url = ?, api_key_ciphertext = ?,
                 models_json = ?, default_model = ?, small_model = ?, allow_unattended = ?,
                 supports_effort = ?, updated_at = ?
           WHERE id = ?`,
       )
       .run(
         row.name,
+        row.provider_id ?? null,
         row.provider_kind,
         row.base_url,
         row.api_key_ciphertext,
@@ -206,10 +263,72 @@ export class CustomClaudeProviderStore {
       );
     this.registerRow(row);
     this.logger.info(
-      { provider: row.id, rekeyed: rekeying, allowUnattended: row.allow_unattended === 1 },
+      {
+        provider: row.id,
+        plannerProviderId: row.provider_id ?? null,
+        rekeyed: rekeying,
+        allowUnattended: row.allow_unattended === 1,
+      },
       'custom Claude provider updated',
     );
     return toSummary(row);
+  }
+
+  /**
+   * PA-154: Re-synchronizes any Custom Claude variants linked to a
+   * `planner_providers` row (`provider_id IS NOT NULL`) after providers or
+   * models are modified in Settings -> Providers and Models.
+   */
+  syncFromPlannerProviders(): void {
+    for (const row of this.rows()) {
+      if (!row.provider_id) continue;
+      const plannerProvider = readPlannerProvider(this.db, row.provider_id);
+      if (
+        !plannerProvider ||
+        !isApiKeyProviderKind(plannerProvider.kind) ||
+        !plannerProvider.endpoints.includes('anthropic')
+      ) {
+        continue;
+      }
+      const providerModels = normalizeModels(
+        readPlannerModels(this.db, plannerProvider.id).map((m) => m.modelId),
+      );
+      const models = providerModels.length > 0 ? providerModels : parseModels(row.models_json);
+      if (models.length === 0) continue;
+      const baseUrl = normalizeBaseUrl(resolveAnthropicBaseUrlForProvider(plannerProvider));
+      const apiKeyCiphertext = plannerProvider.secretCiphertext ?? row.api_key_ciphertext;
+      const defaultModel = models.includes(row.default_model) ? row.default_model : models[0]!;
+      const smallModel =
+        row.small_model && models.includes(row.small_model) ? row.small_model : null;
+      const providerKind = plannerProvider.kind === 'deepseek' ? 'deepseek' : 'claude-compatible';
+
+      const updated: Row = {
+        ...row,
+        provider_kind: providerKind,
+        base_url: baseUrl,
+        api_key_ciphertext: apiKeyCiphertext,
+        models_json: JSON.stringify(models),
+        default_model: defaultModel,
+        small_model: smallModel,
+      };
+      this.db
+        .prepare(
+          `UPDATE custom_claude_providers
+              SET provider_kind = ?, base_url = ?, api_key_ciphertext = ?,
+                  models_json = ?, default_model = ?, small_model = ?
+            WHERE id = ?`,
+        )
+        .run(
+          updated.provider_kind,
+          updated.base_url,
+          updated.api_key_ciphertext,
+          updated.models_json,
+          updated.default_model,
+          updated.small_model,
+          updated.id,
+        );
+      this.registerRow(updated);
+    }
   }
 
   /**
@@ -318,6 +437,7 @@ export class CustomClaudeProviderStore {
    * vanished while its row is plainly still in Settings.
    */
   private hydrate(): void {
+    this.syncFromPlannerProviders();
     const rows = this.rows();
     if (rows.length > 0 && this.encKey === undefined) {
       this.logger.warn(
@@ -327,6 +447,61 @@ export class CustomClaudeProviderStore {
       );
     }
     for (const row of rows) this.registerRow(row);
+  }
+
+  private resolveLinkedProvider(
+    providerId: string,
+    fallbackModels?: readonly string[],
+  ): {
+    providerId: string;
+    providerKind: CustomClaudeProviderKind;
+    baseUrl: string;
+    apiKeyCiphertext: string;
+    models: string[];
+  } {
+    const plannerProvider = readPlannerProvider(this.db, providerId);
+    if (!plannerProvider) {
+      throw new CustomClaudeProviderError('Selected provider was not found.', 'invalid', 400);
+    }
+    if (
+      !isApiKeyProviderKind(plannerProvider.kind) ||
+      !plannerProvider.endpoints.includes('anthropic')
+    ) {
+      throw new CustomClaudeProviderError(
+        `Provider "${plannerProvider.label}" does not have the Anthropic endpoint enabled.`,
+        'invalid',
+        400,
+      );
+    }
+    const providerModels = normalizeModels(
+      readPlannerModels(this.db, plannerProvider.id).map((m) => m.modelId),
+    );
+    const models =
+      providerModels.length > 0
+        ? providerModels
+        : fallbackModels && fallbackModels.length > 0
+          ? normalizeModels(fallbackModels)
+          : plannerProvider.kind === 'deepseek'
+            ? [...DEEPSEEK_PROVIDER_DEFAULTS.defaultModels]
+            : plannerProvider.kind === 'opencode-zen'
+              ? [...OPENCODE_ZEN_PROVIDER_DEFAULTS.defaultModels]
+              : plannerProvider.kind === 'opencode-go'
+                ? [...OPENCODE_GO_PROVIDER_DEFAULTS.defaultModels]
+                : [];
+    if (models.length === 0) {
+      throw new CustomClaudeProviderError(
+        `Provider "${plannerProvider.label}" has no models configured. Add at least one model to the provider first.`,
+        'invalid',
+        400,
+      );
+    }
+    return {
+      providerId: plannerProvider.id,
+      providerKind: plannerProvider.kind === 'deepseek' ? 'deepseek' : 'claude-compatible',
+      baseUrl: normalizeBaseUrl(resolveAnthropicBaseUrlForProvider(plannerProvider)),
+      apiKeyCiphertext: plannerProvider.secretCiphertext ?? '',
+      models,
+    };
   }
 
   private registerRow(row: Row): void {
@@ -344,6 +519,7 @@ export class CustomClaudeProviderStore {
   }
 
   private decryptKey(row: Row): string | null {
+    if (!row.api_key_ciphertext) return null;
     if (this.encKey === undefined) return null;
     try {
       return decryptSecret(row.api_key_ciphertext, this.encKey);
@@ -440,13 +616,14 @@ export class CustomClaudeProviderStore {
     this.db
       .prepare(
         `INSERT INTO custom_claude_providers
-           (id, name, provider_kind, base_url, api_key_ciphertext, models_json,
+           (id, name, provider_id, provider_kind, base_url, api_key_ciphertext, models_json,
             default_model, small_model, allow_unattended, supports_effort, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
         row.name,
+        row.provider_id ?? null,
         row.provider_kind,
         row.base_url,
         row.api_key_ciphertext,
@@ -465,6 +642,7 @@ function toSummary(row: Row): CustomClaudeProviderSummary {
   return {
     id: row.id,
     name: row.name,
+    providerId: row.provider_id ?? null,
     // Widened on read rather than trusted: the column is a plain TEXT, so a
     // hand-edited row cannot make the response fail its own schema.
     providerKind: row.provider_kind === 'deepseek' ? 'deepseek' : 'claude-compatible',

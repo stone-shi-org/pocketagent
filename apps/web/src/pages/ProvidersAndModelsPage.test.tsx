@@ -145,7 +145,9 @@ describe('ProvidersAndModelsPage (PA-132, PA-148, PA-152)', () => {
       <PlannerProviderSection {...baseProps} initialModelsExpanded={false} />,
     );
     expect(modelsCollapsedHtml).toContain('aria-label="Expand models for OpenRouter"');
-    expect(modelsCollapsedHtml).toContain('Base URL (OpenAI-compatible)');
+    expect(modelsCollapsedHtml).toContain('>Base URL<');
+    expect(modelsCollapsedHtml).toContain('/v1/chat/completions');
+    expect(modelsCollapsedHtml).toContain('/v1/messages');
     expect(modelsCollapsedHtml).not.toContain('Claude Sonnet 4.6');
 
     const providerCollapsedHtml = renderToStaticMarkup(
@@ -153,7 +155,7 @@ describe('ProvidersAndModelsPage (PA-132, PA-148, PA-152)', () => {
     );
     expect(providerCollapsedHtml).toContain('aria-label="Expand provider OpenRouter"');
     expect(providerCollapsedHtml).toContain('1 model · Endpoint configured · API key set');
-    expect(providerCollapsedHtml).not.toContain('Base URL (OpenAI-compatible)');
+    expect(providerCollapsedHtml).not.toContain('>Base URL<');
     expect(providerCollapsedHtml).not.toContain('Claude Sonnet 4.6');
   });
 });

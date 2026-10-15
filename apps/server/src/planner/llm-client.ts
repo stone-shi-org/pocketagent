@@ -1,3 +1,5 @@
+import type { PlannerProviderKind } from '@pocketagent/protocol';
+import { OPENCODE_GO_PROVIDER_DEFAULTS } from '@pocketagent/protocol';
 import { isContextOverflowMessage, isQuotaMessage, isRetryableStatus, retryAfterMs } from './llm-errors.js';
 
 /** OpenAI wire format is snake_case; kept verbatim rather than translated,
@@ -271,6 +273,9 @@ export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> 
 export interface PlannerLlmClientOptions {
   baseUrl: string;
   apiKey: string | null;
+  /** PA-154: provider kind for OpenCode Go/Zen headers and model discovery fallbacks. */
+  providerKind?: PlannerProviderKind;
+  extraHeaders?: Record<string, string>;
   /** Injected in tests so no real network call is ever made. */
   fetchImpl?: typeof fetch;
   /** PA-121: overrides `DEFAULT_LLM_RETRY_POLICY` — tests shrink the delays,
@@ -356,13 +361,23 @@ export class PlannerLlmClient implements PlannerLlmProvider {
         method: 'GET',
         headers: {
           ...(this.opts.apiKey ? { authorization: `Bearer ${this.opts.apiKey}` } : {}),
+          ...(this.opts.providerKind === 'opencode-zen' || this.opts.providerKind === 'opencode-go'
+            ? { 'user-agent': 'pocketagent/1.0' }
+            : {}),
+          ...this.opts.extraHeaders,
         },
       });
     } catch (err) {
+      if (this.opts.providerKind === 'opencode-go') {
+        return OPENCODE_GO_PROVIDER_DEFAULTS.models.map((m) => m.id);
+      }
       throw new PlannerLlmError(`Could not reach the planner LLM endpoint: ${(err as Error).message}`);
     }
 
     if (!res.ok) {
+      if (this.opts.providerKind === 'opencode-go') {
+        return OPENCODE_GO_PROVIDER_DEFAULTS.models.map((m) => m.id);
+      }
       const body = await res.text().catch(() => '');
       throw new PlannerLlmError(
         `Planner LLM endpoint returned ${res.status}: ${body.slice(0, 500)}`,
@@ -374,11 +389,17 @@ export class PlannerLlmClient implements PlannerLlmProvider {
     try {
       parsed = await res.json();
     } catch (err) {
+      if (this.opts.providerKind === 'opencode-go') {
+        return OPENCODE_GO_PROVIDER_DEFAULTS.models.map((m) => m.id);
+      }
       throw new PlannerLlmError(`Planner LLM endpoint's /models response was not valid JSON: ${(err as Error).message}`);
     }
 
     const data = (parsed as { data?: unknown }).data;
     if (!Array.isArray(data)) {
+      if (this.opts.providerKind === 'opencode-go') {
+        return OPENCODE_GO_PROVIDER_DEFAULTS.models.map((m) => m.id);
+      }
       throw new PlannerLlmError("Planner LLM endpoint's /models response had no \"data\" array.");
     }
     return data
@@ -628,6 +649,13 @@ export class PlannerLlmClient implements PlannerLlmProvider {
           'content-type': 'application/json',
           accept: 'text/event-stream',
           ...(this.opts.apiKey ? { authorization: `Bearer ${this.opts.apiKey}` } : {}),
+          ...(this.opts.providerKind === 'opencode-zen' || this.opts.providerKind === 'opencode-go'
+            ? {
+                'user-agent': 'pocketagent/1.0',
+                ...(options?.chatId ? { 'x-opencode-session': options.chatId } : {}),
+              }
+            : {}),
+          ...this.opts.extraHeaders,
         },
         body: JSON.stringify(requestPayload),
         signal,

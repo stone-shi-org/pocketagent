@@ -387,8 +387,9 @@ export const PLANNER_PROVIDERS_DDL = `
   CREATE TABLE IF NOT EXISTS planner_providers (
     id                TEXT PRIMARY KEY,
     label             TEXT NOT NULL,
-    kind              TEXT NOT NULL DEFAULT 'openai-compatible' CHECK (kind IN ('openai-compatible', 'claude-oauth', 'codex-oauth', 'gemini-oauth', 'antigravity-oauth')),
+    kind              TEXT NOT NULL DEFAULT 'openai-compatible' CHECK (kind IN ('openai-compatible', 'deepseek', 'opencode-zen', 'opencode-go', 'claude-oauth', 'codex-oauth', 'gemini-oauth', 'antigravity-oauth')),
     base_url          TEXT NOT NULL,
+    endpoints_json    TEXT NOT NULL DEFAULT '["openai"]',
     secret_ciphertext TEXT,
     allow_unattended  INTEGER NOT NULL DEFAULT 0,
     sort_order        INTEGER NOT NULL DEFAULT 0,
@@ -1773,16 +1774,33 @@ function migratePlannerProvidersSchema(db: Db): void {
   const existingProviderTable = db
     .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'planner_providers'")
     .get() as { sql?: string } | undefined;
-  if (existingProviderTable?.sql && !existingProviderTable.sql.includes('antigravity-oauth')) {
+  const providerCols = new Set(
+    (db.prepare('PRAGMA table_info(planner_providers)').all() as { name: string }[]).map(
+      (c) => c.name,
+    ),
+  );
+  const hasEndpointsJson = providerCols.has('endpoints_json');
+  if (
+    existingProviderTable?.sql &&
+    (!existingProviderTable.sql.includes('opencode-go') || !hasEndpointsJson)
+  ) {
     db.pragma('foreign_keys = OFF');
     try {
       const widenTx = db.transaction(() => {
+        const endpointsSelect = hasEndpointsJson
+          ? 'endpoints_json'
+          : `CASE
+               WHEN kind IN ('deepseek', 'opencode-zen', 'opencode-go') THEN '["openai","anthropic"]'
+               WHEN kind = 'claude-oauth' THEN '["anthropic"]'
+               ELSE '["openai"]'
+             END`;
         db.exec(`
           CREATE TABLE planner_providers_new (
             id                TEXT PRIMARY KEY,
             label             TEXT NOT NULL,
-            kind              TEXT NOT NULL DEFAULT 'openai-compatible' CHECK (kind IN ('openai-compatible', 'claude-oauth', 'codex-oauth', 'gemini-oauth', 'antigravity-oauth')),
+            kind              TEXT NOT NULL DEFAULT 'openai-compatible' CHECK (kind IN ('openai-compatible', 'deepseek', 'opencode-zen', 'opencode-go', 'claude-oauth', 'codex-oauth', 'gemini-oauth', 'antigravity-oauth')),
             base_url          TEXT NOT NULL,
+            endpoints_json    TEXT NOT NULL DEFAULT '["openai"]',
             secret_ciphertext TEXT,
             allow_unattended  INTEGER NOT NULL DEFAULT 0,
             sort_order        INTEGER NOT NULL DEFAULT 0,
@@ -1791,11 +1809,11 @@ function migratePlannerProvidersSchema(db: Db): void {
             last_error        TEXT
           );
           INSERT INTO planner_providers_new (
-            id, label, kind, base_url, secret_ciphertext, allow_unattended,
+            id, label, kind, base_url, endpoints_json, secret_ciphertext, allow_unattended,
             sort_order, created_at, last_tested_at, last_error
           )
           SELECT
-            id, label, kind, base_url, secret_ciphertext, allow_unattended,
+            id, label, kind, base_url, ${endpointsSelect}, secret_ciphertext, allow_unattended,
             sort_order, created_at, last_tested_at, last_error
           FROM planner_providers;
           DROP TABLE planner_providers;
@@ -2193,6 +2211,9 @@ export function openDatabase(databasePath: string): Db {
   );
   if (customClaudeProviderColumns.size > 0 && !customClaudeProviderColumns.has('supports_effort')) {
     db.exec('ALTER TABLE custom_claude_providers ADD COLUMN supports_effort INTEGER NOT NULL DEFAULT 1');
+  }
+  if (customClaudeProviderColumns.size > 0 && !customClaudeProviderColumns.has('provider_id')) {
+    db.exec('ALTER TABLE custom_claude_providers ADD COLUMN provider_id TEXT');
   }
   // PA-118, same positional-migration hazard: re-running the migration's own
   // DDL constant is idempotent (`IF NOT EXISTS`) and cannot drift from it.

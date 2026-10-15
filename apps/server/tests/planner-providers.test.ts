@@ -469,4 +469,188 @@ describe('PA-148: multiple OpenAI-compatible Pocket Agent providers and models',
       await t2.app.close();
     }
   });
+
+  it('PA-154: supports deepseek, opencode-zen, opencode-go, and general anthropic endpoints with OpenAI-default and Anthropic-only routing', async () => {
+    const calls: Array<{
+      url: string;
+      method: string;
+      headers: Record<string, string>;
+      body?: Record<string, unknown>;
+    }> = [];
+
+    function fakeAnthropicSse(text: string): Response {
+      const sse = [
+        `event: message_start\ndata: ${JSON.stringify({
+          type: 'message_start',
+          message: { id: 'msg_1', type: 'message', role: 'assistant', usage: { input_tokens: 12, output_tokens: 1 } },
+        })}\n\n`,
+        `event: content_block_start\ndata: ${JSON.stringify({
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: '' },
+        })}\n\n`,
+        `event: content_block_delta\ndata: ${JSON.stringify({
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text },
+        })}\n\n`,
+        `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`,
+        `event: message_delta\ndata: ${JSON.stringify({
+          type: 'message_delta',
+          delta: { stop_reason: 'end_turn' },
+          usage: { output_tokens: 5 },
+        })}\n\n`,
+        `event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`,
+      ].join('');
+      return new Response(sse, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    }
+
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const rawHeaders = (init?.headers ?? {}) as Record<string, string>;
+      const headers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(rawHeaders)) {
+        headers[k.toLowerCase()] = v;
+      }
+      const method = init?.method ?? 'GET';
+      const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+      calls.push({ url, method, headers, ...(body ? { body } : {}) });
+
+      if (url.endsWith('/v1/messages')) {
+        return fakeAnthropicSse('Hello from Anthropic endpoint');
+      }
+      if (url.endsWith('/chat/completions')) {
+        return fakeSseCompletion('Hello from OpenAI endpoint');
+      }
+      return new Response('not found', { status: 404 });
+    });
+
+    t = await createTestApp(
+      { POCKETAGENT_SETTINGS_ENC_KEY: ENC_KEY_A },
+      undefined,
+      undefined,
+      undefined,
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    // 1. Preset defaults for deepseek, opencode-zen, and opencode-go.
+    const dsProvider = (
+      await post(t, '/api/planner/providers', {
+        label: 'DeepSeek',
+        kind: 'deepseek',
+        apiKey: 'sk-ds-key',
+      })
+    ).json();
+    expect(dsProvider).toMatchObject({
+      label: 'DeepSeek',
+      kind: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      endpoints: ['openai', 'anthropic'],
+      hasApiKey: true,
+    });
+
+    const zenProvider = (
+      await post(t, '/api/planner/providers', {
+        label: 'OpenCode Zen',
+        kind: 'opencode-zen',
+        apiKey: 'sk-zen-key',
+      })
+    ).json();
+    expect(zenProvider).toMatchObject({
+      label: 'OpenCode Zen',
+      kind: 'opencode-zen',
+      baseUrl: 'https://opencode.ai/zen/v1',
+      endpoints: ['openai', 'anthropic'],
+      hasApiKey: true,
+    });
+
+    const goProvider = (
+      await post(t, '/api/planner/providers', {
+        label: 'OpenCode Go',
+        kind: 'opencode-go',
+        apiKey: 'sk-go-key',
+      })
+    ).json();
+    expect(goProvider).toMatchObject({
+      label: 'OpenCode Go',
+      kind: 'opencode-go',
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+      endpoints: ['openai', 'anthropic'],
+      hasApiKey: true,
+    });
+
+    // 2. General API provider with ONLY 'anthropic' checked -> routes to /v1/messages.
+    const anthProvider = (
+      await post(t, '/api/planner/providers', {
+        label: 'Anthropic Direct',
+        kind: 'openai-compatible',
+        baseUrl: 'https://api.anthropic.com',
+        apiKey: 'sk-ant-api-123',
+        endpoints: ['anthropic'],
+      })
+    ).json();
+    expect(anthProvider.endpoints).toEqual(['anthropic']);
+
+    const mAnth = (
+      await post(t, '/api/planner/models', {
+        providerId: anthProvider.id,
+        modelId: 'claude-sonnet-4-6',
+        label: 'Claude Sonnet 4.6',
+      })
+    ).json();
+
+    const chatAnth = (await post(t, '/api/planner/chats', { modelId: mAnth.id })).json();
+    const resAnth = await post(t, `/api/planner/chats/${chatAnth.id}/messages`, {
+      content: 'Test anthropic endpoint',
+    });
+    expect(resAnth.statusCode).toBe(200);
+    const anthCall = calls.at(-1)!;
+    expect(anthCall.url).toBe('https://api.anthropic.com/v1/messages');
+    expect(anthCall.headers['x-api-key']).toBe('sk-ant-api-123');
+    expect(anthCall.headers['anthropic-version']).toBe('2023-06-01');
+    // Standard API endpoint must NOT inject Claude Code OAuth identity blocks.
+    const systemBlocks = (anthCall.body?.system ?? []) as Array<{ text?: string }>;
+    expect(JSON.stringify(systemBlocks)).not.toContain("You are Claude Code, Anthropic's official CLI");
+
+    // 3. OpenCode Go with both ['openai', 'anthropic'] enabled:
+    // - glm-5.1 uses /chat/completions with user-agent & x-opencode-session headers
+    // - minimax-m2.7 (Anthropic-only on OpenCode) automatically uses /zen/go/v1/messages
+    const mGoGlm = (
+      await post(t, '/api/planner/models', {
+        providerId: goProvider.id,
+        modelId: 'glm-5.1',
+        label: 'GLM-5.1',
+      })
+    ).json();
+    const mGoMinimax = (
+      await post(t, '/api/planner/models', {
+        providerId: goProvider.id,
+        modelId: 'minimax-m2.7',
+        label: 'MiniMax M2.7',
+      })
+    ).json();
+
+    const chatGo = (await post(t, '/api/planner/chats', { modelId: mGoGlm.id })).json();
+    const resGlm = await post(t, `/api/planner/chats/${chatGo.id}/messages`, {
+      content: 'Hello GLM',
+    });
+    expect(resGlm.statusCode).toBe(200);
+    const glmCall = calls.at(-1)!;
+    expect(glmCall.url).toBe('https://opencode.ai/zen/go/v1/chat/completions');
+    expect(glmCall.headers['user-agent']).toBe('pocketagent/1.0');
+    expect(glmCall.headers['x-opencode-session']).toBe(chatGo.id);
+
+    const resMinimax = await post(t, `/api/planner/chats/${chatGo.id}/messages`, {
+      content: 'Hello MiniMax',
+      modelId: mGoMinimax.id,
+    });
+    expect(resMinimax.statusCode).toBe(200);
+    const mmCall = calls.at(-1)!;
+    expect(mmCall.url).toBe('https://opencode.ai/zen/go/v1/messages');
+    expect(mmCall.headers['user-agent']).toBe('pocketagent/1.0');
+    expect(mmCall.headers['x-opencode-session']).toBe(chatGo.id);
+  });
 });

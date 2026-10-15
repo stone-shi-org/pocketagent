@@ -13,10 +13,14 @@ import {
   CreatePlannerModelRequest,
   CreatePlannerProviderRequest,
   CreatePlannerWorkspaceRequest,
+  DEEPSEEK_PROVIDER_DEFAULTS,
   GeminiLiveTokenRequest,
   GeminiLiveToolCallsRequest,
   GeminiLiveTranscriptRequest,
+  OPENCODE_GO_PROVIDER_DEFAULTS,
+  OPENCODE_ZEN_PROVIDER_DEFAULTS,
   UpdateGeminiLiveSettingsRequest,
+  defaultEndpointsForProviderKind,
   LIST_MCP_TOOLS_NAME,
   PlannerMemoryTier,
   ExportPlannerSkillRequest,
@@ -622,13 +626,23 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       const kind = parsed.data.kind ?? 'openai-compatible';
       const baseUrl =
         (parsed.data.baseUrl ?? '').trim() ||
-        (kind === 'claude-oauth'
-          ? DEFAULT_CLAUDE_OAUTH_BASE_URL
-          : kind === 'codex-oauth'
-            ? DEFAULT_CODEX_OAUTH_BASE_URL
-            : kind === 'antigravity-oauth'
-              ? DEFAULT_ANTIGRAVITY_OAUTH_BASE_URL
-              : '');
+        (kind === 'deepseek'
+          ? DEEPSEEK_PROVIDER_DEFAULTS.baseUrl
+          : kind === 'opencode-zen'
+            ? OPENCODE_ZEN_PROVIDER_DEFAULTS.baseUrl
+            : kind === 'opencode-go'
+              ? OPENCODE_GO_PROVIDER_DEFAULTS.baseUrl
+              : kind === 'claude-oauth'
+                ? DEFAULT_CLAUDE_OAUTH_BASE_URL
+                : kind === 'codex-oauth'
+                  ? DEFAULT_CODEX_OAUTH_BASE_URL
+                  : kind === 'antigravity-oauth'
+                    ? DEFAULT_ANTIGRAVITY_OAUTH_BASE_URL
+                    : '');
+      const endpoints =
+        parsed.data.endpoints && parsed.data.endpoints.length > 0
+          ? parsed.data.endpoints
+          : defaultEndpointsForProviderKind(kind);
       let secretCiphertext: string | null = null;
       let lastTestedAt: number | null = null;
 
@@ -682,6 +696,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
         label: parsed.data.label.trim(),
         kind,
         baseUrl,
+        endpoints,
         secretCiphertext,
         allowUnattended: parsed.data.allowUnattended ?? false,
         sortOrder: nextPlannerProviderSortOrder(db),
@@ -706,6 +721,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
         label: row.label,
         kind: row.kind,
         baseUrl: row.baseUrl,
+        endpoints: row.endpoints,
         allowUnattended: row.allowUnattended,
       });
       const dto: PlannerProvider = toPlannerProviderDto(row, config.settingsEncKey);
@@ -807,6 +823,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       let updated = updatePlannerProvider(db, id, {
         ...(parsed.data.label !== undefined ? { label: parsed.data.label.trim() } : {}),
         ...(parsed.data.baseUrl !== undefined ? { baseUrl: parsed.data.baseUrl.trim() } : {}),
+        ...(parsed.data.endpoints !== undefined ? { endpoints: parsed.data.endpoints } : {}),
         ...(parsed.data.allowUnattended !== undefined
           ? { allowUnattended: parsed.data.allowUnattended }
           : {}),
@@ -822,6 +839,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
           ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
         });
       }
+      app.pocket.customClaudeProviders?.syncFromPlannerProviders();
       auditConfigChange(request, 'planner provider updated', {
         provider: id,
         fields: Object.keys(parsed.data),
@@ -1125,6 +1143,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       createdAt: Date.now(),
     };
     insertPlannerModel(db, row);
+    app.pocket.customClaudeProviders?.syncFromPlannerProviders();
     auditConfigChange(request, 'planner model added to the catalog', {
       model: row.id,
       provider: row.providerId,
@@ -1141,6 +1160,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     }
     const updated = updatePlannerModel(app.pocket.db, id, parsed.data);
     if (!updated) return notFound(reply, 'Model not found.');
+    app.pocket.customClaudeProviders?.syncFromPlannerProviders();
     auditConfigChange(request, 'planner model updated in the catalog', {
       model: id,
       fields: Object.keys(parsed.data),
@@ -1160,6 +1180,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       app.pocket.db,
       providerId && providerId.length > 0 ? providerId : undefined,
     );
+    app.pocket.customClaudeProviders?.syncFromPlannerProviders();
     app.log.info({ removed, providerId: providerId ?? null }, 'planner model catalog emptied');
     return reply.code(204).send();
   });
@@ -1168,6 +1189,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const { id } = request.params as { id: string };
     const removed = deletePlannerModel(app.pocket.db, id);
     if (!removed) return notFound(reply, 'Model not found.');
+    app.pocket.customClaudeProviders?.syncFromPlannerProviders();
     return reply.code(204).send();
   });
 

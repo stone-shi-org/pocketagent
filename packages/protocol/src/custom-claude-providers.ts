@@ -41,6 +41,8 @@ export const CustomClaudeProviderSummary = z.object({
   id: z.string(),
   /** Display name, shown wherever an agent is named. */
   name: z.string(),
+  /** PA-154: ID of the linked Anthropic-enabled provider in `planner_providers`, or null if legacy standalone. */
+  providerId: z.string().nullable().optional(),
   providerKind: CustomClaudeProviderKind,
   /** Bare origin. Claude Code appends its own path, so no `/v1` or `/messages`. */
   baseUrl: z.string(),
@@ -82,22 +84,61 @@ const BASE_URL = z.string().min(1).max(2048);
 const MODEL_ID = z.string().min(1).max(200);
 const API_KEY = z.string().max(4096);
 
-export const CreateCustomClaudeProviderRequest = z.object({
-  name: NAME,
-  providerKind: CustomClaudeProviderKind,
-  baseUrl: BASE_URL,
-  /**
-   * Plaintext, and only ever on the wire: the server encrypts it before it
-   * reaches the database and never sends it back. Required on create — a
-   * provider with no key is an agent row that greys out and can do nothing.
-   */
-  apiKey: API_KEY.min(1),
-  models: z.array(MODEL_ID).min(1).max(50),
-  defaultModel: MODEL_ID,
-  smallModel: MODEL_ID.nullable().optional(),
-  allowUnattended: z.boolean().optional(),
-  supportsEffort: z.boolean().optional(),
-});
+export const CreateCustomClaudeProviderRequest = z
+  .object({
+    name: NAME,
+    /**
+     * PA-154: ID of an Anthropic-enabled provider in `planner_providers`.
+     * When supplied, `baseUrl`, `apiKey`, and `models` are inherited from that
+     * provider and its `planner_models` rows.
+     */
+    providerId: z.string().min(1).max(128).optional(),
+    providerKind: CustomClaudeProviderKind.optional(),
+    baseUrl: BASE_URL.optional(),
+    /**
+     * Plaintext, and only ever on the wire: the server encrypts it before it
+     * reaches the database and never sends it back. Required on legacy standalone
+     * create when `providerId` is not supplied.
+     */
+    apiKey: API_KEY.min(1).optional(),
+    models: z.array(MODEL_ID).min(1).max(50).optional(),
+    defaultModel: MODEL_ID.optional(),
+    smallModel: MODEL_ID.nullable().optional(),
+    allowUnattended: z.boolean().optional(),
+    supportsEffort: z.boolean().optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (!val.providerId) {
+      if (!val.baseUrl) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['baseUrl'],
+          message: 'baseUrl is required when providerId is not specified.',
+        });
+      }
+      if (!val.apiKey) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['apiKey'],
+          message: 'apiKey is required when providerId is not specified.',
+        });
+      }
+      if (!val.models || val.models.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['models'],
+          message: 'models is required when providerId is not specified.',
+        });
+      }
+      if (!val.defaultModel) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['defaultModel'],
+          message: 'defaultModel is required when providerId is not specified.',
+        });
+      }
+    }
+  });
 export type CreateCustomClaudeProviderRequest = z.infer<typeof CreateCustomClaudeProviderRequest>;
 
 /**
@@ -111,6 +152,7 @@ export type CreateCustomClaudeProviderRequest = z.infer<typeof CreateCustomClaud
  */
 export const UpdateCustomClaudeProviderRequest = z.object({
   name: NAME.optional(),
+  providerId: z.string().min(1).max(128).nullable().optional(),
   providerKind: CustomClaudeProviderKind.optional(),
   baseUrl: BASE_URL.optional(),
   apiKey: API_KEY.optional(),

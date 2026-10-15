@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  DEEPSEEK_DEFAULTS,
-  type CustomClaudeProviderKind,
+  DEEPSEEK_PROVIDER_DEFAULTS,
+  OPENCODE_GO_PROVIDER_DEFAULTS,
+  OPENCODE_ZEN_PROVIDER_DEFAULTS,
+  defaultEndpointsForProviderKind,
+  isApiKeyProviderKind,
   type CustomClaudeProviderSummary,
+  type PlannerModel,
+  type PlannerProvider,
 } from '@pocketagent/protocol';
 import { ApiError } from '../api/client.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
@@ -15,141 +20,199 @@ interface Props {
 
 interface FormState {
   name: string;
-  providerKind: CustomClaudeProviderKind;
-  baseUrl: string;
-  apiKey: string;
-  models: string[];
+  providerId: string;
   defaultModel: string;
   smallModel: string;
   allowUnattended: boolean;
   supportsEffort: boolean;
 }
 
-function blankForm(): FormState {
-  return {
-    name: '',
-    providerKind: 'deepseek',
-    baseUrl: DEEPSEEK_DEFAULTS.baseUrl,
-    apiKey: '',
-    models: [...DEEPSEEK_DEFAULTS.models],
-    defaultModel: DEEPSEEK_DEFAULTS.defaultModel,
-    smallModel: DEEPSEEK_DEFAULTS.smallModel,
-    allowUnattended: false,
-    supportsEffort: true,
-  };
-}
-
-function formFor(provider: CustomClaudeProviderSummary): FormState {
-  return {
-    name: provider.name,
-    providerKind: provider.providerKind,
-    baseUrl: provider.baseUrl,
-    // Always empty: there is no reveal endpoint, so the editor genuinely does
-    // not have the stored key to prefill. Blank on save means "keep it".
-    apiKey: '',
-    models: [...provider.models],
-    defaultModel: provider.defaultModel,
-    smallModel: provider.smallModel ?? '',
-    allowUnattended: provider.allowUnattended,
-    supportsEffort: provider.supportsEffort !== false,
-  };
+function modelsForPlannerProvider(
+  provider: PlannerProvider | undefined,
+  allModels: PlannerModel[],
+  fallbackModels?: string[],
+): { modelId: string; label: string }[] {
+  if (!provider) {
+    return (fallbackModels ?? []).map((id) => ({ modelId: id, label: id }));
+  }
+  const configured = allModels.filter(
+    (m) => m.providerId === provider.id || (!m.providerId && provider.id === 'default'),
+  );
+  if (configured.length > 0) {
+    return configured.map((m) => ({
+      modelId: m.modelId,
+      label: m.label && m.label !== m.modelId ? `${m.label} (${m.modelId})` : m.modelId,
+    }));
+  }
+  if (provider.kind === 'deepseek') {
+    return DEEPSEEK_PROVIDER_DEFAULTS.defaultModels.map((id) => ({ modelId: id, label: id }));
+  }
+  if (provider.kind === 'opencode-zen') {
+    return OPENCODE_ZEN_PROVIDER_DEFAULTS.defaultModels.map((id) => ({ modelId: id, label: id }));
+  }
+  if (provider.kind === 'opencode-go') {
+    return OPENCODE_GO_PROVIDER_DEFAULTS.defaultModels.map((id) => ({ modelId: id, label: id }));
+  }
+  return (fallbackModels ?? []).map((id) => ({ modelId: id, label: id }));
 }
 
 /**
- * PA-28: manage the Claude Code provider variants, which used to be two
- * compiled-in entries configured through `POCKETAGENT_DEEPSEEK_*` /
- * `POCKETAGENT_OMNIROUTE_*` (PA-19).
+ * PA-28 / PA-154: manage Custom Claude variants.
  *
- * Unlike every other row on `SettingsPage`, this form has an explicit **Save**
- * rather than auto-saving on change — deliberately, and it is the same reasoning
- * that makes `PlannerAgentEditorPage` stop and confirm on its one directory
- * field while auto-saving the rest. A provider is not a preference: saving it
- * re-registers a live `AgentAdapter`, and the base URL, key and model ids in it
- * are what the *next spawned agent process* is pointed at. Auto-saving would
- * push a half-typed base URL into that adapter on every keystroke, and a
- * multi-field create has nothing to auto-save into in the first place.
- *
- * The API key is write-only end to end: it is a password input here, it is
- * never returned by any route, and there is no reveal action — editing a
- * provider re-enters the key or leaves the field blank to keep the stored one.
+ * Each Custom Claude entry picks an Anthropic-enabled (`endpoints` includes
+ * `'anthropic'`) API-key provider configured under **Providers and Models**,
+ * automatically lists that provider's supported models for selecting the
+ * default and small/fast models, and spawns the `claude` CLI against that
+ * provider's Anthropic `/v1/messages` endpoint and encrypted API key.
  */
 export function CustomClaudeProvidersSection({ onApiError }: Props): JSX.Element {
   const api = useHostApi();
   const [providers, setProviders] = useState<CustomClaudeProviderSummary[] | null>(null);
+  const [plannerProviders, setPlannerProviders] = useState<PlannerProvider[]>([]);
+  const [plannerModels, setPlannerModels] = useState<PlannerModel[]>([]);
   const [encryptionAvailable, setEncryptionAvailable] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /** `null` = closed, `'new'` = create, otherwise the id being edited. */
   const [editing, setEditing] = useState<string | null>(null);
-  const [form, setForm] = useState<FormState>(blankForm);
+  const [form, setForm] = useState<FormState>({
+    name: '',
+    providerId: '',
+    defaultModel: '',
+    smallModel: '',
+    allowUnattended: false,
+    supportsEffort: true,
+  });
   const [confirmingDelete, setConfirmingDelete] = useState<CustomClaudeProviderSummary | null>(
     null,
   );
 
   const load = useCallback(async () => {
     try {
-      const res = await api.listCustomClaudeProviders();
-      setProviders(res.providers);
-      setEncryptionAvailable(res.encryptionAvailable);
+      const [customRes, plannerProvRes, plannerModRes] = await Promise.all([
+        api.listCustomClaudeProviders(),
+        api.listPlannerProviders(),
+        api.listPlannerModels(),
+      ]);
+      setProviders(customRes.providers);
+      setEncryptionAvailable(customRes.encryptionAvailable);
+      setPlannerProviders(plannerProvRes.providers ?? []);
+      setPlannerModels(plannerModRes.models ?? []);
       setError(null);
     } catch (err) {
       onApiError(err);
       setError(err instanceof ApiError ? err.message : 'Could not load custom Claude providers.');
     }
-  }, [onApiError]);
+  }, [api, onApiError]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
+  const anthropicProviders = plannerProviders.filter((p) => {
+    if (!isApiKeyProviderKind(p.kind)) return false;
+    const endpoints = p.endpoints?.length
+      ? p.endpoints
+      : defaultEndpointsForProviderKind(p.kind);
+    return endpoints.includes('anthropic');
+  });
+
   function patch(next: Partial<FormState>): void {
     setForm((prev) => ({ ...prev, ...next }));
   }
 
-  /**
-   * Switching kind prefills, but only ever *forward* into an untouched form —
-   * a user who has typed their own gateway URL must not lose it because they
-   * clicked the wrong radio and clicked back.
-   */
-  function pickKind(kind: CustomClaudeProviderKind): void {
-    if (kind === 'deepseek' && form.baseUrl.trim().length === 0) {
-      patch({
-        providerKind: kind,
-        baseUrl: DEEPSEEK_DEFAULTS.baseUrl,
-        models: [...DEEPSEEK_DEFAULTS.models],
-        defaultModel: DEEPSEEK_DEFAULTS.defaultModel,
-        smallModel: DEEPSEEK_DEFAULTS.smallModel,
-      });
-      return;
-    }
-    patch({ providerKind: kind });
+  function selectPlannerProvider(nextProviderId: string): void {
+    const selected = anthropicProviders.find((p) => p.id === nextProviderId);
+    const available = modelsForPlannerProvider(selected, plannerModels);
+    const firstModel = available[0]?.modelId ?? '';
+    const secondModel =
+      selected?.kind === 'deepseek' && available.length > 1 ? (available[1]?.modelId ?? '') : '';
+    setForm((prev) => ({
+      ...prev,
+      providerId: nextProviderId,
+      name:
+        prev.name.trim().length === 0 && selected
+          ? `Claude Code (${selected.label})`
+          : prev.name,
+      defaultModel: available.some((m) => m.modelId === prev.defaultModel)
+        ? prev.defaultModel
+        : firstModel,
+      smallModel:
+        prev.smallModel && available.some((m) => m.modelId === prev.smallModel)
+          ? prev.smallModel
+          : secondModel,
+    }));
   }
 
   function openCreate(): void {
-    setForm(blankForm());
+    const firstProvider = anthropicProviders[0];
+    const available = modelsForPlannerProvider(firstProvider, plannerModels);
+    const firstModel = available[0]?.modelId ?? '';
+    const secondModel =
+      firstProvider?.kind === 'deepseek' && available.length > 1
+        ? (available[1]?.modelId ?? '')
+        : '';
+    setForm({
+      name: firstProvider ? `Claude Code (${firstProvider.label})` : '',
+      providerId: firstProvider?.id ?? '',
+      defaultModel: firstModel,
+      smallModel: secondModel,
+      allowUnattended: false,
+      supportsEffort: true,
+    });
     setEditing('new');
     setError(null);
   }
 
   function openEdit(provider: CustomClaudeProviderSummary): void {
-    setForm(formFor(provider));
+    const matchedProviderId =
+      provider.providerId ??
+      anthropicProviders.find((p) => p.baseUrl === provider.baseUrl)?.id ??
+      '';
+    setForm({
+      name: provider.name,
+      providerId: matchedProviderId,
+      defaultModel: provider.defaultModel,
+      smallModel: provider.smallModel ?? '',
+      allowUnattended: provider.allowUnattended,
+      supportsEffort: provider.supportsEffort !== false,
+    });
     setEditing(provider.id);
     setError(null);
   }
 
-  const models = form.models.map((m) => m.trim()).filter(Boolean);
+  const editingProvider =
+    editing && editing !== 'new'
+      ? (providers ?? []).find((p) => p.id === editing)
+      : undefined;
+  const selectedPlannerProvider = anthropicProviders.find((p) => p.id === form.providerId);
+  const availableModels = modelsForPlannerProvider(
+    selectedPlannerProvider,
+    plannerModels,
+    editingProvider?.models,
+  );
+  const availableModelIds = availableModels.map((m) => m.modelId);
+
   const problem = ((): string | null => {
     if (form.name.trim().length === 0) return 'A name is required.';
-    if (form.baseUrl.trim().length === 0) return 'A base URL is required.';
-    if (models.length === 0) return 'At least one model id is required.';
-    if (!models.includes(form.defaultModel.trim())) {
-      return 'The default model must be one of the models listed above.';
+    if (!form.providerId.trim()) {
+      return 'Select an Anthropic-enabled provider from Providers and Models.';
     }
-    if (form.smallModel.trim() && !models.includes(form.smallModel.trim())) {
-      return 'The small model must be one of the models listed above.';
+    if (!selectedPlannerProvider) {
+      return 'Selected provider is not found or does not have the Anthropic endpoint enabled.';
     }
-    // Only on create: on edit, blank means "keep the stored key".
-    if (editing === 'new' && form.apiKey.trim().length === 0) return 'An API key is required.';
+    if (!selectedPlannerProvider.hasApiKey) {
+      return `Provider "${selectedPlannerProvider.label}" does not have an API key configured yet. Set its API key in Providers and Models first.`;
+    }
+    if (availableModelIds.length === 0) {
+      return `Provider "${selectedPlannerProvider.label}" has no models configured yet. Add models to it in Providers and Models first.`;
+    }
+    if (!form.defaultModel.trim() || !availableModelIds.includes(form.defaultModel.trim())) {
+      return 'Choose a default model from the provider’s model list.';
+    }
+    if (form.smallModel.trim() && !availableModelIds.includes(form.smallModel.trim())) {
+      return 'The small model must be one of the provider’s models.';
+    }
     return null;
   })();
 
@@ -157,25 +220,18 @@ export function CustomClaudeProvidersSection({ onApiError }: Props): JSX.Element
     if (problem !== null || editing === null) return;
     setBusy(true);
     try {
-      const common = {
+      const payload = {
         name: form.name.trim(),
-        providerKind: form.providerKind,
-        baseUrl: form.baseUrl.trim(),
-        models,
+        providerId: form.providerId.trim(),
         defaultModel: form.defaultModel.trim(),
         smallModel: form.smallModel.trim() || null,
         allowUnattended: form.allowUnattended,
         supportsEffort: form.supportsEffort,
       };
       if (editing === 'new') {
-        await api.createCustomClaudeProvider({ ...common, apiKey: form.apiKey });
+        await api.createCustomClaudeProvider(payload);
       } else {
-        await api.updateCustomClaudeProvider(editing, {
-          ...common,
-          // Omitted entirely when blank, so the server's "keep the stored key"
-          // path is taken rather than relying on it to re-check for emptiness.
-          ...(form.apiKey.trim() ? { apiKey: form.apiKey } : {}),
-        });
+        await api.updateCustomClaudeProvider(editing, payload);
       }
       setEditing(null);
       await load();
@@ -205,10 +261,10 @@ export function CustomClaudeProvidersSection({ onApiError }: Props): JSX.Element
   return (
     <>
       <p className="transport-hint" style={{ marginBottom: 10 }}>
-        Claude Code, pointed at a third-party Anthropic-compatible endpoint. It is the same{' '}
-        <code>claude</code> binary with a different base URL, so a conversation rate-limited on
-        Anthropic can be continued here and lands in the same transcript. Cost figures shown in a
-        session of one of these are computed with Anthropic pricing and will be wrong.
+        Claude Code, pointed at any Anthropic-enabled provider from{' '}
+        <strong>Providers and Models</strong>. Pick a provider with the{' '}
+        <code>Anthropic (/v1/messages)</code> endpoint checked (such as DeepSeek, OpenCode Zen,
+        OpenCode Go, OmniRoute, or any Anthropic-compatible gateway) and choose from its models.
       </p>
 
       {!encryptionAvailable && (
@@ -229,42 +285,47 @@ export function CustomClaudeProvidersSection({ onApiError }: Props): JSX.Element
       {providers === null ? (
         <div className="spinner">Loading…</div>
       ) : providers.length === 0 ? (
-        <p className="planner-row-meta">No custom providers yet.</p>
+        <p className="planner-row-meta">No custom Claude configurations yet.</p>
       ) : (
-        providers.map((p) => (
-          <div key={p.id} className="planner-model-row">
-            <span>
-              <strong>{p.name}</strong>{' '}
-              <span className="planner-row-meta">
-                ({p.providerKind === 'deepseek' ? 'DeepSeek' : 'Claude-compatible'})
+        providers.map((p) => {
+          const linked = p.providerId
+            ? plannerProviders.find((pp) => pp.id === p.providerId)
+            : undefined;
+          return (
+            <div key={p.id} className="planner-model-row">
+              <span>
+                <strong>{p.name}</strong>{' '}
+                <span className="planner-row-meta">
+                  ({linked ? linked.label : p.providerKind === 'deepseek' ? 'DeepSeek' : 'Anthropic endpoint'})
+                </span>
+                {p.allowUnattended && <span className="settings-badge">Unattended use allowed</span>}
+                <br />
+                <span className="planner-row-meta" style={{ wordBreak: 'break-all' }}>
+                  {p.baseUrl} — {p.defaultModel}
+                </span>
               </span>
-              {p.allowUnattended && <span className="settings-badge">Unattended use allowed</span>}
-              <br />
-              <span className="planner-row-meta" style={{ wordBreak: 'break-all' }}>
-                {p.baseUrl} — {p.defaultModel}
-              </span>
-            </span>
-            <div className="planner-row-actions">
-              <button
-                type="button"
-                className="planner-btn"
-                disabled={busy}
-                onClick={() => openEdit(p)}
-              >
-                Edit
-              </button>
-              <button
-                type="button"
-                className="planner-btn danger"
-                disabled={busy}
-                onClick={() => setConfirmingDelete(p)}
-                aria-label={`Delete ${p.name}`}
-              >
-                <Icon name="trash" size={14} />
-              </button>
+              <div className="planner-row-actions">
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={busy}
+                  onClick={() => openEdit(p)}
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  className="planner-btn danger"
+                  disabled={busy}
+                  onClick={() => setConfirmingDelete(p)}
+                  aria-label={`Delete ${p.name}`}
+                >
+                  <Icon name="trash" size={14} />
+                </button>
+              </div>
             </div>
-          </div>
-        ))
+          );
+        })
       )}
 
       {editing === null ? (
@@ -275,28 +336,20 @@ export function CustomClaudeProvidersSection({ onApiError }: Props): JSX.Element
             disabled={busy || !encryptionAvailable}
             onClick={openCreate}
           >
-            Add provider
+            Add custom Claude
           </button>
         </div>
       ) : (
         <div className="planner-section" style={{ marginTop: 12 }}>
-          <h3>{editing === 'new' ? 'New provider' : 'Edit provider'}</h3>
+          <h3>{editing === 'new' ? 'New custom Claude' : 'Edit custom Claude'}</h3>
 
-          <div className="planner-field">
-            <label htmlFor="ccp-kind">Provider</label>
-            <select
-              id="ccp-kind"
-              value={form.providerKind}
-              disabled={busy}
-              onChange={(e) => pickKind(e.target.value as CustomClaudeProviderKind)}
-            >
-              <option value="deepseek">DeepSeek</option>
-              <option value="claude-compatible">Other Anthropic-compatible endpoint</option>
-            </select>
-            <p className="planner-row-meta">
-              Only affects the suggestions below — nothing about how the session runs depends on it.
-            </p>
-          </div>
+          {anthropicProviders.length === 0 && (
+            <div className="warn-callout" role="note" style={{ marginBottom: 10 }}>
+              No Anthropic-enabled providers found. Open <strong>Providers and Models</strong>,
+              create or edit a provider (e.g. DeepSeek, OpenCode Zen, OpenCode Go, or an API
+              endpoint), and check the <code>Anthropic (/v1/messages)</code> endpoint checkbox.
+            </div>
+          )}
 
           <div className="planner-field">
             <label htmlFor="ccp-name">Name</label>
@@ -312,78 +365,23 @@ export function CustomClaudeProvidersSection({ onApiError }: Props): JSX.Element
           </div>
 
           <div className="planner-field">
-            <label htmlFor="ccp-base-url">Base URL</label>
-            <input
-              id="ccp-base-url"
-              type="text"
-              placeholder={DEEPSEEK_DEFAULTS.baseUrl}
-              value={form.baseUrl}
+            <label htmlFor="ccp-provider">Provider (Anthropic-enabled)</label>
+            <select
+              id="ccp-provider"
+              value={form.providerId}
               disabled={busy}
-              onChange={(e) => patch({ baseUrl: e.target.value })}
-            />
-            <p className="planner-row-meta">
-              Bare origin — no <code>/v1</code> or <code>/messages</code>. Claude Code appends its
-              own path.
-            </p>
-          </div>
-
-          <div className="planner-field">
-            <label htmlFor="ccp-api-key">API key</label>
-            <input
-              id="ccp-api-key"
-              type="password"
-              autoComplete="new-password"
-              placeholder={editing === 'new' ? 'sk-…' : '••••••••  (leave blank to keep)'}
-              value={form.apiKey}
-              disabled={busy}
-              onChange={(e) => patch({ apiKey: e.target.value })}
-            />
-            <p className="planner-row-meta">
-              Stored encrypted, and never sent back to this page — there is no reveal. To change it,
-              type a new one; leave it blank to keep the stored key.
-            </p>
-          </div>
-
-          <div className="planner-field">
-            <label>Models</label>
-            {form.models.map((model, i) => (
-              // Index-keyed on purpose: these rows are positional free text with
-              // no stable id of their own, and a value-keyed list would remount
-              // (and lose focus in) the input being typed into the moment two
-              // rows briefly matched.
-              <div key={i} className="planner-inline" style={{ marginBottom: 6 }}>
-                <input
-                  type="text"
-                  placeholder="model-id"
-                  value={model}
-                  disabled={busy}
-                  onChange={(e) =>
-                    patch({ models: form.models.map((m, j) => (j === i ? e.target.value : m)) })
-                  }
-                />
-                <button
-                  type="button"
-                  className="planner-btn danger"
-                  disabled={busy || form.models.length === 1}
-                  aria-label="Remove this model"
-                  onClick={() => patch({ models: form.models.filter((_, j) => j !== i) })}
-                >
-                  <Icon name="trash" size={14} />
-                </button>
-              </div>
-            ))}
-            <button
-              type="button"
-              className="planner-btn"
-              disabled={busy}
-              onClick={() => patch({ models: [...form.models, ''] })}
+              onChange={(e) => selectPlannerProvider(e.target.value)}
             >
-              Add model
-            </button>
+              <option value="">Choose an Anthropic-enabled provider…</option>
+              {anthropicProviders.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label} ({p.kind})
+                </option>
+              ))}
+            </select>
             <p className="planner-row-meta">
-              Take these from the provider&apos;s own <code>/models</code>. Claude Code reports
-              Anthropic&apos;s catalog whatever the base URL says, so this list replaces it rather
-              than adding to it — a guessed id yields a picker entry the endpoint rejects.
+              Lists providers from <strong>Providers and Models</strong> that have the{' '}
+              <code>Anthropic (/v1/messages)</code> endpoint enabled.
             </p>
           </div>
 
@@ -392,13 +390,15 @@ export function CustomClaudeProvidersSection({ onApiError }: Props): JSX.Element
             <select
               id="ccp-default-model"
               value={form.defaultModel}
-              disabled={busy}
+              disabled={busy || availableModels.length === 0}
               onChange={(e) => patch({ defaultModel: e.target.value })}
             >
-              {!models.includes(form.defaultModel.trim()) && <option value="">Choose a model…</option>}
-              {models.map((m) => (
-                <option key={m} value={m}>
-                  {m}
+              {!availableModelIds.includes(form.defaultModel.trim()) && (
+                <option value="">Choose a model…</option>
+              )}
+              {availableModels.map((m) => (
+                <option key={m.modelId} value={m.modelId}>
+                  {m.label}
                 </option>
               ))}
             </select>
@@ -409,19 +409,18 @@ export function CustomClaudeProvidersSection({ onApiError }: Props): JSX.Element
             <select
               id="ccp-small-model"
               value={form.smallModel}
-              disabled={busy}
+              disabled={busy || availableModels.length === 0}
               onChange={(e) => patch({ smallModel: e.target.value })}
             >
               <option value="">Same as the default model</option>
-              {models.map((m) => (
-                <option key={m} value={m}>
-                  {m}
+              {availableModels.map((m) => (
+                <option key={m.modelId} value={m.modelId}>
+                  {m.label}
                 </option>
               ))}
             </select>
             <p className="planner-row-meta">
-              Used for conversation titles and compaction summaries, which run constantly. If the
-              endpoint does not know the id, those fail mid-session rather than at start.
+              Used for conversation titles and compaction summaries.
             </p>
           </div>
 
@@ -466,7 +465,7 @@ export function CustomClaudeProvidersSection({ onApiError }: Props): JSX.Element
               disabled={busy || problem !== null}
               onClick={() => void save()}
             >
-              {busy ? 'Saving…' : 'Save provider'}
+              {busy ? 'Saving…' : 'Save custom Claude'}
             </button>
             <button
               type="button"
@@ -484,8 +483,8 @@ export function CustomClaudeProvidersSection({ onApiError }: Props): JSX.Element
         <ConfirmDialog
           title={`Delete ${confirmingDelete.name}?`}
           body={
-            'The stored API key is deleted with it. Chats already started on this provider keep ' +
-            'their transcripts — they just can no longer be continued on it.'
+            'Chats already started on this custom Claude configuration keep their transcripts — ' +
+            'they just can no longer be continued on it.'
           }
           confirmLabel="Delete"
           busy={busy}

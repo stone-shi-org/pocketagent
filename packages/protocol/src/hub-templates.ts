@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { EffortLevel } from './agent-events.js';
-import { PlannerModelOptionalFields } from './planner.js';
+import { PlannerModelOptionalFields, PlannerProviderEndpoint } from './planner.js';
 import { HubHostId } from './hub-registry.js';
 import { McpAuthKind, McpTransportKind } from './mcp-registry.js';
 import { CustomClaudeProviderKind } from './custom-claude-providers.js';
@@ -290,9 +290,13 @@ export type PlannerProviderTemplateModel = z.infer<typeof PlannerProviderTemplat
  */
 export const PlannerProviderTemplatePayload = z.object({
   label: z.string().min(1).max(128),
-  /** PA-147: subscription providers are not templatable (an OAuth login is one person's account on one host). */
-  kind: z.literal('openai-compatible').optional().default('openai-compatible'),
+  /** PA-147 / PA-154: API-key providers are templatable; subscription providers are not (an OAuth login is one person's account on one host). */
+  kind: z
+    .enum(['openai-compatible', 'deepseek', 'opencode-zen', 'opencode-go'])
+    .optional()
+    .default('openai-compatible'),
   baseUrl: BASE_URL,
+  endpoints: z.array(PlannerProviderEndpoint).min(1).optional(),
   allowUnattended: z.boolean().optional().default(false),
   models: z.array(PlannerProviderTemplateModel).max(50),
 });

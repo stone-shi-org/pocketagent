@@ -710,3 +710,135 @@ describe('the one-time import of the PA-19 env vars', () => {
     }
   });
 });
+
+describe('PA-154: Custom Claude linked to Anthropic-enabled Providers & Models entries', () => {
+  let ctx: TestApp;
+
+  beforeEach(async () => {
+    ctx = await createTestApp({ POCKETAGENT_SETTINGS_ENC_KEY: ENC_KEY });
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+  });
+
+  it('creates a Custom Claude entry referencing an Anthropic-enabled providerId, derives its Anthropic URL, key, and models, and syncs on provider/model updates', async () => {
+    // 1. Create a DeepSeek provider (both openai and anthropic enabled by default) and add models.
+    const dsRes = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/planner/providers',
+      headers: authHeaders(ctx.cookie),
+      payload: {
+        label: 'DeepSeek',
+        kind: 'deepseek',
+        apiKey: 'sk-deepseek-shared',
+      },
+    });
+    expect(dsRes.statusCode).toBe(201);
+    const dsProvider = dsRes.json();
+
+    for (const [modelId, label] of [
+      ['deepseek-v4-pro', 'DeepSeek V4 Pro'],
+      ['deepseek-v4-flash', 'DeepSeek V4 Flash'],
+    ] as const) {
+      const mRes = await ctx.app.inject({
+        method: 'POST',
+        url: '/api/planner/models',
+        headers: authHeaders(ctx.cookie),
+        payload: { providerId: dsProvider.id, modelId, label },
+      });
+      expect(mRes.statusCode).toBe(201);
+    }
+
+    // 2. Create a Custom Claude entry by passing only name + providerId + defaultModel + smallModel.
+    const createRes = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/custom-claude-providers',
+      headers: authHeaders(ctx.cookie),
+      payload: {
+        name: 'Claude Code (DeepSeek)',
+        providerId: dsProvider.id,
+        defaultModel: 'deepseek-v4-pro',
+        smallModel: 'deepseek-v4-flash',
+      },
+    });
+    expect(createRes.statusCode, createRes.body).toBe(201);
+    const created = createRes.json();
+    expect(created).toMatchObject({
+      name: 'Claude Code (DeepSeek)',
+      providerId: dsProvider.id,
+      providerKind: 'deepseek',
+      baseUrl: 'https://api.deepseek.com/anthropic',
+      models: ['deepseek-v4-pro', 'deepseek-v4-flash'],
+      defaultModel: 'deepseek-v4-pro',
+      smallModel: 'deepseek-v4-flash',
+    });
+
+    const adapter = ctx.context.agents.get(created.id);
+    expect(adapter).toBeDefined();
+    expect(adapter?.staticModels?.map((m) => m.value)).toEqual([
+      'deepseek-v4-pro',
+      'deepseek-v4-flash',
+    ]);
+    const cmd = adapter?.buildCommand({ cwd: '/tmp', cols: 80, rows: 24 });
+    expect(cmd?.env?.ANTHROPIC_BASE_URL).toBe('https://api.deepseek.com/anthropic');
+    expect(cmd?.env?.ANTHROPIC_AUTH_TOKEN).toBe('sk-deepseek-shared');
+    expect(cmd?.env?.ANTHROPIC_MODEL).toBe('deepseek-v4-pro');
+    expect(cmd?.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('deepseek-v4-flash');
+
+    // 3. Adding a model and rotating the API key on the linked provider syncs to Custom Claude automatically.
+    await ctx.app.inject({
+      method: 'POST',
+      url: '/api/planner/models',
+      headers: authHeaders(ctx.cookie),
+      payload: {
+        providerId: dsProvider.id,
+        modelId: 'deepseek-r2',
+        label: 'DeepSeek R2',
+      },
+    });
+    await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/planner/providers/${encodeURIComponent(dsProvider.id)}`,
+      headers: authHeaders(ctx.cookie),
+      payload: { apiKey: 'sk-deepseek-rotated' },
+    });
+
+    const syncedAdapter = ctx.context.agents.get(created.id);
+    expect(syncedAdapter?.staticModels?.map((m) => m.value)).toEqual([
+      'deepseek-v4-pro',
+      'deepseek-v4-flash',
+      'deepseek-r2',
+    ]);
+    const syncedCmd = syncedAdapter?.buildCommand({ cwd: '/tmp', cols: 80, rows: 24 });
+    expect(syncedCmd?.env?.ANTHROPIC_AUTH_TOKEN).toBe('sk-deepseek-rotated');
+
+    // 4. Rejects linking to a provider that does NOT have the Anthropic endpoint enabled.
+    const openaiOnlyRes = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/planner/providers',
+      headers: authHeaders(ctx.cookie),
+      payload: {
+        label: 'Local vLLM',
+        kind: 'openai-compatible',
+        baseUrl: 'http://127.0.0.1:8000/v1',
+        apiKey: 'sk-vllm',
+        endpoints: ['openai'],
+      },
+    });
+    const openaiOnlyProvider = openaiOnlyRes.json();
+
+    const rejectedRes = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/custom-claude-providers',
+      headers: authHeaders(ctx.cookie),
+      payload: {
+        name: 'Claude on vLLM',
+        providerId: openaiOnlyProvider.id,
+        defaultModel: 'qwen',
+      },
+    });
+    expect(rejectedRes.statusCode).toBe(400);
+    expect(rejectedRes.json().error.message).toMatch(/Anthropic endpoint/i);
+  });
+});

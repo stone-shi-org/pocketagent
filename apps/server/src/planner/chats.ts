@@ -39,6 +39,10 @@ import type { PlannerWorkspaceRegistry, PlannerWorkspaceRow } from './workspaces
 import type { PlannerMemoryService } from './memory.js';
 import { sanitizeCompetingIdentity } from './antigravity-gemini-translator.js';
 import { AntigravityOAuthPlannerProvider } from './antigravity-oauth.js';
+import {
+  AnthropicApiPlannerProvider,
+  isOpencodeAnthropicOnlyModel,
+} from './claude-messages-translator.js';
 import { ClaudeOAuthPlannerProvider } from './claude-oauth.js';
 import { CodexOAuthPlannerProvider } from './codex-oauth.js';
 import {
@@ -58,6 +62,7 @@ import {
   readPlannerLastEffort,
   readPlannerProvider,
   recordPlannerProviderTestResult,
+  resolveAnthropicBaseUrlForProvider,
   resolvePlannerModel,
   countPlannerQueuedPrompts,
   deletePlannerQueuedPrompt,
@@ -84,6 +89,7 @@ import {
   LIST_SKILLS_NAME,
   USE_SKILL_NAME,
   MAX_QUEUED_PROMPTS_PER_CHAT,
+  isApiKeyProviderKind,
   isTerminalStatus,
   plannerModelSupportsImages,
   type PromptAttachment,
@@ -2128,14 +2134,48 @@ export class PlannerChatService {
     if (error !== null) {
       throw new PlannerChatError(error, 'not_configured');
     }
-    return new PlannerLlmClient({
+    const retryOpt =
+      opts.retry === false
+        ? { retry: { maxRetries: 0 } }
+        : this.opts.llmRetry
+          ? { retry: this.opts.llmRetry }
+          : {};
+    const hasOpenai = provider.endpoints.includes('openai');
+    const hasAnthropic = provider.endpoints.includes('anthropic');
+    const anthropicClient = new AnthropicApiPlannerProvider({
+      baseUrl: provider.baseUrl,
+      anthropicBaseUrl: resolveAnthropicBaseUrlForProvider(provider),
+      apiKey,
+      providerKind: provider.kind,
+      ...(this.opts.llmFetch ? { fetchImpl: this.opts.llmFetch } : {}),
+      ...retryOpt,
+    });
+    if (!hasOpenai && hasAnthropic) {
+      return anthropicClient;
+    }
+    const openaiClient = new PlannerLlmClient({
       baseUrl: provider.baseUrl,
       apiKey,
+      providerKind: provider.kind,
       ...(this.opts.llmFetch ? { fetchImpl: this.opts.llmFetch } : {}),
       // PA-121: a turn retries a transient failure; a "Test" button must
       // report the first one, or a 503 reads as a 14-second hang.
-      ...(opts.retry === false ? { retry: { maxRetries: 0 } } : this.opts.llmRetry ? { retry: this.opts.llmRetry } : {}),
+      ...retryOpt,
     });
+    if (hasAnthropic && (provider.kind === 'opencode-zen' || provider.kind === 'opencode-go')) {
+      return {
+        listModels: () => openaiClient.listModels(),
+        streamComplete: (model, messages, tools, signal, options) =>
+          isOpencodeAnthropicOnlyModel(model)
+            ? anthropicClient.streamComplete(model, messages, tools, signal, options)
+            : openaiClient.streamComplete(model, messages, tools, signal, options),
+        test: (model) =>
+          isOpencodeAnthropicOnlyModel(model)
+            ? anthropicClient.test(model)
+            : openaiClient.test(model),
+      };
+    }
+    return openaiClient;
   }
 
   /** Resolves the provider for a model (`planner_models.id` or bare `model_id`)
@@ -2907,7 +2947,7 @@ export class PlannerChatService {
         ? Math.max(1024, Math.min(modelRow.maxOutputTokens, limits.contextWindow - estimatedTokens - CONTEXT_SAFETY_TOKENS))
         : undefined;
 
-    if (!resolved.provider || (resolved.provider.kind === 'openai-compatible' && !resolved.provider.baseUrl)) {
+    if (!resolved.provider || (isApiKeyProviderKind(resolved.provider.kind) && !resolved.provider.baseUrl)) {
       // Checked before the first yield by `resolveModelId`, so only an
       // endpoint cleared in Settings mid-turn lands here — reported in-band,
       // since `clientForProvider()` would throw past a stream already started.
@@ -2958,18 +2998,22 @@ export class PlannerChatService {
     }
     const client = this.clientForProvider(resolved.provider);
 
-    // PA-122 / PA-149 / PA-151: Anthropic-style cache breakpoints, for a model whose
-    // caching is on (always on by default for `claude-oauth` unless the row
-    // explicitly sets `promptCaching: false`) and whose endpoint has not
+    // PA-122 / PA-149 / PA-151 / PA-154: Anthropic-style cache breakpoints, for a model whose
+    // caching is on (always on by default for `claude-oauth` and Anthropic-only providers
+    // unless the row explicitly sets `promptCaching: false`) and whose endpoint has not
     // refused them earlier in this turn. `codex-oauth` uses `prompt_cache_key`
     // and `session_id` natively instead, and `antigravity-oauth` uses Gemini
     // prefix caching with stable user-turn system prefixes. The unmarked
     // `messages` are kept for the estimate and the calibration, so the markers
     // never change what we think the prompt weighs.
+    const usesAnthropicOnly =
+      resolved.provider.kind === 'claude-oauth' ||
+      (!resolved.provider.endpoints.includes('openai') &&
+        resolved.provider.endpoints.includes('anthropic'));
     const cacheControl =
       resolved.provider.kind !== 'codex-oauth' &&
       resolved.provider.kind !== 'antigravity-oauth' &&
-      (resolved.provider.kind === 'claude-oauth'
+      (usesAnthropicOnly
         ? modelRow?.promptCaching !== false
         : resolvePromptCaching(wireModelId, modelRow?.promptCaching)) &&
       !this.cacheControlRefused.has(chat.id);
@@ -4135,13 +4179,13 @@ export class PlannerChatService {
     const candidate = requested ?? chat.lastModelId ?? settings.lastModelId;
     if (!candidate) {
       const defaultProvider = readDefaultOrFirstPlannerProvider(this.opts.db);
-      if (!defaultProvider || (defaultProvider.kind === 'openai-compatible' && !defaultProvider.baseUrl)) {
+      if (!defaultProvider || (isApiKeyProviderKind(defaultProvider.kind) && !defaultProvider.baseUrl)) {
         throw new PlannerChatError('Planner LLM endpoint is not configured.', 'not_configured');
       }
       throw new PlannerChatError('No model selected, and none is configured.', 'not_configured');
     }
     const resolved = resolvePlannerModel(this.opts.db, candidate);
-    if (!resolved.provider || (resolved.provider.kind === 'openai-compatible' && !resolved.provider.baseUrl)) {
+    if (!resolved.provider || (isApiKeyProviderKind(resolved.provider.kind) && !resolved.provider.baseUrl)) {
       throw new PlannerChatError('Planner LLM endpoint is not configured.', 'not_configured');
     }
     const { apiKey, error } = decryptPlannerProviderSecret(resolved.provider, this.opts.config?.settingsEncKey);
