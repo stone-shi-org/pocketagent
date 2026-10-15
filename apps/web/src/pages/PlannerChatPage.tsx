@@ -1002,8 +1002,7 @@ export function PlannerChatPage({
     [api, chatId, attachedDocWorkspaceId],
   );
 
-  // PA-122 / PA-149: resolve the active model and its provider so we can warn
-  // about image support and render standing subscription provider disclosures.
+  // PA-122: resolve the active model so we can warn about image support.
   const effectiveModelRef = chat?.lastModelId ?? agentDefaultModelId;
   const selectedModel =
     (effectiveModelRef
@@ -1011,9 +1010,6 @@ export function PlannerChatPage({
       : undefined) ??
     models[0] ??
     null;
-  const selectedProvider = selectedModel?.providerId
-    ? providers.find((p) => p.id === selectedModel.providerId) ?? null
-    : null;
   const imageNote =
     selectedModel && !plannerModelSupportsImages(selectedModel.modelId, selectedModel.supportsImages)
       ? `${selectedModel.label} cannot read images — it will see a note instead. Pick a vision model to have it look.`
@@ -1721,13 +1717,6 @@ export function PlannerChatPage({
           >
             parent chat
           </button>
-        </div>
-      )}
-
-      {selectedProvider?.providerDisclosure && (
-        // PA-149 standing disclosure on every chat using a subscription provider.
-        <div className="warn-callout" role="status" data-testid="provider-disclosure-banner">
-          <strong>{selectedProvider.label}:</strong> {selectedProvider.providerDisclosure}
         </div>
       )}
 

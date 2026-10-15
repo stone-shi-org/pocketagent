@@ -9157,6 +9157,24 @@ button.chat-rate-limit-badge {
 .planner-model-label-edit:disabled { opacity: 0.5; cursor: default; }
 .planner-model-label-input { width: 150px; padding: 2px 6px; font-size: 13.5px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--bg); color: var(--text); }
 
+/* PA-152: collapsible provider and models headers, plus one-line model row with expandable edit detail. */
+.planner-collapsible-toggle { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; background: none; border: none; padding: 2px 4px; margin: -2px -4px; border-radius: var(--radius); font: inherit; color: var(--text); cursor: pointer; text-align: left; }
+.planner-collapsible-toggle:hover { background: var(--bg-elev); }
+.planner-collapsible-toggle h3, .planner-collapsible-toggle h4 { margin: 0; font-size: 14px; }
+.planner-provider-models { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.planner-model-item { border-bottom: 1px solid var(--border); }
+.planner-model-item:last-child { border-bottom: none; }
+.planner-model-item > .planner-model-row { border-bottom: none; }
+.planner-model-summary { min-width: 0; }
+.planner-model-name { font-weight: 500; }
+.planner-btn.active { border-color: var(--accent); color: var(--accent); background: var(--bg-elev); }
+.planner-model-detail { display: flex; flex-direction: column; gap: 10px; margin: 2px 0 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); font-size: 12.5px; }
+.planner-model-detail-grid { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.planner-model-detail .planner-model-limit { margin-left: 0; }
+.planner-model-detail .planner-model-name-input { width: 160px; padding: 3px 7px; font-size: 12.5px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--bg); color: var(--text); }
+.planner-model-detail .planner-model-prices { gap: 8px 12px; margin-top: 0; }
+.planner-model-detail-actions { gap: 8px; }
+
 
 /* ---- Page headers on a phone (PA-131) ----------------------------------
    Cron, Webhooks, Pocket Agent settings and Settings each put a title, a

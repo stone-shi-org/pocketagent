@@ -200,22 +200,22 @@ export const PlannerProviderAuthMode = z.enum([
 export type PlannerProviderAuthMode = z.infer<typeof PlannerProviderAuthMode>;
 
 /**
- * PA-149: standing disclosure shown on every Pocket Agent chat whose active
- * model belongs to a `claude-oauth` subscription provider.
+ * PA-149 / PA-152: standing disclosure shown in Settings → Providers and Models
+ * for a `claude-oauth` subscription provider.
  */
 export const CLAUDE_OAUTH_PROVIDER_DISCLOSURE =
   "This chat uses a Claude subscription credential (setup-token / OAuth) directly against Anthropic's Messages API, not an API key. Using a subscription token outside the official Claude Code CLI may violate Anthropic's Terms of Service or your organization's enterprise seat policy and carries account risk. Usage counts against your subscription's 5-hour / 7-day limits rather than per-token billing.";
 
 /**
- * PA-150: standing disclosure shown on every Pocket Agent chat whose active
- * model belongs to a `codex-oauth` subscription provider.
+ * PA-150 / PA-152: standing disclosure shown in Settings → Providers and Models
+ * for a `codex-oauth` subscription provider.
  */
 export const CODEX_OAUTH_PROVIDER_DISCLOSURE =
   "This chat uses a ChatGPT subscription OAuth token directly against OpenAI's Codex Responses backend, not an API key. This session is not authorized for proxy or router use outside the official Codex CLI, and OpenAI may restrict or suspend accounts for out-of-client or automated usage. Usage counts against your ChatGPT subscription's 5-hour / 7-day limits rather than per-token billing.";
 
 /**
- * PA-151: standing disclosure shown on every Pocket Agent chat whose active
- * model belongs to an `antigravity-oauth` subscription provider.
+ * PA-151 / PA-152: standing disclosure shown in Settings → Providers and Models
+ * for an `antigravity-oauth` subscription provider.
  */
 export const ANTIGRAVITY_OAUTH_PROVIDER_DISCLOSURE =
   "This chat uses an Antigravity (Google) subscription OAuth credential directly against Google's Code Assist API, not a Google Cloud / Gemini API key. Using a consumer or enterprise Code Assist token outside the official Antigravity client may violate Google's Terms of Service or your organization's seat policy and carries account risk. Usage counts against your Antigravity model quota rather than per-token billing.";

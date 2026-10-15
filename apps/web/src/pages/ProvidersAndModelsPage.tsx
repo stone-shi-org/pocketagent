@@ -391,13 +391,6 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
     })();
   };
 
-  const toggleModelEffort = (id: string, current: boolean): void => {
-    void withBusy(async () => {
-      await api.updatePlannerModel(id, { supportsEffort: !current });
-      await load();
-    });
-  };
-
   const setModelLimit = (id: string, patch: UpdatePlannerModelRequest): void => {
     void withBusy(async () => {
       await api.updatePlannerModel(id, patch);
@@ -807,7 +800,6 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                     }),
                   )
                 }
-                onToggleModelEffort={toggleModelEffort}
                 onSetModelLimit={setModelLimit}
                 onRemoveModel={removeModel}
                 onDeleteAllModels={() => setConfirmingDeleteAllForProvider(provider)}
@@ -1059,7 +1051,7 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
   );
 }
 
-interface PlannerProviderSectionProps {
+export interface PlannerProviderSectionProps {
   api: ApiClient;
   provider: PlannerProvider;
   hasLocalAgyAuth: boolean;
@@ -1067,6 +1059,8 @@ interface PlannerProviderSectionProps {
   busy: boolean;
   testingAll: boolean;
   testResults: Record<string, TestPlannerModelResponse | 'testing'>;
+  initialExpanded?: boolean;
+  initialModelsExpanded?: boolean;
   onSaveProvider: (patch: {
     label?: string;
     baseUrl?: string;
@@ -1081,7 +1075,6 @@ interface PlannerProviderSectionProps {
   onExportProvider: () => void;
   onDiscoverModels: () => Promise<{ modelIds: string[] }>;
   onAddModel: (input: { modelId: string; label: string; supportsEffort: boolean }) => void;
-  onToggleModelEffort: (id: string, current: boolean) => void;
   onSetModelLimit: (id: string, patch: UpdatePlannerModelRequest) => void;
   onRemoveModel: (id: string) => void;
   onDeleteAllModels: () => void;
@@ -1091,7 +1084,7 @@ interface PlannerProviderSectionProps {
   onError: (message: string | null) => void;
 }
 
-function PlannerProviderSection({
+export function PlannerProviderSection({
   api,
   provider,
   hasLocalAgyAuth,
@@ -1099,13 +1092,14 @@ function PlannerProviderSection({
   busy,
   testingAll,
   testResults,
+  initialExpanded = true,
+  initialModelsExpanded = true,
   onSaveProvider,
   onReload,
   onDeleteProvider,
   onExportProvider,
   onDiscoverModels,
   onAddModel,
-  onToggleModelEffort,
   onSetModelLimit,
   onRemoveModel,
   onDeleteAllModels,
@@ -1118,6 +1112,8 @@ function PlannerProviderSection({
   const isCodexOAuth = provider.kind === 'codex-oauth';
   const isAntigravityOAuth = provider.kind === 'antigravity-oauth';
   const isSubscriptionOAuth = isClaudeOAuth || isCodexOAuth || isAntigravityOAuth;
+  const [providerExpanded, setProviderExpanded] = useState(initialExpanded);
+  const [modelsExpanded, setModelsExpanded] = useState(initialModelsExpanded);
   const [labelInput, setLabelInput] = useState(provider.label);
   const [baseUrlInput, setBaseUrlInput] = useState(provider.baseUrl);
   const [apiKeyInput, setApiKeyInput] = useState('');
@@ -1471,15 +1467,56 @@ function PlannerProviderSection({
     suggestionsOpen,
   );
 
+  const statusSummary = provider.keyUnreadable
+    ? 'Credential unreadable'
+    : isClaudeOAuth
+      ? provider.authMode === 'setup-token'
+        ? 'Signed in via setup-token'
+        : provider.authMode === 'oauth'
+          ? 'Signed in via OAuth'
+          : provider.hasApiKey
+            ? 'Credential configured'
+            : 'Not signed in'
+      : isCodexOAuth
+        ? provider.authMode === 'cli-readonly'
+          ? provider.hasApiKey
+            ? 'Reading ~/.codex/auth.json'
+            : 'Token missing or expired'
+          : provider.authMode === 'device-code' && provider.hasApiKey
+            ? 'Signed in via device-code'
+            : 'Not signed in'
+        : isAntigravityOAuth
+          ? provider.authMode === 'cli-import' && provider.hasApiKey
+            ? 'Using signed-in Antigravity CLI'
+            : provider.authMode === 'oauth' && provider.hasApiKey
+              ? 'Signed in via Google OAuth'
+              : 'Not signed in'
+          : `${provider.baseUrl ? 'Endpoint configured' : 'Endpoint not configured'} · ${
+              provider.hasApiKey ? 'API key set' : 'No API key'
+            }`;
+
   return (
     <div className="planner-section" data-provider-id={provider.id}>
       <div className="planner-section-header">
-        <h3>
-          {provider.label}{' '}
-          <span className="planner-row-meta" style={{ fontWeight: 400 }}>
-            ({provider.kind})
+        <button
+          type="button"
+          className="planner-collapsible-toggle"
+          onClick={() => setProviderExpanded((v) => !v)}
+          aria-expanded={providerExpanded}
+          aria-label={`${providerExpanded ? 'Collapse' : 'Expand'} provider ${provider.label}`}
+        >
+          <Icon name={providerExpanded ? 'chevron-down' : 'chevron-right'} size={14} />
+          <h3>
+            {provider.label}{' '}
+            <span className="planner-row-meta" style={{ fontWeight: 400 }}>
+              ({provider.kind})
+            </span>
+          </h3>
+          <span className="planner-row-meta">
+            · {models.length} model{models.length === 1 ? '' : 's'}
+            {!providerExpanded ? ` · ${statusSummary}` : ''}
           </span>
-        </h3>
+        </button>
         <div className="planner-section-actions">
           {!isSubscriptionOAuth && (
             <button
@@ -1505,6 +1542,8 @@ function PlannerProviderSection({
         </div>
       </div>
 
+      {providerExpanded && (
+        <div className="planner-provider-body" style={{ marginTop: 10 }}>
       {provider.providerDisclosure && (
         <div className="warn-callout" role="note" style={{ marginBottom: 10 }}>
           {provider.providerDisclosure}
@@ -2017,15 +2056,32 @@ function PlannerProviderSection({
         </>
       )}
 
-      <div style={{ marginTop: 16, borderTop: '1px solid var(--border, #2a2f3a)', paddingTop: 12 }}>
+      <div className="planner-provider-models">
         <div className="planner-section-header">
-          <h4>Models</h4>
+          <button
+            type="button"
+            className="planner-collapsible-toggle"
+            onClick={() => setModelsExpanded((v) => !v)}
+            aria-expanded={modelsExpanded}
+            aria-label={`${modelsExpanded ? 'Collapse' : 'Expand'} models for ${provider.label}`}
+          >
+            <Icon name={modelsExpanded ? 'chevron-down' : 'chevron-right'} size={14} />
+            <h4>
+              Models{' '}
+              <span className="planner-row-meta" style={{ fontWeight: 400 }}>
+                ({models.length})
+              </span>
+            </h4>
+          </button>
           <div className="planner-section-actions">
             <button
               type="button"
               className="planner-btn"
               disabled={discovering || (isSubscriptionOAuth ? !provider.hasApiKey : !provider.baseUrl)}
-              onClick={discoverModels}
+              onClick={() => {
+                setModelsExpanded(true);
+                discoverModels();
+              }}
               title={
                 isClaudeOAuth
                   ? provider.hasApiKey
@@ -2065,332 +2121,506 @@ function PlannerProviderSection({
           </div>
         </div>
 
-        {discoverMessage && <p className="planner-row-meta">{discoverMessage}</p>}
-        {models.length === 0 && (
-          <p className="planner-row-meta">
-            No models configured for this provider yet — query the endpoint above, then pick from
-            the suggestions as you type an id below.
-          </p>
-        )}
+        {modelsExpanded && (
+          <div style={{ marginTop: 8 }}>
+            {discoverMessage && <p className="planner-row-meta">{discoverMessage}</p>}
+            {models.length === 0 && (
+              <p className="planner-row-meta">
+                No models configured for this provider yet — query the endpoint above, then pick from
+                the suggestions as you type an id below.
+              </p>
+            )}
 
-        {models.map((m) => {
-          const result = testResults[m.id];
-          return (
-            <div key={m.id} className="planner-model-row">
-              <span>
-                <ModelLabelEditor
-                  label={m.label}
-                  modelId={m.modelId}
-                  disabled={busy}
-                  onSave={(nextLabel) => onSetModelLimit(m.id, { label: nextLabel })}
-                />{' '}
-                <span className="planner-row-meta">({m.modelId})</span>
-                <button
-                  type="button"
-                  className={`planner-badge-btn${m.supportsEffort !== false ? ' active' : ''}`}
-                  onClick={() => onToggleModelEffort(m.id, m.supportsEffort !== false)}
-                  title={
-                    m.supportsEffort !== false
-                      ? 'Reasoning effort enabled (click to disable)'
-                      : 'Reasoning effort disabled (click to enable)'
-                  }
-                >
-                  <Icon name="brain" size={12} />
-                  <span>{m.supportsEffort !== false ? 'Effort on' : 'Effort off'}</span>
-                </button>
-                <ModelLimitInput
-                  label="Context"
-                  title="Context window in tokens. Empty = worked out from the model name (128k if unknown)."
-                  value={m.contextWindow ?? null}
-                  disabled={busy}
-                  onSave={(v) => onSetModelLimit(m.id, { contextWindow: v })}
-                />
-                {!isCodexOAuth && (
-                  <ModelLimitInput
-                    label="Max out"
-                    title="Output limit in tokens, sent as max_tokens. Empty = not sent."
-                    value={m.maxOutputTokens ?? null}
-                    disabled={busy}
-                    onSave={(v) => onSetModelLimit(m.id, { maxOutputTokens: v })}
-                  />
-                )}
-                <TriStateSelect
-                  label="Cache"
-                  title="Prompt caching: send Anthropic cache_control markers. Auto = on for Claude models only, since strict OpenAI-compatible servers reject the field. Cached token counts are shown whenever the provider reports them, whatever this says."
-                  value={m.promptCaching ?? null}
-                  disabled={busy}
-                  onSave={(v) => onSetModelLimit(m.id, { promptCaching: v })}
-                />
-                <TriStateSelect
-                  label="Images"
-                  title="Whether this model can read attached images. Auto = yes, unless it is a known text-only model. When off, each image is replaced by a short note in what the model is sent; the chat keeps the image."
-                  value={m.supportsImages ?? null}
-                  disabled={busy}
-                  onSave={(v) => onSetModelLimit(m.id, { supportsImages: v })}
-                />
-                <TriStateSelect
-                  label="PDFs"
-                  title="Whether to send an attached PDF itself (as an OpenAI file part) beside its extracted text. Off by default: most OpenAI-compatible servers reject PDF input. If the server refuses one, the turn continues with the text only."
-                  value={m.supportsPdf ?? null}
-                  disabled={busy}
-                  noAuto
-                  onSave={(v) => onSetModelLimit(m.id, { supportsPdf: v })}
-                />
-                <span
-                  className="planner-model-prices"
-                  title="USD per million tokens, used to show each turn's cost. Optional — with no input and output price a turn shows no cost. An empty cache price is charged at the input price. A cost the provider reports itself is used instead."
-                >
-                  <PriceInput
-                    label="$ in"
-                    value={m.inputPricePerMTok ?? null}
-                    disabled={busy}
-                    onSave={(v) => onSetModelLimit(m.id, { inputPricePerMTok: v })}
-                  />
-                  <PriceInput
-                    label="out"
-                    value={m.outputPricePerMTok ?? null}
-                    disabled={busy}
-                    onSave={(v) => onSetModelLimit(m.id, { outputPricePerMTok: v })}
-                  />
-                  <PriceInput
-                    label="cache read"
-                    value={m.cacheReadPricePerMTok ?? null}
-                    disabled={busy}
-                    onSave={(v) => onSetModelLimit(m.id, { cacheReadPricePerMTok: v })}
-                  />
-                  <PriceInput
-                    label="cache write"
-                    value={m.cacheWritePricePerMTok ?? null}
-                    disabled={busy}
-                    onSave={(v) => onSetModelLimit(m.id, { cacheWritePricePerMTok: v })}
-                  />
-                  <span className="planner-row-meta">per 1M tokens</span>
-                </span>
-                {result === 'testing' && <span className="planner-row-meta"> — testing…</span>}
-                {result && result !== 'testing' && (
-                  <span className={result.ok ? 'planner-test-ok' : 'planner-test-fail'}>
-                    {' '}
-                    — {result.ok ? `OK (${result.latencyMs}ms)` : 'Failed'}: {result.message}
-                  </span>
-                )}
-              </span>
-              <div className="planner-row-actions">
-                <button
-                  type="button"
-                  className="planner-btn"
-                  disabled={result === 'testing' || testingAll}
-                  onClick={() => onTestModel(m.id)}
-                >
-                  Test
-                </button>
-                <button
-                  type="button"
-                  className="planner-btn danger"
-                  disabled={busy}
-                  onClick={() => onRemoveModel(m.id)}
-                  aria-label={`Remove ${m.label}`}
-                >
-                  <Icon name="trash" size={14} />
-                </button>
-              </div>
-            </div>
-          );
-        })}
-
-        <div className="planner-inline" style={{ marginTop: 10 }}>
-          <input
-            type="text"
-            placeholder="Model id, e.g. gpt-4o-mini"
-            value={newModelId}
-            onChange={(e) => {
-              setNewModelId(e.target.value);
-              setSuggestionsOpen(true);
-            }}
-            onFocus={() => setSuggestionsOpen(true)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') addModel();
-            }}
-          />
-          <input
-            ref={newModelLabelInputRef}
-            type="text"
-            placeholder="Label, e.g. Fast"
-            value={newModelLabel}
-            onChange={(e) => setNewModelLabel(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') addModel();
-            }}
-          />
-          <label
-            className="planner-inline-checkbox"
-            title="Allow configuring reasoning effort for this model"
-          >
-            <input
-              type="checkbox"
-              checked={newModelSupportsEffort}
-              onChange={(e) => setNewModelSupportsEffort(e.target.checked)}
-            />
-            <span>Reasoning effort</span>
-          </label>
-          <button type="button" className="planner-btn" disabled={busy} onClick={addModel}>
-            <Icon name="plus" size={14} /> Add
-          </button>
-        </div>
-
-        {modelSuggestions.length > 0 && (
-          <div className="planner-suggestions" role="listbox" aria-label="Matching models">
-            {modelSuggestions.map((modelId) => (
-              <button
-                key={modelId}
-                type="button"
-                role="option"
-                aria-selected={false}
-                className="planner-suggestion"
-                disabled={busy}
-                onClick={() => selectDiscoveredModel(modelId)}
-              >
-                {modelId}
-              </button>
+            {models.map((m) => (
+              <PlannerModelRow
+                key={m.id}
+                model={m}
+                isCodexOAuth={isCodexOAuth}
+                busy={busy}
+                testingAll={testingAll}
+                testResult={testResults[m.id]}
+                onSave={(patch) => onSetModelLimit(m.id, patch)}
+                onTest={() => onTestModel(m.id)}
+                onRemove={() => onRemoveModel(m.id)}
+                onError={onError}
+              />
             ))}
+
+            <div className="planner-inline" style={{ marginTop: 10 }}>
+              <input
+                type="text"
+                placeholder="Model id, e.g. gpt-4o-mini"
+                value={newModelId}
+                onChange={(e) => {
+                  setNewModelId(e.target.value);
+                  setSuggestionsOpen(true);
+                }}
+                onFocus={() => setSuggestionsOpen(true)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') addModel();
+                }}
+              />
+              <input
+                ref={newModelLabelInputRef}
+                type="text"
+                placeholder="Label, e.g. Fast"
+                value={newModelLabel}
+                onChange={(e) => setNewModelLabel(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') addModel();
+                }}
+              />
+              <label
+                className="planner-inline-checkbox"
+                title="Allow configuring reasoning effort for this model"
+              >
+                <input
+                  type="checkbox"
+                  checked={newModelSupportsEffort}
+                  onChange={(e) => setNewModelSupportsEffort(e.target.checked)}
+                />
+                <span>Reasoning effort</span>
+              </label>
+              <button type="button" className="planner-btn" disabled={busy} onClick={addModel}>
+                <Icon name="plus" size={14} /> Add
+              </button>
+            </div>
+
+            {modelSuggestions.length > 0 && (
+              <div className="planner-suggestions" role="listbox" aria-label="Matching models">
+                {modelSuggestions.map((modelId) => (
+                  <button
+                    key={modelId}
+                    type="button"
+                    role="option"
+                    aria-selected={false}
+                    className="planner-suggestion"
+                    disabled={busy}
+                    onClick={() => selectDiscoveredModel(modelId)}
+                  >
+                    {modelId}
+                  </button>
+                ))}
+              </div>
+            )}
+            {newModelId.trim().length > 0 && discoveredIds.length === 0 && (
+              <p className="planner-row-meta" style={{ marginTop: 6 }}>
+                Query the endpoint above to get suggestions, or type a full id and a label and press Add.
+              </p>
+            )}
           </div>
         )}
-        {newModelId.trim().length > 0 && discoveredIds.length === 0 && (
-          <p className="planner-row-meta" style={{ marginTop: 6 }}>
-            Query the endpoint above to get suggestions, or type a full id and a label and press Add.
-          </p>
-        )}
       </div>
+        </div>
+      )}
     </div>
   );
 }
 
-/** PA-122: one per-million-token price; empty = not set. */
-function PriceInput({
-  label,
-  value,
-  disabled,
-  onSave,
-}: {
-  label: string;
-  value: number | null;
-  disabled: boolean;
-  onSave: (value: number | null) => void;
-}): JSX.Element {
-  const [text, setText] = useState(value === null ? '' : String(value));
-  useEffect(() => {
-    setText(value === null ? '' : String(value));
-  }, [value]);
-  const commit = (): void => {
-    const trimmed = text.trim();
-    if (trimmed === '') {
-      if (value !== null) onSave(null);
-      return;
-    }
-    const parsed = Number(trimmed);
-    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 10_000) {
-      setText(value === null ? '' : String(value));
-      return;
-    }
-    if (parsed !== value) onSave(parsed);
-  };
-  return (
-    <label className="planner-model-limit">
-      <span>{label}</span>
-      <input
-        type="number"
-        min={0}
-        step="any"
-        placeholder="—"
-        value={text}
-        disabled={disabled}
-        onChange={(e) => setText(e.target.value)}
-        onBlur={commit}
-      />
-    </label>
-  );
+export interface PlannerModelRowProps {
+  model: PlannerModel;
+  isCodexOAuth?: boolean;
+  busy: boolean;
+  testingAll?: boolean;
+  testResult?: TestPlannerModelResponse | 'testing';
+  initialEditing?: boolean;
+  onSave: (patch: UpdatePlannerModelRequest) => void;
+  onTest: () => void;
+  onRemove: () => void;
+  onError?: (message: string | null) => void;
 }
 
-/** PA-122: Auto / On / Off for a nullable per-model boolean. */
-function TriStateSelect({
-  label,
-  title,
-  value,
-  disabled,
-  noAuto = false,
+/**
+ * PA-152: compact one-line model row showing only the model display name,
+ * model id, and Edit / Test / Remove actions. Clicking Edit expands a detail
+ * form with Save / Cancel for reasoning effort, token limits, caching,
+ * multimodal flags, and pricing.
+ */
+export function PlannerModelRow({
+  model,
+  isCodexOAuth = false,
+  busy,
+  testingAll = false,
+  testResult,
+  initialEditing = false,
   onSave,
-}: {
-  label: string;
-  title: string;
-  value: boolean | null;
-  disabled: boolean;
-  /** PA-137: a flag whose unset value simply means off (`supportsPdf`). */
-  noAuto?: boolean;
-  onSave: (value: boolean | null) => void;
-}): JSX.Element {
-  const current = value === null ? (noAuto ? 'off' : 'auto') : value ? 'on' : 'off';
-  return (
-    <label className="planner-model-limit" title={title}>
-      <span>{label}</span>
-      <select
-        value={current}
-        disabled={disabled}
-        onChange={(e) => {
-          const next = e.target.value === 'auto' ? null : e.target.value === 'on';
-          if (next !== value) onSave(next);
-        }}
-      >
-        {!noAuto && <option value="auto">Auto</option>}
-        <option value="on">On</option>
-        <option value="off">Off</option>
-      </select>
-    </label>
+  onTest,
+  onRemove,
+  onError,
+}: PlannerModelRowProps): JSX.Element {
+  const [editing, setEditing] = useState(initialEditing);
+  const [labelDraft, setLabelDraft] = useState(model.label);
+  const [supportsEffortDraft, setSupportsEffortDraft] = useState(model.supportsEffort !== false);
+  const [contextWindowDraft, setContextWindowDraft] = useState(
+    model.contextWindow != null ? String(model.contextWindow) : '',
   );
-}
+  const [maxOutputTokensDraft, setMaxOutputTokensDraft] = useState(
+    model.maxOutputTokens != null ? String(model.maxOutputTokens) : '',
+  );
+  const [promptCachingDraft, setPromptCachingDraft] = useState<'auto' | 'on' | 'off'>(
+    model.promptCaching == null ? 'auto' : model.promptCaching ? 'on' : 'off',
+  );
+  const [supportsImagesDraft, setSupportsImagesDraft] = useState<'auto' | 'on' | 'off'>(
+    model.supportsImages == null ? 'auto' : model.supportsImages ? 'on' : 'off',
+  );
+  const [supportsPdfDraft, setSupportsPdfDraft] = useState<'on' | 'off'>(
+    model.supportsPdf === true ? 'on' : 'off',
+  );
+  const [inputPriceDraft, setInputPriceDraft] = useState(
+    model.inputPricePerMTok != null ? String(model.inputPricePerMTok) : '',
+  );
+  const [outputPriceDraft, setOutputPriceDraft] = useState(
+    model.outputPricePerMTok != null ? String(model.outputPricePerMTok) : '',
+  );
+  const [cacheReadPriceDraft, setCacheReadPriceDraft] = useState(
+    model.cacheReadPricePerMTok != null ? String(model.cacheReadPricePerMTok) : '',
+  );
+  const [cacheWritePriceDraft, setCacheWritePriceDraft] = useState(
+    model.cacheWritePricePerMTok != null ? String(model.cacheWritePricePerMTok) : '',
+  );
 
-function ModelLimitInput({
-  label,
-  title,
-  value,
-  disabled,
-  onSave,
-}: {
-  label: string;
-  title: string;
-  value: number | null;
-  disabled: boolean;
-  onSave: (value: number | null) => void;
-}): JSX.Element {
-  const [text, setText] = useState(value === null ? '' : String(value));
+  const resetDrafts = useCallback(() => {
+    setLabelDraft(model.label);
+    setSupportsEffortDraft(model.supportsEffort !== false);
+    setContextWindowDraft(model.contextWindow != null ? String(model.contextWindow) : '');
+    setMaxOutputTokensDraft(model.maxOutputTokens != null ? String(model.maxOutputTokens) : '');
+    setPromptCachingDraft(model.promptCaching == null ? 'auto' : model.promptCaching ? 'on' : 'off');
+    setSupportsImagesDraft(model.supportsImages == null ? 'auto' : model.supportsImages ? 'on' : 'off');
+    setSupportsPdfDraft(model.supportsPdf === true ? 'on' : 'off');
+    setInputPriceDraft(model.inputPricePerMTok != null ? String(model.inputPricePerMTok) : '');
+    setOutputPriceDraft(model.outputPricePerMTok != null ? String(model.outputPricePerMTok) : '');
+    setCacheReadPriceDraft(model.cacheReadPricePerMTok != null ? String(model.cacheReadPricePerMTok) : '');
+    setCacheWritePriceDraft(model.cacheWritePricePerMTok != null ? String(model.cacheWritePricePerMTok) : '');
+  }, [model]);
+
   useEffect(() => {
-    setText(value === null ? '' : String(value));
-  }, [value]);
-  const commit = (): void => {
-    const trimmed = text.trim();
-    if (trimmed === '') {
-      if (value !== null) onSave(null);
-      return;
+    if (!editing) {
+      resetDrafts();
     }
-    const parsed = Number(trimmed);
-    if (!Number.isInteger(parsed) || parsed < 1024 || parsed > 10_000_000) {
-      setText(value === null ? '' : String(value));
-      return;
-    }
-    if (parsed !== value) onSave(parsed);
+  }, [editing, resetDrafts]);
+
+  const openEdit = (): void => {
+    resetDrafts();
+    setEditing(true);
   };
+
+  const cancelEdit = (): void => {
+    resetDrafts();
+    setEditing(false);
+  };
+
+  const saveEdit = (): void => {
+    const trimmedLabel = labelDraft.trim();
+    if (!trimmedLabel || trimmedLabel.length > 128) {
+      onError?.('Model name must be between 1 and 128 characters.');
+      return;
+    }
+
+    const parseTokenLimit = (
+      raw: string,
+      fieldName: string,
+    ): { ok: true; value: number | null } | { ok: false; error: string } => {
+      const trimmed = raw.trim();
+      if (!trimmed) return { ok: true, value: null };
+      const parsed = Number(trimmed);
+      if (!Number.isInteger(parsed) || parsed < 1024 || parsed > 10_000_000) {
+        return {
+          ok: false,
+          error: `${fieldName} must be an integer between 1024 and 10,000,000.`,
+        };
+      }
+      return { ok: true, value: parsed };
+    };
+
+    const parsePrice = (
+      raw: string,
+      fieldName: string,
+    ): { ok: true; value: number | null } | { ok: false; error: string } => {
+      const trimmed = raw.trim();
+      if (!trimmed) return { ok: true, value: null };
+      const parsed = Number(trimmed);
+      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 10_000) {
+        return {
+          ok: false,
+          error: `${fieldName} must be between 0 and 10,000.`,
+        };
+      }
+      return { ok: true, value: parsed };
+    };
+
+    const ctxRes = parseTokenLimit(contextWindowDraft, 'Context window');
+    if (!ctxRes.ok) {
+      onError?.(ctxRes.error);
+      return;
+    }
+    const maxOutRes = isCodexOAuth
+      ? { ok: true as const, value: model.maxOutputTokens ?? null }
+      : parseTokenLimit(maxOutputTokensDraft, 'Max output tokens');
+    if (!maxOutRes.ok) {
+      onError?.(maxOutRes.error);
+      return;
+    }
+    const inPriceRes = parsePrice(inputPriceDraft, 'Input price');
+    if (!inPriceRes.ok) {
+      onError?.(inPriceRes.error);
+      return;
+    }
+    const outPriceRes = parsePrice(outputPriceDraft, 'Output price');
+    if (!outPriceRes.ok) {
+      onError?.(outPriceRes.error);
+      return;
+    }
+    const cacheReadRes = parsePrice(cacheReadPriceDraft, 'Cache read price');
+    if (!cacheReadRes.ok) {
+      onError?.(cacheReadRes.error);
+      return;
+    }
+    const cacheWriteRes = parsePrice(cacheWritePriceDraft, 'Cache write price');
+    if (!cacheWriteRes.ok) {
+      onError?.(cacheWriteRes.error);
+      return;
+    }
+
+    onError?.(null);
+    setEditing(false);
+    onSave({
+      label: trimmedLabel,
+      supportsEffort: supportsEffortDraft,
+      contextWindow: ctxRes.value,
+      ...(!isCodexOAuth ? { maxOutputTokens: maxOutRes.value } : {}),
+      promptCaching: promptCachingDraft === 'auto' ? null : promptCachingDraft === 'on',
+      supportsImages: supportsImagesDraft === 'auto' ? null : supportsImagesDraft === 'on',
+      supportsPdf: supportsPdfDraft === 'on' ? true : model.supportsPdf == null ? null : false,
+      inputPricePerMTok: inPriceRes.value,
+      outputPricePerMTok: outPriceRes.value,
+      cacheReadPricePerMTok: cacheReadRes.value,
+      cacheWritePricePerMTok: cacheWriteRes.value,
+    });
+  };
+
   return (
-    <label className="planner-model-limit" title={title}>
-      <span>{label}</span>
-      <input
-        type="number"
-        min={1024}
-        step={1024}
-        placeholder="auto"
-        value={text}
-        disabled={disabled}
-        onChange={(e) => setText(e.target.value)}
-        onBlur={commit}
-      />
-    </label>
+    <div className="planner-model-item" data-model-id={model.id}>
+      <div className="planner-model-row">
+        <span className="planner-model-summary">
+          <span className="planner-model-name">{model.label}</span>{' '}
+          <span className="planner-row-meta">({model.modelId})</span>
+          {testResult === 'testing' && <span className="planner-row-meta"> — testing…</span>}
+          {testResult && testResult !== 'testing' && (
+            <span className={testResult.ok ? 'planner-test-ok' : 'planner-test-fail'}>
+              {' '}
+              — {testResult.ok ? `OK (${testResult.latencyMs}ms)` : 'Failed'}: {testResult.message}
+            </span>
+          )}
+        </span>
+        <div className="planner-row-actions">
+          <button
+            type="button"
+            className={`planner-btn${editing ? ' active' : ''}`}
+            disabled={busy}
+            onClick={() => (editing ? cancelEdit() : openEdit())}
+            aria-expanded={editing}
+            aria-label={`Edit ${model.label}`}
+            title={`Edit ${model.label}`}
+          >
+            <Icon name="edit" size={14} /> Edit
+          </button>
+          <button
+            type="button"
+            className="planner-btn"
+            disabled={testResult === 'testing' || testingAll}
+            onClick={onTest}
+          >
+            Test
+          </button>
+          <button
+            type="button"
+            className="planner-btn danger"
+            disabled={busy}
+            onClick={onRemove}
+            aria-label={`Remove ${model.label}`}
+            title={`Remove ${model.label}`}
+          >
+            <Icon name="trash" size={14} />
+          </button>
+        </div>
+      </div>
+
+      {editing && (
+        <div className="planner-model-detail" role="region" aria-label={`Edit ${model.label} details`}>
+          <div className="planner-model-detail-grid">
+            <label className="planner-model-limit">
+              <span>Name</span>
+              <input
+                type="text"
+                className="planner-model-name-input"
+                aria-label={`Model name for ${model.modelId}`}
+                value={labelDraft}
+                maxLength={128}
+                disabled={busy}
+                onChange={(e) => setLabelDraft(e.target.value)}
+              />
+            </label>
+            <label
+              className="planner-inline-checkbox"
+              title="Allow configuring reasoning effort for this model"
+            >
+              <input
+                type="checkbox"
+                checked={supportsEffortDraft}
+                disabled={busy}
+                onChange={(e) => setSupportsEffortDraft(e.target.checked)}
+              />
+              <span>Reasoning effort</span>
+            </label>
+            <label
+              className="planner-model-limit"
+              title="Context window in tokens. Empty = worked out from the model name (128k if unknown)."
+            >
+              <span>Context</span>
+              <input
+                type="number"
+                min={1024}
+                step={1024}
+                placeholder="auto"
+                value={contextWindowDraft}
+                disabled={busy}
+                onChange={(e) => setContextWindowDraft(e.target.value)}
+              />
+            </label>
+            {!isCodexOAuth && (
+              <label
+                className="planner-model-limit"
+                title="Output limit in tokens, sent as max_tokens. Empty = not sent."
+              >
+                <span>Max out</span>
+                <input
+                  type="number"
+                  min={1024}
+                  step={1024}
+                  placeholder="auto"
+                  value={maxOutputTokensDraft}
+                  disabled={busy}
+                  onChange={(e) => setMaxOutputTokensDraft(e.target.value)}
+                />
+              </label>
+            )}
+            <label
+              className="planner-model-limit"
+              title="Prompt caching: send Anthropic cache_control markers. Auto = on for Claude models only, since strict OpenAI-compatible servers reject the field. Cached token counts are shown whenever the provider reports them, whatever this says."
+            >
+              <span>Cache</span>
+              <select
+                value={promptCachingDraft}
+                disabled={busy}
+                onChange={(e) => setPromptCachingDraft(e.target.value as 'auto' | 'on' | 'off')}
+              >
+                <option value="auto">Auto</option>
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+            <label
+              className="planner-model-limit"
+              title="Whether this model can read attached images. Auto = yes, unless it is a known text-only model. When off, each image is replaced by a short note in what the model is sent; the chat keeps the image."
+            >
+              <span>Images</span>
+              <select
+                value={supportsImagesDraft}
+                disabled={busy}
+                onChange={(e) => setSupportsImagesDraft(e.target.value as 'auto' | 'on' | 'off')}
+              >
+                <option value="auto">Auto</option>
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+            <label
+              className="planner-model-limit"
+              title="Whether to send an attached PDF itself (as an OpenAI file part) beside its extracted text. Off by default: most OpenAI-compatible servers reject PDF input. If the server refuses one, the turn continues with the text only."
+            >
+              <span>PDFs</span>
+              <select
+                value={supportsPdfDraft}
+                disabled={busy}
+                onChange={(e) => setSupportsPdfDraft(e.target.value as 'on' | 'off')}
+              >
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+          </div>
+
+          <div
+            className="planner-model-prices"
+            title="USD per million tokens, used to show each turn's cost. Optional — with no input and output price a turn shows no cost. An empty cache price is charged at the input price. A cost the provider reports itself is used instead."
+          >
+            <label className="planner-model-limit">
+              <span>$ in</span>
+              <input
+                type="number"
+                min={0}
+                step="any"
+                placeholder="—"
+                value={inputPriceDraft}
+                disabled={busy}
+                onChange={(e) => setInputPriceDraft(e.target.value)}
+              />
+            </label>
+            <label className="planner-model-limit">
+              <span>out</span>
+              <input
+                type="number"
+                min={0}
+                step="any"
+                placeholder="—"
+                value={outputPriceDraft}
+                disabled={busy}
+                onChange={(e) => setOutputPriceDraft(e.target.value)}
+              />
+            </label>
+            <label className="planner-model-limit">
+              <span>cache read</span>
+              <input
+                type="number"
+                min={0}
+                step="any"
+                placeholder="—"
+                value={cacheReadPriceDraft}
+                disabled={busy}
+                onChange={(e) => setCacheReadPriceDraft(e.target.value)}
+              />
+            </label>
+            <label className="planner-model-limit">
+              <span>cache write</span>
+              <input
+                type="number"
+                min={0}
+                step="any"
+                placeholder="—"
+                value={cacheWritePriceDraft}
+                disabled={busy}
+                onChange={(e) => setCacheWritePriceDraft(e.target.value)}
+              />
+            </label>
+            <span className="planner-row-meta">per 1M tokens</span>
+          </div>
+
+          <div className="planner-inline planner-model-detail-actions">
+            <button
+              type="button"
+              className="planner-btn"
+              disabled={busy || !labelDraft.trim()}
+              onClick={saveEdit}
+            >
+              Save
+            </button>
+            <button type="button" className="planner-btn" disabled={busy} onClick={cancelEdit}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

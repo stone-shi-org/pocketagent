@@ -1273,8 +1273,8 @@ own system message, with no evasion layer. `buildAnthropicMessagesRequest` and
 (enforcing strict `tool_use` → `tool_result` adjacency), base64/URL images, PDF `document`
 blocks, adaptive/budget thinking, and our three `cache_control` breakpoints, while `parseUsage`
 reads native `input_tokens` (additive with `cache_read_input_tokens` + `cache_creation_input_tokens`)
-and `output_tokens`. Every chat using a `claude-oauth` model shows `CLAUDE_OAUTH_PROVIDER_DISCLOSURE`
-(subscription use, ToS/enterprise seat policy risk, 5h/7d windows rather than per-token billing),
+and `output_tokens`. `CLAUDE_OAUTH_PROVIDER_DISCLOSURE` is shown in **Settings → Providers and Models**
+(not on the chat screen, PA-152; covers subscription use, ToS/enterprise seat policy risk, 5h/7d windows rather than per-token billing),
 `GET /api/planner/providers/:id/usage` reads `/api/oauth/usage`, `allowUnattended` (off by
 default) gates cron, webhook, and MCP-started chats (`unattendedPlannerModelProblem`), and
 `PlannerProviderTemplatePayload` rejects `claude-oauth` so personal subscriptions are never
@@ -1312,8 +1312,8 @@ user parts to `input_text`/`input_image`/`input_file`, assistant `tool_calls`/`t
 paired `function_call`/`function_call_output` items, and model effort suffixes (`-low`, `-medium`,
 `-high`, `-xhigh`) to `reasoning.effort`, while carrying `reasoning.encrypted_content` items
 forward across tool-loop round trips (persisted on `ThinkingEvent.encryptedContent` /
-`reasoningItemId`). Every chat using a `codex-oauth` model shows
-`CODEX_OAUTH_PROVIDER_DISCLOSURE`, `GET /api/planner/providers/:id/usage` queries
+`reasoningItemId`). `CODEX_OAUTH_PROVIDER_DISCLOSURE` is shown in **Settings → Providers and Models**
+(not on the chat screen, PA-152), `GET /api/planner/providers/:id/usage` queries
 `GET https://chatgpt.com/backend-api/wham/usage` (falling back to cached `x-codex-5h-*` /
 `x-codex-7d-*` response headers), `allowUnattended` (off by default) gates cron, webhook, and
 MCP-started chats, and `PlannerProviderTemplatePayload` rejects `codex-oauth`.
@@ -1358,8 +1358,8 @@ only for legacy history). Model discovery calls `POST /v1internal:fetchAvailable
 each model's real API key, e.g. `gemini-3.7-flash-high` or `fable-2.0`, with static fallback),
 `GET /api/planner/providers/:id/usage` reads `remainingFraction` / `resetTime` from
 `fetchAvailableModels` and `/v1internal:retrieveUserQuota`, `ANTIGRAVITY_OAUTH_PROVIDER_DISCLOSURE`
-is shown on every chat, `allowUnattended` (off by default) gates unattended triggers, and
-`PlannerProviderTemplatePayload` rejects `antigravity-oauth`.
+is shown in **Settings → Providers and Models** (not on the chat screen, PA-152), `allowUnattended` (off by default) gates unattended triggers, and
+`PlannerProviderTemplatePayload` rejects `antigravity-oauth`. In **Settings → Providers and Models** (`ProvidersAndModelsPage.tsx`, PA-152), each provider card and its Models subsection are collapsible, and each model row renders as a single compact line (`label`, `(modelId)`, `Edit`, `Test`, `Remove`) that expands its full configuration and pricing form with **Save** / **Cancel** only when `Edit` is clicked.
 
 **Images** (`image-budget.ts`, both sides). The browser downscales an attachment to at most
 2000×2000 and ~4.5 MB of base64 (`apps/web/src/agent/image-budget.ts`) rather than refusing
