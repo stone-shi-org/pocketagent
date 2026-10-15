@@ -174,16 +174,29 @@ export const UpdatePlannerWorkspaceRequest = z.object({
 export type UpdatePlannerWorkspaceRequest = z.infer<typeof UpdatePlannerWorkspaceRequest>;
 
 /**
- * PA-148 / PA-149 / PA-150: the kind of a Pocket Agent LLM provider. Phase 1
- * supports `openai-compatible`; Phase 2 (PA-149) adds `claude-oauth` (Anthropic
- * Messages API using a Claude subscription setup-token or PKCE OAuth credential);
- * Phase 3 (PA-150) adds `codex-oauth` (ChatGPT Codex Responses API using a
- * ChatGPT subscription OAuth token or read-only `~/.codex/auth.json`).
+ * PA-148 / PA-149 / PA-150 / PA-151: the kind of a Pocket Agent LLM provider.
+ * Phase 1 supports `openai-compatible`; Phase 2 (PA-149) adds `claude-oauth`
+ * (Anthropic Messages API using a Claude subscription setup-token or PKCE OAuth
+ * credential); Phase 3 (PA-150) adds `codex-oauth` (ChatGPT Codex Responses API
+ * using a ChatGPT subscription OAuth token or read-only `~/.codex/auth.json`);
+ * Phase 4 (PA-151) adds `antigravity-oauth` (Google Code Assist API reusing the
+ * signed-in `agy` CLI login or a separate Google OAuth credential).
  */
-export const PlannerProviderKind = z.enum(['openai-compatible', 'claude-oauth', 'codex-oauth']);
+export const PlannerProviderKind = z.enum([
+  'openai-compatible',
+  'claude-oauth',
+  'codex-oauth',
+  'antigravity-oauth',
+]);
 export type PlannerProviderKind = z.infer<typeof PlannerProviderKind>;
 
-export const PlannerProviderAuthMode = z.enum(['setup-token', 'oauth', 'device-code', 'cli-readonly']);
+export const PlannerProviderAuthMode = z.enum([
+  'setup-token',
+  'oauth',
+  'device-code',
+  'cli-readonly',
+  'cli-import',
+]);
 export type PlannerProviderAuthMode = z.infer<typeof PlannerProviderAuthMode>;
 
 /**
@@ -201,7 +214,14 @@ export const CODEX_OAUTH_PROVIDER_DISCLOSURE =
   "This chat uses a ChatGPT subscription OAuth token directly against OpenAI's Codex Responses backend, not an API key. This session is not authorized for proxy or router use outside the official Codex CLI, and OpenAI may restrict or suspend accounts for out-of-client or automated usage. Usage counts against your ChatGPT subscription's 5-hour / 7-day limits rather than per-token billing.";
 
 /**
- * PA-148 / PA-149 / PA-150: one configured LLM provider in `planner_providers`.
+ * PA-151: standing disclosure shown on every Pocket Agent chat whose active
+ * model belongs to an `antigravity-oauth` subscription provider.
+ */
+export const ANTIGRAVITY_OAUTH_PROVIDER_DISCLOSURE =
+  "This chat uses an Antigravity (Google) subscription OAuth credential directly against Google's Code Assist API, not a Google Cloud / Gemini API key. Using a consumer or enterprise Code Assist token outside the official Antigravity client may violate Google's Terms of Service or your organization's seat policy and carries account risk. Usage counts against your Antigravity model quota rather than per-token billing.";
+
+/**
+ * PA-148 / PA-149 / PA-150 / PA-151: one configured LLM provider in `planner_providers`.
  * Each provider owns its own `planner_models` rows (`ON DELETE CASCADE`). Secrets
  * live in `secret_ciphertext` encrypted with `POCKETAGENT_SETTINGS_ENC_KEY` and
  * are write-only (never returned or revealed over HTTP).
@@ -220,7 +240,7 @@ export const PlannerProvider = z.object({
   createdAt: z.number().int(),
   lastTestedAt: z.number().int().nullable().default(null),
   lastError: z.string().nullable().default(null),
-  /** PA-149 / PA-150: non-secret credential metadata for subscription providers. */
+  /** PA-149 / PA-150 / PA-151: non-secret credential metadata for subscription providers. */
   authMode: PlannerProviderAuthMode.nullable().optional(),
   accountEmail: z.string().nullable().optional(),
   accountId: z.string().nullable().optional(),
@@ -235,6 +255,8 @@ export type PlannerProvider = z.infer<typeof PlannerProvider>;
 export const PlannerProviderListResponse = z.object({
   providers: z.array(PlannerProvider),
   encryptionAvailable: z.boolean(),
+  /** PA-151: whether `~/.gemini/antigravity-cli/antigravity-oauth-token` is available on this host. */
+  hasLocalAgyAuth: z.boolean().optional(),
 });
 export type PlannerProviderListResponse = z.infer<typeof PlannerProviderListResponse>;
 
@@ -247,8 +269,8 @@ export const CreatePlannerProviderRequest = z
     apiKey: z.string().max(2048).optional(),
     /** PA-149: optional `claude setup-token` (`sk-ant-oat...`) for `claude-oauth` providers. */
     setupToken: z.string().max(2048).optional(),
-    /** PA-150: credential mode for `codex-oauth` providers (`device-code` default, or `cli-readonly`). */
-    authMode: z.enum(['device-code', 'cli-readonly']).optional(),
+    /** PA-150 / PA-151: credential mode for `codex-oauth` or `antigravity-oauth` providers. */
+    authMode: z.enum(['device-code', 'cli-readonly', 'cli-import', 'oauth']).optional(),
     allowUnattended: z.boolean().optional(),
   })
   .superRefine((val, ctx) => {
@@ -270,8 +292,8 @@ export const UpdatePlannerProviderRequest = z.object({
   apiKey: z.string().max(2048).optional(),
   /** PA-149: paste a new `claude setup-token` (`sk-ant-oat...`) on a `claude-oauth` provider. */
   setupToken: z.string().max(2048).optional(),
-  /** PA-150: switch `codex-oauth` credential mode between `device-code` and `cli-readonly`. */
-  authMode: z.enum(['device-code', 'cli-readonly']).optional(),
+  /** PA-150 / PA-151: switch credential mode on `codex-oauth` or `antigravity-oauth` providers. */
+  authMode: z.enum(['device-code', 'cli-readonly', 'cli-import', 'oauth']).optional(),
   clearApiKey: z.boolean().optional(),
   allowUnattended: z.boolean().optional(),
 });

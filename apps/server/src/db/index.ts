@@ -387,7 +387,7 @@ export const PLANNER_PROVIDERS_DDL = `
   CREATE TABLE IF NOT EXISTS planner_providers (
     id                TEXT PRIMARY KEY,
     label             TEXT NOT NULL,
-    kind              TEXT NOT NULL DEFAULT 'openai-compatible' CHECK (kind IN ('openai-compatible', 'claude-oauth', 'codex-oauth', 'gemini-oauth')),
+    kind              TEXT NOT NULL DEFAULT 'openai-compatible' CHECK (kind IN ('openai-compatible', 'claude-oauth', 'codex-oauth', 'gemini-oauth', 'antigravity-oauth')),
     base_url          TEXT NOT NULL,
     secret_ciphertext TEXT,
     allow_unattended  INTEGER NOT NULL DEFAULT 0,
@@ -1773,7 +1773,7 @@ function migratePlannerProvidersSchema(db: Db): void {
   const existingProviderTable = db
     .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'planner_providers'")
     .get() as { sql?: string } | undefined;
-  if (existingProviderTable?.sql && !existingProviderTable.sql.includes('claude-oauth')) {
+  if (existingProviderTable?.sql && !existingProviderTable.sql.includes('antigravity-oauth')) {
     db.pragma('foreign_keys = OFF');
     try {
       const widenTx = db.transaction(() => {
@@ -1781,7 +1781,7 @@ function migratePlannerProvidersSchema(db: Db): void {
           CREATE TABLE planner_providers_new (
             id                TEXT PRIMARY KEY,
             label             TEXT NOT NULL,
-            kind              TEXT NOT NULL DEFAULT 'openai-compatible' CHECK (kind IN ('openai-compatible', 'claude-oauth', 'codex-oauth', 'gemini-oauth')),
+            kind              TEXT NOT NULL DEFAULT 'openai-compatible' CHECK (kind IN ('openai-compatible', 'claude-oauth', 'codex-oauth', 'gemini-oauth', 'antigravity-oauth')),
             base_url          TEXT NOT NULL,
             secret_ciphertext TEXT,
             allow_unattended  INTEGER NOT NULL DEFAULT 0,

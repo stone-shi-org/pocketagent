@@ -81,6 +81,12 @@ export const ToolUseEvent = z.object({
   summary: z.string(),
   /** Absolute path this call touches, when there is one. */
   filePath: z.string().nullable(),
+  /**
+   * PA-151: Gemini / Antigravity `thoughtSignature` returned on a `functionCall`
+   * part, persisted so multi-turn transcripts and post-approval resumptions can
+   * replay it on subsequent turns.
+   */
+  thoughtSignature: z.string().optional(),
 });
 
 export const ToolResultEvent = z.object({

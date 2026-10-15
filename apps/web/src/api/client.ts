@@ -1059,6 +1059,12 @@ export function createApiClient(endpoint: HostEndpoint) {
         { method: 'POST', body: JSON.stringify(body) },
       ),
 
+    importAntigravityPlannerProviderCli: (id: string) =>
+      request<PlannerProvider>(
+        `/api/planner/providers/${encodeURIComponent(id)}/antigravity/import-cli`,
+        { method: 'POST' },
+      ),
+
     listPlannerModels: (providerId?: string) =>
       request<PlannerModelListResponse>(
         providerId

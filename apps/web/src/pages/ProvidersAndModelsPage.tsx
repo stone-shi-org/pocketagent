@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
+  ANTIGRAVITY_OAUTH_PROVIDER_DISCLOSURE,
   CLAUDE_OAUTH_PROVIDER_DISCLOSURE,
   CODEX_OAUTH_PROVIDER_DISCLOSURE,
   type ClaudeOAuthAuthorizeResponse,
@@ -31,6 +32,20 @@ type RuntimeSettings = SettingsResponse['settings'];
 
 const DEBOUNCE_MS = 500;
 
+const ANTIGRAVITY_SUGGESTED_MODELS: readonly string[] = [
+  'auto',
+  'gemini-3.7-flash-high',
+  'fable-5.1-high',
+  'fable-5.1-low',
+  'opus-5.5-thinking',
+  'gemini-3.1-pro-high',
+  'gemini-3.1-pro-low',
+  'gemini-3-flash',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6-thinking',
+  'gpt-oss-120b-medium',
+];
+
 interface Props {
   onApiError: (error: unknown) => void;
   /** Present only on the phone route or tab strip close action. */
@@ -46,6 +61,7 @@ interface Props {
 export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Element {
   const api = useHostApi();
   const [providers, setProviders] = useState<PlannerProvider[] | null>(null);
+  const [hasLocalAgyAuth, setHasLocalAgyAuth] = useState(false);
   const [models, setModels] = useState<PlannerModel[] | null>(null);
   const [plannerSettings, setPlannerSettings] = useState<PlannerSettingsDto | null>(null);
   const [runtimeData, setRuntimeData] = useState<SettingsResponse | null>(null);
@@ -62,6 +78,7 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
   const [newProviderApiKey, setNewProviderApiKey] = useState('');
   const [newProviderSetupToken, setNewProviderSetupToken] = useState('');
   const [newProviderCodexAuthMode, setNewProviderCodexAuthMode] = useState<'device-code' | 'cli-readonly'>('device-code');
+  const [newProviderAntigravityAuthMode, setNewProviderAntigravityAuthMode] = useState<'cli-import' | 'oauth'>('cli-import');
   const [confirmingDeleteProvider, setConfirmingDeleteProvider] = useState<PlannerProvider | null>(null);
   const [confirmingDeleteAllForProvider, setConfirmingDeleteAllForProvider] = useState<PlannerProvider | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestPlannerModelResponse | 'testing'>>({});
@@ -93,6 +110,7 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
         api.getSettings(),
       ]);
       setProviders(pr.providers);
+      setHasLocalAgyAuth(Boolean(pr.hasLocalAgyAuth));
       setModels(mo.models);
       setPlannerSettings(se);
       setEmbeddingBaseUrlInput(se.embeddingBaseUrl ?? '');
@@ -286,6 +304,13 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
           authMode: newProviderCodexAuthMode,
           ...(baseUrl.length > 0 ? { baseUrl } : {}),
         });
+      } else if (newProviderKind === 'antigravity-oauth') {
+        await api.createPlannerProvider({
+          label,
+          kind: 'antigravity-oauth',
+          authMode: hasLocalAgyAuth ? newProviderAntigravityAuthMode : 'oauth',
+          ...(baseUrl.length > 0 ? { baseUrl } : {}),
+        });
       } else {
         await api.createPlannerProvider({
           label,
@@ -299,6 +324,7 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
       setNewProviderApiKey('');
       setNewProviderSetupToken('');
       setNewProviderCodexAuthMode('device-code');
+      setNewProviderAntigravityAuthMode(hasLocalAgyAuth ? 'cli-import' : 'oauth');
       setNewProviderKind('openai-compatible');
       setAddingProvider(false);
     });
@@ -564,9 +590,10 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
             </div>
             <p className="planner-row-meta" style={{ marginBottom: 10 }}>
               Configure one or more OpenAI-compatible LLM providers (for example a local vLLM and
-              OpenRouter side by side), a Claude subscription provider (setup-token / OAuth), or a
-              Codex (ChatGPT) subscription provider (device-code / <code>~/.codex/auth.json</code>).
-              Each provider has its own encrypted credential and model catalog.
+              OpenRouter side by side), a Claude subscription provider (setup-token / OAuth), a
+              Codex (ChatGPT) subscription provider (device-code / <code>~/.codex/auth.json</code>),
+              or an Antigravity (Google) subscription provider (signed-in <code>agy</code> CLI /
+              Google OAuth). Each provider has its own encrypted credential and model catalog.
             </p>
 
             {(addingProvider || (providers !== null && providers.length === 0)) && (
@@ -585,12 +612,18 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                         setNewProviderLabel('Claude Subscription');
                       } else if (nextKind === 'codex-oauth' && !newProviderLabel.trim()) {
                         setNewProviderLabel('Codex Subscription');
+                      } else if (nextKind === 'antigravity-oauth') {
+                        if (!newProviderLabel.trim()) {
+                          setNewProviderLabel('Antigravity Subscription');
+                        }
+                        setNewProviderAntigravityAuthMode(hasLocalAgyAuth ? 'cli-import' : 'oauth');
                       }
                     }}
                   >
                     <option value="openai-compatible">OpenAI-compatible endpoint</option>
                     <option value="claude-oauth">Claude subscription (setup-token / OAuth)</option>
                     <option value="codex-oauth">Codex (ChatGPT) subscription (device-code / ~/.codex/auth.json)</option>
+                    <option value="antigravity-oauth">Antigravity (Google) subscription (signed-in agy CLI / Google OAuth)</option>
                   </select>
                 </div>
                 <div className="planner-field" style={{ marginTop: 8 }}>
@@ -603,7 +636,9 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                         ? 'e.g. Claude Subscription'
                         : newProviderKind === 'codex-oauth'
                           ? 'e.g. Codex Subscription'
-                          : 'e.g. OpenRouter, Local vLLM'
+                          : newProviderKind === 'antigravity-oauth'
+                            ? 'e.g. Antigravity Subscription'
+                            : 'e.g. OpenRouter, Local vLLM'
                     }
                     value={newProviderLabel}
                     disabled={busy}
@@ -665,6 +700,37 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                       </span>
                     </div>
                   </>
+                ) : newProviderKind === 'antigravity-oauth' ? (
+                  <>
+                    <div className="warn-callout" role="note" style={{ marginTop: 8 }}>
+                      {ANTIGRAVITY_OAUTH_PROVIDER_DISCLOSURE}
+                    </div>
+                    <div className="planner-field" style={{ marginTop: 8 }}>
+                      <label htmlFor="new-provider-antigravity-auth-mode">Credential source</label>
+                      <select
+                        id="new-provider-antigravity-auth-mode"
+                        value={hasLocalAgyAuth ? newProviderAntigravityAuthMode : 'oauth'}
+                        disabled={busy}
+                        onChange={(e) =>
+                          setNewProviderAntigravityAuthMode(e.target.value as 'cli-import' | 'oauth')
+                        }
+                      >
+                        {hasLocalAgyAuth && (
+                          <option value="cli-import">
+                            Use the signed-in Antigravity CLI (~/.gemini/antigravity-cli/antigravity-oauth-token)
+                          </option>
+                        )}
+                        <option value="oauth">
+                          Sign in with Google OAuth (paste loopback redirect URL after creating)
+                        </option>
+                      </select>
+                      <span className="planner-row-meta">
+                        {hasLocalAgyAuth
+                          ? 'Reuses the signed-in agy CLI refresh token on this host (strictly read-only — never modifies the CLI token file) and refreshes PocketAgent’s own encrypted access token.'
+                          : 'No local ~/.gemini/antigravity-cli/antigravity-oauth-token found on this host — sign in with Google OAuth after creating the provider.'}
+                      </span>
+                    </div>
+                  </>
                 ) : (
                   <>
                     <div className="planner-field" style={{ marginTop: 8 }}>
@@ -719,6 +785,7 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                 key={provider.id}
                 api={api}
                 provider={provider}
+                hasLocalAgyAuth={hasLocalAgyAuth}
                 models={providerModels}
                 busy={busy}
                 testingAll={testingProviderId === provider.id}
@@ -995,6 +1062,7 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
 interface PlannerProviderSectionProps {
   api: ApiClient;
   provider: PlannerProvider;
+  hasLocalAgyAuth: boolean;
   models: PlannerModel[];
   busy: boolean;
   testingAll: boolean;
@@ -1004,7 +1072,7 @@ interface PlannerProviderSectionProps {
     baseUrl?: string;
     apiKey?: string;
     setupToken?: string;
-    authMode?: 'device-code' | 'cli-readonly';
+    authMode?: 'device-code' | 'cli-readonly' | 'cli-import' | 'oauth';
     clearApiKey?: boolean;
     allowUnattended?: boolean;
   }) => void;
@@ -1026,6 +1094,7 @@ interface PlannerProviderSectionProps {
 function PlannerProviderSection({
   api,
   provider,
+  hasLocalAgyAuth,
   models,
   busy,
   testingAll,
@@ -1047,7 +1116,8 @@ function PlannerProviderSection({
 }: PlannerProviderSectionProps): JSX.Element {
   const isClaudeOAuth = provider.kind === 'claude-oauth';
   const isCodexOAuth = provider.kind === 'codex-oauth';
-  const isSubscriptionOAuth = isClaudeOAuth || isCodexOAuth;
+  const isAntigravityOAuth = provider.kind === 'antigravity-oauth';
+  const isSubscriptionOAuth = isClaudeOAuth || isCodexOAuth || isAntigravityOAuth;
   const [labelInput, setLabelInput] = useState(provider.label);
   const [baseUrlInput, setBaseUrlInput] = useState(provider.baseUrl);
   const [apiKeyInput, setApiKeyInput] = useState('');
@@ -1055,6 +1125,7 @@ function PlannerProviderSection({
   const [oauthAuthorize, setOauthAuthorize] = useState<ClaudeOAuthAuthorizeResponse | null>(null);
   const [oauthCodeInput, setOauthCodeInput] = useState('');
   const [oauthBusy, setOauthBusy] = useState(false);
+  const [importingAgyCli, setImportingAgyCli] = useState(false);
   const [codexDeviceSession, setCodexDeviceSession] = useState<{
     deviceAuthId: string;
     userCode: string;
@@ -1075,7 +1146,9 @@ function PlannerProviderSection({
   const newModelLabelInputRef = useRef<HTMLInputElement | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
-  const [discoveredIds, setDiscoveredIds] = useState<string[]>([]);
+  const [discoveredIds, setDiscoveredIds] = useState<string[]>(
+    isAntigravityOAuth ? [...ANTIGRAVITY_SUGGESTED_MODELS] : [],
+  );
 
   useEffect(() => {
     setLabelInput(provider.label);
@@ -1145,7 +1218,11 @@ function PlannerProviderSection({
         window.open(res.authorizeUrl, '_blank', 'noopener,noreferrer');
       } catch (err) {
         onApiError(err);
-        onError(err instanceof ApiError ? err.message : 'Could not start Claude OAuth sign-in.');
+        onError(
+          err instanceof ApiError
+            ? err.message
+            : `Could not start ${isAntigravityOAuth ? 'Google' : 'Claude'} OAuth sign-in.`,
+        );
       } finally {
         setOauthBusy(false);
       }
@@ -1167,9 +1244,34 @@ function PlannerProviderSection({
         await onReload();
       } catch (err) {
         onApiError(err);
-        onError(err instanceof ApiError ? err.message : 'Could not complete Claude OAuth sign-in.');
+        onError(
+          err instanceof ApiError
+            ? err.message
+            : `Could not complete ${isAntigravityOAuth ? 'Google' : 'Claude'} OAuth sign-in.`,
+        );
       } finally {
         setOauthBusy(false);
+      }
+    })();
+  };
+
+  const importLocalAgyCli = (): void => {
+    setImportingAgyCli(true);
+    onError(null);
+    void (async () => {
+      try {
+        await api.importAntigravityPlannerProviderCli(provider.id);
+        setOauthAuthorize(null);
+        await onReload();
+      } catch (err) {
+        onApiError(err);
+        onError(
+          err instanceof ApiError
+            ? err.message
+            : 'Could not import the local Antigravity CLI login.',
+        );
+      } finally {
+        setImportingAgyCli(false);
       }
     })();
   };
@@ -1726,6 +1828,147 @@ function PlannerProviderSection({
             </label>
           </div>
         </>
+      ) : isAntigravityOAuth ? (
+        <>
+          <div className="planner-inline" style={{ marginTop: 8, flexWrap: 'wrap', gap: 8 }}>
+            <button type="button" className="planner-btn" disabled={busy} onClick={saveProvider}>
+              Save provider
+            </button>
+            {hasLocalAgyAuth && (
+              <button
+                type="button"
+                className="planner-btn"
+                disabled={busy || importingAgyCli}
+                onClick={importLocalAgyCli}
+              >
+                {importingAgyCli
+                  ? 'Importing agy CLI login…'
+                  : 'Use the signed-in Antigravity CLI'}
+              </button>
+            )}
+            <button
+              type="button"
+              className="planner-btn"
+              disabled={busy || oauthBusy}
+              onClick={startOAuth}
+            >
+              {oauthBusy && !oauthAuthorize
+                ? 'Starting Google OAuth…'
+                : 'Sign in with Google OAuth (copy-paste)'}
+            </button>
+            {provider.hasApiKey && (
+              <>
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={busy || loadingUsage}
+                  onClick={loadUsage}
+                >
+                  {loadingUsage ? 'Checking quota…' : 'Check quota'}
+                </button>
+                <button type="button" className="planner-btn danger" disabled={busy} onClick={clearApiKey}>
+                  Sign out
+                </button>
+              </>
+            )}
+            <span className="planner-row-meta">
+              {provider.keyUnreadable
+                ? 'Credential unreadable'
+                : provider.authMode === 'cli-import' && provider.hasApiKey
+                  ? `Using signed-in Antigravity CLI${
+                      provider.accountEmail ? ` · ${provider.accountEmail}` : ''
+                    }${provider.accountId ? ` (${provider.accountId})` : ''}${
+                      provider.planType ? ` · ${provider.planType}` : ''
+                    }`
+                  : provider.authMode === 'oauth' && provider.hasApiKey
+                    ? `Signed in via Google OAuth${
+                        provider.accountEmail ? ` · ${provider.accountEmail}` : ''
+                      }${provider.accountId ? ` (${provider.accountId})` : ''}${
+                        provider.planType ? ` · ${provider.planType}` : ''
+                      }`
+                    : 'Not signed in'}
+            </span>
+          </div>
+
+          {oauthAuthorize && (
+            <div className="planner-provider-add-form" style={{ marginTop: 10 }}>
+              <p className="planner-row-meta" style={{ marginBottom: 6 }}>
+                1. Authorize in the Google sign-in tab that opened (or{' '}
+                <a href={oauthAuthorize.authorizeUrl} target="_blank" rel="noreferrer">
+                  open authorization link
+                </a>
+                ).
+                <br />
+                2. After consenting, Google redirects to <code>http://127.0.0.1:.../oauth-callback?code=...&amp;state=...</code>. Copy that full redirect URL from your browser&apos;s address bar and paste it below:
+              </p>
+              <div className="planner-inline" style={{ gap: 8 }}>
+                <input
+                  type="text"
+                  placeholder="Paste full http://127.0.0.1:.../oauth-callback?code=...&state=... URL"
+                  value={oauthCodeInput}
+                  disabled={oauthBusy}
+                  onChange={(e) => setOauthCodeInput(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={oauthBusy || !oauthCodeInput.trim()}
+                  onClick={completeOAuth}
+                >
+                  {oauthBusy ? 'Exchanging…' : 'Complete sign-in'}
+                </button>
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={oauthBusy}
+                  onClick={() => {
+                    setOauthAuthorize(null);
+                    setOauthCodeInput('');
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {usage && (
+            <div className="planner-row-meta" style={{ marginTop: 8 }}>
+              {usage.available && usage.windows.length > 0 ? (
+                <span>
+                  {usage.windows.map((w, idx) => (
+                    <span key={w.label}>
+                      {idx > 0 ? ' · ' : ''}
+                      {w.label}: {Math.round(w.percentUsed)}% used
+                      {w.resetsAt
+                        ? ` (resets ${new Date(w.resetsAt).toLocaleString()})`
+                        : ''}
+                    </span>
+                  ))}
+                </span>
+              ) : (
+                <span>
+                  Quota windows unavailable:{' '}
+                  {usage.error ?? 'Not supported for this token.'}
+                </span>
+              )}
+            </div>
+          )}
+
+          <div style={{ marginTop: 10 }}>
+            <label className="planner-inline-checkbox">
+              <input
+                type="checkbox"
+                checked={provider.allowUnattended}
+                disabled={busy}
+                onChange={(e) => toggleAllowUnattended(e.target.checked)}
+              />
+              <span>
+                Allow unattended runs (scheduled jobs, inbound webhooks, and MCP-started chats)
+              </span>
+            </label>
+          </div>
+        </>
       ) : (
         <>
           <div className="planner-field" style={{ marginTop: 8 }}>
@@ -1792,9 +2035,13 @@ function PlannerProviderSection({
                     ? provider.hasApiKey
                       ? undefined
                       : 'Sign in with device code or enable ~/.codex/auth.json read-only mode first.'
-                    : provider.baseUrl
-                      ? undefined
-                      : 'Save a base URL on this provider first.'
+                    : isAntigravityOAuth
+                      ? provider.hasApiKey
+                        ? undefined
+                        : 'Use the signed-in Antigravity CLI or sign in with Google OAuth first.'
+                      : provider.baseUrl
+                        ? undefined
+                        : 'Save a base URL on this provider first.'
               }
             >
               {discovering ? 'Querying…' : 'Query models'}

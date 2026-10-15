@@ -1318,6 +1318,49 @@ forward across tool-loop round trips (persisted on `ThinkingEvent.encryptedConte
 `x-codex-7d-*` response headers), `allowUnattended` (off by default) gates cron, webhook, and
 MCP-started chats, and `PlannerProviderTemplatePayload` rejects `codex-oauth`.
 
+**Antigravity (Google) subscription provider (`antigravity-oauth`, PA-151).** `PlannerProviderKind`
+widens to `'openai-compatible' | 'claude-oauth' | 'codex-oauth' | 'antigravity-oauth'`, implemented
+by `AntigravityOAuthPlannerProvider` (`planner/antigravity-oauth.ts`) and
+`planner/antigravity-gemini-translator.ts` (ported from OmniRoute, MIT). It calls Google's Cloud
+Code Assist backend (`POST {base}/v1internal:streamGenerateContent?alt=sse`, trying
+`https://daily-cloudcode-pa.googleapis.com` then falling back to
+`https://cloudcode-pa.googleapis.com` on 429/404/5xx) directly with the operator's Antigravity
+login rather than spawning the `agy` CLI. Two credential modes live inside
+`planner_providers.secret_ciphertext` (AES-256-GCM via `secret-box`, never returned or logged):
+(1) `cli-import` (default when `~/.gemini/antigravity-cli/antigravity-oauth-token` or
+`POCKETAGENT_AGY_OAUTH_TOKEN_FILE` exists, surfaced as `hasLocalAgyAuth` on
+`GET /api/planner/providers`), which reads the CLI's `refresh_token` strictly read-only, **never
+writes or modifies the CLI's file**, and refreshes our own access token via
+`POST https://oauth2.googleapis.com/token` (Google does not rotate this refresh token on refresh;
+verified empirically on Linux x86_64 that `agy models` still works afterwards, and if `invalid_grant`
+occurs in `cli-import` mode it automatically re-reads the CLI file once in case the operator ran
+`agy auth login` again); or (2) a separate Google OAuth flow (`POST .../oauth/authorize` and
+`.../oauth/exchange`, scopes `cloud-platform`, `userinfo.email`, `userinfo.profile`, `cclog`,
+`experimentsandconfigs` with no `openid`, loopback `http://127.0.0.1:<port>/oauth-callback`
+redirect URL paste step). Project discovery calls `POST /v1internal:loadCodeAssist` with
+`{ ideType: 9, platform, pluginType: 2 }`, caching `cloudaicompanionProject` on the provider row
+and calling `onboardUser` only for a separate OAuth login with no project. Requests send
+`Authorization: Bearer <token>`, `x-goog-user-project`, and the real host's CLI User-Agent
+`antigravity/cli/<ver> (aidev_client; os_type=...; arch=...; auth_method=consumer)` (version
+resolved once from `agy --version` or `DEFAULT_ANTIGRAVITY_CLI_VERSION = '1.2.6'`; verified
+empirically that `os_type=linux; arch=x86_64` is accepted). Because Cloud Code Assist filters or
+429s large custom `systemInstruction` payloads and Claude/Anthropic identity strings,
+`PlannerChatService.buildTurnContext` (`injectSystemIntoUserTurns`) places `basePlannerSystemPrompt`
++ persona into the first user message and per-turn dynamic memories into the last user message on
+`antigravity-oauth` while `buildAntigravityGeminiRequest` sets `systemInstruction` to
+`ANTIGRAVITY_DEFAULT_SYSTEM`, keeping `contents[0]` and all prior turns byte-identical across turns
+for Gemini implicit context caching. Tool schemas are cleaned by `cleanJSONSchemaForAntigravity`
+(`$ref` inlined, `anyOf`/`oneOf` flattened, unsupported keywords stripped while server-side
+`prepareToolArguments` still validates against the original schema), and Gemini 3
+`thoughtSignature` on `functionCall` parts is persisted on `ToolUseEvent.thoughtSignature` and
+replayed across tool loops and approval pauses (falling back to `"skip_thought_signature_validator"`
+only for legacy history). Model discovery calls `POST /v1internal:fetchAvailableModels` (returning
+each model's real API key, e.g. `gemini-3.7-flash-high` or `fable-2.0`, with static fallback),
+`GET /api/planner/providers/:id/usage` reads `remainingFraction` / `resetTime` from
+`fetchAvailableModels` and `/v1internal:retrieveUserQuota`, `ANTIGRAVITY_OAUTH_PROVIDER_DISCLOSURE`
+is shown on every chat, `allowUnattended` (off by default) gates unattended triggers, and
+`PlannerProviderTemplatePayload` rejects `antigravity-oauth`.
+
 **Images** (`image-budget.ts`, both sides). The browser downscales an attachment to at most
 2000×2000 and ~4.5 MB of base64 (`apps/web/src/agent/image-budget.ts`) rather than refusing
 photos over 5 MB — on the client because the server has no image library and `sharp` would be

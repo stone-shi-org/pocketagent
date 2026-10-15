@@ -43,14 +43,16 @@ export interface ModelLimits {
 const KNOWN_MODEL_WINDOWS: ReadonlyArray<readonly [RegExp, number, number]> = [
   [/^claude-.*\[1m\]/, 1_000_000, 64_000],
   [/^claude-/, 200_000, 32_000],
+  [/^opus-/, 200_000, 32_000],
   [/^gpt-4\.1/, 1_047_576, 32_768],
   [/^gpt-[56]/, 400_000, 128_000],
+  [/^gpt-oss-120b/, 131_072, 32_768],
   [/^gpt-4o/, 128_000, 16_384],
   [/^gpt-4-turbo/, 128_000, 4_096],
   [/^gpt-4/, 8_192, 4_096],
   [/^gpt-3\.5/, 16_385, 4_096],
   [/^o[134](-|$)/, 200_000, 100_000],
-  [/^gemini-/, 1_048_576, 65_536],
+  [/^(gemini-|fable-|auto$)/, 1_048_576, 65_536],
   // V4 (flash and pro): 1M context, 384k output — omniroute's /v1/models and
   // DeepSeek's own catalog both report it. Earlier DeepSeek models keep the
   // family default below.

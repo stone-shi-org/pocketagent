@@ -88,6 +88,13 @@ import { DocWorkspaceNotFoundError, DocWorkspaceValidationError } from '../doc-w
 import { PlannerWorkspaceError } from '../planner/workspaces.js';
 import { PlannerChatError } from '../planner/chats.js';
 import {
+  exchangeAntigravityOAuthCode,
+  fetchAntigravityOAuthUsage,
+  hasLocalAgyCliToken,
+  importLocalAgyCliTokenForProvider,
+  startAntigravityOAuthAuthorization,
+} from '../planner/antigravity-oauth.js';
+import {
   exchangeClaudeOAuthCode,
   fetchClaudeOAuthUsage,
   startClaudeOAuthAuthorization,
@@ -115,9 +122,11 @@ import { SpokenTextPipeline } from '../voice/spoken-text-pipeline.js';
 import { TurnTtsPump } from '../voice/turn-tts-pump.js';
 import type { Config } from '../config/index.js';
 import {
+  DEFAULT_ANTIGRAVITY_OAUTH_BASE_URL,
   DEFAULT_CLAUDE_OAUTH_BASE_URL,
   DEFAULT_CODEX_OAUTH_BASE_URL,
   PlannerProviderStoreError,
+  decryptAntigravityOAuthCredentials,
   decryptCodexOAuthCredentials,
   deleteAllPlannerModels,
   deletePlannerModel,
@@ -598,6 +607,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const response: PlannerProviderListResponse = {
       providers: readPlannerProviders(db).map((p) => toPlannerProviderDto(p, config.settingsEncKey)),
       encryptionAvailable: config.settingsEncKey !== undefined,
+      hasLocalAgyAuth: hasLocalAgyCliToken(),
     };
     return response;
   });
@@ -616,7 +626,9 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
           ? DEFAULT_CLAUDE_OAUTH_BASE_URL
           : kind === 'codex-oauth'
             ? DEFAULT_CODEX_OAUTH_BASE_URL
-            : '');
+            : kind === 'antigravity-oauth'
+              ? DEFAULT_ANTIGRAVITY_OAUTH_BASE_URL
+              : '');
       let secretCiphertext: string | null = null;
       let lastTestedAt: number | null = null;
 
@@ -653,6 +665,10 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
             lastTestedAt = Date.now();
           }
         }
+      } else if (kind === 'antigravity-oauth') {
+        if (parsed.data.authMode === 'cli-import') {
+          requirePlannerProviderEncKey(config.settingsEncKey);
+        }
       } else {
         const trimmedKey = (parsed.data.apiKey ?? '').trim();
         secretCiphertext =
@@ -661,7 +677,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
             : null;
       }
 
-      const row = insertPlannerProvider(db, {
+      let row = insertPlannerProvider(db, {
         id: crypto.randomUUID(),
         label: parsed.data.label.trim(),
         kind,
@@ -672,6 +688,19 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
         createdAt: Date.now(),
         lastTestedAt,
       });
+      if (kind === 'antigravity-oauth' && parsed.data.authMode === 'cli-import') {
+        try {
+          row = await importLocalAgyCliTokenForProvider({
+            db,
+            providerId: row.id,
+            encKey: config.settingsEncKey,
+            ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
+          });
+        } catch (err) {
+          deletePlannerProvider(db, row.id);
+          throw err;
+        }
+      }
       auditConfigChange(request, 'planner provider created', {
         provider: row.id,
         label: row.label,
@@ -748,6 +777,19 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
             hasNewSecret = true;
           }
         }
+      } else if (existing.kind === 'antigravity-oauth') {
+        if (parsed.data.authMode === 'cli-import') {
+          requirePlannerProviderEncKey(config.settingsEncKey);
+          hasNewSecret = true;
+        } else if (parsed.data.authMode === 'oauth') {
+          const { credentials } = existing.secretCiphertext
+            ? decryptAntigravityOAuthCredentials(existing, config.settingsEncKey)
+            : { credentials: null };
+          if (credentials?.mode === 'cli-import') {
+            secretPatch = { secretCiphertext: null };
+            hasNewSecret = true;
+          }
+        }
       } else {
         const trimmedKey = (parsed.data.apiKey ?? '').trim();
         if (trimmedKey.length > 0) {
@@ -762,7 +804,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
         parsed.data.baseUrl !== undefined || parsed.data.clearApiKey === true || hasNewSecret
           ? { lastError: null as string | null }
           : {};
-      const updated = updatePlannerProvider(db, id, {
+      let updated = updatePlannerProvider(db, id, {
         ...(parsed.data.label !== undefined ? { label: parsed.data.label.trim() } : {}),
         ...(parsed.data.baseUrl !== undefined ? { baseUrl: parsed.data.baseUrl.trim() } : {}),
         ...(parsed.data.allowUnattended !== undefined
@@ -772,6 +814,14 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
         ...resetError,
       });
       if (!updated) return notFound(reply, 'Provider not found.');
+      if (existing.kind === 'antigravity-oauth' && parsed.data.authMode === 'cli-import' && parsed.data.clearApiKey !== true) {
+        updated = await importLocalAgyCliTokenForProvider({
+          db,
+          providerId: id,
+          encKey: config.settingsEncKey,
+          ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
+        });
+      }
       auditConfigChange(request, 'planner provider updated', {
         provider: id,
         fields: Object.keys(parsed.data),
@@ -786,17 +836,47 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
+  app.post('/api/planner/providers/:id/antigravity/import-cli', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { db, config, plannerChats } = app.pocket;
+    const provider = readPlannerProvider(db, id);
+    if (!provider) return notFound(reply, 'Provider not found.');
+    if (provider.kind !== 'antigravity-oauth') {
+      return badRequest(reply, 'Antigravity CLI import is only supported for antigravity-oauth providers.');
+    }
+    try {
+      requirePlannerProviderEncKey(config.settingsEncKey);
+      const updated = await importLocalAgyCliTokenForProvider({
+        db,
+        providerId: id,
+        encKey: config.settingsEncKey,
+        ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
+      });
+      auditConfigChange(request, 'planner provider antigravity cli imported', {
+        provider: id,
+        authMode: 'cli-import',
+      });
+      const dto: PlannerProvider = toPlannerProviderDto(updated, config.settingsEncKey);
+      return noStore(reply).send(dto);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
   app.post('/api/planner/providers/:id/oauth/authorize', async (request, reply) => {
     const { id } = request.params as { id: string };
     const { db, config } = app.pocket;
     const provider = readPlannerProvider(db, id);
     if (!provider) return notFound(reply, 'Provider not found.');
-    if (provider.kind !== 'claude-oauth') {
-      return badRequest(reply, 'OAuth sign-in is only supported for claude-oauth providers.');
+    if (provider.kind !== 'claude-oauth' && provider.kind !== 'antigravity-oauth') {
+      return badRequest(reply, 'OAuth sign-in is only supported for claude-oauth and antigravity-oauth providers.');
     }
     try {
       requirePlannerProviderEncKey(config.settingsEncKey);
-      const response: ClaudeOAuthAuthorizeResponse = startClaudeOAuthAuthorization(id);
+      const response: ClaudeOAuthAuthorizeResponse =
+        provider.kind === 'antigravity-oauth'
+          ? startAntigravityOAuthAuthorization(id)
+          : startClaudeOAuthAuthorization(id);
       return noStore(reply).send(response);
     } catch (err) {
       return mapChatError(reply, err);
@@ -812,11 +892,27 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const { db, config, plannerChats } = app.pocket;
     const provider = readPlannerProvider(db, id);
     if (!provider) return notFound(reply, 'Provider not found.');
-    if (provider.kind !== 'claude-oauth') {
-      return badRequest(reply, 'OAuth code exchange is only supported for claude-oauth providers.');
+    if (provider.kind !== 'claude-oauth' && provider.kind !== 'antigravity-oauth') {
+      return badRequest(reply, 'OAuth code exchange is only supported for claude-oauth and antigravity-oauth providers.');
     }
     try {
       requirePlannerProviderEncKey(config.settingsEncKey);
+      if (provider.kind === 'antigravity-oauth') {
+        const updated = await exchangeAntigravityOAuthCode({
+          db,
+          providerId: id,
+          code: parsed.data.code,
+          ...(parsed.data.state ? { state: parsed.data.state } : {}),
+          encKey: config.settingsEncKey,
+          ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
+        });
+        auditConfigChange(request, 'planner provider antigravity oauth connected', {
+          provider: id,
+          authMode: 'oauth',
+        });
+        const dto: PlannerProvider = toPlannerProviderDto(updated, config.settingsEncKey);
+        return noStore(reply).send(dto);
+      }
       const creds = await exchangeClaudeOAuthCode({
         providerId: id,
         rawCode: parsed.data.code,
@@ -948,7 +1044,19 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       });
       return noStore(reply).send(response);
     }
-    return badRequest(reply, 'Subscription usage is only supported for claude-oauth and codex-oauth providers.');
+    if (provider.kind === 'antigravity-oauth') {
+      const response: ClaudeProviderUsageResponse = await fetchAntigravityOAuthUsage({
+        db,
+        providerId: id,
+        encKey: config.settingsEncKey,
+        ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
+      });
+      return noStore(reply).send(response);
+    }
+    return badRequest(
+      reply,
+      'Subscription usage is only supported for claude-oauth, codex-oauth, and antigravity-oauth providers.',
+    );
   });
 
   app.delete('/api/planner/providers/:id', async (request, reply) => {

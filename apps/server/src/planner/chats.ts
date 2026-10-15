@@ -14,6 +14,7 @@ import {
   type PlannerChat,
   type PlannerContextPreviewResponse,
   type PlannerMemory,
+  type PlannerProviderKind,
   type PlannerSystemPromptSection,
   type PlannerToolApprovalChoice,
   type SessionInfo,
@@ -36,9 +37,12 @@ import type { WebhookService } from '../webhooks/index.js';
 import type { CronService } from '../cron/index.js';
 import type { PlannerWorkspaceRegistry, PlannerWorkspaceRow } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
+import { sanitizeCompetingIdentity } from './antigravity-gemini-translator.js';
+import { AntigravityOAuthPlannerProvider } from './antigravity-oauth.js';
 import { ClaudeOAuthPlannerProvider } from './claude-oauth.js';
 import { CodexOAuthPlannerProvider } from './codex-oauth.js';
 import {
+  decryptAntigravityOAuthCredentials,
   decryptClaudeOAuthCredentials,
   decryptCodexOAuthCredentials,
   decryptPlannerProviderSecret,
@@ -2098,6 +2102,25 @@ export class PlannerChatService {
         ...(opts.retry === false ? { retry: { maxRetries: 0 } } : this.opts.llmRetry ? { retry: this.opts.llmRetry } : {}),
       });
     }
+    if (provider.kind === 'antigravity-oauth') {
+      const { credentials, error } = decryptAntigravityOAuthCredentials(provider, this.opts.config?.settingsEncKey);
+      if (error !== null) {
+        throw new PlannerChatError(error, 'not_configured');
+      }
+      if (!credentials || (!credentials.accessToken && !credentials.refreshToken)) {
+        throw new PlannerChatError(
+          `Antigravity provider "${provider.label}" has no credentials configured. Use the signed-in Antigravity CLI or sign in with Google OAuth in Settings → Providers & Models.`,
+          'not_configured',
+        );
+      }
+      return new AntigravityOAuthPlannerProvider({
+        db: this.opts.db,
+        providerId: provider.id,
+        encKey: this.opts.config?.settingsEncKey,
+        ...(this.opts.llmFetch ? { fetchImpl: this.opts.llmFetch } : {}),
+        ...(opts.retry === false ? { retry: { maxRetries: 0 } } : this.opts.llmRetry ? { retry: this.opts.llmRetry } : {}),
+      });
+    }
     if (!provider.baseUrl) {
       throw new PlannerChatError('Planner LLM endpoint is not configured.', 'not_configured');
     }
@@ -2829,7 +2852,13 @@ export class PlannerChatService {
       inliner.reset();
       return this.withFinalSummaryPrompt(
         budgetContextPdfs(
-          budgetContextImages(await this.buildTurnContext(chat, workspacePath, settings, events, { inliner }), imageBudget),
+          budgetContextImages(
+            await this.buildTurnContext(chat, workspacePath, settings, events, {
+              inliner,
+              providerKind: resolved.provider?.kind,
+            }),
+            imageBudget,
+          ),
         ),
         finalSummary,
       );
@@ -2918,17 +2947,28 @@ export class PlannerChatService {
       yield* this.finishTurn(chat, workspacePath, modelId, '', true, stats);
       return;
     }
+    if (resolved.provider.kind === 'antigravity-oauth' && !apiKey) {
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'notice',
+        level: 'error',
+        text: `Antigravity provider "${resolved.provider.label}" has no credentials configured. Use the signed-in Antigravity CLI or sign in with Google OAuth in Settings → Providers & Models.`,
+      });
+      yield* this.finishTurn(chat, workspacePath, modelId, '', true, stats);
+      return;
+    }
     const client = this.clientForProvider(resolved.provider);
 
-    // PA-122 / PA-149: Anthropic-style cache breakpoints, for a model whose
+    // PA-122 / PA-149 / PA-151: Anthropic-style cache breakpoints, for a model whose
     // caching is on (always on by default for `claude-oauth` unless the row
     // explicitly sets `promptCaching: false`) and whose endpoint has not
     // refused them earlier in this turn. `codex-oauth` uses `prompt_cache_key`
-    // and `session_id` natively instead. The unmarked `messages` are kept for
-    // the estimate and the calibration, so the markers never change what we
-    // think the prompt weighs.
+    // and `session_id` natively instead, and `antigravity-oauth` uses Gemini
+    // prefix caching with stable user-turn system prefixes. The unmarked
+    // `messages` are kept for the estimate and the calibration, so the markers
+    // never change what we think the prompt weighs.
     const cacheControl =
       resolved.provider.kind !== 'codex-oauth' &&
+      resolved.provider.kind !== 'antigravity-oauth' &&
       (resolved.provider.kind === 'claude-oauth'
         ? modelRow?.promptCaching !== false
         : resolvePromptCaching(wireModelId, modelRow?.promptCaching)) &&
@@ -3203,6 +3243,7 @@ export class PlannerChatService {
         input: args,
         summary: summarizeToolCall(call.function.name, args),
         filePath: extractFilePath(args),
+        ...(call.thoughtSignature ? { thoughtSignature: call.thoughtSignature } : {}),
       });
     }
 
@@ -4119,6 +4160,12 @@ export class PlannerChatService {
         'not_configured',
       );
     }
+    if (resolved.provider.kind === 'antigravity-oauth' && !apiKey) {
+      throw new PlannerChatError(
+        `Antigravity provider "${resolved.provider.label}" has no credentials configured. Use the signed-in Antigravity CLI or sign in with Google OAuth in Settings → Providers & Models.`,
+        'not_configured',
+      );
+    }
     return resolved.row ? resolved.row.id : candidate;
   }
 
@@ -4543,7 +4590,7 @@ export class PlannerChatService {
     workspacePath: string,
     settings: PlannerSettingsSnapshot,
     events: readonly AgentEvent[],
-    opts: { dryRun?: boolean; inliner?: AttachmentInliner } = {},
+    opts: { dryRun?: boolean; inliner?: AttachmentInliner; providerKind?: PlannerProviderKind } = {},
   ): Promise<PlannerChatMessage[]> {
     const memoryEnabled = this.memoryEnabledFor(chat.workspaceId);
     const build = { ...(opts.inliner ? { inliner: opts.inliner } : {}) };
@@ -4574,6 +4621,20 @@ export class PlannerChatService {
     const workspace = chat.workspaceId ? this.opts.plannerWorkspaces.get(chat.workspaceId) : undefined;
     const docWorkspace = chat.docWorkspaceId ? this.opts.docWorkspaces?.get(chat.docWorkspaceId) ?? null : null;
     const brief = docWorkspace ? this.opts.docWorkspaces?.readBriefForPrompt(docWorkspace.id)?.content ?? null : null;
+    if (opts.providerKind === 'antigravity-oauth') {
+      // PA-151: Code Assist returns 429 on large client `systemInstruction` payloads and
+      // requires Antigravity's own short system prompt in `systemInstruction`. Move Pocket
+      // Agent's stable system prompt (base prompt + persona + workspace brief) to the start
+      // of the first user turn so `contents[0]` and all completed turns remain byte-identical
+      // across turns for Gemini's implicit prefix cache, and attach turn-ranked dynamic
+      // memories to the latest user turn so re-ranking never invalidates earlier cached turns.
+      const stableSystem = sanitizeCompetingIdentity(
+        buildSystemMessage(workspace ?? null, settings, [], workspacePath, docWorkspace, brief),
+      ).trim();
+      const dynamicMemories =
+        memories.length > 0 ? sanitizeCompetingIdentity(buildMemorySystemMessage(memories)).trim() : '';
+      return injectSystemIntoUserTurns(history, stableSystem, dynamicMemories);
+    }
     return [
       {
         role: 'system',
@@ -4608,6 +4669,7 @@ export class PlannerChatService {
     signal?: AbortSignal,
   ): AsyncGenerator<AgentEvent, CompactionOutcome> {
     const settings = readPlannerSettings(this.opts.db);
+    const resolved = resolvePlannerModel(this.opts.db, modelId);
     const limits = this.modelLimits(modelId);
     const threshold = compactionThreshold(limits.contextWindow, settings.compactionReserveTokens);
     // An overflow means the estimate was wrong — the provider has just said
@@ -4623,7 +4685,10 @@ export class PlannerChatService {
       this.calibration.apply(
         chat.id,
         estimateRequestTokens(
-          await this.buildTurnContext(chat, workspacePath, { ...settings, compactionEnabled: true }, evts, { dryRun: true }),
+          await this.buildTurnContext(chat, workspacePath, { ...settings, compactionEnabled: true }, evts, {
+            dryRun: true,
+            ...(resolved.provider?.kind ? { providerKind: resolved.provider.kind } : {}),
+          }),
           toolSpecs,
         ),
       );
@@ -4666,7 +4731,6 @@ export class PlannerChatService {
         ),
       },
     ];
-    const resolved = resolvePlannerModel(this.opts.db, modelId);
     const modelRow = resolved.row;
     const wireModelId = resolved.modelId;
     const startedAt = Date.now();
@@ -5140,6 +5204,7 @@ export function eventsToLlmMessages(
           id: event.id,
           type: 'function',
           function: { name: event.name, arguments: JSON.stringify(cleanInput) },
+          ...(event.thoughtSignature ? { thoughtSignature: event.thoughtSignature } : {}),
         });
         break;
       }
@@ -5260,6 +5325,67 @@ function lastUserPromptText(events: readonly AgentEvent[]): string {
     if (event.kind === 'user_prompt') return event.text;
   }
   return '';
+}
+
+/**
+ * PA-151: Prepend text to a user message (`string` or multimodal array).
+ */
+function prependTextToUserMessage(
+  msg: Extract<PlannerChatMessage, { role: 'user' }>,
+  prefix: string,
+): Extract<PlannerChatMessage, { role: 'user' }> {
+  if (!prefix) return msg;
+  if (typeof msg.content === 'string') {
+    return { ...msg, content: msg.content ? `${prefix}\n\n${msg.content}` : prefix };
+  }
+  return { ...msg, content: [{ type: 'text', text: prefix }, ...msg.content] };
+}
+
+/**
+ * PA-151: Places Pocket Agent's stable system prompt at the start of the first
+ * user turn (`contents[0]`) and turn-ranked dynamic memories at the start of
+ * the latest user turn so completed turns remain byte-identical across turns
+ * for Gemini's implicit prefix cache on `antigravity-oauth`.
+ */
+function injectSystemIntoUserTurns(
+  history: readonly PlannerChatMessage[],
+  stableSystem: string,
+  dynamicMemories: string,
+): PlannerChatMessage[] {
+  const firstUserIdx = history.findIndex((m) => m.role === 'user');
+  let lastUserIdx = -1;
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i]!.role === 'user') {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (firstUserIdx === -1) {
+    const combined = [stableSystem, dynamicMemories].filter(Boolean).join('\n\n');
+    return combined ? [{ role: 'user', content: combined }, ...history] : [...history];
+  }
+  const result = [...history];
+  if (firstUserIdx === lastUserIdx) {
+    const combined = [stableSystem, dynamicMemories].filter(Boolean).join('\n\n');
+    result[firstUserIdx] = prependTextToUserMessage(
+      result[firstUserIdx] as Extract<PlannerChatMessage, { role: 'user' }>,
+      combined,
+    );
+    return result;
+  }
+  if (stableSystem) {
+    result[firstUserIdx] = prependTextToUserMessage(
+      result[firstUserIdx] as Extract<PlannerChatMessage, { role: 'user' }>,
+      stableSystem,
+    );
+  }
+  if (dynamicMemories) {
+    result[lastUserIdx] = prependTextToUserMessage(
+      result[lastUserIdx] as Extract<PlannerChatMessage, { role: 'user' }>,
+      dynamicMemories,
+    );
+  }
+  return result;
 }
 
 /**

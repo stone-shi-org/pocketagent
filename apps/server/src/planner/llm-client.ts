@@ -8,6 +8,11 @@ export interface PlannerLlmToolCall {
   id: string;
   type: 'function';
   function: { name: string; arguments: string };
+  /**
+   * PA-151: Gemini / Antigravity `thoughtSignature` returned on a `functionCall`
+   * part and replayed on subsequent turns.
+   */
+  thoughtSignature?: string;
 }
 
 /** PA-122: Anthropic's prompt-caching breakpoint, as Anthropic-compatible

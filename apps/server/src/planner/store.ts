@@ -10,6 +10,7 @@ import type {
   PlannerProviderKind,
 } from '@pocketagent/protocol';
 import {
+  ANTIGRAVITY_OAUTH_PROVIDER_DISCLOSURE,
   CLAUDE_OAUTH_PROVIDER_DISCLOSURE,
   CODEX_OAUTH_PROVIDER_DISCLOSURE,
   DEFAULT_INLINE_EXTRACT_MAX_TOKENS,
@@ -308,6 +309,7 @@ export const DEFAULT_PLANNER_PROVIDER_ID = 'default';
 export const DEFAULT_PLANNER_PROVIDER_LABEL = 'Default';
 export const DEFAULT_CLAUDE_OAUTH_BASE_URL = 'https://api.anthropic.com';
 export const DEFAULT_CODEX_OAUTH_BASE_URL = 'https://chatgpt.com/backend-api/codex';
+export const DEFAULT_ANTIGRAVITY_OAUTH_BASE_URL = 'https://daily-cloudcode-pa.googleapis.com';
 
 export interface ClaudeOAuthStoredCredentials {
   mode: PlannerProviderAuthMode;
@@ -328,6 +330,22 @@ export interface CodexOAuthStoredCredentials {
   planType?: string | null;
   accountEmail?: string | null;
   organizationName?: string | null;
+}
+
+export interface AntigravityOAuthStoredCredentials {
+  mode: 'cli-import' | 'oauth';
+  accessToken?: string | null;
+  refreshToken?: string | null;
+  expiresAt?: number | null;
+  /** Cached Code Assist project ID (`cloudaicompanionProject`) from `loadCodeAssist` / `onboardUser`. */
+  projectId?: string | null;
+  /** True when `loadCodeAssist` reported `gcpManaged: true`. */
+  gcpManaged?: boolean | null;
+  /** True when `x-goog-user-project` should be omitted on requests (e.g. `gcpManaged` or after a 403). */
+  omitUserProjectHeader?: boolean | null;
+  accountEmail?: string | null;
+  planType?: string | null;
+  rateLimitTier?: string | null;
 }
 
 export class PlannerProviderStoreError extends Error {
@@ -370,6 +388,7 @@ interface PlannerProviderDbRow {
 function toProviderKind(raw: string | null | undefined): PlannerProviderKind {
   if (raw === 'claude-oauth') return 'claude-oauth';
   if (raw === 'codex-oauth') return 'codex-oauth';
+  if (raw === 'antigravity-oauth') return 'antigravity-oauth';
   return 'openai-compatible';
 }
 
@@ -547,6 +566,74 @@ export function encryptCodexOAuthCredentials(
   return encryptSecret(JSON.stringify(normalized), requirePlannerProviderEncKey(encKey));
 }
 
+export function decryptAntigravityOAuthCredentials(
+  provider: PlannerProviderRow,
+  encKey: Buffer | undefined,
+): { credentials: AntigravityOAuthStoredCredentials | null; error: string | null } {
+  if (!provider.secretCiphertext) return { credentials: null, error: null };
+  if (encKey === undefined) {
+    return {
+      credentials: null,
+      error: `Set ${SETTINGS_ENC_KEY_VAR} to decrypt this provider's credentials.`,
+    };
+  }
+  let raw: string;
+  try {
+    raw = decryptSecret(provider.secretCiphertext, encKey);
+  } catch {
+    return {
+      credentials: null,
+      error: `Could not decrypt this provider's credentials with the configured ${SETTINGS_ENC_KEY_VAR}. Re-import or sign in again in Settings to repair it.`,
+    };
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<AntigravityOAuthStoredCredentials>;
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      (parsed.mode === 'cli-import' || parsed.mode === 'oauth')
+    ) {
+      return {
+        credentials: {
+          mode: parsed.mode,
+          accessToken: typeof parsed.accessToken === 'string' && parsed.accessToken.trim() ? parsed.accessToken.trim() : null,
+          refreshToken: typeof parsed.refreshToken === 'string' && parsed.refreshToken.trim() ? parsed.refreshToken.trim() : null,
+          expiresAt: typeof parsed.expiresAt === 'number' ? parsed.expiresAt : null,
+          projectId: typeof parsed.projectId === 'string' && parsed.projectId.trim() ? parsed.projectId.trim() : null,
+          gcpManaged: typeof parsed.gcpManaged === 'boolean' ? parsed.gcpManaged : null,
+          omitUserProjectHeader: typeof parsed.omitUserProjectHeader === 'boolean' ? parsed.omitUserProjectHeader : null,
+          accountEmail: typeof parsed.accountEmail === 'string' ? parsed.accountEmail : null,
+          planType: typeof parsed.planType === 'string' ? parsed.planType : null,
+          rateLimitTier: typeof parsed.rateLimitTier === 'string' ? parsed.rateLimitTier : null,
+        },
+        error: null,
+      };
+    }
+  } catch {
+    // Fall through
+  }
+  return { credentials: null, error: 'Stored Antigravity provider credentials are invalid.' };
+}
+
+export function encryptAntigravityOAuthCredentials(
+  creds: AntigravityOAuthStoredCredentials,
+  encKey: Buffer | undefined,
+): string {
+  const normalized: AntigravityOAuthStoredCredentials = {
+    mode: creds.mode,
+    accessToken: creds.accessToken ? creds.accessToken.trim() : null,
+    refreshToken: creds.refreshToken ? creds.refreshToken.trim() : null,
+    expiresAt: creds.expiresAt ?? null,
+    projectId: creds.projectId ? creds.projectId.trim() : null,
+    gcpManaged: creds.gcpManaged ?? null,
+    omitUserProjectHeader: creds.omitUserProjectHeader ?? null,
+    accountEmail: creds.accountEmail ?? null,
+    planType: creds.planType ?? null,
+    rateLimitTier: creds.rateLimitTier ?? null,
+  };
+  return encryptSecret(JSON.stringify(normalized), requirePlannerProviderEncKey(encKey));
+}
+
 export function decryptPlannerProviderSecret(
   provider: PlannerProviderRow,
   encKey: Buffer | undefined,
@@ -564,6 +651,10 @@ export function decryptPlannerProviderSecret(
       return { apiKey: cli.accessToken, error: null };
     }
     return { apiKey: credentials?.accessToken ?? null, error: null };
+  }
+  if (provider.kind === 'antigravity-oauth') {
+    const { credentials, error } = decryptAntigravityOAuthCredentials(provider, encKey);
+    return { apiKey: credentials?.accessToken ?? credentials?.refreshToken ?? null, error };
   }
   if (!provider.secretCiphertext) return { apiKey: null, error: null };
   if (encKey === undefined) {
@@ -659,6 +750,32 @@ export function toPlannerProviderDto(row: PlannerProviderRow, encKey?: Buffer): 
       rateLimitTier: credentials?.planType ?? null,
       tokenExpiresAt: credentials?.expiresAt ?? null,
       providerDisclosure: CODEX_OAUTH_PROVIDER_DISCLOSURE,
+    };
+  }
+  if (row.kind === 'antigravity-oauth') {
+    const { credentials, error } = row.secretCiphertext
+      ? decryptAntigravityOAuthCredentials(row, encKey)
+      : { credentials: null, error: null };
+    return {
+      id: row.id,
+      label: row.label,
+      kind: row.kind,
+      baseUrl: row.baseUrl,
+      hasApiKey: Boolean(credentials?.accessToken || credentials?.refreshToken),
+      keyUnreadable: error !== null,
+      allowUnattended: row.allowUnattended,
+      sortOrder: row.sortOrder,
+      createdAt: row.createdAt,
+      lastTestedAt: row.lastTestedAt,
+      lastError: row.lastError ?? error,
+      authMode: credentials?.mode ?? null,
+      accountEmail: credentials?.accountEmail ?? null,
+      accountId: credentials?.projectId ?? null,
+      planType: credentials?.planType ?? null,
+      organizationName: null,
+      rateLimitTier: credentials?.rateLimitTier ?? credentials?.planType ?? null,
+      tokenExpiresAt: credentials?.expiresAt ?? null,
+      providerDisclosure: ANTIGRAVITY_OAUTH_PROVIDER_DISCLOSURE,
     };
   }
   const decryptStatus = row.secretCiphertext
