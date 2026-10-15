@@ -1835,7 +1835,7 @@ location**, the same place it lands when you run the installer yourself:
 | --- | --- | --- | --- |
 | Claude Code | `https://claude.ai/install.sh` | `~/.local/share/claude/versions/`, linked from `~/.local/bin/claude` | `claude update` |
 | Codex | `https://chatgpt.com/codex/install.sh` | `~/.codex/packages/standalone/`, linked from `~/.local/bin/codex` | the installer again (updates in place) |
-| opencode | `https://opencode.ai/install` | `~/.opencode/bin/opencode` | the installer again (updates in place) |
+| opencode | `https://opencode.ai/v2/install` | `~/.opencode/bin/opencode` | the installer again (updates in place) |
 | Antigravity CLI | `https://antigravity.google/cli/install.sh` | `~/.local/bin/agy` | `agy update` |
 | pi | `https://pi.dev/install.sh` | `~/.pi/agent/`, linked from `~/.local/bin/pi` | `pi update --self` |
 

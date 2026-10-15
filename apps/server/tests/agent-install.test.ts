@@ -183,7 +183,7 @@ describe('agent install catalog', () => {
     expect(bySource).toEqual({
       claude: 'https://claude.ai/install.sh',
       codex: 'https://chatgpt.com/codex/install.sh',
-      opencode: 'https://opencode.ai/install',
+      opencode: 'https://opencode.ai/v2/install',
       agy: 'https://antigravity.google/cli/install.sh',
       pi: 'https://pi.dev/install.sh',
     });

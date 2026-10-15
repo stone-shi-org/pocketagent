@@ -112,6 +112,16 @@ describe('checkAgentLatestVersion', () => {
     expect(asked).toEqual(['@openai/codex']);
     expect(result).toEqual({ latestVersion: '0.157.0', hasUpdate: true });
   });
+
+  it('reads opencode v2 latest from @opencode/cli (PA-153)', async () => {
+    const asked: string[] = [];
+    const result = await checkAgentLatestVersion('opencode', '2.0.14', async (pkg) => {
+      asked.push(pkg);
+      return '2.0.29';
+    });
+    expect(asked).toEqual(['@opencode/cli']);
+    expect(result).toEqual({ latestVersion: '2.0.29', hasUpdate: true });
+  });
 });
 
 describe('refreshAgentVersions & probeAndRecordAgentVersion', () => {

@@ -24,10 +24,10 @@
     },
     {
       "customType": "regex",
-      "description": "opencode image pin (docker/agent-versions.env). Installed by opencode.ai/install --version, which takes the same release number npm publishes.",
+      "description": "opencode image pin (docker/agent-versions.env). Installed by opencode.ai/v2/install --version, which takes the same release number npm publishes.",
       "fileMatch": ["^docker/agent-versions\\.env$"],
       "matchStrings": ["OPENCODE_VERSION=(?<currentValue>[0-9.]+)"],
-      "depNameTemplate": "opencode-ai",
+      "depNameTemplate": "@opencode/cli",
       "datasourceTemplate": "npm",
       "groupName": "opencode agent pin"
     },

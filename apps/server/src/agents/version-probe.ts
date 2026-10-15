@@ -136,7 +136,8 @@ export async function checkAgentLatestVersion(
     return { latestVersion: null, hasUpdate: false };
   }
   const entry = catalogEntry(agentId);
-  const versionSource = entry.method === 'npm' ? entry.packageName : entry.legacyNpmPackage;
+  const versionSource =
+    entry.method === 'npm' ? entry.packageName : (entry.npmVersionPackage ?? entry.legacyNpmPackage);
   if (versionSource === null) return { latestVersion: null, hasUpdate: false };
   let latest = await npmFetcher(versionSource);
   if (!latest && entry.method === 'npm') {

@@ -108,6 +108,12 @@ export interface OfficialScriptEntry {
    */
   legacyNpmPackage: string | null;
   /**
+   * Optional npm package publishing the current release numbers when it differs
+   * from `legacyNpmPackage` (PA-153: opencode v2 publishes `@opencode/cli` while
+   * pre-PA-104 prefix installs used `opencode-ai`).
+   */
+  npmVersionPackage?: string | null;
+  /**
    * Directories under `$HOME` the installer or update writes, checked for
    * writability before anything runs (`homeWritabilityProblem`). Read off each
    * script and from what a real run created.
@@ -194,18 +200,18 @@ const CATALOG: Readonly<Record<InstallableAgentId, CatalogEntry>> = Object.freez
     method: 'official-script',
     displayName: 'opencode',
     binName: 'opencode',
-    scriptUrl: 'https://opencode.ai/install',
+    scriptUrl: 'https://opencode.ai/v2/install',
     interpreter: 'bash',
     supportedPlatforms: ['linux', 'darwin'],
     installArgs: [],
     imageInstallArgs: (version) => ['--version', version],
     imagePinVar: 'OPENCODE_VERSION',
     env: {},
-    // The installer exits early when the requested version is already
-    // installed, and otherwise replaces `~/.opencode/bin/opencode` in place.
+    // The installer replaces `~/.opencode/bin/opencode` in place.
     update: { kind: 'script', description: 'Re-runs the official installer, which replaces ~/.opencode/bin/opencode in place.' },
     officialPathFragments: ['/.opencode/bin/opencode'],
     legacyNpmPackage: 'opencode-ai',
+    npmVersionPackage: '@opencode/cli',
     homeDirs: ['.opencode', '.local', '.local/share', '.local/state', '.config', '.cache'],
     selfUpdating: true,
     notes: [

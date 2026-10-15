@@ -412,7 +412,7 @@ RUN test -n "${CODEX_VERSION}" && test -n "${OPENCODE_VERSION}" \
     && A="$AGENT_IMAGE_HOME" \
     && curl -fsSL --compressed https://chatgpt.com/codex/install.sh -o /tmp/codex-install.sh \
     && env -u NPM_CONFIG_PREFIX HOME="$A" CODEX_NON_INTERACTIVE=1 sh /tmp/codex-install.sh --release "${CODEX_VERSION}" \
-    && curl -fsSL --compressed https://opencode.ai/install -o /tmp/opencode-install.sh \
+    && curl -fsSL --compressed https://opencode.ai/v2/install -o /tmp/opencode-install.sh \
     && env -u NPM_CONFIG_PREFIX HOME="$A" bash /tmp/opencode-install.sh --version "${OPENCODE_VERSION}" --no-modify-path \
     && curl -fsSL --compressed https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh \
     && env -u NPM_CONFIG_PREFIX HOME="$A" bash /tmp/agy-install.sh \
