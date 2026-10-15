@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   CLAUDE_OAUTH_PROVIDER_DISCLOSURE,
+  CODEX_OAUTH_PROVIDER_DISCLOSURE,
   type ClaudeOAuthAuthorizeResponse,
   type ClaudeProviderUsageResponse,
+  type CodexDeviceCodeStartResponse,
   type PlannerModel,
   type PlannerProvider,
   type PlannerProviderKind,
@@ -59,6 +61,7 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
   const [newProviderBaseUrl, setNewProviderBaseUrl] = useState('');
   const [newProviderApiKey, setNewProviderApiKey] = useState('');
   const [newProviderSetupToken, setNewProviderSetupToken] = useState('');
+  const [newProviderCodexAuthMode, setNewProviderCodexAuthMode] = useState<'device-code' | 'cli-readonly'>('device-code');
   const [confirmingDeleteProvider, setConfirmingDeleteProvider] = useState<PlannerProvider | null>(null);
   const [confirmingDeleteAllForProvider, setConfirmingDeleteAllForProvider] = useState<PlannerProvider | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestPlannerModelResponse | 'testing'>>({});
@@ -276,6 +279,13 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
           ...(baseUrl.length > 0 ? { baseUrl } : {}),
           ...(setupToken.length > 0 ? { setupToken } : {}),
         });
+      } else if (newProviderKind === 'codex-oauth') {
+        await api.createPlannerProvider({
+          label,
+          kind: 'codex-oauth',
+          authMode: newProviderCodexAuthMode,
+          ...(baseUrl.length > 0 ? { baseUrl } : {}),
+        });
       } else {
         await api.createPlannerProvider({
           label,
@@ -288,6 +298,7 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
       setNewProviderBaseUrl('');
       setNewProviderApiKey('');
       setNewProviderSetupToken('');
+      setNewProviderCodexAuthMode('device-code');
       setNewProviderKind('openai-compatible');
       setAddingProvider(false);
     });
@@ -553,8 +564,9 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
             </div>
             <p className="planner-row-meta" style={{ marginBottom: 10 }}>
               Configure one or more OpenAI-compatible LLM providers (for example a local vLLM and
-              OpenRouter side by side) or a Claude subscription provider (setup-token / OAuth). Each
-              provider has its own encrypted credential and model catalog.
+              OpenRouter side by side), a Claude subscription provider (setup-token / OAuth), or a
+              Codex (ChatGPT) subscription provider (device-code / <code>~/.codex/auth.json</code>).
+              Each provider has its own encrypted credential and model catalog.
             </p>
 
             {(addingProvider || (providers !== null && providers.length === 0)) && (
@@ -571,11 +583,14 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                       setNewProviderKind(nextKind);
                       if (nextKind === 'claude-oauth' && !newProviderLabel.trim()) {
                         setNewProviderLabel('Claude Subscription');
+                      } else if (nextKind === 'codex-oauth' && !newProviderLabel.trim()) {
+                        setNewProviderLabel('Codex Subscription');
                       }
                     }}
                   >
                     <option value="openai-compatible">OpenAI-compatible endpoint</option>
                     <option value="claude-oauth">Claude subscription (setup-token / OAuth)</option>
+                    <option value="codex-oauth">Codex (ChatGPT) subscription (device-code / ~/.codex/auth.json)</option>
                   </select>
                 </div>
                 <div className="planner-field" style={{ marginTop: 8 }}>
@@ -586,7 +601,9 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                     placeholder={
                       newProviderKind === 'claude-oauth'
                         ? 'e.g. Claude Subscription'
-                        : 'e.g. OpenRouter, Local vLLM'
+                        : newProviderKind === 'codex-oauth'
+                          ? 'e.g. Codex Subscription'
+                          : 'e.g. OpenRouter, Local vLLM'
                     }
                     value={newProviderLabel}
                     disabled={busy}
@@ -615,6 +632,36 @@ export function ProvidersAndModelsPage({ onApiError, onBack }: Props): JSX.Eleme
                         Run <code>claude setup-token</code> in a terminal to mint an inference-only token
                         (~1 year, no refresh token, no conflict with the <code>claude</code> CLI&apos;s own
                         login). Or leave blank and sign in via OAuth after creating the provider.
+                      </span>
+                    </div>
+                  </>
+                ) : newProviderKind === 'codex-oauth' ? (
+                  <>
+                    <div className="warn-callout" role="note" style={{ marginTop: 8 }}>
+                      {CODEX_OAUTH_PROVIDER_DISCLOSURE}
+                    </div>
+                    <div className="planner-field" style={{ marginTop: 8 }}>
+                      <label htmlFor="new-provider-codex-auth-mode">Credential source</label>
+                      <select
+                        id="new-provider-codex-auth-mode"
+                        value={newProviderCodexAuthMode}
+                        disabled={busy}
+                        onChange={(e) =>
+                          setNewProviderCodexAuthMode(e.target.value as 'device-code' | 'cli-readonly')
+                        }
+                      >
+                        <option value="device-code">
+                          Device-code login (sign in at auth.openai.com/codex/device after creating)
+                        </option>
+                        <option value="cli-readonly">
+                          Read ~/.codex/auth.json read-only (re-read on every request, never modified)
+                        </option>
+                      </select>
+                      <span className="planner-row-meta">
+                        Device-code login stores encrypted credentials in PocketAgent and rotates refresh
+                        tokens automatically (~5 minutes before expiry). Read-only CLI mode reads{' '}
+                        <code>~/.codex/auth.json</code> on every request without ever writing or refreshing
+                        that file.
                       </span>
                     </div>
                   </>
@@ -957,6 +1004,7 @@ interface PlannerProviderSectionProps {
     baseUrl?: string;
     apiKey?: string;
     setupToken?: string;
+    authMode?: 'device-code' | 'cli-readonly';
     clearApiKey?: boolean;
     allowUnattended?: boolean;
   }) => void;
@@ -998,6 +1046,8 @@ function PlannerProviderSection({
   onError,
 }: PlannerProviderSectionProps): JSX.Element {
   const isClaudeOAuth = provider.kind === 'claude-oauth';
+  const isCodexOAuth = provider.kind === 'codex-oauth';
+  const isSubscriptionOAuth = isClaudeOAuth || isCodexOAuth;
   const [labelInput, setLabelInput] = useState(provider.label);
   const [baseUrlInput, setBaseUrlInput] = useState(provider.baseUrl);
   const [apiKeyInput, setApiKeyInput] = useState('');
@@ -1005,6 +1055,17 @@ function PlannerProviderSection({
   const [oauthAuthorize, setOauthAuthorize] = useState<ClaudeOAuthAuthorizeResponse | null>(null);
   const [oauthCodeInput, setOauthCodeInput] = useState('');
   const [oauthBusy, setOauthBusy] = useState(false);
+  const [codexDeviceSession, setCodexDeviceSession] = useState<{
+    deviceAuthId: string;
+    userCode: string;
+    verificationUri: string;
+    intervalSec: number;
+    mode: 'server' | 'browser';
+    fallbackReason: string | null;
+  } | null>(null);
+  const [codexDeviceBusy, setCodexDeviceBusy] = useState(false);
+  const codexPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const codexPollCancelledRef = useRef(false);
   const [usage, setUsage] = useState<ClaudeProviderUsageResponse | null>(null);
   const [loadingUsage, setLoadingUsage] = useState(false);
   const [newModelId, setNewModelId] = useState('');
@@ -1021,19 +1082,40 @@ function PlannerProviderSection({
     setBaseUrlInput(provider.baseUrl);
   }, [provider.label, provider.baseUrl]);
 
+  useEffect(() => {
+    return () => {
+      codexPollCancelledRef.current = true;
+      if (codexPollTimerRef.current) clearTimeout(codexPollTimerRef.current);
+    };
+  }, []);
+
+  const stopCodexDevicePolling = (): void => {
+    codexPollCancelledRef.current = true;
+    if (codexPollTimerRef.current) {
+      clearTimeout(codexPollTimerRef.current);
+      codexPollTimerRef.current = null;
+    }
+    setCodexDeviceSession(null);
+    setCodexDeviceBusy(false);
+  };
+
   const saveProvider = (): void => {
     const trimmedLabel = labelInput.trim();
     const trimmedBaseUrl = baseUrlInput.trim();
     const trimmedKey = apiKeyInput.trim();
     const trimmedSetupToken = setupTokenInput.trim();
-    if (!trimmedLabel || (!isClaudeOAuth && !trimmedBaseUrl)) {
-      onError(isClaudeOAuth ? 'Provider label is required.' : 'Provider label and base URL are required.');
+    if (!trimmedLabel || (!isSubscriptionOAuth && !trimmedBaseUrl)) {
+      onError(
+        isSubscriptionOAuth
+          ? 'Provider label is required.'
+          : 'Provider label and base URL are required.',
+      );
       return;
     }
     onSaveProvider({
       label: trimmedLabel,
       ...(trimmedBaseUrl.length > 0 ? { baseUrl: trimmedBaseUrl } : {}),
-      ...(!isClaudeOAuth && trimmedKey.length > 0 ? { apiKey: trimmedKey } : {}),
+      ...(!isSubscriptionOAuth && trimmedKey.length > 0 ? { apiKey: trimmedKey } : {}),
       ...(isClaudeOAuth && trimmedSetupToken.length > 0 ? { setupToken: trimmedSetupToken } : {}),
     });
     setApiKeyInput('');
@@ -1041,6 +1123,7 @@ function PlannerProviderSection({
   };
 
   const clearApiKey = (): void => {
+    stopCodexDevicePolling();
     onSaveProvider({ clearApiKey: true });
     setApiKeyInput('');
     setSetupTokenInput('');
@@ -1091,6 +1174,136 @@ function PlannerProviderSection({
     })();
   };
 
+  const startCodexDeviceLogin = (): void => {
+    stopCodexDevicePolling();
+    codexPollCancelledRef.current = false;
+    setCodexDeviceBusy(true);
+    onError(null);
+    void (async () => {
+      try {
+        const startRes: CodexDeviceCodeStartResponse = await api.startCodexPlannerProviderDeviceFlow(
+          provider.id,
+        );
+        let deviceAuthId = startRes.deviceAuthId ?? '';
+        let userCode = startRes.userCode ?? '';
+        let intervalSec = startRes.intervalSec || 5;
+        const verificationUri = startRes.verificationUri;
+        let mode: 'server' | 'browser' = startRes.mode;
+
+        if (mode === 'browser' || !deviceAuthId || !userCode) {
+          mode = 'browser';
+          const browserRes = await fetch('https://auth.openai.com/api/accounts/deviceauth/usercode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({ client_id: startRes.clientId }),
+          });
+          if (!browserRes.ok) {
+            throw new Error(`Browser device-code request failed (${browserRes.status}).`);
+          }
+          const browserData = (await browserRes.json()) as {
+            device_auth_id?: string;
+            user_code?: string;
+            usercode?: string;
+            interval?: string | number;
+          };
+          deviceAuthId = browserData.device_auth_id ?? '';
+          userCode = browserData.user_code ?? browserData.usercode ?? '';
+          const parsedInt = Number.parseInt(String(browserData.interval ?? '5'), 10);
+          if (Number.isFinite(parsedInt) && parsedInt > 0) intervalSec = parsedInt;
+          if (!deviceAuthId || !userCode) {
+            throw new Error('auth.openai.com did not return a device_auth_id and user_code.');
+          }
+        }
+
+        if (codexPollCancelledRef.current) return;
+        setCodexDeviceSession({
+          deviceAuthId,
+          userCode,
+          verificationUri,
+          intervalSec,
+          mode,
+          fallbackReason: startRes.fallbackReason ?? null,
+        });
+        window.open(verificationUri, '_blank', 'noopener,noreferrer');
+
+        const pollOnce = async (): Promise<void> => {
+          if (codexPollCancelledRef.current) return;
+          try {
+            if (mode === 'server') {
+              const pollRes = await api.pollCodexPlannerProviderDeviceFlow(provider.id, {
+                deviceAuthId,
+                userCode,
+              });
+              if (codexPollCancelledRef.current) return;
+              if (pollRes.status === 'completed') {
+                stopCodexDevicePolling();
+                await onReload();
+                return;
+              }
+            } else {
+              const tokenPoll = await fetch('https://auth.openai.com/api/accounts/deviceauth/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                body: JSON.stringify({ device_auth_id: deviceAuthId, user_code: userCode }),
+              });
+              if (codexPollCancelledRef.current) return;
+              if (tokenPoll.ok) {
+                const pollJson = (await tokenPoll.json()) as {
+                  authorization_code?: string;
+                  code_verifier?: string;
+                };
+                if (pollJson.authorization_code && pollJson.code_verifier) {
+                  await api.completeCodexPlannerProviderDeviceFlow(provider.id, {
+                    authorizationCode: pollJson.authorization_code,
+                    codeVerifier: pollJson.code_verifier,
+                  });
+                  stopCodexDevicePolling();
+                  await onReload();
+                  return;
+                }
+              } else if (tokenPoll.status !== 403 && tokenPoll.status !== 404) {
+                throw new Error(`Device-code polling failed (${tokenPoll.status}).`);
+              }
+            }
+          } catch (pollErr) {
+            if (codexPollCancelledRef.current) return;
+            stopCodexDevicePolling();
+            onApiError(pollErr);
+            onError(
+              pollErr instanceof ApiError
+                ? pollErr.message
+                : pollErr instanceof Error
+                  ? pollErr.message
+                  : 'Codex device-code sign-in failed.',
+            );
+            return;
+          }
+          if (!codexPollCancelledRef.current) {
+            codexPollTimerRef.current = setTimeout(() => {
+              void pollOnce();
+            }, intervalSec * 1000);
+          }
+        };
+
+        codexPollTimerRef.current = setTimeout(() => {
+          void pollOnce();
+        }, intervalSec * 1000);
+      } catch (err) {
+        stopCodexDevicePolling();
+        onApiError(err);
+        onError(
+          err instanceof ApiError
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : 'Could not start Codex device-code sign-in.',
+        );
+      } finally {
+        setCodexDeviceBusy(false);
+      }
+    })();
+  };
+
   const loadUsage = (): void => {
     setLoadingUsage(true);
     void (async () => {
@@ -1099,7 +1312,7 @@ function PlannerProviderSection({
         setUsage(res);
       } catch (err) {
         onApiError(err);
-        onError(err instanceof ApiError ? err.message : 'Could not read Claude usage.');
+        onError(err instanceof ApiError ? err.message : 'Could not read subscription usage.');
       } finally {
         setLoadingUsage(false);
       }
@@ -1166,7 +1379,7 @@ function PlannerProviderSection({
           </span>
         </h3>
         <div className="planner-section-actions">
-          {!isClaudeOAuth && (
+          {!isSubscriptionOAuth && (
             <button
               type="button"
               className="planner-btn icon-only"
@@ -1367,6 +1580,152 @@ function PlannerProviderSection({
             </label>
           </div>
         </>
+      ) : isCodexOAuth ? (
+        <>
+          <div className="planner-inline" style={{ marginTop: 8, flexWrap: 'wrap', gap: 8 }}>
+            <button type="button" className="planner-btn" disabled={busy} onClick={saveProvider}>
+              Save provider
+            </button>
+            <button
+              type="button"
+              className="planner-btn"
+              disabled={busy || codexDeviceBusy}
+              onClick={startCodexDeviceLogin}
+            >
+              {codexDeviceBusy
+                ? 'Starting device login…'
+                : codexDeviceSession
+                  ? 'Restart device-code login'
+                  : 'Sign in with device code'}
+            </button>
+            <button
+              type="button"
+              className="planner-btn"
+              disabled={busy}
+              onClick={() =>
+                onSaveProvider({
+                  authMode: provider.authMode === 'cli-readonly' ? 'device-code' : 'cli-readonly',
+                })
+              }
+            >
+              {provider.authMode === 'cli-readonly'
+                ? 'Switch to device-code mode'
+                : 'Use ~/.codex/auth.json (read-only)'}
+            </button>
+            {provider.hasApiKey && (
+              <>
+                <button
+                  type="button"
+                  className="planner-btn"
+                  disabled={busy || loadingUsage}
+                  onClick={loadUsage}
+                >
+                  {loadingUsage ? 'Checking usage…' : 'Check 5h / 7d usage'}
+                </button>
+                <button type="button" className="planner-btn danger" disabled={busy} onClick={clearApiKey}>
+                  Sign out
+                </button>
+              </>
+            )}
+            <span className="planner-row-meta">
+              {provider.keyUnreadable
+                ? 'Credential unreadable'
+                : provider.authMode === 'cli-readonly'
+                  ? `Reading ~/.codex/auth.json (read-only)${
+                      provider.accountEmail
+                        ? ` · ${provider.accountEmail}`
+                        : provider.accountId
+                          ? ` · ${provider.accountId}`
+                          : ''
+                    }${provider.planType ? ` · ${provider.planType}` : ''}${
+                      provider.hasApiKey ? '' : ' · token missing or expired (run codex once to refresh)'
+                    }`
+                  : provider.authMode === 'device-code' && provider.hasApiKey
+                    ? `Signed in via device-code${
+                        provider.accountEmail
+                          ? ` · ${provider.accountEmail}`
+                          : provider.accountId
+                            ? ` · ${provider.accountId}`
+                            : ''
+                      }${provider.organizationName ? ` (${provider.organizationName})` : ''}${
+                        provider.planType ? ` · ${provider.planType}` : ''
+                      }`
+                    : 'Not signed in'}
+            </span>
+          </div>
+
+          {codexDeviceSession && (
+            <div className="planner-provider-add-form" style={{ marginTop: 10 }}>
+              {codexDeviceSession.fallbackReason && (
+                <p className="planner-row-meta" style={{ marginBottom: 6 }}>
+                  {codexDeviceSession.fallbackReason}
+                </p>
+              )}
+              <p className="planner-row-meta" style={{ marginBottom: 6 }}>
+                1. Open{' '}
+                <a href={codexDeviceSession.verificationUri} target="_blank" rel="noreferrer">
+                  {codexDeviceSession.verificationUri}
+                </a>{' '}
+                and enter this device code:
+              </p>
+              <div className="planner-inline" style={{ gap: 8, alignItems: 'center' }}>
+                <code style={{ fontSize: 16, fontWeight: 600, letterSpacing: '0.08em' }}>
+                  {codexDeviceSession.userCode}
+                </code>
+                <button
+                  type="button"
+                  className="planner-btn"
+                  onClick={() => void navigator.clipboard?.writeText(codexDeviceSession.userCode)}
+                >
+                  Copy code
+                </button>
+                <button type="button" className="planner-btn" onClick={stopCodexDevicePolling}>
+                  Cancel
+                </button>
+                <span className="planner-row-meta">
+                  Waiting for authorization (polling every {codexDeviceSession.intervalSec}s)…
+                </span>
+              </div>
+            </div>
+          )}
+
+          {usage && (
+            <div className="planner-row-meta" style={{ marginTop: 8 }}>
+              {usage.available && usage.windows.length > 0 ? (
+                <span>
+                  {usage.windows.map((w, idx) => (
+                    <span key={w.label}>
+                      {idx > 0 ? ' · ' : ''}
+                      {w.label}: {Math.round(w.percentUsed)}% used
+                      {w.resetsAt
+                        ? ` (resets ${new Date(w.resetsAt).toLocaleString()})`
+                        : ''}
+                    </span>
+                  ))}
+                </span>
+              ) : (
+                <span>
+                  Usage windows unavailable:{' '}
+                  {usage.error ?? 'Not supported for this token.'}
+                </span>
+              )}
+            </div>
+          )}
+
+          <div style={{ marginTop: 10 }}>
+            <label className="planner-inline-checkbox">
+              <input
+                type="checkbox"
+                checked={provider.allowUnattended}
+                disabled={busy}
+                onChange={(e) => toggleAllowUnattended(e.target.checked)}
+              />
+              <span>
+                Allow unattended runs (scheduled jobs, inbound webhooks, and MCP-started chats)
+              </span>
+            </label>
+          </div>
+        </>
       ) : (
         <>
           <div className="planner-field" style={{ marginTop: 8 }}>
@@ -1422,16 +1781,20 @@ function PlannerProviderSection({
             <button
               type="button"
               className="planner-btn"
-              disabled={discovering || (isClaudeOAuth ? !provider.hasApiKey : !provider.baseUrl)}
+              disabled={discovering || (isSubscriptionOAuth ? !provider.hasApiKey : !provider.baseUrl)}
               onClick={discoverModels}
               title={
                 isClaudeOAuth
                   ? provider.hasApiKey
                     ? undefined
                     : 'Sign in with a setup token or OAuth first.'
-                  : provider.baseUrl
-                    ? undefined
-                    : 'Save a base URL on this provider first.'
+                  : isCodexOAuth
+                    ? provider.hasApiKey
+                      ? undefined
+                      : 'Sign in with device code or enable ~/.codex/auth.json read-only mode first.'
+                    : provider.baseUrl
+                      ? undefined
+                      : 'Save a base URL on this provider first.'
               }
             >
               {discovering ? 'Querying…' : 'Query models'}
@@ -1495,13 +1858,15 @@ function PlannerProviderSection({
                   disabled={busy}
                   onSave={(v) => onSetModelLimit(m.id, { contextWindow: v })}
                 />
-                <ModelLimitInput
-                  label="Max out"
-                  title="Output limit in tokens, sent as max_tokens. Empty = not sent."
-                  value={m.maxOutputTokens ?? null}
-                  disabled={busy}
-                  onSave={(v) => onSetModelLimit(m.id, { maxOutputTokens: v })}
-                />
+                {!isCodexOAuth && (
+                  <ModelLimitInput
+                    label="Max out"
+                    title="Output limit in tokens, sent as max_tokens. Empty = not sent."
+                    value={m.maxOutputTokens ?? null}
+                    disabled={busy}
+                    onSave={(v) => onSetModelLimit(m.id, { maxOutputTokens: v })}
+                  />
+                )}
                 <TriStateSelect
                   label="Cache"
                   title="Prompt caching: send Anthropic cache_control markers. Auto = on for Claude models only, since strict OpenAI-compatible servers reject the field. Cached token counts are shown whenever the provider reports them, whatever this says."

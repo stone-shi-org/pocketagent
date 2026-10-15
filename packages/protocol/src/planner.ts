@@ -174,14 +174,16 @@ export const UpdatePlannerWorkspaceRequest = z.object({
 export type UpdatePlannerWorkspaceRequest = z.infer<typeof UpdatePlannerWorkspaceRequest>;
 
 /**
- * PA-148 / PA-149: the kind of a Pocket Agent LLM provider. Phase 1 supports
- * `openai-compatible`; Phase 2 (PA-149) adds `claude-oauth` (Anthropic Messages
- * API using a Claude subscription setup-token or PKCE OAuth credential).
+ * PA-148 / PA-149 / PA-150: the kind of a Pocket Agent LLM provider. Phase 1
+ * supports `openai-compatible`; Phase 2 (PA-149) adds `claude-oauth` (Anthropic
+ * Messages API using a Claude subscription setup-token or PKCE OAuth credential);
+ * Phase 3 (PA-150) adds `codex-oauth` (ChatGPT Codex Responses API using a
+ * ChatGPT subscription OAuth token or read-only `~/.codex/auth.json`).
  */
-export const PlannerProviderKind = z.enum(['openai-compatible', 'claude-oauth']);
+export const PlannerProviderKind = z.enum(['openai-compatible', 'claude-oauth', 'codex-oauth']);
 export type PlannerProviderKind = z.infer<typeof PlannerProviderKind>;
 
-export const PlannerProviderAuthMode = z.enum(['setup-token', 'oauth']);
+export const PlannerProviderAuthMode = z.enum(['setup-token', 'oauth', 'device-code', 'cli-readonly']);
 export type PlannerProviderAuthMode = z.infer<typeof PlannerProviderAuthMode>;
 
 /**
@@ -192,8 +194,15 @@ export const CLAUDE_OAUTH_PROVIDER_DISCLOSURE =
   "This chat uses a Claude subscription credential (setup-token / OAuth) directly against Anthropic's Messages API, not an API key. Using a subscription token outside the official Claude Code CLI may violate Anthropic's Terms of Service or your organization's enterprise seat policy and carries account risk. Usage counts against your subscription's 5-hour / 7-day limits rather than per-token billing.";
 
 /**
- * PA-148 / PA-149: one configured LLM provider in `planner_providers`. Each
- * provider owns its own `planner_models` rows (`ON DELETE CASCADE`). Secrets
+ * PA-150: standing disclosure shown on every Pocket Agent chat whose active
+ * model belongs to a `codex-oauth` subscription provider.
+ */
+export const CODEX_OAUTH_PROVIDER_DISCLOSURE =
+  "This chat uses a ChatGPT subscription OAuth token directly against OpenAI's Codex Responses backend, not an API key. This session is not authorized for proxy or router use outside the official Codex CLI, and OpenAI may restrict or suspend accounts for out-of-client or automated usage. Usage counts against your ChatGPT subscription's 5-hour / 7-day limits rather than per-token billing.";
+
+/**
+ * PA-148 / PA-149 / PA-150: one configured LLM provider in `planner_providers`.
+ * Each provider owns its own `planner_models` rows (`ON DELETE CASCADE`). Secrets
  * live in `secret_ciphertext` encrypted with `POCKETAGENT_SETTINGS_ENC_KEY` and
  * are write-only (never returned or revealed over HTTP).
  */
@@ -211,9 +220,11 @@ export const PlannerProvider = z.object({
   createdAt: z.number().int(),
   lastTestedAt: z.number().int().nullable().default(null),
   lastError: z.string().nullable().default(null),
-  /** PA-149: non-secret credential metadata for subscription providers. */
+  /** PA-149 / PA-150: non-secret credential metadata for subscription providers. */
   authMode: PlannerProviderAuthMode.nullable().optional(),
   accountEmail: z.string().nullable().optional(),
+  accountId: z.string().nullable().optional(),
+  planType: z.string().nullable().optional(),
   organizationName: z.string().nullable().optional(),
   rateLimitTier: z.string().nullable().optional(),
   tokenExpiresAt: z.number().int().nullable().optional(),
@@ -236,6 +247,8 @@ export const CreatePlannerProviderRequest = z
     apiKey: z.string().max(2048).optional(),
     /** PA-149: optional `claude setup-token` (`sk-ant-oat...`) for `claude-oauth` providers. */
     setupToken: z.string().max(2048).optional(),
+    /** PA-150: credential mode for `codex-oauth` providers (`device-code` default, or `cli-readonly`). */
+    authMode: z.enum(['device-code', 'cli-readonly']).optional(),
     allowUnattended: z.boolean().optional(),
   })
   .superRefine((val, ctx) => {
@@ -257,6 +270,8 @@ export const UpdatePlannerProviderRequest = z.object({
   apiKey: z.string().max(2048).optional(),
   /** PA-149: paste a new `claude setup-token` (`sk-ant-oat...`) on a `claude-oauth` provider. */
   setupToken: z.string().max(2048).optional(),
+  /** PA-150: switch `codex-oauth` credential mode between `device-code` and `cli-readonly`. */
+  authMode: z.enum(['device-code', 'cli-readonly']).optional(),
   clearApiKey: z.boolean().optional(),
   allowUnattended: z.boolean().optional(),
 });
@@ -273,6 +288,39 @@ export const ClaudeOAuthExchangeRequest = z.object({
   state: z.string().max(512).optional(),
 });
 export type ClaudeOAuthExchangeRequest = z.infer<typeof ClaudeOAuthExchangeRequest>;
+
+export const CodexDeviceCodeStartResponse = z.object({
+  mode: z.enum(['server', 'browser']),
+  deviceAuthId: z.string().optional(),
+  userCode: z.string().optional(),
+  intervalSec: z.number().int().positive(),
+  verificationUri: z.string(),
+  clientId: z.string(),
+  fallbackReason: z.string().nullable().optional(),
+});
+export type CodexDeviceCodeStartResponse = z.infer<typeof CodexDeviceCodeStartResponse>;
+
+export const CodexDeviceCodePollRequest = z.object({
+  deviceAuthId: z.string().min(1).max(512),
+  userCode: z.string().min(1).max(128),
+});
+export type CodexDeviceCodePollRequest = z.infer<typeof CodexDeviceCodePollRequest>;
+
+export const CodexDeviceCodePollResponse = z.object({
+  status: z.enum(['pending', 'completed']),
+  provider: PlannerProvider.optional(),
+});
+export type CodexDeviceCodePollResponse = z.infer<typeof CodexDeviceCodePollResponse>;
+
+export const CodexDeviceCodeExchangeRequest = z.object({
+  authorizationCode: z.string().min(1).max(4096).optional(),
+  codeVerifier: z.string().min(1).max(1024).optional(),
+  accessToken: z.string().min(1).max(8192).optional(),
+  refreshToken: z.string().max(8192).optional(),
+  idToken: z.string().max(8192).optional(),
+  expiresIn: z.number().int().positive().optional(),
+});
+export type CodexDeviceCodeExchangeRequest = z.infer<typeof CodexDeviceCodeExchangeRequest>;
 
 export const ClaudeProviderUsageWindow = z.object({
   label: z.string(),

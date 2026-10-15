@@ -54,6 +54,13 @@ export const ThinkingEvent = z.object({
   kind: z.literal('thinking'),
   id: z.string(),
   text: z.string(),
+  /**
+   * PA-150: OpenAI Responses API encrypted reasoning item (`reasoning.encrypted_content`
+   * and item `id`) carried forward between round trips of a tool loop so the
+   * model retains its reasoning state across tool calls and approval pauses.
+   */
+  encryptedContent: z.string().optional(),
+  reasoningItemId: z.string().optional(),
 });
 
 /** Incremental thinking for the block with the same id, when partials are on. */

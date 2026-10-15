@@ -44,7 +44,7 @@ const KNOWN_MODEL_WINDOWS: ReadonlyArray<readonly [RegExp, number, number]> = [
   [/^claude-.*\[1m\]/, 1_000_000, 64_000],
   [/^claude-/, 200_000, 32_000],
   [/^gpt-4\.1/, 1_047_576, 32_768],
-  [/^gpt-5/, 400_000, 128_000],
+  [/^gpt-[56]/, 400_000, 128_000],
   [/^gpt-4o/, 128_000, 16_384],
   [/^gpt-4-turbo/, 128_000, 4_096],
   [/^gpt-4/, 8_192, 4_096],

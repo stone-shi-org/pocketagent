@@ -1280,6 +1280,44 @@ default) gates cron, webhook, and MCP-started chats (`unattendedPlannerModelProb
 `PlannerProviderTemplatePayload` rejects `claude-oauth` so personal subscriptions are never
 exported as Hub fleet templates.
 
+**Codex (ChatGPT) subscription provider (`codex-oauth`, PA-150).** `PlannerProviderKind` widens
+to `'openai-compatible' | 'claude-oauth' | 'codex-oauth'`, implemented by
+`CodexOAuthPlannerProvider` (`planner/codex-oauth.ts`) and `planner/codex-responses-translator.ts`
+(ported from OmniRoute, MIT). It calls OpenAI's ChatGPT Codex Responses backend
+(`POST https://chatgpt.com/backend-api/codex/responses`, always streamed SSE) with the operator's
+ChatGPT subscription OAuth token rather than spawning the `codex` CLI or `codex app-server`. Two
+credential modes live inside `planner_providers.secret_ciphertext` (AES-256-GCM via `secret-box`,
+never returned or logged): (1) our own device-code login (`POST /api/planner/providers/:id/codex/device/start`
+→ `https://auth.openai.com/api/accounts/deviceauth/usercode` with client ID
+`app_EMoamEEZ73f0CkXaXp7hrann`, verification at `https://auth.openai.com/codex/device`, polling
+`.../deviceauth/token` for `{ authorization_code, code_verifier }`, and exchanging at
+`https://auth.openai.com/oauth/token` with `redirect_uri: https://auth.openai.com/deviceauth/callback`,
+trying server-side first and falling back to browser-side via `.../codex/device/complete` if
+`auth.openai.com` blocks the host IP), extracting `chatgpt_account_id` and `chatgpt_plan_type`
+from the `https://api.openai.com/auth` JWT claim and refreshing ~5 minutes before expiry via a
+per-provider serialized form POST (`grant_type=refresh_token`, `refresh_token`, `client_id`,
+**deliberately omitting `scope`**) persisted atomically to SQLite (`refresh_token_reused`,
+`invalid_grant`, `token_expired`, `invalid_token`, or `401` surface as "sign in again"); or
+(2) `cli-readonly` mode, which re-reads `~/.codex/auth.json` (`$CODEX_HOME/auth.json` or
+`POCKETAGENT_CODEX_AUTH_FILE`) read-only on every request, **never writes or refreshes that
+file**, and fails with `"run codex once to refresh"` when expired. Requests send
+`Authorization: Bearer <token>`, `chatgpt-account-id`, `originator: codex_cli_rs`,
+`Version: <ver>` (resolved from `codex --version` or `DEFAULT_CODEX_CLIENT_VERSION = '0.159.2'`),
+`Openai-Beta: responses_websockets=2026-02-06`, `User-Agent: codex_cli_rs/<ver> (...)`, and
+`session_id: <chatId>` with body `{ stream: true, store: false, instructions, input, reasoning, include: ["reasoning.encrypted_content"], prompt_cache_key: <chatId> }`
+and strip backend-rejected parameters (`max_tokens`, `max_output_tokens`, `temperature`, `top_p`,
+`user`, `truncation`, etc.). `buildCodexResponsesRequest` and `CodexResponsesSseParser` translate
+the first system message to `instructions`, later system messages to `developer` items, multimodal
+user parts to `input_text`/`input_image`/`input_file`, assistant `tool_calls`/`tool` results to
+paired `function_call`/`function_call_output` items, and model effort suffixes (`-low`, `-medium`,
+`-high`, `-xhigh`) to `reasoning.effort`, while carrying `reasoning.encrypted_content` items
+forward across tool-loop round trips (persisted on `ThinkingEvent.encryptedContent` /
+`reasoningItemId`). Every chat using a `codex-oauth` model shows
+`CODEX_OAUTH_PROVIDER_DISCLOSURE`, `GET /api/planner/providers/:id/usage` queries
+`GET https://chatgpt.com/backend-api/wham/usage` (falling back to cached `x-codex-5h-*` /
+`x-codex-7d-*` response headers), `allowUnattended` (off by default) gates cron, webhook, and
+MCP-started chats, and `PlannerProviderTemplatePayload` rejects `codex-oauth`.
+
 **Images** (`image-budget.ts`, both sides). The browser downscales an attachment to at most
 2000×2000 and ~4.5 MB of base64 (`apps/web/src/agent/image-budget.ts`) rather than refusing
 photos over 5 MB — on the client because the server has no image library and `sharp` would be

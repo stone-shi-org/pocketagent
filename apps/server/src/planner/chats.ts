@@ -37,8 +37,10 @@ import type { CronService } from '../cron/index.js';
 import type { PlannerWorkspaceRegistry, PlannerWorkspaceRow } from './workspaces.js';
 import type { PlannerMemoryService } from './memory.js';
 import { ClaudeOAuthPlannerProvider } from './claude-oauth.js';
+import { CodexOAuthPlannerProvider } from './codex-oauth.js';
 import {
   decryptClaudeOAuthCredentials,
+  decryptCodexOAuthCredentials,
   decryptPlannerProviderSecret,
   deletePlannerChat,
   insertPlannerChat,
@@ -109,6 +111,7 @@ import {
   type PlannerLlmRetryPolicy,
   type PlannerLlmToolCall,
   type PlannerLlmUsage,
+  type PlannerReasoningItem,
   type PlannerUserContentPart,
 } from './llm-client.js';
 import {
@@ -2076,6 +2079,25 @@ export class PlannerChatService {
         ...(opts.retry === false ? { retry: { maxRetries: 0 } } : this.opts.llmRetry ? { retry: this.opts.llmRetry } : {}),
       });
     }
+    if (provider.kind === 'codex-oauth') {
+      const { credentials, error } = decryptCodexOAuthCredentials(provider, this.opts.config?.settingsEncKey);
+      if (error !== null) {
+        throw new PlannerChatError(error, 'not_configured');
+      }
+      if (!credentials || (credentials.mode !== 'cli-readonly' && !credentials.accessToken)) {
+        throw new PlannerChatError(
+          `Codex provider "${provider.label}" has no credentials configured. Sign in with device code or enable ~/.codex/auth.json read-only mode in Settings → Providers & Models.`,
+          'not_configured',
+        );
+      }
+      return new CodexOAuthPlannerProvider({
+        db: this.opts.db,
+        providerId: provider.id,
+        encKey: this.opts.config?.settingsEncKey,
+        ...(this.opts.llmFetch ? { fetchImpl: this.opts.llmFetch } : {}),
+        ...(opts.retry === false ? { retry: { maxRetries: 0 } } : this.opts.llmRetry ? { retry: this.opts.llmRetry } : {}),
+      });
+    }
     if (!provider.baseUrl) {
       throw new PlannerChatError('Planner LLM endpoint is not configured.', 'not_configured');
     }
@@ -2887,15 +2909,26 @@ export class PlannerChatService {
       yield* this.finishTurn(chat, workspacePath, modelId, '', true, stats);
       return;
     }
+    if (resolved.provider.kind === 'codex-oauth' && !apiKey) {
+      yield* this.emit(workspacePath, chat.id, {
+        kind: 'notice',
+        level: 'error',
+        text: `Codex provider "${resolved.provider.label}" has no credentials configured. Sign in with device code or enable ~/.codex/auth.json read-only mode in Settings → Providers & Models.`,
+      });
+      yield* this.finishTurn(chat, workspacePath, modelId, '', true, stats);
+      return;
+    }
     const client = this.clientForProvider(resolved.provider);
 
     // PA-122 / PA-149: Anthropic-style cache breakpoints, for a model whose
     // caching is on (always on by default for `claude-oauth` unless the row
     // explicitly sets `promptCaching: false`) and whose endpoint has not
-    // refused them earlier in this turn. The unmarked `messages` are kept for
+    // refused them earlier in this turn. `codex-oauth` uses `prompt_cache_key`
+    // and `session_id` natively instead. The unmarked `messages` are kept for
     // the estimate and the calibration, so the markers never change what we
     // think the prompt weighs.
     const cacheControl =
+      resolved.provider.kind !== 'codex-oauth' &&
       (resolved.provider.kind === 'claude-oauth'
         ? modelRow?.promptCaching !== false
         : resolvePromptCaching(wireModelId, modelRow?.promptCaching)) &&
@@ -2908,7 +2941,10 @@ export class PlannerChatService {
     const thinkingBlockId = crypto.randomUUID();
     let completion: PlannerLlmCompletion | null = null;
     let accumulatedThinking = '';
+    let accumulatedEncryptedContent: string | undefined;
+    let accumulatedReasoningItemId: string | undefined;
     let emittedThinking = false;
+    let emittedEncryptedContent = false;
     // `elapsedMs` only ever covers this — the LLM actually generating a
     // reply — never tool execution or an approval pause; see
     // `PlannerTurnStats`'s doc comment for why.
@@ -2918,6 +2954,7 @@ export class PlannerChatService {
         effort: chat.lastEffort,
         thinking: chat.thinkingEnabled !== false,
         idleTimeoutMs: settings.llmIdleTimeoutSeconds * 1000,
+        chatId: chat.id,
         ...(maxTokens !== undefined ? { maxTokens } : {}),
         ...(finalSummary ? { forbidToolCalls: true } : {}),
       })) {
@@ -2933,12 +2970,23 @@ export class PlannerChatService {
             text: `The LLM endpoint failed (${firstLine(chunk.reason)}); retrying in ${seconds}s (attempt ${chunk.attempt} of ${chunk.maxRetries}).`,
           });
         } else if (chunk.type === 'thinking_delta') {
-          accumulatedThinking += chunk.text;
-          yield { kind: 'thinking_delta', id: thinkingBlockId, text: chunk.text };
+          if (chunk.encryptedContent) accumulatedEncryptedContent = chunk.encryptedContent;
+          if (chunk.reasoningItemId) accumulatedReasoningItemId = chunk.reasoningItemId;
+          if (chunk.text) {
+            accumulatedThinking += chunk.text;
+            yield { kind: 'thinking_delta', id: thinkingBlockId, text: chunk.text };
+          }
         } else if (chunk.type === 'text_delta') {
-          if (accumulatedThinking.trim().length > 0 && !emittedThinking) {
+          if ((accumulatedThinking.trim().length > 0 || accumulatedEncryptedContent) && !emittedThinking) {
             emittedThinking = true;
-            const thinkEv: ThinkingEvent = { kind: 'thinking', id: thinkingBlockId, text: accumulatedThinking };
+            if (accumulatedEncryptedContent) emittedEncryptedContent = true;
+            const thinkEv: ThinkingEvent = {
+              kind: 'thinking',
+              id: thinkingBlockId,
+              text: accumulatedThinking,
+              ...(accumulatedEncryptedContent ? { encryptedContent: accumulatedEncryptedContent } : {}),
+              ...(accumulatedReasoningItemId ? { reasoningItemId: accumulatedReasoningItemId } : {}),
+            };
             yield thinkEv;
             await appendTranscriptEvent(workspacePath, chat.id, thinkEv);
           }
@@ -3037,10 +3085,29 @@ export class PlannerChatService {
     }
 
     const finalReasoning = completion?.reasoning || accumulatedThinking;
-    if (finalReasoning.trim().length > 0 && !emittedThinking) {
+    const finalEncryptedContent = completion?.reasoningEncryptedContent || accumulatedEncryptedContent;
+    const finalReasoningItemId = completion?.reasoningItemId || accumulatedReasoningItemId;
+    if ((finalReasoning.trim().length > 0 || finalEncryptedContent) && !emittedThinking) {
       emittedThinking = true;
-      const thinkEv: ThinkingEvent = { kind: 'thinking', id: thinkingBlockId, text: finalReasoning };
+      if (finalEncryptedContent) emittedEncryptedContent = true;
+      const thinkEv: ThinkingEvent = {
+        kind: 'thinking',
+        id: thinkingBlockId,
+        text: finalReasoning,
+        ...(finalEncryptedContent ? { encryptedContent: finalEncryptedContent } : {}),
+        ...(finalReasoningItemId ? { reasoningItemId: finalReasoningItemId } : {}),
+      };
       yield thinkEv;
+      await appendTranscriptEvent(workspacePath, chat.id, thinkEv);
+    } else if (finalEncryptedContent && !emittedEncryptedContent) {
+      emittedEncryptedContent = true;
+      const thinkEv: ThinkingEvent = {
+        kind: 'thinking',
+        id: crypto.randomUUID(),
+        text: '',
+        encryptedContent: finalEncryptedContent,
+        ...(finalReasoningItemId ? { reasoningItemId: finalReasoningItemId } : {}),
+      };
       await appendTranscriptEvent(workspacePath, chat.id, thinkEv);
     }
     const timedStats = { ...stats, elapsedMs: stats.elapsedMs + (Date.now() - llmStartedAt) };
@@ -4046,6 +4113,12 @@ export class PlannerChatService {
         'not_configured',
       );
     }
+    if (resolved.provider.kind === 'codex-oauth' && !apiKey) {
+      throw new PlannerChatError(
+        `Codex provider "${resolved.provider.label}" has no credentials configured. Sign in with device code or enable ~/.codex/auth.json read-only mode in Settings → Providers & Models.`,
+        'not_configured',
+      );
+    }
     return resolved.row ? resolved.row.id : candidate;
   }
 
@@ -4603,6 +4676,7 @@ export class PlannerChatService {
         effort: chat.lastEffort,
         thinking: chat.thinkingEnabled !== false,
         idleTimeoutMs: settings.llmIdleTimeoutSeconds * 1000,
+        chatId: chat.id,
         ...(modelRow?.maxOutputTokens != null ? { maxTokens: Math.min(summaryBudget, modelRow.maxOutputTokens) } : {}),
       })) {
         if (chunk.type === 'done') completion = chunk;
@@ -4934,6 +5008,10 @@ export function eventsToLlmMessages(
   // what the provider originally returned — OpenAI-compatible APIs accept
   // `content` alongside `tool_calls`.
   let pendingNarration: string | null = null;
+  // PA-150: encrypted reasoning items (`reasoning.encrypted_content`) from
+  // Codex Responses API must be replayed on the assistant turn they preceded
+  // so multi-step tool loops keep their reasoning context across round trips.
+  let pendingReasoning: PlannerReasoningItem[] | null = null;
   const resultsById = new Map<string, string>();
   const imagesById = new Map<string, PromptImage>();
 
@@ -4941,8 +5019,14 @@ export function eventsToLlmMessages(
     if (!pendingCalls) return;
     const calls = pendingCalls;
     pendingCalls = null;
-    messages.push({ role: 'assistant', content: pendingNarration, tool_calls: calls });
+    messages.push({
+      role: 'assistant',
+      content: pendingNarration,
+      tool_calls: calls,
+      ...(pendingReasoning ? { reasoningItems: pendingReasoning } : {}),
+    });
     pendingNarration = null;
+    pendingReasoning = null;
     for (const call of calls) {
       messages.push({
         role: 'tool',
@@ -4968,8 +5052,13 @@ export function eventsToLlmMessages(
   };
   const flushNarration = (): void => {
     if (pendingNarration === null) return;
-    messages.push({ role: 'assistant', content: pendingNarration });
+    messages.push({
+      role: 'assistant',
+      content: pendingNarration,
+      ...(pendingReasoning ? { reasoningItems: pendingReasoning } : {}),
+    });
     pendingNarration = null;
+    pendingReasoning = null;
   };
 
   for (const event of events) {
@@ -4977,6 +5066,7 @@ export function eventsToLlmMessages(
       case 'user_prompt':
         flushPendingCalls();
         flushNarration();
+        pendingReasoning = null;
         {
           // PA-136: a file is a path note, generated from the event's metadata
           // here rather than stored in its text — see `plannerAttachmentNote`.
@@ -5010,11 +5100,30 @@ export function eventsToLlmMessages(
           }
         }
         break;
+      case 'thinking':
+        flushPendingCalls();
+        flushNarration();
+        if (event.encryptedContent) {
+          (pendingReasoning ??= []).push({
+            ...(event.reasoningItemId ? { id: event.reasoningItemId } : {}),
+            encryptedContent: event.encryptedContent,
+            ...(event.text ? { summary: event.text } : {}),
+          });
+        }
+        break;
       case 'text':
         flushPendingCalls();
         flushNarration();
-        if (event.interim) pendingNarration = event.text;
-        else messages.push({ role: 'assistant', content: event.text });
+        if (event.interim) {
+          pendingNarration = event.text;
+        } else {
+          messages.push({
+            role: 'assistant',
+            content: event.text,
+            ...(pendingReasoning ? { reasoningItems: pendingReasoning } : {}),
+          });
+          pendingReasoning = null;
+        }
         break;
       case 'tool_use': {
         const hasSynthetic = Object.keys(event.input).some(

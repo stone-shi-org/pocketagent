@@ -65,6 +65,10 @@ import type {
   ClaudeOAuthAuthorizeResponse,
   ClaudeOAuthExchangeRequest,
   ClaudeProviderUsageResponse,
+  CodexDeviceCodeExchangeRequest,
+  CodexDeviceCodePollRequest,
+  CodexDeviceCodePollResponse,
+  CodexDeviceCodeStartResponse,
   PlannerModel,
   PlannerModelListResponse,
   CreatePlannerModelRequest,
@@ -1035,6 +1039,24 @@ export function createApiClient(endpoint: HostEndpoint) {
     getClaudePlannerProviderUsage: (id: string) =>
       request<ClaudeProviderUsageResponse>(
         `/api/planner/providers/${encodeURIComponent(id)}/usage`,
+      ),
+
+    startCodexPlannerProviderDeviceFlow: (id: string) =>
+      request<CodexDeviceCodeStartResponse>(
+        `/api/planner/providers/${encodeURIComponent(id)}/codex/device/start`,
+        { method: 'POST' },
+      ),
+
+    pollCodexPlannerProviderDeviceFlow: (id: string, body: CodexDeviceCodePollRequest) =>
+      request<CodexDeviceCodePollResponse>(
+        `/api/planner/providers/${encodeURIComponent(id)}/codex/device/poll`,
+        { method: 'POST', body: JSON.stringify(body) },
+      ),
+
+    completeCodexPlannerProviderDeviceFlow: (id: string, body: CodexDeviceCodeExchangeRequest) =>
+      request<PlannerProvider>(
+        `/api/planner/providers/${encodeURIComponent(id)}/codex/device/complete`,
+        { method: 'POST', body: JSON.stringify(body) },
       ),
 
     listPlannerModels: (providerId?: string) =>

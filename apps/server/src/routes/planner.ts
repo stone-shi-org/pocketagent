@@ -7,6 +7,8 @@ import { openSseStream } from './sse.js';
 import {
   CALL_MCP_TOOL_NAME,
   ClaudeOAuthExchangeRequest,
+  CodexDeviceCodeExchangeRequest,
+  CodexDeviceCodePollRequest,
   CreatePlannerChatRequest,
   CreatePlannerModelRequest,
   CreatePlannerProviderRequest,
@@ -39,6 +41,8 @@ import {
   type AgentEvent,
   type ClaudeOAuthAuthorizeResponse,
   type ClaudeProviderUsageResponse,
+  type CodexDeviceCodePollResponse,
+  type CodexDeviceCodeStartResponse,
   type DeleteAllPlannerChatsResponse,
   type DiscoverPlannerModelsResponse,
   type GeminiLiveSettingsDto,
@@ -89,6 +93,13 @@ import {
   startClaudeOAuthAuthorization,
   validateClaudeSetupToken,
 } from '../planner/claude-oauth.js';
+import {
+  completeCodexBrowserDeviceFlow,
+  fetchCodexOAuthUsage,
+  pollCodexDeviceFlow,
+  readCodexCliAuthJson,
+  startCodexDeviceFlow,
+} from '../planner/codex-oauth.js';
 import { GEMINI_LIVE_WS_URL, GeminiLiveError } from '../planner/gemini-live.js';
 import { PlannerLlmClient, PlannerLlmError } from '../planner/llm-client.js';
 import { PLANNER_TOOLS, postJsonToIntegration } from '../planner/tools.js';
@@ -105,12 +116,15 @@ import { TurnTtsPump } from '../voice/turn-tts-pump.js';
 import type { Config } from '../config/index.js';
 import {
   DEFAULT_CLAUDE_OAUTH_BASE_URL,
+  DEFAULT_CODEX_OAUTH_BASE_URL,
   PlannerProviderStoreError,
+  decryptCodexOAuthCredentials,
   deleteAllPlannerModels,
   deletePlannerModel,
   deletePlannerProvider,
   deletePlannerToolApproval,
   encryptClaudeOAuthCredentials,
+  encryptCodexOAuthCredentials,
   encryptPlannerProviderSecret,
   ensureDefaultPlannerProvider,
   insertPlannerModel,
@@ -598,7 +612,11 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
       const kind = parsed.data.kind ?? 'openai-compatible';
       const baseUrl =
         (parsed.data.baseUrl ?? '').trim() ||
-        (kind === 'claude-oauth' ? DEFAULT_CLAUDE_OAUTH_BASE_URL : '');
+        (kind === 'claude-oauth'
+          ? DEFAULT_CLAUDE_OAUTH_BASE_URL
+          : kind === 'codex-oauth'
+            ? DEFAULT_CODEX_OAUTH_BASE_URL
+            : '');
       let secretCiphertext: string | null = null;
       let lastTestedAt: number | null = null;
 
@@ -613,6 +631,27 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
           });
           secretCiphertext = encryptClaudeOAuthCredentials(creds, config.settingsEncKey);
           lastTestedAt = Date.now();
+        }
+      } else if (kind === 'codex-oauth') {
+        if (parsed.data.authMode === 'cli-readonly') {
+          requirePlannerProviderEncKey(config.settingsEncKey);
+          secretCiphertext = encryptCodexOAuthCredentials(
+            {
+              mode: 'cli-readonly',
+              accessToken: null,
+              refreshToken: null,
+              expiresAt: null,
+              accountId: null,
+              planType: null,
+              accountEmail: null,
+              organizationName: null,
+            },
+            config.settingsEncKey,
+          );
+          const cli = readCodexCliAuthJson();
+          if (cli.accessToken && !cli.expired) {
+            lastTestedAt = Date.now();
+          }
         }
       } else {
         const trimmedKey = (parsed.data.apiKey ?? '').trim();
@@ -678,6 +717,36 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
             lastTestedAt: Date.now(),
           };
           hasNewSecret = true;
+        }
+      } else if (existing.kind === 'codex-oauth') {
+        if (parsed.data.authMode === 'cli-readonly') {
+          requirePlannerProviderEncKey(config.settingsEncKey);
+          const cli = readCodexCliAuthJson();
+          secretPatch = {
+            secretCiphertext: encryptCodexOAuthCredentials(
+              {
+                mode: 'cli-readonly',
+                accessToken: null,
+                refreshToken: null,
+                expiresAt: null,
+                accountId: null,
+                planType: null,
+                accountEmail: null,
+                organizationName: null,
+              },
+              config.settingsEncKey,
+            ),
+            ...(cli.accessToken && !cli.expired ? { lastTestedAt: Date.now() } : {}),
+          };
+          hasNewSecret = true;
+        } else if (parsed.data.authMode === 'device-code') {
+          const { credentials } = existing.secretCiphertext
+            ? decryptCodexOAuthCredentials(existing, config.settingsEncKey)
+            : { credentials: null };
+          if (credentials?.mode === 'cli-readonly') {
+            secretPatch = { secretCiphertext: null };
+            hasNewSecret = true;
+          }
         }
       } else {
         const trimmedKey = (parsed.data.apiKey ?? '').trim();
@@ -772,21 +841,114 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
+  app.post('/api/planner/providers/:id/codex/device/start', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { db, config, plannerChats } = app.pocket;
+    const provider = readPlannerProvider(db, id);
+    if (!provider) return notFound(reply, 'Provider not found.');
+    if (provider.kind !== 'codex-oauth') {
+      return badRequest(reply, 'Codex device-code login is only supported for codex-oauth providers.');
+    }
+    try {
+      requirePlannerProviderEncKey(config.settingsEncKey);
+      const response: CodexDeviceCodeStartResponse = await startCodexDeviceFlow(id, plannerChats.llmFetch);
+      return noStore(reply).send(response);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  app.post('/api/planner/providers/:id/codex/device/poll', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = CodexDeviceCodePollRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    const { db, config, plannerChats } = app.pocket;
+    const provider = readPlannerProvider(db, id);
+    if (!provider) return notFound(reply, 'Provider not found.');
+    if (provider.kind !== 'codex-oauth') {
+      return badRequest(reply, 'Codex device-code polling is only supported for codex-oauth providers.');
+    }
+    try {
+      requirePlannerProviderEncKey(config.settingsEncKey);
+      const response: CodexDeviceCodePollResponse = await pollCodexDeviceFlow({
+        db,
+        providerId: id,
+        encKey: config.settingsEncKey,
+        deviceAuthId: parsed.data.deviceAuthId,
+        userCode: parsed.data.userCode,
+        ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
+      });
+      if (response.status === 'completed') {
+        auditConfigChange(request, 'planner provider codex device-code connected', {
+          provider: id,
+          authMode: 'device-code',
+        });
+      }
+      return noStore(reply).send(response);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
+  app.post('/api/planner/providers/:id/codex/device/complete', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = CodexDeviceCodeExchangeRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return badRequest(reply, parsed.error.issues[0]?.message ?? 'Invalid body.');
+    }
+    const { db, config, plannerChats } = app.pocket;
+    const provider = readPlannerProvider(db, id);
+    if (!provider) return notFound(reply, 'Provider not found.');
+    if (provider.kind !== 'codex-oauth') {
+      return badRequest(reply, 'Codex device-code completion is only supported for codex-oauth providers.');
+    }
+    try {
+      requirePlannerProviderEncKey(config.settingsEncKey);
+      const updated = await completeCodexBrowserDeviceFlow({
+        db,
+        providerId: id,
+        encKey: config.settingsEncKey,
+        body: parsed.data,
+        ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
+      });
+      auditConfigChange(request, 'planner provider codex device-code connected', {
+        provider: id,
+        authMode: 'device-code',
+        browserFallback: true,
+      });
+      const dto: PlannerProvider = toPlannerProviderDto(updated, config.settingsEncKey);
+      return noStore(reply).send(dto);
+    } catch (err) {
+      return mapChatError(reply, err);
+    }
+  });
+
   app.get('/api/planner/providers/:id/usage', async (request, reply) => {
     const { id } = request.params as { id: string };
     const { db, config, plannerChats } = app.pocket;
     const provider = readPlannerProvider(db, id);
     if (!provider) return notFound(reply, 'Provider not found.');
-    if (provider.kind !== 'claude-oauth') {
-      return badRequest(reply, 'Subscription usage is only supported for claude-oauth providers.');
+    if (provider.kind === 'claude-oauth') {
+      const response: ClaudeProviderUsageResponse = await fetchClaudeOAuthUsage({
+        db,
+        providerId: id,
+        encKey: config.settingsEncKey,
+        ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
+      });
+      return noStore(reply).send(response);
     }
-    const response: ClaudeProviderUsageResponse = await fetchClaudeOAuthUsage({
-      db,
-      providerId: id,
-      encKey: config.settingsEncKey,
-      ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
-    });
-    return noStore(reply).send(response);
+    if (provider.kind === 'codex-oauth') {
+      const response: ClaudeProviderUsageResponse = await fetchCodexOAuthUsage({
+        db,
+        providerId: id,
+        encKey: config.settingsEncKey,
+        ...(plannerChats.llmFetch ? { fetchImpl: plannerChats.llmFetch } : {}),
+      });
+      return noStore(reply).send(response);
+    }
+    return badRequest(reply, 'Subscription usage is only supported for claude-oauth and codex-oauth providers.');
   });
 
   app.delete('/api/planner/providers/:id', async (request, reply) => {

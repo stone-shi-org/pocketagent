@@ -11,6 +11,7 @@ import type {
 } from '@pocketagent/protocol';
 import {
   CLAUDE_OAUTH_PROVIDER_DISCLOSURE,
+  CODEX_OAUTH_PROVIDER_DISCLOSURE,
   DEFAULT_INLINE_EXTRACT_MAX_TOKENS,
   DEFAULT_INLINE_TEXT_MAX_BYTES,
   MAX_INLINE_EXTRACT_MAX_TOKENS,
@@ -30,6 +31,7 @@ import {
   decryptSecret,
   encryptSecret,
 } from '../crypto/secret-box.js';
+import { readCodexCliAuthJson } from './codex-oauth.js';
 import type { PlannerWorkspaceRow, PlannerWorkspaceStore } from './workspaces.js';
 
 // ---- planner_workspaces -----------------------------------------------------
@@ -305,6 +307,7 @@ export function setMcpRegistryEnabledForWorkspace(
 export const DEFAULT_PLANNER_PROVIDER_ID = 'default';
 export const DEFAULT_PLANNER_PROVIDER_LABEL = 'Default';
 export const DEFAULT_CLAUDE_OAUTH_BASE_URL = 'https://api.anthropic.com';
+export const DEFAULT_CODEX_OAUTH_BASE_URL = 'https://chatgpt.com/backend-api/codex';
 
 export interface ClaudeOAuthStoredCredentials {
   mode: PlannerProviderAuthMode;
@@ -314,6 +317,17 @@ export interface ClaudeOAuthStoredCredentials {
   accountEmail?: string | null;
   organizationName?: string | null;
   rateLimitTier?: string | null;
+}
+
+export interface CodexOAuthStoredCredentials {
+  mode: 'device-code' | 'cli-readonly';
+  accessToken?: string | null;
+  refreshToken?: string | null;
+  expiresAt?: number | null;
+  accountId?: string | null;
+  planType?: string | null;
+  accountEmail?: string | null;
+  organizationName?: string | null;
 }
 
 export class PlannerProviderStoreError extends Error {
@@ -355,6 +369,7 @@ interface PlannerProviderDbRow {
 
 function toProviderKind(raw: string | null | undefined): PlannerProviderKind {
   if (raw === 'claude-oauth') return 'claude-oauth';
+  if (raw === 'codex-oauth') return 'codex-oauth';
   return 'openai-compatible';
 }
 
@@ -451,6 +466,87 @@ export function encryptClaudeOAuthCredentials(
   return encryptSecret(JSON.stringify(normalized), requirePlannerProviderEncKey(encKey));
 }
 
+export function decryptCodexOAuthCredentials(
+  provider: PlannerProviderRow,
+  encKey: Buffer | undefined,
+): { credentials: CodexOAuthStoredCredentials | null; error: string | null } {
+  if (!provider.secretCiphertext) return { credentials: null, error: null };
+  if (encKey === undefined) {
+    return {
+      credentials: null,
+      error: `Set ${SETTINGS_ENC_KEY_VAR} to decrypt this provider's credentials.`,
+    };
+  }
+  let raw: string;
+  try {
+    raw = decryptSecret(provider.secretCiphertext, encKey);
+  } catch {
+    return {
+      credentials: null,
+      error: `Could not decrypt this provider's credentials with the configured ${SETTINGS_ENC_KEY_VAR}. Re-enter or sign in again in Settings to repair it.`,
+    };
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<CodexOAuthStoredCredentials>;
+    if (parsed && typeof parsed === 'object') {
+      if (parsed.mode === 'cli-readonly') {
+        return {
+          credentials: {
+            mode: 'cli-readonly',
+            accessToken: null,
+            refreshToken: null,
+            expiresAt: null,
+            accountId: null,
+            planType: null,
+            accountEmail: null,
+            organizationName: null,
+          },
+          error: null,
+        };
+      }
+      if (
+        parsed.mode === 'device-code' &&
+        typeof parsed.accessToken === 'string' &&
+        parsed.accessToken.trim().length > 0
+      ) {
+        return {
+          credentials: {
+            mode: 'device-code',
+            accessToken: parsed.accessToken.trim(),
+            refreshToken: typeof parsed.refreshToken === 'string' ? parsed.refreshToken : null,
+            expiresAt: typeof parsed.expiresAt === 'number' ? parsed.expiresAt : null,
+            accountId: typeof parsed.accountId === 'string' ? parsed.accountId : null,
+            planType: typeof parsed.planType === 'string' ? parsed.planType : null,
+            accountEmail: typeof parsed.accountEmail === 'string' ? parsed.accountEmail : null,
+            organizationName: typeof parsed.organizationName === 'string' ? parsed.organizationName : null,
+          },
+          error: null,
+        };
+      }
+    }
+  } catch {
+    // Fall through
+  }
+  return { credentials: null, error: 'Stored Codex provider credentials are invalid.' };
+}
+
+export function encryptCodexOAuthCredentials(
+  creds: CodexOAuthStoredCredentials,
+  encKey: Buffer | undefined,
+): string {
+  const normalized: CodexOAuthStoredCredentials = {
+    mode: creds.mode,
+    accessToken: creds.accessToken ? creds.accessToken.trim() : null,
+    refreshToken: creds.refreshToken ? creds.refreshToken.trim() : null,
+    expiresAt: creds.expiresAt ?? null,
+    accountId: creds.accountId ?? null,
+    planType: creds.planType ?? null,
+    accountEmail: creds.accountEmail ?? null,
+    organizationName: creds.organizationName ?? null,
+  };
+  return encryptSecret(JSON.stringify(normalized), requirePlannerProviderEncKey(encKey));
+}
+
 export function decryptPlannerProviderSecret(
   provider: PlannerProviderRow,
   encKey: Buffer | undefined,
@@ -458,6 +554,16 @@ export function decryptPlannerProviderSecret(
   if (provider.kind === 'claude-oauth') {
     const { credentials, error } = decryptClaudeOAuthCredentials(provider, encKey);
     return { apiKey: credentials?.accessToken ?? null, error };
+  }
+  if (provider.kind === 'codex-oauth') {
+    const { credentials, error } = decryptCodexOAuthCredentials(provider, encKey);
+    if (error !== null) return { apiKey: null, error };
+    if (credentials?.mode === 'cli-readonly') {
+      const cli = readCodexCliAuthJson();
+      if (cli.error) return { apiKey: null, error: cli.error };
+      return { apiKey: cli.accessToken, error: null };
+    }
+    return { apiKey: credentials?.accessToken ?? null, error: null };
   }
   if (!provider.secretCiphertext) return { apiKey: null, error: null };
   if (encKey === undefined) {
@@ -505,6 +611,56 @@ export function toPlannerProviderDto(row: PlannerProviderRow, encKey?: Buffer): 
       providerDisclosure: CLAUDE_OAUTH_PROVIDER_DISCLOSURE,
     };
   }
+  if (row.kind === 'codex-oauth') {
+    const { credentials, error } = row.secretCiphertext
+      ? decryptCodexOAuthCredentials(row, encKey)
+      : { credentials: null, error: null };
+    if (credentials?.mode === 'cli-readonly') {
+      const cli = readCodexCliAuthJson();
+      return {
+        id: row.id,
+        label: row.label,
+        kind: row.kind,
+        baseUrl: row.baseUrl,
+        hasApiKey: Boolean(cli.accessToken && !cli.expired),
+        keyUnreadable: false,
+        allowUnattended: row.allowUnattended,
+        sortOrder: row.sortOrder,
+        createdAt: row.createdAt,
+        lastTestedAt: row.lastTestedAt,
+        lastError: row.lastError ?? cli.error,
+        authMode: 'cli-readonly',
+        accountEmail: cli.accountEmail,
+        accountId: cli.accountId,
+        planType: cli.planType,
+        organizationName: cli.organizationName,
+        rateLimitTier: cli.planType,
+        tokenExpiresAt: cli.expiresAt,
+        providerDisclosure: CODEX_OAUTH_PROVIDER_DISCLOSURE,
+      };
+    }
+    return {
+      id: row.id,
+      label: row.label,
+      kind: row.kind,
+      baseUrl: row.baseUrl,
+      hasApiKey: Boolean(credentials?.accessToken),
+      keyUnreadable: error !== null,
+      allowUnattended: row.allowUnattended,
+      sortOrder: row.sortOrder,
+      createdAt: row.createdAt,
+      lastTestedAt: row.lastTestedAt,
+      lastError: row.lastError ?? error,
+      authMode: credentials?.mode ?? null,
+      accountEmail: credentials?.accountEmail ?? null,
+      accountId: credentials?.accountId ?? null,
+      planType: credentials?.planType ?? null,
+      organizationName: credentials?.organizationName ?? null,
+      rateLimitTier: credentials?.planType ?? null,
+      tokenExpiresAt: credentials?.expiresAt ?? null,
+      providerDisclosure: CODEX_OAUTH_PROVIDER_DISCLOSURE,
+    };
+  }
   const decryptStatus = row.secretCiphertext
     ? decryptPlannerProviderSecret(row, encKey)
     : { apiKey: null, error: null };
@@ -522,6 +678,8 @@ export function toPlannerProviderDto(row: PlannerProviderRow, encKey?: Buffer): 
     lastError: row.lastError ?? decryptStatus.error,
     authMode: null,
     accountEmail: null,
+    accountId: null,
+    planType: null,
     organizationName: null,
     rateLimitTier: null,
     tokenExpiresAt: null,

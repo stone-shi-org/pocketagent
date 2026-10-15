@@ -26,10 +26,22 @@ export type PlannerUserContentPart =
   /** PA-137: a PDF, for a model whose row sets `supportsPdf` — see `attachments/inline.ts`. */
   | { type: 'file'; file: { filename: string; file_data: string }; cache_control?: PlannerCacheControl };
 
+export interface PlannerReasoningItem {
+  id?: string;
+  encryptedContent: string;
+  summary?: string;
+}
+
 export type PlannerChatMessage =
   | { role: 'system'; content: string | PlannerTextContentPart[] }
   | { role: 'user'; content: string | PlannerUserContentPart[] }
-  | { role: 'assistant'; content: string | null; tool_calls?: PlannerLlmToolCall[] }
+  | {
+      role: 'assistant';
+      content: string | null;
+      tool_calls?: PlannerLlmToolCall[];
+      /** PA-150: OpenAI Responses API encrypted reasoning items carried forward across tool-loop round trips. */
+      reasoningItems?: PlannerReasoningItem[];
+    }
   | { role: 'tool'; tool_call_id: string; content: string | PlannerTextContentPart[] };
 
 /** OpenAI's own `usage` shape, snake_case for the same reason as the wire
@@ -103,6 +115,9 @@ export interface PlannerLlmCompletion {
   toolCalls: PlannerLlmToolCall[];
   usage: PlannerLlmUsage | null;
   reasoning: string | null;
+  /** PA-150: OpenAI Responses API encrypted reasoning item captured from `output_item.done`. */
+  reasoningEncryptedContent?: string | null;
+  reasoningItemId?: string | null;
   /**
    * PA-121: the provider's `choices[0].finish_reason` (`stop`, `tool_calls`,
    * `length`, …), or `null` when it never sent one. `length` is the one that
@@ -122,7 +137,7 @@ export interface PlannerLlmCompletion {
  */
 export type PlannerLlmStreamEvent =
   | { type: 'text_delta'; text: string }
-  | { type: 'thinking_delta'; text: string }
+  | { type: 'thinking_delta'; text: string; encryptedContent?: string; reasoningItemId?: string }
   /** PA-121: an attempt failed before streaming anything and will be
       retried after `delayMs`. Surfaced so the chat is not silent while it
       waits; nothing about the failed attempt reaches the transcript. */
@@ -132,6 +147,8 @@ export type PlannerLlmStreamEvent =
 export interface PlannerLlmStreamOptions {
   effort?: string | null;
   thinking?: boolean;
+  /** PA-150: chat ID used as `session_id` header and `prompt_cache_key` for Codex Responses cache affinity. */
+  chatId?: string;
   /**
    * PA-121: abandon the request when no byte has arrived for this long —
    * waiting for the response headers included. `0`/absent means no idle
@@ -563,9 +580,19 @@ export class PlannerLlmClient implements PlannerLlmProvider {
     idleFailure: () => PlannerLlmError | null,
   ): AsyncGenerator<PlannerLlmStreamEvent> {
 
+    const wireMessages = messages.map((m) =>
+      m.role === 'assistant' && m.reasoningItems
+        ? {
+            role: m.role,
+            content: m.content,
+            ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
+          }
+        : m,
+    );
+
     const requestPayload: Record<string, unknown> = {
       model,
-      messages,
+      messages: wireMessages,
       stream: true,
       // Asks for a final usage-only chunk (`choices: []`, a `usage`
       // object) before `[DONE]` — the standard OpenAI streaming opt-in,
