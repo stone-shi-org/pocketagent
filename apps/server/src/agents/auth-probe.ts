@@ -46,6 +46,8 @@ export async function probeAgentAuth(adapter: AgentAdapter): Promise<AgentAuthRe
   if (executable === null) return { state: 'unknown', detail: null };
 
   const cwd = usageProbeCwd();
+  const built = adapter.buildCommand({ cwd, cols: 80, rows: 24, skipPermissions: false });
+  const env = buildChildEnv({ cwd, overrides: built.env });
   const result = await new Promise<{
     stdout: string;
     stderr: string;
@@ -54,7 +56,7 @@ export async function probeAgentAuth(adapter: AgentAdapter): Promise<AgentAuthRe
   }>((resolve) => {
     let child;
     try {
-      child = spawn(executable, probe.args, { cwd, env: buildChildEnv({ cwd }) });
+      child = spawn(executable, probe.args, { cwd, env });
     } catch (err) {
       resolve({ stdout: '', stderr: `Could not start ${executable}: ${(err as Error).message}`, code: null, timedOut: false });
       return;

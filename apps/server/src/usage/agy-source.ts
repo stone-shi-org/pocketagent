@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AgentUsageInfo, UsageWindowInfo } from '@pocketagent/protocol';
+import { agyFileTokenStorageEnv } from '../agents/agy.js';
 import { buildChildEnv } from '../sessions/env.js';
 import { formatResetLabel } from './format.js';
 import { createPolled, type Polled } from './poll.js';
@@ -84,7 +85,7 @@ export function createAgyUsageSource(opts: AgyUsageSourceOptions): Polled<AgentU
         ['-p', '/usage', '--output-format', 'json'],
         {
           cwd,
-          env: buildChildEnv({ cwd }),
+          env: buildChildEnv({ cwd, overrides: agyFileTokenStorageEnv() }),
           timeout: TIMEOUT_MS,
           maxBuffer: 1024 * 1024,
         },

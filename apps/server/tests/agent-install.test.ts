@@ -7,7 +7,7 @@ import { INSTALLABLE_AGENT_IDS, installActionFor } from '@pocketagent/protocol';
 import { buildApp } from '../src/app.js';
 import { openDatabase } from '../src/db/index.js';
 import { catalogEntry, catalogPlatformProblem, installableAgents, isOfficialInstallPath } from '../src/agents/catalog.js';
-import { deriveSetupState } from '../src/agents/auth-probe.js';
+import { deriveSetupState, probeAgentAuth } from '../src/agents/auth-probe.js';
 import {
   agentBinaryReport,
   homeWritabilityProblem,
@@ -24,7 +24,7 @@ import {
   setAgentInstallPrefixSource,
   wrapLoginShellCommand,
 } from '../src/agents/registry.js';
-import { createAgyAdapter } from '../src/agents/agy.js';
+import { agyFileTokenStorageEnv, createAgyAdapter } from '../src/agents/agy.js';
 import { createClaudeAdapter } from '../src/agents/claude.js';
 import { createCodexAdapter } from '../src/agents/codex.js';
 import { authHeaders, createTestApp, makeConfig, makeWorkspace, TEST_TOKEN, type TestApp } from './helpers.js';
@@ -694,6 +694,36 @@ describe('auth probe interpretation', () => {
     const { createPiAdapter } = await import('../src/agents/pi.js');
     expect(createOpencodeAdapter('opencode').authProbe).toBeUndefined();
     expect(createPiAdapter('pi').authProbe).toBeUndefined();
+  });
+
+  /**
+   * When PocketAgent runs as a `systemd --user` service on a Linux host with a
+   * desktop/XRDP session (`gnome-keyring-daemon` on `/run/user/$UID/bus`),
+   * `SSH_*` is unset in the daemon environment while an operator signing in
+   * over SSH writes only to `~/.gemini/antigravity-cli/antigravity-oauth-token`.
+   * Forcing `SSH_CONNECTION` on `agy` spawns keeps sessions, model probes,
+   * auth probes, and usage polls on the file-based token store.
+   */
+  it('forces agy onto file-based token storage across buildCommand and probeAgentAuth', async () => {
+    expect(agyFileTokenStorageEnv({})).toEqual({ SSH_CONNECTION: 'pocketagent' });
+    expect(agyFileTokenStorageEnv({ SSH_CONNECTION: '10.0.0.1 12345 10.0.0.2 22' })).toEqual({
+      SSH_CONNECTION: '10.0.0.1 12345 10.0.0.2 22',
+    });
+    expect(agy.buildCommand({ cwd: '/tmp', cols: 80, rows: 24 }).env?.SSH_CONNECTION).toBeTruthy();
+
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'pa-agy-probe-'));
+    try {
+      const fakeAgy = path.join(dir, 'agy');
+      writeFileSync(
+        fakeAgy,
+        '#!/bin/sh\nif [ -n "$SSH_CONNECTION" ]; then\n  printf "auto\\tGemini Pro Next\\n"\n  exit 0\nfi\nprintf "Error: Please sign in to view available models.\\n" >&2\nexit 1\n',
+      );
+      chmodSync(fakeAgy, 0o755);
+      const res = await probeAgentAuth(createAgyAdapter(fakeAgy));
+      expect(res).toEqual({ state: 'ready', detail: 'Signed in' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

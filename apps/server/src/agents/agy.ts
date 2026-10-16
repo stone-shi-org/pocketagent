@@ -22,6 +22,35 @@ import { normalizeAgyModelList } from '../sessions/normalize.js';
  * offer a checkbox that implies an off state which does not exist. See
  * `AgySession` for the long-lived subprocess model this implies.
  */
+/**
+ * Force `agy`'s `CompositeTokenStorage` onto its file-based token store
+ * (`~/.gemini/antigravity-cli/antigravity-oauth-token`) rather than the OS
+ * keyring (`org.freedesktop.secrets` over `/run/user/$UID/bus`).
+ *
+ * Confirmed against `agy` v1.3.6 (`composite_token_storage.go` +
+ * `keyring_detector_ssh.go`):
+ *   - When an operator signs in or switches accounts over SSH, `SSH_CONNECTION`
+ *     (or `SSH_CLIENT` / `SSH_TTY`) is set, so `sshDetector.Detect()` triggers
+ *     ("Using file-based token storage because SSH session detected") and
+ *     writes the OAuth token only to `antigravity-oauth-token`, leaving any
+ *     desktop keyring (`gnome-keyring-daemon`) untouched.
+ *   - When PocketAgent runs as a `systemd --user` service on a Linux host that
+ *     also has a desktop/XRDP session (`DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID/bus`),
+ *     `SSH_*` is absent from the daemon's environment. Without it, `agy`
+ *     consults `gnome-keyring-daemon` first — reading a stale account from the
+ *     keyring instead of the account configured over SSH, or writing refreshed
+ *     tokens back into the keyring so the next SSH account switch splits the
+ *     two stores again (`dbusDetector` still sees the `/run/user/$UID/bus`
+ *     socket even when `DBUS_SESSION_BUS_ADDRESS` is unset or `disabled:`).
+ */
+export function agyFileTokenStorageEnv(
+  base: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  return {
+    SSH_CONNECTION: base.SSH_CONNECTION || 'pocketagent',
+  };
+}
+
 export function createAgyAdapter(bin: string): AgentAdapter {
   return {
     id: 'agy',
@@ -37,7 +66,7 @@ export function createAgyAdapter(bin: string): AgentAdapter {
       // Args are unused for the structured transport (AgySession builds its
       // own argv); this only has to be truthful for `isAvailable`
       // and for `env` merging, which happens regardless of transport.
-      return { command: bin, args: [] };
+      return { command: bin, args: [], env: agyFileTokenStorageEnv() };
     },
 
     bin,
