@@ -663,7 +663,8 @@ export function PlannerChatPage({
     }
   }, [artifactsOpen, refreshArtifacts]);
 
-  // Pre-fetch artifacts count for badge even when panel is closed
+  // Pre-fetch artifacts count for badge even when panel is closed, and re-fetch
+  // whenever the chat's attached document workspace changes (PA-157).
   useEffect(() => {
     let cancelled = false;
     void api
@@ -675,7 +676,7 @@ export function PlannerChatPage({
     return () => {
       cancelled = true;
     };
-  }, [api, chatId]);
+  }, [api, chatId, attachedDocWorkspaceId]);
 
   const toggleArtifacts = useCallback(() => {
     setArtifactsOpen((prev) => {

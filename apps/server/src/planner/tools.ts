@@ -807,9 +807,7 @@ function isPlannerIdentityRelativePath(requested: string): boolean {
     norm === 'IDENTITY.md' ||
     norm === 'MEMORY.md' ||
     norm === 'skills' ||
-    norm.startsWith('skills/') ||
-    norm === 'artifacts' ||
-    norm.startsWith('artifacts/')
+    norm.startsWith('skills/')
   );
 }
 

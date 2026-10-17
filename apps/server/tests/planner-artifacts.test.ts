@@ -207,4 +207,146 @@ describe('planner artifacts (PA-128)', () => {
     const body2 = listRes2.json() as PlannerArtifactsResponse;
     expect(body2.artifacts.length).toBe(0);
   });
+
+  it('scopes artifacts per document workspace and does not leak global artifacts (PA-157)', async () => {
+    const defaultWs = t.context.plannerWorkspaces.getDefault()!;
+    const globalArtifactsDir = path.join(defaultWs.path, 'artifacts');
+    await fs.mkdir(globalArtifactsDir, { recursive: true });
+    await fs.writeFile(path.join(globalArtifactsDir, 'global-plan.md'), '# Global Plan');
+
+    const docWsDirA = path.join(t.workspaceRoot, 'doc-ws-a');
+    const docWsDirB = path.join(t.workspaceRoot, 'doc-ws-b');
+    await fs.mkdir(docWsDirA, { recursive: true });
+    await fs.mkdir(docWsDirB, { recursive: true });
+    await fs.writeFile(path.join(docWsDirA, 'source-a.txt'), 'user source file A');
+
+    const docWsA = await t.context.docWorkspaces.create({ path: docWsDirA, name: 'Workspace A' });
+    const docWsB = await t.context.docWorkspaces.create({ path: docWsDirB, name: 'Workspace B' });
+
+    const chatGlobal = t.context.plannerChats.create({
+      workspaceId: defaultWs.id,
+      title: 'Global Chat',
+    });
+    const chatA = t.context.plannerChats.create({
+      workspaceId: defaultWs.id,
+      docWorkspaceId: docWsA.id,
+      title: 'Workspace A Chat',
+    });
+    const chatB = t.context.plannerChats.create({
+      workspaceId: defaultWs.id,
+      docWorkspaceId: docWsB.id,
+      title: 'Workspace B Chat',
+    });
+
+    // 1. Fresh document workspace chat has 0 artifacts (does not show global-plan.md)
+    // and does NOT create an empty artifacts/ directory in the user's folder on GET.
+    const emptyResA = await get(`/api/planner/chats/${chatA.id}/artifacts`);
+    expect(emptyResA.statusCode).toBe(200);
+    expect(emptyResA.json().artifacts).toEqual([]);
+    await expect(fs.stat(path.join(docWsDirA, 'artifacts'))).rejects.toThrow();
+
+    // 2. Global chat still sees global-plan.md
+    const globalRes = await get(`/api/planner/chats/${chatGlobal.id}/artifacts`);
+    expect(globalRes.statusCode).toBe(200);
+    expect(globalRes.json().artifacts.map((a: { name: string }) => a.name)).toEqual(['global-plan.md']);
+
+    // 3. Create artifacts in Workspace A (both in artifacts/ and outputs/) and Workspace B
+    await fs.mkdir(path.join(docWsDirA, 'artifacts'), { recursive: true });
+    await fs.writeFile(path.join(docWsDirA, 'artifacts', 'plan-a.md'), '# Plan A');
+    await fs.mkdir(path.join(docWsDirA, 'outputs'), { recursive: true });
+    await fs.writeFile(path.join(docWsDirA, 'outputs', 'report-a.pdf'), 'PDF-A');
+
+    await fs.mkdir(path.join(docWsDirB, 'artifacts'), { recursive: true });
+    await fs.writeFile(path.join(docWsDirB, 'artifacts', 'plan-b.md'), '# Plan B');
+
+    const resA = await get(`/api/planner/chats/${chatA.id}/artifacts`);
+    expect(resA.statusCode).toBe(200);
+    const namesA = resA
+      .json()
+      .artifacts.map((a: { name: string }) => a.name)
+      .sort();
+    expect(namesA).toEqual(['outputs/report-a.pdf', 'plan-a.md']);
+
+    const resB = await get(`/api/planner/chats/${chatB.id}/artifacts`);
+    expect(resB.statusCode).toBe(200);
+    expect(resB.json().artifacts.map((a: { name: string }) => a.name)).toEqual(['plan-b.md']);
+
+    // 4. Serving files from Workspace A (artifacts/ and outputs/) works and blocks traversal
+    const fileResA = await get(`/api/planner/chats/${chatA.id}/artifacts/file?name=plan-a.md`);
+    expect(fileResA.statusCode).toBe(200);
+    expect(fileResA.body).toBe('# Plan A');
+
+    const outResA = await get(`/api/planner/chats/${chatA.id}/artifacts/file?name=outputs/report-a.pdf`);
+    expect(outResA.statusCode).toBe(200);
+    expect(outResA.body).toBe('PDF-A');
+
+    const leakGlobalFromA = await get(`/api/planner/chats/${chatA.id}/artifacts/file?name=global-plan.md`);
+    expect(leakGlobalFromA.statusCode).toBe(404);
+
+    const traversalA = await get(`/api/planner/chats/${chatA.id}/artifacts/file?name=../source-a.txt`);
+    expect(traversalA.statusCode).toBe(403);
+
+    // 5. Clean all artifacts in Workspace A deletes only Workspace A's artifacts/ and outputs/,
+    // leaving Workspace A's user source files, Workspace B's artifacts, and global artifacts intact.
+    const cleanA = await del(`/api/planner/chats/${chatA.id}/artifacts`);
+    expect(cleanA.statusCode).toBe(200);
+    expect(cleanA.json()).toEqual({ ok: true, count: 2 });
+
+    expect((await get(`/api/planner/chats/${chatA.id}/artifacts`)).json().artifacts).toEqual([]);
+    expect(await fs.readFile(path.join(docWsDirA, 'source-a.txt'), 'utf8')).toBe('user source file A');
+    expect((await get(`/api/planner/chats/${chatB.id}/artifacts`)).json().artifacts).toHaveLength(1);
+    expect((await get(`/api/planner/chats/${chatGlobal.id}/artifacts`)).json().artifacts).toHaveLength(1);
+  });
+
+  it('resolves and auto-approves relative artifacts/ writes inside an attached document workspace (PA-157)', async () => {
+    const defaultWs = t.context.plannerWorkspaces.getDefault()!;
+    const docWsDir = path.join(t.workspaceRoot, 'doc-ws-tools');
+    await fs.mkdir(docWsDir, { recursive: true });
+    const docWs = await t.context.docWorkspaces.create({ path: docWsDir, name: 'Tools WS' });
+
+    const chat = t.context.plannerChats.create({
+      workspaceId: defaultWs.id,
+      docWorkspaceId: docWs.id,
+      title: 'Doc WS Tool Chat',
+    });
+
+    const chatsService = t.context.plannerChats as unknown as {
+      gateToolCall: (
+        chat: unknown,
+        call: { id: string; type: 'function'; function: { name: string; arguments: string } },
+      ) => { kind: string; tool?: { execute: (deps: unknown, args: Record<string, unknown>) => Promise<unknown> } };
+      buildToolDeps: (chat: unknown) => unknown;
+    };
+
+    // Even with autoApproveEdits=false on docWs, mkdir and write_file under relative 'artifacts' are auto-approved
+    const mkdirDecision = chatsService.gateToolCall(chat, {
+      id: 'call_doc_1',
+      type: 'function',
+      function: { name: 'mkdir', arguments: JSON.stringify({ path: 'artifacts' }) },
+    });
+    expect(mkdirDecision.kind).toBe('run');
+
+    const writeDecision = chatsService.gateToolCall(chat, {
+      id: 'call_doc_2',
+      type: 'function',
+      function: { name: 'write_file', arguments: JSON.stringify({ path: 'artifacts/doc-plan.md', content: '# Doc Plan' }) },
+    });
+    expect(writeDecision.kind).toBe('run');
+
+    // Outside artifacts/ in docWs (when autoApproveEdits=false) still requires approval
+    const outsideDecision = chatsService.gateToolCall(chat, {
+      id: 'call_doc_3',
+      type: 'function',
+      function: { name: 'write_file', arguments: JSON.stringify({ path: 'notes.md', content: '# Notes' }) },
+    });
+    expect(outsideDecision.kind).toBe('needs_approval');
+
+    // Executing mkdir + write_file writes to <docWs.path>/artifacts/doc-plan.md, NOT <defaultWs.path>/artifacts
+    const deps = chatsService.buildToolDeps(chat);
+    await mkdirDecision.tool!.execute(deps, { path: 'artifacts' });
+    await writeDecision.tool!.execute(deps, { path: 'artifacts/doc-plan.md', content: '# Doc Plan' });
+
+    expect(await fs.readFile(path.join(docWsDir, 'artifacts', 'doc-plan.md'), 'utf8')).toBe('# Doc Plan');
+    await expect(fs.stat(path.join(defaultWs.path, 'artifacts', 'doc-plan.md'))).rejects.toThrow();
+  });
 });

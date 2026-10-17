@@ -247,7 +247,7 @@ describe('PocketAgentsSection (PA-106)', () => {
       />,
     );
 
-    expect(html).toContain('Workspaces');
+    expect(html).toContain('<div class="section-head"><h2 class="section-heading">Workspaces</h2><button type="button" class="round-btn plain section-head-action" aria-label="Add document workspace"');
     expect(html).toContain('Legal Matter');
     expect(html).toContain('Review Clause 4');
     expect(html).toContain('aria-label="New chat in Legal Matter"');

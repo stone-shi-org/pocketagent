@@ -273,8 +273,8 @@ export function basePlannerSystemPrompt(
             'New artifacts from create_sheet, create_doc, and export_pdf default to outputs/ inside the document workspace.',
         ]
       : []),
-    "- Store files you are asked to create, implementation plans in Markdown, exported documents, or generated " +
-      "assets in the 'artifacts' subfolder inside your workspace directory (create it with mkdir if it does not " +
+    '- Store files you are asked to create, implementation plans in Markdown, exported documents, or generated ' +
+      `assets in the 'artifacts' subfolder inside ${docWorkspace ? `the attached document workspace (${docWorkspace.path})` : 'your workspace directory'} (create it with mkdir if it does not ` +
       "exist). Writing or creating files in the 'artifacts' subfolder does not require user confirmation. If a file " +
       'name already exists from another session, append a suffix to the filename to avoid overwriting it.',
     '- For Excel workbooks (.xlsx / .xlsm), use sheet_info, sheet_read, sheet_find, sheet_check and sheet_edit ' +
@@ -3615,15 +3615,20 @@ export class PlannerChatService {
     } catch {
       return false;
     }
-    const artifactsDir = path.resolve(workspacePath, 'artifacts');
+    const baseDir = docWs ? docWs.path : workspacePath;
+    const candidateDirs = docWs
+      ? [path.resolve(docWs.path, 'artifacts'), path.resolve(workspacePath, 'artifacts')]
+      : [path.resolve(workspacePath, 'artifacts')];
     const resolvedTarget = path.isAbsolute(requestedPath)
       ? path.resolve(requestedPath)
-      : path.resolve(workspacePath, requestedPath);
+      : path.resolve(baseDir, requestedPath);
 
-    if (toolName === 'mkdir') {
-      return resolvedTarget === artifactsDir || isContained(artifactsDir, resolvedTarget);
-    }
-    return isContained(artifactsDir, resolvedTarget) && resolvedTarget !== artifactsDir;
+    return candidateDirs.some((artifactsDir) => {
+      if (toolName === 'mkdir') {
+        return resolvedTarget === artifactsDir || isContained(artifactsDir, resolvedTarget);
+      }
+      return isContained(artifactsDir, resolvedTarget) && resolvedTarget !== artifactsDir;
+    });
   }
 
   // ---- Gemini Live (PA-96) --------------------------------------------------

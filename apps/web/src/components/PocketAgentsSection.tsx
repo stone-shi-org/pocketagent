@@ -496,18 +496,18 @@ export function PocketAgentsSection({
         );
       })}
 
-      {/* PA-142: "Workspaces" group inside the Pocket Agents section */}
+      {/* PA-142 / PA-157: "Workspaces" group inside the Pocket Agents section */}
       <div className="doc-workspaces-group">
-        <div className="doc-workspaces-group-head">
-          <span className="doc-workspaces-group-title">Workspaces</span>
+        <div className="section-head">
+          <h2 className="section-heading">Workspaces</h2>
           <button
             type="button"
-            className="round-btn plain"
+            className="round-btn plain section-head-action"
             onClick={() => setPickingDocWorkspaceDir(true)}
             aria-label="Add document workspace"
             title="Add document workspace folder"
           >
-            <Icon name="plus" size={16} />
+            <Icon name="plus" size={18} />
           </button>
         </div>
 

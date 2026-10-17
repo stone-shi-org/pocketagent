@@ -2443,7 +2443,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     }
   }
 
-  async function listArtifactFiles(artifactsDir: string): Promise<PlannerArtifact[]> {
+  async function listArtifactFiles(artifactsDir: string, prefix = ''): Promise<PlannerArtifact[]> {
     const results: PlannerArtifact[] = [];
     async function walk(currentDir: string, relativeDir: string) {
       let entries: fs.Dirent[];
@@ -2453,7 +2453,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
         return;
       }
       for (const entry of entries) {
-        if (entry.name.startsWith('.')) continue; // ignore hidden files
+        if (entry.name.startsWith('.') || entry.name.startsWith('~$')) continue; // ignore hidden & Office lock files
         const fullPath = path.join(currentDir, entry.name);
         const relPath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
         if (entry.isDirectory()) {
@@ -2462,7 +2462,7 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
           try {
             const stat = await fsPromises.stat(fullPath);
             results.push({
-              name: relPath,
+              name: prefix ? `${prefix}/${relPath}` : relPath,
               size: stat.size,
               modifiedAt: Math.round(stat.mtimeMs),
             });
@@ -2495,23 +2495,76 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     return path.join(ws.path, 'artifacts');
   }
 
-  function artifactsDirForChat(chatId: string): string | null {
+  // PA-157: When a chat is attached to a document workspace (`chat.docWorkspaceId`),
+  // its artifacts must be scoped to that document workspace rather than the
+  // calling Pocket Agent's shared `<plannerWorkspace>/artifacts` directory.
+  type ChatArtifactTarget =
+    | { kind: 'planner_workspace'; artifactsDir: string }
+    | { kind: 'doc_workspace'; artifactsDir: string; outputsDir: string };
+
+  function artifactTargetForChat(chatId: string): ChatArtifactTarget | null {
     const chat = app.pocket.plannerChats.get(chatId);
     if (!chat) return null;
+    if (chat.docWorkspaceId) {
+      const docWs = app.pocket.docWorkspaces.get(chat.docWorkspaceId);
+      if (!docWs) return null;
+      return {
+        kind: 'doc_workspace',
+        artifactsDir: path.join(docWs.path, 'artifacts'),
+        outputsDir: path.join(docWs.path, 'outputs'),
+      };
+    }
     const ws = chat.workspaceId ? app.pocket.plannerWorkspaces.get(chat.workspaceId) : undefined;
     const workspace = ws ?? app.pocket.plannerWorkspaces.getDefault();
     if (!workspace) return null;
-    return path.join(workspace.path, 'artifacts');
+    return {
+      kind: 'planner_workspace',
+      artifactsDir: path.join(workspace.path, 'artifacts'),
+    };
+  }
+
+  function resolveChatArtifactPath(target: ChatArtifactTarget, requestedName: string): string | null {
+    const inArtifacts = resolveArtifactPath(target.artifactsDir, requestedName);
+    if (target.kind === 'planner_workspace') {
+      return inArtifacts;
+    }
+    const normalized = requestedName.trim().replace(/\\/g, '/').replace(/^\.\//, '');
+    if (normalized.startsWith('outputs/')) {
+      if (inArtifacts && fs.existsSync(inArtifacts)) {
+        return inArtifacts;
+      }
+      const relInOutputs = normalized.slice('outputs/'.length);
+      return resolveArtifactPath(target.outputsDir, relInOutputs);
+    }
+    return inArtifacts;
+  }
+
+  async function listChatArtifactFiles(target: ChatArtifactTarget): Promise<PlannerArtifact[]> {
+    if (target.kind === 'planner_workspace') {
+      await fsPromises.mkdir(target.artifactsDir, { recursive: true });
+      return listArtifactFiles(target.artifactsDir);
+    }
+    // PA-157 / PA-142 invariant: never create directories inside a user's document
+    // workspace on read. Both `artifacts/` and `outputs/` (where `create_sheet`,
+    // `create_doc`, and `export_pdf` default in document workspaces) are listed
+    // if they exist.
+    const [fromArtifacts, fromOutputs] = await Promise.all([
+      listArtifactFiles(target.artifactsDir),
+      listArtifactFiles(target.outputsDir, 'outputs'),
+    ]);
+    const seen = new Set(fromArtifacts.map((a) => a.name));
+    const merged = [...fromArtifacts, ...fromOutputs.filter((a) => !seen.has(a.name))];
+    merged.sort((a, b) => b.modifiedAt - a.modifiedAt);
+    return merged;
   }
 
   async function handleServeArtifactFile(
-    artifactsDir: string,
+    filePath: string | null,
     query: { name?: string; download?: string },
     reply: FastifyReply,
   ) {
     const name = query.name;
     if (!name) return badRequest(reply, 'Missing required name query parameter.');
-    const filePath = resolveArtifactPath(artifactsDir, name);
     if (!filePath) return forbidden(reply, 'Invalid or forbidden artifact path.');
     let stat: fs.Stats;
     try {
@@ -2537,13 +2590,12 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
   }
 
   async function handleDeleteArtifactFile(
-    artifactsDir: string,
+    filePath: string | null,
     query: { name?: string },
     reply: FastifyReply,
   ) {
     const name = query.name;
     if (!name) return badRequest(reply, 'Missing required name query parameter.');
-    const filePath = resolveArtifactPath(artifactsDir, name);
     if (!filePath) return forbidden(reply, 'Invalid or forbidden artifact path.');
     try {
       const stat = await fsPromises.stat(filePath);
@@ -2560,27 +2612,28 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
   }
 
   async function handleDeleteAllArtifacts(
-    artifactsDir: string,
+    artifactsDirs: string[],
     reply: FastifyReply,
   ) {
     try {
-      let entries: fs.Dirent[];
-      try {
-        entries = await fsPromises.readdir(artifactsDir, { withFileTypes: true });
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-          const response: DeletePlannerArtifactResponse = { ok: true, count: 0 };
-          return response;
-        }
-        throw err;
-      }
       let count = 0;
-      for (const entry of entries) {
-        if (entry.name.startsWith('.')) continue;
-        const target = path.join(artifactsDir, entry.name);
-        if (isContained(artifactsDir, target) && target !== artifactsDir) {
-          await fsPromises.rm(target, { recursive: true, force: true });
-          count++;
+      for (const artifactsDir of artifactsDirs) {
+        let entries: fs.Dirent[];
+        try {
+          entries = await fsPromises.readdir(artifactsDir, { withFileTypes: true });
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+            continue;
+          }
+          throw err;
+        }
+        for (const entry of entries) {
+          if (entry.name.startsWith('.')) continue;
+          const target = path.join(artifactsDir, entry.name);
+          if (isContained(artifactsDir, target) && target !== artifactsDir) {
+            await fsPromises.rm(target, { recursive: true, force: true });
+            count++;
+          }
         }
       }
       const response: DeletePlannerArtifactResponse = { ok: true, count };
@@ -2602,10 +2655,9 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
 
   app.get('/api/planner/chats/:id/artifacts', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const artifactsDir = artifactsDirForChat(id);
-    if (!artifactsDir) return notFound(reply, 'Chat not found.');
-    await fsPromises.mkdir(artifactsDir, { recursive: true });
-    const artifacts = await listArtifactFiles(artifactsDir);
+    const target = artifactTargetForChat(id);
+    if (!target) return notFound(reply, 'Chat not found.');
+    const artifacts = await listChatArtifactFiles(target);
     const response: PlannerArtifactsResponse = { artifacts };
     return response;
   });
@@ -2614,14 +2666,18 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const { id } = request.params as { id: string };
     const artifactsDir = artifactsDirForWorkspace(id);
     if (!artifactsDir) return notFound(reply, 'Workspace not found.');
-    return handleDeleteAllArtifacts(artifactsDir, reply);
+    return handleDeleteAllArtifacts([artifactsDir], reply);
   });
 
   app.delete('/api/planner/chats/:id/artifacts', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const artifactsDir = artifactsDirForChat(id);
-    if (!artifactsDir) return notFound(reply, 'Chat not found.');
-    return handleDeleteAllArtifacts(artifactsDir, reply);
+    const target = artifactTargetForChat(id);
+    if (!target) return notFound(reply, 'Chat not found.');
+    const dirs =
+      target.kind === 'doc_workspace'
+        ? [target.artifactsDir, target.outputsDir]
+        : [target.artifactsDir];
+    return handleDeleteAllArtifacts(dirs, reply);
   });
 
   app.get('/api/planner/workspaces/:id/artifacts/file', async (request, reply) => {
@@ -2629,15 +2685,17 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const query = request.query as { name?: string; download?: string };
     const artifactsDir = artifactsDirForWorkspace(id);
     if (!artifactsDir) return notFound(reply, 'Workspace not found.');
-    return handleServeArtifactFile(artifactsDir, query, reply);
+    const filePath = query.name ? resolveArtifactPath(artifactsDir, query.name) : null;
+    return handleServeArtifactFile(filePath, query, reply);
   });
 
   app.get('/api/planner/chats/:id/artifacts/file', async (request, reply) => {
     const { id } = request.params as { id: string };
     const query = request.query as { name?: string; download?: string };
-    const artifactsDir = artifactsDirForChat(id);
-    if (!artifactsDir) return notFound(reply, 'Chat not found.');
-    return handleServeArtifactFile(artifactsDir, query, reply);
+    const target = artifactTargetForChat(id);
+    if (!target) return notFound(reply, 'Chat not found.');
+    const filePath = query.name ? resolveChatArtifactPath(target, query.name) : null;
+    return handleServeArtifactFile(filePath, query, reply);
   });
 
   app.delete('/api/planner/workspaces/:id/artifacts/file', async (request, reply) => {
@@ -2645,14 +2703,16 @@ export const plannerRoutes: FastifyPluginAsync = async (app) => {
     const query = request.query as { name?: string };
     const artifactsDir = artifactsDirForWorkspace(id);
     if (!artifactsDir) return notFound(reply, 'Workspace not found.');
-    return handleDeleteArtifactFile(artifactsDir, query, reply);
+    const filePath = query.name ? resolveArtifactPath(artifactsDir, query.name) : null;
+    return handleDeleteArtifactFile(filePath, query, reply);
   });
 
   app.delete('/api/planner/chats/:id/artifacts/file', async (request, reply) => {
     const { id } = request.params as { id: string };
     const query = request.query as { name?: string };
-    const artifactsDir = artifactsDirForChat(id);
-    if (!artifactsDir) return notFound(reply, 'Chat not found.');
-    return handleDeleteArtifactFile(artifactsDir, query, reply);
+    const target = artifactTargetForChat(id);
+    if (!target) return notFound(reply, 'Chat not found.');
+    const filePath = query.name ? resolveChatArtifactPath(target, query.name) : null;
+    return handleDeleteArtifactFile(filePath, query, reply);
   });
 };
