@@ -352,6 +352,110 @@ describe('GET /api/usage', () => {
       expect(agy.error).toBeNull();
     });
 
+    it('consolidates 20-hour model-tier groups into Pro, Flash, Flash Lite, and Third-Party (PA-156)', async () => {
+      const fake = makeFakeAgy([
+        {
+          name: 'Gemini Pro Next',
+          buckets: [
+            {
+              id: 'gemini-next-v2',
+              name: 'Twenty Hour Limit Remaining',
+              window: '20h',
+              remaining_fraction: 0.85,
+              reset_time: '2026-10-17T12:51:04Z',
+            },
+          ],
+        },
+        {
+          name: 'Gemini Flash Next',
+          buckets: [
+            {
+              id: 'gemini-flash-next',
+              name: 'Twenty Hour Limit Remaining',
+              window: '20h',
+              remaining_fraction: 1,
+              reset_time: '2026-10-17T23:27:54Z',
+            },
+          ],
+        },
+        {
+          name: 'Gemini Teamfood Models',
+          buckets: [
+            {
+              id: 'gemini-google-teamfood-wtu-v2',
+              name: 'Twenty Hour Limit Remaining',
+              window: '20h',
+              remaining_fraction: 0.99,
+              reset_time: '2026-10-17T19:41:55Z',
+            },
+          ],
+        },
+        {
+          name: 'Gemini Flash',
+          buckets: [
+            {
+              id: 'gemini-2.5-flash',
+              name: 'Twenty Hour Limit Remaining',
+              window: '20h',
+              remaining_fraction: 0.6,
+              reset_time: '2026-10-17T11:06:13Z',
+            },
+          ],
+        },
+        {
+          name: 'Gemini Flash Lite',
+          buckets: [
+            {
+              id: 'gemini-2.5-flash-lite',
+              name: 'Twenty Hour Limit Remaining',
+              window: '20h',
+              remaining_fraction: 0.9,
+              reset_time: '2026-10-17T07:06:42Z',
+            },
+          ],
+        },
+        {
+          name: 'Gemini 3.1 Pro',
+          buckets: [
+            {
+              id: 'gemini-3.1-pro',
+              name: 'Twenty Hour Limit Remaining',
+              window: '20h',
+              remaining_fraction: 1,
+              reset_time: '2026-10-17T23:27:54Z',
+            },
+          ],
+        },
+        {
+          name: 'Third-Party Models',
+          buckets: [
+            {
+              id: '3p-wtu-daily',
+              name: 'Twenty Hour Limit Remaining',
+              window: '20h',
+              remaining_fraction: 0.75,
+              reset_time: '2026-10-17T23:27:54Z',
+            },
+          ],
+        },
+      ]);
+      fakes.push(fake);
+      t = await createTestApp({ ...NO_CLAUDE, ...NO_CODEX, POCKETAGENT_AGY_BIN: fake.bin });
+
+      const res = await t.app.inject({ method: 'GET', url: '/api/usage', headers: headers(t) });
+      const agy = findAgent(res.json().usage, 'agy') as Record<string, unknown>;
+      expect(agy.available).toBe(true);
+      expect(agy.percentUsed).toBe(40);
+      expect(agy.windowLabel).toBe('Flash 20h');
+      const windows = agy.windows as Array<{ label: string; percentUsed: number }>;
+      expect(windows).toEqual([
+        expect.objectContaining({ label: 'Pro 20h', percentUsed: 15 }),
+        expect.objectContaining({ label: 'Flash 20h', percentUsed: 40 }),
+        expect.objectContaining({ label: 'Flash Lite 20h', percentUsed: 10 }),
+        expect.objectContaining({ label: 'Third-Party 20h', percentUsed: 25 }),
+      ]);
+    });
+
     it('reports unavailable, rather than failing the request, when the binary cannot run', async () => {
       t = await createTestApp(NONE_OF_THEM);
       const res = await t.app.inject({ method: 'GET', url: '/api/usage', headers: headers(t) });

@@ -32,11 +32,31 @@ interface UsageCommandResult {
 
 type GroupedBucket = UsageBucket & { groupName?: string };
 
+const AGY_MODEL_TIERS = ['Pro', 'Flash', 'Flash Lite', 'Third-Party'] as const;
+type AgyModelTier = (typeof AGY_MODEL_TIERS)[number];
+
 /**
- * One `UsageWindowInfo` from a set of buckets that are all the same window
- * type (5h or weekly) — normally one bucket per group, but reduced to the
- * worst rather than just taking `[0]` in case a future `/usage` shape ever
- * reports more than one per group per type.
+ * Maps `agy /usage`'s per-model groups (`"Gemini Pro Next"`, `"Gemini 3.1 Pro"`,
+ * `"Gemini Teamfood Models"`, `"Gemini Flash"`, `"Gemini Flash Next"`,
+ * `"Gemini Flash Lite"`, `"Third-Party Models"`) onto the four canonical model
+ * tiers surfaced in the gauge ring and expanded panel (PA-156). Returns `null`
+ * for legacy or unrecognized group names (such as the older `"Gemini Models"` /
+ * `"Claude and GPT models"` 5h+weekly shape) so they keep their verbatim label.
+ */
+function classifyAgyTier(groupName: string | undefined): AgyModelTier | null {
+  if (!groupName) return null;
+  if (/flash[\s-]*li(?:te|ght)/i.test(groupName)) return 'Flash Lite';
+  if (/flash/i.test(groupName)) return 'Flash';
+  if (/\bpro\b|teamfood/i.test(groupName)) return 'Pro';
+  if (/third[\s-]*party|\b3p\b/i.test(groupName)) return 'Third-Party';
+  return null;
+}
+
+/**
+ * One `UsageWindowInfo` from a set of buckets that share a group and window
+ * type — reduced to the most depleted bucket so a tier backed by multiple raw
+ * CLI groups (e.g. `"Gemini Pro Next"` and `"Gemini 3.1 Pro"`) surfaces the
+ * active quota rather than an unused sibling's 0% bar.
  */
 function buildWindow(buckets: GroupedBucket[], fallbackWindow: string): UsageWindowInfo {
   const worst = buckets.reduce((a, b) =>
@@ -92,43 +112,51 @@ export function createAgyUsageSource(opts: AgyUsageSourceOptions): Polled<AgentU
       );
       const parsed = JSON.parse(stdout) as UsageCommandResult;
       const groups = parsed.command?.data?.groups ?? [];
-      const buckets = groups.flatMap((group) =>
-        (group.buckets ?? [])
+      const buckets = groups.flatMap((group) => {
+        const groupName = classifyAgyTier(group.name) ?? group.name;
+        return (group.buckets ?? [])
           .filter((b) => typeof b.remaining_fraction === 'number')
-          .map((b) => ({ ...b, groupName: group.name })),
-      );
+          .map((b) => ({ ...b, groupName }));
+      });
       if (buckets.length === 0) {
         return unavailable('Could not find a usage bucket in `agy /usage` output.');
       }
 
-      // Antigravity multiplexes quota across model families — confirmed live,
-      // `/usage` returns separate groups like "Gemini Models" and "Claude and
-      // GPT models", each with its own 5h/weekly buckets. Collapsing to a
-      // single worst-of-all-groups window (the original approach here) hid a
-      // whole group's quota whenever another group was more depleted — a
-      // healthy non-Gemini allowance read as if it didn't exist. One window
-      // per (group, window-type) pair instead, so every group gets its own bar.
+      // Antigravity multiplexes quota across model tiers (`Pro`, `Flash`,
+      // `Flash Lite`, `Third-Party`, each with a 20h bucket in current CLI
+      // releases, or `5h`/`weekly` per family in older ones). Emit one window
+      // per (tier/group, window-type) pair in canonical tier order so both the
+      // 4-ring gauge and the expanded panel show every tier in lockstep.
       const windows: UsageWindowInfo[] = [];
-      const groupNames = [
+      const rawGroupNames = [
         ...new Set(buckets.map((b) => b.groupName).filter((n): n is string => Boolean(n))),
       ];
+      const groupNames = [
+        ...AGY_MODEL_TIERS.filter((tier) => rawGroupNames.includes(tier)),
+        ...rawGroupNames.filter((name) => !AGY_MODEL_TIERS.includes(name as AgyModelTier)),
+      ];
+      const isFiveHour = (b: GroupedBucket) =>
+        b.window === '5h' || /5h|5-hour|five hour/i.test(b.window || b.name || '');
+      const isWeekly = (b: GroupedBucket) =>
+        b.window === 'weekly' || /weekly|7day|7-day/i.test(b.window || b.name || '');
+
       // Buckets with no group name at all (an older/simpler `/usage` shape)
       // are still one implicit group, so the loop below runs at least once.
       for (const groupName of groupNames.length > 0 ? groupNames : [undefined]) {
         const groupBuckets = groupName ? buckets.filter((b) => b.groupName === groupName) : buckets;
-        const fiveHour = groupBuckets.filter(
-          (b) => b.window === '5h' || /5h|5-hour|five hour/i.test(b.window || b.name || ''),
-        );
-        const weekly = groupBuckets.filter(
-          (b) => b.window === 'weekly' || /weekly|7day|7-day/i.test(b.window || b.name || ''),
-        );
+        const fiveHour = groupBuckets.filter(isFiveHour);
+        const weekly = groupBuckets.filter(isWeekly);
         if (fiveHour.length > 0) windows.push(buildWindow(fiveHour, '5h'));
         if (weekly.length > 0) windows.push(buildWindow(weekly, 'weekly'));
+
+        const otherBuckets = groupBuckets.filter((b) => !isFiveHour(b) && !isWeekly(b));
+        const otherWindowTypes = [...new Set(otherBuckets.map((b) => b.window || 'Limit'))];
+        for (const win of otherWindowTypes) {
+          const matching = otherBuckets.filter((b) => (b.window || 'Limit') === win);
+          if (matching.length > 0) windows.push(buildWindow(matching, win));
+        }
       }
 
-      // Nothing matched the 5h/weekly patterns at all (an unrecognized
-      // `/usage` shape) — still surface the single worst bucket rather than
-      // an empty windows list.
       if (windows.length === 0) windows.push(buildWindow(buckets, 'Limit'));
 
       // The compact top-level summary (used where there is only room for one

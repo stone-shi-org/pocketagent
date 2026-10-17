@@ -196,18 +196,65 @@ export function UsageBar(): JSX.Element | null {
 const OUTER_R = 19;
 const INNER_R = 13.5;
 
+/**
+ * Radii and stroke width for a 4-ring gauge (PA-156: agy's Pro, Flash,
+ * Flash Lite, and Third-Party model tiers, outside-in in the same order as the
+ * expanded panel). Leaves a 9.1px clear inner radius (18.2px diameter) for the
+ * two-letter agent label.
+ */
+const FOUR_RING_RADII = [20.2, 16.8, 13.4, 10.0] as const;
+const FOUR_RING_WIDTH = 1.8;
+
+export interface GaugeRingSpec {
+  window: UsageWindowInfo;
+  r: number;
+  width: number;
+}
+
+/**
+ * Concentric arcs drawn inside one 44x44 gauge, outside-in. Agents reporting
+ * 1–2 windows (Claude, Codex, or legacy 5h+weekly agy) use the two thicker
+ * rings from `ringWindows`; agy's per-tier model windows (`Pro`, `Flash`,
+ * `Flash Lite`, `Third-Party`) draw up to four thinner rings in the exact
+ * order of the expanded panel so both views match 1:1 (PA-156).
+ */
+export function gaugeRings(usage: AgentUsageInfo, windows: UsageWindowInfo[]): GaugeRingSpec[] {
+  const hasLegacy5hOrWeekly = windows.some(
+    (w) => FIVE_HOUR_RE.test(w.label) || WEEKLY_RE.test(w.label),
+  );
+  if (usage.agent === 'agy' && !hasLegacy5hOrWeekly && windows.length > 2) {
+    return windows.slice(0, FOUR_RING_RADII.length).map((window, idx) => ({
+      window,
+      r: FOUR_RING_RADII[idx]!,
+      width: FOUR_RING_WIDTH,
+    }));
+  }
+  const { outer, inner } = ringWindows(usage, windows);
+  const specs: GaugeRingSpec[] = [];
+  if (outer) specs.push({ window: outer, r: OUTER_R, width: 3.5 });
+  if (inner) specs.push({ window: inner, r: INNER_R, width: 3 });
+  return specs;
+}
+
 function UsageRing({ usage }: { usage: AgentUsageInfo }): JSX.Element {
-  const { outer, inner } = ringWindows(usage, windowsOf(usage));
-  const describe = (w: UsageWindowInfo | null) =>
-    w ? `${w.label ? `${w.label} ` : ''}${clampPct(w.percentUsed)}% used${w.resetsAtLabel ? `, resets ${w.resetsAtLabel}` : ''}` : null;
-  const title = [usage.agentDisplayName, describe(outer), describe(inner)].filter(Boolean).join(' · ');
-  const worst = Math.max(outer ? clampPct(outer.percentUsed) : 0, inner ? clampPct(inner.percentUsed) : 0);
+  const rings = gaugeRings(usage, windowsOf(usage));
+  const describe = (w: UsageWindowInfo) =>
+    `${w.label ? `${w.label} ` : ''}${clampPct(w.percentUsed)}% used${w.resetsAtLabel ? `, resets ${w.resetsAtLabel}` : ''}`;
+  const title = [usage.agentDisplayName, ...rings.map((ring) => describe(ring.window))].filter(Boolean).join(' · ');
+  const worst = rings.reduce((max, ring) => Math.max(max, clampPct(ring.window.percentUsed)), 0);
+  const dense = rings.length > 2;
 
   return (
-    <span className={`usage-ring usage-ring-${levelOf(worst)}`} title={title} role="img" aria-label={title}>
+    <span
+      className={`usage-ring usage-ring-${levelOf(worst)}${dense ? ' usage-ring-dense' : ''}`}
+      title={title}
+      role="img"
+      aria-label={title}
+    >
       <svg viewBox="0 0 44 44" width="44" height="44" aria-hidden="true">
-        {outer && <RingArc r={OUTER_R} width={3.5} pct={clampPct(outer.percentUsed)} />}
-        {inner && <RingArc r={INNER_R} width={3} pct={clampPct(inner.percentUsed)} />}
+        {rings.map((ring, idx) => (
+          <RingArc key={idx} r={ring.r} width={ring.width} pct={clampPct(ring.window.percentUsed)} />
+        ))}
       </svg>
       <span className="usage-ring-label">{agentAbbreviation(usage)}</span>
     </span>

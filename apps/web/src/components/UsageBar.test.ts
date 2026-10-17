@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentUsageInfo, UsageWindowInfo } from '@pocketagent/protocol';
-import { agentAbbreviation, collapsedWindows, ringWindows } from './UsageBar.js';
+import { agentAbbreviation, collapsedWindows, gaugeRings, ringWindows } from './UsageBar.js';
 
 function usage(agent: string, overrides: Partial<AgentUsageInfo> = {}): AgentUsageInfo {
   return {
@@ -99,5 +99,41 @@ describe('agentAbbreviation (PA-131)', () => {
   it('falls back to initials, then to the first two letters', () => {
     expect(agentAbbreviation({ agent: 'x', agentDisplayName: 'Open Code' })).toBe('OC');
     expect(agentAbbreviation({ agent: 'pi', agentDisplayName: 'pi' })).toBe('PI');
+  });
+});
+
+describe('gaugeRings (PA-156)', () => {
+  it('draws 4 thinner concentric rings for agy model tiers in the exact order of the expanded panel', () => {
+    const windows = [
+      window('Pro 20h', 15),
+      window('Flash 20h', 40),
+      window('Flash Lite 20h', 10),
+      window('Third-Party 20h', 25),
+    ];
+    expect(gaugeRings(usage('agy'), windows)).toEqual([
+      { window: windows[0], r: 20.2, width: 1.8 },
+      { window: windows[1], r: 16.8, width: 1.8 },
+      { window: windows[2], r: 13.4, width: 1.8 },
+      { window: windows[3], r: 10.0, width: 1.8 },
+    ]);
+  });
+
+  it('keeps the 2-ring gauge for 2-window agents (Claude, Codex) and legacy 5h+weekly agy', () => {
+    const claudeWindows = [window('5-hour', 40), window('Weekly', 10)];
+    expect(gaugeRings(usage('claude'), claudeWindows)).toEqual([
+      { window: claudeWindows[0], r: 19, width: 3.5 },
+      { window: claudeWindows[1], r: 13.5, width: 3 },
+    ]);
+
+    const legacyAgy = [
+      window('Gemini Models 5h', 20),
+      window('Gemini Models weekly', 8),
+      window('Claude and GPT models 5h', 0),
+      window('Claude and GPT models weekly', 0),
+    ];
+    expect(gaugeRings(usage('agy'), legacyAgy)).toEqual([
+      { window: legacyAgy[0], r: 19, width: 3.5 },
+      { window: legacyAgy[1], r: 13.5, width: 3 },
+    ]);
   });
 });

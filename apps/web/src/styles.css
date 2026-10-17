@@ -3169,6 +3169,10 @@ button.chat-rate-limit-badge {
   color: var(--text-dim);
 }
 
+.usage-ring-dense .usage-ring-label {
+  font-size: 9.5px;
+}
+
 .usage-ring-warn .usage-ring-label { color: var(--warn); }
 .usage-ring-danger .usage-ring-label { color: var(--danger); }
 
